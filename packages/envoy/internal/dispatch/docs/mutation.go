@@ -233,9 +233,10 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 //     (refuseUndecodable), before anything is appended. applyLive takes every measure of the
 //     growth weigh; a margin record, which leaves the rendering and the anchor marks as they
 //     were, is weighed by the margin bound alone (applyMargin).
-//   - applyLive refuses a write introducing a block pointer to a block of a type its attribute
-//     does not allow (refuseBlockPointers), before anything is appended. A margin record leaves
-//     the rendering, and so every pointer, as it was.
+//   - applyLive refuses a write introducing a block pointer at a block the attribute may not
+//     name — one no document holds, one of a type its targets do not allow, or one outside the
+//     issues and documents it may point into (refuseBlockPointers) — before anything is
+//     appended. A margin record leaves the rendering, and so every pointer, as it was.
 //
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
@@ -534,15 +535,18 @@ func joinedSchemaError(err error, start func() error) error {
 }
 
 // refuseBlockPointers refuses tree, the tree a write to artifactID leaves (rendered as offsets),
-// when a `block[]` pointer it introduces over prior names a block of a type the attribute does not
-// allow (pmdoc.CheckBlockPointers), each target's type read as the block index would hold it once
-// the write is indexed (refs.BlockTypes) in the write's transaction. The refusal is
-// pmdoc.ErrBlockPointer, which no schema refusal path (joinedSchemaError) reclassifies. A
-// browser's write (settlement) and the reconciliation never come here: what a browser wrote is
-// already stored, so it is never refused.
+// when a `block[]` pointer it introduces over prior names a block the attribute may not name: one
+// no document holds, one of a type its targets do not allow, one of an issue that is neither the
+// document's own nor above it, or one outside the document where the attribute points only inside
+// it (pmdoc.CheckBlockPointers). Each target is read as the block index would hold it once the
+// write is indexed, with the writing document's issue and that issue's ancestors
+// (refs.BlockTargets), in the write's transaction. The refusal is pmdoc.ErrBlockPointer, which no
+// schema refusal path (joinedSchemaError) reclassifies. A browser's write (settlement) and the
+// reconciliation never come here: what a browser wrote is already stored, so it is never refused,
+// and a pointer of its at a block no document holds stays unresolved.
 func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
-	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (map[string][]string, error) {
-		return refs.BlockTypes(ctx, tx, artifactID, offsetBlocks(offsets), targets)
+	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
+		return refs.BlockTargets(ctx, tx, artifactID, offsetBlocks(offsets), targets)
 	})
 }
 
@@ -1099,6 +1103,7 @@ func renderedBlocks(tree pmdoc.ValidDocument, rows map[string][]pmdoc.TableRow) 
 			From:          offset.From,
 			To:            offset.To,
 			Token:         tokens.blocks[offset.ID],
+			Attributes:    offset.Attributes,
 			DescendantIDs: tableDescendants[offset.ID],
 		}
 		if offset.Type != "table" {

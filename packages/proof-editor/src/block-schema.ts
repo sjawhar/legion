@@ -1,3 +1,12 @@
+import type {
+  BlockAttributeKind,
+  BlockAttributeSchema,
+  BlockContentRule,
+  BlockElementVersions,
+  BlockSchema,
+  BlockSchemaElement,
+  BlockTypeSchema,
+} from '@legion/contracts';
 import { $nodeSchema } from '@milkdown/kit/utils';
 import { DOMParser, type DOMOutputSpec, type Fragment, type Node as ProseMirrorNode, type Schema } from '@milkdown/kit/prose/model';
 import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/kit/transformer';
@@ -8,49 +17,19 @@ import { withDomAttributes } from './editor/schema/dom-attributes.js';
 import { maxDirectiveNesting } from './directive-container.js';
 import { markdownSource } from './typed-block-drawing.js';
 
-export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'block[]' | 'actor' | 'timestamp';
-
-/**
- * From which schema version an editor reads an element of the manifest (`since`) and from which
- * it may create one (`creatable_since`); each is 1 when the manifest names none. An editor built
- * from a schema reads every element the schema declares and creates the ones whose
- * `creatable_since` is at most the schema's `version` (`creatable`).
- */
-export interface BlockElementVersions {
-  since?: number;
-  creatable_since?: number;
-}
-
-export interface BlockAttributeSchema extends BlockElementVersions {
-  kind: BlockAttributeKind;
-  choices?: readonly string[];
-  default?: string | boolean | readonly string[];
-  server?: boolean;
-  /** The numbers of each choice that has some, by choice: the choices stay plain strings. */
-  choice_versions?: Readonly<Record<string, BlockElementVersions>>;
-  /** The block types a `block[]` attribute points at (./block-pointers.ts); none, any block. */
-  targets?: readonly string[];
-}
-
-export interface BlockTypeSchema extends BlockElementVersions {
-  name: string;
-  content: string;
-  render: 'host';
-  attributes: Readonly<Record<string, BlockAttributeSchema>>;
-}
-
-/** A node or a mark of the Proof schema, as the manifest names it. */
-export interface BlockSchemaElement extends BlockElementVersions {
-  name: string;
-}
-
-export interface BlockSchema {
-  version: number;
-  /** The Proof schema's nodes and marks; a document service older than the manifest names none. */
-  nodes?: readonly BlockSchemaElement[];
-  marks?: readonly BlockSchemaElement[];
-  types: readonly BlockTypeSchema[];
-}
+// The shape the server declares (packages/contracts/schemas/block-schema.schema.json) is the one
+// this editor draws: its types are re-exported here, so an importer of this module and the server
+// read one shape. `validateBlockSchema` below still checks a schema's values at runtime, since
+// the JSON it is given comes off the wire.
+export type {
+  BlockAttributeKind,
+  BlockAttributeSchema,
+  BlockContentRule,
+  BlockElementVersions,
+  BlockSchema,
+  BlockSchemaElement,
+  BlockTypeSchema,
+};
 
 /** Whether an editor of schema version `version` may create `element`. */
 export function creatable(version: number, element: BlockElementVersions | undefined): boolean {

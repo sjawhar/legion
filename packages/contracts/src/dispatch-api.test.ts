@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { BlockTypeSchema } from "./block-schema.generated";
 import {
   type Actor,
   type Agent,
@@ -14,7 +15,6 @@ import {
   type AskRead,
   type AskThread,
   answerNotKept,
-  type BlockTypeSchema,
   type ChangedReference,
   type Comment,
   CommentEventPayloadSchema,

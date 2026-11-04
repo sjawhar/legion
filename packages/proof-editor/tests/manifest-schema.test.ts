@@ -39,15 +39,24 @@ test("the ProseMirror schema the editor builds has exactly the manifest's nodes 
   expect(Object.keys(headless.schema.marks).sort()).toEqual(wantMarks);
 });
 
-/** The manifest of a later build, at the same version: a typed block, an attribute, an enum
- *  value, a node and a mark an editor of version 2 reads but may not create yet. */
+/** The version the build after this one reads: the one it introduces its new elements from. */
+const stagedVersion = manifest.version + 1;
+
+/** The manifest of the build that introduces a typed block, an attribute, an enum value, a node
+ *  and a mark: each read from that build's own version and created only from the one after it,
+ *  so an editor built from this manifest reads them and creates none of them. */
 const laterManifest = {
   ...manifest,
+  version: stagedVersion,
   nodes: manifest.nodes?.map((node) =>
-    node.name === "hr" ? { ...node, since: 2, creatable_since: 3 } : node
+    node.name === "hr"
+      ? { ...node, since: stagedVersion, creatable_since: stagedVersion + 1 }
+      : node
   ),
   marks: manifest.marks?.map((mark) =>
-    mark.name === "strike_through" ? { ...mark, since: 2, creatable_since: 3 } : mark
+    mark.name === "strike_through"
+      ? { ...mark, since: stagedVersion, creatable_since: stagedVersion + 1 }
+      : mark
   ),
   types: [
     ...manifest.types.map((type) => {
@@ -60,8 +69,8 @@ const laterManifest = {
               kind: "enum",
               choices: ["plain", "loud"],
               default: "plain",
-              since: 2,
-              creatable_since: 3,
+              since: stagedVersion,
+              creatable_since: stagedVersion + 1,
             },
           },
         };
@@ -75,7 +84,9 @@ const laterManifest = {
             urgency: {
               ...urgency,
               choices: [...(urgency?.choices ?? []), "critical"],
-              choice_versions: { critical: { since: 2, creatable_since: 3 } },
+              choice_versions: {
+                critical: { since: stagedVersion, creatable_since: stagedVersion + 1 },
+              },
             },
           },
         };
@@ -87,8 +98,8 @@ const laterManifest = {
       content: "block+",
       render: "host",
       attributes: {},
-      since: 2,
-      creatable_since: 3,
+      since: stagedVersion,
+      creatable_since: stagedVersion + 1,
     },
   ],
 } as BlockSchema;
@@ -104,7 +115,7 @@ function blockOfType(doc: ProseMirrorNode, typeName: string): ProseMirrorNode {
 }
 
 test("the editor reads but never offers a typed block, attribute or value it cannot create yet", async () => {
-  expect(laterManifest.version).toBe(2);
+  expect(laterManifest.version).toBe(stagedVersion);
   await withMarksEditor(
     "Before",
     ({ handle, view }) => {
@@ -129,7 +140,7 @@ test("the editor reads but never offers a typed block, attribute or value it can
   );
 });
 
-/** Each element of `laterManifest` that an editor of version 2 may not create, that `doc` holds. */
+/** Each element of `laterManifest` that an editor of its version may not create, that `doc` holds. */
 function uncreatable(doc: ProseMirrorNode): string[] {
   const found = new Set<string>();
   doc.descendants((node) => {
@@ -145,7 +156,7 @@ function uncreatable(doc: ProseMirrorNode): string[] {
 
 const everyUncreatable = ["future", "hr", "strike_through", "tone loud", "urgency critical"];
 
-/** Each element that an editor of version 2 may not create, as markdown, and why it is refused. */
+/** Each element an editor of `laterManifest`'s version may not create, as markdown, and why it is refused. */
 const uncreatableMarkdown: [string, string][] = [
   [":::future\nFuture text\n:::", 'this editor cannot create typed block "future" yet'],
   [
@@ -160,7 +171,7 @@ const uncreatableMarkdown: [string, string][] = [
   ["Above\n\n***\n\nBelow", 'this editor cannot create node "hr" yet'],
 ];
 
-/** A document a later build stored, holding every element an editor of version 2 only reads. */
+/** A document a later build stored, holding every element an editor of that version only reads. */
 const storedMarkdown = uncreatableMarkdown.map(([markdown]) => markdown).join("\n\n");
 
 /** The stored document as a reader parses it. */

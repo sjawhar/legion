@@ -11,7 +11,7 @@ body: |-
     upload or rebuild. The document schema manifest (`pmdoc/schema/blocks.json`,
     `GET /api/v1/schema/blocks`) names the schema's nodes and marks beside its typed blocks, and every
     element may carry `since` (the schema version from which a build reads it) and `creatable_since`
-    (from which a build creates it), both 1 when absent; the version stays 2. A write that would add
+    (from which a build creates it), both 1 when absent. A write that would add
     an element this build reads but may not create yet is refused, naming it, unless the document
     holds it already.
 time: 2026-10-28T12:39:36.543494262Z

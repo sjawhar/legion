@@ -377,7 +377,7 @@ func TestARebuildFromAVersionHoldingNewerContentIsRefusedAsNewerContent(t *testi
 // document already stored, so a rebuild from it restores that content: the seed puts back what the
 // version holds and creates nothing.
 func TestARebuildFromAVersionHoldingAnElementThisBuildCannotCreateRestoresIt(t *testing.T) {
-	restore, err := pmdoc.UseStagedBlockForTest("future", 3)
+	restore, err := pmdoc.UseStagedBlockForTest("future", false)
 	if err != nil {
 		t.Fatalf("stage the future block as not creatable: %v", err)
 	}

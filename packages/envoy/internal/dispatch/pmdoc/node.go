@@ -218,10 +218,10 @@ func validateNode(n *Node, depth int) error {
 
 // undeclaredAttributes is the refusal for a typed block holding attributes its schema does not
 // declare, naming every one of them in sorted order, or nil when it declares them all.
-func undeclaredAttributes(typeName string, attrs Attrs, declared map[string]BlockAttributeSchema) error {
+func undeclaredAttributes(typeName string, attrs Attrs, declared BlockAttributes) error {
 	var names []string
 	for name := range attrs {
-		if _, ok := declared[name]; !ok && name != BlockIDAttr {
+		if !declared.Has(name) && name != BlockIDAttr {
 			names = append(names, name)
 		}
 	}
@@ -275,7 +275,7 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			}
 			continue
 		}
-		definition := typ.Attributes[name]
+		definition := typ.Attributes.Get(name)
 		if value == nil && definition.Default == nil {
 			continue
 		}
@@ -507,7 +507,7 @@ func attrsEqualOutsideServerState(nodeType string, a, b Attrs) bool {
 	if !typed {
 		return attrsEqual(a, b)
 	}
-	return attrsEqualBut(a, b, func(name string) bool { return !IsAnswerAttribute(name) && typ.Attributes[name].Server })
+	return attrsEqualBut(a, b, func(name string) bool { return !IsAnswerAttribute(name) && typ.Attributes.Get(name).Server })
 }
 
 // equalNode compares n and o, their content and structure, holding each node's attributes to

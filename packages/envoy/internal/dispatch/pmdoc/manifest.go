@@ -8,13 +8,14 @@ import (
 	"slices"
 )
 
-// ElementVersions is from which schema version a build reads an element (Since) and from which a
-// build may create it (CreatableSince). The manifest leaves out a number that is 1. Two builds
-// serve one database during a release, so an element is added in two steps: one release reads it
-// and does not create it, and a later one creates it, once no live build lacks it.
-type ElementVersions struct {
-	Since          int `json:"since,omitempty"`
-	CreatableSince int `json:"creatable_since,omitempty"`
+// elementVersions is what the manifest says of one element: from which schema version a build
+// reads it (Since) and from which a build may create it (CreatableSince), 1 where the manifest
+// says neither (BlockElementVersions, generated from the contract). Two builds serve one database
+// during a release, so an element whose writer would serve beside a build that cannot read it is
+// added in two steps: one release reads it and does not create it, and a later one creates it,
+// once no live build lacks it.
+func elementVersions(since, creatableSince int) BlockElementVersions {
+	return BlockElementVersions{Since: since, CreatableSince: creatableSince}
 }
 
 // ElementKind is what an Element names.
@@ -52,7 +53,7 @@ func (e Element) String() string {
 
 // Versions is e's since and creatable_since in this build's manifest, each 1 where the manifest
 // says none, and false when the manifest does not declare e.
-func (e Element) Versions() (ElementVersions, bool) {
+func (e Element) Versions() (BlockElementVersions, bool) {
 	versions, declared := active.versions[e]
 	return versions, declared
 }
@@ -63,7 +64,7 @@ type compiledManifest struct {
 	types       map[string]BlockTypeSchema
 	nodes       map[string]bool
 	marks       map[string]bool
-	versions    map[Element]ElementVersions
+	versions    map[Element]BlockElementVersions
 	uncreatable map[Element]bool
 	creatable   int
 	// linkKinds is the edge kinds the manifest's `block[]` attributes make, sorted (LinkKinds),
@@ -109,12 +110,12 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 		types:             make(map[string]BlockTypeSchema, len(value.Types)),
 		nodes:             make(map[string]bool, len(value.Nodes)),
 		marks:             make(map[string]bool, len(value.Marks)),
-		versions:          make(map[Element]ElementVersions),
+		versions:          make(map[Element]BlockElementVersions),
 		uncreatable:       make(map[Element]bool),
 		pointerAttributes: map[string][]string{},
 	}
 	linkKinds := map[string]struct{}{}
-	declare := func(element Element, versions ElementVersions) error {
+	declare := func(element Element, versions BlockElementVersions) error {
 		if _, duplicate := compiled.versions[element]; duplicate {
 			return fmt.Errorf("invalid: %s is declared twice", element)
 		}
@@ -134,7 +135,7 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 		if node.Name == "" {
 			return compiledManifest{}, fmt.Errorf("invalid: a node has no name")
 		}
-		if err := declare(Element{Kind: NodeElement, Name: node.Name}, node.ElementVersions); err != nil {
+		if err := declare(Element{Kind: NodeElement, Name: node.Name}, elementVersions(node.Since, node.CreatableSince)); err != nil {
 			return compiledManifest{}, err
 		}
 		compiled.nodes[node.Name] = true
@@ -143,7 +144,7 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 		if mark.Name == "" {
 			return compiledManifest{}, fmt.Errorf("invalid: a mark has no name")
 		}
-		if err := declare(Element{Kind: MarkElement, Name: mark.Name}, mark.ElementVersions); err != nil {
+		if err := declare(Element{Kind: MarkElement, Name: mark.Name}, elementVersions(mark.Since, mark.CreatableSince)); err != nil {
 			return compiledManifest{}, err
 		}
 		compiled.marks[mark.Name] = true
@@ -152,17 +153,18 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 		if compiled.nodes[typ.Name] {
 			return compiledManifest{}, fmt.Errorf("invalid: type %q is also a node", typ.Name)
 		}
-		if err := declare(Element{Kind: TypedBlockElement, Name: typ.Name}, typ.ElementVersions); err != nil {
+		if err := declare(Element{Kind: TypedBlockElement, Name: typ.Name}, elementVersions(typ.Since, typ.CreatableSince)); err != nil {
 			return compiledManifest{}, err
 		}
 		compiled.types[typ.Name] = typ
 		var pointers []string
-		for name, attr := range typ.Attributes {
-			if attr.Kind == "block[]" {
+		for _, attribute := range typ.Attributes {
+			name, attr := attribute.Name, attribute.BlockAttributeSchema
+			if attr.Kind == BlockAttributeBlockList {
 				linkKinds[name] = struct{}{}
 				pointers = append(pointers, name)
 			}
-			if err := declare(Element{Kind: AttributeElement, Block: typ.Name, Name: name}, attr.ElementVersions); err != nil {
+			if err := declare(Element{Kind: AttributeElement, Block: typ.Name, Name: name}, elementVersions(attr.Since, attr.CreatableSince)); err != nil {
 				return compiledManifest{}, err
 			}
 			for choice := range attr.ChoiceVersions {
@@ -177,7 +179,7 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 			}
 			// A write gives a new block an attribute's default (defaultAttributes), so a default
 			// value a build may not create would be created with every block that takes it.
-			if fallback, ok := attr.Default.(string); ok && attr.Kind == "enum" && attr.ChoiceVersions[fallback].CreatableSince > attr.CreatableSince {
+			if fallback, ok := attr.Default.(string); ok && attr.Kind == BlockAttributeEnum && attr.ChoiceVersions[fallback].CreatableSince > attr.CreatableSince {
 				return compiledManifest{}, fmt.Errorf("invalid: type %q attribute %q default %q is creatable later than the attribute", typ.Name, name, fallback)
 			}
 		}
@@ -198,47 +200,48 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 
 // normalizeVersions writes 1 for every since and creatable_since the manifest leaves out.
 func normalizeVersions(value *BlockSchema) {
-	one := func(versions *ElementVersions) {
-		if versions.Since == 0 {
-			versions.Since = 1
+	one := func(since, creatableSince *int) {
+		if *since == 0 {
+			*since = 1
 		}
-		if versions.CreatableSince == 0 {
-			versions.CreatableSince = 1
+		if *creatableSince == 0 {
+			*creatableSince = 1
 		}
 	}
 	for index := range value.Nodes {
-		one(&value.Nodes[index].ElementVersions)
+		one(&value.Nodes[index].Since, &value.Nodes[index].CreatableSince)
 	}
 	for index := range value.Marks {
-		one(&value.Marks[index].ElementVersions)
+		one(&value.Marks[index].Since, &value.Marks[index].CreatableSince)
 	}
 	for index := range value.Types {
 		typ := &value.Types[index]
-		one(&typ.ElementVersions)
-		for name, attr := range typ.Attributes {
-			one(&attr.ElementVersions)
-			if len(attr.Choices) > 0 {
-				choices := make(map[string]ElementVersions, len(attr.Choices))
-				for _, choice := range attr.Choices {
-					versions := attr.ChoiceVersions[choice]
-					one(&versions)
+		one(&typ.Since, &typ.CreatableSince)
+		for attrIndex := range typ.Attributes {
+			attr := &typ.Attributes[attrIndex]
+			one(&attr.Since, &attr.CreatableSince)
+			if len(attr.Choices) == 0 {
+				continue
+			}
+			choices := make(map[string]BlockElementVersions, len(attr.Choices))
+			for _, choice := range attr.Choices {
+				versions := attr.ChoiceVersions[choice]
+				one(&versions.Since, &versions.CreatableSince)
+				choices[choice] = versions
+			}
+			for choice, versions := range attr.ChoiceVersions {
+				if _, listed := choices[choice]; !listed {
 					choices[choice] = versions
 				}
-				for choice, versions := range attr.ChoiceVersions {
-					if _, listed := choices[choice]; !listed {
-						choices[choice] = versions
-					}
-				}
-				attr.ChoiceVersions = choices
 			}
-			typ.Attributes[name] = attr
+			attr.ChoiceVersions = choices
 		}
 	}
 }
 
 // validateElementVersions refuses numbers no build can act on: an element read before version 1,
 // read only from a version after the manifest's own, or created before it is read.
-func validateElementVersions(element Element, versions ElementVersions, version int) error {
+func validateElementVersions(element Element, versions BlockElementVersions, version int) error {
 	switch {
 	case versions.Since < 1 || versions.CreatableSince < 1:
 		return fmt.Errorf("%s has since %d and creatable_since %d; both must be 1 or more", element, versions.Since, versions.CreatableSince)
@@ -307,7 +310,7 @@ func eachElement(nodes []*Node, yield func(Element) bool) bool {
 				if !yield(Element{Kind: AttributeElement, Block: node.Type, Name: name}) {
 					return false
 				}
-				if choice, ok := value.(string); ok && typ.Attributes[name].Kind == "enum" {
+				if choice, ok := value.(string); ok && typ.Attributes.Get(name).Kind == BlockAttributeEnum {
 					if !yield(Element{Kind: ChoiceElement, Block: node.Type, Attribute: name, Name: choice}) {
 						return false
 					}

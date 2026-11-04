@@ -157,6 +157,10 @@ func (m blockManifest) creatable() int {
 type pageParameters struct {
 	query url.Values
 	token string
+	// version is the schema_version the page presents and creatable the schema_creatable, 1 for
+	// a page that sends none: every element of a manifest before them has since 1.
+	version   int
+	creatable int
 }
 
 func (p pageParameters) String() string { return "?" + p.query.Encode() + " with token " + p.token }
@@ -165,10 +169,12 @@ func (p pageParameters) String() string { return "?" + p.query.Encode() + " with
 // when that build's page sends it.
 func (m blockManifest) page(sendsCreatable bool) pageParameters {
 	query := url.Values{"schema_version": {strconv.Itoa(m.Version)}}
+	creatable := 1
 	if sendsCreatable {
-		query.Set("schema_creatable", strconv.Itoa(m.creatable()))
+		creatable = m.creatable()
+		query.Set("schema_creatable", strconv.Itoa(creatable))
 	}
-	return pageParameters{query: query, token: strconv.Itoa(m.Version)}
+	return pageParameters{query: query, token: strconv.Itoa(m.Version), version: m.Version, creatable: creatable}
 }
 
 // pageSendsCreatable reports whether a built web app's scripts name schema_creatable, the
@@ -235,9 +241,39 @@ const (
 	hocuspocusAuthToken     = 0
 	hocuspocusAuthDenied    = 1
 	hocuspocusAuthenticated = 2
-	// writableScope is the scope an Authenticated frame names for a socket that may write.
+	// writableScope is the scope an Authenticated frame names for a socket that may write, and
+	// readOnlyScope the one it names for a socket that may not.
 	writableScope = "read-write"
+	readOnlyScope = "readonly"
 )
+
+// admittedScope is the scope reader admits a socket with writer's page parameters in, by the rule
+// the page admission states (docs.schemaFleet.admits): the page creates no more than the reader
+// reads and no more than the reader creates, and it reads at least what the reader creates and
+// what the document holds. The reader's own numbers are the whole fleet, since a build that
+// predates the fleet columns registers none and is left out. The document is one the writer
+// created, so the highest since it holds is at most the writer's own schema version.
+//
+// A reader that predates the admission - its manifest names no nodes - knows no fleet: it
+// compares the page's token, which is the page's schema version alone, with its own version, and
+// answers read-only when they differ (packages/dispatch/AGENTS.md, the document socket's token).
+// So a release that raises the manifest version makes every page of the newer build read-only on
+// a process of the older one until the older build is gone, whatever the elements are creatable
+// from.
+func admittedScope(writer, reader documentSide) string {
+	if len(reader.manifest.Nodes) == 0 {
+		if writer.page.token == strconv.Itoa(reader.manifest.Version) {
+			return writableScope
+		}
+		return readOnlyScope
+	}
+	version, creatable := reader.manifest.Version, reader.manifest.creatable()
+	if writer.page.creatable <= min(version, creatable) &&
+		writer.page.version >= max(creatable, writer.manifest.Version) {
+		return writableScope
+	}
+	return readOnlyScope
+}
 
 // documentSocket is a document socket as a page's provider holds it: authenticated with the
 // page's token, reading every frame the room sends until the connection ends.
@@ -387,9 +423,18 @@ func TestTwoBuildsReadAndEditEachOthersDocuments(t *testing.T) {
 // was admitted: long enough for a server that closes a socket it admitted to have done so.
 const socketOpenFor = 3 * time.Second
 
+// corpusSkipped are the corpus files this row leaves out, each with why. A corpus file is
+// markdown for the parsers' fixtures, which a server does not have to be able to store.
+var corpusSkipped = map[string]string{
+	"requirements-tasks-and-checks.md": "its plan tasks and checks point at blocks of a document no project this row creates holds, and a stored block pointer is held to a block the database has (CheckBlockPointers)",
+}
+
 func requireCorpusCrossesBuilds(t *testing.T, writer, reader documentSide, project string) {
 	var sockets []*documentSocket
-	files := corpusFiles(t, writer.corpus)
+	files := slices.DeleteFunc(corpusFiles(t, writer.corpus), func(file string) bool {
+		_, skipped := corpusSkipped[file]
+		return skipped
+	})
 	for _, file := range files {
 		markdown, err := os.ReadFile(filepath.Join(writer.corpus, file))
 		if err != nil {
@@ -407,31 +452,37 @@ func requireCorpusCrossesBuilds(t *testing.T, writer, reader documentSide, proje
 		}
 
 		socket := openDocumentSocket(t, reader.process, artifactID, writer.page)
-		if socket.scope != writableScope {
+		if want := admittedScope(writer, reader); socket.scope != want {
 			t.Errorf("%s: the %s admits a socket with the %s page's parameters (%s) as %q, want %q",
-				file, reader.name, writer.name, writer.page, socket.scope, writableScope)
+				file, reader.name, writer.name, writer.page, socket.scope, want)
 		}
 		sockets = append(sockets, socket)
 	}
 	time.Sleep(socketOpenFor)
 	for _, socket := range sockets {
 		if socket.closed() {
-			t.Errorf("the %s closed the writable socket it admitted for document %s: %v", reader.name, socket.artifactID, socket.endErr)
+			t.Errorf("the %s closed the socket it admitted for document %s: %v", reader.name, socket.artifactID, socket.endErr)
 		}
 	}
-	t.Logf("%d corpus documents of the %s read, took an edit and admitted a writable socket on the %s", len(files), writer.name, reader.name)
+	t.Logf("%d corpus documents of the %s read, took an edit and kept a socket open on the %s, admitted %s",
+		len(files), writer.name, reader.name, admittedScope(writer, reader))
 }
 
 // typedBlockID is the block id the typed-block document gives each typed block: tb-<type name>.
 func typedBlockID(name string) string { return "tb-" + name }
 
-// typedBlocksMarkdown is a document holding one block of every typed block the manifest declares,
-// each with its id and every attribute a writer sets at its default. A decision block (the ask
-// type) is given two choices, First and Second.
-func typedBlocksMarkdown(t *testing.T, manifest blockManifest) string {
+// typedBlocksMarkdown is a document holding one block of every typed block both manifests
+// declare, each with its id and every attribute a writer sets at its default. A decision block
+// (the ask type) is given two choices, First and Second. A type only the writer's manifest
+// declares is left out: the reader could not read such a document at all, which is the point of
+// the manifest's own staging tests and not of this row, which is about what both builds read.
+func typedBlocksMarkdown(t *testing.T, manifest, reader blockManifest) string {
 	t.Helper()
 	blocks := []string{"# Every typed block\n"}
 	for _, typed := range manifest.Types {
+		if !slices.ContainsFunc(reader.Types, func(other manifestType) bool { return other.Name == typed.Name }) {
+			continue
+		}
 		attributes := []string{"#" + typedBlockID(typed.Name)}
 		for _, name := range slices.Sorted(maps.Keys(typed.Attributes)) {
 			attribute := typed.Attributes[name]
@@ -482,7 +533,7 @@ func requireApprovalCarriedAcrossBuilds(t *testing.T, writer, reader documentSid
 	if !slices.ContainsFunc(writer.manifest.Types, func(typed manifestType) bool { return typed.Name == "ask" }) {
 		t.Fatalf("the %s's manifest declares no ask block, the decision block an approval is carried by", writer.name)
 	}
-	issueKey, artifactID := createDocument(t, writer.process, project, "Every typed block", typedBlocksMarkdown(t, writer.manifest))
+	issueKey, artifactID := createDocument(t, writer.process, project, "Every typed block", typedBlocksMarkdown(t, writer.manifest, reader.manifest))
 	askID := waitForBlockAsk(t, writer.process, issueKey, typedBlockID("ask"))
 
 	var approval servedReview

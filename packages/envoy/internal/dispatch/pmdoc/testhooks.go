@@ -46,24 +46,36 @@ func SetBlockSchemaForTest(value BlockSchema) (restore func(), err error) {
 	}, nil
 }
 
-// UseStagedBlockForTest makes the embedded manifest with one more typed block the manifest this
-// package reads and writes by, until restore is called (UseManifestForTest): a block named name,
-// of block content, rendered by the host, which a build reads from schema version 2 and may
-// create from schema version creatableSince, as a build that stages an element declares one. A
-// test uses it to act as a build before that element became creatable (creatableSince above
-// SchemaVersion), or as the build it became creatable in.
-func UseStagedBlockForTest(name string, creatableSince int) (restore func(), err error) {
+// UseStagedBlockForTest makes the embedded manifest, its version raised by one and one more typed
+// block declared, the manifest this package reads and writes by, until restore is called
+// (UseManifestForTest): a block named name, of block content, rendered by the host, read from
+// the raised version and created from it when creatable, or from the version after it when not,
+// as the build that introduces an element declares it. A test uses it to act as that build,
+// before the element became creatable or as the build it became creatable in. The version is
+// raised because an element is read from the version that introduces it, and this build's own
+// version introduces the elements it ships.
+func UseStagedBlockForTest(name string, creatable bool) (restore func(), err error) {
 	var manifest map[string]any
 	if err := json.Unmarshal(SchemaJSON(), &manifest); err != nil {
 		return nil, fmt.Errorf("decode the embedded manifest: %w", err)
+	}
+	version, ok := manifest["version"].(float64)
+	if !ok {
+		return nil, errors.New("the embedded manifest declares no version")
 	}
 	types, ok := manifest["types"].([]any)
 	if !ok {
 		return nil, errors.New("the embedded manifest declares no types array")
 	}
+	staged := int(version) + 1
+	creatableSince := staged + 1
+	if creatable {
+		creatableSince = staged
+	}
+	manifest["version"] = staged
 	manifest["types"] = append(types, map[string]any{
 		"name": name, "content": "block+", "render": "host", "attributes": map[string]any{},
-		"since": 2, "creatable_since": creatableSince,
+		"since": staged, "creatable_since": creatableSince,
 	})
 	encoded, err := json.Marshal(manifest)
 	if err != nil {

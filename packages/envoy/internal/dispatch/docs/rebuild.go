@@ -33,8 +33,8 @@ type RebuildReport struct {
 // loads, a closed issue (for supplied markdown, which changes the document), a latest version
 // holding an element this build does not know (ErrDocNewerContent, as every read of it answers),
 // and markdown that is not a Proof document, drops an open ask block, or introduces a block
-// pointer to a block of a type its attribute does not allow (refuseBlockPointers, against the
-// latest version). Supplied markdown is caller text: it is parsed as an upload is, and its
+// pointer at a block the attribute may not name (refuseBlockPointers, against the latest
+// version). Supplied markdown is caller text: it is parsed as an upload is, and its
 // rendering is weighed as a new document's is (SeedText). The latest version is the server's own
 // rendering of the document, read back as every stored rendering is (pmdoc.ParseRendering), so a
 // document whose version is past what one write may make - stored before that bound, or grown

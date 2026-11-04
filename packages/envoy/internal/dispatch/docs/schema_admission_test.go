@@ -166,29 +166,29 @@ func admission(t *testing.T, serverURL, artifactID string, query url.Values, tok
 }
 
 // newAdmissionServer is a document service on its own database, with a document on an open issue,
-// served over HTTP. With future, the document also holds a typed block "future", which builds
-// read from schema version 2; this build reads it and does not create it, so its own creatable
-// version stays 1.
+// served over HTTP. Its process stages one typed block, "future", read from one version above the
+// shipped manifest and not creatable (UseStagedBlockForTest), so the process reads V one above
+// the shipped version and creates up to R, the shipped version: the cases below need a process
+// that creates less than it reads. With future, the document holds a "future" block too, so the
+// highest since it holds is that V.
 func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.Server) {
 	t.Helper()
+	restoreCreatable, err := pmdoc.UseStagedBlockForTest("future", true)
+	if err != nil {
+		t.Fatalf("stage the future block as creatable: %v", err)
+	}
+	t.Cleanup(restoreCreatable)
 	markdown := "# First\n"
 	if future {
-		restore, err := pmdoc.UseStagedBlockForTest("future", 2)
-		if err != nil {
-			t.Fatalf("stage the future block as creatable: %v", err)
-		}
-		t.Cleanup(restore)
 		markdown += "\n:::future{#future-1}\nBody.\n:::\n"
 	}
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, markdown)
-	if future {
-		restore, err := pmdoc.UseStagedBlockForTest("future", 3)
-		if err != nil {
-			t.Fatalf("stage the future block as not creatable: %v", err)
-		}
-		t.Cleanup(restore)
+	restoreUncreatable, err := pmdoc.UseStagedBlockForTest("future", false)
+	if err != nil {
+		t.Fatalf("stage the future block as not creatable: %v", err)
 	}
+	t.Cleanup(restoreUncreatable)
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
 	return service, artifactID, server
@@ -208,8 +208,8 @@ func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.
 // socket's scope.
 func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 	v, r := pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()
-	if v != 2 || r != 1 {
-		t.Fatalf("this build reads schema version %d and creates up to %d; the cases below assume 2 and 1", v, r)
+	if v != 3 || r != 3 {
+		t.Fatalf("this build reads schema version %d and creates up to %d; the cases below assume 3 and 3, and the process they run against stages one element on top of that, so it reads 4 and creates up to 3 (newAdmissionServer)", v, r)
 	}
 	type process struct {
 		version, creatable int
@@ -223,18 +223,18 @@ func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 		token    string
 		writable bool
 	}{
-		{name: "a page one version newer beside a live process of its build", fleet: []process{{3, 2, 0}}, query: page(3, 2), token: "3", writable: true},
-		{name: "after a rollback, a page one version newer creating what no live process creates", query: page(3, 2), token: "3"},
-		{name: "after a rollback, a page one version older that represents everything the fleet creates", query: page(1, 1), token: "1", writable: true},
-		{name: "a page that cannot represent an element the document holds", future: true, query: page(1, 1), token: "1"},
-		{name: "a page of this version beside the element it represents", future: true, query: page(2, 1), token: "2", writable: true},
-		{name: "a live process creating what an older page cannot represent", fleet: []process{{3, 2, 0}}, query: page(1, 1), token: "1"},
-		{name: "a live process that cannot read what a newer page creates", fleet: []process{{1, 1, 0}}, query: page(3, 2), token: "3"},
-		{name: "a process that predates the fleet columns is left out", fleet: []process{{0, 0, 0}}, query: page(2, 1), token: "2", writable: true},
-		{name: "a lapsed process is left out", fleet: []process{{3, 2, time.Hour}}, query: page(1, 1), token: "1", writable: true},
-		{name: "a page that sends no schema_creatable on this version", query: page(2, -1), token: "2", writable: true},
-		{name: "a page that sends no schema_creatable one version newer creates what the first version reads", query: page(3, -1), token: "3", writable: true},
-		{name: "a page that sends no schema_creatable beside a live process that reads only the first version", fleet: []process{{1, 1, 0}}, query: page(2, -1), token: "2", writable: true},
+		{name: "a page one version newer beside a live process of its build", fleet: []process{{5, 4, 0}}, query: page(5, 4), token: "5", writable: true},
+		{name: "after a rollback, a page one version newer creating what no live process creates", query: page(5, 4), token: "5"},
+		{name: "after a rollback, a page one version older that represents everything the fleet creates", query: page(3, 3), token: "3", writable: true},
+		{name: "a page that cannot represent an element the document holds", future: true, query: page(3, 3), token: "3"},
+		{name: "a page of this version beside the element it represents", future: true, query: page(4, 3), token: "4", writable: true},
+		{name: "a live process creating what an older page cannot represent", fleet: []process{{5, 4, 0}}, query: page(3, 3), token: "3"},
+		{name: "a live process that cannot read what a newer page creates", fleet: []process{{1, 1, 0}}, query: page(5, 4), token: "5"},
+		{name: "a process that predates the fleet columns is left out", fleet: []process{{0, 0, 0}}, query: page(4, 3), token: "4", writable: true},
+		{name: "a lapsed process is left out", fleet: []process{{5, 4, time.Hour}}, query: page(3, 3), token: "3", writable: true},
+		{name: "a page that sends no schema_creatable on this version", query: page(4, -1), token: "4", writable: true},
+		{name: "a page that sends no schema_creatable one version newer creates what the first version reads", query: page(5, -1), token: "5", writable: true},
+		{name: "a page that sends no schema_creatable beside a live process that reads only the first version", fleet: []process{{1, 1, 0}}, query: page(4, -1), token: "4", writable: true},
 		{name: "a page presenting no number", query: url.Values{"schema_version": {"two"}}, token: "two"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -257,7 +257,7 @@ func TestSchemaAdmissionOfAClosedIssueIsReadOnly(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close the document's issue: %v", err)
 	}
-	if socket, authenticated := admission(t, server.URL, artifactID, page(2, 1), "2"); socket || authenticated {
+	if socket, authenticated := admission(t, server.URL, artifactID, page(pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()), strconv.Itoa(pmdoc.SchemaVersion())); socket || authenticated {
 		t.Errorf("a current page on a closed issue is admitted writable=%t by its socket and %t by its token, want read-only", socket, authenticated)
 	}
 }
@@ -293,8 +293,8 @@ func TestATokenIsAnsweredFromTheAdmissionItsSocketCarries(t *testing.T) {
 // is read-only; a current page's socket stays open and writable.
 func TestAdmissionRecheckClosesASocketTheFleetNoLongerAdmits(t *testing.T) {
 	service, artifactID, server := newAdmissionServer(t, false)
-	older := mustDialPage(t, server.URL, artifactID, page(1, 1))
-	if !tokenWritable(t, older, artifactID, "1") {
+	older := mustDialPage(t, server.URL, artifactID, page(3, 3))
+	if !tokenWritable(t, older, artifactID, "3") {
 		t.Fatal("an older page that represents everything the fleet creates was authenticated read-only")
 	}
 	current := mustDialPage(t, server.URL, artifactID, page(pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()))
@@ -302,13 +302,13 @@ func TestAdmissionRecheckClosesASocketTheFleetNoLongerAdmits(t *testing.T) {
 		t.Fatal("a current page was authenticated read-only")
 	}
 
-	fleetProcess(t, service, 3, 2, 0)
+	fleetProcess(t, service, 5, 4, 0)
 	if err := service.recheckSchemaAdmissions(context.Background()); err != nil {
 		t.Fatalf("re-check the sockets' admission: %v", err)
 	}
 
 	requireRevokedClose(t, older, "the older page's socket")
-	if socket, authenticated := admission(t, server.URL, artifactID, page(1, 1), "1"); socket || authenticated {
+	if socket, authenticated := admission(t, server.URL, artifactID, page(3, 3), "3"); socket || authenticated {
 		t.Errorf("the older page's reconnect was admitted writable=%t by its socket and %t by its token, want read-only", socket, authenticated)
 	}
 	if !probeWritable(t, current, artifactID) {
@@ -321,9 +321,9 @@ func TestAdmissionRecheckClosesASocketTheFleetNoLongerAdmits(t *testing.T) {
 // page's socket stays open and writable.
 func TestAdmissionRecheckClosesANewerPageOnceNoLiveProcessCreatesWhatItCreates(t *testing.T) {
 	service, artifactID, server := newAdmissionServer(t, false)
-	fleetProcess(t, service, 3, 2, 0)
-	newer := mustDialPage(t, server.URL, artifactID, page(3, 2))
-	if !tokenWritable(t, newer, artifactID, "3") {
+	fleetProcess(t, service, 5, 4, 0)
+	newer := mustDialPage(t, server.URL, artifactID, page(5, 4))
+	if !tokenWritable(t, newer, artifactID, "5") {
 		t.Fatal("a newer page beside a live process of its build was authenticated read-only")
 	}
 	current := mustDialPage(t, server.URL, artifactID, page(pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()))
@@ -340,7 +340,7 @@ func TestAdmissionRecheckClosesANewerPageOnceNoLiveProcessCreatesWhatItCreates(t
 	}
 
 	requireRevokedClose(t, newer, "the newer page's socket")
-	if socket, authenticated := admission(t, server.URL, artifactID, page(3, 2), "3"); socket || authenticated {
+	if socket, authenticated := admission(t, server.URL, artifactID, page(5, 4), "5"); socket || authenticated {
 		t.Errorf("the newer page's reconnect was admitted writable=%t by its socket and %t by its token, want read-only", socket, authenticated)
 	}
 	if !probeWritable(t, current, artifactID) {
@@ -433,18 +433,25 @@ func dialSlowPage(t *testing.T, serverURL, artifactID string, query url.Values) 
 // admission-revoked code after them - never a protocol error from a frame cut in half, and never
 // the bare 1006 of a connection closed without a frame.
 func TestARevokeWaitsForTheMessageTheServerHasInFlight(t *testing.T) {
+	// The process stages one element it reads and cannot create, so it creates less than it
+	// reads and a page one version older is still writable (newAdmissionServer).
+	restore, err := pmdoc.UseStagedBlockForTest("future", false)
+	if err != nil {
+		t.Fatalf("stage the future block as not creatable: %v", err)
+	}
+	t.Cleanup(restore)
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, bigDocumentMarkdown())
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
 
-	// A page creating up to 1 represents everything this fleet creates, so its socket is admitted
-	// writable; it reads nothing, so the sync message stays part way out.
-	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	// A page one version older represents everything this fleet creates, so its socket is
+	// admitted writable; it reads nothing, so the sync message stays part way out.
+	reader := dialSlowPage(t, server.URL, artifactID, page(3, 3))
 	time.Sleep(250 * time.Millisecond)
 
 	// A process that creates what this page cannot represent joins, and the re-check revokes it.
-	fleetProcess(t, service, 3, 2, 0)
+	fleetProcess(t, service, 5, 4, 0)
 	if err := service.recheckSchemaAdmissions(context.Background()); err != nil {
 		t.Fatalf("re-check the sockets' admission: %v", err)
 	}
@@ -553,6 +560,11 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	message := slowPageMessageSize(t, grant)
 	markdown := slowPageMarkdown(message)
 	t.Logf("the kernel grants a send buffer of %d bytes, so the slow page is owed a document message of about %d bytes", grant, message)
+	restore, err := pmdoc.UseStagedBlockForTest("future", false)
+	if err != nil {
+		t.Fatalf("stage the future block as not creatable: %v", err)
+	}
+	t.Cleanup(restore)
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, markdown)
 	// The server accepts through a listener that hands out connections recording what the server
@@ -574,13 +586,13 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	// revoke is taken once that document is on the wire and unread, not after a fixed wait: a run
 	// that revoked before it would be revoking a socket the page was owed nothing on.
 	dialed := time.Now()
-	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	reader := dialSlowPage(t, server.URL, artifactID, page(3, 3))
 	serverConn := accepted.find(reader.LocalAddr().String())
 	if serverConn == nil {
 		t.Fatalf("no accepted connection has the slow page's local address %s, so nothing records what the server writes to it", reader.LocalAddr())
 	}
 	onTheWire := waitForTheDocumentOnTheWire(t, serverConn, dialed)
-	fleetProcess(t, service, 3, 2, 0)
+	fleetProcess(t, service, 5, 4, 0)
 	fleet, err := readSchemaFleet(context.Background(), service.store.Pool)
 	if err != nil {
 		t.Fatalf("read the live fleet: %v", err)
@@ -593,8 +605,9 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	if len(revoked) != 1 {
 		t.Fatalf("the re-check revoked %d sockets, want the slow page's alone", len(revoked))
 	}
-	if got := revoked[0]; got.key.room != artifactID || got.page != (schemaPage{version: 1, creatable: 1, valid: true}) {
-		t.Fatalf("the re-check revoked room %q presenting %+v, want room %q presenting version 1 and creating up to 1, the slow page's",
+	if got := revoked[0]; got.key.room != artifactID ||
+		got.page != (schemaPage{version: 3, creatable: 3, valid: true}) {
+		t.Fatalf("the re-check revoked room %q presenting %+v, want room %q presenting version 3 and creating up to 3, the slow page's",
 			got.key.room, got.page, artifactID)
 	}
 	if took := revokedAt.Sub(dialed); took > revokeAfterDialBound {
@@ -641,7 +654,7 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	}
 	// The reconnect is that page on a new socket of the same room, read-only now: the fleet that
 	// revoked it admits it no other way. What it syncs must be the whole document.
-	address := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?" + page(1, 1).Encode()
+	address := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?" + page(3, 3).Encode()
 	reconnected := docstest.Dial(t, address, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
 	waitForPeerDocument(t, reconnected, want)
 }

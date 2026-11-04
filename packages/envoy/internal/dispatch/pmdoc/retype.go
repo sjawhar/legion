@@ -48,7 +48,7 @@ func RetypeBlock(doc *Node, blockID, typeName string, attributes Attrs) (*Node, 
 	attrs := defaultAttributes(typ)
 	attrs[BlockIDAttr] = blockID
 	for name, value := range attributes {
-		if name == BlockIDAttr || typ.Attributes[name].Server {
+		if name == BlockIDAttr || typ.Attributes.Get(name).Server {
 			continue
 		}
 		attrs[name] = value
@@ -69,16 +69,16 @@ func StripServerOwnedAttrs(doc *Node) {
 		if !typed {
 			return true
 		}
-		for name, attribute := range typ.Attributes {
+		for _, attribute := range typ.Attributes {
 			if !attribute.Server {
 				continue
 			}
-			value, ok := writtenDefault(typ, name, attribute)
+			value, ok := writtenDefault(typ, attribute)
 			if !ok {
-				delete(node.Attrs, name)
+				delete(node.Attrs, attribute.Name)
 				continue
 			}
-			node.Attrs[name] = value
+			node.Attrs[attribute.Name] = value
 		}
 		return true
 	})

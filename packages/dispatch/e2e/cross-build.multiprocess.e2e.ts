@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type Browser,
   type BrowserContext,
@@ -41,10 +44,11 @@ import { signIn } from "./users";
  * envoy-dispatch and `DISPATCH_E2E_WEB_DIST_B` its web dist, Dispatch B is that release, so each
  * direction runs one build's page against the other build's server; without it both processes run
  * this tree. In each direction the page signs in, opens a project's issue list and an issue, posts
- * a comment, answers an ask, types into the issue's document and sees the edit saved and shown in
- * a context of the other build's page, and opens the Delivery page, whose live socket subscribes
- * to the timeline and is answered a snapshot. Every selector is one both builds' own browser
- * suites use.
+ * a comment, answers an ask, opens the issue's document - where that server admits the page
+ * writable it types and sees the edit saved and shown in a context of the other build's page, and
+ * where it admits the page read-only the page says so and the stored document is untouched
+ * (`pageWritable`) - and opens the Delivery page, whose live socket subscribes to the timeline and
+ * is answered a snapshot. Every selector is one both builds' own browser suites use.
  *
  * Each seed call names the process it runs on (`process` in e2e/api.ts, which pins its sign-in
  * there too), so the build that wrote a row and the build that reads it back are both known.
@@ -57,6 +61,65 @@ const builds: Record<DispatchProcess, string> = {
 };
 
 const seedAgent = { kind: "session", id: "e2e-cross-build" } as const;
+
+/** packages/envoy, which `DISPATCH_E2E_BINARY_B` is a path from, and the directory
+ *  build-dispatch-build.sh wrote that build into: the binary's own, which also holds the build's
+ *  `pmdoc/schema/blocks.json` and its `web/` dist. */
+const envoyDir = fileURLToPath(new URL("../../envoy", import.meta.url));
+const buildB = binaryB === undefined ? undefined : dirname(resolve(envoyDir, binaryB));
+
+/** The schema manifest version a build's server reads and admits a page by. */
+function manifestVersion(process: DispatchProcess): number {
+  const path =
+    process === "b" && buildB !== undefined
+      ? resolve(buildB, "pmdoc", "schema", "blocks.json")
+      : resolve(envoyDir, "internal", "dispatch", "pmdoc", "schema", "blocks.json");
+  const manifest: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (
+    manifest === null ||
+    typeof manifest !== "object" ||
+    !("version" in manifest) ||
+    typeof manifest.version !== "number"
+  ) {
+    throw new Error(`${path} declares no schema version`);
+  }
+  return manifest.version;
+}
+
+/** Whether a build's page carries the manifest it was built with, which it presents as
+ *  `schema_version` and `schema_creatable` (web/src/features/doc/schema.ts). A page of a build
+ *  before that reads the schema from the server it talks to and sends `schema_version` alone. */
+function pageCarriesManifest(process: DispatchProcess): boolean {
+  if (process !== "b" || buildB === undefined) {
+    return true;
+  }
+  const assets = resolve(buildB, "web", "assets");
+  return readdirSync(assets).some(
+    (file) =>
+      file.endsWith(".js") &&
+      readFileSync(resolve(assets, file), "utf8").includes("schema_creatable")
+  );
+}
+
+/**
+ * Whether a page of `pageProcess` may write a document on the server of `server`.
+ *
+ * A page that carries no manifest of its own takes its `schema_version` from the schema route of
+ * the server it talks to and sends no `schema_creatable`, so it presents that server's own
+ * version and creates up to 1: every server admits it, its own rule (a version equal to the
+ * server's) and this tree's (R 1 at most what the server reads, and a version at least what the
+ * server creates and the document holds) alike.
+ *
+ * A page that carries its manifest presents that manifest's version, so a server reading another
+ * version admits it read-only: a build before the fleet columns compares the token with its own
+ * version exactly (`schemaReadOnly`), and this tree's rule refuses a page whose version is below
+ * the highest `since` the fleet creates (`docs.schemaFleet.admits`).
+ */
+function pageWritable(pageProcess: DispatchProcess, server: DispatchProcess): boolean {
+  return (
+    !pageCarriesManifest(pageProcess) || manifestVersion(pageProcess) === manifestVersion(server)
+  );
+}
 
 /** The day `seedDeliveryFixture` writes its timeline on. */
 const deliveryWindow = "from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
@@ -159,14 +222,21 @@ for (const pageProcess of dispatchProcesses) {
         .poll(async () => (await getAsk(ask.id, { process: pageProcess })).answers.length)
         .toBe(1);
 
-      // The issue's document: an edit typed here is saved by this context's server, then read
-      // from the store by the other server, and shown below in a context of the other build's
-      // page.
+      // The issue's document. Where the other build's server admits this page writable
+      // (pageWritable), an edit typed here is saved by that server, then read from the store by
+      // this page's own server, and shown below in a context of the other build's page. Where it
+      // admits the page read-only - a page carrying a manifest of another version than the
+      // server reads - the page says so, takes no edit, and the stored document is untouched.
       await page.goto(`/issues/${issue.key}/spec`);
       await expect(documentEditor(page)).toContainText("Written before the edit.");
       await expect(connectedDot(page)).toHaveText("connected");
       const edit = `Typed on ${builds[pageProcess]}'s page.`;
-      await typeAtEnd(page, edit);
+      const writable = pageWritable(pageProcess, server);
+      if (writable) {
+        await typeAtEnd(page, edit);
+      } else {
+        await expect(page.locator('.dispatch-doc[data-read-only="true"]')).toBeVisible();
+      }
       for (const reader of [server, pageProcess]) {
         await expect
           .poll(
@@ -174,7 +244,11 @@ for (const pageProcess of dispatchProcesses) {
               (await getIssueArtifactText(issue.key, "spec", { process: reader })).markdown,
             { timeout: 30_000 }
           )
-          .toContain(edit);
+          .toContain(writable ? edit : "Written before the edit.");
+        if (!writable) {
+          const { markdown } = await getIssueArtifactText(issue.key, "spec", { process: reader });
+          expect(markdown).not.toContain(edit);
+        }
       }
 
       // The Delivery page on the fixture's day: the page's live socket subscribes to the timeline
@@ -213,12 +287,15 @@ for (const pageProcess of dispatchProcesses) {
         expect(opened.filter((socket) => socket.upstream !== server)).toEqual([]);
       }
 
-      // The edit, in a context of the other build's page against this page's own server.
+      // The document, in a context of the other build's page against this page's own server: the
+      // edit where this page could make one, and the text it opened with where it could not.
       const otherBuild = await splitContext(browser, server, pageProcess);
       try {
         const reading = await otherBuild.newPage();
         await reading.goto(`/issues/${issue.key}/spec`);
-        await expect(documentEditor(reading)).toContainText(edit);
+        await expect(documentEditor(reading)).toContainText(
+          writable ? edit : "Written before the edit."
+        );
       } finally {
         await otherBuild.close();
       }

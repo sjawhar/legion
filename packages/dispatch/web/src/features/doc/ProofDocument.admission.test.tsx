@@ -14,6 +14,7 @@ import {
 import { ApiError, api } from "../../api/client";
 import type { ArtifactText } from "../../api/types";
 import { openPendingEdits } from "./pending-edits";
+import { compiledSchemaCreatable } from "./schema";
 
 // Whether the live editor may connect, and what the page shows when it may not or cannot: the
 // admission's own `/text` read, a socket the server refuses as outside the Proof schema, the repair
@@ -626,7 +627,7 @@ test("ProofDocument names a reload again for a schema's admission when a close a
 // During a release the process that answers the page can be of the other build, and its schema
 // route names that build's manifest, not the one this page's editor builds. So the page presents
 // the manifest it was built with: its version, and the highest version that reads every element
-// it creates (each current element is read from version 1), and it asks no server for a schema.
+// it creates (`compiledSchemaCreatable`), and it asks no server for a schema.
 test("ProofDocument connects with the schema it was built with and reads none from the server", async () => {
   const realFetch = globalThis.fetch;
   const schemaReads: string[] = [];
@@ -643,7 +644,7 @@ test("ProofDocument connects with the schema it was built with and reads none fr
   try {
     await waitFor(() => expect(connections).toHaveLength(1));
     expect(callbacks[0]?.schemaVersion).toBe(manifest.version);
-    expect(callbacks[0]?.schemaCreatable).toBe(1);
+    expect(callbacks[0]?.schemaCreatable).toBe(compiledSchemaCreatable);
     expect(schemaReads).toEqual([]);
   } finally {
     view.unmount();

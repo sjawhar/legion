@@ -3,9 +3,11 @@ import { expect, test } from "bun:test";
 import type { BlockSchema } from "../../api/types";
 import { compiledBlockSchema, schemaCreatable } from "./schema";
 
-/** The compiled manifest with one more typed block, "future", which builds read from schema
- *  version 2 and create from schema version `creatableSince`. */
-function withFutureBlock(creatableSince: number): BlockSchema {
+/** The compiled manifest as the build that introduces one more typed block, "future", declares
+ *  it: the version raised by one, and the block read from that version and created from it
+ *  (`creatable`) or from the version after it. */
+function withFutureBlock(creatable: boolean): BlockSchema {
+  const version = compiledBlockSchema.version + 1;
   return {
     ...compiledBlockSchema,
     types: [
@@ -13,31 +15,41 @@ function withFutureBlock(creatableSince: number): BlockSchema {
       {
         attributes: {},
         content: "block+",
-        creatable_since: creatableSince,
+        creatable_since: creatable ? version : version + 1,
         name: "future",
         render: "host",
-        since: 2,
+        since: version,
       },
     ],
+    version,
   };
 }
 
 // The page presents the manifest it was built with: its version V, and R, the highest `since`
 // among the elements it may create (`creatable_since` V or less), as Go's `pmdoc.SchemaCreatable`
-// computes it. Every element of today's manifest is read and created from version 1.
-test("the compiled manifest is the page's own, and everything it creates is read from version 1", () => {
-  expect(compiledBlockSchema.version).toBe(2);
+// computes it. Today's manifest creates every element it reads, the three blocks version 3 adds
+// included, so its R is its version.
+test("the compiled manifest is the page's own, and it creates everything it reads", () => {
+  expect(compiledBlockSchema.version).toBe(3);
   expect(compiledBlockSchema.nodes?.map(({ name }) => name)).toContain("paragraph");
-  expect(compiledBlockSchema.types.map(({ name }) => name)).toEqual(["callout", "ask"]);
-  expect(schemaCreatable(compiledBlockSchema)).toBe(1);
+  expect(compiledBlockSchema.types.map(({ name }) => name)).toEqual([
+    "callout",
+    "ask",
+    "requirement",
+    "plan_task",
+    "check",
+  ]);
+  expect(schemaCreatable(compiledBlockSchema)).toBe(3);
 });
 
 test("an element the page creates counts toward its creatable version, one it only reads does not", () => {
-  expect(schemaCreatable(withFutureBlock(2))).toBe(2);
-  expect(schemaCreatable(withFutureBlock(3))).toBe(1);
+  expect(schemaCreatable(withFutureBlock(true))).toBe(compiledBlockSchema.version + 1);
+  expect(schemaCreatable(withFutureBlock(false))).toBe(compiledBlockSchema.version);
 });
 
 test("nodes, marks, attributes and enum choices each count toward the creatable version", () => {
+  const version = compiledBlockSchema.version + 1;
+  const shipped = schemaCreatable(compiledBlockSchema);
   const ask = compiledBlockSchema.types.find(({ name }) => name === "ask");
   const urgency = ask?.attributes.urgency;
   if (ask === undefined || urgency === undefined) {
@@ -48,6 +60,7 @@ test("nodes, marks, attributes and enum choices each count toward the creatable 
     types: compiledBlockSchema.types.map((type) =>
       type.name === "ask" ? { ...ask, attributes: { ...ask.attributes, ...attributes } } : type
     ),
+    version,
   });
 
   expect(
@@ -55,28 +68,35 @@ test("nodes, marks, attributes and enum choices each count toward the creatable 
       ...compiledBlockSchema,
       nodes: [
         ...(compiledBlockSchema.nodes ?? []),
-        { creatable_since: 2, name: "aside", since: 2 },
+        { creatable_since: version, name: "aside", since: version },
       ],
+      version,
     })
-  ).toBe(2);
+  ).toBe(version);
   expect(
     schemaCreatable({
       ...compiledBlockSchema,
-      marks: [...(compiledBlockSchema.marks ?? []), { creatable_since: 3, name: "glow", since: 2 }],
+      marks: [
+        ...(compiledBlockSchema.marks ?? []),
+        { creatable_since: version + 1, name: "glow", since: version },
+      ],
+      version,
     })
-  ).toBe(1);
+  ).toBe(shipped);
   expect(
-    schemaCreatable(withAsk({ due: { creatable_since: 2, kind: "timestamp", since: 2 } }))
-  ).toBe(2);
+    schemaCreatable(
+      withAsk({ due: { creatable_since: version, kind: "timestamp", since: version } })
+    )
+  ).toBe(version);
   expect(
     schemaCreatable(
       withAsk({
         urgency: {
           ...urgency,
-          choice_versions: { critical: { creatable_since: 2, since: 2 } },
+          choice_versions: { critical: { creatable_since: version, since: version } },
           choices: [...(urgency.choices ?? []), "critical"],
         },
       })
     )
-  ).toBe(2);
+  ).toBe(version);
 });

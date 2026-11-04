@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "nodes": [
     { "name": "doc" },
     { "name": "paragraph" },
@@ -102,6 +102,60 @@
           "server": true
         }
       }
+    },
+    {
+      "name": "requirement",
+      "content": "paragraph+",
+      "render": "host",
+      "attributes": {},
+      "since": 3,
+      "creatable_since": 3
+    },
+    {
+      "name": "plan_task",
+      "content": "paragraph+",
+      "render": "host",
+      "attributes": {
+        "serves": {
+          "kind": "block[]",
+          "targets": ["requirement"]
+        },
+        "needs": {
+          "kind": "block[]",
+          "targets": ["plan_task"],
+          "scope": "document"
+        }
+      },
+      "since": 3,
+      "creatable_since": 3
+    },
+    {
+      "name": "check",
+      "content": "paragraph+",
+      "render": "host",
+      "attributes": {
+        "serves": {
+          "kind": "block[]",
+          "targets": ["requirement"]
+        },
+        "surface": {
+          "kind": "enum",
+          "choices": ["browser", "cli", "api"]
+        },
+        "run": {
+          "kind": "string"
+        },
+        "when": {
+          "kind": "enum",
+          "choices": ["before_merge", "after_merge", "default_branch"],
+          "default": "before_merge"
+        },
+        "negative_control": {
+          "kind": "string"
+        }
+      },
+      "since": 3,
+      "creatable_since": 3
     }
   ]
 }

@@ -122,13 +122,14 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 		}
 	}
 
-	restoreCreatable, err := UseStagedBlockForTest("future", 2)
+	shipped, shippedCreatable := SchemaVersion(), SchemaCreatable()
+	restoreCreatable, err := UseStagedBlockForTest("future", true)
 	if err != nil {
 		t.Fatalf("stage the future block as creatable: %v", err)
 	}
 	t.Cleanup(restoreCreatable)
-	if got := SchemaCreatable(); got != 2 {
-		t.Fatalf("SchemaCreatable() where future is creatable = %d, want 2", got)
+	if got, want := SchemaCreatable(), shipped+1; got != want {
+		t.Fatalf("SchemaCreatable() where future is creatable = %d, want %d", got, want)
 	}
 	written, err := ParseForWrite(markdown, nil)
 	if err != nil {
@@ -142,20 +143,20 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 		t.Fatalf("a build that creates future stores it: %v", err)
 	}
 
-	restoreUncreatable, err := UseStagedBlockForTest("future", 3)
+	restoreUncreatable, err := UseStagedBlockForTest("future", false)
 	if err != nil {
 		t.Fatalf("stage the future block as not creatable: %v", err)
 	}
 	t.Cleanup(restoreUncreatable)
-	if got, want := SchemaVersion(), 2; got != want {
+	if got, want := SchemaVersion(), shipped+1; got != want {
 		t.Fatalf("SchemaVersion() = %d, want %d", got, want)
 	}
-	if got := SchemaCreatable(); got != 1 {
-		t.Fatalf("SchemaCreatable() where future is not creatable = %d, want 1", got)
+	if got := SchemaCreatable(); got != shippedCreatable {
+		t.Fatalf("SchemaCreatable() where future is not creatable = %d, want the shipped manifest's %d", got, shippedCreatable)
 	}
 	versions, declared := Element{Kind: TypedBlockElement, Name: "future"}.Versions()
-	if !declared || versions != (ElementVersions{Since: 2, CreatableSince: 3}) {
-		t.Fatalf("future versions = %+v, %t; want since 2, creatable_since 3", versions, declared)
+	if !declared || versions != (BlockElementVersions{Since: shipped + 1, CreatableSince: shipped + 2}) {
+		t.Fatalf("future versions = %+v, %t; want since %d, creatable_since %d", versions, declared, shipped+1, shipped+2)
 	}
 	read, err := Read(fragment)
 	if err != nil {
@@ -203,10 +204,10 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 
 // DocumentSince is the highest since among the declared elements a document holds: the schema
 // version a client needs to represent all of it. A document of version 1 elements is 1, one that
-// also holds an element read from version 2 is 2, and no document is 0. An element the manifest
-// does not declare has no since, and counts for nothing.
+// also holds an element the staged manifest reads from its own version is that version, and no
+// document is 0. An element the manifest does not declare has no since, and counts for nothing.
 func TestDocumentSinceIsTheHighestSinceTheDocumentHolds(t *testing.T) {
-	restore, err := UseStagedBlockForTest("future", 2)
+	restore, err := UseStagedBlockForTest("future", true)
 	if err != nil {
 		t.Fatalf("stage the future block as creatable: %v", err)
 	}
@@ -227,11 +228,92 @@ func TestDocumentSinceIsTheHighestSinceTheDocumentHolds(t *testing.T) {
 	}{
 		{name: "no document", doc: nil, want: 0},
 		{name: "a paragraph", doc: plain, want: 1},
-		{name: "a paragraph and a future block", doc: future, want: 2},
+		{name: "a paragraph and a future block", doc: future, want: SchemaVersion()},
 		{name: "a paragraph and an undeclared node", doc: unknown, want: 1},
 	} {
 		if got := DocumentSince(c.doc); got != c.want {
 			t.Errorf("DocumentSince(%s) = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// manifestAsOf is the embedded manifest as the build of an earlier release read it: its version
+// lowered to version, and every element it reads only from a later one dropped. An element whose
+// since is at most version stays as it is, creatable_since above version included: that is an
+// element the earlier build already read and did not create.
+func manifestAsOf(t *testing.T, version int) []byte {
+	t.Helper()
+	var value BlockSchema
+	if err := json.Unmarshal(SchemaJSON(), &value); err != nil {
+		t.Fatalf("decode the embedded manifest: %v", err)
+	}
+	later := func(since int) bool { return since > version }
+	value.Version = version
+	value.Nodes = slices.DeleteFunc(value.Nodes, func(node BlockSchemaElement) bool { return later(node.Since) })
+	value.Marks = slices.DeleteFunc(value.Marks, func(mark BlockSchemaElement) bool { return later(mark.Since) })
+	value.Types = slices.DeleteFunc(value.Types, func(typ BlockTypeSchema) bool { return later(typ.Since) })
+	for index := range value.Types {
+		typ := &value.Types[index]
+		typ.Attributes = slices.DeleteFunc(typ.Attributes, func(attr BlockAttribute) bool { return later(attr.Since) })
+		for attrIndex := range typ.Attributes {
+			attr := &typ.Attributes[attrIndex]
+			attr.Choices = slices.DeleteFunc(slices.Clone(attr.Choices), func(choice string) bool {
+				return later(attr.ChoiceVersions[choice].Since)
+			})
+		}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode the manifest as of version %d: %v", version, err)
+	}
+	return encoded
+}
+
+// The typed blocks this manifest's version adds are staged by their numbers: the build of the
+// release before, whose manifest is this one as of the version before, does not declare them. It
+// creates none of them - a write naming one is refused - and a stored document holding one reads
+// as an element it does not know (ErrUnknownElement), which the document service answers
+// 409 DOC_NEWER_CONTENT for rather than repairing or rebuilding the document.
+func TestTheTypedBlocksThisVersionAddsAreUnknownToTheBuildBefore(t *testing.T) {
+	added := []string{"requirement", "plan_task", "check"}
+	for _, name := range added {
+		versions, declared := Element{Kind: TypedBlockElement, Name: name}.Versions()
+		if !declared || versions.Since != SchemaVersion() {
+			t.Fatalf("typed block %q = %+v, %t; want since %d, the version that adds it", name, versions, declared, SchemaVersion())
+		}
+	}
+	markdown := func(name string) string {
+		return ":::" + name + "{#b-" + name + "}\nBody.\n:::\n"
+	}
+	stored, err := Parse(markdown("requirement") + "\n" + markdown("plan_task") + "\n" + markdown("check"))
+	if err != nil {
+		t.Fatalf("this build reads a document holding the blocks it adds: %v", err)
+	}
+	for _, name := range added {
+		if _, err := ParseForWrite(markdown(name), nil); err != nil {
+			t.Fatalf("this build writes a %s block: %v", name, err)
+		}
+	}
+
+	before := SchemaVersion() - 1
+	restore, err := UseManifestForTest(manifestAsOf(t, before))
+	if err != nil {
+		t.Fatalf("install the manifest as of version %d: %v", before, err)
+	}
+	t.Cleanup(restore)
+	if got := SchemaVersion(); got != before {
+		t.Fatalf("SchemaVersion() of the build before = %d, want %d", got, before)
+	}
+	for _, name := range added {
+		if IsTypedBlock(name) {
+			t.Errorf("the build before declares typed block %q, which version %d adds", name, before+1)
+		}
+		_, err := ParseForWrite(markdown(name), nil)
+		if !errors.Is(err, ErrUnknownElement) || !strings.Contains(err.Error(), name) {
+			t.Errorf("the build before writing a %s block = %v, want ErrUnknownElement naming it", name, err)
+		}
+	}
+	if err := stored.Validate(); !errors.Is(err, ErrUnknownElement) {
+		t.Errorf("the build before reading a stored document holding them = %v, want ErrUnknownElement", err)
 	}
 }

@@ -231,7 +231,7 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 // INVALID_MARKDOWN. A version holding an element this build reads but may not create yet rebuilds:
 // the seed only puts back content the document stored.
 func TestARebuildFromTheLatestVersionAnswersForWhatThatVersionHolds(t *testing.T) {
-	restore, err := pmdoc.UseStagedBlockForTest("staged", 3)
+	restore, err := pmdoc.UseStagedBlockForTest("staged", false)
 	if err != nil {
 		t.Fatalf("stage a typed block this build reads and may not create: %v", err)
 	}

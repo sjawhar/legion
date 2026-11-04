@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
@@ -411,6 +412,11 @@ type server struct {
 	// (recordRelatedChecks, run as detached work) hold or wait on a pool connection right now, at
 	// most relatedRecordRetryLimit.
 	relatedRecordRetrying atomic.Int32
+	// defaultBranches is what the results reads last learned about each repository's default
+	// branch (delivery.DefaultBranches), held across requests so the Verification tab's refetch
+	// on every result.recorded does not spend one GET /repos/{owner}/{repo} apiece. The policy
+	// is delivery's; the server holds the one cache the process shares.
+	defaultBranches delivery.DefaultBranches
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -1315,6 +1321,15 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	return tx, nil
+}
+
+// readyPool is the pool a route reads through before it opens its transaction, with the
+// refusal begin would make when there is no database.
+func (s *server) readyPool() (*store.Pool, error) {
+	if s.deps.Store == nil || s.deps.Store.Pool == nil {
+		return nil, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
+	}
+	return s.deps.Store.Pool, nil
 }
 
 // requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
