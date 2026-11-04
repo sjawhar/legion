@@ -13,9 +13,11 @@ import (
 
 // Ask followers: the sessions an ask's answer, edits, resolution, and replies reach
 // directly. Every session that writes to an ask follows it (asks.FollowAuthor at each
-// insert site); these routes let a session leave or rejoin and a human curate the list.
-// A bearer names its own session in the body and may act only on that session; a human
-// (cookie identity) may add or remove any session and sends no body.
+// insert site); these routes let a session leave or rejoin and a person curate the list.
+// A credential that does not act for a person names its own session in the body and may act
+// only on that session; a person's own credential — their browser's cookie, or a token of
+// theirs holding the `person` scope — may add or remove any session and sends no body of its
+// own, since putting a session on an ask is the person's act.
 
 func parseAskID(r *http.Request) (string, error) {
 	id := r.PathValue("id")
@@ -82,12 +84,22 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 		writeError(w, "FOLLOWER_INPUT", http.StatusBadRequest, "follower session id is required")
 		return
 	}
-	actor, human, err := s.optionalActor(r)
+	actor, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return
 	}
-	if !human {
+	if s.callerHoldsScope(r, model.ScopePerson) {
+		// The person this credential acts for, with the agent beside them where one acted, as
+		// every route a person's credential opens records it. requireScope cannot refuse the
+		// scope here, which the line above has just read; it still refuses a `?session=` that
+		// names a session other than the one a broker-issued token proved.
+		person, ok := s.requireScope(w, r, model.ScopePerson)
+		if !ok {
+			return
+		}
+		actor = person
+	} else {
 		var input struct {
 			Actor *model.Actor `json:"actor"`
 		}

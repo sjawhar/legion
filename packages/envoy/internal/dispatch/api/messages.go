@@ -675,11 +675,12 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 }
 
 // readableMessageThread is the conversation message {id} belongs to, when the caller may read it
-// under getMessageThread's rule: a human reads any, a bearer an issue thread and only a direct
-// conversation its ?session= is in. Every route that reads a message by its id alone (the
-// conversation, the message's blocks) asks it. ok is false once it has written the refusal.
+// under getMessageThread's rule: a person's own credential reads any, and every other reads an
+// issue thread and only a direct conversation its ?session= is in. Every route that reads a
+// message by its id alone (the conversation, the message's blocks) asks it. ok is false once it
+// has written the refusal.
 func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageRead, bool) {
-	_, human, err := s.optionalActor(r)
+	_, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return messageRead{}, false
@@ -699,7 +700,10 @@ func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (
 		s.writeHandlerError(w, err)
 		return messageRead{}, false
 	}
-	if !human && read.Message.IssueKey == nil {
+	// A direct conversation is the person's own, so a credential of theirs reads it whole and
+	// names no session in it, as their browser does. The scope is the request's credential's;
+	// this read records no actor, so there is nothing else to resolve.
+	if !s.callerHoldsScope(r, model.ScopePerson) && read.Message.IssueKey == nil {
 		session := strings.TrimSpace(r.URL.Query().Get("session"))
 		if session == "" {
 			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,

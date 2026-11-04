@@ -47,7 +47,9 @@ func TestAPersonsTokenForcesAndReleasesAClaimAsThePersonDoes(t *testing.T) {
 			forced.Key, took.Code, took.Body.String())
 	}
 
-	released := createInteractionIssue(t, handler, "KND", "Releasing a claim", "A spec")
+	// A project of its own: createInteractionIssue creates the project it names and fails on one
+	// that already exists, so the second issue of a test cannot share the first's key.
+	released := createInteractionIssue(t, handler, "KNR", "Releasing a claim", "A spec")
 	if claimed := dispatchRequest(t, handler, http.MethodPost,
 		"/api/v1/issues/"+released.Key+"/claim", map[string]any{}, "bob"); claimed.Code != http.StatusOK {
 		t.Fatalf("bob claims %s in a browser: status=%d body=%s", released.Key, claimed.Code, claimed.Body.String())

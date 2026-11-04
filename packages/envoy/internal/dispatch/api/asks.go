@@ -341,6 +341,19 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Rewording somebody else's ask is the person's act, so a credential of theirs that holds
+	// the person scope is recorded as the person and passes the author check below, as their
+	// browser does. Read from the request's own credential: the actor above is the session a
+	// bearer acts for, which would refuse the person's token what the person is allowed.
+	if s.callerHoldsScope(r, model.ScopePerson) {
+		person, held := s.requireScope(w, r, model.ScopePerson)
+		if !held {
+			return
+		}
+		if actor, ok = actSessionFromBody(w, person, input.Actor); !ok {
+			return
+		}
+	}
 	if !requireUUIDPath(w, r, "ask") {
 		return
 	}

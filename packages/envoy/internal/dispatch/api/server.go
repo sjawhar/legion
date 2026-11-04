@@ -1291,11 +1291,27 @@ func actSessionFromBody(w http.ResponseWriter, actor model.Actor, supplied *mode
 	return actor, true
 }
 
-// requireCallerScope refuses a request whose credential does not hold one scope, for a check
-// that is not a route's own gate: the claim's `force` field (issue_claim.go), which every
-// authenticated caller may send and only a person's own credential may set. It reads the
-// credential from optionalActor because the actor those handlers hold came through requireActor,
-// which drops it (model.Actor.Recorded).
+// callerHoldsScope reports whether this request's credential holds one OAuth scope. It is the
+// question every check inside a handler asks that a person's own credential must pass as the
+// person at a browser passes it: taking a live holder's claim and releasing anyone's claim
+// (issue_claim.go), following or unfollowing an ask for any session (ask_followers.go),
+// rewording any ask (asks.go) and reading any direct conversation (messages.go). None of them
+// can read it off the actor they hold: a bearer's recorded actor is the session it acts for,
+// and actorFrom drops the credential from what it hands back (model.Actor.Recorded). A caller
+// that does not resolve at all holds nothing, and the route's own gate answers it.
+func (s *server) callerHoldsScope(r *http.Request, scope string) bool {
+	actor, _, err := s.optionalActor(r)
+	if err != nil {
+		return false
+	}
+	return actor.Credential.Holds(scope)
+}
+
+// requireCallerScope refuses a request whose credential does not hold one scope, for a field
+// that is not a route's own gate: the claim's `force` (issue_claim.go), which every
+// authenticated caller may send and only a person's own credential may set. Where such a check
+// passes a caller it lacks the scope for rather than refusing it, callerHoldsScope above is the
+// predicate to read instead.
 func (s *server) requireCallerScope(w http.ResponseWriter, r *http.Request, scope string) bool {
 	actor, _, err := s.optionalActor(r)
 	if err != nil {

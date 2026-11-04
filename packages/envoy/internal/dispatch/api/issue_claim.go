@@ -78,7 +78,7 @@ type claimConflict struct {
 	// leaves it empty, which costs nothing: claimHolder names a non-session by kind and id
 	// and reads no title at all.
 	liveTitle string
-	// forcible is humanRule.forcible, carried through so the refusal offers only what its
+	// forcible is personRule.forcible, carried through so the refusal offers only what its
 	// caller can use.
 	forcible bool
 }
@@ -161,12 +161,16 @@ func (s *server) fetchHolderLiveness(ctx context.Context, holder model.IssueClai
 	return holderLiveness{fetched: true, holder: &session}, nil
 }
 
-// humanRule is how a route treats a human caller, the one difference between claiming and
-// releasing. override is whether being human is itself enough to act over a live holder:
-// releasing a claim is any human's to do, while claiming over a live holder takes an explicit
-// {force: true}. forcible is whether the route has that force at all, so a refusal offers only
-// what its caller can use — POST /api/v1/issues/{key}/claim has one, DELETE has none.
-type humanRule struct {
+// personRule is how a route treats a caller acting as the person whose issue this is, the one
+// difference between claiming and releasing. override is whether acting as the person is itself
+// enough to act over a live holder: releasing a claim is the person's to do, while claiming over
+// a live holder takes an explicit {force: true}. Each route decides it from the request's own
+// credential (server.callerHoldsScope, model.ScopePerson), never from the kind of the actor the
+// write records: that actor is the session a bearer acts for, so reading it would refuse a
+// person's own token what the same person's browser is allowed. forcible is whether the route
+// has that force at all, so a refusal offers only what its caller can use —
+// POST /api/v1/issues/{key}/claim has one, DELETE has none.
+type personRule struct {
 	override bool
 	forcible bool
 }
@@ -198,7 +202,7 @@ type judgement struct {
 // work the same issue, and whatever the first wrote is already another's to overwrite — so
 // the holder's own record decides.
 func claimBlockedBy(
-	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement,
+	current *model.IssueClaim, actor model.Actor, rule personRule, judged judgement,
 ) error {
 	if judged.live.fetched && !sameHolder(judged.holder, current) {
 		return errHolderUnjudged
@@ -206,7 +210,7 @@ func claimBlockedBy(
 	if current == nil || current.Actor.SameAs(actor) {
 		return nil
 	}
-	if rule.override && actor.Kind == "user" {
+	if rule.override {
 		return nil
 	}
 	if current.Actor.Kind != "session" {
@@ -237,7 +241,7 @@ func sameHolder(left, right *model.IssueClaim) bool {
 // rather than by re-deriving when a holder must be judged. It decides nothing; claimBlockedBy
 // does, under the lock, against the row as it stands then.
 func (s *server) judgeHolder(
-	ctx context.Context, key string, actor model.Actor, rule humanRule,
+	ctx context.Context, key string, actor model.Actor, rule personRule,
 ) (judgement, error) {
 	holder, err := s.readIssueClaim(ctx, key)
 	if err != nil {
@@ -480,7 +484,7 @@ func (s *server) claimCycle(
 	r *http.Request,
 	key string,
 	actor model.Actor,
-	rule humanRule,
+	rule personRule,
 	decide func(before model.Issue, judged judgement) (claimChange, error),
 ) {
 	applied, err := resolveThenLock(r.Context(),
@@ -529,7 +533,7 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
-	rule := humanRule{override: input.Force, forcible: true}
+	rule := personRule{override: input.Force, forcible: true}
 	s.claimCycle(w, r, key, actor, rule, func(before model.Issue, judged judgement) (claimChange, error) {
 		if before.ClosedAt != nil {
 			return claimChange{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
@@ -607,9 +611,11 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	key := r.PathValue("key")
-	// Releasing a claim is any human's to do, and this route has no force to point a refused
-	// caller at.
-	rule := humanRule{override: true}
+	// Releasing a claim is the person's to do, whichever credential of theirs makes it, and this
+	// route has no force to point a refused caller at. The scope is read from the request's own
+	// credential rather than from the actor the release records, which for a bearer is the
+	// session it acts for.
+	rule := personRule{override: s.callerHoldsScope(r, model.ScopePerson)}
 	s.claimCycle(w, r, key, actor, rule, func(before model.Issue, judged judgement) (claimChange, error) {
 		if before.Claim == nil {
 			// Nothing to release, including on a closed issue, whose close already cleared
