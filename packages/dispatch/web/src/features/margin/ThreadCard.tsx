@@ -39,7 +39,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { useMargin } from "./margin-context";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -204,7 +204,7 @@ function CommentBody({
           )}
         </div>
       ) : null}
-      {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
+      <Unfurl body={comment.body} source={owner} />
       <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <span>
           <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
@@ -516,7 +516,7 @@ export function ThreadCard({
                     </blockquote>
                   )}
                   <MarkdownPreview lines={2} links="live" markdown={root.body} source={owner} />
-                  {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
+                  <Unfurl body={root.body} source={owner} />
                 </>
               )}
               {thread.replies.length === 0 ? null : (

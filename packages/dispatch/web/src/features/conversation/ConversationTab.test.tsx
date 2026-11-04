@@ -2238,3 +2238,37 @@ test("the read mark writes the issue's head seq as the reader, and retries an un
     viewport.restore();
   }
 });
+
+// INFRA-869: a message that is nothing but a reference shows the reference's card under it, as
+// the margin's comments do.
+test("a message that is nothing but a reference shows its card", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue({
+    documents: [],
+    key: "CORE-2",
+    project: "CORE",
+    status: "in_progress",
+    title: "The other issue",
+  });
+  const stub = stubLists({
+    messages: [thread(message("message-1", { body: "dispatch://CORE-2" }))],
+  });
+  const view = render(tab({ "CORE-1": issueState() }, true, newQueryClient()));
+
+  try {
+    const turn = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>('[data-turn="message:message-1"]');
+      if (found === null) throw new Error("the turn has not rendered");
+      return found;
+    });
+    const cards = await within(turn).findByRole("region", { name: "References" });
+    expect(
+      within(cards)
+        .getByRole("link", { name: /The other issue/ })
+        .getAttribute("href")
+    ).toBe("/issues/CORE-2");
+  } finally {
+    view.unmount();
+    stub.restore();
+    getIssueSummary.mockRestore();
+  }
+});

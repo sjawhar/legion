@@ -53,6 +53,8 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { issueSource } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
@@ -217,7 +219,12 @@ function ConversationReply({
       actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
       at={reply.created_at}
       author={reply.author}
-      body={<MarkdownBody markdown={reply.body} />}
+      body={
+        <>
+          <MarkdownBody markdown={reply.body} />
+          <Unfurl body={reply.body} source={issueSource(issueKey)} />
+        </>
+      }
       current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
@@ -347,6 +354,7 @@ function MessageTurn({
             {item.unread ? <UnreadMark /> : null}
           </p>
           <MarkdownBody markdown={item.root.body} />
+          <Unfurl body={item.root.body} source={issueSource(issueKey)} />
         </div>
         <TurnActions>
           <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
@@ -840,6 +848,7 @@ function TargetedMessageTurn({
             {item.unread ? <UnreadMark /> : null}
           </p>
           <MarkdownBody markdown={item.root.body} />
+          <Unfurl body={item.root.body} source={issueSource(issueKey)} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}

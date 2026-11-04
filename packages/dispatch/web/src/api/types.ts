@@ -143,6 +143,7 @@ export type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  IDCandidate,
   InboxDocument,
   InboxRow,
   Issue,

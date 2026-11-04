@@ -44,8 +44,12 @@ export function referenceSpans(text: string, prefix = ""): ReferenceSpan[] {
  * emphasis and strikethrough around it (GFM's autolinks drop the same characters, keeping them
  * inside a link), and a closing parenthesis that opens nowhere in the reference. It counts the
  * parentheses once and walks back from the end, so a run of closers costs one pass.
+ *
+ * It is also the one list of what a word may hold beyond its reference and still be that
+ * reference: the unfurl cards read it rather than keeping a second copy of these characters
+ * (`Unfurl.tsx`).
  */
-function trimReference(value: string): string {
+export function trimReference(value: string): string {
   let opened = 0;
   let closed = 0;
   for (let index = 0; index < value.length; index += 1) {

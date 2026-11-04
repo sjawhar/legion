@@ -33,6 +33,7 @@ import { ChildrenTab } from "./ChildrenTab";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { IssueHeader } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
+import { ItemMatchList } from "./ItemMatchList";
 import { stateForIssue } from "./pins";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
@@ -336,8 +337,13 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   if (issue.data === undefined) {
     return <p className={dangerText}>Could not load this issue.</p>;
   }
-  if (landing?.kind === "redirect") {
+  // The rewrite replaces the address with the whole id rather than adding to the reader's
+  // history, so Back still leaves the page they came from.
+  if (landing?.kind === "redirect" || landing?.kind === "rewrite") {
     return <Navigate replace to={landing.to} />;
+  }
+  if (isItemRoute(route) && landing?.kind === "ambiguous") {
+    return <ItemMatchList candidates={landing.candidates} route={route} />;
   }
   if (isItemRoute(route) && (landing?.kind === "missing" || landing?.kind === "unavailable")) {
     return <ItemLandingFailure landing={landing} route={route} />;

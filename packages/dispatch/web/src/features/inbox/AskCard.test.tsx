@@ -614,3 +614,37 @@ test("a question closed under the reader keeps their unsent answer, out of the f
     view.unmount();
   }
 });
+
+// INFRA-869: a reply that is nothing but a reference shows the reference's card under it, as
+// the margin's comments do.
+test("a reply that is nothing but a reference shows its card", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue({
+    documents: [],
+    key: "CORE-2",
+    project: "CORE",
+    status: "in_progress",
+    title: "The other issue",
+  });
+  const ask = answeredAsk();
+  const link = { ...askReply("reply-1", "2026-10-08T03:00:00Z"), body: "dispatch://CORE-2" };
+  const { view } = renderCard(
+    <AskCard ask={ask} initialThread={{ ...thread(ask), replies: [link] }} />
+  );
+
+  try {
+    const reply = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-reply]");
+      if (found === null) throw new Error("the reply has not rendered");
+      return found;
+    });
+    const cards = await within(reply).findByRole("region", { name: "References" });
+    expect(
+      within(cards)
+        .getByRole("link", { name: /The other issue/ })
+        .getAttribute("href")
+    ).toBe("/issues/CORE-2");
+  } finally {
+    getIssueSummary.mockRestore();
+    view.unmount();
+  }
+});
