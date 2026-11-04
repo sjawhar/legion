@@ -72,7 +72,7 @@ type Deploy struct {
 	Step     string
 }
 
-// GitHubApp is one App's configuration. Load resolves the configured private-key source into
+// GitHubApp is one App's configuration. Load resolves a configured private-key source into
 // PrivateKey; LoadForValidation preserves command and secret sources without executing them.
 // TokenCommand is the fourth source, for a deployment whose App keys only a secrets broker holds:
 // the daemon holds no key and runs the command for every lease it needs (appauth's token mode), so

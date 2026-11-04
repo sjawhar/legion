@@ -126,11 +126,18 @@ func (p githubPullRequest) mergeState() record.MergeState {
 // record, in the single read they share. It also returns the githubrest.Client its own token mint
 // built, so the per-issue read's further reads of the same pull request reuse it rather than
 // minting a second token.
+//
+// The read is made of the repository GitHub serves the recorded one under (repositories.serving),
+// as every GitHub call the daemon makes for a recorded tree is: a record keeps the name it was
+// written under for its whole life, and after a transfer GitHub holds the repository under the
+// other name, on the other owner's installation. Read under the recorded name, this would mint on
+// the installation the repository has left and address a repository GitHub no longer answers for.
 func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullRequest) (githubrest.Client, githubPullRequest, error) {
-	repository, err := ghrepo.Parse("the pull request's repository", pr.Repo)
+	recorded, err := ghrepo.Parse("the pull request's repository", pr.Repo)
 	if err != nil {
 		return githubrest.Client{}, githubPullRequest{}, err
 	}
+	repository := w.repositories.serving(recorded)
 	github, err := implementClient(ctx, w.tokens, w.githubAPI, repository)
 	if err != nil {
 		return githubrest.Client{}, githubPullRequest{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)

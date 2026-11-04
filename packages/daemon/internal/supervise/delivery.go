@@ -523,8 +523,11 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
-		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)
-		retired.ServingAssignmentID = serving(p, deliveredAssignment, retired.ServingAssignmentID)
+		// The task is confirmed, so serving's second rule answers it and the hold decides
+		// nothing: a task a round holds back is one no worker was handed, and no turn of it can
+		// have confirmed it.
+		retired.ServingGeneration = serving(p, false, deliveredRun, retired.ServingGeneration)
+		retired.ServingAssignmentID = serving(p, false, deliveredAssignment, retired.ServingAssignmentID)
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0

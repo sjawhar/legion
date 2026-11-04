@@ -275,11 +275,18 @@ func (w *workflowRuntime) heardSpelling(repo string) string {
 // the webhook path reads (intake's decodePullRequest takes head_ref alone), whichever repository
 // the head lives in. The workflow keeps one pull request per branch and assumes one is open at a
 // time, so of two it takes the first GitHub lists.
+//
+// The repository GitHub serves the recorded one under is what this reads, addresses and filters
+// on (repositories.serving): after a transfer the record keeps the old name, and the head filter
+// names an owner, so a listing made under the recorded name would ask the wrong installation for
+// heads of an owner that holds none and find no pull request at all — which the caller reports as
+// a pull request that has gone missing.
 func (w *workflowRuntime) openPullRequestOn(ctx context.Context, repo, branch string) (githubPullRequest, bool, error) {
-	repository, err := ghrepo.Parse("the issue's repository", repo)
+	recorded, err := ghrepo.Parse("the issue's repository", repo)
 	if err != nil {
 		return githubPullRequest{}, false, err
 	}
+	repository := w.repositories.serving(recorded)
 	github, err := implementClient(ctx, w.tokens, w.githubAPI, repository)
 	if err != nil {
 		return githubPullRequest{}, false, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)

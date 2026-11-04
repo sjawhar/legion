@@ -277,7 +277,9 @@ func PluginRound(contract int) string { return PluginRoundPrefix + strconv.Itoa(
 // InPodRound and InPluginRound say which kind of round this claim is in; both are false for a
 // claim in no round at all. IsPodRound and IsPluginRound ask the same of a round id on its own,
 // for the callers that have the round before any claim holds it (UpdateTask, wording the ask the
-// round sends), so the words and the claim's own reading can never part company.
+// round sends; LeftPodRound, which is asked about a round the claim may not record and answers
+// for a pod round alone, so the empty round nobody is in is no round it left), so the words and
+// the claim's own reading can never part company.
 func (c Claim) InPodRound() bool { return IsPodRound(c.UpdateRound) }
 
 func (c Claim) InPluginRound() bool { return IsPluginRound(c.UpdateRound) }
@@ -311,7 +313,7 @@ func IsPluginRound(round string) bool { return strings.HasPrefix(round, PluginRo
 // it decides whom a replacement still waits for, and one predicate is what keeps the two from
 // drifting apart.
 func (c Claim) LeftPodRound(round string) bool {
-	return c.UpdateRound == round && c.UpdateLeftRound == round
+	return IsPodRound(round) && c.UpdateRound == round && c.UpdateLeftRound == round
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
@@ -969,7 +971,7 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 //
 // An operator's task belongs to no run and answers for none of them: it carries generation 0.
 func (c Claim) ServingRun() uint64 {
-	return serving(c.servedPending(), deliveredRun, c.ServingGeneration)
+	return serving(c.Pending, c.openRoundHoldsTask(), deliveredRun, c.ServingGeneration)
 }
 
 // ServingAssignment is the assignment of the task this claim's worker took, and "" for a claim
@@ -979,25 +981,7 @@ func (c Claim) ServingRun() uint64 {
 // check's look, and every task a daemon older than the assignment delivered — so a resumed
 // worker's in-flight completion is never refused for an assignment it was never given.
 func (c Claim) ServingAssignment() string {
-	return serving(c.servedPending(), deliveredAssignment, c.ServingAssignmentID)
-}
-
-// servedPending is the pending delivery the two accessors above read, and nil for a task an open
-// update round is keeping from the worker: one that is not the round's own ask, that nobody has
-// sent, acknowledged or prompted, and that the round will release only once it ends
-// (sendPending's hold, PodUpdateEnded). Without this the unsent-task fallback below would credit
-// the worker with a run it was never given, and any turn of its own — an Envoy notice's, say —
-// would answer for it. A task already sent, acknowledged or confirmed stays what the claim is on,
-// since a round that opens over a worker mid-turn takes nothing back from it.
-func (c Claim) servedPending() *Delivery {
-	p := c.Pending
-	if p == nil || c.UpdateRound == "" || updatesRound(p, c.UpdateRound) {
-		return p
-	}
-	if p.ConfirmedAt.IsZero() && p.DeliveredAt.IsZero() && !p.Prompted {
-		return nil
-	}
-	return p
+	return serving(c.Pending, c.openRoundHoldsTask(), deliveredAssignment, c.ServingAssignmentID)
 }
 
 // deliveredRun and deliveredAssignment are what a delivery carries of each: the two values serving
@@ -1014,12 +998,15 @@ func deliveredAssignment(d Delivery) string { return d.Assignment }
 //
 //  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
 //     runs one turn at a time.
+//
 //  2. Otherwise what this claim is left serving: the turn's end retires its delivery, and the
 //     worker goes on working that run and that assignment — a tester waiting on CI, a merger
 //     waiting on a person — until another delivery carrying one replaces it. A notice's turn has
 //     no delivery behind it.
+//
 //  3. Otherwise, for a claim that has served none at all, the task it holds, unless a prompt of
-//     that task has already come to nothing (Delivery.Prompted). Oh My Pi's own agent_start names
+//     that task has already come to nothing (Delivery.Prompted) or an open update round is holding
+//     it back from the worker (held, Claim.openRoundHoldsTask). Oh My Pi's own agent_start names
 //     no prompt, so a turn that starts after the daemon's wait for it is indistinguishable from a
 //     turn of the agent's own and confirms nothing; and a turn an Envoy message starts can run the
 //     whole phase before the phase's task is sent at all, which is what INFRA-264's tester did — it
@@ -1030,7 +1017,14 @@ func deliveredAssignment(d Delivery) string { return d.Assignment }
 //     not one it read, and the claim answers for nothing until one is. The completion retires the
 //     task it is credited to, through the phase it leaves behind (sendPending), so that task is
 //     never sent after the work it names is done.
-func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T) T {
+//
+//     held is sendPending's own hold, read through the one predicate that spells it
+//     (openRoundHoldsTask): a worker that has answered its update round is given no task until the
+//     round ends, so a task waiting behind that hold is work the worker has not been handed and
+//     answers for nothing it does in the meantime. The hold reaches this rule alone. A task the
+//     daemon had already sent when the round opened stays what the claim is on, since a round that
+//     opens over a worker mid-turn takes nothing back from it.
+func serving[T comparable](pending *Delivery, held bool, carried func(Delivery) T, retired T) T {
 	var none T
 	if pending == nil {
 		return retired
@@ -1042,7 +1036,7 @@ func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired 
 	if !pending.ConfirmedAt.IsZero() {
 		return value
 	}
-	if retired == none && (!pending.DeliveredAt.IsZero() || !pending.Prompted) {
+	if retired == none && (!pending.DeliveredAt.IsZero() || (!pending.Prompted && !held)) {
 		return value
 	}
 	return retired
