@@ -160,9 +160,9 @@ test("a project with no Legion setting has no Legion view until the Settings pag
     await page.goto("/settings");
     await expect(page.getByRole("heading", { name: "Legion" })).toBeVisible();
     await page.getByLabel("Legion daemon state URL").fill(daemon.url);
-    await page.getByRole("combobox", { exact: true, name: "Legion project" }).selectOption(
-      LEGION_PROJECT
-    );
+    await page
+      .getByRole("combobox", { exact: true, name: "Legion project" })
+      .selectOption(LEGION_PROJECT);
     const saved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&

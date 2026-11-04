@@ -1452,6 +1452,26 @@ export class DispatchApiClient {
     return this.json<LegionSetting[]>("/api/v1/settings/legion");
   }
 
+  /** Names the daemon a project's state is read from, and answers the row as it was stored.
+   *  Deployment-scoped (`scopeDeployment`), so a credential naming one project is refused it; a
+   *  `state_url` that is not an absolute http(s) URL with a host and no path, carrying no user,
+   *  password, query or fragment, is `400 LEGION_SETTING_INPUT` with the server's own reason
+   *  (`legionStateURL` in packages/envoy/internal/dispatch/api/settings_legion.go), and an
+   *  unknown project is `404 NOT_FOUND`. */
+  putLegionSetting(project: string, stateUrl: string, bounds: WriteBounds): Promise<LegionSetting> {
+    return this.put<LegionSetting>(
+      `/api/v1/settings/legion/${pathSegment(project)}`,
+      { state_url: stateUrl },
+      bounds
+    );
+  }
+
+  /** Stops reading a project's daemon: what was read stays, and nothing re-reads it. Scoped as
+   *  the PUT is; a project with no setting is `404 NOT_FOUND`. */
+  async deleteLegionSetting(project: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(`/api/v1/settings/legion/${pathSegment(project)}`, bounds);
+  }
+
   /** Relays an operator's `legion.yaml` change to the project's daemon, by dotted path, and
    *  answers what the daemon decided for each key: applied at once, by a rebuild or at the next
    *  launch, or refused with its reason. Dispatch passes the daemon's status and body back
