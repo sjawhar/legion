@@ -22,7 +22,9 @@ const DefaultAzureTokenFile = "/var/run/secrets/azure/tokens/azure-identity-toke
 // the broker trusts its own mounted file and reads the JWT claims only to refuse an expired token.
 type AzureLogin struct {
 	TokenFile string
-	Now       func() time.Time
+	// SecretName is the only secret allowed to release this token. Empty disables every release.
+	SecretName string
+	Now        func() time.Time
 }
 
 type azureLoginSecret struct {
@@ -37,10 +39,14 @@ type azureLoginRelease struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
-// Mint returns a JSON document for an Azure federated sign-in. A malformed identity is a
-// stored-value failure; an unreadable, malformed or expired projected token is an upstream
-// failure for the broker's operator. Errors never quote stored fields, token bytes or file paths.
+// Mint returns a JSON document for an Azure federated sign-in only for the configured human-tier
+// secret; a disabled or mismatched release is refused. A malformed identity is a stored-value
+// failure; an unreadable, malformed or expired projected token is an upstream failure for the
+// broker's operator. Errors never quote stored fields, token bytes or file paths.
 func (m AzureLogin) Mint(_ context.Context, req MintRequest) (string, error) {
+	if m.SecretName == "" || req.Name != m.SecretName || !req.HumanTier {
+		return "", fmt.Errorf("%w: Azure login requires the configured human-tier secret", ErrMintRefused)
+	}
 	var identity azureLoginSecret
 	if json.Unmarshal([]byte(req.Value), &identity) != nil || strings.TrimSpace(identity.TenantID) == "" || strings.TrimSpace(identity.ClientID) == "" {
 		return "", fmt.Errorf("%w: Azure login secret must name tenant_id and client_id", ErrMintStoredValue)

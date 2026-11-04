@@ -134,6 +134,13 @@ type Config struct {
 	// audience api://AzureADTokenExchange and a one-hour lifetime. Only one Entra identity may
 	// trust this ServiceAccount subject: a released token can sign in to any identity that does.
 	AzureTokenFile string
+	// BROKER_AZURE_LOGIN_SECRET: the one agent-secret name allowed to release the broker's Azure
+	// projected token, for example AZURE_LOGIN. Empty (the default) disables azure-login
+	// releases. Must be an uppercase agent-secret name, not its store id or slug. That secret
+	// must be human tier in the policy snapshot checked for each release, with a person's
+	// approval recorded for that name in its grant. Another secret with kind=azure-login,
+	// the named secret retagged to agent tier, or an automatic grant releases no token.
+	AzureLoginSecret string
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
@@ -725,11 +732,17 @@ func Load(getenv func(string) string) (Config, error) {
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
+		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
 		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
+	}
+	if cfg.AzureLoginSecret != "" {
+		if _, err := policy.NameToSlug(cfg.AzureLoginSecret); err != nil {
+			return Config{}, fmt.Errorf("BROKER_AZURE_LOGIN_SECRET: %w", err)
+		}
 	}
 	if cfg.SecretsStore != secrets.StoreAWS && cfg.SecretsStore != secrets.StoreGCP {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_STORE must be %s or %s, got %q", secrets.StoreAWS, secrets.StoreGCP, cfg.SecretsStore)

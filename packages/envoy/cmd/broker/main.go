@@ -636,7 +636,7 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		VMServicesByAccount: cfg.VMServicesByAccount,
 		VMProjects:          cfg.VMProjects,
 		VMInstancePatterns:  cfg.VMInstancePatterns,
-		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile}),
+		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m

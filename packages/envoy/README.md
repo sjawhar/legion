@@ -46,6 +46,9 @@ The secrets broker (`cmd/broker`) supports these kinds for `agent-secrets secret
 - `github-app`: stores an App id and private key; releases installation tokens for its listed GitHub owners.
 - `google-login`: stores an `authorized_user` credential; releases a Google access token, not the refresh token.
 - `azure-login`: stores `{"tenant_id":"<tenant>","client_id":"<client>"}`; releases JSON with `tenant_id`, `client_id`, `federated_token` and `expires_at` (RFC3339 UTC, from the token's JWT `exp`).
+  Set `BROKER_AZURE_LOGIN_SECRET` to the one agent-secret name allowed to release that token; unset, every Azure release is refused.
+  The configured secret must be human tier in the policy snapshot checked for each release, and its grant decision must record a person's approval, never an automatic grant.
+  Retagging another secret to `azure-login`, or retagging the configured secret to agent tier, releases no Azure token.
   Each release reads the broker pod's projected ServiceAccount token from `BROKER_AZURE_TOKEN_FILE`, default `/var/run/secrets/azure/tokens/azure-identity-token`.
   Unreadable, malformed or expired tokens refuse the release; token bytes never enter an error or log.
   Mount the token read-only in the broker container alone, with audience `api://AzureADTokenExchange` and a one-hour lifetime.

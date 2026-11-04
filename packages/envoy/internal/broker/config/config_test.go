@@ -105,6 +105,24 @@ func TestLoadKeepsTheAzureProjectedTokenPathForEachRelease(t *testing.T) {
 	}
 }
 
+func TestLoadLimitsAzureLoginToOneNamedSecret(t *testing.T) {
+	for _, name := range []string{"", "AZURE_LOGIN"} {
+		e := validEnv()
+		e["BROKER_AZURE_LOGIN_SECRET"] = name
+		cfg, err := Load(env(e))
+		if err != nil || cfg.AzureLoginSecret != name {
+			t.Fatalf("Load AzureLoginSecret = %q, %v, want %q", cfg.AzureLoginSecret, err, name)
+		}
+	}
+	for _, name := range []string{"azure-login", "AZURE__LOGIN", " AZURE_LOGIN", "AZURE_LOGIN OTHER_LOGIN"} {
+		e := validEnv()
+		e["BROKER_AZURE_LOGIN_SECRET"] = name
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_AZURE_LOGIN_SECRET") {
+			t.Fatalf("Load an invalid Azure login secret name = %v, want refusal naming the setting", err)
+		}
+	}
+}
+
 // TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
 // that carries a credential and is refused names the variable and the value as
 // redact.NotPrinted, never the user name, password or query; a clean refused value is named as

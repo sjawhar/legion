@@ -21,8 +21,9 @@ func azureProjectedToken(payload string) string {
 func TestAzureLoginMintReleasesTheCurrentProjectedToken(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "token")
 	minter := secrets.AzureLogin{
-		TokenFile: file,
-		Now:       func() time.Time { return time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC) },
+		TokenFile:  file,
+		SecretName: "AZURE_LOGIN",
+		Now:        func() time.Time { return time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC) },
 	}
 	for _, row := range []struct{ claims, expiry string }{
 		{`{"exp":1793754000}`, "2026-11-04T01:00:00Z"},
@@ -32,7 +33,7 @@ func TestAzureLoginMintReleasesTheCurrentProjectedToken(t *testing.T) {
 		if err := os.WriteFile(file, []byte("\n "+token+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		minted, err := minter.Mint(t.Context(), secrets.MintRequest{Value: azureLoginValue})
+		minted, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "AZURE_LOGIN", HumanTier: true, Value: azureLoginValue})
 		if err != nil {
 			t.Fatalf("Mint: %v", err)
 		}
@@ -52,7 +53,7 @@ func TestAzureLoginMintRefusesMalformedStoredIdentities(t *testing.T) {
 		`{"client_id":"client-id"}`, `{"tenant_id":" ","client_id":"client-id"}`,
 		`{"tenant_id":"tenant-id","client_id":" "}`, `{"tenant_id":123,"client_id":"client-id"}`,
 	} {
-		got, err := (secrets.AzureLogin{}).Mint(t.Context(), secrets.MintRequest{Value: value})
+		got, err := (secrets.AzureLogin{SecretName: "AZURE_LOGIN"}).Mint(t.Context(), secrets.MintRequest{Name: "AZURE_LOGIN", HumanTier: true, Value: value})
 		if got != "" || secrets.MintErrorClass(err) != "stored-value" {
 			t.Fatalf("Mint of malformed identity returned class %s, value present %t; want stored-value and no value", secrets.MintErrorClass(err), got != "")
 		}
@@ -64,7 +65,7 @@ func TestAzureLoginMintRefusesMalformedStoredIdentities(t *testing.T) {
 
 func TestAzureLoginMintRefusesUnreadableProjectedTokens(t *testing.T) {
 	for _, file := range []string{filepath.Join(t.TempDir(), "do-not-print-this-token"), t.TempDir()} {
-		got, err := (secrets.AzureLogin{TokenFile: file}).Mint(t.Context(), secrets.MintRequest{Value: azureLoginValue})
+		got, err := (secrets.AzureLogin{TokenFile: file, SecretName: "AZURE_LOGIN"}).Mint(t.Context(), secrets.MintRequest{Name: "AZURE_LOGIN", HumanTier: true, Value: azureLoginValue})
 		if got != "" || secrets.MintErrorClass(err) != "upstream" {
 			t.Fatalf("Mint of unreadable file returned class %s, value present %t; want upstream and no value", secrets.MintErrorClass(err), got != "")
 		}
@@ -98,12 +99,45 @@ func TestAzureLoginMintRefusesInvalidOrExpiredProjectedTokensWithoutDisclosingTh
 			if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			got, err := (secrets.AzureLogin{TokenFile: file, Now: func() time.Time { return now }}).Mint(t.Context(), secrets.MintRequest{Value: azureLoginValue})
+			got, err := (secrets.AzureLogin{TokenFile: file, SecretName: "AZURE_LOGIN", Now: func() time.Time { return now }}).Mint(t.Context(), secrets.MintRequest{Name: "AZURE_LOGIN", HumanTier: true, Value: azureLoginValue})
 			if got != "" || secrets.MintErrorClass(err) != "upstream" {
 				t.Fatalf("Mint returned class %s, value present %t; want upstream and no value", secrets.MintErrorClass(err), got != "")
 			}
 			if strings.Contains(err.Error(), "do-not-print-this-token") || (strings.TrimSpace(token) != "" && strings.Contains(err.Error(), token)) {
 				t.Fatal("Mint error disclosed the projected token")
+			}
+		})
+	}
+}
+
+func TestAzureLoginMintRequiresTheConfiguredHumanTierSecret(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "token")
+	token := azureProjectedToken(`{"exp":4102444800}`)
+	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		name, configured, requested string
+		human, allowed              bool
+	}{
+		{"disabled by default", "", "AZURE_LOGIN", true, false},
+		{"another human secret", "AZURE_LOGIN", "OTHER_LOGIN", true, false},
+		{"another agent secret", "AZURE_LOGIN", "OTHER_LOGIN", false, false},
+		{"configured agent secret", "AZURE_LOGIN", "AZURE_LOGIN", false, false},
+		{"missing name", "AZURE_LOGIN", "", true, false},
+		{"configured human secret", "AZURE_LOGIN", "AZURE_LOGIN", true, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			minted, err := (secrets.AzureLogin{TokenFile: file, SecretName: row.configured}).Mint(t.Context(), secrets.MintRequest{
+				Name: row.requested, HumanTier: row.human, Value: azureLoginValue,
+			})
+			if row.allowed {
+				var got map[string]string
+				if err != nil || json.Unmarshal([]byte(minted), &got) != nil || got["federated_token"] != token {
+					t.Fatal("configured human-tier secret did not release the projected token")
+				}
+			} else if minted != "" || secrets.MintErrorClass(err) != "refused" {
+				t.Fatalf("Mint returned class %s, value present %t; want refused and no value", secrets.MintErrorClass(err), minted != "")
 			}
 		})
 	}
