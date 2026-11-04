@@ -51,7 +51,7 @@ export function isItemRoute(route: IssueRoute): route is ItemRoute {
 /** The items an `ID_AMBIGUOUS` refusal listed, or undefined for any other failure and for a
  *  refusal that listed none, which there is no list to show for. The code is what says the
  *  entries are these and not a duplicate check's issues (`ErrorCandidate`). */
-function ambiguousItems(error: unknown): readonly IDCandidate[] | undefined {
+export function ambiguousItems(error: unknown): readonly IDCandidate[] | undefined {
   if (!(error instanceof ApiError) || error.code !== ID_AMBIGUOUS) {
     return undefined;
   }

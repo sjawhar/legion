@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
-import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
@@ -1042,6 +1042,86 @@ test("a pane pushes no document keymap scope and registers no binding of its own
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
   } finally {
+    view.unmount();
+  }
+});
+
+/** A block id as the editor mints one, and the first eight characters of it, which is how a
+ *  person or an agent writes it short. */
+const WHOLE_BLOCK = "2a7f1c90-7d5e-4a21-9b3c-6f0e5d4c3b2a";
+const OTHER_BLOCK = "2a7f1c90-0000-4000-8000-000000000000";
+const SHORT_BLOCK = "2a7f1c90";
+
+/** The fake editor draws no blocks of its own, so a test that links to one draws them: these
+ *  are the `[data-block-id]` elements a short id is resolved against and `focusBlock` looks a
+ *  whole one up in. */
+function runtimeWithBlocks(blockIds: readonly string[]): FakeDocumentRuntime {
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  const createEditor = fake.runtime.createEditor;
+  return {
+    ...fake,
+    runtime: {
+      ...fake.runtime,
+      createEditor: async (root, options) => {
+        const handle = await createEditor(root, options);
+        root.innerHTML = blockIds.map((id) => `<p data-block-id="${id}">a block</p>`).join("");
+        return handle;
+      },
+    },
+  };
+}
+
+test("ProofDocument focuses the whole block a hash names short and replaces the address with it", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", `#b-${SHORT_BLOCK}`);
+  const entries = window.history.length;
+  const { editors, sync, view } = renderProofDocument({ fake: runtimeWithBlocks([WHOLE_BLOCK]) });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual([WHOLE_BLOCK]));
+    // The address carries the whole id from here on, and it replaced the short one rather than
+    // leaving a second entry in the reader's history.
+    expect(window.location.hash).toBe(`#b-${WHOLE_BLOCK}`);
+    expect(window.history.length).toBe(entries);
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
+    view.unmount();
+  }
+});
+
+test("ProofDocument focuses a whole block id as written, resolving nothing against the document", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", `#b-${WHOLE_BLOCK}`);
+  // No block of this document is drawn: a whole id is focused as the hash wrote it, as it was
+  // before a short one could be written.
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual([WHOLE_BLOCK]));
+    expect(window.location.hash).toBe(`#b-${WHOLE_BLOCK}`);
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
+    view.unmount();
+  }
+});
+
+test("ProofDocument focuses nothing for a short block id two blocks of the document carry", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", `#b-${SHORT_BLOCK}`);
+  const { editors, sync, view } = renderProofDocument({
+    fake: runtimeWithBlocks([WHOLE_BLOCK, OTHER_BLOCK]),
+  });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    // Two blocks start with it, so it names neither; the address stays as the reader wrote it.
+    expect(editors[0]?.focusedBlocks).toEqual([]);
+    expect(window.location.hash).toBe(`#b-${SHORT_BLOCK}`);
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
     view.unmount();
   }
 });

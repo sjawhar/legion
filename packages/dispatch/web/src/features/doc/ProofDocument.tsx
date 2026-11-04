@@ -46,6 +46,7 @@ import {
   buildProjectPath,
   documentRoute,
 } from "../refs/routes";
+import { isIdPrefix } from "../refs/text-references";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
@@ -76,6 +77,27 @@ import { loadBlockSchema } from "./schema";
 import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
+
+/** The one block of `root` whose id starts with `prefix`, compared without case, or undefined
+ *  where none does or two or more do - an id written short names a record only where it names
+ *  exactly one, as the server resolves one (`text.IsIDPrefix`). The editor's own rendered
+ *  blocks are the answer, the same `[data-block-id]` elements `focusBlock` looks a whole id up
+ *  in, so a block link written short costs no read. */
+function wholeBlockId(root: HTMLElement, prefix: string): string | undefined {
+  const lower = prefix.toLowerCase();
+  let found: string | undefined;
+  for (const element of root.querySelectorAll<HTMLElement>("[data-block-id]")) {
+    const id = element.getAttribute("data-block-id") ?? "";
+    if (!id.toLowerCase().startsWith(lower) || id === found) {
+      continue;
+    }
+    if (found !== undefined) {
+      return undefined;
+    }
+    found = id;
+  }
+  return found;
+}
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
@@ -560,13 +582,31 @@ export function ProofDocument({
       // list, so a pane never follows it.
       if (page && blockLink.startsWith("#b-")) {
         const linkedBlockId = decodeURIComponent(blockLink.slice(3));
-        // The re-run lands only while the hash still names this block.
-        focusInEditor(
-          () => handle.focusBlock(linkedBlockId),
-          () => {
-            if (window.location.hash === blockLink) handle.focusBlock(linkedBlockId);
+        // The hash the address holds: the one the reader followed until a short id resolves,
+        // the whole block's from then on.
+        let linkHash = blockLink;
+        const focusLinked = () => {
+          // An id written short names the one block of this document it starts; a whole id is
+          // the block's own, with nothing to resolve and no read to make.
+          const whole = isIdPrefix(linkedBlockId)
+            ? wholeBlockId(handle.view.dom, linkedBlockId)
+            : linkedBlockId;
+          if (whole === undefined) {
+            return;
           }
-        );
+          if (whole !== linkedBlockId) {
+            // The address carries the whole id from here on, so one copied off the page names
+            // the block outright; replacing it leaves no history entry behind, as the rewrite
+            // of an item address does.
+            linkHash = blockFragment(whole);
+            window.history.replaceState(null, "", linkHash);
+          }
+          handle.focusBlock(whole);
+        };
+        // The re-run lands only while the hash still names this block.
+        focusInEditor(focusLinked, () => {
+          if (window.location.hash === linkHash) focusLinked();
+        });
       }
       // `CSS.highlights["dispatch-search"]` and the margin's open document are one apiece for the
       // whole page; a pane writes neither.

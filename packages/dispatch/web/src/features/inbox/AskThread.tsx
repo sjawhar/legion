@@ -56,7 +56,7 @@ function AskReply({
       ref={markRef}
     >
       <div className={textPrimaryOnSurfaceMuted}>
-        <MarkdownBody markdown={comment.body} />
+        <MarkdownBody markdown={comment.body} source={issueSource(comment.issue_key)} />
       </div>
       <Unfurl body={comment.body} source={issueSource(comment.issue_key)} />
       <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
