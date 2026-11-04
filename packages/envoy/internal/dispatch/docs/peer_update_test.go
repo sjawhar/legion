@@ -1411,15 +1411,16 @@ func bornDeletedIn(t *testing.T, update []byte) int {
 // A browser's GC run over clocks the room holds live deletes none of them, and the room lists none
 // of them as deleted: ygo integrates a struct from the first clock the room does not hold
 // (sjawhar/ygo v1.55.1-sami.1, crdt/item.go:83-91), so the run's clocks stay live, and what the
-// room lists it reads from the delete set ygo writes into the update of its own transaction
-// (deletedRuns.list). Listed from the browser's bytes, as the room once listed them, one 22-byte
-// frame - a GC struct over every clock the room holds of each of its clients, and one of a client
-// it holds nothing of so that the frame delivers a struct born deleted - took the room's whole
-// document off the books: every later delete range over the text was covered (covers) and left no
-// end split (splitEnds), so the struct total, the structure part and the frame total each charged
-// it nothing until the measurer's next count. Here the honest delete of every other character of a
+// room lists it reads from its own commit - the delete set ygo writes into that commit's update,
+// and the GC structs that update carries, which are the ones ygo appended (deletedRuns.list).
+// Listed from the browser's bytes, as the room once listed them, one 22-byte frame - a GC struct
+// over every clock the room holds of each of its clients, and one of a client it holds nothing
+// of so that the frame delivers a struct born deleted - took the room's whole document off the
+// books: every later delete range over the text was covered (covers) and left no end split
+// (splitEnds), so the struct total, the structure part and the frame total each charged it
+// nothing until the measurer's next count. Here the honest delete of every other character of a
 // 2,000-character paragraph is weighed before the frame and again after it, and weighs the same
-// both times.
+// both times, since the room lists not one clock of the forged run over its live text.
 func TestAGCRunOverHeldClocksLeavesLaterDeletesCharged(t *testing.T) {
 	service, room, replica, charge := drainedPeerUpdateRoom(t, strings.Repeat("word ", 400)+"\n")
 	replica.structs.recount(room)
@@ -1462,17 +1463,19 @@ func TestAGCRunOverHeldClocksLeavesLaterDeletesCharged(t *testing.T) {
 	if charge.deletes().covers(uint64(first.Client), first.Clock, uint64(text.Len())) {
 		t.Errorf("the room lists the %d characters of its text from clock %d deleted, want it to list only what it holds deleted", text.Len(), first.Clock)
 	}
-	// The clock the frame's GC struct delivered is one ygo holds deleted and no commit's delete
+	// The clock the frame's GC struct delivered is one ygo holds deleted that no commit's delete
 	// set names: ygo appends such a struct to the store already deleted without integrating it
 	// (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1161-1174 and :938-949), and a commit's update
-	// carries that transaction's deletions alone (reearth/ygo#350). The room lists it only once a
-	// load seeds the room's delete set (deletedRuns.seed), so a later delete of it is weighed
-	// against a list that does not hold it, which over-charges and never under-charges.
+	// carries that transaction's deletions alone (reearth/ygo#350). The commit's update carries
+	// the struct itself, though, written back as a GC struct (encodeItem, crdt/update.go:441-466),
+	// so the room's drain of its own commit lists it (roomCharge.applied) - that clock and
+	// nothing else of the frame, the rest of it being clocks the room holds live, which the apply
+	// skipped and the commit's update never carried.
 	if ranges := crdt.DeleteSetFromDoc(room).Ranges(gcForgeryClient); len(ranges) == 0 {
 		t.Error("ygo holds none of the clock the frame's GC run delivered deleted, want it in the room's own delete set")
 	}
-	if charge.deletes().covers(uint64(gcForgeryClient), 0, 1) {
-		t.Error("the room lists a GC struct's clock, which no commit of its own deleted, want it to list only what its commits deleted")
+	if !charge.deletes().covers(uint64(gcForgeryClient), 0, 1) {
+		t.Error("the room lists none of the clock its commit appended as a GC struct, want it listed from the walk of that commit")
 	}
 	after := weighHonest()
 	if after.deletes != before.deletes || after.added() != before.added() || after.splits != before.splits ||
@@ -1512,21 +1515,22 @@ func gcRunOverHeldClocks(room *crdt.Doc) []byte {
 	return frame.group(1, gcForgeryClient, 0).gc(1).noDeletes()
 }
 
-// What the room lists is what its own commits deleted. A deleted item a browser's update
-// integrates is one of them: ygo decodes it as an item carrying ContentDeleted
-// (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1280-1288) and marks it deleted as it integrates
-// it, as Yjs does (crdt/item.go:298-306 and :453-455), so its range is in that transaction's
-// delete set, which is what the commit's update carries (reearth/ygo#350), and the room lists it
-// once its update observer drains that commit (roomCharge.applied, deletedRuns.list): a later
-// delete range over those clocks is charged nothing. A GC run is the exception: ygo decodes a GC
-// struct as an item already marked deleted and appends it to the store without integrating it
-// (crdt/update.go:1161-1174 and :938-949), so no transaction's delete set names it, the room's
-// own delete set holds it (buildDeleteSet lists item.Deleted alone, crdt/update.go:659-678), and
-// the room lists it only once a load seeds that set (deletedRuns.seed). A later delete over those
-// clocks is weighed against a list that does not hold them, which over-charges and never
-// under-charges. The hook lists nothing of a browser's update itself, since a browser's bytes say
-// which clocks the browser holds deleted, not which the room does.
-func TestAnAdmittedDeletedItemIsListedAndAnAdmittedGCRunIsNot(t *testing.T) {
+// What the room lists is what its own commits left it holding deleted, which it reads out of the
+// update of each of them two ways. A deleted item a browser's update integrates comes from the
+// commit's delete set: ygo decodes it as an item carrying ContentDeleted (sjawhar/ygo
+// v1.55.1-sami.1, crdt/update.go:1280-1288) and marks it deleted as it integrates it, as Yjs
+// does (crdt/item.go:298-306 and :453-455), so its range is in that transaction's delete set,
+// which is what the commit's update carries (reearth/ygo#350), and the room lists it once its
+// update observer drains that commit (roomCharge.applied, deletedRuns.list). A GC run comes from
+// the commit's structs: ygo decodes a GC struct as an item already marked deleted and appends it
+// to the store without integrating it (crdt/update.go:1161-1174 and :938-949), so no
+// transaction's delete set names it while the room's own delete set holds it (buildDeleteSet
+// lists item.Deleted alone, crdt/update.go:659-678) - and the commit's update carries the struct
+// itself, written back as a GC struct (encodeItem, crdt/update.go:441-466), which the same walk
+// lists. Either way a later delete range over those clocks is charged nothing. The hook lists
+// nothing of a browser's update itself, since a browser's bytes say which clocks the browser
+// holds deleted, not which the room does.
+func TestAnAdmittedDeletedItemAndAnAdmittedGCRunAreBothListed(t *testing.T) {
 	const (
 		bornClient = 1<<40 + 7
 		bornRun    = 3
@@ -1554,17 +1558,17 @@ func TestAnAdmittedDeletedItemIsListedAndAnAdmittedGCRunIsNot(t *testing.T) {
 	if ranges := crdt.DeleteSetFromDoc(room).Ranges(crdt.ClientID(bornClient)); len(ranges) == 0 {
 		t.Fatal("ygo holds none of the GC run's clocks deleted, want the struct it appended already deleted")
 	}
-	if charge.deletes().covers(bornClient, 0, bornRun) {
-		t.Fatalf("the room lists the %d clocks of a GC run no commit of its own deleted, want it to list only its commits' deletions", bornRun)
+	if !charge.deletes().covers(bornClient, 0, bornRun) {
+		t.Fatalf("the room lists none of the %d clocks of the GC run its commit appended, want them listed from the walk of that commit", bornRun)
 	}
 	gcAgain := newV1Frame(0).uint(1).uint(bornClient).uint(1).uint(0).uint(bornRun).done()
-	overCharged := peerWeighing{held: room.StateVector(), known: charge.deletes()}
-	if _, err := walkUpdate(gcAgain, fromPeer, &overCharged); err != nil {
+	repeatGC := peerWeighing{held: room.StateVector(), known: charge.deletes()}
+	if _, err := walkUpdate(gcAgain, fromPeer, &repeatGC); err != nil {
 		t.Fatal(err)
 	}
-	if overCharged.added() == 0 || overCharged.frame == 0 {
-		t.Fatalf("a delete range over a GC run's clocks weighs %d structs and %d frame bytes, want the room to over-charge what its list does not hold",
-			overCharged.added(), overCharged.frame)
+	if repeatGC.added() != 0 || repeatGC.splits != 0 || repeatGC.frame != 0 || repeatGC.structureHeap() != 0 {
+		t.Fatalf("a delete range over a GC run's clocks weighs %d structs, %d splits, %d frame bytes and %d structure bytes, want nothing of each",
+			repeatGC.added(), repeatGC.splits, repeatGC.frame, repeatGC.structureHeap())
 	}
 
 	admit("a deleted item", rootedDeletedItem(itemClient, itemRun))

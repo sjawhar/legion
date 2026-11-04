@@ -159,8 +159,9 @@ func (w *peerWeighing) weighStruct(walked updateStruct, cost applyCost) {
 }
 
 // bornDeleted is whether walked renders nothing of its own: a GC run, or a deleted item. It is
-// not whether the room holds those clocks deleted - ygo deletes none of a GC run's clocks the
-// room holds live, and holds a deleted item live (deletedRuns) - and nothing reads it for that.
+// not whether the room holds those clocks deleted - ygo skips a GC run's clocks the room holds
+// already, and holds a deleted item it parked live until its predecessor arrives (deletedRuns) -
+// and nothing reads it for that.
 func bornDeleted(walked updateStruct) bool {
 	return walked.kind == structGC || walked.kind == structDeleted
 }

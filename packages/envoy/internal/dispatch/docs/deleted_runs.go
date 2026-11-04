@@ -13,26 +13,43 @@ import (
 // holds deleted already, which is most of a reconnecting browser's whole-state handoff.
 
 // deletedRuns is the delete ranges a room is known to hold deleted, each client's sorted and
-// merged. It has one source, the deletions ygo itself committed for the room: the room's whole
-// delete set at its load (seed, crdt.DeleteSetFromDoc), and the deletions of every update the
-// room's update observer drains, listed by the walk the room's charge already makes of that
-// update (list, from roomCharge.applied and roomCharge.wrote). ygo writes the delete set of the
-// transaction itself - what that commit deleted, and nothing the room deleted before it - into
-// the update of every commit (sjawhar/ygo v1.55.1-sami.1, collectAndEncodeLocked encodes
-// cloneDeleteSet(txn.deleteSet) under the document's lock, crdt/doc.go:844-873, the encode at
-// :861, and encodeV1Locked writes it, crdt/update.go:403; reearth/ygo#350), so the list is the
-// union of what the room's commits deleted, commit by commit: what ygo holds deleted as of the
+// merged. It has two sources, both of them what ygo itself holds deleted for the room: the
+// delete sets of the room's commits, and the GC structs of those same commits. It reads them
+// from the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), which holds both,
+// and from every update the room's update observer drains, the delete set and the GC runs of it
+// listed by the walk the room's charge already makes of that update (list, from
+// roomCharge.applied and roomCharge.wrote). So the list is what ygo holds deleted as of the
 // room's last drain, and nothing besides.
 //
-// A transaction's delete set holds every item it deleted (Item.delete, crdt/item.go:500-539, the
-// range at :536) and every item that arrived carrying ContentDeleted, which Item.integrate marks
-// deleted as Yjs's ContentDeleted.integrate does (crdt/item.go:298-306 and :453-455). The one
-// thing ygo holds deleted that no commit's delete set names is a GC struct a browser sends: ygo
-// decodes it as an item marked deleted (crdt/update.go:1161-1174) and appends it to the store
-// without integrating it (crdt/update.go:938-949), so buildDeleteSet lists its clocks
-// (crdt/update.go:659-678) where the commit's own delete set does not. The room lists them only
-// when a load seeds them again (seed), and until then weighs a delete of them against a list
-// that does not hold them, which over-charges and never under-charges (splitEnds).
+// ygo writes the delete set of the transaction itself - what that commit deleted, and nothing
+// the room deleted before it - into the update of every commit (sjawhar/ygo v1.55.1-sami.1,
+// collectAndEncodeLocked encodes cloneDeleteSet(txn.deleteSet) under the document's lock,
+// crdt/doc.go:844-873, the encode at :861, and encodeV1Locked writes it, crdt/update.go:403;
+// reearth/ygo#350). That delete set holds every item the transaction deleted (Item.delete,
+// crdt/item.go:500-539, the range at :536) and every item that arrived carrying ContentDeleted,
+// which Item.integrate marks deleted as Yjs's ContentDeleted.integrate does
+// (crdt/item.go:298-306 and :453-455).
+//
+// The one thing ygo holds deleted that no commit's delete set names is a GC struct: ygo decodes
+// one as an item already marked deleted (crdt/update.go:1161-1174) and appends it to the store
+// without integrating it (crdt/update.go:938-949), so Item.delete never runs for it - and would
+// leave it out anyway, since it steps past an item already deleted before reaching
+// txn.deleteSet.add (crdt/item.go:500-507) - while buildDeleteSet lists its clocks from
+// item.Deleted alone (crdt/update.go:659-678). That is why the walk lists the update's GC runs
+// beside its delete set.
+//
+// Reading a GC struct out of the update of the room's own commit is safe where reading one out
+// of a browser's bytes is not. That update is ygo's own encode of a transaction the room
+// committed, written from the state before it (encodeV1Locked over txn.beforeState,
+// crdt/update.go:367-405), so every struct in it is one the room's store holds: a GC struct over
+// clocks the room already held is skipped by the apply before anything is appended
+// (integrateGroup steps over a struct ending at or before the client's clock,
+// crdt/update.go:899-917), so it never reaches the encode; one past them is appended Deleted and
+// written back as a GC struct, since an item with no parent, no origins and no parent id encodes
+// as one (encodeItem, crdt/update.go:441-466). An item ygo garbage-collects as the transaction
+// commits is written as a GC struct too (gcTxnDeleteSet, crdt/snapshot.go:370-407, through
+// markGCOrphan, crdt/update.go:420-427), and the commit's own delete set names its clocks
+// already, so listing it again adds nothing.
 //
 // A delete range it covers whole adds no struct, and one that overlaps what it lists none at an
 // end inside it (splitEnds), so neither the structure part nor the struct total charges a
@@ -49,19 +66,21 @@ import (
 // GC run over clocks the room holds live deletes none of them, and it parks the part of a delete
 // range past the clocks the room holds (crdt/delete_set.go:316-322, applyDecodedDeleteSet
 // :216-226), which deletes nothing until those clocks arrive and which no delete set ygo builds
-// holds. And not the structs of an update, which the room once read from its own encode of a
-// transaction it had committed: a struct that renders nothing is not always one ygo holds
-// deleted, and one it does hold deleted is listed from the commit's delete set already. A
-// deleted item - content reference 1, what a browser sends for a tombstone of its own - ygo
-// decodes as an item carrying ContentDeleted (crdt/update.go:1280-1288) and marks deleted as it
-// integrates it, as Yjs does (yjs 13.6.32, src/structs/ContentDeleted.js:65-68), so the commit's
-// delete set carries its range and the list holds it without reading a struct. Listed from that
-// walk, as the room once listed it, a struct the room holds live takes its clocks off the books:
-// at sjawhar/ygo v1.54.1-sami.3, where Item.integrate left such an item live, one 26-byte frame
-// - a browser's rooted deleted item of length 1,000, whose length is a varuint that can claim up
-// to 2^53 clocks - took 1,000 clocks of a client of its own off them, and a delete of every
-// other one of them was then charged nothing at all, where against the room's own delete set it
-// is charged 999 structs, 999 splits and 81,360 frame bytes
+// holds. And not an item of an update, its deleted content reference included, which the room
+// once read from its own encode of a transaction it had committed: an item that renders nothing
+// is not always one ygo holds deleted, and one it does hold deleted is listed from the commit's
+// delete set already. A deleted item - content reference 1, what a browser sends for a tombstone
+// of its own - ygo decodes as an item carrying ContentDeleted (crdt/update.go:1280-1288) and
+// marks deleted as it integrates it, as Yjs does (yjs 13.6.32,
+// src/structs/ContentDeleted.js:65-68), so the commit's delete set carries its range and the
+// list holds it without reading a struct. A GC struct is the one struct the walk reads, because
+// ygo appends one only as a struct it holds deleted; an item it writes back is a struct it may
+// hold live, and listing those took live clocks off the books: at sjawhar/ygo v1.54.1-sami.3,
+// where Item.integrate left an arriving deleted item live, one 26-byte frame - a browser's
+// rooted deleted item of length 1,000, whose length is a varuint that can claim up to 2^53
+// clocks - took 1,000 clocks of a client of its own off them, and a delete of every other one of
+// them was then charged nothing at all, where against the room's own delete set it is charged
+// 999 structs, 999 splits and 81,360 frame bytes
 // (TestADeletedItemTheRoomHoldsLiveLeavesLaterDeletesCharged, which holds the class on a struct
 // this library still leaves live).
 //
@@ -164,15 +183,16 @@ func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) 
 	return clock > 0 && !beside(clock), !beside(clock + length)
 }
 
-// list lists the clocks [clock, clock+length) of client of one range of the delete set of an
-// update the room's update observer drained, as the walk the room's charge makes of that update
-// reads it (roomCharge.applied, roomCharge.wrote): the one place a run is listed from an update,
-// beside the room's delete set at its load (seed). The room's delete set only grows, so a range
-// the list covers already adds nothing, and costs the read lock and a binary search alone -
-// neither the write lock nor an allocation. A keystroke into a room of thousands of deleted runs
-// costs no more here: its transaction deletes nothing, so its update carries no delete range at
-// all, and a delete's update carries only the ranges that commit deleted, which the list holds
-// after it. Nil, a room no load charged, lists nothing.
+// list lists the clocks [clock, clock+length) of client of one range of the delete set, or of
+// one GC struct, of an update the room's update observer drained, as the walk the room's charge
+// makes of that update reads them (roomCharge.applied, roomCharge.wrote): the one place a run is
+// listed from an update, beside the room's delete set at its load (seed). The room's delete set
+// only grows, so a range the list covers already adds nothing, and costs the read lock and a
+// binary search alone - neither the write lock nor an allocation. A keystroke into a room of
+// thousands of deleted runs costs no more here: its transaction deletes nothing and collects
+// nothing, so its update carries neither a delete range nor a GC struct, and a delete's update
+// carries only the ranges that commit deleted, which the list holds after it. Nil, a room no
+// load charged, lists nothing.
 func (d *deletedRuns) list(client, clock, length uint64) {
 	if d == nil || length == 0 || d.covers(client, clock, length) {
 		return

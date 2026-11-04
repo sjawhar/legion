@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"fmt"
 	"maps"
 	"runtime"
 	"slices"
@@ -46,32 +47,6 @@ func weighedAgainst(t *testing.T, room *crdt.Doc, known *deletedRuns, update []b
 func sameCharge(a, b peerWeighing) bool {
 	return a.added() == b.added() && a.splits == b.splits && a.deletes == b.deletes &&
 		a.frame == b.frame && a.structureHeap() == b.structureHeap()
-}
-
-// chargesAtLeast is whether a charges its room at least what b charges it, part for part: what a
-// delete weighed against the room's list comes to beside what it weighs against the room's own
-// delete set, which the list is a subset of, so a range weighed against it is charged no less
-// (deletedRuns).
-func chargesAtLeast(a, b peerWeighing) bool {
-	return a.added() >= b.added() && a.splits >= b.splits && a.deletes >= b.deletes &&
-		a.frame >= b.frame && a.structureHeap() >= b.structureHeap()
-}
-
-// listedWithin is whether every run listed lies inside a run held: the room's list holds no clock
-// ygo holds live.
-func listedWithin(listed, held map[uint64][]clockRun) bool {
-	for client, runs := range listed {
-		for _, run := range runs {
-			inside := false
-			for _, holds := range held[client] {
-				inside = inside || (holds.start <= run.start && run.end <= holds.end)
-			}
-			if !inside {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // everyOtherClockDeleted is the frame a browser sends that deletes every other clock in
@@ -138,24 +113,24 @@ func TestADeletedItemTheRoomHoldsLiveLeavesLaterDeletesCharged(t *testing.T) {
 	}
 }
 
-// Whatever a browser sends, the room lists only clocks ygo holds deleted: after each frame below
-// is admitted through the hook, the room's list is the room's own delete set run for run
-// (crdt.DeleteSetFromDoc), and a delete of every other character of the room's text is charged
-// the same against the room's list as against a list seeded from that delete set. The frames run
-// in order against one room, as a browser's updates reach one: forgeries - a GC run over clocks
-// the room holds live, the reviewer's rooted deleted item of length 1,000, a GC run of a client
-// the room holds nothing of - mixed with the honest traffic of an editor, a keystroke, a delete
-// and a whole-state handoff, and a delete range past the clocks the room holds, which ygo parks
-// and which neither the room's delete set nor the list holds.
+// Whatever a browser sends, the room lists the clocks ygo holds deleted and all of them: after
+// each frame below is admitted through the hook, the room's list is the room's own delete set
+// run for run (crdt.DeleteSetFromDoc), and a delete of every other character of the room's text
+// is charged the same against the room's list as against a list seeded from that delete set. The
+// frames run in order against one room, as a browser's updates reach one: forgeries - a GC run
+// over clocks the room holds live, the reviewer's rooted deleted item of length 1,000, a GC run
+// of a client the room holds nothing of - mixed with the honest traffic of an editor, a
+// keystroke, a delete and a whole-state handoff, and a delete range past the clocks the room
+// holds, which ygo parks and which neither the room's delete set nor the list holds.
 //
-// A frame carrying a GC struct the room does not hold yet is the one exception, and the rows
-// after it inherit it. ygo decodes such a struct as an item already marked deleted and appends it
-// to the store without integrating it (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1161-1174 and
-// :938-949), so it never joins the transaction's delete set, which is what the commit's update
-// carries (reearth/ygo#350) and all the room lists from. The room's own delete set holds those
-// clocks; its list does not until a load seeds them (deletedRuns.seed). From there the property
-// is the one that matters for the budget: the list is a subset of ygo's delete set, so a later
-// delete weighs at least as much against the list as against the truth and is never under-charged.
+// A frame carrying a GC struct the room does not hold yet is in that rule, not an exception to
+// it. ygo decodes such a struct as an item already marked deleted and appends it to the store
+// without integrating it (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1161-1174 and :938-949), so
+// it joins no transaction's delete set, which is what the commit's update carries beside its
+// structs (reearth/ygo#350) - but that update carries the struct itself, written back as a GC
+// struct (encodeItem, crdt/update.go:441-466), and the walk the room's charge already makes of
+// the commit lists it (roomCharge.applied, deletedRuns). So the room's delete set holds those
+// clocks and so does its list, from the drain of the commit that appended them.
 func TestEveryAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(t *testing.T) {
 	const (
 		deletedItemClient = 1<<40 + 11
@@ -163,27 +138,23 @@ func TestEveryAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(t *testing.T) {
 		parkedClient      = 1<<40 + 17
 	)
 	service, room, replica, charge := drainedPeerUpdateRoom(t, strings.Repeat("word ", 60)+"\n")
-	gcSent := false
 	for _, row := range []struct {
 		name  string
-		gc    bool
 		frame func(t *testing.T) []byte
 	}{
-		{"a GC run over every clock the room holds", true, func(*testing.T) []byte { return gcRunOverHeldClocks(room) }},
-		{"a rooted deleted item of length 1,000", false, func(*testing.T) []byte { return rootedDeletedItem(deletedItemClient, 1_000) }},
-		{"a GC run of a client the room holds nothing of", true, func(*testing.T) []byte {
+		{"a GC run over every clock the room holds", func(*testing.T) []byte { return gcRunOverHeldClocks(room) }},
+		{"a rooted deleted item of length 1,000", func(*testing.T) []byte { return rootedDeletedItem(deletedItemClient, 1_000) }},
+		{"a GC run of a client the room holds nothing of", func(*testing.T) []byte {
 			return newV1Frame(1).group(1, freshGCClient, 0).gc(7).noDeletes()
 		}},
-		{"a browser's keystroke", false, func(t *testing.T) []byte { return peerTyping(t, room, "y") }},
-		{"a browser's delete of three characters", false, func(t *testing.T) []byte { return peerDeletingAt(t, room, 5, 3) }},
-		{"the same deleted item again", false, func(*testing.T) []byte { return rootedDeletedItem(deletedItemClient, 1_000) }},
-		{"a browser's whole-state handoff of the room", false, func(*testing.T) []byte { return crdt.EncodeStateAsUpdateV1(room, nil) }},
-		{"a delete range past the clocks the room holds", false, func(*testing.T) []byte {
+		{"a browser's keystroke", func(t *testing.T) []byte { return peerTyping(t, room, "y") }},
+		{"a browser's delete of three characters", func(t *testing.T) []byte { return peerDeletingAt(t, room, 5, 3) }},
+		{"the same deleted item again", func(*testing.T) []byte { return rootedDeletedItem(deletedItemClient, 1_000) }},
+		{"a browser's whole-state handoff of the room", func(*testing.T) []byte { return crdt.EncodeStateAsUpdateV1(room, nil) }},
+		{"a delete range past the clocks the room holds", func(*testing.T) []byte {
 			return newV1Frame(0).uint(1).uint(parkedClient).uint(1).uint(0).uint(4).done()
 		}},
 	} {
-		gcSent = gcSent || row.gc
-		exact := !gcSent
 		t.Run(row.name, func(t *testing.T) {
 			update := row.frame(t)
 			if err, called := weighInto(service, room, update); err != nil || !called {
@@ -191,30 +162,27 @@ func TestEveryAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(t *testing.T) {
 			}
 			runtime.KeepAlive(replica)
 			listed, held := listedRuns(charge.deletes()), roomDeletedRuns(room)
-			if !listedWithin(listed, held) {
-				t.Fatalf("the room lists %v deleted, want a subset of ygo's own delete set, %v", listed, held)
-			}
-			if exact && !maps.EqualFunc(listed, held, slices.Equal) {
+			if !maps.EqualFunc(listed, held, slices.Equal) {
 				t.Fatalf("the room lists %v deleted, want ygo's own delete set, %v", listed, held)
 			}
 			probe := peerDeletingEveryOtherCharacter(t, room)
 			var truth deletedRuns
 			truth.seed(crdt.DeleteSetFromDoc(room))
 			against, fresh := weighedAgainst(t, room, charge.deletes(), probe), weighedAgainst(t, room, &truth, probe)
-			if !chargesAtLeast(against, fresh) || (exact && !sameCharge(against, fresh)) {
-				t.Fatalf("a delete of every other character weighs %d structs, %d splits, %d frame bytes and %d structure bytes against the room's list and %d, %d, %d and %d against its own delete set, want at least each of them (exactly, with no GC run sent: %t)",
+			if !sameCharge(against, fresh) {
+				t.Fatalf("a delete of every other character weighs %d structs, %d splits, %d frame bytes and %d structure bytes against the room's list and %d, %d, %d and %d against its own delete set, want the same of each",
 					against.added(), against.splits, against.frame, against.structureHeap(),
-					fresh.added(), fresh.splits, fresh.frame, fresh.structureHeap(), exact)
+					fresh.added(), fresh.splits, fresh.frame, fresh.structureHeap())
 			}
 		})
 	}
 }
 
 // The same property over a corpus: whatever bytes a browser sends, a room that admitted and
-// applied them lists only clocks ygo holds deleted - the list is a subset of the room's own
-// delete set, equal to it but for the clocks of any GC struct the frame carried. The seeds are
-// the crafted frames of the table above; run as an ordinary test it runs them alone, and a frame
-// the hook refuses, or one whose apply fails, leaves the room nothing to answer for.
+// applied them lists ygo's own delete set, run for run, the clocks of the frame's GC structs
+// included, which the room lists from the commit that appended them. The seeds are the crafted
+// frames of the table above; run as an ordinary test it runs them alone, and a frame the hook
+// refuses, or one whose apply fails, leaves the room nothing to answer for.
 func FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(f *testing.F) {
 	f.Add(rootedDeletedItem(1<<40+19, 1_000))
 	f.Add(newV1Frame(1).group(1, 1<<40+23, 0).gc(7).noDeletes())
@@ -228,8 +196,8 @@ func FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(f *testing.F) {
 			return
 		}
 		listed, held := listedRuns(charge.deletes()), roomDeletedRuns(room)
-		if !listedWithin(listed, held) {
-			t.Fatalf("after the %d-byte frame the room lists %v deleted, want a subset of ygo's own delete set, %v", len(update), listed, held)
+		if !maps.EqualFunc(listed, held, slices.Equal) {
+			t.Fatalf("after the %d-byte frame the room lists %v deleted, want ygo's own delete set, %v", len(update), listed, held)
 		}
 	})
 }
@@ -278,5 +246,217 @@ func TestACommitIntoARoomOfThousandsOfDeletedRunsAllocatesNoMore(t *testing.T) {
 	t.Logf("a commit allocates %.0f objects against 50 deleted runs and %.0f against 4,000", few, thousands)
 	if thousands > few {
 		t.Fatalf("a commit into a room of 4,000 deleted runs allocates %.0f objects, past the %.0f one into a room of 50 allocates", thousands, few)
+	}
+}
+
+// The two rules the room leans on when it lists a GC run out of its own commit, pinned against
+// the ygo the module names. A GC struct over clocks the document already holds is skipped by the
+// apply before anything is appended (sjawhar/ygo v1.55.1-sami.1, integrateGroup steps over a
+// struct ending at or before the client's clock, crdt/update.go:899-917), so the store is as it
+// was and the transaction logs no update at all (collectAndEncodeLocked logs one only for a
+// transaction that changed the document or parked something, crdt/doc.go:844-873). A GC struct
+// past those clocks is appended to the store already deleted, without integrating it
+// (crdt/update.go:1161-1174 and :938-949), so ygo holds it deleted (buildDeleteSet reads
+// item.Deleted, crdt/update.go:659-678) while no transaction's delete set names it - Item.delete
+// steps past an item already deleted before it reaches txn.deleteSet.add (crdt/item.go:500-507,
+// the range at :536; reearth/ygo#350) - and the commit's own logged update carries it, written
+// back as a GC struct because it has no parent, no origins and no parent id (encodeItem,
+// crdt/update.go:441-466).
+//
+// Together they are why the walk of the room's own commit may list a GC run as the room's
+// (deletedRuns, roomCharge.applied): every GC struct it reads is one ygo holds deleted, and
+// never a clock the document held before the commit. Should a later ygo stop skipping the first,
+// or stop logging the second, this fails here rather than the room's list quietly listing clocks
+// ygo holds live.
+func TestAGCRunOverClocksADocumentHoldsIsSkippedAndOneBeyondThemIsLoggedDeleted(t *testing.T) {
+	const (
+		heldClient = 1<<40 + 41
+		gcClient   = 1<<40 + 43
+		gcRun      = 7
+	)
+	doc := newDocumentCopy()
+	seed := newV1Frame(1).group(1, heldClient, 0).rooted(byte(structString), fragmentName, "").str("hello world").noDeletes()
+	if err := crdt.ApplyUpdateV1(doc, seed, nil); err != nil {
+		t.Fatal(err)
+	}
+	held := doc.StateVector()[crdt.ClientID(heldClient)]
+	structs := countRoomStructs(doc)
+	if held == 0 || structs == 0 {
+		t.Fatalf("the document holds %d clocks of the seeded client in %d structs, want a document holding its text", held, structs)
+	}
+	log := doc.OpenUpdateLog()
+	t.Cleanup(log.Close)
+	log.Drain()
+
+	over := newV1Frame(1).group(1, heldClient, 0).gc(held).noDeletes()
+	if err := crdt.ApplyUpdateV1(doc, over, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, logged := log.Drain(); len(logged) != 0 {
+		t.Fatalf("a GC run over the %d clocks the document holds logged %d updates, want none: ygo skips such a struct", held, len(logged))
+	}
+	if after := countRoomStructs(doc); after != structs {
+		t.Fatalf("a GC run over the clocks the document holds left it %d structs, want the %d it held", after, structs)
+	}
+	if ranges := crdt.DeleteSetFromDoc(doc).Ranges(crdt.ClientID(heldClient)); len(ranges) != 0 {
+		t.Fatalf("a GC run over the clocks the document holds left ygo holding %v of them deleted, want none", ranges)
+	}
+
+	past := newV1Frame(1).group(1, gcClient, 0).gc(gcRun).noDeletes()
+	if err := crdt.ApplyUpdateV1(doc, past, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, logged := log.Drain()
+	if len(logged) != 1 {
+		t.Fatalf("a GC run past the clocks the document holds logged %d updates, want the one its commit made", len(logged))
+	}
+	walked, _, err := walkRecorded(logged[0].Update, fromRoom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	for _, s := range walked.structs {
+		if s.kind == structGC && s.client == gcClient && s.clock == 0 && s.length == gcRun {
+			runs++
+		}
+	}
+	if runs != 1 || len(walked.structs) != 1 {
+		t.Fatalf("the commit's logged update carries %d structs, %d of them the %d-clock GC run that arrived, want that run alone", len(walked.structs), runs, gcRun)
+	}
+	for _, ranged := range walked.deletes {
+		if ranged.client == gcClient {
+			t.Fatalf("the commit's own delete set names the GC run's clocks %v, want a run no commit's delete set holds (reearth/ygo#350)", ranged)
+		}
+	}
+	if ranges := crdt.DeleteSetFromDoc(doc).Ranges(crdt.ClientID(gcClient)); len(ranges) != 1 || ranges[0].Clock != 0 || ranges[0].Len != gcRun {
+		t.Fatalf("ygo holds %v of the GC run deleted, want its whole %d clocks", ranges, gcRun)
+	}
+}
+
+// An honest browser keeps ygo's GC on, as every Yjs browser does: the paragraphs it writes and
+// then deletes while it is offline are collected into GC structs, and its whole state carries
+// them to the room on every connect. The room appends each of them to its store already deleted
+// (deletedRuns), so from the second connect on the room holds every one of those clocks deleted
+// and the browser's handoff adds nothing to its heap. Listed only from the delete sets of the
+// room's commits, which name none of them (reearth/ygo#350), the room charged that handoff
+// afresh on every reconnect - 400 bytes of structure part, one struct of the struct total and
+// about 86 frame bytes for each unlisted GC run, for a room whose heap did not move, and the
+// structure part no count clears - so a room held open across a day's reconnects grew without
+// bound. Listed from the GC structs of the room's own commits too, the over-charge is nothing:
+// here, over six connects of one browser holding 10, 500 and 10,000 GC runs, every reconnect
+// weighs against the room's list exactly what it weighs against a list seeded fresh from
+// crdt.DeleteSetFromDoc, and moves the structure part by nothing.
+func TestAnHonestBrowsersReconnectsAreNotOverChargedForItsOwnGCRuns(t *testing.T) {
+	for _, runs := range []int{10, 500, 10_000} {
+		t.Run(fmt.Sprintf("%d GC runs", runs), func(t *testing.T) {
+			service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
+			handoff := browserHoldingGCRuns(t, room, runs)
+			if held := gcRunsIn(t, handoff); held < runs {
+				t.Fatalf("the browser's %d-byte handoff carries %d GC runs, want the %d it collected", len(handoff), held, runs)
+			}
+			for connect := 1; connect <= 6; connect++ {
+				var truth deletedRuns
+				truth.seed(crdt.DeleteSetFromDoc(room))
+				against := weighedAgainst(t, room, charge.deletes(), handoff)
+				fresh := weighedAgainst(t, room, &truth, handoff)
+				structure, _, _, _ := chargeParts(charge)
+				if err, called := weighInto(service, room, handoff); err != nil || !called {
+					t.Fatalf("connect %d: the %d-byte handoff was answered %v (applied %t), want it admitted", connect, len(handoff), err, called)
+				}
+				runtime.KeepAlive(replica)
+				grew, _, _, _ := chargeParts(charge)
+				t.Logf("connect %d: the handoff weighs %d structs, %d splits and %d frame bytes against the room's list and %d, %d and %d against its own delete set, and moves the structure part by %d bytes",
+					connect, against.added(), against.splits, against.frame,
+					fresh.added(), fresh.splits, fresh.frame, grew-structure)
+				if !sameCharge(against, fresh) {
+					t.Fatalf("connect %d: the handoff weighs %d structs, %d splits, %d frame bytes and %d structure bytes against the room's list and %d, %d, %d and %d against its own delete set, want no over-charge",
+						connect, against.added(), against.splits, against.frame, against.structureHeap(),
+						fresh.added(), fresh.splits, fresh.frame, fresh.structureHeap())
+				}
+				if connect > 1 && grew != structure {
+					t.Fatalf("connect %d: the handoff moved the structure part from %d to %d bytes, want a reconnect of a browser the room already holds to move it by nothing", connect, structure, grew)
+				}
+			}
+		})
+	}
+}
+
+// browserHoldingGCRuns is the whole state of a browser that worked offline on a copy of the room
+// with ygo's GC on: it cut the start of the room's own paragraph, wrote 2*runs paragraphs of its
+// own and cut every other one of them, so that no two of its deletions touch. ygo collects a
+// deleted paragraph as the transaction commits, turning every item under it into a GC struct
+// (gcTxnDeleteSet's ContentType case, sjawhar/ygo v1.55.1-sami.1, crdt/snapshot.go:370-404,
+// through gcTypeItems, :431-470), so the copy's encode carries runs separated deleted runs of
+// the browser's own client, each of them a deleted paragraph the room integrates beside the GC
+// structs of what was under it, which no commit's delete set names. That is what a browser hands
+// back on every connect.
+func browserHoldingGCRuns(t *testing.T, room *crdt.Doc, runs int) []byte {
+	t.Helper()
+	browser, text := peerDocument(t, room)
+	fragment := browser.GetXmlFragment(fragmentName)
+	browser.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, min(4, text.Len())) })
+	browser.Transact(func(txn *crdt.Transaction) {
+		// Prepended, as document_copy_test's browser does: ygo walks a fragment's children from
+		// its start to find an insert position, so prepending each is the cheap end.
+		for range 2 * runs {
+			paragraph := crdt.NewYXmlElement("paragraph")
+			fragment.InsertElement(txn, 0, paragraph)
+			paragraph.InsertText(txn, 0, crdt.NewYXmlText())
+		}
+	})
+	browser.Transact(func(txn *crdt.Transaction) {
+		for at := 2*runs - 1; at > 0; at -= 2 {
+			fragment.Delete(txn, at, 1)
+		}
+	})
+	return crdt.EncodeStateAsUpdateV1(browser, nil)
+}
+
+// gcRunsIn is how many GC structs update carries.
+func gcRunsIn(t *testing.T, update []byte) int {
+	t.Helper()
+	walked, _, err := walkRecorded(update, fromPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	for _, s := range walked.structs {
+		if s.kind == structGC {
+			runs++
+		}
+	}
+	return runs
+}
+
+// A browser that stays connected types and deletes through the hook, as a person writing does,
+// and the room is never over-charged for it: after each of its updates the room's list is ygo's
+// own delete set run for run, and the next update weighs the same against the list as against a
+// list seeded fresh from it. The room's own GC runs on every commit that deletes (gcTxnDeleteSet,
+// sjawhar/ygo v1.55.1-sami.1, crdt/snapshot.go:370-407), so the commits here carry the GC structs
+// the walk now lists beside the delete sets it always read.
+func TestAConnectedTypingSessionWithDeletesIsNeverOverCharged(t *testing.T) {
+	service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
+	for round := range 12 {
+		update := peerTyping(t, room, "typed ")
+		if round%3 == 2 {
+			update = peerDeletingAt(t, room, 2, 4)
+		}
+		if err, called := weighInto(service, room, update); err != nil || !called {
+			t.Fatalf("round %d: the %d-byte update was answered %v (applied %t), want it admitted", round, len(update), err, called)
+		}
+		runtime.KeepAlive(replica)
+		listed, held := listedRuns(charge.deletes()), roomDeletedRuns(room)
+		if !maps.EqualFunc(listed, held, slices.Equal) {
+			t.Fatalf("round %d: the room lists %v deleted, want ygo's own delete set, %v", round, listed, held)
+		}
+		probe := peerDeletingEveryOtherCharacter(t, room)
+		var truth deletedRuns
+		truth.seed(crdt.DeleteSetFromDoc(room))
+		against, fresh := weighedAgainst(t, room, charge.deletes(), probe), weighedAgainst(t, room, &truth, probe)
+		if !sameCharge(against, fresh) {
+			t.Fatalf("round %d: a delete of every other character weighs %d structs, %d splits, %d frame bytes and %d structure bytes against the room's list and %d, %d, %d and %d against its own delete set, want no over-charge",
+				round, against.added(), against.splits, against.frame, against.structureHeap(),
+				fresh.added(), fresh.splits, fresh.frame, fresh.structureHeap())
+		}
 	}
 }

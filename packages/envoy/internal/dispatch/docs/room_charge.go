@@ -106,19 +106,29 @@ func (c *roomCharge) adds(content int64) {
 // applied charges the room what update added, one transaction's update the peer hook's own apply
 // committed, which the room's update observer hands over (renderedReplica.chargeAdded): its
 // content a rendering can show to the uncounted part, as contentAdded counts it, its structure
-// having been charged by the hook that admitted it (grew). From the same walk it lists the
-// update's delete set as the room's (deletedRuns.list): ygo writes the transaction's own
-// deletions into the update of every commit (cloneDeleteSet(txn.deleteSet) in
-// collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:861, written by
-// encodeV1Locked, crdt/update.go:403; reearth/ygo#350), so what the apply of the browser's
-// update actually deleted is in it, which is the room's own answer for what the browser's bytes
-// only claimed: a browser's GC run over clocks the room holds live deletes none of them, and a
-// delete range past the clocks the room holds parks and deletes nothing (deletedRuns). The
-// structs of the update are not read into the list at all, since a struct the walk reads as born
-// deleted is not always one ygo holds deleted, and one it does hold deleted the commit's delete
-// set names already (deletedRuns). A range the list holds already costs a read of it and no
-// more, and a keystroke's update carries no delete range at all, so the listing costs the walk
-// the charge already makes and nothing besides.
+// having been charged by the hook that admitted it (grew). From the same walk it lists what that
+// commit left the room holding deleted as the room's (deletedRuns.list): the update's delete set,
+// and every GC struct it carries.
+//
+// ygo writes the transaction's own deletions into the update of every commit
+// (cloneDeleteSet(txn.deleteSet) in collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1,
+// crdt/doc.go:861, written by encodeV1Locked, crdt/update.go:403; reearth/ygo#350), so what the
+// apply of the browser's update actually deleted is in it, which is the room's own answer for
+// what the browser's bytes only claimed: a browser's GC run over clocks the room holds live
+// deletes none of them, and a delete range past the clocks the room holds parks and deletes
+// nothing (deletedRuns). The one thing ygo holds deleted that no commit's delete set names is a
+// GC struct, which it appends to the store already deleted without integrating it
+// (crdt/update.go:1161-1174 and :938-949), so the walk lists those runs too - safely, because
+// this is ygo's own encode of a commit the room made, from the state before the transaction
+// (encodeV1Locked over txn.beforeState, crdt/update.go:367-405), so every struct in it is one
+// the room's store holds, a GC struct over clocks the room already held having been skipped by
+// the apply before anything was appended (crdt/update.go:914-917). An item of the update the
+// room holds live is still not listed: a struct that renders nothing is not always one ygo holds
+// deleted, and one it does hold deleted the commit's delete set names already (deletedRuns).
+//
+// A range the list holds already costs a read of it and no more, and a keystroke's update carries
+// no delete range and no GC struct at all, so the listing costs the walk the charge already makes
+// and nothing besides.
 //
 // A delete range weighed between the apply and this drain finds those clocks unlisted and is
 // charged for them, which over-charges and never under-charges. An update the walk cannot read is
@@ -138,14 +148,19 @@ func (c *roomCharge) applied(update []byte) {
 
 // appliedWalk is applied's visitor: the content a rendering can show (contentAdded's
 // renderedContent) of one walk of a transaction's update, and the room's list of delete ranges,
-// which that walk lists the update's delete set into.
+// which that walk lists the update's delete set and its GC runs into.
 type appliedWalk struct {
 	content renderedContent
 	deleted *deletedRuns
 }
 
+// walkedStruct counts the struct's content and lists it when it is a GC run, the one struct of
+// the room's own commit ygo holds deleted that the commit's delete set does not name (applied).
 func (w *appliedWalk) walkedStruct(walked updateStruct) {
 	w.content.walkedStruct(walked)
+	if walked.kind == structGC {
+		w.deleted.list(walked.client, walked.clock, walked.length)
+	}
 }
 
 func (w *appliedWalk) walkedDelete(client, clock, length uint64) {
@@ -171,14 +186,18 @@ func (c *roomCharge) grew(structure int64) {
 // the content no rendering prices. It refuses nothing: the write has committed, and its charge only
 // raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner.
 //
-// The same walk lists the update's delete set as the room's (deletedRuns.list), which is what
-// that commit deleted, every range of it weighed before it is listed: ygo sorts and merges each
-// client's ranges as it decodes them (crdt/update.go:1527), so no two ranges of one update
-// touch, and listing one leaves what the rest are charged as it was. The structs of the
-// update are not read into the list, here as in applied. One walk reads the content, the structure
-// and the delete set. An update the walk cannot read is charged its bytes as content, as
-// contentAdded charges it, and the structure the walk read before it refused. Nil, a replica no
-// room's load charged (a test's), charges nothing and walks nothing.
+// The same walk lists what the commit left the room holding deleted as the room's
+// (deletedRuns.list): its delete set, what that commit deleted, every range of it weighed before
+// it is listed - ygo sorts and merges each client's ranges as it decodes them
+// (crdt/update.go:1527), so no two ranges of one update touch, and listing one leaves what the
+// rest are charged as it was - and every GC struct it carries, the one struct ygo holds deleted
+// that no commit's delete set names, listed here as in applied and safe for the same reason: the
+// update is ygo's own encode of a commit the room made, so every struct in it is one the room's
+// store holds. An item the room holds live is not listed, here as in applied. One walk reads the
+// content, the structure, the delete set and the GC runs. An update the walk cannot read is
+// charged its bytes as content, as contentAdded charges it, and the structure the walk read
+// before it refused. Nil, a replica no room's load charged (a test's), charges nothing and walks
+// nothing.
 func (c *roomCharge) wrote(update []byte) {
 	if c == nil {
 		return
@@ -194,9 +213,9 @@ func (c *roomCharge) wrote(update []byte) {
 
 // writtenWeighing is wrote's visitor: the content a rendering can show (contentAdded's
 // renderedContent) and the structure (peerWeighing) of one walk of a server write's update, and
-// the room's list of delete ranges, which that walk lists the update's delete set into. Its
-// peerWeighing holds no state vector, so every struct counts as past the room's state, as every
-// struct of a transaction's update is.
+// the room's list of delete ranges, which that walk lists the update's delete set and its GC
+// runs into. Its peerWeighing holds no state vector, so every struct counts as past the room's
+// state, as every struct of a transaction's update is.
 type writtenWeighing struct {
 	content   renderedContent
 	structure peerWeighing
@@ -206,10 +225,14 @@ type writtenWeighing struct {
 // walkedStruct weighs walked as the peer hook's weighing does, but for the apply-heap estimate
 // (structApplyHeap), which wrote never reads: it reads the structure (structureHeap) alone, so a
 // server write pays not even the estimate's arithmetic over what the walk counted in each struct's
-// content (contentShape).
+// content (contentShape). It lists walked when it is a GC run, as applied's walk does, and only
+// after weighing it, so the struct is charged against the list as it stood before this update.
 func (w *writtenWeighing) walkedStruct(walked updateStruct) {
 	w.content.walkedStruct(walked)
 	w.structure.weighStruct(walked, applyCost{})
+	if walked.kind == structGC {
+		w.deleted.list(walked.client, walked.clock, walked.length)
+	}
 }
 
 // walkedDelete weighs the range against the room's list and only then lists it, so the splits it

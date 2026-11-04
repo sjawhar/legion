@@ -47,12 +47,12 @@ func chargeParts(charge *roomCharge) (structure, content, measuredAt, weight int
 // part as it was.
 //
 // The room drains its own commits, as every loaded room does (keepReplica, websocket.go's update
-// observer): what a commit of the room deleted is listed as the room's from the delete set ygo
-// writes into the update of that commit (roomCharge.applied, deletedRuns.list), so the handoff
-// that carries those ranges back is charged nothing for them. A delete range the room parks is
-// in no delete set ygo builds, so the room lists none of it and every update carrying it again is
-// charged for it again; so is the delete range of a GC struct a browser sent, which ygo holds
-// deleted but no commit's delete set names. Both over-charge and neither under-charges.
+// observer): what a commit of the room left it holding deleted is listed as the room's from that
+// commit's update - its delete set, and the GC structs ygo appended (roomCharge.applied,
+// deletedRuns.list) - so the handoff that carries those ranges back is charged nothing for them,
+// the GC structs' range included. A delete range the room parks is in no delete set ygo builds
+// and in no struct of a commit, so the room lists none of it and every update carrying it again
+// is charged for it again, which over-charges and never under-charges.
 func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount(t *testing.T) {
 	service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
 	service.measurer.interval = noInterval
@@ -104,15 +104,15 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	if grew := admit("the same delete ranges again", deleteRangesFrom(78, 5)); grew != parked {
 		t.Fatalf("five parked delete ranges grew the structure part by %d bytes on their second apply, want the %d of their first", grew, parked)
 	}
-	// The handoff carries the parked ranges and the delete range of the GC structs above: ygo
-	// appends a GC struct to the store already deleted (sjawhar/ygo v1.55.1-sami.1,
-	// crdt/update.go:1161-1174 and :938-949), so its clocks are in the room's own delete set but
-	// in no commit's delete set, which is all the room lists (deletedRuns, reearth/ygo#350). That
-	// range is charged the one split its end can leave - its start is the client's first clock -
-	// which over-charges and never under-charges.
-	handoff := parked + bytesOfHeapASplit*roomCopies
-	if grew := admit("the whole state the room holds, its parked delete ranges included", crdt.EncodeStateAsUpdateV1(room, nil)); grew != handoff {
-		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want the %d its parked ranges and the GC run's end are charged again", grew, handoff)
+	// The handoff carries the parked ranges and the delete range of the GC structs above. The
+	// parked ranges are charged again; the GC structs' range is not, since the room listed those
+	// clocks when it drained the commit that appended them: ygo appends a GC struct to the store
+	// already deleted (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1161-1174 and :938-949) and
+	// writes it back into that commit's own update as a GC struct (encodeItem,
+	// crdt/update.go:441-466), which the walk lists (deletedRuns), so the handoff's range over
+	// them covers nothing the room does not already hold deleted and leaves no end split.
+	if grew := admit("the whole state the room holds, its parked delete ranges included", crdt.EncodeStateAsUpdateV1(room, nil)); grew != parked {
+		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want the %d its parked ranges are charged again", grew, parked)
 	}
 	structure, _, _, _ := chargeParts(charge)
 	otherRoot := newV1Frame(1).group(1, 79, 0).rooted(byte(structString), "other", "").str("x").noDeletes()
@@ -138,8 +138,9 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 }
 
 // The structure part charges a delete range's splits once, for a range the room did not already
-// hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is the
-// delete set of every commit the room's drain hands over, which is what that commit deleted
+// hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is every
+// commit the room's drain hands over - that commit's delete set, what it deleted, and the GC
+// structs it carries, what ygo appended to the store already deleted
 // (deletedRuns.list). So a browser's whole-state handoff of a document edited into
 // 2,000 deleted runs, and a keystroke whose own transaction deletes nothing, so its update
 // carries no delete range at all (collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1,
