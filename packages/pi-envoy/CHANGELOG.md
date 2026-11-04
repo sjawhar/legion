@@ -1,5 +1,12 @@
 # Changelog
 
+## [16.2.0] - 2026-11-04
+
+### Changed
+
+- `envoy_publish` to a role nobody holds now reports that Envoy kept the message for the session
+  that claims the role next, instead of failing.
+
 ## [16.1.0] - 2026-11-04
 
 ### Changed

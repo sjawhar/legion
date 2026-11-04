@@ -641,11 +641,10 @@ func (p *settlementPass) applyStamp(ctx context.Context) (settleStep, settleOutc
 	// The stamp is written into the room as it stands, read inside the stamp's own transaction.
 	var renamed []stampedAsk
 	if p.stamping {
-		slot, update, err := s.applySuppressed(ctx, room, p.doc, func(doc *crdt.Doc, origin any) (bool, error) {
-			var minted int
+		slot, update, err := s.applySuppressed(ctx, room, p.doc, func(doc *crdt.Doc, origin any) error {
 			var stampErr error
-			_, minted, renamed, stampErr = stampBlockIDs(doc, origin)
-			return minted > 0, stampErr
+			_, _, renamed, stampErr = stampBlockIDs(doc, origin)
+			return stampErr
 		})
 		p.keep(slot, update)
 		p.stamp = update

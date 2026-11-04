@@ -69,6 +69,9 @@ func (r *podUpdateRig) awaitRescues(n int, what string) {
 func TestPodUpdatePushesWhatTheDiskHoldsBeforeItReplacesThePod(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		// before, when set, pushes to the remote before the pod's clone is made, so the clone holds
+		// what it pushed from the start (rescuetest.New).
+		before func(d *rescuetest.Disk)
 		// leave puts the workspace in its state and returns the commit the rescue branch must
 		// hold, "" when nothing is to be rescued, and a check of that commit's shape.
 		leave func(t *testing.T, d *rescuetest.Disk) (string, func(commit string))
@@ -107,10 +110,8 @@ func TestPodUpdatePushesWhatTheDiskHoldsBeforeItReplacesThePod(t *testing.T) {
 			name: "a jj-only commit",
 			leave: func(_ *testing.T, d *rescuetest.Disk) (string, func(string)) {
 				d.Write(d.Workspace, "feature.txt", "work jj alone holds\n")
-				d.JJ("commit", "-m", "work jj alone holds")
-				commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
-				d.JJ("new", `bookmarks(exact:"`+d.Branch+`")`)
-				return commit, nil
+				d.JJ("describe", "-m", "work jj alone holds")
+				return d.JJ("log", "--no-graph", "-r", "@", "-T", "commit_id"), nil
 			},
 		},
 		{
@@ -132,9 +133,36 @@ func TestPodUpdatePushesWhatTheDiskHoldsBeforeItReplacesThePod(t *testing.T) {
 				return merge, nil
 			},
 		},
+		{
+			name: "an unpushed commit beside commits the clone held when it was made",
+			before: func(d *rescuetest.Disk) {
+				side := filepath.Join(filepath.Dir(d.Remote), "side")
+				d.Run(filepath.Dir(d.Remote), "git", "clone", "--quiet", d.Remote, side)
+				for _, name := range []string{"old-merge", "abandoned-wip"} {
+					d.Write(side, name+".txt", name+"\n")
+					d.Run(side, "git", "add", name+".txt")
+					d.RunBefore(side, "git", "commit", "--quiet", "-m", name)
+					d.Run(side, "git", "push", "--quiet", "origin", "HEAD:refs/heads/"+name)
+				}
+			},
+			leave: func(_ *testing.T, d *rescuetest.Disk) (string, func(string)) {
+				d.Run(d.Clone, "jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false")
+				for _, name := range []string{"old-merge", "abandoned-wip"} {
+					d.Run(d.Remote, "git", "branch", "--quiet", "-D", name)
+				}
+				d.JJ("git", "fetch")
+				d.Write(d.Workspace, "feature.txt", "the workspace's own work\n")
+				d.JJ("commit", "-m", "the workspace's own work")
+				return d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id"), nil
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := rescuetest.New(t, podUpdateIssue)
+			var before []func(*rescuetest.Disk)
+			if tc.before != nil {
+				before = append(before, tc.before)
+			}
+			d := rescuetest.New(t, podUpdateIssue, before...)
 			want, shape := tc.leave(t, d)
 			rig := newPodUpdateRig(t, readyWorker(claim.RoleArchitect), readyWorker(claim.RoleImplementer))
 			rig.rescueOn(d)
@@ -164,6 +192,9 @@ func TestPodUpdatePushesWhatTheDiskHoldsBeforeItReplacesThePod(t *testing.T) {
 			}
 			if shape != nil {
 				shape(held)
+			}
+			if extra := d.RemoteBranch(podUpdateRescueBranch + "-2"); extra != "" {
+				t.Fatalf("the remote holds %s-2 at %s, want one rescue branch: the workspace's own work is one head", podUpdateRescueBranch, extra)
 			}
 			if len(messages) != 1 || !strings.Contains(messages[0], "`"+branch+"` (commit "+held+")") || !strings.Contains(messages[0], d.Workspace) {
 				t.Fatalf("the issue was told %q, want one message naming %s at %s from %s", messages, branch, held, d.Workspace)

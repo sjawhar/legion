@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -23,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // Two envoy-dispatch processes serve one Postgres, and a room resident in one of them never
@@ -635,6 +638,70 @@ func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T
 	}
 	if !closed {
 		t.Fatal("the close of the room whose write has ended closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// ygo closes no room another caller is inside: a browser's join, or an Apply - a write's publish, a
+// read loading the room. The evictor's close of a room behind the head meets one as it meets an
+// open write: it closes nothing, keeps the room's window for a later try, lifts its reservation,
+// so the caller inside keeps the room it is in and a write after it is not refused, and warns of
+// nothing, since a browser joining the room is no fault. Once the caller has left, the same close
+// closes the room.
+func TestARoomBehindTheHeadThatAnotherCallerIsInsideIsClosedOnceItLeaves(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob types once.\n")
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	live := pair.taskA.srv.GetDoc(pair.artifactID)
+	inside, leave := make(chan struct{}), make(chan struct{})
+	applied := make(chan error, 1)
+	go func() {
+		applied <- pair.taskA.srv.Apply(withOwnerVerified(context.Background()), pair.artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(inside)
+			<-leave
+		})
+	}()
+	<-inside
+	left := false
+	leaveRoom := func() {
+		if !left {
+			left = true
+			close(leave)
+			if err := <-applied; err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+				t.Errorf("the Apply inside the room: %v", err)
+			}
+		}
+	}
+	t.Cleanup(leaveRoom)
+
+	if evictor.documentChanged(context.Background(), pair.artifactID) {
+		t.Fatal("the evictor closed the room another caller was inside")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+		t.Fatal("the room was closed under the caller inside it")
+	}
+	if wake := evictor.wakeIn(); wake <= 0 {
+		t.Fatalf("the attempt that found a caller inside the room spent the room's window (wakeIn = %s)", wake)
+	}
+	state := pair.taskA.lockState(pair.artifactID)
+	reloading := state.reloading
+	pair.taskA.unlockState(pair.artifactID, state)
+	if reloading {
+		t.Fatal("the close held off by a caller inside the room left its reservation, which refuses every write")
+	}
+	if warned := logs.String(); warned != "" {
+		t.Errorf("the close held off by a caller inside the room warned:\n%s", warned)
+	}
+
+	leaveRoom()
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room once the caller has left it: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the room the caller left closed nothing")
 	}
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
@@ -1612,34 +1679,26 @@ func keptAndFreshRendering(t *testing.T, service *Service, artifactID string) (k
 	return replica.rendering.markdown, fresh
 }
 
-// A comment's margin write changes only the marks map, yet the update it publishes can change the
-// room's text: ygo encodes every transaction's update with the whole delete set of the document it
-// was made on, so the update carries every deletion its fork holds. Here task A's room stands
-// behind the head because task B, the other process, appended a browser's deletion of "Second."
-// that the room never took, so the margin write - ProjectMark in a joined transaction, as a reply,
-// a resolve, a reopen and a comment edit run it - forks the stored document (coldFork), which holds
-// that deletion, and its publish carries the deletion into the room. The room's update observer
-// has to render that update as it renders any other: the class it records says the content
-// changed, the ask-block observer is handed the tree (which forgets an ask author whose block the
-// tree no longer holds, observeAskBlocks), and the rendering the replica keeps is the room's own.
-// An observer that took a margin-only update for one that cannot change the text would keep
-// "Second." in that rendering and record the publish as no change, and would then measure the next
-// browser update against the stale rendering: a browser's margin note alone would count as a
-// content change, credited to that browser's person and settled as their edit.
+// A comment's margin write changes only the marks map, and the update it publishes carries only
+// what its own transaction did: ygo encodes a transaction's update with that transaction's own
+// deletions (reearth/ygo#350), as Yjs does, not with every deletion the fork holds. Here task A's
+// room stands behind the head because task B, the other process, appended a browser's deletion of
+// "Second." that the room never took, so the margin write - ProjectMark in a joined transaction, as
+// a reply, a resolve, a reopen and a comment edit run it - forks the stored document (coldFork),
+// which holds that deletion, and publishes into a room that does not. The publish brings the
+// margin record and nothing of the fork's text: the room keeps "Second." until the evictor or its
+// settlement loads it again at the head. A cold fork carries no rendering of the room, so the
+// room's update observer renders the publish as it renders any other update: it records no
+// content change, and the rendering the replica keeps is the room's own. An observer that took
+// the fork's rendering, which lacks "Second.", for the room's would record the publish as a
+// content change and then measure the next browser update against that rendering: a browser's
+// margin note alone would count as a content change, credited to that browser's person and settled
+// as their edit.
 func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testing.T) {
 	pair := newProcessPair(t)
 	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	pair.leaveTaskABehindWith(t, 1, bob, withoutTopLevelBlock("Second."))
-	// An ask author for a block the document does not hold: the ask-block observer forgets it
-	// whenever it is handed a tree, and only then.
-	const goneAsk = "ask-block-the-document-does-not-hold"
-	state := pair.taskA.lockState(pair.artifactID)
-	if state.askAuthors == nil {
-		state.askAuthors = make(map[string]model.Actor)
-	}
-	state.askAuthors[goneAsk] = bob
-	pair.taskA.unlockState(pair.artifactID, state)
 
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
 	var cold bool
@@ -1665,18 +1724,12 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 		_, ok := origin.(*liveWriteOrigin)
 		return ok
 	})
-	if !published.contentChanged {
-		t.Error("the room recorded the margin write's publish as no content change, though it deleted \"Second.\" from the room")
-	}
-	state = pair.taskA.lockState(pair.artifactID)
-	_, remembered := state.askAuthors[goneAsk]
-	pair.taskA.unlockState(pair.artifactID, state)
-	if remembered {
-		t.Error("the ask-block observer was not handed the tree the margin write's publish left")
+	if published.contentChanged {
+		t.Error("the room recorded the margin write's publish as a content change, though it changed no text in the room")
 	}
 	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
-	if strings.Contains(fresh, "Second.") {
-		t.Fatalf("the room after the publish = %q, want task B's deletion carried in by the margin write", fresh)
+	if !strings.Contains(fresh, "Second.") {
+		t.Fatalf("the room after the publish = %q, want it to keep \"Second.\": the margin write's update carries only its own transaction", fresh)
 	}
 	if kept != fresh {
 		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
@@ -1699,23 +1752,29 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 		t.Fatalf("apply the browser's margin note to the room: %v", err)
 	}
 	if class := classes.latest(t, "the browser's margin note", func(origin any) bool { return origin == "peer" }); class.contentChanged {
-		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering it kept from before the margin write's publish")
+		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering that was not the room's")
 	}
 }
 
 // A margin write a transaction makes after its own text edit, on a fork warm-built from the room,
 // is published into that room right after the edit, and only the margin write's publish may keep
-// the rendering the replica has. The fork holds the edit's deletion of "Second.", so the margin
-// write's update carries that deletion too, but the edit's own update has already brought it into
-// the room, so the margin update changes no text there (liveWriteOrigin.marginOnly). The edit's
-// publish is a content change the observer has to render: one that kept the rendering for it too -
-// a tag on every update of a warm-forked transaction rather than on its margin writes - would
-// record the edit as no change and keep "Second." in the rendering every later browser update is
-// measured against.
+// the rendering the replica has. The edit's update carries its deletion of "Second." and the margin
+// write's carries only its own transaction, the marks map, so the margin update changes no text
+// there (liveWriteOrigin.marginOnly). The edit's publish is a content change the observer has to
+// render: one that kept the rendering for it too - a tag on every update of a warm-forked
+// transaction rather than on its margin writes - would record the edit as no change and keep
+// "Second." in the rendering every later browser update is measured against.
 func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *testing.T) {
 	pair := newProcessPair(t)
 	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	const goneAsk = "ask-block-the-document-does-not-hold"
+	state := pair.taskA.lockState(pair.artifactID)
+	if state.askAuthors == nil {
+		state.askAuthors = make(map[string]model.Actor)
+	}
+	state.askAuthors[goneAsk] = alice
+	pair.taskA.unlockState(pair.artifactID, state)
 	var cold bool
 	if err := joinedWrite(pair.taskA, pair.artifactID, func(ctx context.Context) error {
 		if _, err := pair.taskA.ReplaceText(ctx, pair.artifactID, "First.\n", alice); err != nil {
@@ -1741,6 +1800,12 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
 	if strings.Contains(fresh, "Second.") {
 		t.Fatalf("the room after the publishes = %q, want the text edit's deletion of \"Second.\"", fresh)
+	}
+	state = pair.taskA.lockState(pair.artifactID)
+	_, remembered := state.askAuthors[goneAsk]
+	pair.taskA.unlockState(pair.artifactID, state)
+	if remembered {
+		t.Error("the ask-block observer retained an author for a block absent from the edited room")
 	}
 	if kept != fresh {
 		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
