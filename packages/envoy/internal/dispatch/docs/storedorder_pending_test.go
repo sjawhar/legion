@@ -14,18 +14,21 @@ import (
 
 type storedOrderReplayTx struct {
 	pgx.Tx
-	updates  [][]byte
-	classes  []bool
-	prefixes []int64
+	updates [][]byte
+	classes []bool
+	scanned int
 }
 
 func (tx *storedOrderReplayTx) Query(_ context.Context, query string, args ...any) (pgx.Rows, error) {
 	through := len(tx.updates)
+	from := 0
 	if len(args) > 1 {
-		tx.prefixes = append(tx.prefixes, args[1].(int64))
 		through = int(args[1].(int64))
 	}
-	return &storedOrderReplayRows{tx: tx, full: strings.Contains(query, "content_changed"), through: through}, nil
+	if len(args) > 2 {
+		from = int(args[2].(int64))
+	}
+	return &storedOrderReplayRows{tx: tx, full: strings.Contains(query, "content_changed"), pos: from, through: through}, nil
 }
 
 type storedOrderReplayRows struct {
@@ -39,6 +42,7 @@ func (r *storedOrderReplayRows) Next() bool { r.pos++; return r.pos <= r.through
 func (r *storedOrderReplayRows) Close()     {}
 func (r *storedOrderReplayRows) Err() error { return nil }
 func (r *storedOrderReplayRows) Scan(dest ...any) error {
+	r.tx.scanned++
 	*dest[0].(*int64) = int64(r.pos)
 	*dest[1].(*[]byte) = r.tx.updates[r.pos-1]
 	if r.full {
@@ -158,7 +162,7 @@ func TestStoredOrderPendingRows(t *testing.T) {
 	}
 }
 
-func TestStoredOrderStreamsEachOmittedPrefix(t *testing.T) {
+func TestStoredOrderReusesThePrefixBeforeParkedRows(t *testing.T) {
 	seed := newDocumentCopy(crdt.WithClientID(100))
 	seed.Transact(typeParagraph(seed, "base"))
 	updates := [][]byte{
@@ -170,16 +174,20 @@ func TestStoredOrderStreamsEachOmittedPrefix(t *testing.T) {
 		storedOrderHex(t, "01010b0004010174016300"),
 		storedOrderHex(t, "01010d0004010174016500"),
 	}
+	// Old service histories can hold no-op sync rows. A long settled prefix must
+	// not be decoded again for every short parked span near its end.
+	const prefix = 1000
+	updates = append(append([][]byte{updates[0]}, slices.Repeat([][]byte{{0, 0}}, prefix)...), updates[1:]...)
 	tx := &storedOrderReplayTx{updates: updates, classes: make([]bool, len(updates))}
 	var report StoredOrderReport
 	if err := foldStoredOrder(context.Background(), tx, "replay", time.Time{}, nil, &report); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(tx.prefixes, []int64{5, 6, 7}) {
-		t.Fatalf("streamed prefixes = %v, want a separate prefix through each row's resolution: [5 6 7]", tx.prefixes)
+	if tx.scanned > 2*len(updates)+16 {
+		t.Fatalf("read %d rows for a %d-row history, want the settled prefix read at most twice", tx.scanned, len(updates))
 	}
-	if report.Refused != "" || report.UpdatesAwaitingPredecessor != 0 || len(report.Mismatches) != 2 || report.Mismatches[0].Update != 3 || report.Mismatches[1].Update != 4 {
-		t.Fatalf("report = %+v, want only rows 3 and 4 blamed", report)
+	if report.Refused != "" || report.UpdatesAwaitingPredecessor != 0 || len(report.Mismatches) != 2 || report.Mismatches[0].Update != prefix+3 || report.Mismatches[1].Update != prefix+4 {
+		t.Fatalf("report = %+v, want only rows %d and %d blamed", report, prefix+3, prefix+4)
 	}
 }
 
