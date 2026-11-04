@@ -243,8 +243,8 @@ test("a kept answer is not the architect being told, so the run's next reminder 
     publish: (input) => client.publish(input),
   });
 
-  expect(await reminder.settle("Pushed.")).toBeString();
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
 
   expect(published).toHaveLength(1);
@@ -256,7 +256,7 @@ test("a kept answer is not the architect being told, so the run's next reminder 
   const kept = entries.at(-1);
   expect(kept).toMatchObject({ count: 2, reported: false });
 
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(2);
   expect(published[1]?.idempotencyKey).toBe(kept?.reportKey);
@@ -285,8 +285,8 @@ test("a notice no session held the architect role for is published again by the 
     },
   });
 
-  expect(await reminder.settle("Pushed.")).toBeString();
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(1);
   expect(published[0]?.keep).toBe(false);
@@ -294,7 +294,7 @@ test("a notice no session held the architect role for is published again by the 
   const refused = entries.at(-1);
   expect(refused).toMatchObject({ count: 2, reported: false });
 
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(2);
   expect(published[1]?.idempotencyKey).toBe(refused?.reportKey);
