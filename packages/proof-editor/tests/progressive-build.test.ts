@@ -1,8 +1,10 @@
 // What `createProofEditor` does with a document of many blocks: it builds the editor a batch of
 // blocks at a time, each batch its own task, and the collab binding adopts what the batches made
-// (`src/progressive-build.ts`, dispatch://INFRA-341 R11). These rows read the two things that
-// makes true of the editor a reader is handed: every block of the document is in its DOM, and an
-// edit another person makes while the batches run is in it too.
+// (`src/progressive-build.ts`, dispatch://INFRA-341 R11). These rows read the three things that
+// makes true of the editor a reader is handed: every block of the document is in its DOM, an
+// edit another person makes while the batches run is in it too, and the end of the build is
+// three tasks - the last batch, the binding's adoption, and the host's swap - rather than the
+// one task of 1,370 ms the three were on a phone at 4x CPU throttling.
 import { describe, expect, test } from "bun:test";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import * as Y from "yjs";
@@ -76,13 +78,21 @@ function sendToTheEditor(peer: Y.Doc, ydoc: Y.Doc): void {
 
 /**
  * Builds the editor over a Y.Doc holding `markdown`, with `act` run the first time the build is
- * found partway through, and answers what was in the editor's root at each look and the text the
+ * found partway through, and answers what was in the editor's root at each look, what the root's
+ * own `display` was when the handle arrived and once the host revealed it, and the text the
  * editor ended with.
  */
 async function build(
   markdown: string,
   act: (ydoc: Y.Doc) => void
-): Promise<{ counts: number[]; blocks: number; text: string; markdown: string }> {
+): Promise<{
+  counts: number[];
+  blocks: number;
+  displayWhenHandled: string;
+  displayWhenRevealed: string;
+  text: string;
+  markdown: string;
+}> {
   const { parseMarkdown } = await createHeadlessProof({});
   const ydoc = new Y.Doc();
   prosemirrorToYXmlFragment(parseMarkdown(markdown), ydoc.getXmlFragment("prosemirror"));
@@ -99,11 +109,16 @@ async function build(
       ydoc,
     });
     watch.stop();
+    const displayWhenHandled = root.style.display;
+    handle.reveal();
+    const displayWhenRevealed = root.style.display;
     const { view } = handle;
     try {
       return {
         blocks: blocksBuilt(root),
         counts: watch.counts,
+        displayWhenHandled,
+        displayWhenRevealed,
         markdown: handle.getMarkdown(),
         text: view.dom.textContent ?? "",
       };
@@ -124,6 +139,31 @@ describe("a document built in batches", () => {
     expect(built.counts.filter((count) => count > 0 && count < BLOCKS).length).toBeGreaterThan(0);
     expect(built.text).toContain("Paragraph 0 of the ledger.");
     expect(built.text).toContain(`Paragraph ${BLOCKS - 1} of the ledger.`);
+  });
+
+  // The last batch, the binding's adoption and the host's swap were one task, and on a phone at
+  // 4x CPU throttling that task was 1,370 ms - a freeze a reader sees. They are three tasks
+  // now, so the look between them runs twice with the whole document built and the editor not
+  // yet handed over: once while the adoption is still owed, and once while the swap is.
+  test("ends in three tasks: the last batch, the binding's adoption and the host's swap", async () => {
+    const built = await build(paragraphs(BLOCKS), () => {});
+
+    expect(built.blocks).toBe(BLOCKS);
+    expect(
+      built.counts.filter((count) => count === BLOCKS).length,
+      "the whole document was built, the binding adopted it and the handle was answered in one " +
+        "task: nothing else could run between them, which is the freeze this build exists to end"
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  // The root is hidden from before the first batch until the host shows it, so the batches cost
+  // no layout, no frame holds a half-built document, and the host's swap - its own draw of the
+  // document going, this root coming - is one change it makes in one task of its own.
+  test("hands the host a hidden root, which `reveal` shows", async () => {
+    const built = await build(paragraphs(BLOCKS), () => {});
+
+    expect(built.displayWhenHandled).toBe("none");
+    expect(built.displayWhenRevealed).toBe("");
   });
 
   test("keeps an edit another person makes to a block the batches already built", async () => {

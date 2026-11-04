@@ -121,6 +121,10 @@ export function VersionView({
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
+      // The editor's root is hidden from the moment it is created until this
+      // (`@legion/proof-editor`'s `reveal`), so a version is drawn once, with its text in it,
+      // rather than as an empty editor that fills a task later.
+      editor.reveal();
       setHighlightMissing(highlighted !== undefined && embedded === undefined);
       if (embedded !== undefined && highlighted !== undefined) {
         editor.focusMark(highlighted.id);

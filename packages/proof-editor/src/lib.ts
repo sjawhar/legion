@@ -48,7 +48,7 @@ import { clipboard } from '@milkdown/plugin-clipboard';
 import { nord } from '@milkdown/theme-nord';
 import { yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
 import { collabCursorPlugin } from './collab-cursor-plugin';
-import { buildTheDocumentInBatches } from './progressive-build';
+import { buildTheDocumentInBatches, endOfTask } from './progressive-build';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
@@ -242,6 +242,17 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setChangeDecorations(decorations: ChangeDecorations): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
+  /**
+   * Shows the editor's root, which is hidden from before the first batch of the build until
+   * this is called (`createProofEditor`).
+   *
+   * The swap is the host's, because only the host knows what the editor replaces: in Dispatch
+   * the reader has the document's own draw in front of them while the editor is built
+   * (`features/doc/DocumentPreview.tsx`), and no frame may hold both that draw and this editor
+   * or neither of them. So the host takes this and whatever it is swapping for in one task -
+   * one visibility change, one commit - and the browser draws the frame after it.
+   */
+  reveal(): void;
   /** Tear down the editor and any collab bindings. */
   destroy(): void;
 }
@@ -460,18 +471,33 @@ export async function createProofEditor(
   });
   // The document is built a batch of blocks at a time, each batch a task of its own, and the
   // binding adopts the document and the mapping those batches made instead of drawing the whole
-  // document itself in one task (./progressive-build.ts, dispatch://INFRA-341 R11).
-  const mapping = await buildTheDocumentInBatches({
-    fragment: opts.ydoc.getXmlFragment('prosemirror'),
-    root,
-    schema: editor.ctx.get(schemaCtx),
-    view,
-  });
-  // `mapping` is `ySyncPlugin`'s own option - the one `initProseMirrorDoc` exists to fill - and
-  // Milkdown's `YSyncOpts`, written before y-prosemirror had it, does not name it; CollabService
-  // passes the whole object through to the plugin (`#createPlugins`).
-  collabService.mergeOptions({ ySyncOpts: { mapping } as unknown as YSyncOpts });
-  collabService.connect();
+  // document itself in one task (./progressive-build.ts, dispatch://INFRA-341 R11). The root is
+  // hidden for the whole of it and stays hidden until the host swaps the editor in (`reveal`),
+  // so the batches cost no layout, no frame holds a half-built document, and the swap itself -
+  // the host's own draw of the document going, this root coming - is one change in one frame.
+  const shown = root.style.display;
+  root.style.display = 'none';
+  try {
+    await buildTheDocumentInBatches({
+      // `mapping` is `ySyncPlugin`'s own option - the one `initProseMirrorDoc` exists to fill -
+      // and Milkdown's `YSyncOpts`, written before y-prosemirror had it, does not name it;
+      // CollabService passes the whole object through to the plugin (`#createPlugins`).
+      adopt: (mapping) => {
+        collabService.mergeOptions({ ySyncOpts: { mapping } as unknown as YSyncOpts });
+        collabService.connect();
+      },
+      fragment: opts.ydoc.getXmlFragment('prosemirror'),
+      schema: editor.ctx.get(schemaCtx),
+      view,
+    });
+  } catch (error) {
+    // Nothing will reveal a root whose editor was never answered.
+    root.style.display = shown;
+    throw error;
+  }
+  // The third task of the three: the host's swap runs when this resolves, so this resolves a
+  // task after the binding connected rather than in its microtask.
+  await endOfTask();
 
   if (opts.awareness) {
     // Mirrors CollabClient#setLocalUser: yCursorPlugin's cursor builder reads
@@ -580,8 +606,14 @@ export async function createProofEditor(
       }
       return null;
     },
+    reveal(): void {
+      root.style.display = shown;
+    },
     destroy(): void {
       alive = false;
+      // A root this editor never revealed is still hidden, and the host builds its next editor
+      // in the same element.
+      root.style.display = shown;
       unregisterPopoverHook();
       editor.action((ctx) => {
         const collabService = ctx.get(collabServiceCtx);

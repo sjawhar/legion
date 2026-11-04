@@ -294,10 +294,15 @@ export function ProofDocument({
   // reconnect's admission decides again.
   const [closedAdmission, setClosedAdmission] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
-  // Whether this effect's editor has its DOM in the page, which is what the document's own first
-  // draw gives way to (`DocumentPreview`). It is set in the same task the editor's DOM lands in,
-  // so the two are never both on the page.
+  // Whether this effect's editor has been revealed in the page, which is what the document's own
+  // first draw gives way to (`DocumentPreview`). It is set in the same task the editor's root is
+  // shown in, so the two are never both on the page and never both off it.
   const [editorDrawn, setEditorDrawn] = useState(false);
+  // Whether this effect's editor is being built, from the task the build begins in. The
+  // document's own draw stops painting then (`DocumentPreview`): every batch of the build yields
+  // the thread, and a paint of the whole document into a draw the editor is about to replace
+  // takes those gaps from the reader's own editor.
+  const [editorBuilding, setEditorBuilding] = useState(false);
   const {
     blockSchema: runtimeBlockSchema,
     createEditor,
@@ -604,6 +609,7 @@ export function ProofDocument({
     // document's own text (`DocumentPreview`) - at a mount, and again wherever a rebuilt editor
     // follows a torn-down one.
     setEditorDrawn(false);
+    setEditorBuilding(false);
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
@@ -621,6 +627,9 @@ export function ProofDocument({
       }
       failed = true;
       setConnection("failed");
+      // No editor is coming, so the draw in front of the reader is the document: it paints the
+      // whole of itself again rather than holding the screenful it stopped at.
+      setEditorBuilding(false);
       setLoadError(error instanceof Error ? error.message : String(error));
     };
     const teardown = () => {
@@ -631,8 +640,10 @@ export function ProofDocument({
         editorRef.current = undefined;
       }
       // Whatever the editor drew has gone with it, so the document's own text is what the reader
-      // reads again until the next one is built.
+      // reads again until the next one is built, and paints the whole of itself again while it
+      // waits.
       setEditorDrawn(false);
+      setEditorBuilding(false);
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
@@ -833,6 +844,10 @@ export function ProofDocument({
             },
             onSynced: () => {
               refusals = 0;
+              // From here the editor is being built, so the draw the reader is reading stops
+              // painting the rest of itself into a page this editor is about to replace
+              // (`DocumentPreview`).
+              setEditorBuilding(true);
               void createEditor(parent, {
                 // Cursor labels are outside the compact acceptance bar. Even with inline labels,
                 // yCursor's edge widget disrupts the mobile browser's post-update text selection.
@@ -898,10 +913,16 @@ export function ProofDocument({
                   // in the same order, so the block they were reading is the editor's block of
                   // the same index (`readersBlock`).
                   const place = readersBlock(documentPreview(parent.parentElement));
-                  // The editor's DOM is in the page already, and this runs in the same task it
-                  // landed in, so the draw it replaces goes in that task too: no frame is drawn
-                  // holding both, and none is drawn holding neither.
-                  flushSync(() => setEditorDrawn(true));
+                  // The swap, in a task of its own: the editor's build and the binding's
+                  // connect are each a task before this one (`@legion/proof-editor`'s
+                  // `progressive-build.ts`), and this task is one visibility change and one
+                  // commit. Both halves are in it, so the frame the browser draws next holds
+                  // the editor and not the draw: no frame is drawn holding both, and none is
+                  // drawn holding neither.
+                  flushSync(() => {
+                    handle.reveal();
+                    setEditorDrawn(true);
+                  });
                   // Put them back now, and again once the page's diagrams have drawn and it has
                   // settled, exactly as a block link's focus is (`focusInEditor`): a diagram
                   // drawn above them, and a block painting at its own height in place of the one
@@ -1119,7 +1140,9 @@ export function ProofDocument({
           navigate(buildReferencePath(route));
         }}
       >
-        {showsOwnText ? <DocumentPreview markdown={liveMarkdown} /> : null}
+        {showsOwnText ? (
+          <DocumentPreview building={editorBuilding} markdown={liveMarkdown} />
+        ) : null}
         <div ref={root} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);

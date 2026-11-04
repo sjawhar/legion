@@ -72,8 +72,28 @@ export function documentPreview(within: HTMLElement | null): HTMLElement | null 
  * Until the first pass lands the element holds nothing (`whilePending: "nothing"`): 2,000
  * characters of Markdown syntax is no document to read, and the pass that replaces it is a
  * frame away.
+ *
+ * It stops where the editor's build begins (`building`). The build fills the editor a batch of
+ * blocks at a time and hands the thread back between batches
+ * (`@legion/proof-editor`'s `progressive-build.ts`), and a second pass painting into those gaps
+ * is work for a draw the editor is about to replace: it delays the editor the reader is waiting
+ * for by the whole of its own cost. So from the task the build begins in, this element holds
+ * what it has already drawn and paints no more - the whole document where that pass had
+ * landed, the first screenful where it had not - and the parse it was waiting for is dropped
+ * (a parse already posted is the worker's own to finish, and its answer is dropped where it
+ * arrives). Nothing goes off the screen: a paint stopped part-way puts back what the element
+ * held before it (`useRenderedMarkdown`), which is the pass the reader is reading. A build that
+ * fails to produce an editor hands this element its own job back (`ProofDocument`'s
+ * `reportLoadFailure`): there is nothing to replace the draw, so it paints the whole document.
  */
-export function DocumentPreview({ markdown }: { markdown: string }): ReactNode {
+export function DocumentPreview({
+  building,
+  markdown,
+}: {
+  /** Whether the editor's build has begun, which is where this draw stops painting. */
+  building: boolean;
+  markdown: string;
+}): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const firstScreenful = useMemo(
     () => leadingBlocks(markdown, markdownWorkerThreshold),
@@ -83,13 +103,21 @@ export function DocumentPreview({ markdown }: { markdown: string }): ReactNode {
    *  front of it. A document whose every block fits in the first draw is its own first draw
    *  (`leadingBlocks` answers the source itself), so nothing is parsed twice for it. */
   const [drawnOnce, setDrawnOnce] = useState(false);
-  const source = drawnOnce ? markdown : firstScreenful;
+  /** The last source a pass of this element finished drawing, which is what it holds once the
+   *  build has begun. Read only in the render the build's start causes, so it is never behind;
+   *  before the first pass lands there is nothing drawn to hold, and the first pass is what
+   *  the build then finds here. */
+  const drawn = useRef(firstScreenful);
+  const source = !drawnOnce ? firstScreenful : building ? drawn.current : markdown;
   // The document's own parse policies, which are this hook's defaults: a single newline inside a
   // paragraph is a space (hard-wrapped Markdown is one paragraph), and a line of raw HTML leaves
   // the source to the literal-text fallback rather than drawing as text.
   const { isFallback, isPending, portals } = useRenderedMarkdown(root, source, paintBlock, {
     keepAPostedParse: false,
-    onRendered: () => setDrawnOnce(true),
+    onRendered: () => {
+      drawn.current = source;
+      setDrawnOnce(true);
+    },
     paintInSlices: paintBlockInSlices,
     theWorkerOrNothing: true,
     whilePending: "nothing",

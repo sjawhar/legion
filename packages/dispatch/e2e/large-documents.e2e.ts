@@ -47,11 +47,23 @@ import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
+/** What one animation frame of the swap held: how many of the document's blocks the editor's
+ *  root had built, whether the document's own draw was on the screen, and whether the editor
+ *  was. `framesOfTheSwap` records one of these per frame and the swap row reads them. */
+interface SwapFrame {
+  readonly blocks: number;
+  readonly drawn: boolean;
+  readonly shown: boolean;
+}
+
 declare global {
   interface Window {
     /** How many of the document's blocks the editor's root held at each animation frame, which
      *  `framesOfTheBuild` records and the two progressive-build rows read. */
     __blocksBuilt?: number[];
+    /** What each animation frame of the swap held, which `framesOfTheSwap` records and the swap
+     *  row reads. */
+    __swapFrames?: SwapFrame[];
   }
 }
 
@@ -116,6 +128,9 @@ async function seedDocument(
 }
 
 interface Row {
+  /** How long the row waits for the editor to open, which is the end of its build and the end
+   *  of the window the longest task is read over. */
+  readonly buildTimeoutMs: number;
   /** The document an agent writes. */
   readonly content: string;
   /** How many diagrams it holds, which the row proves before it measures anything. */
@@ -129,7 +144,7 @@ interface Row {
   /** The file it is written under. */
   readonly name: string;
   /** The row's own timeout, since the suite sets none and Playwright's 30 s default is under
-   *  what the seed, the throttled draw and 120 scroll steps cost. */
+   *  what the seed, the throttled draw, the build and 120 scroll steps cost. */
   readonly timeoutMs: number;
   /** What the row calls it in the numbers it prints. */
   readonly what: string;
@@ -137,6 +152,7 @@ interface Row {
 
 const rows: readonly [Row, Row] = [
   {
+    buildTimeoutMs: 240_000,
     content: smallDocument,
     diagrams: documentDiagrams.small,
     firstBlockTargetMs: 3_000,
@@ -146,12 +162,13 @@ const rows: readonly [Row, Row] = [
     what: documentNames.small,
   },
   {
+    buildTimeoutMs: 480_000,
     content: largeDocument,
     diagrams: documentDiagrams.large,
     firstBlockTargetMs: 5_000,
     firstBlockTimeoutMs: 240_000,
     name: "specs-large.md",
-    timeoutMs: 600_000,
+    timeoutMs: 900_000,
     what: documentNames.large,
   },
 ];
@@ -173,16 +190,22 @@ for (const row of rows) {
     const alice = await asUser(browser, "alice");
     try {
       const page = await alice.newPage();
-      const measured = await measureDocument(page, path, row.firstBlockTimeoutMs);
+      const measured = await measureDocument(page, path, {
+        buildTimeoutMs: row.buildTimeoutMs,
+        firstBlockTimeoutMs: row.firstBlockTimeoutMs,
+      });
       printMeasurement(
         `${row.what}, ${row.content.length} characters, ${row.diagrams} diagrams`,
         measured
       );
 
-      // What a measured number needs to mean anything: the document really drew, and the page
-      // really scrolled, so the longest task covers a scroll through the whole document.
+      // What a measured number needs to mean anything: the document really drew, the editor
+      // really opened, and the page really scrolled afterwards, so the longest task covers the
+      // whole build and then a scroll through the whole document.
       await expect(documentEditor(page)).toBeVisible();
       expect(measured.firstBlockMs).toBeGreaterThan(0);
+      expect(measured.editorOpenedMs ?? 0).toBeGreaterThan(0);
+      expect(measured.windowClosedMs).toBeGreaterThan(measured.editorOpenedMs ?? 0);
       expect(measured.scrollSteps).toBeGreaterThan(0);
       expect(measured.longestTaskMs).toBeGreaterThan(0);
 
@@ -193,6 +216,65 @@ for (const row of rows) {
     }
   });
 }
+
+/** How long the row below holds the socket after the document's own draw is on the screen.
+ *  Well past the moment the page's own end is reached - the draw is a screenful and a few
+ *  steps of 100 ms exhaust it - so a window that closed there closed inside this wait. */
+const heldAfterTheDrawMs = 20_000;
+
+// What the two rows above read their longest task over has to cover the build, and the page is
+// not the document until the editor is in it: the draw in front of the reader is the blocks the
+// document opens with (`large-documents-page.ts`'s module comment), so a window that ended
+// where that page ends ended four scroll steps in, with most of the build still to come. This
+// row holds the document's socket, so the editor is built only when it says so, and reads
+// whether the measurement closed its window meanwhile.
+test(`the measurement's window stays open until ${documentNames.large}'s editor opens @phone`, async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "the measurement set-up is the iphone project's viewport, touch and Chromium"
+  );
+  test.setTimeout(900_000);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page, { holding: true });
+    const measuring = measureDocument(page, path, {
+      buildTimeoutMs: 480_000,
+      firstBlockTimeoutMs: 240_000,
+    });
+    let closed = false;
+    const noteClosed = () => {
+      closed = true;
+    };
+    void measuring.then(noteClosed, noteClosed);
+
+    // The reader has the document's own draw, and no editor is being built behind it.
+    await expect(page.locator('[aria-label="Document text"] [data-block-id]').first()).toBeAttached(
+      { timeout: 240_000 }
+    );
+    await expect(documentEditor(page)).toHaveCount(0);
+    await page.waitForTimeout(heldAfterTheDrawMs);
+    expect(
+      closed,
+      "the measurement closed its window with no editor on the page: it read the longest task " +
+        "of the draw's own screenful and none of the build"
+    ).toBe(false);
+
+    // Released, the build runs, the editor opens, and only then does the window close.
+    await transport.release();
+    const measured = await measuring;
+    expect(measured.editorOpenedMs ?? 0).toBeGreaterThan(heldAfterTheDrawMs);
+    expect(measured.windowClosedMs).toBeGreaterThan(measured.editorOpenedMs ?? 0);
+    // And what it scrolled was the editor's own page, not the draw's screenful.
+    expect(measured.scrollSteps).toBeGreaterThan(10);
+  } finally {
+    await alice.close();
+  }
+});
 
 test(`a link to the decision block at the end of ${documentNames.large} lands on that block @phone`, async ({
   browser,
@@ -298,13 +380,14 @@ test(`the editor opens ${documentNames.large} where its reader had got to @phone
   }
 });
 
-// The two rows below are about the build behind that swap. The editor is not drawn in one task
-// any more: it is built a batch of blocks at a time, each batch its own task, and the collab
-// binding adopts the document and the mapping those batches made rather than drawing the whole
-// document itself (`packages/proof-editor/src/progressive-build.ts`). Both hold the document's
-// socket (`documentTransport`), so the build begins when the row releases it, and both throttle
+// The three rows below are about the build behind that swap. The editor is not drawn in one task
+// any more: it is built a batch of blocks at a time, each batch its own task, the collab binding
+// adopts the document and the mapping those batches made rather than drawing the whole document
+// itself, and the last batch, that adoption and the swap are three tasks
+// (`packages/proof-editor/src/progressive-build.ts`). Each holds the document's
+// socket (`documentTransport`), so the build begins when the row releases it, and each throttles
 // the renderer as the measurement does - not to time anything, but so the build lasts long
-// enough for the page to draw frames while it runs, which is the only state either row is about.
+// enough for the page to draw frames while it runs, which is the only state these rows are about.
 
 /** How many of the document's blocks the editor's root holds, at whatever depth. The view wears
  *  its `Document editor` name only once the build is over, and its root is hidden until then,
@@ -462,6 +545,85 @@ test(`an edit made while ${documentNames.large}'s editor is being built is in it
     ).not.toEqual([]);
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+/**
+ * Records, every animation frame until the editor is on the screen, what that frame held: how
+ * many of the document's blocks the editor's root had built, whether the document's own draw
+ * was on the screen, and whether the editor was. Install before the navigation.
+ *
+ * The editor's root carries `proof-editor` from the moment it is created and is hidden until
+ * the swap shows it, so a box of its own is exactly what the reader can see. The reading is the
+ * page's own rather than a poll from here, for the reason `framesOfTheBuild` gives: a poll
+ * cannot land between the tasks of the build, and a frame is what the reader is shown anyway.
+ */
+async function framesOfTheSwap(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const frames: SwapFrame[] = [];
+    window.__swapFrames = frames;
+    const look = () => {
+      const editor = document.querySelector(".proof-editor");
+      const draw = document.querySelector('[aria-label="Document text"]');
+      const shown = (editor?.getBoundingClientRect().height ?? 0) > 0;
+      frames.push({
+        blocks: editor === null ? 0 : editor.querySelectorAll("[data-block-id]").length,
+        drawn: (draw?.getBoundingClientRect().height ?? 0) > 0,
+        shown,
+      });
+      // The frame the editor is first shown in is the swap, and the last one worth reading.
+      if (shown) return;
+      requestAnimationFrame(look);
+    };
+    requestAnimationFrame(look);
+  });
+}
+
+test(`no frame of ${documentNames.large}'s swap holds both documents or neither @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(900_000);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    await framesOfTheSwap(page);
+    const transport = await documentTransport(page, { holding: true });
+    await page.goto(path);
+    await expect(page.locator('[aria-label="Document text"] [data-block-id]').first()).toBeAttached(
+      { timeout: 240_000 }
+    );
+
+    await transport.release();
+    await expect(documentEditor(page)).toBeVisible({ timeout: 480_000 });
+    const whole = await blocksBuilt(page);
+    const frames = await page.evaluate(() => window.__swapFrames ?? []);
+    const drawnAt = frames.findIndex((frame) => frame.drawn);
+    expect(drawnAt, "the document's own draw was never on the screen").toBeGreaterThanOrEqual(0);
+
+    // The invariant the swap keeps: from the frame the reader first has a document in, every
+    // frame holds exactly one of the two - never the draw and the editor together, and never
+    // the page with neither of them on it.
+    const swapped = frames.slice(drawnAt);
+    expect(
+      swapped.filter((frame) => frame.drawn === frame.shown),
+      "a frame held both the document's own draw and its editor, or neither of them"
+    ).toEqual([]);
+    expect(swapped.at(-1)).toMatchObject({ blocks: whole, drawn: false, shown: true });
+
+    // And the swap is a task of its own, after the last batch and after the binding's connect:
+    // the page drew frames holding the whole document built and the editor still hidden, which
+    // a build that ended in one task - the last batch, the connect and the swap together, 1,370
+    // ms of it on this phone - never shows.
+    expect(
+      swapped.filter((frame) => frame.blocks === whole && !frame.shown).length,
+      "no frame was drawn with the document built and the editor not yet shown: the last " +
+        "batch, the binding's connect and the swap were one task again"
+    ).toBeGreaterThan(0);
+  } finally {
     await alice.close();
   }
 });

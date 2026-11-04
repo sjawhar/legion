@@ -110,8 +110,9 @@ const theScheduler: { yield?: () => Promise<void> } | undefined = (
 ).scheduler;
 
 /**
- * The end of this task, so the next batch is a task of its own and the browser has the thread
- * back in between.
+ * The end of this task, so what runs next is a task of its own and the browser has the thread
+ * back in between: each batch of the build, the binding's adoption after the last of them, and
+ * the host's swap after that (`createProofEditor`).
  *
  * `scheduler.yield()` where it exists, because what the build must not do is wait: it resumes
  * in the next task, ahead of the page's own timers, where a `setTimeout` waits behind every
@@ -120,7 +121,7 @@ const theScheduler: { yield?: () => Promise<void> } | undefined = (
  * 58 s of wall clock, each one queued behind a slice of the document's own draw painting
  * (`DocumentPreview.tsx` in Dispatch), while the reader waited for an editor.
  */
-function endOfTask(): Promise<void> {
+export function endOfTask(): Promise<void> {
   if (theScheduler?.yield !== undefined) return theScheduler.yield();
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, 0);
@@ -175,32 +176,48 @@ function repair(
 }
 
 export interface ProgressiveBuild {
-  /** The editor's root, hidden while the batches run so no frame holds a half-built document. */
-  root: HTMLElement;
   /** The document's own fragment, the one the binding will adopt. */
   fragment: Y.XmlFragment;
   schema: Schema;
   view: EditorView;
+  /**
+   * Hands the mapping the batches made to `ySyncPlugin`
+   * (`collabService.mergeOptions({ ySyncOpts: { mapping } })`, then `connect()`), in a task of
+   * its own after the last batch's.
+   *
+   * The binding adopts in this call rather than after this function resolves, because the
+   * repair below and the adoption have to fall in one task: an edit that arrived between them
+   * would be in the Yjs document, absent from the editor, and no business of a binding that
+   * only draws what arrives after it. Not called at all for a view destroyed while the batches
+   * ran, which belongs to nothing and must not be connected.
+   */
+  adopt(mapping: ProsemirrorMapping): void;
 }
 
 /**
- * Builds `view`'s document from `fragment` a batch of blocks at a time, and answers the mapping
- * for `ySyncPlugin` to adopt (`collabService.mergeOptions({ ySyncOpts: { mapping } })`, then
- * `connect()`). Every block of the fragment is in the editor's document, and in the real DOM,
- * when this resolves.
+ * Builds `view`'s document from `fragment` a batch of blocks at a time, and has `adopt` hand
+ * the binding the mapping those batches made. Every block of the fragment is in the editor's
+ * document, and in the real DOM, when this resolves.
  *
- * The root is hidden for as long as the batches run. The reader has the document's own draw in
- * front of them while an editor is built for them (`DocumentPreview.tsx` in Dispatch), and a
- * build that painted its batches would put a second, growing copy of the document under that
- * draw; hidden, the batches cost no layout either, which is the one part of the old single task
- * that was already cheap.
+ * The caller keeps `view`'s root hidden for the whole of this and until it swaps the editor in
+ * (`createProofEditor`'s `reveal`). The reader has the document's own draw in front of them
+ * while an editor is built for them (`DocumentPreview.tsx` in Dispatch), and a build that
+ * painted its batches would put a second, growing copy of the document under that draw;
+ * hidden, the batches cost no layout either, which is the one part of the old single task that
+ * was already cheap.
+ *
+ * The last batch, the adoption and the swap are three tasks, not one (dispatch://INFRA-341,
+ * R11): together they were 1,370 ms on a phone at 4x CPU throttling, over the 500 ms a reader
+ * feels as a freeze. The task between the last batch and the adoption is this function's;
+ * the one between the adoption and the swap is `createProofEditor`'s, which answers its handle
+ * a task after the connect so the host's swap never joins it.
  */
 export async function buildTheDocumentInBatches({
-  root,
+  adopt,
   fragment,
   schema,
   view,
-}: ProgressiveBuild): Promise<ProsemirrorMapping> {
+}: ProgressiveBuild): Promise<void> {
   const mapping: ProsemirrorMapping = new Map();
   const changed = new Set<Block>();
   let changedAtAll = false;
@@ -217,8 +234,6 @@ export async function buildTheDocumentInBatches({
     }
   };
   fragment.observeDeep(note);
-  const shown = root.style.display;
-  root.style.display = "none";
   try {
     const blocks = fragment.toArray();
     let built = 0;
@@ -229,7 +244,7 @@ export async function buildTheDocumentInBatches({
     // fragment does not, and write that paragraph to the Yjs document at the reader's first
     // keystroke.
     do {
-      if (view.isDestroyed) return mapping;
+      if (view.isDestroyed) return;
       const began = performance.now();
       const batch = blocks.slice(built, built + take);
       place(view, convert(mapping, fragment, batch, schema), built === 0);
@@ -237,12 +252,14 @@ export async function buildTheDocumentInBatches({
       take = nextBatch(batch.length, performance.now() - began);
       if (built < blocks.length) await endOfTask();
     } while (built < blocks.length);
-    // From here to the binding is one task, so no edit can arrive between the repair and the
-    // adoption: anything that arrives afterwards is the binding's, which is what it is for.
-    if (changedAtAll && !view.isDestroyed) repair(view, fragment, schema, mapping, changed);
+    // The last batch ends here, and the adoption is a task of its own; from the repair to the
+    // binding is one task, so no edit can arrive between the two, and anything that arrives
+    // afterwards is the binding's, which is what it is for.
+    await endOfTask();
+    if (view.isDestroyed) return;
+    if (changedAtAll) repair(view, fragment, schema, mapping, changed);
+    adopt(mapping);
   } finally {
     fragment.unobserveDeep(note);
-    root.style.display = shown;
   }
-  return mapping;
 }

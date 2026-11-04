@@ -81,7 +81,7 @@ describe("the document preview's parse", () => {
     const screenfulParagraphs = firstScreenful.split("\n\n").length;
 
     setParseDeadline(50);
-    const view = render(<DocumentPreview markdown={markdown} />);
+    const view = render(<DocumentPreview building={false} markdown={markdown} />);
     try {
       // The first pass: the blocks the document opens with, parsed on the page in one short
       // task, which is what puts the whole document in front of the reader next.
@@ -114,7 +114,7 @@ describe("the document preview's parse", () => {
   // one of the four places in the answer cache.
   test("builds nothing on the reader's thread for an answer that arrives after it has gone", async () => {
     const markdown = wholeDocument("A document whose editor landed first");
-    const view = render(<DocumentPreview markdown={markdown} />);
+    const view = render(<DocumentPreview building={false} markdown={markdown} />);
     try {
       await worker.waitForRequests(1);
       expect(worker.requests[0].markdown).toBe(markdown);
@@ -129,5 +129,53 @@ describe("the document preview's parse", () => {
     const { cached, cancel } = alreadyParsed(markdown);
     cancel();
     expect(cached).toBe(false);
+  }, 20_000);
+
+  // The third way the whole document would be parsed or painted for nothing: the editor's
+  // build has begun. Every batch of it hands the thread back (`progressive-build.ts`), and a
+  // paint of the whole document into those gaps is work for a draw the editor is about to
+  // replace - it delays the editor the reader is waiting for by the whole of its own cost
+  // (dispatch://INFRA-341, R11).
+  test("paints no more of the document once the editor's build has begun", async () => {
+    const markdown = wholeDocument("A document whose editor began building");
+    const firstScreenful = leadingBlocks(markdown, markdownWorkerThreshold);
+    const screenfulParagraphs = firstScreenful.split("\n\n").length;
+
+    const view = render(<DocumentPreview building={false} markdown={markdown} />);
+    try {
+      await waitFor(() => expect(paragraphs(view.container)).toBe(screenfulParagraphs));
+      await worker.waitForRequests(1);
+      expect(worker.requests[0].markdown).toBe(markdown);
+
+      // The build begins while the worker still holds the whole document.
+      view.rerender(<DocumentPreview building markdown={markdown} />);
+      await act(() => worker.answer(0));
+
+      // The reader keeps the pass they were reading, and nothing was built out of that answer:
+      // not the paint, and not the cache entry a paint would have left behind.
+      expect(paragraphs(view.container)).toBe(screenfulParagraphs);
+      expect(preview(view.container).getAttribute("data-markdown-fallback")).toBeNull();
+      const { cached, cancel } = alreadyParsed(markdown);
+      cancel();
+      expect(cached).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  }, 20_000);
+
+  // And where the build begins before the first pass has even landed, the whole document is
+  // never posted at all: the reader gets the first pass, and the thread is the build's.
+  test("asks for no second pass when the build begins before the first one lands", async () => {
+    const markdown = wholeDocument("A document whose build began first");
+    const firstScreenful = leadingBlocks(markdown, markdownWorkerThreshold);
+    const screenfulParagraphs = firstScreenful.split("\n\n").length;
+
+    const view = render(<DocumentPreview building markdown={markdown} />);
+    try {
+      await waitFor(() => expect(paragraphs(view.container)).toBe(screenfulParagraphs));
+      expect(worker.requests).toEqual([]);
+    } finally {
+      view.unmount();
+    }
   }, 20_000);
 });
