@@ -132,30 +132,16 @@ func Parse(value string) (Renames, error) {
 	return renames, nil
 }
 
-// FormerSubject is subject under the former name of the pair whose current name the subject names,
-// and whether a pair names it. The subject is rewritten only when its first four dot-separated
-// tokens are `notifications`, `github` and that pair's current owner and name, and at least one
-// token follows: the four alone name a repository rather than an event, and nothing publishes on
-// them. Everything after the fourth token is carried over byte for byte, so the copy is the same
-// event, addressed to the repository as it was named.
-//
-// A rewrite past contracts.SubjectMaxBytes is declined rather than cut short: the former name may
-// be longer than the current one, and the bus refuses a subject past that length, so the copy would
-// fail for ever while the publish it copies succeeds. Declining keeps that failure out of the
-// original's way; the caller logs the skip.
-func (r Renames) FormerSubject(subject string) (string, bool) {
-	former, _, named := r.rewrite(subject)
-	if !named || len(former) > contracts.SubjectMaxBytes {
-		return "", false
-	}
-	return former, true
-}
-
 // rewrite is subject under the former name of the pair whose current name it names, that pair, and
-// whether a pair names the repository at all. The rewrite is answered whatever its length, since
-// its two callers part there: FormerSubject declines one past contracts.SubjectMaxBytes, and the
-// publisher logs that one line. One walk of the subject and one map read answer both, which is what
-// every GitHub publish pays.
+// whether a pair names the repository at all. The subject is rewritten only when its first four
+// dot-separated tokens are `notifications`, `github` and that pair's current owner and name, and
+// at least one token follows: the four alone name a repository rather than an event, and nothing
+// publishes on them. Everything after the fourth token is carried over byte for byte, so the copy
+// is the same event, addressed to the repository as it was named.
+//
+// The rewrite is answered whatever its length: its one caller, the publisher, declines one past
+// contracts.SubjectMaxBytes and logs that one line. One walk of the subject and one map read
+// answer all three, which is what every GitHub publish pays.
 func (r Renames) rewrite(subject string) (former string, pair Rename, named bool) {
 	// Every GitHub publish asks this, and a deployment that configures no rename asks it of the
 	// zero value: the nil map answers before anything is measured or lowercased.
@@ -183,21 +169,29 @@ func (r Renames) IsZero() bool { return len(r.pairs) == 0 }
 // the renames answer.
 func (r Renames) Pairs() []Rename { return slices.Clone(r.pairs) }
 
-// subjectHead begins every GitHub subject, before the repository's owner and name.
-const subjectHead = "notifications.github."
+// String spells the configured pairs, in configured order, as ENVOY_GITHUB_REPOSITORY_RENAMES
+// spells them: `<former>=<current>`, joined by `, `. The value's grammar is written here, in the
+// package that parses it, so a caller that prints the renames cannot spell them another way. The
+// zero Renames is the empty string.
+func (r Renames) String() string {
+	spelled := make([]string, 0, len(r.pairs))
+	for _, pair := range r.pairs {
+		spelled = append(spelled, pair.Former+"="+pair.Current)
+	}
+	return strings.Join(spelled, ", ")
+}
 
 // repositoryPrefix is the subject prefix every envelope of the repository name names is published
 // on, and whether name is an `<owner>/<name>` at all: an owner and a name, both non-empty, parted
 // by one /. The owner and the name are each sanitized exactly as a published subject writes them,
 // because a name holding a dot (`acme/site.io`) is written `acme.site_io` and a comparison against
-// the configured spelling would never match a subject. Mirrors contracts' githubRepositoryPrefix,
-// which is unexported there.
+// the configured spelling would never match a subject.
 func repositoryPrefix(name string) (string, bool) {
 	owner, repository, found := strings.Cut(name, "/")
 	if !found || owner == "" || repository == "" || strings.Contains(repository, "/") {
 		return "", false
 	}
-	return subjectHead + contracts.SanitizeSubjectSegment(owner) + "." + contracts.SanitizeSubjectSegment(repository), true
+	return contracts.GithubRepositoryPrefix(owner, repository), true
 }
 
 // repositoryPrefixEnd is the index in subject of the dot that closes
@@ -205,14 +199,14 @@ func repositoryPrefix(name string) (string, bool) {
 // token after the name. A sanitized owner and name hold no dot, so the fourth dot ends the prefix
 // whatever the event carries after it.
 func repositoryPrefixEnd(subject string) int {
-	if !strings.HasPrefix(subject, subjectHead) {
+	if !strings.HasPrefix(subject, contracts.GithubTopicPrefix) {
 		return -1
 	}
-	owner := strings.IndexByte(subject[len(subjectHead):], '.')
+	owner := strings.IndexByte(subject[len(contracts.GithubTopicPrefix):], '.')
 	if owner < 0 {
 		return -1
 	}
-	rest := len(subjectHead) + owner + 1
+	rest := len(contracts.GithubTopicPrefix) + owner + 1
 	name := strings.IndexByte(subject[rest:], '.')
 	if name < 0 || rest+name == len(subject)-1 {
 		return -1

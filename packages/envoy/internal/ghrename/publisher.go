@@ -43,8 +43,8 @@ type Publisher struct {
 // so a mention's three topics go out as six in a defined order, every name still most specific
 // first.
 //
-// renames may be the zero value and logger may be nil, which a caller that configures no rename and
-// a test both pass; neither publishes a copy or logs a line.
+// renames may be the zero value, which a caller that configures no rename passes; it publishes no
+// copy.
 func Publishing(bus Bus, renames Renames, logger *logging.Logger) *Publisher {
 	return &Publisher{bus: bus, renames: renames, logger: logger}
 }
@@ -64,11 +64,12 @@ func (p *Publisher) Publish(item contracts.Envelope) error {
 	if err := p.bus.Publish(item); err != nil {
 		return err
 	}
-	copied, ok := p.copy(item)
+	former, ok := p.formerTopic(item.Topic)
 	if !ok {
 		return nil
 	}
-	return p.bus.Publish(copied)
+	item.Topic = former
+	return p.bus.Publish(item)
 }
 
 // PublishWithin publishes item, then its copy under the former name, each within ctx. It is
@@ -80,44 +81,41 @@ func (p *Publisher) PublishWithin(ctx context.Context, item contracts.Envelope) 
 	if err := p.bus.PublishWithin(ctx, item); err != nil {
 		return err
 	}
-	copied, ok := p.copy(item)
+	former, ok := p.formerTopic(item.Topic)
 	if !ok {
 		return nil
 	}
-	return p.bus.PublishWithin(ctx, copied)
+	item.Topic = former
+	return p.bus.PublishWithin(ctx, item)
 }
 
-// copy is item addressed to the former name of the repository its topic names, and whether there is
-// such a copy to publish at all. A deployment that configures no rename, and an envelope whose topic
-// no pair names, answer false having allocated nothing, so the publisher is the bus's own behaviour
-// for them: one call, the same error. One walk of the topic and one map read decide it, which is
-// what every GitHub publish pays.
+// formerTopic is topic under the former name of the repository it names, and whether there is such
+// a copy to publish at all. A deployment that configures no rename, and a topic no pair names,
+// answer false having allocated nothing, so the publisher is the bus's own behaviour for them: one
+// call, the same error. One walk of the topic and one map read decide it, which is what every
+// GitHub publish pays. The caller publishes the copy by giving the envelope it already holds by
+// value this topic, so no envelope is copied for a repository nothing renames.
 //
 // A rewrite the former name makes too long for the bus is the one false worth a line in the log,
 // and the same lookup has already found the pair to name in it, so it is logged here.
-func (p *Publisher) copy(item contracts.Envelope) (contracts.Envelope, bool) {
-	former, pair, named := p.renames.rewrite(item.Topic)
+func (p *Publisher) formerTopic(topic string) (string, bool) {
+	former, pair, named := p.renames.rewrite(topic)
 	if !named {
-		return contracts.Envelope{}, false
+		return "", false
 	}
 	if len(former) > contracts.SubjectMaxBytes {
-		p.warnDeclined(item.Topic, former, pair)
-		return contracts.Envelope{}, false
+		p.warnDeclined(topic, former, pair)
+		return "", false
 	}
-	copied := item
-	copied.Topic = former
-	return copied, true
+	return former, true
 }
 
 // warnDeclined logs the one line a skipped copy is worth: the rewrite of subject under pair's
 // former name is past contracts.SubjectMaxBytes, so the envelope went out under its own topic alone
 // and a subscriber of the former name did not hear it. Every other copy a publisher does not make
 // is "no pair names this repository", which is every publish of every other repository and is
-// silent. A nil logger, which a caller that wants none passes, writes nothing.
+// silent.
 func (p *Publisher) warnDeclined(subject, former string, pair Rename) {
-	if p.logger == nil {
-		return
-	}
 	p.logger.Warn("github rename copy skipped: the subject under the former name is past the subject limit",
 		slog.String("former", pair.Former),
 		slog.String("current", pair.Current),

@@ -3,8 +3,6 @@ package ghrename
 import (
 	"strings"
 	"testing"
-
-	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 func TestParse(t *testing.T) {
@@ -159,7 +157,10 @@ func TestParseRefusals(t *testing.T) {
 	}
 }
 
-func TestFormerSubject(t *testing.T) {
+// TestRewrite covers which subjects name a configured pair's current repository, and the subject
+// under the former name each of them answers. The length the publisher declines a rewrite past is
+// its own case (publisher_test.go), where the decline lives.
+func TestRewrite(t *testing.T) {
 	cases := []struct {
 		name    string
 		value   string
@@ -234,54 +235,9 @@ func TestFormerSubject(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%q) refused the value: %v, want the pairs it holds", tc.value, err)
 			}
-			got, rewritten := renames.FormerSubject(tc.subject)
+			got, _, rewritten := renames.rewrite(tc.subject)
 			if got != tc.want || rewritten != (tc.want != "") {
-				t.Errorf("FormerSubject(%q) = %q, %v, want %q, %v", tc.subject, got, rewritten, tc.want, tc.want != "")
-			}
-		})
-	}
-}
-
-// TestFormerSubjectSubjectMaxBytes covers the one rewrite that is declined rather than published:
-// a former name longer than the current one makes a subject the bus would refuse for ever, while
-// the publish it copies succeeds.
-func TestFormerSubjectSubjectMaxBytes(t *testing.T) {
-	renames, err := Parse("acme/a-much-longer-former-name=acme/new")
-	if err != nil {
-		t.Fatalf("Parse refused the pair: %v, want the pair it holds", err)
-	}
-	const current = "notifications.github.acme.new"
-	const former = "notifications.github.acme.a-much-longer-former-name"
-
-	cases := []struct {
-		name string
-		// length is the length of the rewritten subject the trailing segment is built for.
-		length int
-		want   bool
-	}{
-		{name: "a rewrite of exactly SubjectMaxBytes", length: contracts.SubjectMaxBytes, want: true},
-		{name: "a rewrite one byte past SubjectMaxBytes", length: contracts.SubjectMaxBytes + 1, want: false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tail := strings.Repeat("a", tc.length-len(former)-1)
-			subject := current + "." + tail
-			want := former + "." + tail
-			got, rewritten := renames.FormerSubject(subject)
-			if rewritten != tc.want {
-				t.Fatalf("FormerSubject of a subject rewriting to %d bytes answered %v, want %v (SubjectMaxBytes is %d)",
-					tc.length, rewritten, tc.want, contracts.SubjectMaxBytes)
-			}
-			if !tc.want {
-				if got != "" {
-					t.Errorf("a declined rewrite answered %.60q… , want the empty subject", got)
-				}
-				return
-			}
-			if got != want || len(got) != contracts.SubjectMaxBytes {
-				t.Errorf("a rewrite of %d bytes = %.60q… (%d bytes), want the subject under the former name at %d bytes",
-					tc.length, got, len(got), contracts.SubjectMaxBytes)
+				t.Errorf("rewrite(%q) = %q, %v, want %q, %v", tc.subject, got, rewritten, tc.want, tc.want != "")
 			}
 		})
 	}
@@ -303,8 +259,38 @@ func TestZeroRenames(t *testing.T) {
 		"notifications.slack.T01.C02.message",
 		"",
 	} {
-		if got, rewritten := zero.FormerSubject(subject); rewritten || got != "" {
-			t.Errorf("the zero Renames answered FormerSubject(%q) = %q, %v, want %q, false", subject, got, rewritten, "")
+		if got, _, rewritten := zero.rewrite(subject); rewritten || got != "" {
+			t.Errorf("the zero Renames answered rewrite(%q) = %q, %v, want %q, false", subject, got, rewritten, "")
 		}
+	}
+}
+
+// TestRenamesString covers the one spelling of the configured pairs: the value's own, so a caller
+// that logs the renames an operator configured prints what the operator wrote.
+func TestRenamesString(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "no pair", value: "", want: ""},
+		{name: "one pair", value: "sjawhar/legion=cybermonklabs/legion", want: "sjawhar/legion=cybermonklabs/legion"},
+		{
+			name:  "two pairs, in configured order and as the value spelled them",
+			value: " acme/old = acme/new , sjawhar/legion=cybermonklabs/legion ",
+			want:  "acme/old=acme/new, sjawhar/legion=cybermonklabs/legion",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			renames, err := Parse(tc.value)
+			if err != nil {
+				t.Fatalf("Parse(%q) refused the value: %v, want the pairs it holds", tc.value, err)
+			}
+			if got := renames.String(); got != tc.want {
+				t.Errorf("Parse(%q).String() = %q, want %q", tc.value, got, tc.want)
+			}
+		})
 	}
 }

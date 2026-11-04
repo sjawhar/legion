@@ -39,8 +39,10 @@ type intakeDelivery struct {
 	released bool
 }
 
-// intakeMessage is one message on its way to its key's handler, with its envelope when keying it
-// decoded the envelope (a workflow run's), so the handler does not decode it again.
+// intakeMessage is one message on its way to its key's handler, with its envelope when keying
+// decoded it, so the handler does not decode it again. Keying decodes every message it wants, a
+// pull request's and a workflow run's alike, so the envelope is absent only when that decode
+// failed and deliver reports the failure.
 type intakeMessage struct {
 	msg      *natsgo.Msg
 	envelope *contracts.Envelope
@@ -251,10 +253,12 @@ func (d *intakeDelivery) receive(msg *natsgo.Msg) {
 // 2 and 3, since a name may hold a dot, which the sanitizer replaces -- and without case, as
 // GitHub compares repository names.
 //
-// The decode costs nothing new: the envelope decoded here is handed on (intakeMessage), and
-// deliver would otherwise decode it itself. A pull request is keyed by its subject's repository
-// and number. A workflow run's subject names its file and not its run, so its key is its
-// payload's repo and run_id.
+// The envelope decode costs nothing new: the envelope decoded here is handed on (intakeMessage),
+// and deliver would otherwise decode it itself. The payload is another matter -- route parses the
+// same payload string again for its kind and its fields -- so a pull-request message now pays one
+// extra JSON parse, which is what the copy rule costs. A pull request is keyed by its subject's
+// repository and number. A workflow run's subject names its file and not its run, so its key is
+// its payload's repo and run_id.
 //
 // A message this cannot judge keeps exactly the behaviour it had before the rule: wanted, and
 // keyed as it was keyed then. The canonical repository is the one the payload names, and a
@@ -270,32 +274,39 @@ func intakeKey(msg *natsgo.Msg) (key string, envelope *contracts.Envelope, wante
 		return "", nil, false
 	}
 	pullRequest := tokens[4] == "pr" && len(tokens) == 6
-	if !pullRequest && !(tokens[4] == "workflow" && len(tokens) == 7) {
+	workflow := tokens[4] == "workflow" && len(tokens) == 7
+	if !pullRequest && !workflow {
 		return "", nil, false
-	}
-	// The key a message this cannot judge keeps, whichever shape it is.
-	subjectKey := "workflow " + msg.Subject
-	if pullRequest {
-		subjectKey = "pr " + tokens[2] + "/" + tokens[3] + "#" + tokens[5]
 	}
 	decoded, err := decodeEnvelope(msg.Data)
 	if err != nil {
-		return subjectKey, nil, true
+		return subjectKey(msg.Subject, tokens, pullRequest), nil, true
 	}
 	var event struct {
 		Repo  string `json:"repo"`
 		RunID string `json:"run_id"`
 	}
 	if err := json.Unmarshal([]byte(decoded.Payload), &event); err != nil {
-		return subjectKey, &decoded, true
+		return subjectKey(msg.Subject, tokens, pullRequest), &decoded, true
 	}
 	if !subjectNamesRepo(tokens, event.Repo) {
 		return "", nil, false
 	}
-	if pullRequest {
-		return subjectKey, &decoded, true
+	if workflow {
+		return "workflow " + event.Repo + "#" + event.RunID, &decoded, true
 	}
-	return "workflow " + event.Repo + "#" + event.RunID, &decoded, true
+	return subjectKey(msg.Subject, tokens, pullRequest), &decoded, true
+}
+
+// subjectKey is the key a message keeps when its subject is all there is to key it by: a pull
+// request by its subject's repository and number, a workflow run by its whole subject, since
+// that subject names the workflow file and not the run. It is built where it is returned, so a
+// message pays for the one key it is handled under.
+func subjectKey(subject string, tokens []string, pullRequest bool) string {
+	if pullRequest {
+		return "pr " + tokens[2] + "/" + tokens[3] + "#" + tokens[5]
+	}
+	return "workflow " + subject
 }
 
 // subjectNamesRepo reports whether a GitHub subject's owner and repository tokens (2 and 3) name
@@ -304,8 +315,8 @@ func intakeKey(msg *natsgo.Msg) (key string, envelope *contracts.Envelope, wante
 // an owner and a name -- an empty one above all -- names no repository to compare, and answers
 // true, so intakeKey wants that message as it always did rather than dropping it.
 func subjectNamesRepo(tokens []string, repo string) bool {
-	owner, name, split := strings.Cut(repo, "/")
-	if !split || owner == "" || name == "" {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
 		return true
 	}
 	return strings.EqualFold(contracts.SanitizeSubjectSegment(owner), tokens[2]) &&

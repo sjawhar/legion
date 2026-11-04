@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -187,7 +188,7 @@ func TestPublisherCopyDiffersOnlyInTopic(t *testing.T) {
 	for _, method := range publishMethods {
 		t.Run(method.name, func(t *testing.T) {
 			bus := &recordingBus{}
-			publisher := Publishing(bus, mustParse(t, "sjawhar/legion=cybermonklabs/legion"), nil)
+			publisher := Publishing(bus, mustParse(t, "sjawhar/legion=cybermonklabs/legion"), logging.NewWithWriter("test", io.Discard))
 			item := testEnvelope("notifications.github.cybermonklabs.legion.pr.7706.mention")
 
 			if err := method.publish(publisher, item); err != nil {
@@ -252,7 +253,7 @@ func TestPublisherFailures(t *testing.T) {
 		for _, method := range publishMethods {
 			t.Run(tc.name+"/"+method.name, func(t *testing.T) {
 				bus := &recordingBus{failOn: tc.failOn, failWith: tc.failWith}
-				publisher := Publishing(bus, mustParse(t, "sjawhar/legion=cybermonklabs/legion"), nil)
+				publisher := Publishing(bus, mustParse(t, "sjawhar/legion=cybermonklabs/legion"), logging.NewWithWriter("test", io.Discard))
 
 				err := method.publish(publisher, testEnvelope("notifications.github.cybermonklabs.legion.pr.7706"))
 
@@ -276,54 +277,77 @@ func TestPublisherFailures(t *testing.T) {
 	}
 }
 
-// TestPublisherDeclinedRewriteIsLoggedOnce covers the one skip an operator is owed a line about: a
-// former name long enough to push the rewrite past contracts.SubjectMaxBytes is declined, the
-// envelope goes out under its own topic alone, and one warning names the pair. A publisher built
-// with no logger skips the line instead of panicking.
+// TestPublisherDeclinedRewriteIsLoggedOnce covers the subject limit a copy is bounded by, at the
+// byte either side of it: a rewrite of exactly contracts.SubjectMaxBytes is published as every
+// other copy is and logs nothing, and a former name long enough to push the rewrite one byte past
+// it is declined -- the envelope goes out under its own topic alone, and one warning names the
+// pair. Declining is what keeps a copy the bus would refuse for ever out of the way of the
+// publish it copies, and the line is the one skip an operator is owed.
 func TestPublisherDeclinedRewriteIsLoggedOnce(t *testing.T) {
 	const renames = "acme/a-much-longer-former-name=acme/new"
 	const current = "notifications.github.acme.new"
 	const former = "notifications.github.acme.a-much-longer-former-name"
-	// A subject whose rewrite under the former name is one byte past what the bus accepts.
-	topic := current + "." + strings.Repeat("a", contracts.SubjectMaxBytes+1-len(former)-1)
 
-	for _, method := range publishMethods {
-		t.Run(method.name, func(t *testing.T) {
-			var logged bytes.Buffer
-			bus := &recordingBus{}
-			publisher := Publishing(bus, mustParse(t, renames), logging.NewWithWriter("test", &logged))
+	cases := []struct {
+		name string
+		// length is the length of the rewritten subject the trailing segment is built for.
+		length   int
+		declined bool
+	}{
+		{name: "a rewrite of exactly SubjectMaxBytes", length: contracts.SubjectMaxBytes},
+		{name: "a rewrite one byte past SubjectMaxBytes", length: contracts.SubjectMaxBytes + 1, declined: true},
+	}
 
-			if err := method.publish(publisher, testEnvelope(topic)); err != nil {
-				t.Fatalf("%s of a subject whose rewrite is too long: %v, want the envelope's own publish to succeed", method.name, err)
-			}
-
-			if bus.calls != 1 || len(bus.published) != 1 || bus.published[0].Topic != topic {
-				t.Fatalf("%s of a subject whose rewrite is too long put %v on the bus in %d calls, want the envelope's own topic alone",
-					method.name, bus.topics(), bus.calls)
-			}
-			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
-			if logged.Len() == 0 || len(lines) != 1 {
-				t.Fatalf("%s of a subject whose rewrite is too long logged %d lines (%q), want one naming the pair",
-					method.name, len(lines), logged.String())
-			}
-			for _, want := range []string{"acme/a-much-longer-former-name", "acme/new"} {
-				if !strings.Contains(lines[0], want) {
-					t.Errorf("%s logged %q, want a line naming %q, the pair whose copy was skipped", method.name, lines[0], want)
+	for _, tc := range cases {
+		for _, method := range publishMethods {
+			t.Run(tc.name+"/"+method.name, func(t *testing.T) {
+				tail := strings.Repeat("a", tc.length-len(former)-1)
+				topic := current + "." + tail
+				want := []string{topic, former + "." + tail}
+				if tc.declined {
+					want = want[:1]
 				}
-			}
-		})
 
-		t.Run(method.name+"/no logger", func(t *testing.T) {
-			bus := &recordingBus{}
-			publisher := Publishing(bus, mustParse(t, renames), nil)
+				var logged bytes.Buffer
+				bus := &recordingBus{}
+				publisher := Publishing(bus, mustParse(t, renames), logging.NewWithWriter("test", &logged))
 
-			if err := method.publish(publisher, testEnvelope(topic)); err != nil {
-				t.Fatalf("%s through a publisher with no logger: %v, want the envelope's own publish to succeed", method.name, err)
-			}
-			if bus.calls != 1 {
-				t.Errorf("%s through a publisher with no logger made %d calls, want the envelope's own publish alone", method.name, bus.calls)
-			}
-		})
+				if err := method.publish(publisher, testEnvelope(topic)); err != nil {
+					t.Fatalf("%s of a subject whose rewrite is %d bytes: %v, want the envelope's own publish to succeed",
+						method.name, tc.length, err)
+				}
+
+				got := bus.topics()
+				if len(got) != len(want) || bus.calls != len(want) {
+					t.Fatalf("%s of a subject whose rewrite is %d bytes put %v on the bus in %d calls, want %d of them",
+						method.name, tc.length, got, bus.calls, len(want))
+				}
+				for i, subject := range want {
+					if got[i] != subject {
+						t.Errorf("%s of a subject whose rewrite is %d bytes: publish %d went to %.60q… (%d bytes), want %.60q… (%d bytes)",
+							method.name, tc.length, i+1, got[i], len(got[i]), subject, len(subject))
+					}
+				}
+
+				if !tc.declined {
+					if logged.Len() != 0 {
+						t.Errorf("%s of a rewrite of exactly %d bytes logged %q, want nothing: the copy went out",
+							method.name, contracts.SubjectMaxBytes, logged.String())
+					}
+					return
+				}
+				lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+				if logged.Len() == 0 || len(lines) != 1 {
+					t.Fatalf("%s of a subject whose rewrite is too long logged %d lines (%q), want one naming the pair",
+						method.name, len(lines), logged.String())
+				}
+				for _, want := range []string{"acme/a-much-longer-former-name", "acme/new"} {
+					if !strings.Contains(lines[0], want) {
+						t.Errorf("%s logged %q, want a line naming %q, the pair whose copy was skipped", method.name, lines[0], want)
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -29,7 +29,6 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 )
@@ -168,8 +167,11 @@ func TestRenameUnsetPublishesTheCurrentNameAlone(t *testing.T) {
 		renameCurChecks, renameCurPR, renameCurReview, renameCurMention, renameCurComment,
 	})
 
+	// One wait, not two: every event reached the stream and S3 before this line, so a copy would
+	// have been published before the wait began, and after S1's three seconds of silence nothing
+	// is on its way to S2 either.
 	rig.s1.quiet(t, rig.listener, renameQuiet)
-	rig.s2.quiet(t, rig.listener, renameQuiet)
+	rig.s2.empty(t, rig.listener)
 }
 
 // renameCase is one run of the rig: its own nats-server, its own listener process, and the four
@@ -192,7 +194,7 @@ func startRenameCase(t *testing.T, machineID, renames string) *renameCase {
 	t.Helper()
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	seedRenameCIRecord(t, client)
+	seedDueCIRecord(t, client, "cybermonklabs", "legion", renamePR, renameSHA)
 
 	// Each subscriber is written as a client writes it: a client subscribing to topic X subscribes
 	// X and X.>, because NATS's > needs at least one trailing token and so matches none of the
@@ -368,23 +370,16 @@ func (s *renameSub) quiet(t *testing.T, listener *listenerProcess, grace time.Du
 	}
 }
 
-// seedRenameCIRecord stores one commit of cybermonklabs/legion#8821 whose checks finished a minute
-// ago and have not settled, as seedDueCIRecord (startup_test.go) does for acme/widgets, so the
-// listener's summary loop settles it at its first pass over the record and the settlement goes out
-// through the same publisher the webhook route publishes through.
-func seedRenameCIRecord(t *testing.T, client *bus.Client) {
+// empty requires that nothing is already waiting for the subscriber, without waiting itself. It
+// is the second half of a negative control whose first half waited: a copy of any of the events
+// would have been published before quiet began, so a quiet S1 leaves nothing on its way to S2.
+func (s *renameSub) empty(t *testing.T, listener *listenerProcess) {
 	t.Helper()
-	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
-	if err != nil {
-		t.Fatalf("create the CI bucket: %v", err)
-	}
-	key := cistore.Key("cybermonklabs", "legion", renamePR, renameSHA)
-	record := `{"owner":"cybermonklabs","repo":"legion","number":"` + renamePR + `","sha":"` + renameSHA + `",` +
-		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/cybermonklabs/legion/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
-		`"suites":{},"last_event_at":` + strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + `,` +
-		`"generation":1,"emitted_count":0,"settled_emitted":false,"schema":1}`
-	if _, err := kv.Put(key, []byte(record)); err != nil {
-		t.Fatalf("store the CI record of cybermonklabs/legion#%s: %v", renamePR, err)
+	select {
+	case message := <-s.msgs:
+		t.Fatalf("%s received %q with ENVOY_GITHUB_REPOSITORY_RENAMES unset, want nothing: the listener published under the former name with no rename configured\n%s",
+			s.name, message.Subject, listener.Output.String())
+	default:
 	}
 }
 
