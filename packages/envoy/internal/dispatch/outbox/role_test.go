@@ -115,7 +115,8 @@ func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Con
 // deps is the outbox's dependencies as cmd/dispatch wires them: role routes resolved through
 // roles.Buckets on the outbox's own client, judged by the package's own windows, which is what
 // a deployment that sets neither ENVOY_SESSION_LIVE_WINDOW nor ENVOY_SESSION_GONE_HORIZON
-// gives it.
+// gives it, and that client the reader of a role's kept lane and its drain cursor, which a
+// keep's handover makes its pass over (Deps.KeptLanes).
 func (r *roleRig) deps() Deps {
 	return r.depsJudgedBy(roles.Windows{})
 }
@@ -124,17 +125,16 @@ func (r *roleRig) deps() Deps {
 // them by the two the deployment gave its listeners (roleHolderWindows, cmd/dispatch/main.go).
 func (r *roleRig) depsJudgedBy(windows roles.Windows) Deps {
 	holders := roles.NewBuckets(r.client, windows)
-	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders}
+	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders,
+		KeptLanes: r.client}
 }
 
-// claim makes holder role's holder, registered with entry, as a session plugin's registration does.
+// claim makes holder role's holder, registered with entry, as a session plugin's registration
+// does (claimUnder), and fails the test when that did not come off.
 func (r *roleRig) claim(t *testing.T, role, holder string, entry session.SessionEntry) {
 	t.Helper()
-	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim %s for %s: %v", role, holder, err)
-	}
-	if err := r.sessions.Put(holder, entry); err != nil {
-		t.Fatalf("register %s: %v", holder, err)
+	if err := r.claimUnder(role, holder, entry); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -428,8 +428,9 @@ func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgeme
 }
 
 // A role nobody claims has no holder: its route counts as reached, the event is published, and
-// nothing is sent to any session.
-func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
+// nothing is sent to any session - the copy kept for the role's next holder goes to that role's
+// kept lane, which is no session's subject (TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder).
+func TestARoleRouteWithNoClaimIsPublishedWithNothingSentToASession(t *testing.T) {
 	rig := newRoleRig(t)
 	const role = "unclaimed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -449,11 +450,12 @@ func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
 	}
 }
 
-// A role route reached with nothing to send is no send of its batch. The event's first batch, with
-// no role reader, reaches the issue's topic and leaves the role route pending; once the event is
-// due again, the role, which nobody claims, is its only unreached destination, and the batch that
-// publishes it reports nothing sent.
-func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
+// The event's first batch, with no role reader, reaches the issue's topic and leaves the role
+// route pending; once the event is due again, the role, which nobody claims, is its only
+// unreached destination, and the batch that publishes it keeps the copy for the role's next
+// holder, the one send it makes. A role route reached with nothing to send at all is no send of
+// its batch, which TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept holds.
+func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *testing.T) {
 	ctx := context.Background()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
@@ -479,16 +481,17 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
 	if publishedAt(t, rig.database, event.ID) == nil {
 		t.Fatal("the event whose only route left is an unclaimed role was not published")
 	}
-	if second.sent != 0 || second.firstID != 0 || second.lastID != 0 || second.published != 1 {
-		t.Fatalf("the second batch = %+v, want it to publish the event with nothing sent", second)
+	if second.sent != 1 || second.firstID != event.ID || second.lastID != event.ID || second.published != 1 {
+		t.Fatalf("the second batch = %+v, want it to keep the event for the role's next holder and publish it", second)
 	}
 }
 
 // A holder whose own record is past the gone horizon is gone, and the role route counts as
-// reached: the event is published with nothing sent, as the workflow needs, rather than being
-// retried for a session that will not answer. The claim is not touched - releasing it is the
-// listener's role-claim reaper's alone, and a resolution that released it here would take an
-// unresponsive holder's role on the next event (dispatch://INFRA-392).
+// reached: the event is published with nothing sent to that holder, its copy kept for the role's
+// next holder as an unclaimed role's is, rather than being retried for a session that will not
+// answer. The claim is not touched - releasing it is the listener's role-claim reaper's alone,
+// and a resolution that released it here would take an unresponsive holder's role on the next
+// event (dispatch://INFRA-392).
 func TestARoleRouteWhoseHolderIsGoneKeepsTheClaimAndIsPublished(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"

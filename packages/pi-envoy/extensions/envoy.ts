@@ -4284,7 +4284,10 @@ export default function envoyExtension(pi: PiApi): void {
           // while the ones it was only stored for are named under `unresponsive`. AGENTS.md and the
           // envoy skill carry the general rule. A direct envoy_send is unaffected: the
           // agent-subject lane has no such skip.
-          const undelivered = source !== "" && result.holder === source && inSubagent;
+          // A kept answer reached no session at all, so the echo rule cannot apply to it: the
+          // holder it names is the session the resolution read, which never received the message.
+          const undelivered =
+            result.kept !== true && source !== "" && result.holder === source && inSubagent;
           const published = publishConfirmationText(result);
           return toolSuccess(
             undelivered
@@ -4298,6 +4301,8 @@ export default function envoyExtension(pi: PiApi): void {
               // Named only when the listener named one, so an answer where every recipient took
               // the message reads exactly as it did.
               ...(result.unresponsive.length === 0 ? {} : { unresponsive: result.unresponsive }),
+              ...(result.kept === undefined ? {} : { kept: result.kept }),
+              ...(result.keptReason === undefined ? {} : { kept_reason: result.keptReason }),
               ...(undelivered ? { undelivered_echo: true } : {}),
             }
           );

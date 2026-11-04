@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -146,6 +147,28 @@ func (e *ReadError) Error() string {
 }
 
 func (e *ReadError) Unwrap() error { return e.Err }
+
+// PatternString is the shape of a role token: the pattern POST /v1/roles/set accepts, so it is
+// every token a claim can name. A role message under a token it refuses can reach no holder and
+// is kept for none (Valid).
+const PatternString = `^[a-z0-9][a-z0-9_-]*$`
+
+var pattern = regexp.MustCompile(PatternString)
+
+// Valid reports whether role is a token a claim can name (PatternString). The listener's role
+// routes and Dispatch's outbox both ask it, so the two cannot drift over which role a message
+// may be kept for.
+func Valid(role string) bool {
+	return pattern.MatchString(role)
+}
+
+// Registered is the liveness that counts any registered session as live: any entry.
+func Registered(session.SessionEntry) bool { return true }
+
+// Fresh reports whether entry heartbeated within session.ClaimStaleAfter of now.
+func Fresh(entry session.SessionEntry, now time.Time) bool {
+	return entry.UpdatedAt > 0 && now.UnixMilli()-entry.UpdatedAt < session.ClaimStaleAfter.Milliseconds()
+}
 
 // readClaim reads role's claim for a resolution (ResolveHolderFrom). A resolution given a
 // firstHolder reads it from there - the listener's registry passes its watched copy of the role

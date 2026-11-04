@@ -59,6 +59,9 @@ const InboundEnvelopeSchema = z
     dedupe_key: z.string().optional(),
     issued_at: z.number().int().optional(),
     expires_at: z.number().int().optional(),
+    // Set only on a copy the listener forwards from a role's kept lane: the message waited for
+    // this session to claim the role, so the card says when it was kept.
+    kept_at: z.number().int().optional(),
     payload_summary: z.string().optional(),
     payload: z.string().optional(),
     sender: InboundSenderSchema.optional(),
@@ -1138,6 +1141,9 @@ export function renderInbound(
     from: senderLabel(envelope),
     at: inboundTimestamp(envelope.issued_at),
     id: envelope.event_id ?? "unknown",
+    // The listener could not deliver this message when it was sent, so it kept it until this
+    // session claimed the role. The time it was kept says how long it waited.
+    ...(envelope.kept_at === undefined ? {} : { kept_at: inboundTimestamp(envelope.kept_at) }),
     ...(envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) }),
     ...(envelope.urgency === undefined ? {} : { urgency: envelope.urgency }),
     ...(envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply }),

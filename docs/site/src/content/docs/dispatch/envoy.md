@@ -10,9 +10,11 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours. Role messages and team topics travel over core NATS and are not
-  kept for a later subscriber, but the listener's forward of a role message to its current holder
-  is kept on that holder's inbox. Envoy also keeps its own state in JetStream key-value buckets:
+  session's inbox for 72 hours. Role messages and team topics travel over core NATS. A team topic
+  is not kept for a later subscriber. The listener's forward of a role message to its current
+  holder is kept on that holder's inbox, and a role message no session holds the role for is kept
+  for the session that claims the role next. Envoy also keeps its own state in JetStream
+  key-value buckets:
   which session is subscribed to what (`envoy_interests`), each session's registration and when it
   last registered (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check
   results (`envoy_ci_state`). The stream and every bucket are kept in at least as many copies as
@@ -146,7 +148,7 @@ published still gets it when it reconnects
 | Topic | What it is |
 | --- | --- |
 | `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, comments on an issue with no route and no session claim whose spec it wrote, and claim changes arrive here. |
-| `notifications.role.<role>` | A role, held by one session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. |
+| `notifications.role.<role>` | A role, held by one session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. With no claim at all it keeps the message for the session that claims the role next, and answers that it kept it; a holder that stopped answering keeps its role, and its message waits for it. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
@@ -158,19 +160,25 @@ An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscr
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for a later holder. A publish through the API resolves the role's
-holder, waits for it to confirm the message, and answers `200` naming the holder and its
-`holder_state`. If no session holds the role, it is refused `404` with the reason `unclaimed`. If
-the claim's holder is not `live`, it is refused `404` with the reason `holder_lapsed`, which names
-the holder, its `holder_state` ([The session list](#the-session-list)), its `last_seen` and
-`claim_released: false`: nothing was forwarded and nothing was released, so a holder that is
-`unresponsive` keeps its role and the sender publishes the message again once that session
-answers. If the holder does not take the message's delivery mode, the refusal is `403`; and if a
-live holder has not confirmed the message within four seconds, it is `504` naming the holder, with
-the reason `receipt_timeout` or `delivery_failed`. A role message published straight onto NATS,
-not through the API, is forwarded once, and if the holder does not take it the listener publishes
-an exception naming the reason: `no_holder`, `delivery_failed` (which a holder that is not `live`
-gives) or `receipt_timeout`. Either way the forward to the holder is
+A publish to a role through the API resolves the role's holder, waits for it to confirm the
+message, and answers `200` naming the holder and its `holder_state`. If no session holds the role
+at all, the listener keeps the message and answers `202` with `kept: true` and
+`kept_reason: "unclaimed"`. The next session that claims the role is handed each kept message
+once, in the order the messages were kept. A message kept more than an hour before is dropped
+instead. A sender that keeps a queue of its own sends `keep: false`, and an unclaimed role is
+then refused `404` with the reason `unclaimed`, as it is when the keep itself fails. If the
+claim's holder is not `live`, the message is refused `404` with the reason `holder_lapsed`, which
+names the holder, its `holder_state` ([The session list](#the-session-list)), its `last_seen` and
+`claim_released: false`: nothing was forwarded, nothing was released and nothing was kept, so a
+holder that is `unresponsive` keeps its role and the sender publishes the message again once that
+session answers. If the holder does not take the message's delivery mode, the refusal is `403`;
+and if a live holder has not confirmed the message within four seconds, it is `504` naming the
+holder, with the reason `receipt_timeout` or `delivery_failed`, and that message is not kept,
+because its forward is already stored on the holder's inbox. A role message published straight
+onto NATS, not through the API, is kept the same way when no session claims the role; otherwise
+it is forwarded once, and if the holder does not take it the listener publishes an exception
+naming the reason: `no_holder`, `delivery_failed` (which a holder that is not `live` gives) or
+`receipt_timeout`. Either way the forward to the live holder is
 stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
 holder that restarts or loses its connection gets the forward once when it is back.
 

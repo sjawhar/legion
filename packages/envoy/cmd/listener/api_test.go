@@ -583,7 +583,11 @@ func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 	}
 }
 
-func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
+// Each route that resolves a role names the state it found. The lookup still answers 404 with the
+// reason, unclaimed or holder_lapsed; the publish route now keeps the message for the role's next
+// holder and answers 202 with kept true and the same reason as kept_reason. Both release a lapsed
+// holder's claim.
+func TestRoleHolderStateIsNamedByEachRoutesAnswer(t *testing.T) {
 	type roleError struct {
 		Error         string `json:"error"`
 		Reason        string `json:"reason"`
@@ -592,13 +596,36 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		LastSeen      int64  `json:"last_seen"`
 		ClaimReleased bool   `json:"claim_released"`
 	}
+	assertKept := func(t *testing.T, recorder *httptest.ResponseRecorder, reason, holder string) {
+		t.Helper()
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202 for a message the listener kept; body = %s", recorder.Code, recorder.Body.String())
+		}
+		t.Logf("kept role response: %s", recorder.Body.String())
+		var kept struct {
+			Kept       bool   `json:"kept"`
+			KeptReason string `json:"kept_reason"`
+			Holder     string `json:"holder"`
+			Topic      string `json:"topic"`
+		}
+		if err := json.NewDecoder(recorder.Body).Decode(&kept); err != nil {
+			t.Fatalf("decode kept response: %v", err)
+		}
+		if !kept.Kept || kept.KeptReason != reason || kept.Holder != holder || kept.Topic != "notifications.role.reviewer" {
+			t.Fatalf("kept response = %+v, want kept with reason %s and holder %q on the role topic", kept, reason, holder)
+		}
+	}
 	tests := []struct {
-		name    string
+		name string
+		// kept is whether this route keeps a role message it cannot deliver, answering 202,
+		// where the lookup, which has no message to keep, answers its 404.
+		kept    bool
 		request func() *http.Request
 		handler func(*listenerDeps) http.Handler
 	}{
 		{
 			name: "publish",
+			kept: true,
 			request: func() *http.Request {
 				return httptest.NewRequest(
 					http.MethodPost,
@@ -625,21 +652,37 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, nil)
-			handler := tc.handler(withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}))
+			deps := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
+			handler := tc.handler(deps)
+			// The publish route's keep hands the role's lane over in a goroutine of its own
+			// (keepForNextHolder), and that handover resolves the role's holder: it would find
+			// the claim this test makes below lapsed and release it, which is right of the
+			// product and wrong for a test that is about what each route answers. The guard one
+			// handover of a role takes is held here for the whole subtest, so every handover the
+			// keeps start waits and none resolves a holder while the test is setting one up.
+			release, held := deps.delivery.roleKeepDrains.hold(context.Background(), "reviewer")
+			if !held {
+				t.Fatalf("take the reviewer role's handover guard")
+			}
+			defer release()
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
-			if unclaimedRecorder.Code != http.StatusNotFound {
-				t.Fatalf("unclaimed status = %d, want 404; body = %s", unclaimedRecorder.Code, unclaimedRecorder.Body.String())
-			}
-			t.Logf("unclaimed role response: %s", unclaimedRecorder.Body.String())
-			var unclaimed roleError
-			if err := json.NewDecoder(unclaimedRecorder.Body).Decode(&unclaimed); err != nil {
-				t.Fatalf("decode unclaimed response: %v", err)
-			}
-			if unclaimed.Error != "no holder for role reviewer" || unclaimed.Reason != "unclaimed" ||
-				unclaimed.Holder != "" || unclaimed.LastSeen != 0 || unclaimed.ClaimReleased {
-				t.Fatalf("unclaimed response = %+v", unclaimed)
+			if tc.kept {
+				assertKept(t, unclaimedRecorder, "unclaimed", "")
+			} else {
+				if unclaimedRecorder.Code != http.StatusNotFound {
+					t.Fatalf("unclaimed status = %d, want 404; body = %s", unclaimedRecorder.Code, unclaimedRecorder.Body.String())
+				}
+				t.Logf("unclaimed role response: %s", unclaimedRecorder.Body.String())
+				var unclaimed roleError
+				if err := json.NewDecoder(unclaimedRecorder.Body).Decode(&unclaimed); err != nil {
+					t.Fatalf("decode unclaimed response: %v", err)
+				}
+				if unclaimed.Error != "no holder for role reviewer" || unclaimed.Reason != "unclaimed" ||
+					unclaimed.Holder != "" || unclaimed.LastSeen != 0 || unclaimed.ClaimReleased {
+					t.Fatalf("unclaimed response = %+v", unclaimed)
+				}
 			}
 
 			if err := sessions.Put("ses_holder", session.SessionEntry{
@@ -661,6 +704,9 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 
 			lapsedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(lapsedRecorder, tc.request())
+			// A lapsed claim is kept for by nobody in this build, on the publish route as on
+			// the lookup: no resolution releases a claim, so the holder keeps its role and the
+			// 404 says the claim was retained (roleKeepable).
 			if lapsedRecorder.Code != http.StatusNotFound {
 				t.Fatalf("lapsed status = %d, want 404; body = %s", lapsedRecorder.Code, lapsedRecorder.Body.String())
 			}
@@ -742,7 +788,7 @@ func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 		if err := sessions.WaitForCacheReady(ctx); err != nil {
 			t.Fatalf("warm the %s's session cache: %v", name, err)
 		}
-		return &listenerDeps{client: client, registry: registry, sessions: sessions}
+		return withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	}
 	claimant, observer = open("claimant"), open("observer")
 	observer.sessions.StopWatch()
@@ -777,7 +823,10 @@ func TestARoleClaimWritesTheServingPortOutOfTheClaimantsEntry(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	roleSetHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test")).ServeHTTP(recorder,
+	// withRoleClaimDrain, because a claim that lands hands the role's kept lane to its new
+	// holder (runKeptRoleDrain), which needs the delivery configuration and a bus.
+	deps := withRoleClaimDrain(t, &listenerDeps{client: setupPublishTestClient(t), registry: registry, sessions: sessions})
+	roleSetHandler(deps, "test-machine", logging.New("test")).ServeHTTP(recorder,
 		httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"`+sessionID+`","role":"ported-claimant"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("%s claims ported-claimant: status %d %s", sessionID, recorder.Code, recorder.Body.String())
@@ -962,18 +1011,31 @@ func (kv stalledReadKV) Get(string) (nats.KeyValueEntry, error) {
 	return nil, errors.New("the session bucket's read never answered")
 }
 
+// swapSessionBucket puts the handle sessions' (stopped) watcher hands out behind what wrap
+// returns over it, so every read sessions makes of the session bucket from here on goes through
+// it: a resolution of a role's holder reads the holder's session that way whenever this
+// listener's cache does not hold it (session.SessionRegistry.Refresh), which is how a test
+// counts those reads, fails one, or stalls them all. The field the handle hangs off is the
+// registry's own, so one helper holds the reflection that reaches it and a rename of it breaks
+// here alone.
+func swapSessionBucket(t *testing.T, sessions *session.SessionRegistry, wrap func(nats.KeyValue) nats.KeyValue) {
+	t.Helper()
+	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
+	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	old := watcher.Interface().(*kvwatch.Watcher).KV()
+	swapped := bus.NewKeyValue(wrap(old.Legacy()), old.WatchHandle(), old.Streams())
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", swapped, discardingCache{})))
+}
+
 // stallSessionReads makes every bucket read of sessions stall until the test ends, keeping its
-// writes, by swapping the handle its (stopped) watcher hands out. A read that does not answer must
-// take nothing from a role holder.
+// writes. A read that does not answer must take nothing from a role holder.
 func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 	t.Helper()
 	released := make(chan struct{})
 	t.Cleanup(func() { close(released) })
-	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
-	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	old := watcher.Interface().(*kvwatch.Watcher).KV()
-	stalled := bus.NewKeyValue(stalledReadKV{KeyValue: old.Legacy(), released: released}, old.WatchHandle(), old.Streams())
-	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, discardingCache{})))
+	swapSessionBucket(t, sessions, func(kv nats.KeyValue) nats.KeyValue {
+		return stalledReadKV{KeyValue: kv, released: released}
+	})
 }
 
 // discardingCache is a kvwatch.Cache that keeps nothing: stallSessionReads's watcher never starts,
@@ -1032,7 +1094,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 	})
 	t.Run("role delivery", func(t *testing.T) {
 		harness := newListenerDeliveryHarness(t)
-		claimant := &listenerDeps{client: harness.client, registry: harness.registry}
+		claimant := &listenerDeps{client: harness.client, registry: harness.registry, delivery: &harness.config}
 		var err error
 		if claimant.sessions, err = session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1)); err != nil {
 			t.Fatalf("open the claimant's session registry: %v", err)
@@ -1104,7 +1166,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	// stand-in connects with the parent's.
 	uri := testnats.URL(t)
 
-	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
+	t.Run("unheld role is kept and answered 202 without publishing on the role topic", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
 		if err != nil {
 			t.Fatalf("subscribe to unheld role: %v", err)
@@ -1122,12 +1184,20 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.unheld","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202 for a kept message; body = %s", recorder.Code, recorder.Body.String())
 		}
 		t.Logf("publish unheld role: %s", recorder.Body.String())
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
-			t.Fatalf("body = %q", body)
+		var kept struct {
+			Kept       bool   `json:"kept"`
+			KeptReason string `json:"kept_reason"`
+			Holder     string `json:"holder"`
+		}
+		if err := json.NewDecoder(recorder.Body).Decode(&kept); err != nil {
+			t.Fatalf("decode the kept answer: %v", err)
+		}
+		if !kept.Kept || kept.KeptReason != "unclaimed" || kept.Holder != "" {
+			t.Fatalf("kept answer = %+v, want kept with reason unclaimed and no holder", kept)
 		}
 		assertNoMessage := func(name string, probe *nats.Subscription) {
 			t.Helper()
@@ -1163,7 +1233,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		}
 	})
 
-	t.Run("stale holder returns 404 from publish and lookup", func(t *testing.T) {
+	t.Run("a lapsed holder keeps its claim, so the publish keeps nothing and both answer 404", func(t *testing.T) {
 		if err := sessions.Delete(context.Background(), "ses_holder"); err != nil {
 			t.Fatalf("delete holder session: %v", err)
 		}
@@ -1173,8 +1243,23 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			"/v1/messages/publish",
 			strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`),
 		))
+		// Nothing is kept for a claim that stands: the holder writes no new claim, so a copy
+		// would wait for a claim that never comes (roleKeepable).
 		if publishRecorder.Code != http.StatusNotFound {
-			t.Fatalf("publish status = %d, want 404; body = %s", publishRecorder.Code, publishRecorder.Body.String())
+			t.Fatalf("publish status = %d, want 404 with nothing kept; body = %s", publishRecorder.Code, publishRecorder.Body.String())
+		}
+		var refusal struct {
+			Reason        string `json:"reason"`
+			Holder        string `json:"holder"`
+			HolderState   string `json:"holder_state"`
+			ClaimReleased bool   `json:"claim_released"`
+			Kept          bool   `json:"kept"`
+		}
+		if err := json.NewDecoder(publishRecorder.Body).Decode(&refusal); err != nil {
+			t.Fatalf("decode the refusal: %v", err)
+		}
+		if refusal.Reason != "holder_lapsed" || refusal.Holder != "ses_holder" || refusal.ClaimReleased || refusal.Kept {
+			t.Fatalf("refusal = %+v, want reason holder_lapsed naming ses_holder, its claim retained and nothing kept", refusal)
 		}
 		roleRecorder := httptest.NewRecorder()
 		roleGetHandler(state).ServeHTTP(roleRecorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
@@ -1262,7 +1347,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err := firstSessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register role holder: %v", err)
 	}
-	firstState := &listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions}
+	firstState := withRoleClaimDrain(t, &listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions})
 	claim := httptest.NewRecorder()
 	roleSetHandler(firstState, "test-machine", logging.New("test")).ServeHTTP(
 		claim,
@@ -1358,7 +1443,7 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	mux := http.NewServeMux()
 	registerV1Routes(mux, state, "test-machine", logging.New("test"))
 	post := func(body string) *httptest.ResponseRecorder {
@@ -1500,7 +1585,10 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		t.Helper()
 		registry, sessions := setupSessionsTest(t, nil, nil)
 		logs := &bytes.Buffer{}
-		handler := roleSetHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.NewWithWriter("test", logs))
+		// withRoleClaimDrain, because a claim that lands hands the role's kept lane to its new
+		// holder (runKeptRoleDrain), which needs the delivery configuration and a bus.
+		deps := withRoleClaimDrain(t, &listenerDeps{client: setupPublishTestClient(t), registry: registry, sessions: sessions})
+		handler := roleSetHandler(deps, "test-machine", logging.NewWithWriter("test", logs))
 		return registry, sessions, logs, func(body string) *httptest.ResponseRecorder {
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(body)))

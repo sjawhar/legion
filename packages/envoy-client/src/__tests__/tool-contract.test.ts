@@ -138,9 +138,63 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain(
       "A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again."
     );
+  });
+
+  test("tells an agent the three answers a role message has, the kept one as a success", () => {
+    const publish = envoyToolSpecs.find((spec) => spec.name === "envoy_publish");
+
+    expect(publish?.description).toContain("A role message has three possible answers.");
+    // 200: a live holder took it, and must confirm it.
     expect(publish?.description).toContain(
-      "a role message errs when its holder did not confirm it within the listener's window"
+      "the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs"
     );
+    // 202: nobody holds the role, so the listener keeps the message. This is not a refusal.
+    expect(publish?.description).toContain(
+      "The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success"
+    );
+    // 404: nothing was kept, so the sender's own fallback must run.
+    expect(publish?.description).toContain("the listener keeps nothing and errs");
+  });
+});
+
+describe("publishConfirmationText", () => {
+  test("says a kept answer is a success, and that the message waits for the role's next holder", () => {
+    const line = publishConfirmationText({
+      envelope: { event_id: "event-kept" },
+      unresponsive: [],
+      kept: true,
+    });
+
+    expect(line).toBe(
+      "published event-kept. Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next."
+    );
+  });
+
+  test("names no holder on a kept answer whose resolution named one", () => {
+    // `holder` on a kept answer is the session the resolution read, which never got the
+    // message, so naming it as the holder would be a lie.
+    const line = publishConfirmationText({
+      envelope: { event_id: "event-lapsed" },
+      holder: "ses_lapsed",
+      unresponsive: [],
+      kept: true,
+    });
+
+    expect(line).not.toContain("ses_lapsed");
+    expect(line).toContain("kept it for the role");
+  });
+
+  test("names the holder a delivered role message reached, and nothing else for a plain topic", () => {
+    expect(
+      publishConfirmationText({
+        envelope: { event_id: "event-held" },
+        holder: "ses_architect",
+        unresponsive: [],
+      })
+    ).toBe("published event-held. Its role holder is ses_architect.");
+    expect(
+      publishConfirmationText({ envelope: { event_id: "event-team" }, unresponsive: [] })
+    ).toBe("published event-team.");
   });
 
   // The description is what an agent reads at the moment it decides whether a peer is alive. The

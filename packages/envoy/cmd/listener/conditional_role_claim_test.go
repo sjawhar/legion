@@ -38,8 +38,12 @@ type conditionalClaimRig struct {
 
 func newConditionalClaimRig(t *testing.T, sessionIDs ...string) *conditionalClaimRig {
 	t.Helper()
+	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	deps := &listenerDeps{registry: registry, sessions: sessions}
+	// A claim this route lands hands the role's kept lane to its new holder (runKeptRoleDrain),
+	// so the route needs the delivery configuration that drain runs on, as every other test that
+	// claims through it gives it.
+	deps := withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	for _, sessionID := range sessionIDs {
 		if err := sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine"}); err != nil {
 			t.Fatalf("register %s: %v", sessionID, err)

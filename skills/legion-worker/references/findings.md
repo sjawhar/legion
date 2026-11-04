@@ -72,17 +72,20 @@ sent to the controller.
 
 ### When no controller takes it
 
-The controller topic is a live wake: a message published while no controller runs reaches nobody,
-and no controller reads it later. `envoy_publish`'s own answer tells you whether one took it. A
-publish to a role answers with its live `holder`. It fails with
-`no holder for role legion-<project>-controller` when no session holds the role at all, and the
-listener delivers nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404
-without publishing"). It fails with `role legion-<project>-controller holder <session> lapsed;
-claim retained`, naming the holder, its `holder_state` and its `last_seen`, when a controller
-holds the role and its session has not registered within the live window: an `unresponsive`
-controller is not a stopped one, so release nothing, take nothing from it, and publish no second
-copy.
-Either way the finding has not been taken yet, so make it an ask, as
+The controller topic is a live wake: a message published while no controller runs reaches nobody
+at the time. `envoy_publish`'s own answer tells you whether one took it. A publish to a role
+answers with its live `holder`. With no claim on `legion-<project>-controller` at all, the answer
+says Envoy kept the message instead (`packages/envoy/cmd/listener`, the test "unheld role is kept
+and answered 202 without publishing on the role topic"): the next session that claims the role is
+handed each kept message once, within one hour of the keep. A keep is not a delivery: a
+controller can stay away for the whole hour, and a message kept longer than an hour is dropped
+unread, so a kept finding can reach nobody. It fails with `role legion-<project>-controller
+holder <session> lapsed; claim retained`, naming the holder, its `holder_state` and its
+`last_seen`, when a controller holds the role and its session has not registered within the live
+window: an `unresponsive` controller is not a stopped one, so release nothing, take nothing from
+it, and publish no second copy.
+Treat a kept answer as a controller not taking it. Either way the finding has not been taken yet,
+so make it an ask, as
 [What the ask says](#what-the-ask-says) spells it, on the first
 of these that holds, so a person sees it and the controller finds it when it returns:
 
@@ -188,8 +191,8 @@ open, `envoy_publish` its reference, `dispatch://<REPORT KEY>/ask/<id>` (the id 
 `Asked <id> on …` line), to the controller topic your `Legion addressing` line names, with
 `expects_reply: none`. The controller follows the ask and files what the person's answer asks for;
 you file nothing, whatever the answer says. The controller itself skips this step, since it follows
-each ask it opens. When that publish names no holder, do nothing more for an ask on the report
-issue: the controller's catch-up follows it at its next start.
+each ask it opens. When the listener kept that publish rather than a holder taking it, do nothing
+more for an ask on the report issue: the controller's catch-up follows it at its next start.
 
 An ask on the report issue blocks nothing of your own issue: its work goes on. One on your own
 issue holds its acceptance, as step 2 of [When no controller takes

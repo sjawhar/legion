@@ -215,7 +215,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions. A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again. A session that holds its own NATS connection receives such a live topic directly, yours included. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way: a holder that stopped answering keeps its role, so its message waits for it. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions. A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again. A session that holds its own NATS connection receives such a live topic directly, yours included. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -304,9 +304,16 @@ export function publishConfirmationText(result: {
   readonly holder?: string;
   readonly holderState?: SessionState;
   readonly unresponsive: readonly string[];
+  readonly kept?: boolean;
 }): string {
   const sentences = [`published ${result.envelope.event_id}.`];
-  if (result.holder !== undefined) {
+  // A kept answer is a success of its own: the listener holds the message on the role's kept
+  // lane and hands it to the session that claims the role next, and no holder received it.
+  if (result.kept === true) {
+    sentences.push(
+      "Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next."
+    );
+  } else if (result.holder !== undefined) {
     const state = result.holderState === undefined ? "" : ` (${result.holderState})`;
     sentences.push(`Its role holder is ${result.holder}${state}.`);
   }

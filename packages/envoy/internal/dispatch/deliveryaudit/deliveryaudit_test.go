@@ -73,6 +73,12 @@ func (r *recorder) Request(_ string, item contracts.Envelope, _ bus.RequestOptio
 	return r.PublishAsync(item)
 }
 
+// PublishStoredAsync takes a role route kept on the role's kept lane, recording the envelope,
+// whose topic is still the role's.
+func (r *recorder) PublishStoredAsync(_ string, item contracts.Envelope, _ string) <-chan error {
+	return r.PublishAsync(item)
+}
+
 func (r *recorder) Probe(time.Duration) error { return nil }
 
 func (r *recorder) sent(eventID string) []string {

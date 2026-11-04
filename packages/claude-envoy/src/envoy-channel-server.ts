@@ -172,7 +172,9 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
  * A rejection handler for a listener read whose subject legitimately may not
  * exist yet: `undefined` on the listener's 404 — no such role, no such entry —
  * and a rethrow for everything else, so a transport failure is never read as an
- * absence.
+ * absence. These are reads: only the publish route keeps a message it cannot
+ * deliver and answers 202 (INFRA-839), and `GET /v1/roles/<role>` still refuses
+ * an unheld role, so a 404 here is the absence it always was.
  */
 function undefinedOnNotFound(error: unknown): undefined {
   if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
@@ -1709,7 +1711,8 @@ export async function executeEnvoyTool(
       })
       // The answer the model reads, its line first. A topic send whose subscriber stopped
       // answering was accepted and stored for that session, and this result is the one place
-      // the model is told so.
+      // the model is told so; a kept answer is a success of its own, which the line says in the
+      // words the Oh My Pi plugin uses (`publishConfirmationText`).
       return {
         message: publishConfirmationText(result),
         event_id: result.envelope.event_id,
@@ -1717,6 +1720,8 @@ export async function executeEnvoyTool(
         ...(result.holder === undefined ? {} : { holder: result.holder }),
         ...(result.holderState === undefined ? {} : { holder_state: result.holderState }),
         unresponsive: result.unresponsive,
+        ...(result.kept === undefined ? {} : { kept: result.kept }),
+        ...(result.keptReason === undefined ? {} : { kept_reason: result.keptReason }),
       }
     }
     case EnvoyToolOperation.subscribe: {

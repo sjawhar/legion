@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,10 +23,6 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
-
-const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
-
-var rolePattern = regexp.MustCompile(rolePatternString)
 
 type streamInfoLookup interface {
 	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
@@ -77,13 +72,11 @@ type sendResponse struct {
 }
 
 // noLiveSessionRefusal is the 404 of a send, or of a registry lookup, for a session this listener
-// will not answer for: one no record is held for or whose record is past the gone horizon, and,
-// for a send, one past the live window that receives on a serving port, which cannot be pushed to
-// while it is stalled. State and LastSeen say which of those it was and when the session last
-// registered, and the error keeps the "no live session <id>" prefix exactly: Dispatch classifies
-// a delivery failure by that prefix (internal/dispatch/api/envoy_resolve.go), so a listener that
-// says more must still say it after those words, and a Dispatch that reads only the prefix is
-// unaffected.
+// will not answer for: one no record is held for or whose record is past the gone horizon. State
+// and LastSeen say which of those it was and when the session last registered, and the error
+// keeps the "no live session <id>" prefix exactly: Dispatch classifies a delivery failure by that
+// prefix (internal/dispatch/api/envoy_resolve.go), so a listener that says more must still say it
+// after those words, and a Dispatch that reads only the prefix is unaffected.
 type noLiveSessionRefusal struct {
 	Error    string        `json:"error"`
 	State    session.State `json:"state"`
@@ -120,18 +113,27 @@ func lastSeenOf(sessions *session.SessionRegistry, sessionID string, entry sessi
 	return sessions.LastSeen(sessionID)
 }
 
-// publishResponse is the 200 of POST /v1/messages/publish. Holder and HolderState name the role
+// publishResponse is the publish route's accepted answer. Holder and HolderState name the role
 // message's holder and the state its own record puts it in, as GET /v1/roles/<role> names them
-// and under the same two field names, so a client reads one shape from every role answer; a
-// role message is answered 200 only for a holder a resolution read live, so that is the state it
+// and under the same two field names, so a client reads one shape from every role answer; a role
+// message is answered 200 only for a holder a resolution read live, so that is the state it
 // carries. Unresponsive names every recipient of an ad-hoc topic send past the live window, which
 // the message was forwarded to and stored for and no receipt asked of (confirmTopicRecipient).
-// Each is left out when it is empty, so a stored-topic publish answers exactly as it did.
+// Kept and KeptReason name a role send the listener could not deliver and kept on the role's kept
+// lane instead (roleSend.kept), and are absent from every other answer, a delivered role send's
+// included. A role send has three answers and a sender tells them apart by status: 200, a live
+// holder took the message; 202, nobody holds the role and the message waits for whoever claims
+// it; 404, nothing was kept. Each field is left out when it is empty, so a stored-topic publish
+// answers exactly as it did.
 type publishResponse struct {
 	contracts.Envelope
 	Holder       string        `json:"holder,omitempty"`
 	HolderState  session.State `json:"holder_state,omitempty"`
 	Unresponsive []string      `json:"unresponsive,omitempty"`
+	Kept         bool          `json:"kept,omitempty"`
+	// KeptReason is the state the resolution found, in the same wire words the 404's own reason
+	// carries (roleHolderError.Reason): unclaimed, or holder_lapsed.
+	KeptReason roles.State `json:"kept_reason,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -143,10 +145,6 @@ type subscribeResponse struct {
 }
 
 const unwiredRepositoryWarningTimeout = 750 * time.Millisecond
-
-func isValidRole(role string) bool {
-	return rolePattern.MatchString(role)
-}
 
 // hasCapability reports whether capabilities includes value. The Dispatch
 // server (packages/envoy/internal/dispatch/api) has its own copy of this
@@ -819,7 +817,8 @@ type deleteSessionResponse struct {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and sends the envelope. A role topic is forwarded to its holder and
+// instead) and the listener's own kept lane, and sends the envelope. A role
+// topic is forwarded to its holder and
 // an ad-hoc topic confirmed with each self-subscribed recipient, both answered
 // once confirmed or when publishDeliveryWindow from the request's arrival has
 // passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
@@ -835,6 +834,15 @@ type deleteSessionResponse struct {
 // /v1/messages/send, whose key is the listener's. Like the send route, it answers through record,
 // which writes this route's one line per request with the answer; a confirmed send answers through
 // it too.
+//
+// keep is this route's own request field, meaningful only for a role topic, and unset means true:
+// a role message the listener cannot deliver is kept on the role's kept lane and handed to the
+// role's next holder, and the send is answered 202 kept rather than 404 (roleSend.kept). A sender
+// that holds a queue of its own and must get today's answer passes keep: false, which keeps
+// nothing and answers the 404. It is read by this route's give-up alone (roleSend.noHolder) and
+// rides no envelope, which travels on to the holder and back in the answer. A role token no claim
+// can name keeps nothing either, which the keep itself refuses, for this route and the role lane
+// alike (keepForNextHolder).
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrived := time.Now()
@@ -846,6 +854,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		var request struct {
 			messageBody
 			Topic string `json:"topic"`
+			Keep  *bool  `json:"keep"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "invalid json")
@@ -868,6 +877,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
+			return
+		}
+		if strings.HasPrefix(request.Topic, bus.KeptTopicPrefix) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to "+bus.KeptTopicPrefix+" topics; that lane is the listener's own, holding the copies it keeps for a role's next holder and the cursors of its drains")
 			return
 		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
@@ -902,7 +915,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			sendToRole(ctx, w, record, d, item, role, arrived)
+			// The request's keep flag is read here and nowhere else: it belongs to this route's
+			// give-up (roleSend.noHolder) rather than to the envelope, which travels on to the
+			// holder and back in this route's own answer. No flag at all means keep, so every
+			// publisher that sets none is unchanged.
+			sendToRole(ctx, w, record, d, item, role, request.Keep == nil || *request.Keep, arrived)
 			return
 		}
 		if bus.UsesCoreTransport(request.Topic) {
@@ -1354,6 +1371,13 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // turns a read of a role and the claim that
 // follows into one decision, which neither last-claim-wins nor a soft claim can do.
 //
+// A claim that landed also hands the role's kept lane to its new holder: whatever the listener
+// kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which reads the
+// lane first and resolves the role's holder itself, so a claim of a role with nothing kept for
+// it costs one stream read and no resolution at all, and a lane with copies on it goes to the
+// claim that superseded this one when one has). That runs in a goroutine under a context of its
+// own, so this answer's status and body are exactly what they were and wait for none of it.
+//
 // logger is registerV1Routes's own. One decision of this route is logged with it: a soft claim that
 // takes a role from the predecessor it names because the claimant's entry or the predecessor's
 // carries no client instance id, which is the one takeover the route cannot tell from a different
@@ -1414,8 +1438,8 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
-		if !isValidRole(body.Role) {
-			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
+		if !roles.Valid(body.Role) {
+			writeJSONError(w, http.StatusBadRequest, "role must match "+roles.PatternString, "role")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
@@ -1522,6 +1546,7 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
+		go runKeptRoleDrain(*d.delivery, body.Role)
 		writeJSON(w, http.StatusOK, item)
 	}
 }

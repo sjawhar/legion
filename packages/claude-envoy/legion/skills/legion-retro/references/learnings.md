@@ -1,57 +1,58 @@
-# Writing a retro learning under `docs/solutions/`
+# Writing a retro learning as a Dispatch comment
 
-Read this at step 3 of `skill://legion-retro`, when you write a learning document. Organize by
-reusable topic, not by pull request, so a worker on another issue finds it by its subject.
+Read this at step 3 of `skill://legion-retro`, when you write what the work taught. It is one
+`dispatch comment` on the issue, and its reader is the skill librarian, who turns a point into a
+rule in a skill, a role prompt or a repository guide. Retro commits nothing:
+`docs/solutions/` stays as the history of the rules written before this, and no role writes there.
 
-## Never edit a document you did not write this retro
+## What a point must carry
 
-Not its front matter, not its body. Two issues' retros can land within the same hour, and an
-in-place edit (another `related_issues` entry, a sharpened sentence, a `status` flip) conflicts
-with the other retro's edit to the same lines.
+Write each kept point as a rule a worker on another issue could follow, and give it:
+
+- **The rule**, in a few imperative lines. State it in the present tense, about the work, never
+  about this pull request.
+- **The evidence** below the rule: the file, line or commit of this pull request that shows it,
+  and what went wrong before the rule. A reader takes a story as an instruction, so the story
+  never stands in the rule's place.
+- **Where it belongs**: the skill, role prompt or guide a reader would look in — for example
+  `skills/legion-worker/references/tools.md` or `packages/daemon/internal/prompts/roles/tester.md`.
+  Name the file; the librarian decides whether to write it there.
+- **What it replaces**, when an instruction the repository already carries is wrong: quote that
+  instruction and its path, so the librarian can find both.
+
+Drop a point that cites no file, line or commit of this pull request, and a point that only
+restates what a skill already says.
 
 ## Find what already covers the topic
 
-1. Search `docs/solutions/` with the `grep` tool, case-insensitive, for two or three words naming
-   the topic, and read each hit's H1 and rule.
-2. For each file you found, search `docs/solutions/` for its path (`docs/solutions/<its-path>`).
-   A file that lists that path under `supersedes:` (on that line, or as an item of the list below
-   it) replaces it: read that file instead, and repeat this search for it. A file whose first line
-   under the H1 is `Extends docs/solutions/<its-path>.md.` adds to it: read both. Legion runs no
-   pass that reconciles these links, so this search is the only way to reach the newer file.
+1. `dispatch search --query '<two or three words naming the topic>'` finds the issues and
+   comments that hold it, this project's retros included.
+2. Search `docs/solutions/` with the `grep` tool, case-insensitive, for the same words, and read
+   each hit's H1 and rule: a rule written before this change may already say it, or may say the
+   opposite, which is itself the point to report.
+3. Search the skills and role prompts the point would change (`skills/`,
+   `packages/daemon/internal/prompts/`). A rule one of them already states is no learning.
 
-## Write a new file of your own
+## The comment
 
-Name it `docs/solutions/<category>/<slug>-pr<number>.md`, `<number>` being the pull request's
-number, so two pull requests' retros never choose the same path. `<category>` is an existing
-subdirectory of `docs/solutions/`; make a new one only when none fits. `<slug>` is the title in
-lowercase words joined by `-`.
+One comment holds every kept point, each under its own `###` heading, so the issue carries one
+record of the retro rather than a thread of them:
 
-- **A fresh topic:** state the rule in a few imperative lines. The incident goes under a
-  `## Evidence` heading below the rule, never in the rule, because a reader takes a story as an
-  instruction.
-- **A topic an existing document already covers:** the first line under the H1 reads
-  `Extends docs/solutions/<existing-path>.md.`, and the rule states only what is new.
-- **A topic an existing document states wrongly:** front matter adds
-  `supersedes: docs/solutions/<existing-path>.md`, or a `supersedes:` list with one
-  `- docs/solutions/<existing-path>.md` item each, and the first line under the H1 says why. Leave
-  the old file untouched. A reader reaches your correction from it only through the search in step
-  2 above, so the path in your `supersedes:` must be exact.
+```bash
+dispatch comment --issue '<KEY>' --body-file - <<'EOF'
+## Retro learnings
 
-Front matter (`status: active` for a new file; `module:` the package or directory the rule is
-about, as `packages/daemon` or `skills/legion-worker`):
+### <the rule, in one line>
 
-```yaml
----
-title: "Descriptive title matching the H1"
-category: subdirectory-name
-tags:
-  - searchable-topic
-date: YYYY-MM-DD # (`date -u +%F` prints it)
-status: active
-module: affected-module
-related_issues:
-  - "owner/repo#456"  # the pull request
----
+<the rule, a few imperative lines>
+
+Evidence: <file, line or commit of this pull request, and what went wrong>.
+Belongs in: <the skill, prompt or guide>.
+Replaces: <the instruction and its path>, or nothing.
+
+<!-- legion: {"session":"<session-id>","phase":"retro"} -->
+EOF
 ```
 
-Commit it on the existing issue branch (step 3 of `skill://legion-retro`).
+When no point qualifies, write no comment and say so in the retro message (step 5 of
+`skill://legion-retro`).
