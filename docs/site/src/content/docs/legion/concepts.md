@@ -180,8 +180,10 @@ request of the root's spec, and so does the spec's design gate standing open. Th
 when nothing is asked of you any more: Dispatch retracts the question because its decision block
 left the spec, a session closes it, or a session hands it back to the agent's turn. The answered
 root goes to the front of the waiting line, among the issues whose work came back and ahead of
-every issue whose first phase has yet to start, and the next free
-slot gives the same architect session a task naming what answered it and what is still with you. An
+every issue whose first phase has yet to start, and its promotion there gives the same architect
+session a task naming what answered it and what is still with you: at once, taking no slot, once
+the root's design gate has opened, and at the next free
+slot while its architect is still writing the first spec. An
 agent's answer or resolution of another ask answers nothing, and an act of yours from before the
 wait began is one the architect already read. Taking the label off, or a person or an outside session
 claiming the root on Dispatch, takes it out of the workflow instead: Legion never resumes work

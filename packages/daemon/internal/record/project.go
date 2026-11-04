@@ -60,26 +60,42 @@ func InWorkflow(issue Issue) bool {
 var AcceptedPhases = []phase.Phase{phase.Retro, phase.Merging, phase.AwaitingMerge}
 
 // AcceptedAncestor is the nearest issue strictly above issue, on the chain of recorded parents in
-// byKey, that the daemon has already accepted (AcceptedPhases), and "" when no ancestor has been.
-// byKey is the records of the issue's own project the caller already holds, which is where the
-// chain is read: a parent outside it ends the walk, as does a chain that loops back on itself.
+// byKey and then the root of issue's own tree, that the daemon has already accepted
+// (AcceptedPhases), and "" when no ancestor has been. byKey is the records of the issue's own
+// project the caller already holds, which is where the chain is read.
 //
-// A parent already done does not end the walk: the spec's grandchild under a done parent is held
-// by whichever issue above that parent is still merging, which is what the walk goes on to find.
-// A done ancestor holds nothing itself — its merge has happened, so there is no order left to
-// keep.
+// A parent outside byKey does not end the walk, and neither does a chain that ends short of the
+// tree's own root or loops back on itself: the walk goes on at that root, which stands above
+// every member of the tree whatever each member's record says it hangs under — the same reading
+// Beneath gives a root, whose descendants are every other member of its tree. Without that the
+// judgement would depend on which records the caller holds, and the callers do not hold the same
+// ones: the waiting line is read over the project's live records (Store.LiveIssues, which leaves
+// out an issue already done), while the two doors that refuse work beneath an accepted ancestor
+// are read over the whole tree (Store.TreeIssues, AcceptedAncestorOf, OpenBeneath). A done issue
+// in the middle of the chain is a gap in it, not the end of it, and the daemon must not start
+// beneath an ancestor it has accepted merely because it cannot see every step of the way up to
+// it. The two now answer alike, which is what keeps the rules from deadlocking: OpenBeneath
+// leaves out the issues this hold has stopped, so an issue the line holds is an issue the
+// ancestor's own close does not wait for.
+//
+// A parent already done does not end the walk either: the spec's grandchild under a done parent
+// is held by whichever issue above that parent is still merging, which is what the walk goes on
+// to find. A done ancestor holds nothing itself — its merge has happened, so there is no order
+// left to keep.
 func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
 	seen := map[string]bool{issue.Key: true}
-	for parent := issue.Parent; parent != nil && !seen[*parent]; {
-		seen[*parent] = true
-		above, recorded := byKey[*parent]
-		if !recorded {
-			return ""
+	for _, start := range []*string{issue.Parent, &issue.Tree} {
+		for key := start; key != nil && !seen[*key]; {
+			seen[*key] = true
+			above, recorded := byKey[*key]
+			if !recorded {
+				break
+			}
+			if slices.Contains(AcceptedPhases, above.Phase) {
+				return above.Key
+			}
+			key = above.Parent
 		}
-		if slices.Contains(AcceptedPhases, above.Phase) {
-			return above.Key
-		}
-		parent = above.Parent
 	}
 	return ""
 }

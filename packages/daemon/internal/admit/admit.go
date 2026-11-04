@@ -1216,7 +1216,16 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			// own.
 			takes := slotFor(candidate, gate)
 			if takes && len(own) >= a.cap {
-				break
+				// A full cap gives no further slot, and the scan goes on. This is not the hold
+				// above and must not be read as one: a hold is an answer for every candidate
+				// behind it, because it says the pass does not yet know what this candidate is;
+				// the cap is an answer for this candidate alone, because it says only that there
+				// is no slot for it. own only grows inside this loop, so no candidate behind
+				// this one takes a slot either and the rank order of the issues that need one is
+				// kept whole, while the candidates the cap cannot bind — the ones slotFor is
+				// false for — are promoted as they are reached, which is what makes a hand-over
+				// and an answered root resume under a cap that is permanently full.
+				continue
 			}
 			if candidate.Kind == record.LineAnswered {
 				// The root's tree already runs: only a reason it may not resume in its own
@@ -1934,8 +1943,11 @@ func (a *Admission) finishFencedStarts(ctx context.Context, tx pgx.Tx, issues []
 			owed.Generation == issue.Generation && owed.Phase == issue.Phase {
 			continue
 		}
-		// The row has never been leased (record.Store.OwedStarts), so it carries no lease token.
-		if err := a.store.FinishOutbox(ctx, tx, owed.ID, ""); err != nil {
+		// No live lease holds the row (record.Store.OwedStarts), so the token it carries is
+		// either none at all or the one a dead lane left on it, and the delete names that token:
+		// a lane that took the row between this pass's read and this write keeps it, and the
+		// next pass repairs what is left.
+		if err := a.store.FinishOutbox(ctx, tx, owed.ID, owed.LeaseToken); err != nil {
 			return fmt.Errorf("finish the start %s owed a worker it can no longer reach: %w", owed.Issue, err)
 		}
 		intake.OnCommit(ctx, func() {

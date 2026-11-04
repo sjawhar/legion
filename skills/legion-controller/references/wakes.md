@@ -74,7 +74,9 @@ now waits only on them: the daemon returned its slot while the architect stays l
 person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
 take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
 slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it among the
-issues at the front of `admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+issues at the front of `admission.waiting` by itself, and its promotion gives its architect the
+answer task: at once, holding no slot, when its design gate has already opened, and at the next
+free slot while its architect is still writing the first spec. A lost label or a foreign
 Dispatch claim sends the separate `unslotted` wake.
 
 ## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)

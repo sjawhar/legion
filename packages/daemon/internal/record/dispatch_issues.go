@@ -25,28 +25,36 @@ func (s *Postgres) PutDispatchIssue(ctx context.Context, tx pgx.Tx, row Dispatch
 	if row.Parent != "" {
 		parent = &row.Parent
 	}
-	_, err := tx.Exec(ctx, `insert into dispatch_issues (key, project, status, blockers, dispatch_seq, parent)
+	tag, err := tx.Exec(ctx, `insert into dispatch_issues (key, project, status, blockers, dispatch_seq, parent)
 		values ($1, $2, $3, $4, $5, $6)
 		on conflict (key) do update set project = excluded.project, status = excluded.status,
 			blockers = excluded.blockers, dispatch_seq = excluded.dispatch_seq,
-			parent = coalesce(excluded.parent, dispatch_issues.parent)
+			parent = excluded.parent
 		where dispatch_issues.dispatch_seq < excluded.dispatch_seq`,
 		row.Key, row.Project, row.Status, blockers, row.Seq, parent)
 	if err != nil {
 		return fmt.Errorf("put the Dispatch mirror of %s: %w", row.Key, err)
 	}
-	// The parent stands outside the sequence fence. Only Dispatch's own listing of the project
-	// carries one — the boot listing and the controller tick's re-read — and an issue whose live
-	// events are newer than that listing would keep no parent at all if the fence refused this
-	// observation. The write above has already set it when the fence let the row through, so this
-	// one is for the row the fence refused, and it touches the parent alone: the status, the
-	// blockers and the sequence of the fresher observation the row holds stay as they are. An
-	// observation carrying no parent writes none, rather than clearing the one Dispatch gave.
-	if parent != nil {
-		if _, err := tx.Exec(ctx, `update dispatch_issues set parent = $2
-			where key = $1 and parent is distinct from $2`, row.Key, row.Parent); err != nil {
-			return fmt.Errorf("put the Dispatch parent of %s: %w", row.Key, err)
-		}
+	if tag.RowsAffected() > 0 {
+		return s.PutDispatchClaim(ctx, tx, row.Key, row.ClaimedBy, row.ClaimSeq)
+	}
+	// The write above sets the parent the observation saw, and no parent is one of the things it
+	// can have seen: a person who takes the parent off a child ends that parent's children-first
+	// wait exactly as a move to another parent does, so the observation's parent is written
+	// rather than coalesced with the one the row held.
+	//
+	// The parent stands outside the sequence fence as well, which is what this statement is for:
+	// the fence above refused this observation, so nothing of it has landed. An observation at
+	// the sequence the row already holds is the same state said again — a listing of a project
+	// whose issue has had no event since, which is the only way the parent of an issue the daemon
+	// has never recorded reaches the mirror — and the fence refuses it, since it refuses
+	// everything that is not strictly newer. So the parent alone is written here, leaving the
+	// status, the blockers and the sequence of the fresher observation the row holds as they are.
+	// An observation strictly older than the row writes nothing even here: the row's own saw the
+	// parent later, so this one would undo what Dispatch has since said.
+	if _, err := tx.Exec(ctx, `update dispatch_issues set parent = $2
+		where key = $1 and dispatch_seq <= $3 and parent is distinct from $2`, row.Key, parent, row.Seq); err != nil {
+		return fmt.Errorf("put the Dispatch parent of %s: %w", row.Key, err)
 	}
 	return s.PutDispatchClaim(ctx, tx, row.Key, row.ClaimedBy, row.ClaimSeq)
 }

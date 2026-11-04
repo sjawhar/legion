@@ -46,33 +46,35 @@ func ChildrenFirstCandidates(issues []Issue, gates map[string]DesignGate) []stri
 // ChildOpen says whether one Dispatch child of a parent still holds that parent's own first
 // phase. It is read over two sources and no others: the status Dispatch shows the child in, from
 // the daemon's mirror of the project's issues, and the daemon's own record of the child, nil when
-// it has never recorded one. parentTree is the tree the parent belongs to, which is how a child
-// recorded as a member of that tree is told from one recorded elsewhere.
+// it has never recorded one.
 //
-//	| Dispatch status of the child       | daemon record of the child                                 | open? |
-//	| ---------------------------------- | ---------------------------------------------------------- | ----- |
-//	| done                               | any                                                          | no    |
-//	| icebox                             | any                                                          | no    |
-//	| backlog                            | none, or not a member of the parent's tree                   | yes   |
-//	| backlog                            | a member whose phase is done or whose status left the flow   | no    |
-//	| triage                             | none, or not a member of the parent's tree                   | yes   |
-//	| triage                             | a member that left the workflow                              | no    |
-//	| todo, in_progress, testing, …      | any                                                          | yes   |
+//	| Dispatch status of the child       | daemon record of the child                                   | open? |
+//	| ---------------------------------- | ------------------------------------------------------------ | ----- |
+//	| done                               | any                                                            | no    |
+//	| icebox                             | any                                                            | no    |
+//	| backlog                            | none                                                           | yes   |
+//	| backlog                            | one whose phase is done or whose status left the workflow      | no    |
+//	| triage                             | none                                                           | yes   |
+//	| triage                             | one that left the workflow                                     | no    |
+//	| todo, in_progress, testing, …      | none, or one that is no tree of its own                        | yes   |
+//	| todo, in_progress, testing, …      | a tree of its own that has left the workflow                   | no    |
 //
 // A child the architect has filed and not released yet — backlog or triage, with no record of its
 // own — is open, because it is work of the parent that has still to happen: the parent's wait
 // therefore begins at its gate's opening, before the design-approved turn releases the wave. The
-// same two statuses on a member of the parent's own tree are the opposite case, a child the tree
-// ran and parked or finished, which holds nothing.
+// same two statuses on a child some tree of the daemon records are the opposite case, a child a
+// tree ran and parked or finished, which holds nothing. Which tree recorded it does not come into
+// it: a parked child holds nothing wherever it was parked, and reading it as open because another
+// tree parked it would hold its parent on work no tree will do.
 //
 // A descendant that has become a tree of its own — handed over, or recorded under its own key as
-// its tree's root — is read by its own record rather than by the parent's membership: its run
-// belongs to that tree now, and it is open exactly while it is in the workflow there.
+// its tree's root — is read by its own record whatever Dispatch shows: its run belongs to that
+// tree now, and it is open exactly while it is in the workflow there.
 //
 // An unknown status is open. The safe reading of a status this daemon does not know is that the
 // child still has work in it; a wait costs a pass, and starting a parent too early costs its
 // children's merges.
-func ChildOpen(child DispatchIssueRow, recorded *Issue, parentTree string) bool {
+func ChildOpen(child DispatchIssueRow, recorded *Issue) bool {
 	switch child.Status {
 	case "done", "icebox":
 		return false
@@ -82,7 +84,7 @@ func ChildOpen(child DispatchIssueRow, recorded *Issue, parentTree string) bool 
 	}
 	switch child.Status {
 	case "backlog", "triage":
-		return recorded == nil || recorded.Tree != parentTree || InWorkflow(*recorded)
+		return recorded == nil || InWorkflow(*recorded)
 	default:
 		return true
 	}
@@ -95,7 +97,9 @@ func ChildOpen(child DispatchIssueRow, recorded *Issue, parentTree string) bool 
 // the pass already holds.
 //
 // Nothing here is stored. The wait ends when every open child is released and leaves the
-// workflow, is closed, is moved to icebox, or is moved to another parent, and each of those is a
+// workflow, is closed, is moved to icebox, is moved to another parent, or is moved out from
+// under its parent to no parent at all — Dispatch reports the last two the same way, as the
+// issue's parent now, and the mirror takes both (Store.PutDispatchIssue). Each of those is a
 // change to a mirror row or a record that the next pass reads. A flag would have to be cleared by
 // whichever of them happened, and a missed clear would hold a parent for ever; a judgement made
 // again each pass costs one pass when a mirror row is stale, and the boot listing and the
@@ -126,7 +130,7 @@ func ChildWaits(issues []Issue, children map[string][]DispatchIssueRow, records 
 			} else if found, ok := byKey[row.Key]; ok {
 				child = &found
 			}
-			if !ChildOpen(row, child, parent.Tree) {
+			if !ChildOpen(row, child) {
 				continue
 			}
 			open = append(open, OpenChild{Key: row.Key, Status: row.Status, Cycle: cycleAncestor(row, parent, byKey)})
@@ -190,10 +194,10 @@ func ChildWaitsOf(ctx context.Context, tx pgx.Tx, store Store, project string, i
 	}
 	slices.Sort(keys)
 	// The daemon's own record of each child is read by key rather than taken from issues, the
-	// project's live records: a member of the parent's tree that has left the workflow is not
-	// among those, and a child the daemon has never recorded is not either, and the two are
-	// opposite answers — the first holds nothing, the second is work nobody has released yet
-	// (ChildOpen). One query, whatever the number of children.
+	// project's live records: a child that has left the workflow is not among those, in this
+	// parent's tree or in any other, and a child the daemon has never recorded is not either,
+	// and the two are opposite answers — the first holds nothing, the second is work nobody has
+	// released yet (ChildOpen). One query, whatever the number of children.
 	rows, err := store.IssuesOf(ctx, tx, project, slices.Compact(keys))
 	if err != nil {
 		return nil, err

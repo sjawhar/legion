@@ -98,14 +98,16 @@ type HeldRow struct {
 	WaitsOn int64
 }
 
-// OwedStart is one pending, never-leased worker start that waits for its issue's admission slot
-// (SuperviseRequest.NeedsSlot), as the waiting line orders it: the row's own creation time and
-// its id. That pair is the line's ordering key because it is durable — the transition wrote the
-// row in its own transaction, and a restart finds it exactly where it was — and because it is
-// already the order the issue's work came back in, which is the order the line gives those
-// issues their slots back (Waiting). The role, phase and generation the row serves travel with
-// it so that the one read also answers admission's repair of a row that has outlived the
-// fences the outbox would have run it under.
+// OwedStart is one pending worker start that waits for its issue's admission slot
+// (SuperviseRequest.NeedsSlot) and that no live lease holds, as the waiting line orders it: the
+// row's own creation time and its id. That pair is the line's ordering key because it is durable
+// — the transition wrote the row in its own transaction, and a restart finds it exactly where it
+// was — and because it is already the order the issue's work came back in, which is the order the
+// line gives those issues their slots back (Waiting). The role, phase and generation the row
+// serves travel with it so that the one read also answers admission's repair of a row that has
+// outlived the fences the outbox would have run it under, and LeaseToken with them: a row whose
+// lease has lapsed is still owed, and that repair must name the token the dead lane left to
+// finish it (Store.FinishOutbox).
 type OwedStart struct {
 	Issue      string
 	CreatedAt  time.Time
@@ -113,6 +115,7 @@ type OwedStart struct {
 	Role       claim.Role
 	Phase      phase.Phase
 	Generation uint64
+	LeaseToken string
 }
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.

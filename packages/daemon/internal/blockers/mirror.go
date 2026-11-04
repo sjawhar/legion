@@ -68,10 +68,12 @@ func (m *Mirror) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 // put is one observation's row, under the daemon's project and behind the sequence fences
 // PutDispatchIssue applies: an observation older than the row's own leaves it exactly as it
 // stands, and one that does not show the claim leaves the claim as it stands. The parent is the
-// one field written outside that fence (record.PutDispatchIssue), because only a listing and a
-// detail read carry one at all: an issue whose live events are newer than the listing that first
-// showed its parent would otherwise hold no parent, and the children-first rule would never see
-// it under its own.
+// one field written outside that fence (record.PutDispatchIssue), for an observation at the
+// sequence the row already holds: that is a listing of an issue no event has touched since,
+// which is the only way the parent of an issue the daemon has never recorded reaches the mirror
+// at all. Every observation carries the parent it saw, an event's own payload included, and no
+// parent is one of the things it can have seen, so a child a person took out from under its
+// parent is mirrored as the issue Dispatch now shows and ends that parent's children-first wait.
 func (m *Mirror) put(ctx context.Context, tx pgx.Tx, observed intake.IssueStatus) error {
 	row := record.DispatchIssueRow{
 		Key: observed.Key, Project: m.project, Status: observed.Status, Blockers: observed.Blockers, Seq: observed.Seq,

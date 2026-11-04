@@ -34,14 +34,16 @@ import (
 // suspension (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms
 // its open pull request (disarmOpen), as a root's linger disarms every member's.
 //
-// A member's leave may be the last its root waited for: a merged root stands in awaiting_merge
-// while any other issue of its tree is in the workflow (closeMerged), and closes once the last of
-// them leaves (closeAwaitingRoot). Every way a member stops holding it runs this function — a
-// status moving to backlog, icebox, triage or done (dispatchIssue), a phase reaching done
-// (transition), the architect's close_root, and LeaveUnslotted — and the boot's sweep is the
-// backstop. The child's check opens after that close, so its start row follows the linger's
-// suspends and resumes the implementer as a root's own check does, rather than being stopped by
-// them.
+// A member's leave may be the last one a merged issue above it waited for: an issue whose pull
+// request merged stands in awaiting_merge while any issue beneath it is in the workflow
+// (closeMerged), and closes once the last of them leaves (closeAwaitingMerge). That is the tree
+// root for a member of its tree, and any parent between them for a member below it, so the leave
+// re-reads the wait of every merged ancestor the departing issue stood beneath. Every way a
+// member stops holding one runs this function — a status moving to backlog, icebox, triage or
+// done (dispatchIssue), a phase reaching done (transition), the architect's close_root, and
+// LeaveUnslotted — and the boot's sweep is the backstop. The child's check opens after that
+// close, so its start row follows the linger's suspends and resumes the implementer as a root's
+// own check does, rather than being stopped by them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
 	if err := e.untellUnresumedChanges(ctx, tx, issue); err != nil {
@@ -89,9 +91,17 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	if err := e.everyClaim(ctx, tx, issue, op, fmt.Sprintf("%s is %s", issue.Key, status), except); err != nil {
 		return err
 	}
-	root, err := e.store.Issue(ctx, tx, issue.Tree)
+	members, err := e.treeMembers(ctx, tx, issue)
 	if err != nil {
 		return err
+	}
+	above := record.Above(issue, members)
+	var root *record.Issue
+	for i := range members {
+		if members[i].Key == issue.Tree {
+			root = &members[i]
+			break
+		}
 	}
 	if root == nil {
 		return fmt.Errorf("suspend issue %s: tree root %s is not recorded", issue.Key, issue.Tree)
@@ -110,8 +120,24 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: kind, Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is %s", issue.Key, status)}); err != nil {
 		return err
 	}
-	if err := e.closeAwaitingRoot(ctx, tx, *root); err != nil {
-		return err
+	// This departure may be the last one any merged ancestor of the issue waited for, and not
+	// only the tree root's: the wait reads the issues beneath an issue (record.OpenBeneath), so a
+	// child that merged before the grandchild under it stands in awaiting_merge too, and nothing
+	// else would ever re-read it — it holds no slot, it is in neither part of the waiting line,
+	// and while it stands there its root can be neither accepted nor closed. Each ancestor's
+	// record is read again rather than taken from the snapshot above, because closing the
+	// nearest one leaves (transition's own leave) and may close the ones above it on the way.
+	for _, ancestor := range above {
+		current, err := e.store.Issue(ctx, tx, ancestor.Key)
+		if err != nil {
+			return err
+		}
+		if current == nil {
+			continue
+		}
+		if err := e.closeAwaitingMerge(ctx, tx, *current); err != nil {
+			return err
+		}
 	}
 	if !merged {
 		return nil
@@ -175,25 +201,26 @@ func (e *Engine) openCheckIfMerged(ctx context.Context, tx pgx.Tx, issue record.
 	return e.openCheck(ctx, tx, issue, *pr, wake)
 }
 
-// closeAwaitingRoot closes root when its merge was waiting on the rest of its tree: a merged root
-// stands in awaiting_merge (or held from it) while any other member of its tree is in the workflow
-// (closeMerged), and closes, as its merge would have, once the last of them leaves. Which members
-// still hold it is closeMerged's to judge, so this runs on every issue that leaves the workflow
-// and changes nothing for any other root. It tells nobody: the architect heard the wait when the
-// close entered it (merged), and this path is walked at every departure.
-func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.Issue) error {
-	if !awaitsMerge(root) {
+// closeAwaitingMerge closes merged when its own merge was waiting on the issues beneath it: an
+// issue whose pull request merged stands in awaiting_merge (or held from it) while any issue
+// beneath it is in the workflow (closeMerged), and closes, as its merge would have, once the
+// last of them leaves. Which issues still hold it is closeMerged's to judge, so this runs on
+// every merged ancestor of an issue that leaves the workflow and changes nothing for any other.
+// It tells nobody: the architect heard the wait when the close entered it (merged), and this
+// path is walked at every departure.
+func (e *Engine) closeAwaitingMerge(ctx context.Context, tx pgx.Tx, merged record.Issue) error {
+	if !awaitsMerge(merged) {
 		return nil
 	}
-	pr, err := e.store.PullRequest(ctx, tx, root.Key)
+	pr, err := e.store.PullRequest(ctx, tx, merged.Key)
 	if err != nil || pr == nil || pr.State != record.PullRequestMerged {
 		return err
 	}
-	waiting, err := e.closeMerged(ctx, tx, root, pr)
+	waiting, err := e.closeMerged(ctx, tx, merged, pr)
 	if err != nil || len(waiting) > 0 {
 		return err
 	}
-	e.logOnCommit(ctx, "workflow: a merged root closes once its last child left the workflow", "issue", root.Key, "pullRequest", pr.Number)
+	e.logOnCommit(ctx, "workflow: a merged issue closes once the last issue beneath it left the workflow", "issue", merged.Key, "pullRequest", pr.Number)
 	return nil
 }
 

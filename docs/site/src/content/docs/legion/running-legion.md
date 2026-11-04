@@ -820,8 +820,9 @@ Closing the terminal leaves the project without one, and the daemon logs
   trees` count is the trees that run whether or not any issue of theirs holds one.
 
   The `roots waiting on a person` line counts the roots that gave their admission slot back to
-  wait on a person (phase `awaiting_person`), how many have been answered — each first in line for
-  the next free slot — and each by key with what it waits on (`none` when no root waits). An
+  wait on a person (phase `awaiting_person`), how many have been answered — each first in line,
+  and each resuming at once and taking no slot once its design gate has opened — and each by key
+  with what it waits on (`none` when no root waits). An
   unanswered one is in neither admission list, only among the live trees, so without this line the
   capacity it freed looks idle.
 

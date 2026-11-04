@@ -63,7 +63,8 @@ func (w *workflowRuntime) observeWaitedOn(ctx context.Context) []intake.IssueSta
 // An open child is in the set because the turn's re-read is what rewrites its mirror row. A
 // child the architect filed and has not released has no event this daemon consumes — it reaches
 // the mirror from a Dispatch listing alone — so without this its row would stand until the next
-// boot, and its move to icebox or to another parent would not end the wait it holds.
+// boot, and its move to icebox, to another parent or out from under its parent would not end the
+// wait it holds.
 func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {

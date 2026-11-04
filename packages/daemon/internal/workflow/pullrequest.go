@@ -311,8 +311,9 @@ func waitingForTree(issue string, number int, waiting []string) string {
 // waited for the rest of the tree instead, tells the root's architect once. It is the two places
 // a wait is newly entered — the merge arriving at an issue in awaiting_merge (merged), and an
 // issue reaching awaiting_merge on a pull request already merged (transition) — and nowhere else:
-// notices never de-duplicate (notice writes a row per call) and closeMerged is re-entered on every
-// child's departure (closeAwaitingRoot) and on every boot (sweepMerged), so those two tell nobody.
+// notices never de-duplicate (notice writes a row per call) and closeMerged is re-entered on the
+// departure of every issue beneath it (closeAwaitingMerge) and on every boot (sweepMerged), so
+// those two tell nobody.
 func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
 	waiting, err := e.closeMerged(ctx, tx, issue, pr)
 	if err != nil || len(waiting) == 0 {
@@ -335,15 +336,18 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 // suspends nothing: the linger's own rows already did, and the tree's close retires every member's
 // claims. The boot's sweep closes a migrated issue the same way (booted).
 //
-// A root's close waits for the rest of its tree: the linger it would begin suspends every member
-// mid-turn, so a child's finished phase would be refused 409 TREE_LINGERING and its work lost. It
-// waits on the one set both acceptance rules read (OpenBeneath), which for a tree root is every
-// other member of the tree still in the workflow, read from the flat tree rather than the parent
-// relation because the linger stops every member whatever it hangs under, and which leaves out an
-// issue the daemon itself holds at admitted beneath this root — without that the two would wait on
-// each other for ever, as OpenBeneath's own comment sets out. The wait is kept inside the branch
-// where the tree does not linger: a member of a tree that already lingers must still close at its
-// merge, which suspends nothing further and is the one thing that still moves there.
+// A merged issue's close waits for the issues beneath it, on the one set both acceptance rules
+// read (OpenBeneath): for a tree root that is every other member of the tree still in the
+// workflow, read from the flat tree rather than the parent relation because the linger its close
+// begins stops every member whatever it hangs under — a child's finished phase would be refused
+// 409 TREE_LINGERING and its work lost — and for an issue below the root it is the issues whose
+// chain of recorded parents reaches it, whose merges its own head is meant to carry. The set
+// leaves out an issue the daemon itself holds at admitted beneath this one — without that the
+// two would wait on each other for ever, as OpenBeneath's own comment sets out. The departure of
+// any of them re-reads this wait (leave's closeAwaitingMerge), so the close happens as soon as
+// the last one leaves. The wait is kept inside the branch where the tree does not linger: a
+// member of a tree that already lingers must still close at its merge, which suspends nothing
+// further and is the one thing that still moves there.
 func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) ([]string, error) {
 	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge {
 		issue.Phase, issue.Hold = phase.AwaitingMerge, nil
@@ -361,7 +365,7 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 			return nil, err
 		}
 		if len(waiting) > 0 {
-			e.logOnCommit(ctx, "workflow: a merged root's close waits for the rest of its tree", "issue", issue.Key, "tree", issue.Tree,
+			e.logOnCommit(ctx, "workflow: a merged issue's close waits for the issues beneath it", "issue", issue.Key, "tree", issue.Tree,
 				"pullRequest", pr.Number, "waitingFor", strings.Join(waiting, ", "))
 			return waiting, nil
 		}

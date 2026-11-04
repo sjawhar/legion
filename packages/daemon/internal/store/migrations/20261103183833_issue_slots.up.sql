@@ -16,14 +16,19 @@
 -- Every existing gate is read from what the record still shows. An approval that stands is an
 -- opening, and covers both the gate open now and one a newer document version closed, since only a
 -- changes request nulls the approval. A gate whose approval a changes request cleared shows
--- nothing of itself, so the tree says it instead: the gate's opening is the only thing that moves
--- a member of the tree out of admitted, so a member past admitted is a gate that opened. A gate
--- that shows neither never opened, and keeps the default.
+-- nothing of itself, so the tree says it instead: a member recorded in a phase the workflow only
+-- reaches after the gate opened is a gate that opened. phase done is not one of them, and is the
+-- one phase past admitted that proves nothing: workflow's leave records any non-root member a
+-- person moves to backlog, icebox, triage or done at done whatever the gate was doing, and the
+-- children of a live tree are recorded before any release, so a root still writing its first spec
+-- can already have a parked child. A gate that shows neither never opened, and keeps the default,
+-- which leaves its root at work (record.AtWork) and its slot where it is.
 alter table design_gates add column ever_opened boolean not null default false;
 
 update design_gates set ever_opened = true
   where approved_version is not null
-     or exists (select 1 from issues m where m.tree = design_gates.issue and m.phase <> 'admitted');
+     or exists (select 1 from issues m where m.tree = design_gates.issue
+                  and m.phase not in ('admitted', 'done'));
 
 -- dispatch_issues.parent is the key of the issue's Dispatch parent, null for none. Admission and
 -- the workflow judge inside a transaction that does no I/O, so neither can ask Dispatch what hangs
@@ -35,6 +40,25 @@ update design_gates set ever_opened = true
 alter table dispatch_issues add column parent text;
 
 update dispatch_issues d set parent = i.parent from issues i where i.key = d.key and i.parent is not null;
+
+-- A tree's liveness moves with this release from the slot its root holds to its lifecycle row,
+-- which every rule that read "the root holds a slot" as "the tree runs" now reads instead
+-- (record.TreeLive). Before this migration only a root holds a slot, so a root holding one with
+-- no linger deadline is a tree that runs; after it, a root whose tree has no open lifecycle row
+-- belongs to no live tree, and the first admission pass takes it out of the workflow altogether
+-- (admit's unslotted and releaseUnslotted) though its architect is at work in it. So the
+-- pre-release fact is written in the shape the new rule reads. Every tree an admission opened
+-- has its row already — 0033_tree_lifecycle backfilled the roots recorded then, and each
+-- promotion since opened one — so this writes nothing where they are all there, and carries the
+-- fact where one is missing. Epoch one under the workflow's authority is 0033's own choice, and
+-- the claims of such a tree already carry that epoch; a row that already exists is left exactly
+-- as it stands, a reserved cleanup and the operator's authority included.
+insert into tree_lifecycles (project, tree, epoch, authority)
+select distinct regexp_replace(lower(i.project), '[^a-z0-9]', '', 'g'), i.key, 1, 'workflow'
+  from issues i
+  join slots s on s.issue = i.key
+ where i.key = i.tree and i.linger_until is null
+on conflict do nothing;
 
 -- One slot row exists per tree root today; after the whole change any issue may hold one while it
 -- has a worker with work to do. At the first boot after this migration every issue already in a

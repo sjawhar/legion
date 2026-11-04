@@ -33,6 +33,37 @@ func Beneath(issue Issue, members []Issue) []Issue {
 	return under
 }
 
+// Above is the members of issue's tree that issue lies beneath, nearest first and the tree's own
+// root last: the mirror of Beneath, so a member is in Above(issue) exactly where issue is in
+// Beneath(member). The chain of recorded parents gives the rest, and the root is always there,
+// whatever that chain shows, for the reason Beneath gives a root every other member.
+//
+// It is what a departure reads to find whose wait it may have ended: a merged issue stands in
+// awaiting_merge until the last issue beneath it leaves (OpenBeneath, workflow's closeMerged),
+// and that wait is no longer a tree root's alone, so the leave of one issue re-reads the wait of
+// every merged ancestor it stood beneath (workflow's leave).
+func Above(issue Issue, members []Issue) []Issue {
+	byKey := make(map[string]Issue, len(members))
+	for _, member := range members {
+		byKey[member.Key] = member
+	}
+	above := make([]Issue, 0, len(members))
+	seen := map[string]bool{issue.Key: true}
+	for key := issue.Parent; key != nil && !seen[*key]; {
+		seen[*key] = true
+		parent, recorded := byKey[*key]
+		if !recorded {
+			break
+		}
+		above = append(above, parent)
+		key = parent.Parent
+	}
+	if root, recorded := byKey[issue.Tree]; recorded && !seen[issue.Tree] {
+		above = append(above, root)
+	}
+	return above
+}
+
 // descends says whether member hangs under key, through the chain of recorded parents in byKey.
 // A chain that leaves the records, or loops back on itself, ends the walk.
 func descends(member Issue, key string, byKey map[string]Issue) bool {

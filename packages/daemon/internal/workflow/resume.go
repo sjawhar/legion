@@ -16,8 +16,8 @@ import (
 // First, the upgrade's sweep (sweepMerged): an issue of this project that awaits its merge on a
 // pull request already merged is one the migration moved out of production_check, and the merge
 // that would have closed it will never come again, so the boot closes it as the merge would have
-// (closeMerged) — unless it is a root with a child still in the workflow, which stays where it is
-// and closes when its last child leaves (leave's closeAwaitingRoot), so the deploy suspends no
+// (closeMerged) — unless an issue beneath it is still in the workflow, which leaves it where it
+// is to close when the last of them leaves (leave's closeAwaitingMerge), so the deploy suspends no
 // running child under a mass of lingers. The check such a close opens has no merge commit, which
 // its first compare fills from GitHub.
 //
@@ -123,11 +123,11 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 }
 
 // sweepMerged closes every issue of the project that awaits a merge GitHub already reported
-// (booted). Each is re-read before its close: a child's close may have closed its root
-// (closeAwaitingRoot), and a root's close lingers the tree its children then close under. A root
-// whose tree still runs is left where it stands by closeMerged, which owns that rule, and the
-// sweep tells nobody of the wait: a restart must not repeat the architect's notice, and a root can
-// now wait for days across many boots.
+// (booted). Each is re-read before its close: a child's close may have closed the merged issues
+// above it (closeAwaitingMerge), and a root's close lingers the tree its children then close
+// under. A root whose tree still runs is left where it stands by closeMerged, which owns that
+// rule, and the sweep tells nobody of the wait: a restart must not repeat the architect's
+// notice, and a root can now wait for days across many boots.
 func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {

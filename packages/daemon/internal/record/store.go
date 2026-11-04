@@ -1593,9 +1593,10 @@ func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int
 }
 
 // ReplaceOwedStart writes row's payload over the start the issue already owes its worker — its
-// oldest unleased supervise start marked needsSlot — and says whether it found one. The caller
-// enqueues row itself when it did not (workflow.StartOrOwe), which is the back-to-back case the
-// daemon has always had: two transitions before the worker runs leave one start, the later one.
+// oldest supervise start marked needsSlot that no live lease holds — and says whether it found
+// one. The caller enqueues row itself when it did not (workflow.StartOrOwe), which is the
+// back-to-back case the daemon has always had: two transitions before the worker runs leave one
+// start, the later one.
 //
 // It updates that row in place rather than deleting it and inserting a fresh one because the
 // row's id and created_at are the waiting line's own ordering key (OwedStart): the issue queued
@@ -1603,8 +1604,22 @@ func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int
 // wait carrying a newer task, not a new turn at the back of the line. The earlier task is
 // already dead whichever path wrote it — the transition minted a new assignment onto the role's
 // phases row in its own transaction, so a completion of the earlier one is refused
-// HANDOFF_STALE_ASSIGNMENT — so no information is lost with it. A row under a live lease is not
-// updated: its slot came, its lane has it, and the caller's own row is the next start.
+// HANDOFF_STALE_ASSIGNMENT — so no information is lost with it.
+//
+// A row under a live lease is not updated: its slot came, its lane has it, and the caller's own
+// row is the next start. A lapsed lease is no lane holding anything — the outbox's own due
+// predicate reads it as free (outboxUnleasedDue) and only a finished delivery takes the row
+// away — so such a row is still the start this issue is owed and is replaced like any other.
+// The lease is tested in the update's own where clause and not only in the sub-select that picks
+// the row: a lane claiming the row while this statement waits on its row lock would otherwise
+// have the task under it changed, and deliver the earlier task while the phases row already
+// carries the later assignment. It is ClaimRow's own shape — one conditional update, never a
+// read and then a write — because Postgres rechecks the quals against the row's new version once
+// the lock is released, so the claim's lease is seen and nothing is written. ClaimRow's advisory
+// lock is for the one rule of its own the row lock does not cover, a subquery over other rows;
+// this statement's lease test is on the row it writes, so it needs none. The moment the test is
+// made against is the one the caller is acting at, which rides in on the row it hands over
+// (NewOutboxRow's nextAt), so one transition reads one clock throughout.
 //
 // A partial unique index on the pending start would be the other way to keep one row, and is not
 // available: Enqueue allows one `on conflict` target per statement and already spends it on
@@ -1613,10 +1628,13 @@ func (s *Postgres) ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRo
 	if !json.Valid(row.Payload) {
 		return false, fmt.Errorf("replace the owed start of %s: payload is not JSON", row.Issue)
 	}
-	tag, err := tx.Exec(ctx, `update outbox set payload = $2 where id = (select id from outbox
-		where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'
-			and payload->>'needsSlot' = 'true' and lease_until is null order by id limit 1)`,
-		row.Issue, string(row.Payload))
+	tag, err := tx.Exec(ctx, `update outbox set payload = $2
+		where id = (select id from outbox
+			where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'
+				and payload->>'needsSlot' = 'true' and (lease_until is null or lease_until <= $3)
+			order by id limit 1)
+			and (lease_until is null or lease_until <= $3)`,
+		row.Issue, string(row.Payload), row.NextAt)
 	if err != nil {
 		return false, fmt.Errorf("replace the owed start of %s: %w", row.Issue, err)
 	}
@@ -1624,15 +1642,23 @@ func (s *Postgres) ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRo
 }
 
 // OwedStarts is every pending worker start of project's issues that waits for its issue's
-// admission slot and no lane has ever leased, oldest first by the pair the waiting line orders
-// them on (OwedStart), with the role, phase and generation each row serves. A row under a lease,
-// live or expired, is left out: its issue holds a slot already, so it is neither waiting in the
-// line nor safe for admission's repair to finish.
+// admission slot and that no live lease holds, oldest first by the pair the waiting line orders
+// them on (OwedStart), with the role, phase and generation each row serves and the lease token
+// it still carries. A row a lane holds now is left out: its slot came, so it is neither waiting
+// in the line nor safe for admission's repair to finish. A row whose lease has lapsed is not
+// that — the lane that held it is gone and only a finished delivery removes a row — so it is
+// listed, exactly as the outbox's own due predicate lists it again (outboxUnleasedDue); left
+// out, its issue would stand in no part of the line and nothing would ever deliver or repair it.
+//
+// The lapse is judged against the database's own clock, the one moment a read with no caller's
+// now can ask for. The lane that wrote the lease and the rows' other readers compare against the
+// daemon's clock, which the deployment keeps on the same time.
 func (s *Postgres) OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([]OwedStart, error) {
 	rows, err := tx.Query(ctx, `select issue, created_at, id, coalesce(payload->>'role', ''), coalesce(payload->>'phase', ''),
-			coalesce((payload->>'generation')::bigint, 0)
+			coalesce((payload->>'generation')::bigint, 0), lease_token
 		from outbox where kind = $1 and split_part(issue, '-', 1) = $2
-			and payload->>'op' = 'start' and payload->>'needsSlot' = 'true' and lease_until is null
+			and payload->>'op' = 'start' and payload->>'needsSlot' = 'true'
+			and (lease_until is null or lease_until <= now())
 		order by created_at, id`, string(OutboxKindSupervise), project)
 	if err != nil {
 		return nil, fmt.Errorf("list the starts %s owes its workers: %w", project, err)
@@ -1641,7 +1667,8 @@ func (s *Postgres) OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([
 	var owed []OwedStart
 	for rows.Next() {
 		var start OwedStart
-		if err := rows.Scan(&start.Issue, &start.CreatedAt, &start.ID, &start.Role, &start.Phase, &start.Generation); err != nil {
+		if err := rows.Scan(&start.Issue, &start.CreatedAt, &start.ID, &start.Role, &start.Phase, &start.Generation,
+			&start.LeaseToken); err != nil {
 			return nil, fmt.Errorf("list the starts %s owes its workers: %w", project, err)
 		}
 		owed = append(owed, start)

@@ -45,7 +45,7 @@ You own one issue tree from its first decision to the merge that closes it. The 
 
 ## 3. Children complete
 
-Your issue's own first phase does not start while Dispatch shows an open child under it, one you filed and have not released included: the daemon tells you once per generation with a `children-first` notice naming each open child and the Dispatch status that holds it, and starts the parent at its next admission slot once the last of them has left the workflow, closed, gone to `icebox`, or moved to another parent. So file and release the whole wave at once, and park what should not run. No notice marks the last child's close. A child filed after your issue started runs beside it, and the daemon refuses the parent's `sign_off` while that child is in the workflow: run the parent's last round (section 4) so its head carries the child's merge.
+Your issue's own first phase does not start while Dispatch shows an open child under it, one you filed and have not released included: the daemon tells you once per generation with a `children-first` notice naming each open child and the Dispatch status that holds it, and starts the parent at its next admission slot once the last of them has left the workflow, closed, gone to `icebox`, or been moved out from under it, to another parent or to none. So file and release the whole wave at once, and park what should not run. No notice marks the last child's close. A child filed after your issue started runs beside it, and the daemon refuses the parent's `sign_off` while that child is in the workflow: run the parent's last round (section 4) so its head carries the child's merge.
 
 ## 4. Integration verification
 

@@ -412,7 +412,8 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 // stands at. The periodic turn's re-read carries them on its ControllerTick, and blockers.Mirror
 // writes each through the same sequence-fenced write an event's own row takes, so a view older
 // than an event already applied changes nothing — except the parent, which record.PutDispatchIssue
-// writes outside that fence, since only a listing or a detail read carries one. ClaimedBy and
+// also writes for a view at the row's own sequence, the listing that is the only thing to carry
+// the parent of an issue the daemon has never recorded. ClaimedBy and
 // ClaimKnown are DispatchIssue's: the issue read behind this view shows the claim unless it names
 // no actor.
 type IssueStatus struct {
@@ -422,9 +423,11 @@ type IssueStatus struct {
 	Seq        int64
 	ClaimedBy  string
 	ClaimKnown bool
-	// Parent is the key of the issue's Dispatch parent, empty for a root or for a view that does
-	// not show one. The children-first rule reads the mirror's parent column to find what hangs
-	// under an issue (record.ChildWaits), so every observation that knows the parent carries it.
+	// Parent is the key of the issue's Dispatch parent, empty for an issue Dispatch shows under
+	// none. The children-first rule reads the mirror's parent column to find what hangs under an
+	// issue (record.ChildWaits), so every observation carries the parent it saw, and empty is
+	// the observation that the issue has no parent: it clears the one the mirror holds
+	// (record.PutDispatchIssue).
 	Parent string
 }
 

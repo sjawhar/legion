@@ -40,8 +40,8 @@ func ChildrenFirstNotice(wait record.ChildWait) record.Notice {
 		}
 	}
 	reason := fmt.Sprintf("%s starts no phase of its own while Dispatch shows an open child under it: %s. "+
-		"Each one must be released and run until it leaves the workflow, closed, moved to icebox, or moved to another parent; %s starts its own first phase when the last of them has.",
-		wait.Parent, strings.Join(named, ", "), wait.Parent)
+		"Each one must be released and run until it leaves the workflow, closed, moved to icebox, or moved out from under %s, to another parent or to none; %s starts its own first phase when the last of them has.",
+		wait.Parent, strings.Join(named, ", "), wait.Parent, wait.Parent)
 	if len(cycles) > 0 {
 		reason += " " + strings.Join(cycles, " ") + "."
 	}

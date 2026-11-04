@@ -958,9 +958,11 @@ type HandedOverRoot struct {
 // of its own, since a claim event says nothing of the status or the blockers and may arrive before
 // the issue's first mirrored observation (PutDispatchClaim). A row written with ClaimSeq 0 leaves
 // the stored claim as it stands. Parent is the key of the issue's Dispatch parent, "" for none; it
-// is written outside the sequence fence, since Dispatch's listing is the only thing that carries
-// one and an issue whose live events are older than that listing must still get its parent, and a
-// row carrying none never clears a stored one (PutDispatchIssue).
+// is the parent the observation saw, and "" is its observation that the issue has none, which
+// clears a stored one. It is written outside the sequence fence as well as inside it, since a
+// listing at the sequence the row already holds is the only thing that carries the parent of an
+// issue the daemon has never recorded; an observation older than the row writes no parent at all,
+// because the row's own saw it later (PutDispatchIssue).
 type DispatchIssueRow struct {
 	Key       string
 	Project   string
@@ -1239,16 +1241,18 @@ type Store interface {
 	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
 	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.
 	EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error)
-	// ReplaceOwedStart writes row's payload over the issue's oldest unleased supervise start that
-	// waits for the issue's admission slot (SuperviseRequest.NeedsSlot) and says whether it found
-	// one, so two transitions before that slot leave exactly one start, the later one, in the
-	// place in the waiting line the first one took. A row under a live lease is not touched; the
-	// caller then enqueues its own.
+	// ReplaceOwedStart writes row's payload over the issue's oldest supervise start that waits
+	// for the issue's admission slot (SuperviseRequest.NeedsSlot) and that no live lease holds,
+	// and says whether it found one, so two transitions before that slot leave exactly one
+	// start, the later one, in the place in the waiting line the first one took. A row a lane
+	// holds now is not touched, including one it takes while the call waits on its row lock; the
+	// caller then enqueues its own. A lapsed lease holds nothing and is replaced like any other.
 	ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRow) (bool, error)
 	// OwedStarts is every pending worker start of the Dispatch project key project that waits for
-	// its issue's admission slot, oldest first by creation time and then id — the waiting line's
-	// own ordering key for the issues whose work came back (Waiting). An issue holding two of
-	// them appears twice, oldest first.
+	// its issue's admission slot and that no live lease holds, a row whose lease has lapsed among
+	// them, oldest first by creation time and then id — the waiting line's own ordering key for
+	// the issues whose work came back (Waiting). An issue holding two of them appears twice,
+	// oldest first.
 	OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([]OwedStart, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row

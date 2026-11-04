@@ -297,7 +297,9 @@ the approval request is on the architect's turn), `closed` (a session or anyone 
 person closed the question), `turn` (a session handed it back to the agent's turn), `retracted`
 (Dispatch's settlement), and `approved` also when the spec's gate stands open with nobody's
 approval under `gates.design: off`, or when the gate was switched off while the root waited on it. The root is
-at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
+at the front of `admission.waiting` and resumes itself there: at once, holding no slot, once its
+design gate has opened, and at the next free slot while its architect is still writing the first
+spec. Do not park it or
 start it by hand. Without `answeredAt`, check, in order:
 
 1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
