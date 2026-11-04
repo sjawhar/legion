@@ -2765,6 +2765,237 @@ describe("executeDispatchTool", () => {
     expect(childrenOnly.text).toContain("Progress: children 2/5\n");
   });
 
+  test("dispatch_read prints one Coverage line per gap, and names a read it could not make", async () => {
+    const read = async (coverage: Record<string, unknown> | null | number) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const pathname = new URL(String(url)).pathname;
+        if (pathname === "/api/v1/issues/DSP-7") {
+          return response({
+            key: "DSP-7",
+            title: "Covered",
+            status: "todo",
+            priority: null,
+            assignee: null,
+            claim: null,
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+            open_asks: [],
+            last_seq: 0,
+            external_links: [],
+            labels: [],
+            repo: null,
+            resolved_repo: null,
+            route: null,
+            route_status: null,
+            route_holder: null,
+          });
+        }
+        if (pathname === "/api/v1/issues/DSP-7/coverage") {
+          if (coverage === null) {
+            return response({ error: "no such route", code: "NOT_FOUND" }, 404);
+          }
+          if (typeof coverage === "number") {
+            return response({ error: "the coverage read failed", code: "INTERNAL" }, coverage);
+          }
+          return response(coverage);
+        }
+        if (pathname === "/api/v1/issues/DSP-7/events") return response([]);
+        if (pathname === "/api/v1/issues/DSP-7/references" || pathname === "/api/v1/references") {
+          return response({ node: { kind: "issue", id: "DSP-7" }, edges: [], members: [] });
+        }
+        throw new Error(`unexpected request: ${pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { issue: "DSP-7" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text;
+    };
+
+    const gaps = await read({
+      issue: "DSP-7",
+      spec_artifact_id: "artifact-7",
+      has_plan: true,
+      requirements: [
+        {
+          block_id: "r1",
+          ref: "dispatch://DSP-7/spec#b-r1",
+          text: "One.",
+          checks: 1,
+          plan_tasks: 0,
+          gaps: ["has no plan task"],
+        },
+        {
+          block_id: "r2",
+          ref: "dispatch://DSP-7/spec#b-r2",
+          text: "Two.",
+          checks: 0,
+          plan_tasks: 0,
+          gaps: ["has no check", "has no plan task"],
+        },
+      ],
+      gaps: ["r1 has no plan task", "r2 has no check", "r2 has no plan task"],
+    });
+    expect(gaps).toContain(
+      "Coverage: r1 has no plan task\nCoverage: r2 has no check\nCoverage: r2 has no plan task\nExternal links:"
+    );
+
+    const unmarked = await read({
+      issue: "DSP-7",
+      spec_artifact_id: "artifact-7",
+      has_plan: false,
+      requirements: [],
+      gaps: ["the spec marks no requirements"],
+    });
+    expect(unmarked).toContain("Coverage: the spec marks no requirements\nExternal links:");
+
+    const covered = await read({
+      issue: "DSP-7",
+      spec_artifact_id: "artifact-7",
+      has_plan: true,
+      requirements: [
+        {
+          block_id: "r1",
+          ref: "dispatch://DSP-7/spec#b-r1",
+          text: "One.",
+          checks: 1,
+          plan_tasks: 1,
+          gaps: [],
+        },
+      ],
+      gaps: [],
+    });
+    expect(covered).not.toContain("Coverage:");
+
+    // A Dispatch that does not serve the read at all says so in one word; any other failure is
+    // named, so a spec with uncovered requirements never reads like a covered one because the
+    // server answered 500.
+    expect(await read(null)).toContain("Coverage: unavailable\nExternal links:");
+    const failed = await read(500);
+    expect(failed).toContain("Coverage: unavailable: ");
+    expect(failed).toContain("the coverage read failed");
+  });
+
+  test("dispatch_doc_read --blocks prints a typed block's pointers, and not a value that reads like one", async () => {
+    const task =
+      ':::plan_task{#t2 serves="dispatch://DSP-8/spec#b-r1" needs="dispatch://DSP-8/artifact/plan-md#b-t1"}\nSort the asks.\n:::';
+    // A check's run is the command a tester types, which may quote a reference. The schema
+    // declares it a string, so the listing reads it as text: only what the schema declares
+    // block[] is a pointer.
+    const check =
+      ':::check{#k1 serves="dispatch://DSP-8/spec#b-r1" run="dispatch read --ref dispatch://DSP-8/spec#b-r1"}\nThe spec is read.\n:::';
+    const markdown = `${task}\n\n${check}`;
+    const taskBytes = new TextEncoder().encode(task).length;
+    const documentBytes = new TextEncoder().encode(markdown).length;
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname === "/api/v1/issues/DSP-8") {
+        return response({
+          key: "DSP-8",
+          title: "Planned",
+          status: "todo",
+          artifacts: [
+            {
+              id: "artifact-8",
+              issue_key: "DSP-8",
+              project: "DSP",
+              slug: "spec",
+              name: "spec.md",
+              kind: "doc",
+              primary: true,
+              created_by: { kind: "user", id: "alice" },
+              created_at: "2026-10-20T00:00:00Z",
+              versions: [],
+            },
+          ],
+          open_asks: [],
+          last_seq: 0,
+        });
+      }
+      if (pathname === "/api/v1/artifacts/artifact-8/text") {
+        return response({ markdown, token: "sha256:doc" });
+      }
+      if (pathname === "/api/v1/artifacts/artifact-8/blocks") {
+        return response([
+          {
+            id: "t2",
+            type: "plan_task",
+            from: 0,
+            to: taskBytes,
+            token: "sha256:t2",
+            references: { comments: 0, asks: 0 },
+            attributes: [
+              { name: "serves", value: "dispatch://DSP-8/spec#b-r1", kind: "block[]" },
+              {
+                name: "needs",
+                value: "dispatch://DSP-8/artifact/plan-md#b-t1",
+                kind: "block[]",
+              },
+            ],
+          },
+          {
+            id: "k1",
+            type: "check",
+            from: taskBytes + 2,
+            to: documentBytes,
+            token: "sha256:k1",
+            references: { comments: 0, asks: 0 },
+            attributes: [
+              { name: "serves", value: "dispatch://DSP-8/spec#b-r1", kind: "block[]" },
+              {
+                name: "run",
+                value: "dispatch read --ref dispatch://DSP-8/spec#b-r1",
+                kind: "string",
+              },
+            ],
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${pathname}`);
+    };
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-8", blocks: true },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(
+      [
+        't2 plan_task (sha256:t2; 0 comments, 0 asks): :::plan_task{#t2 serves="dispatch://DSP-8/spec#b-r1" needs="…',
+        "  serves: dispatch://DSP-8/spec#b-r1",
+        "  needs: dispatch://DSP-8/artifact/plan-md#b-t1",
+      ].join("\n")
+    );
+    // The check's own pointer is printed, and nothing else of it: the line after its serves is
+    // the listing's trailer, so the run went unprinted rather than reading as a second pointer.
+    expect(result.text).toContain(
+      [
+        'k1 check (sha256:k1; 0 comments, 0 asks): :::check{#k1 serves="dispatch://DSP-8/spec#b-r1" run="dispat…',
+        "  serves: dispatch://DSP-8/spec#b-r1",
+        "",
+        "Document token: sha256:doc",
+      ].join("\n")
+    );
+    expect(result.text).not.toContain("run:");
+    expect(result.text).not.toContain("dispatch read --ref");
+  });
+
   // Every Dispatch the hosts reach pages the listing (sjawhar/legion#1612), so an array answered to
   // dispatch_issues means an older server or a regression, and the agent gets a refusal naming both
   // rather than a page the client cut from every issue. The message itself is pinned in
@@ -5475,12 +5706,14 @@ describe("executeDispatchTool", () => {
       document: "dispatch://CORE-1/spec",
     };
     const notFound = (error: string) => response({ error, code: "NOT_FOUND" }, 404);
-    /** A read of `ref` against a server whose references route answers `to` and `from`: the
-     *  pending result, and the requests it sends. */
+    /** A read of `ref` against a server whose references route answers `to` and `from` and whose
+     *  document lists `blocks` (none by default, so the read prints no type and no attribute):
+     *  the pending result, and the requests it sends. */
     const readBlock = (
       ref: string,
       to: () => Response,
-      from: () => Response = () => response({ node: blockNode, edges: [] })
+      from: () => Response = () => response({ node: blockNode, edges: [] }),
+      blocks: unknown[] = []
     ) => {
       const requests: string[] = [];
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -5491,6 +5724,9 @@ describe("executeDispatchTool", () => {
         }
         if (target.pathname === "/api/v1/references" && target.searchParams.get("from") === ref) {
           return from();
+        }
+        if (target.pathname === "/api/v1/issues/CORE-1/artifacts/spec/blocks") {
+          return response(blocks);
         }
         throw new Error(`unexpected request: ${target.pathname}${target.search}`);
       };
@@ -5575,11 +5811,81 @@ describe("executeDispatchTool", () => {
         ].join("\n"),
         details: { issue: "CORE-1", block: "décision:1" },
       });
-      // The block's own node, both ways, and nothing of the issue or the document.
+      // The block's own node, both ways, and its document's blocks for its type and attributes;
+      // nothing of the issue, which the reference's owner and slug make unnecessary.
       expect(requests.sort()).toEqual([
+        "/api/v1/issues/CORE-1/artifacts/spec/blocks",
         `/api/v1/references?from=${encodeURIComponent(blockRef)}`,
         `/api/v1/references?to=${encodeURIComponent(blockRef)}`,
       ]);
+    });
+
+    test("a check block prints its type, every attribute it carries and who serves it", async () => {
+      const checkRef = "dispatch://CORE-1/spec#b-k1";
+      const requirement = "dispatch://CORE-1/spec#b-r1";
+      const node = {
+        ...blockNode,
+        id: "CORE-1/spec#k1",
+        block_id: "k1",
+        ref: checkRef,
+        changed_version: 4,
+        changed_at: "2026-10-23T00:00:00Z",
+        text: "The issue page draws the open asks, the most urgent first.",
+      };
+      const { result } = readBlock(
+        checkRef,
+        () => response({ node, edges: [] }),
+        () =>
+          response({
+            node,
+            edges: [
+              {
+                kind: "serves",
+                direction: "out",
+                node: { kind: "block", id: "CORE-1/spec#r1", ref: requirement },
+                created_at: "2026-10-23T00:00:00Z",
+                source_seq: null,
+              },
+            ],
+          }),
+        [
+          {
+            id: "k1",
+            type: "check",
+            from: 0,
+            to: 10,
+            token: "sha256:k",
+            references: { comments: 0, asks: 0 },
+            attributes: [
+              { name: "serves", value: requirement },
+              { name: "surface", value: "browser" },
+              { name: "run", value: "bun test web/src/features/issue" },
+              { name: "when", value: "before_merge" },
+              { name: "negative_control", value: "Draw the asks unsorted and watch this fail." },
+            ],
+          },
+        ]
+      );
+
+      expect((await result).text).toBe(
+        [
+          "Block: k1",
+          "Type: check",
+          "Document: dispatch://CORE-1/spec",
+          `serves: ${requirement}`,
+          "surface: browser",
+          "run: bun test web/src/features/issue",
+          "when: before_merge",
+          "negative_control: Draw the asks unsorted and watch this fail.",
+          "Changed in version: 4",
+          "Text:",
+          "The issue page draws the open asks, the most urgent first.",
+          "Referenced by:",
+          "- none",
+          "Links:",
+          `- serves block ${requirement} (2026-10-23T00:00:00Z)`,
+        ].join("\n")
+      );
     });
 
     test("a pinned block says how it stands against its version and shows that version's text", async () => {
@@ -6935,6 +7241,45 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("# Right document");
   });
 
+  // The server answers verification_artifact_id "" for an issue that has no Verification
+  // document, never null, so an empty list of checks there is "no document", not "a document
+  // with no check blocks": the two send the reader to different work.
+  test("dispatch_results tells an issue with no Verification document to write one", async () => {
+    const results = async (verificationArtifactID: string) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42/results") {
+          return response({
+            issue: "DSP-42",
+            verification_artifact_id: verificationArtifactID,
+            checks: [],
+          });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      return await executeDispatchTool({
+        tool: "dispatch_results",
+        args: { issue: "DSP-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+    };
+
+    const none = await results("");
+    expect(none.text).toBe(
+      "DSP-42 has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved."
+    );
+    expect(none.details).toMatchObject({ issue: "DSP-42", checks: 0 });
+    // A Verification document that holds no check block is the other sentence.
+    expect((await results("artifact-9")).text).toBe(
+      "DSP-42's Verification document holds no check blocks."
+    );
+  });
+
   test("dispatch_request_approval sends its summary and reports the question the Inbox shows", async () => {
     const posts: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -7006,6 +7351,82 @@ describe("executeDispatchTool", () => {
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
+  });
+
+  test("dispatch_request_approval prints the spec's coverage, nothing for a covered spec, and says when it was not read", async () => {
+    const request = async (coverage: readonly string[], unread = false) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [
+              {
+                id: "artifact-42",
+                slug: "spec",
+                name: "spec.md",
+                primary: true,
+                approval: { state: "draft", latest_version: 3 },
+              },
+            ],
+            open_asks: [],
+          });
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/blocks") {
+          return response([{ id: "p-1", type: "paragraph", from: 0, to: 12 }]);
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
+          return response(
+            {
+              ask: {
+                id: "ask-9",
+                issue_key: "DSP-42",
+                artifact_id: null,
+                kind: "approval",
+                question: "Approve spec.md (version 3)?",
+              },
+              artifact_id: "artifact-42",
+              version: 3,
+              coverage,
+              ...(unread ? { coverage_unread: true } : {}),
+            },
+            201
+          );
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_request_approval",
+        args: { issue: "DSP-42", summary: "The spec as it stands." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text;
+    };
+
+    const advice =
+      "Mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.";
+    expect(await request(["r1 has no check", "r3 has no check"])).toEndWith(
+      `\nCoverage of spec.md: r1 has no check. r3 has no check. ${advice}`
+    );
+    // A spec that marks none says so, and the request is still recorded.
+    const unmarked = await request(["the spec marks no requirements"]);
+    expect(unmarked).toStartWith("Approval requested for spec.md");
+    expect(unmarked).toEndWith(`\nCoverage of spec.md: the spec marks no requirements. ${advice}`);
+    // The negative control: every requirement has a check, so there is no coverage line at all.
+    expect(await request([])).not.toContain("Coverage of spec.md");
+    // A coverage the server could not read is not silence: an empty coverage alone would read
+    // exactly like a spec every requirement of which has a check.
+    const unread = await request([], true);
+    expect(unread).toStartWith("Approval requested for spec.md");
+    expect(unread).toEndWith(
+      "\nCoverage of spec.md: unread. Dispatch could not read what the spec's requirements lack, so no line here says there is no gap; the request is recorded either way. Read the coverage again with dispatch read --issue, and mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts."
+    );
   });
 
   // A call that finds the open request already waiting on the human (Dispatch's 200) changed
@@ -11037,6 +11458,15 @@ describe("executeDispatchTool", () => {
         target.searchParams.get("from") === "dispatch://DSP-42"
       ) {
         return response({ node: { kind: "issue", id: "DSP-42" }, edges: [] });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/coverage") {
+        return response({
+          issue: "DSP-42",
+          spec_artifact_id: "artifact-1",
+          has_plan: false,
+          requirements: [],
+          gaps: [],
+        });
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };

@@ -126,6 +126,8 @@ On the List:
 | `e` | Edit the title |
 | `Shift+P` | Pin or unpin the issue |
 | `t s` | Spec tab |
+| `t k` | Verification tab |
+| `t p` | Plan tab |
 | `t c` | Conversation tab |
 | `t h` | Children tab |
 | `t a` | Artifacts tab |

@@ -1102,6 +1102,58 @@ test("an architecture event refreshes the source lists and the project's model",
   }
 });
 
+// A recorded result moves two reads and no more: the results of the check's issue, where the
+// event sits, and the results of the issue that recorded it, which lists what it recorded. A
+// result recorded on the check's own issue names one. Each key is the one the Verification tab
+// reads under (`issueResultsQuery`), so a result recorded while that tab is open appears without
+// a reload. event-refresh's switches all have a default, so this pins the decision rather than
+// the compiler.
+test("a recorded result refreshes the results of the check's issue and of the recording issue", () => {
+  const own = event("result.recorded", {
+    check_block_id: "k1",
+    check_issue: "CORE-1",
+    commit_sha: "1111111111111111111111111111111111111111",
+    issue: "CORE-1",
+    role: "implementer",
+    verdict: "pass",
+  });
+  expect(eventRefreshTargets(own, "alice").map((target) => target.queryKey)).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues", "project", "CORE"],
+    ["issue", "CORE-1", "results"],
+  ]);
+  const child = event("result.recorded", {
+    check_block_id: "k1",
+    check_issue: "CORE-1",
+    commit_sha: "1111111111111111111111111111111111111111",
+    issue: "CORE-9",
+    role: "tester",
+    verdict: "pass",
+  });
+  expect(eventRefreshTargets(child, "alice").map((target) => target.queryKey)).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues", "project", "CORE"],
+    ["issue", "CORE-1", "results"],
+    ["issue", "CORE-9", "results"],
+  ]);
+});
+
+// A document version moves what the Spec tab's gap pills and the Verification tab's checks
+// read: adding a `check` to verification.md, or a `requirement` to the spec, changes both. Both
+// reads hang under the issue's key, and every issue target is `exact`, so the branch names them
+// itself; without that a mounted page shows the old gaps and the old checks for the rest of the
+// session.
+test("a document version refreshes the issue's coverage and its recorded results", () => {
+  const version = event("artifact.version", { artifact_id: "artifact-3", name: "Verification" });
+  const keys = eventRefreshTargets(version, "alice").map((target) =>
+    JSON.stringify(target.queryKey)
+  );
+  expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "coverage"]));
+  expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "results"]));
+});
+
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here
  *  until it has a row. */
 const eventsByType: Record<EventType, Event> = {
@@ -1161,6 +1213,14 @@ const eventsByType: Record<EventType, Event> = {
   "message.delivery": event("message.delivery", { target: "session:planner" }),
   "project.created": event("project.created", {}, { issue_key: null }),
   "project.updated": event("project.updated", {}, { issue_key: null }),
+  "result.recorded": event("result.recorded", {
+    check_block_id: "k1",
+    check_issue: "CORE-1",
+    commit_sha: "1111111111111111111111111111111111111111",
+    issue: "CORE-1",
+    role: "implementer",
+    verdict: "pass",
+  }),
   "settings.architecture_source.updated": event(
     "settings.architecture_source.updated",
     {},
