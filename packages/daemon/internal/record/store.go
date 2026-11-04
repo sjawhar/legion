@@ -1833,15 +1833,23 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 }
 
 func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error {
-	// The issue's catch-ups are locked before their leases are read. The lease check below is a
-	// subquery over the outbox, and Postgres rechecks a concurrently updated row's new version
-	// against the where clause, never a subquery over other rows: a delete whose statement began
-	// before a lane's claim committed would wait on the claim's row lock and then delete the row
-	// it had read unleased. The lock waits on that claim instead, and the delete, a statement of
-	// its own, reads the lease it wrote; a claim that arrives after the lock waits on this
-	// transaction and finds the row gone (ClaimRow).
+	// The issue's catch-ups no live lease holds are locked before their leases are read. The lease
+	// check below is a subquery over the outbox, and Postgres rechecks a concurrently updated row's
+	// new version against the where clause, never a subquery over other rows: a delete whose
+	// statement began before a lane's claim committed would wait on the claim's row lock and then
+	// delete the row it had read unleased. The lock waits on that claim instead, and the delete, a
+	// statement of its own, reads the lease it wrote; a claim that arrives after the lock waits on
+	// this transaction, and finds the row gone when the delete took it (ClaimRow).
+	//
+	// A row already under a live lease is not locked: the delete reads that lease anyway, and the
+	// lane holding it may be finishing it. A finish's delete sets its claimed decisions' claimed_by
+	// to null, which waits on a caller that has locked those decisions first (workflow.Adopt and
+	// spentKept lock them through UnclaimedKept before they queue a catch-up), so locking the
+	// leased row here as well would close a deadlock
+	// (TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting).
 	if _, err := tx.Exec(ctx, `select 1 from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
-		order by id for update`, string(OutboxKindNotice), issue); err != nil {
+		and not (lease_token <> '' and lease_until is not null and lease_until > $3)
+		order by id for update`, string(OutboxKindNotice), issue, now); err != nil {
 		return fmt.Errorf("lock the queued catch-ups of %s: %w", issue, err)
 	}
 	// A catch-up that carries kept decisions and one of whose telling's rows (itself, the row it

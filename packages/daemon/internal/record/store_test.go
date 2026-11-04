@@ -1771,6 +1771,88 @@ func TestDroppingCatchUpsLeavesTheRowALaneIsLeasing(t *testing.T) {
 	}
 }
 
+// A lane finishing a catch-up and a transaction that locked the tree's decisions and then drops the
+// root's catch-ups (workflow.Adopt and spentKept, which lock them through UnclaimedKept before they
+// queue a catch-up) take the same two locks in opposite orders unless the drop leaves the leased row
+// alone. The finish deletes its row and then sets the decisions it claimed back to unclaimed (the
+// foreign key's on delete set null), which waits on the decisions the other transaction locked; a
+// drop that then locked every catch-up of the issue, the finishing one included, would wait on the
+// finish, and Postgres would abort one of the two as a deadlock. The drop locks only the catch-ups
+// no live lease holds, so both commit.
+func TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	ref := "dispatch://LEGION-1/ask/ask-1"
+	kept := KeptDecisions{Decisions: []DecisionMark{{Ref: ref, At: at, Issue: "LEGION-1"}}}
+	var catchUp int64
+	inTx(t, st, func(tx pgx.Tx) {
+		putRoot(t, ctx, records, tx, "LEGION-1")
+		must(t, records.AddParkedDecision(ctx, tx, ParkedDecision{Issue: "LEGION-1", Ref: ref, Decision: DecisionAskAnswered,
+			Actor: "user:alice", At: at}))
+		row, err := NewOutboxRow("LEGION-1", Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "the tree of LEGION-1",
+			CatchUp: &CatchUp{Generation: 1, Launch: 1, Decided: ref, Kept: &kept}}, now)
+		must(t, err)
+		catchUp, err = records.EnqueueID(ctx, tx, row)
+		must(t, err)
+		must(t, records.ClaimKeptDecisions(ctx, tx, "LEGION-1", kept, catchUp))
+	})
+	var leased OutboxRow
+	inTx(t, st, func(tx pgx.Tx) {
+		var ok bool
+		var err error
+		if leased, ok, err = records.ClaimRow(ctx, tx, catchUp, now, time.Minute); err != nil || !ok {
+			t.Fatalf("the lane's claim of the catch-up = %v, %v; want it leased", ok, err)
+		}
+	})
+
+	// The adoption's transaction locks the tree's decisions.
+	txAdopt, err := st.BeginTx(ctx, pgx.TxOptions{})
+	must(t, err)
+	defer func() { _ = txAdopt.Rollback(ctx) }()
+	if _, _, _, err := records.UnclaimedKept(ctx, txAdopt, "LEGION-1"); err != nil {
+		t.Fatalf("lock the decisions owed to LEGION-1: %v", err)
+	}
+	// The lane's finish deletes the row and waits on those decisions.
+	finished := make(chan error, 1)
+	go func() {
+		finished <- st.Tx(ctx, func(tx pgx.Tx) error { return records.FinishOutbox(ctx, tx, leased.ID, leased.LeaseToken) })
+	}()
+	testwait.Eventually(t, "the finish to wait on the decisions the adoption locked", func() bool {
+		var waiting int
+		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	})
+	select {
+	case err := <-finished:
+		t.Fatalf("the finish returned (%v) while the adoption held the decisions it claimed; want it waiting on them", err)
+	default:
+	}
+
+	// The adoption then drops the root's catch-ups, and both commit.
+	if err := records.DropCatchUps(ctx, txAdopt, "LEGION-1", now); err != nil {
+		t.Fatalf("drop the catch-ups of LEGION-1 while a lane finishes one: %v; want no wait on the finishing row", err)
+	}
+	must(t, txAdopt.Commit(ctx))
+	if err := <-finished; err != nil {
+		t.Fatalf("finish the catch-up once the adoption committed: %v", err)
+	}
+
+	var left int
+	var claimedBy int64
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, tx.QueryRow(ctx, "select count(*) from outbox where id = $1", catchUp).Scan(&left))
+		must(t, tx.QueryRow(ctx, "select coalesce(claimed_by, 0) from parked_decisions where issue = 'LEGION-1' and ref = $1", ref).Scan(&claimedBy))
+	})
+	if left != 0 || claimedBy != 0 {
+		t.Fatalf("after both committed the catch-up %d is in the outbox %d times and %s is claimed by row %d; want the finished row gone "+
+			"and the decision unclaimed", catchUp, left, ref, claimedBy)
+	}
+}
+
 // A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
 // role starts before its branch exists on GitHub. Nothing else waits on it: a suspend of the same
 // issue, a start queued before the row, and another issue's start are each due.
