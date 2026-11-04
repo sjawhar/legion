@@ -1,2 +1,0 @@
-kind: Added
-body: "`DISPATCH_HREF_REFERENCES` names the Decisions tab's page, `/issues/<key>/decisions`, as the issue's `decisions.md` (`dispatch://<key>/artifact/decisions-md`)."

@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  Two sessions claiming one role at the same moment are both answered 200. A claim's write named
+  the revision its read had seen, so the loser of the race was refused with JetStream's wrong last
+  sequence and `POST /v1/roles/set` answered 500 — an answer that route never documented, since a
+  claim is last-claim-wins. A hard claim with no `if_claim_revision` now writes unconditionally, so
+  the last write holds the role. A hard claim with `if_claim_revision`, and a soft claim, keep their
+  conditional write, answered 409 when another claim landed first.
