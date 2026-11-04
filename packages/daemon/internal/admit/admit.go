@@ -86,10 +86,10 @@ func (a *Admission) ReportCapabilities(open func() []string) {
 }
 
 // UseMemory registers the project's `memory` block, under whose mode every tree this admission
-// opens for the first time is drawn (memorygroup.Draw, promoteHolds). A project whose file names
-// no block leaves the zero value, which draws every tree `none`. It is a setter rather than a
-// parameter of New for the reason ReportCapabilities is: every test that admits anything builds
-// an admission, and none of them configures memory.
+// opens for the first time is drawn (memorygroup.DrawAndRecord, promoteHolds). A project whose
+// file names no block leaves the zero value, which draws every tree `none`. It is a setter rather
+// than a parameter of New for the reason ReportCapabilities is: every test that admits anything
+// builds an admission, and none of them configures memory.
 func (a *Admission) UseMemory(memory config.Memory) {
 	a.memory = memory
 }
@@ -982,10 +982,11 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	// It takes its old tree's answer about memory with it too: the carry copies that tree's draw
 	// verbatim, with the time that tree was drawn, so the work goes on running under the group it
 	// has been running under. The carry is only half of it, because an old tree first opened
-	// before this release has no draw to copy: the record itself draws no root that left another
-	// tree (record.Store.DrawMemory reads handed_over_from, which stored.HandedOverFrom was just
-	// written with), so this child's own first promotion draws nothing either, whatever the
-	// project's mode reads now.
+	// before this release has no draw to copy: the record itself draws no root that left a tree
+	// it had opened (record.Store.DrawMemory reads handed_over_from, which stored.HandedOverFrom
+	// was just written with, against the tree_lifecycles rows), so this child's own first
+	// promotion draws nothing either, whatever the project's mode reads now. A child out of a
+	// tree that was never opened has run under nothing, and its own first promotion draws it.
 	if oldTree != stored.Key {
 		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
 			return err

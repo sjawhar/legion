@@ -77,7 +77,10 @@ func readMemory(value *yaml.Node, key string) (Memory, error) {
 		}
 	}
 	if files := fields["config_files"]; files != nil {
-		if memory.ConfigFiles, err = readMemoryConfigFiles(files, key+".config_files"); err != nil {
+		// A `memory` block's `config_files` and `role_config_files` are read the same way
+		// (readOverlayFiles); the overlays are a project's, and a memory-group role's Oh My Pi
+		// is what loads them.
+		if memory.ConfigFiles, err = readOverlayFiles(files, key+".config_files", "a memory-group role's Oh My Pi", "the project"); err != nil {
 			return Memory{}, err
 		}
 	}
@@ -91,14 +94,6 @@ func readMemory(value *yaml.Node, key string) (Memory, error) {
 		}
 	}
 	return memory, nil
-}
-
-// readMemoryConfigFiles is a `memory` block's `config_files`, which `role_config_files` and this
-// key read the same way (readOverlayFiles): at least one clean absolute path, each named once,
-// none holding PI_CONFIG_FILES' separator. The overlays are a project's, and a memory-group
-// role's Oh My Pi is what loads them.
-func readMemoryConfigFiles(value *yaml.Node, key string) ([]string, error) {
-	return readOverlayFiles(value, key, "a memory-group role's Oh My Pi", "the project")
 }
 
 // checkMemory refuses what a project's `memory` block asks for that no tree could run as asked,

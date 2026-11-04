@@ -81,7 +81,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")
 		return
 	}
@@ -559,7 +559,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 // for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
 // which READY holds the pull request's head to (unreviewedChange).
 func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, false, "", errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})

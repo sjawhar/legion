@@ -27,13 +27,13 @@ const (
 	GroupNone   Group = "none"
 )
 
-// Draw is the group word gives a tree. `off` draws none; `on` draws memory for every tree;
+// draw is the group word gives a tree. `off` draws none; `on` draws memory for every tree;
 // `random` flips coin once and draws memory on true. The word is a mode as a draw records it
 // (config.Memory.Word), which is never the empty string a project naming no block leaves: the
 // empty mode is turned into `off` in that one place, and nowhere else. An unknown word is refused
 // naming it: the loader takes only the three (config.readMemory), so reaching that branch is a
 // programming error, never an operator's file.
-func Draw(word config.MemoryMode, coin func() (bool, error)) (Group, error) {
+func draw(word config.MemoryMode, coin func() (bool, error)) (Group, error) {
 	switch word {
 	case config.MemoryOff:
 		return GroupNone, nil
@@ -67,11 +67,11 @@ type Records interface {
 // spawn — so a tree is drawn the same way whichever opened it, and the mode recorded is the word
 // a draw records (config.Memory.Word), never the empty string a project naming no block leaves.
 // Writing no row is no error and no business of this helper's: a root that carries a draw
-// already, one that left another tree, and a tree with no root record at all each keep what they
-// have (record.Store.DrawMemory).
+// already, one that left a tree the daemon had opened, and a tree with no root record at all
+// each keep what they have (record.Store.DrawMemory).
 func DrawAndRecord(ctx context.Context, tx pgx.Tx, records Records, tree string, memory config.Memory,
 	coin func() (bool, error), at time.Time) error {
-	group, err := Draw(memory.Word(), coin)
+	group, err := draw(memory.Word(), coin)
 	if err != nil {
 		return fmt.Errorf("draw the memory group of %s: %w", tree, err)
 	}

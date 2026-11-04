@@ -45,12 +45,12 @@ func TestEachMemoryModeDrawsTheGroupItsWordNames(t *testing.T) {
 		{name: "random, the coin none", mode: config.MemoryRandom, coin: pinned(false), want: GroupNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Draw(tc.mode, tc.coin)
+			got, err := draw(tc.mode, tc.coin)
 			if err != nil {
-				t.Fatalf("Draw under mode %q: %v", tc.mode, err)
+				t.Fatalf("draw under mode %q: %v", tc.mode, err)
 			}
 			if got != tc.want {
-				t.Fatalf("Draw under mode %q = %q, want %q", tc.mode, got, tc.want)
+				t.Fatalf("draw under mode %q = %q, want %q", tc.mode, got, tc.want)
 			}
 		})
 	}
@@ -59,15 +59,15 @@ func TestEachMemoryModeDrawsTheGroupItsWordNames(t *testing.T) {
 	}
 
 	for _, unknown := range []config.MemoryMode{"sometimes", ""} {
-		group, err := Draw(unknown, refusing)
+		group, err := draw(unknown, refusing)
 		if err == nil || !strings.Contains(err.Error(), `"`+string(unknown)+`"`) {
-			t.Fatalf("Draw under the unknown mode %q = %q, %v; want an error naming it", unknown, group, err)
+			t.Fatalf("draw under the unknown mode %q = %q, %v; want an error naming it", unknown, group, err)
 		}
 	}
 
 	refused := errors.New("the random source is closed")
-	if group, err := Draw(config.MemoryRandom, func() (bool, error) { return true, refused }); !errors.Is(err, refused) || group != "" {
-		t.Fatalf("Draw with a failing coin = %q, %v; want no group and the coin's own error", group, err)
+	if group, err := draw(config.MemoryRandom, func() (bool, error) { return true, refused }); !errors.Is(err, refused) || group != "" {
+		t.Fatalf("draw with a failing coin = %q, %v; want no group and the coin's own error", group, err)
 	}
 }
 
@@ -78,9 +78,9 @@ func TestEachMemoryModeDrawsTheGroupItsWordNames(t *testing.T) {
 func TestTheDefaultCoinReadsCryptoRandAndNotMathRand(t *testing.T) {
 	drawn := map[Group]int{}
 	for range 400 {
-		group, err := Draw(config.MemoryRandom, CryptoCoin)
+		group, err := draw(config.MemoryRandom, CryptoCoin)
 		if err != nil {
-			t.Fatalf("Draw with the default coin: %v", err)
+			t.Fatalf("draw with the default coin: %v", err)
 		}
 		drawn[group]++
 	}

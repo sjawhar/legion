@@ -289,9 +289,10 @@ func TestARootWithNoMemoryBeforeThisReleaseIsNeverDrawnAndItsChildCarriesNone(t 
 // another tree takes that tree's answer with it, and the answer of a tree opened before this
 // release is no draw at all. The carry has none to copy, and the draw its own first promotion
 // would make is refused by the record itself (record.Store.DrawMemory, which draws no root that
-// left another tree). The project here is at `on` with a coin nothing may flip, so a draw would be
-// loud: the child would carry `memory`, drawn as `on`, at the hour of its hand-over, where the
-// tree it left carries nothing at all.
+// left a tree the daemon had opened — the lifecycle row this test seeds for the old tree is that
+// fact). The project here is at `on` with a coin nothing may flip, so a draw would be loud: the
+// child would carry `memory`, drawn as `on`, at the hour of its hand-over, where the tree it left
+// carries nothing at all.
 func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -351,6 +352,75 @@ func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 	if got := memoryOf(t, pool, root); got != noDraw {
 		t.Fatalf("after the hand-over the old root carries %s, want %s", got, noDraw)
 	}
+}
+
+// A root that left a tree nothing ever opened is drawn at its own first open, like any other new
+// tree: the answer it takes with it is its old tree's, and a tree with no tree_lifecycles row was
+// never opened, so its work never ran under a group at all. Here the old root waits for a slot
+// this admission never gives it, a child is recorded under it, and the person takes the root out
+// of todo, which brings the child back as a root of its own (record.Issue.HandedOverFrom, which
+// the carry finds nothing to copy for). The project is at `random` with the coin pinned to
+// memory, so the pass that re-admits that child opens its own tree — the one moment a lifecycle
+// row is created — and draws it `memory`, recorded as `random` at the hour of that pass.
+func TestAChildHandedOverFromATreeNeverOpenedIsDrawnAtItsOwnFirstOpen(t *testing.T) {
+	pool := migratedPool(t)
+	admission := quiet(t, 2)
+	admission.UseMemory(config.Memory{Mode: config.MemoryRandom})
+	admission.coin = func() (bool, error) { return true, nil }
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, child = "LEGION-1", "LEGION-2"
+	// The old tree as the record holds it: a root recorded and waiting for a slot, and a child
+	// recorded under it. No pass admits the root here, so nothing ever opens its tree.
+	seedWaiting(t, pool, root, "A")
+	parent := root
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1,
+		Status: "done", Rank: "B", LastDispatchSeq: 2})
+	if rows := lifecycleRows(t, pool, root); rows != 0 {
+		t.Fatalf("the old tree has %d lifecycle rows, want none: nothing ever opened it", rows)
+	}
+	// The person takes the root out of todo; an hour later the child comes back as a root of its
+	// own, and the hand-over records which tree it left.
+	linger(t, pool, root)
+	later := fixedNow.Add(time.Hour)
+	admission.now = func() time.Time { return later }
+
+	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
+		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: handed}, engine)
+
+	handedOver := issue(t, pool, child)
+	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
+		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
+	}
+	if rows := lifecycleRows(t, pool, child); rows != 1 {
+		t.Fatalf("the child's own tree has %d lifecycle rows, want the one its promotion created", rows)
+	}
+	// And the draw is made once: a later pass over the same tree creates no row and draws
+	// nothing, under a coin that fails the test when it is flipped.
+	admission.coin = refusingCoin(t)
+
+	tick(t, pool, admission, "another-pass-over-the-childs-own-tree")
+
+	want := drawnAs(string(memorygroup.GroupMemory), string(config.MemoryRandom), &later)
+	if got := memoryOf(t, pool, child); got != want {
+		t.Fatalf("after its own tree opened the child carries %s, want %s", got, want)
+	}
+	if got := memoryOf(t, pool, root); got != noDraw {
+		t.Fatalf("the root it left carries %s, want %s: its own tree was never opened", got, noDraw)
+	}
+}
+
+// lifecycleRows is how many tree_lifecycles rows the store holds for tree, the fact that says
+// whether that tree was ever opened (record.Store.DrawMemory reads it the same way, by the tree
+// alone).
+func lifecycleRows(t *testing.T, pool *pgxpool.Pool, tree string) int {
+	t.Helper()
+	var rows int
+	if err := pool.QueryRow(context.Background(), `select count(*) from tree_lifecycles where tree = $1`, tree).Scan(&rows); err != nil {
+		t.Fatalf("count the lifecycle rows of %s: %v", tree, err)
+	}
+	return rows
 }
 
 // linger signs key off and leaves it lingering with its slot given back, the state a root is in

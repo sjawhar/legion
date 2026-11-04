@@ -144,6 +144,31 @@ func TestAKeptPodBuiltBeforeTheMemoryMountIsToldNoMemoryOverlay(t *testing.T) {
 	}
 }
 
+// A pod holding the memory overlays tells a launch whose tree is in no memory group nothing: the
+// launch's own memory group decides what its PI_CONFIG_FILES names, not what the pod it keeps
+// holds, so a role of a tree the daemon never drew into the group is told the operator's and its
+// own overlays alone — the files a memory-group role of the same pod would be told last are left
+// out of its value. It is the other half of the kept pod above: there the launch was a
+// memory-group one and the pod held no memory overlay; here the pod holds them and the launch is
+// in no group.
+func TestAKeptPodHoldingTheMemoryOverlaysTellsALaunchInNoMemoryGroupNone(t *testing.T) {
+	r := memoryRuntime(t, memoryOverlays)
+	own := operatorPod().Env["PI_CONFIG_FILES"] + ":" + strings.Join(roleFiles[claim.RoleTester], ":")
+	s := &sandbox{Spec: sandboxSpec{PodTemplate: podTemplate{Spec: podOf(t, r, memorySpec(t))}}}
+	l := launchOf(t, r, workerSpec(t))
+	kept, readable := r.keptBy(s, l)
+	if !readable {
+		t.Fatal("keptBy could not read the pod's template")
+	}
+	if !slices.Equal(kept.memory, memoryOverlays) {
+		t.Fatalf("the kept pod holds the memory overlays %q, want %q: the launch is told none of a pod that holds them", kept.memory, memoryOverlays)
+	}
+	l.kept = &kept
+	if got := envOf(corev1.Container{Env: r.roleOperatorEnv(l)})["PI_CONFIG_FILES"]; got != own {
+		t.Errorf("the no-memory launch over a memory pod reads PI_CONFIG_FILES = %q, want %q", got, own)
+	}
+}
+
 // Moving a memory overlay's mount is drift for every issue pod of the deployment, the pod of a
 // tree in no memory group among them: any tree may be drawn into the group, so one update round
 // over the whole pod replaces it rather than a later launch replacing it under the roles working

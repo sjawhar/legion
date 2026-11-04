@@ -1381,14 +1381,22 @@ func (s *Postgres) RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string)
 // with, and a key with no record — an operator's spawn, whose tree's root the daemon never
 // recorded — takes none. Neither writes a row, and neither is an error.
 //
-// Nor is a root that left another tree (handed_over_from), which is drawn by nothing: such a root
-// takes its old tree's answer with it, which CarryMemory copies when that tree had a draw, and
-// which is no draw at all when it had none — a tree first opened before this release. Without the
+// Nor is a root that left another tree the daemon had opened: handed_over_from naming a tree that
+// holds a tree_lifecycles row, the store's own fact that the tree was really opened, and nothing
+// outside a test deletes those rows. Such a root takes its old tree's answer with it, which
+// CarryMemory copies when that tree had a draw, and which is no draw at all when it had none — a
+// tree first opened before this release, whose work has been running with no memory. Without the
 // condition, that child's own first OpenTreeLifecycle reports Created and would draw it under
 // whatever mode the project reads now.
+//
+// A root whose old tree was never opened has run under nothing at all, so its own first open
+// draws it like any other new tree, and an empty handed_over_from matches no row and draws. The
+// match is on the tree alone: tree_lifecycles.project is the normalized runtime token while
+// issues.project is the Dispatch key, and an issue key is unique across projects.
 func (s *Postgres) DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error) {
 	tag, err := tx.Exec(ctx, `update issues set memory_group = $2, memory_draw_mode = $3, memory_drawn_at = $4
-		where key = $1 and memory_drawn_at is null and handed_over_from = ''`, root, group, mode, at)
+		where key = $1 and memory_drawn_at is null
+		and not exists (select 1 from tree_lifecycles where tree_lifecycles.tree = issues.handed_over_from)`, root, group, mode, at)
 	if err != nil {
 		return false, fmt.Errorf("draw the memory group of %s: %w", root, err)
 	}

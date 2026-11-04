@@ -4783,7 +4783,8 @@ each issue's pod (every role of it alike) and the image probe's.
   A re-admission, a new generation and the next epoch after a cleanup keep it, since none of them creates that row again, and a child its finished root hands over as a tree of its own takes a copy of its old tree's draw, the draw time included.
   Every issue of a tree carries its root's group, so a child is never drawn for.
   A tree first opened before this release has no group and runs without memory, and nothing draws for it later:
-  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change, and a child handed over out of such a tree is never drawn for either, since a root that left another tree keeps that tree's answer whether it is a draw or none.
+  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change, and a child handed over out of such a tree is never drawn for either, since a root that left a tree the daemon had opened keeps that tree's answer whether it is a draw or none.
+  A root that left a tree the daemon never opened — one with no lifecycle row, whose work never ran — takes no answer with it, so its own first open draws it like any other new tree.
   An operator's spawn whose tree has no issue record records no draw and runs without memory; nothing is refused and no record is invented.
 
 - **What a memory-group role is given.**

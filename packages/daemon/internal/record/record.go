@@ -1190,10 +1190,12 @@ type Store interface {
 	// already carries a draw keeps it, whatever the project's mode says now, and a tree whose root
 	// has no issue record — an operator's spawn — records no draw at all.
 	//
-	// Nor is a root that left another tree (Issue.HandedOverFrom, which admit's readmit writes for
-	// every member that becomes a root of its own) ever drawn: it takes its old tree's answer with
-	// it, which CarryMemory copies when that tree had a draw and which is no draw at all when it
-	// had none — a tree first opened before this release, which nothing draws for.
+	// Nor is a root that left another tree the daemon had opened (Issue.HandedOverFrom, which
+	// admit's readmit writes for every member that becomes a root of its own, naming a tree that
+	// holds a tree_lifecycles row): it takes its old tree's answer with it, which CarryMemory
+	// copies when that tree had a draw and which is no draw at all when it had none — a tree
+	// first opened before this release, which nothing draws for. A root whose old tree was never
+	// opened has run under nothing, so its own first open draws it like any other new tree.
 	DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error)
 	// CarryMemory copies the draw of from onto key verbatim, the original draw time included: the
 	// hand-over of a child to a tree of its own, which keeps the group it has been running under.

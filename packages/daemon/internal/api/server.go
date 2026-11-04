@@ -126,8 +126,8 @@ type Options struct {
 	Trees TreeLifecycles
 	// Memory is the project's `memory` block (config.Project.Memory), under whose mode the
 	// operator's spawn draws the memory group of a tree it opens for the first time
-	// (memorygroup.Draw). The zero block is a project that names none, which draws every tree
-	// `none`. MemoryCoin is the coin the `random` mode is drawn with; nil is
+	// (memorygroup.DrawAndRecord). The zero block is a project that names none, which draws
+	// every tree `none`. MemoryCoin is the coin the `random` mode is drawn with; nil is
 	// memorygroup.CryptoCoin, and a test pins it. Now is the clock that draw's instant is read
 	// from; nil is time.Now, and a test pins it.
 	Memory     config.Memory

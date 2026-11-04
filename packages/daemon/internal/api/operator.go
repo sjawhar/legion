@@ -390,7 +390,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := m.Claim()
-	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.records == nil || s.roleFor == nil {
+	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
 		s.claimRequest("retry", retryEvent)(w, r)
 		return
 	}
