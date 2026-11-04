@@ -731,7 +731,7 @@ func (w *updateWalker) skipJSONValues(n uint64) bool {
 }
 
 // skipJSON reads one JSON text and reports whether fmtValFromJSON would take it (sjawhar/ygo
-// v1.54.1-sami.3, crdt/update.go:1616-1626), recording no refusal.
+// v1.55.1-sami.1, crdt/update.go:1722-1732), recording no refusal.
 func (w *updateWalker) skipJSON() bool {
 	if w.refusal != nil {
 		return false

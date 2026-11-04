@@ -207,7 +207,7 @@ const (
 	applyHeapPerJSONText = 64
 	// applyHeapPerNewJSONText is each JSON value of an integrated item, which the observers'
 	// encode writes as JSON text again with an encoder of its own (fmtValToJSON, sjawhar/ygo
-	// v1.54.1-sami.3, crdt/update.go:1563-1574). 298 bytes measured for a number, 705 for a map
+	// v1.55.1-sami.1, crdt/update.go:1669-1680). 298 bytes measured for a number, 705 for a map
 	// read from legacy lib0 Any.
 	applyHeapPerNewJSONText = 384
 	// applyHeapPerJSONContainer is each JSON object or array: an object's map with its first
@@ -223,7 +223,7 @@ const (
 	applyHeapPerNewJSONMember = 128
 	// applyHeapPerJSONByte is each byte of JSON text beyond applyHeapPerFrameByte: ygo copies the
 	// text into a string and again into the bytes encoding/json reads (fmtValFromJSON, sjawhar/ygo
-	// v1.54.1-sami.3, crdt/update.go:1616-1625), and the strings it decodes copy it once more.
+	// v1.55.1-sami.1, crdt/update.go:1722-1731), and the strings it decodes copy it once more.
 	applyHeapPerJSONByte = 2
 	// applyHeapPerNewJSONByte is each byte of an integrated JSON text beyond
 	// applyHeapPerIntegratedFrameByte, which the observers' encode escapes and copies again. 11.4

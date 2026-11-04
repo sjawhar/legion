@@ -2426,10 +2426,13 @@ func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(newBrowserDocument(t, before).doc, badByte, nil); err == nil {
 		t.Fatal("ygo's own apply took the frame ending in a bad byte, want it refused")
 	}
-	halfApplied := newBrowserDocument(t, before).doc
-	_ = crdt.ApplyUpdateV1(halfApplied, badByte, nil)
-	if halfApplied.StateVector()[crdt.ClientID(client)] == 0 {
-		t.Fatal("ygo's own apply of the frame ending in a bad byte integrated none of its structs, want the valid ones before the bad byte integrated")
+	// ygo refuses the frame and leaves the document holding none of it (reearth/ygo#340): what
+	// the walk keeps off the room is the decode and the integration of the structs before the
+	// bad byte, and the rollback after them, not a document left holding them.
+	refused := newBrowserDocument(t, before).doc
+	_ = crdt.ApplyUpdateV1(refused, badByte, nil)
+	if refused.StateVector()[crdt.ClientID(client)] != 0 {
+		t.Fatalf("ygo's own apply of the frame ending in a bad byte left client %d at clock %d, want a document holding none of it", client, refused.StateVector()[crdt.ClientID(client)])
 	}
 	// rooted is one struct of client's at clock 0: content of reference tag directly under root, as
 	// the entry key of a map when key is not empty (info bit 0x20).

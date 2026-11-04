@@ -335,7 +335,7 @@ func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t 
 // chainedRun applies to doc count one-character items of client, each after the one before and
 // the first after after, each in a remote transaction of its own, as a room takes each of a
 // person's keystrokes: ygo merges a run of characters only within one transaction (sjawhar/ygo
-// v1.54.1-sami.3, crdt/transaction.go:242-247), so each stays an item of its own, and a scan from the
+// v1.55.1-sami.1, crdt/transaction.go:275-280), so each stays an item of its own, and a scan from the
 // run's first item passes count-1 distinct items. doc must have no observer yet, which would pay
 // for every transaction.
 func chainedRun(tb testing.TB, doc *crdt.Doc, after crdt.ID, client crdt.ClientID, count int) {

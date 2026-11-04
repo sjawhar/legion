@@ -718,7 +718,7 @@ const browserAnswerWithin = 2 * time.Minute
 // browser is a document socket a test holds open as the dashboard's editor holds one. A goroutine
 // of its own reads every frame the server sends, so a socket held open while its room broadcasts
 // never fills the server's queue for it - ygo closes a peer whose queue fills (sjawhar/ygo
-// v1.54.1-sami.3, provider/websocket/peer.go:803-856) - and hands on only the answers to what the
+// v1.55.1-sami.1, provider/websocket/peer.go:858-911) - and hands on only the answers to what the
 // test sent: a SyncStatus, a Pong, a SyncStep2, among which a SyncStep2 another browser of the
 // room handed back and the room relayed, which await passes over. The rest - the room's own step
 // 1, awareness, other browsers' updates - is read and dropped, so the test process keeps no

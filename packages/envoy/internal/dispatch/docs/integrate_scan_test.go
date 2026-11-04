@@ -338,7 +338,7 @@ func TestAnIntegrateScanRefusalLeavesTheRoomsChargeAndTotalAsTheyWere(t *testing
 
 // A pending cap refuses a browser's update before the apply begins: ygo reads the update against
 // the cap before it starts the journal or asks the document's scan budget (sjawhar/ygo
-// v1.54.1-sami.3, crdt/update.go:743-760, crdt/apply_rollback.go:140-157), so the refusal reports
+// v1.55.1-sami.1, crdt/update.go:745-760, crdt/apply_rollback.go:155-175), so the refusal reports
 // no scans at all, and the room's scan total neither takes any for it nor has any to give back.
 // The hook returns the error as it is, so ygo answers that browser SyncStatus(0) and leaves it
 // connected (weighPeerUpdate), and the room's charge, its structure part, its struct total and its

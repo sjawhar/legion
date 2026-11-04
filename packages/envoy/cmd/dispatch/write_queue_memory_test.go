@@ -172,6 +172,13 @@ func (p *memoryServer) openSilent(t *testing.T, artifactID string) *silentSocket
 	if err := connection.SetReadDeadline(time.Now().Add(browserAnswerWithin)); err != nil {
 		t.Fatalf("set the socket's read deadline: %v", err)
 	}
+	// The room hands a joining peer its state only once the peer asks for it (reearth/ygo#342),
+	// as @hocuspocus/provider does on every connection, so the handshake read below is the answer
+	// to this ask and not something the room sends unprompted.
+	ask := documentFrame(artifactID, frameSync, ygsync.EncodeSyncStep1(crdt.New()))
+	if err := connection.WriteMessage(gws.BinaryMessage, ask); err != nil {
+		t.Fatalf("ask document %s for its state: %v", artifactID, err)
+	}
 	for {
 		_, message, err := connection.ReadMessage()
 		if err != nil {
@@ -435,7 +442,7 @@ const throttledReadInterval = 250 * time.Millisecond
 // broadcast to every other socket of the room. The burst ends with that browser handing its whole
 // state back, as a browser reconnecting to the room does, which ygo relays to the room's other
 // sockets as the frame it arrived in (applySyncUpdate's broadcastSync, sjawhar/ygo
-// v1.54.1-sami.3, provider/websocket/peer.go:281): the heaviest frame an honest room broadcasts,
+// v1.55.1-sami.1, provider/websocket/peer.go:287): the heaviest frame an honest room broadcasts,
 // and the one the budget is sized to hold beside a reader's ordinary lag.
 const burstKeystrokes = 200
 
@@ -461,9 +468,10 @@ type throttledReader struct {
 	ended  error
 }
 
-// openThrottled opens such a browser on the document's room. It sends a Ping at once, which lifts
-// ygo's handshake deadline as a browser's first frame does, and reads nothing but at its interval
-// from then on, the room's own SyncStep1, its whole state and that Ping's Pong included.
+// openThrottled opens such a browser on the document's room. It asks for the room's state, which
+// the room hands a joining peer only when it asks (reearth/ygo#342), and sends a Ping, which
+// lifts ygo's handshake deadline as a browser's first frame does, and reads nothing but at its
+// interval from then on, the room's whole state and that Ping's Pong included.
 func (p *memoryServer) openThrottled(t *testing.T, artifactID string) *throttledReader {
 	t.Helper()
 	connection, err := p.dialDocument(artifactID)
@@ -476,6 +484,9 @@ func (p *memoryServer) openThrottled(t *testing.T, artifactID string) *throttled
 		doc:        crdt.New(),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
+	}
+	if err := connection.WriteMessage(gws.BinaryMessage, documentFrame(artifactID, frameSync, ygsync.EncodeSyncStep1(crdt.New()))); err != nil {
+		t.Fatalf("ask the room for its state from a slow link: %v", err)
 	}
 	if err := connection.WriteMessage(gws.BinaryMessage, documentFrame(artifactID, framePing, nil)); err != nil {
 		t.Fatalf("ping the room from a slow link: %v", err)

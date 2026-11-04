@@ -635,7 +635,7 @@ func ygoMadeUpdates(tb testing.TB) []madeUpdate {
 
 	// Parked structs behind a skip: a document given a transaction's update without the one before
 	// it parks it, and its state carries the skip and the parked structs (withParked, sjawhar/ygo
-	// v1.54.1-sami.3, crdt/update.go:230-258).
+	// v1.55.1-sami.1, crdt/update.go:229-257).
 	var steps [][]byte
 	writer := newDocumentCopy(crdt.WithClientID(27))
 	stopSteps := writer.OnUpdate(func(update []byte, _ any) { steps = append(steps, slices.Clone(update)) })
@@ -814,7 +814,7 @@ func gcFrame(n int) []byte {
 
 // kindOfItem is the struct kind of an item ygo's decoder returned: a GC run decodes to deleted
 // content on an item already marked deleted, where deleted content is not (sjawhar/ygo
-// v1.54.1-sami.3, crdt/update.go:1063-1077).
+// v1.55.1-sami.1, crdt/update.go:1160-1174).
 func kindOfItem(item *crdt.Item) structKind {
 	switch item.Content.(type) {
 	case *crdt.ContentDeleted:
