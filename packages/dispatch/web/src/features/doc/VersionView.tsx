@@ -12,6 +12,7 @@ import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
+import { DocumentReferences, documentSource, useReferenceClick } from "./document-references";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
@@ -47,6 +48,9 @@ export function VersionView({
 }: VersionViewProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  // The handle the version's references are drawn through: the titles are a render of their
+  // own, so the surface that draws them re-renders with the editor it draws into.
+  const [editorHandle, setEditorHandle] = useState<EditorHandle | undefined>(undefined);
   const [highlightMissing, setHighlightMissing] = useState(false);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
   const { createEditor } = useContext(DocumentRuntime);
@@ -60,6 +64,10 @@ export function VersionView({
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
       : undefined;
+  // Where a `#id` in this version's text resolves: the document it is a version of, whose
+  // question blocks declare the asks it names.
+  const textSource = useMemo(() => documentSource(artifactId, owner), [artifactId, owner]);
+  const followReference = useReferenceClick();
 
   // `ProofDocument` renders this view and forwards `highlight`; `ArtifactDocument` above it
   // builds that object afresh on every render. So the editor effect below keys on what the
@@ -122,6 +130,8 @@ export function VersionView({
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlighted !== undefined && embedded === undefined);
+      // Once the version's text is in: its references are drawn over what it reads now.
+      setEditorHandle(editor);
       if (embedded !== undefined && highlighted !== undefined) {
         editor.focusMark(highlighted.id);
         // A diagram above the quote that draws after this focus pushes it down, so the focus
@@ -141,6 +151,7 @@ export function VersionView({
       // empty document.
       handle?.destroy();
       handle = undefined;
+      setEditorHandle(undefined);
       if (mounted) {
         setRenderError(error instanceof Error ? error.message : String(error));
       }
@@ -151,6 +162,7 @@ export function VersionView({
       disposeRefocus();
       handle?.destroy();
       ydoc?.destroy();
+      setEditorHandle(undefined);
     };
   }, [
     blockSchema,
@@ -186,8 +198,16 @@ export function VersionView({
       {renderError === undefined ? null : (
         <p role="alert">This version could not be rendered: {renderError}</p>
       )}
-      <article aria-label="Document" className="dispatch-doc" data-read-only="true">
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: dispatch:// link clicks bubble here; the
+      editor already handles keyboard activation of its own links. */}
+      <article
+        aria-label="Document"
+        className="dispatch-doc"
+        data-read-only="true"
+        onClick={followReference}
+      >
         <div ref={root} />
+        <DocumentReferences editor={editorHandle} source={textSource} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (

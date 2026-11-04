@@ -3,6 +3,7 @@ import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
+import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
@@ -49,21 +50,25 @@ function renderVersionView({
   if (blockSchema === undefined) {
     throw new Error("VersionView test runtime must provide a block schema.");
   }
+  // Inside a router, as the document page renders it: a click on a reference in the version
+  // opens what it names (`document-references.tsx`).
   const tree = (shown: { by: string; id: string; quote: string } | undefined) => (
-    <QueryClientProvider client={queryClient}>
-      <DocumentRuntime.Provider value={runtime.runtime}>
-        <VersionView
-          artifactId="artifact-1"
-          asks={[]}
-          blockSchema={blockSchema}
-          changeBaseline={changeBaseline}
-          createdAt="2026-09-09T00:00:00Z"
-          highlight={shown}
-          owner={undefined}
-          version={1}
-        />
-      </DocumentRuntime.Provider>
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <DocumentRuntime.Provider value={runtime.runtime}>
+          <VersionView
+            artifactId="artifact-1"
+            asks={[]}
+            blockSchema={blockSchema}
+            changeBaseline={changeBaseline}
+            createdAt="2026-09-09T00:00:00Z"
+            highlight={shown}
+            owner={undefined}
+            version={1}
+          />
+        </DocumentRuntime.Provider>
+      </QueryClientProvider>
+    </MemoryRouter>
   );
   const view = render(tree(highlight));
   /** Renders the view again with `shown`, as its parent does on every render of its own. */

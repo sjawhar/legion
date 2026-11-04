@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import {
   api,
@@ -39,14 +39,12 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
-import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
+import { watchPicturePath } from "../refs/reference-target";
 import {
   buildDispatchReference,
   buildIssuePath,
   buildProjectPath,
-  buildReferencePath,
   documentRoute,
-  parseNodeReference,
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
@@ -57,6 +55,7 @@ import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
+import { DocumentReferences, documentSource, useReferenceClick } from "./document-references";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -185,16 +184,6 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
 }
 
-/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
- * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
- * http/https/mailto/tel/ftp — a document strangers can edit should never render an
- * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
- * `data-dispatch-href` carrying the original target instead. */
-function dispatchHrefOf(anchor: Element): string | null {
-  const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
-  return href?.startsWith("dispatch://") ? href : null;
-}
-
 export function ProofDocument({
   artifact,
   highlight,
@@ -212,6 +201,10 @@ export function ProofDocument({
 }: ProofDocumentProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
+  // The handle this document's references are drawn through, beside the ref the callbacks reach
+  // it by: the titles are a render of their own, so the surface that draws them re-renders with
+  // the editor it draws into.
+  const [editorHandle, setEditorHandle] = useState<EditorHandle | undefined>(undefined);
   // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
   const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
@@ -242,7 +235,6 @@ export function ProofDocument({
     createEditor,
     loadTransport,
   } = useContext(DocumentRuntime);
-  const navigate = useNavigate();
   const margin = useMargin();
   const { blockPlacements } = margin;
   // The editor effect and its callbacks reach the margin's latest functions through this ref
@@ -251,6 +243,13 @@ export function ProofDocument({
   marginRef.current = margin;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
+  // Where a `#id` in this document's text resolves: this document, whose question blocks
+  // declare the asks it names.
+  const textSource = useMemo(
+    () => documentSource(artifact.id, owner.kind === "document" ? owner : undefined),
+    [artifact.id, owner]
+  );
+  const followReference = useReferenceClick();
   const documentRef = buildDispatchReference(documentRoute(artifact));
   const blockSchemaQuery = useQuery({
     queryFn: loadBlockSchema,
@@ -541,6 +540,7 @@ export function ProofDocument({
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }
+      setEditorHandle((current) => (current === editor ? undefined : current));
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
@@ -788,6 +788,7 @@ export function ProofDocument({
                   }
                   editor = handle;
                   editorRef.current = handle;
+                  setEditorHandle(handle);
                   disposeEditorBindings = bindEditor(handle, connection);
                 })
                 .catch(reportLoadFailure);
@@ -965,36 +966,10 @@ export function ProofDocument({
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
-        onClick={(event) => {
-          // A modifier click (open in new tab/window) or a drag-selection that happens to end
-          // on the link should reach the browser/editor's own handling, not steal the click.
-          const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-          if (event.button !== 0 || modified) {
-            return;
-          }
-          const selection = window.getSelection();
-          if (selection !== null && !selection.isCollapsed) {
-            return;
-          }
-          const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
-          // The link's target is a node its author named, and opening it is a read, so it is read
-          // as a node's reference, whatever the length of its name.
-          const href = anchor === null ? null : dispatchHrefOf(anchor);
-          const route = href === null ? undefined : parseNodeReference(href);
-          if (route === undefined) {
-            return;
-          }
-          event.preventDefault();
-          // A block of a spec pinned to a version opens that version under the spec's slug, which
-          // only the issue names; every other reference's path is known at once.
-          if (needsSpecSlug(route)) {
-            void fetchReferencePath(queryClient, route).then((path) => navigate(path));
-            return;
-          }
-          navigate(buildReferencePath(route));
-        }}
+        onClick={followReference}
       >
         <div ref={root} />
+        <DocumentReferences editor={editorHandle} source={textSource} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (

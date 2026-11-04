@@ -32,7 +32,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/tests/*.test.ts` | The suites that came with those files |
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 
-Twenty files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Twenty-one files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -41,6 +41,7 @@ not reach them:
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
 | `src/editor-highlights.ts` | Presentation-only active and pulse highlights for marks and blocks, and the marks a host draws on blocks (`setBlockMarks`: a class each and an optional `title`, the whole set in one call, which replaces the last), drawn as a cached ProseMirror `DecorationSet`, because a host class write on editor DOM is read back as an edit (LEGION-458). The set is mapped through edits inside one node and rebuilt when the active, pulsed or marked set changes, or an edit can change which nodes carry a highlighted id or where a highlighted block ends: a mark or attribute step, inserted content that holds a highlighted target (a collaborator's update replaces the whole document), and, while a block is highlighted or marked, a replace across a node boundary; it is also biome-checked |
 | `src/editor-change-decorations.ts` | Presentation-only change marks a host draws over a read-only document, as a ProseMirror `DecorationSet`, for the same reason `src/editor-highlights.ts` is one (INFRA-575): one `setChangeDecorations({ text, widgets })` carries the whole set and replaces the last one, since its one caller computes both lists from one `ChangeMarks`. A text entry draws a class over a run of a block's own text, by a `range` of character offsets into that text (the block's inline content is walked, counting each leaf node the characters its type's `leafText` draws, a `hardbreak`'s newline among them, exactly as `textContent` counts them, so an offset after an inline atom or a hard break still lands on its character) or over the whole block where it names no range - the two ends are one optional field, so an entry with only one end cannot be written - and a widget entry draws a piece of text beside the document, before the top-level block it names or at the end of it. An entry names its block by index among the document's top-level blocks, and one naming a block the document does not hold, or text it does not reach, is dropped. The editor this serves is read-only and `setMarkdown` replaces its whole document, so a document change rebuilds the set from the entries rather than mapping stale positions; it is also biome-checked |
+| `src/reference-decorations.ts` | Presentation-only reference titles a host draws over the document, as a ProseMirror `DecorationSet`, for the same reason `src/editor-change-decorations.ts` is one (INFRA-869): one `setReferences({ scan, targets, onKeys })` carries the host's whole side of it and replaces the last one. The editor reads each text block's own text - a link's words and code masked out, so each candidate's offsets are the block's positions - through the host's `scan`, reports the distinct keys it found through `onKeys`, and draws each candidate the host's `targets` resolved as a `dispatch://` link holding its target's title, with the stored text hidden under it; an unresolved candidate stays the words the author wrote. A link whose text its author wrote keeps those words and is never drawn over; a link whose text is its own address - the autolink a document stores as `[dispatch://…](dispatch://…)` - is one candidate of that address, drawn beside its anchor rather than inside it, since the whole of the address reads as one reference. The stored text is never changed, and it shows in place of its title while the focused editor's selection touches that candidate, so an author always types over what is stored. A `length` on a target draws the title over only that many of the candidate's characters, never past its end, so a `#q2-` whose question is q2 keeps its `-`. An edit re-reads only the text blocks its steps touched (one position wider each way, so a block a deletion joined or split is read whole) and maps the rest; it is also biome-checked |
 | `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
 | `src/editor/schema/uuid.ts` | `uuidV4`, the block-id default generator: a v4 UUID from `crypto.getRandomValues`, which every browsing context defines, where `crypto.randomUUID` exists only in a secure context, so a document opened over plain HTTP by a LAN address or a host name minted no id (LEGION-461); it is also biome-checked |
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
@@ -59,7 +60,7 @@ not reach them:
 | `src/nested-links.ts` | `remarkHoistNestedLinks` and the `$remark` plugin that registers it: a `link` holding a `link` is rewritten into siblings, the inner link beside the runs around it and each run wrapped in a copy of the outer link's `url` and `title`, so `[a <https://u.test> b](u)` reads as `a ` under the label's link, the autolink's text under its own, and ` b` under the label's again. The only markdown that nests the two is an autolink inside a link label, since CommonMark forbids an inline link there, and `@milkdown/transformer` cannot read that label as written: it holds one flat mark set, so the link mark runner's `closeMark` on the inner autolink removes the `link` type outright (`removeFromSet`) and every later run of the label was left with no link at all, where Go's reader gives it the label's link again (`packages/envoy/internal/dispatch/pmdoc/parse.go`). The hoisted spelling is the tree Go's renderer writes for itself (`[a ](u)<https://u.test>[ b](u)`), so both readers agree rather than meeting at a third reading. It is registered at every parse seam - the explicit chain in `src/lib-headless.ts` and, through `remarkCtx`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown` - and changes no output, since a unified transformer runs on `runSync` at parse and never on `stringify` |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty-four kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-five kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -86,6 +87,11 @@ cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of ca
 `src/lib.ts` installing `editorChangeDecorationsPlugin` and routing the
 handle's new `setChangeDecorations` through `./editor-change-decorations`, whose
 `ChangeDecorations`, `TextDecoration` and `BlockWidget` it re-exports (INFRA-575);
+`src/lib.ts` installing `referenceDecorationsPlugin` and routing the handle's new
+`setReferences` through `./reference-decorations`, whose `EditorReferences`,
+`ReferenceCandidate` and `ReferenceTarget` it re-exports, with `src/lib.css` holding the rules
+that draw a reference's title on one line, cut with an ellipsis, and hide the stored text under
+it (INFRA-869);
 `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`,
 so two readers' asks may cover the same text, with `removeAskMark` removing that mark's instance
 by id rather than every `dispatchAsk` over its range and the parse runner closing its own span of
@@ -150,7 +156,7 @@ that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
-has that counterpart, and the only lines that differ should be the twenty-four kinds.
+has that counterpart, and the only lines that differ should be the twenty-five kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type
@@ -303,7 +309,7 @@ against the source stays readable. `assist` matters as much as the other two: it
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
-`src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor-change-decorations.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
+`src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor-change-decorations.ts`, `src/reference-decorations.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
 `src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`, `src/ask-content.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`, `src/mermaid-code-block-view.ts`,
 `src/directive-container.ts`, `src/block-nesting.ts`,
 `src/tests/harness.ts` — follow the

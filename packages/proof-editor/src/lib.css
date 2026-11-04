@@ -908,3 +908,23 @@ span[data-dispatch="ask"] {
   animation: dispatch-mark-pulse 1.2s ease-out;
   border-radius: 2px;
 }
+
+/*
+ * A reference drawn as its target's title (see ../reference-decorations.ts). The stored text
+ * stays in the document and is only hidden while its title stands in its place, so the title
+ * takes one line however long it is: a paragraph a reference sits in must not reflow around a
+ * document's name, and a title too long for the line is cut with an ellipsis.
+ */
+.dispatch-reference-text {
+  display: none;
+}
+
+.dispatch-reference {
+  display: inline-block;
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  cursor: pointer;
+}
