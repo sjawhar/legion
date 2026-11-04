@@ -11,8 +11,8 @@ import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { openDocumentEarly } from "./features/doc/open-document-early";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
-import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
+import { InboxList, importInbox } from "./features/inbox/InboxList";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
@@ -35,7 +35,6 @@ import {
 import { useRepliesCount } from "./features/replies/useRepliesCount";
 import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
-import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
@@ -106,7 +105,6 @@ const importDocumentPage = () => import("./features/document/DocumentPage");
 const DocumentPage = lazy(() =>
   importDocumentPage().then((module) => ({ default: module.DocumentPage }))
 );
-
 /**
  * Requests the chunk of the page this address opens, as this module evaluates - which is while
  * the shell is still asking who is signed in, and well before the route tree that would ask for
@@ -115,9 +113,10 @@ const DocumentPage = lazy(() =>
  * (dispatch://INFRA-341, R11); the chunk needs neither, and a request for it changes nothing
  * about what the page then shows or who may see it.
  *
- * The two pages that open a document are the ones worth the request: every other route's chunk
- * is asked for by its own `lazy` as it always was, and so is this one on a later navigation,
- * where the shell is long since up and the chunk is usually in hand.
+ * The two pages that open a document are the ones worth the request, and so is the Inbox, whose
+ * list left this module's chunk for one of its own and which the shell lands on: every other
+ * route's chunk is asked for by its own `lazy` as it always was, and so is each of these on a
+ * later navigation, where the shell is long since up and the chunk is usually in hand.
  */
 function requestTheOpenPagesChunk(pathname: string): void {
   if (parseIssuePath(pathname) !== undefined) {
@@ -126,6 +125,10 @@ function requestTheOpenPagesChunk(pathname: string): void {
   }
   if (parseProjectPath(pathname)?.kind === "document") {
     void importDocumentPage().catch(() => undefined);
+    return;
+  }
+  if (routeIsInbox(pathname)) {
+    void importInbox().catch(() => undefined);
   }
 }
 
@@ -171,6 +174,9 @@ const AnswersPage = lazy(() =>
 );
 const RepliesPage = lazy(() =>
   import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
+);
+const SettingsPage = lazy(() =>
+  import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -246,7 +252,11 @@ function InboxPage(): ReactNode {
           Answered by you
         </Link>
       </div>
-      <Inbox />
+      {/* The heading and its link are this module's own, so they are on the screen while the
+          list's chunk is still arriving, as they are while the list's own read is out. */}
+      <Suspense fallback={null}>
+        <InboxList />
+      </Suspense>
     </section>
   );
 }

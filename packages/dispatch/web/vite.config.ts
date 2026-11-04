@@ -150,7 +150,7 @@ export default defineConfig({
   build: {
     outDir: "dist",
     // The largest chunk is ECharts (an `index-*.js` of 1,134,772 bytes raw), which only the
-    // Delivery page loads, and the entry is 781,007 bytes, both past Vite's 500 kB default.
+    // Delivery page loads, and the entry is 812,473 bytes, both past Vite's 500 kB default.
     // beautiful-mermaid and ELK live only in the Mermaid worker's bundle
     // (features/refs/mermaid-render.worker.ts, 1,565,608 bytes), fetched once a body or a
     // document holds a mermaid block; Vite emits it as an asset and holds it to no chunk limit.

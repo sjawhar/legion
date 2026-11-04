@@ -54,9 +54,11 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
   }
   // The text itself, where the address names the document: `/issues/{key}/artifacts/{slug}`
   // names it as Dispatch's own route does, so the bytes a reader reads are asked for in the
-  // first round trip rather than the second. The issue read below still runs - the page needs
-  // it, and it is what names the artifact this answer belongs to - but the document's 420 KB
-  // no longer waits behind it, which on a phone was over a second of nothing on the screen
+  // first round trip rather than the second, and `web/index.html` has usually asked for them
+  // already - this call takes that request rather than making a second one
+  // (`api/early-document-read.ts`). The issue read below still runs - the page needs it, and it
+  // is what names the artifact this answer belongs to - but the document's 420 KB no longer
+  // waits behind it, which on a phone was over a second of nothing on the screen
   // (dispatch://INFRA-341, R11). The Spec tab's address names no slug, so its text is read by
   // the id the issue answers with, as it always was.
   const bySlug =
@@ -76,6 +78,7 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
         readTheTextEarly(client, artifact.id, bySlug);
       }
     })
+    // The issue could not be read, so nothing names a document to read ahead for.
     .catch(() => undefined);
   // The other read the page showing this document holds its whole render behind: the reader's
   // own issue state, which `IssuePage` waits for beside the issue itself (`useIssueDetail`) and

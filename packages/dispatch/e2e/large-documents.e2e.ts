@@ -279,11 +279,12 @@ test(`the editor opens ${documentNames.large} where its reader had got to @phone
   }
 });
 
-// The two rows below are about what the page does in front of that draw, which is what the
-// numbers above are mostly made of. The document's own reads are started from the address, so
-// they wait for nothing the issue page does; and the margin beside the document draws no card
-// a reader cannot see. Neither row is timed: each reads what the page asked for and what it
-// drew, never how long either took.
+// The three rows below are about what the page does in front of that draw, which is what the
+// numbers above are mostly made of. The document's own reads are started from the address, the
+// first of them before any of the page's own code has evaluated, so they wait for nothing the
+// entry chunk or the issue page does; and the margin beside the document draws no card a reader
+// cannot see. None of the three is timed: each reads what the page asked for and what it drew,
+// never how long either took.
 
 /** A document of one short section, so these rows seed in a moment: what they read is the
  *  order the page does things in, which no length of document changes. */
@@ -346,6 +347,54 @@ test("a document's own text is read before the sign-in check has answered @phone
       .first();
     await expect(firstBlock).toBeVisible({ timeout: 60_000 });
     await expect(firstBlock).toContainText("The lease ledger");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a document's text is asked for before the entry chunk has arrived @phone", async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  const { issueKey, path } = await seedDocument("notes.md", shortDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(path, { waitUntil: "commit" });
+    const firstBlock = page
+      .locator(
+        '[aria-label="Document text"] [data-block-id], [aria-label="Document editor"] [data-block-id]'
+      )
+      .first();
+    await expect(firstBlock).toBeVisible({ timeout: 120_000 });
+
+    // What the browser itself timed: when the page asked for the document's text, and when the
+    // last byte of the entry chunk arrived. The entry is the page's one module script, and no
+    // module of it can evaluate before all of its bytes are here, so a read that started before
+    // that moment started before every static import of the entry evaluated - which is where
+    // the page used to ask for it (`web/src/main.tsx`), about 1.4 s into the load on a throttled
+    // phone. Asking for it from `web/index.html` is what moves it in front of the chunk. The two
+    // times are the browser's own resource timing, so nothing this row does sits between them.
+    const timed = await page.evaluate((textPath: string) => {
+      const entry = document.querySelector<HTMLScriptElement>('script[type="module"][src]');
+      const resources = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+      return {
+        chunk: entry?.src,
+        chunkArrivedMs: resources.find((resource) => resource.name === entry?.src)?.responseEnd,
+        textAskedMs: resources.find((resource) => new URL(resource.name).pathname === textPath)
+          ?.startTime,
+      };
+    }, `/api/v1/issues/${issueKey}/artifacts/notes-md/text`);
+
+    expect(timed.chunk, "the page has no module script to time the read against").toBeDefined();
+    expect(timed.chunkArrivedMs, `the entry chunk ${timed.chunk} was never timed`).toBeDefined();
+    expect(timed.textAskedMs, "the document's text was never asked for at all").toBeDefined();
+    expect(
+      timed.textAskedMs ?? Number.POSITIVE_INFINITY,
+      "the document's text was asked for only after the entry chunk had arrived, so it waited " +
+        "for the entry's own static imports to evaluate before it went out (`web/index.html`)"
+    ).toBeLessThan(timed.chunkArrivedMs ?? 0);
   } finally {
     await alice.close();
   }

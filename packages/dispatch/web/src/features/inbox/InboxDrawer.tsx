@@ -1,4 +1,4 @@
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, Suspense, useRef, useState } from "react";
 
 import {
   backdrop50,
@@ -10,7 +10,8 @@ import {
 import type { InboxRoute } from "../refs/routes";
 import { DIALOG_SCOPE } from "../shell/keymap";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
-import { Inbox } from "./Inbox";
+
+import { InboxList } from "./InboxList";
 
 /**
  * The Inbox as a peek over whatever page is open (LEGION-547): the same list, cards and actions
@@ -62,12 +63,14 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
             Close
           </button>
         </div>
-        <Inbox
-          filter={filter}
-          keymapScope={DIALOG_SCOPE}
-          onAssigneesChange={setAssignees}
-          pane={false}
-        />
+        <Suspense fallback={null}>
+          <InboxList
+            filter={filter}
+            keymapScope={DIALOG_SCOPE}
+            onAssigneesChange={setAssignees}
+            pane={false}
+          />
+        </Suspense>
       </aside>
     </>
   );

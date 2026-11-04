@@ -98,6 +98,79 @@
         );
       })();
     </script>
+    <!--
+      The document's own text, asked for while this page is still being parsed.
+
+      A reader who opens /issues/<KEY>/artifacts/<slug> is waiting for that document's bytes, and
+      the address alone names them: Dispatch answers them at
+      /api/v1/issues/<KEY>/artifacts/<slug>/text, the route the page's own client reads them by.
+      The page asks for them in the entry module's body (src/features/doc/open-document-early.ts),
+      which is the earliest any module can and still about 1.4 s into the load on a phone at 4x
+      CPU throttling, because every static import of the entry has to evaluate first - one task of
+      about a second on its own. Here there is nothing to evaluate: the request goes out before
+      the entry chunk has finished downloading (dispatch://INFRA-341, R11).
+
+      The page's client takes this request in place of the one it would have made
+      (src/api/early-document-read.ts), so it is that client's read in every other way - its
+      deadline on Dispatch's silence, its abort, its refusals. The only header this carries is
+      the client's own `credentials: "same-origin"`; a Dispatch GET carries no other, so the
+      server answers this exactly as it answers that one. Until the page takes it, nothing bounds
+      it but the timer below, which stops once the answer's headers arrive.
+
+      The address rule here is deliberately narrower than the router's (`parseIssuePath` in
+      src/features/refs/routes.ts): the same issue key, a slug of the plain form Dispatch mints,
+      no trailing segment, and a `?v=` only in the form the router reads. An address this does not
+      recognise - the Spec tab's, which names no slug and whose text is read by the id the issue
+      answers with, and every address that opens no document at all - asks for nothing here, and
+      the page reads exactly as it does today. A failure costs the same nothing.
+
+      This is a classic inline script and not a module one because Vite's build folds every
+      module script of this page into the one chunk it generates for it - an inline module
+      script and a second entry's `src` alike, both rewritten to imports of that chunk - so
+      either shape would run only once all 813 kB of the entry had downloaded, which is the wait
+      this is here to skip. A second entry kept outside the bundle, under `web/public/`, would be
+      another file to download first and another untyped file to keep. A classic inline script
+      survives the build exactly as it is written, as the recovery script above does, and costs
+      no request at all.
+    -->
+    <script>
+      (() => {
+        var opened =
+          /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifacts?\/([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(
+            window.location.pathname
+          );
+        if (opened === null) {
+          return;
+        }
+        var pinned = new URLSearchParams(window.location.search).get("v");
+        if (pinned !== null && pinned !== "" && !/^[1-9][0-9]*$/.test(pinned)) {
+          return;
+        }
+        var path = `/api/v1/issues/${opened[1]}/artifacts/${opened[2]}/text`;
+        var early = new AbortController();
+        // How long this waits for the answer's headers, matching REQUEST_DEADLINE_MS in
+        // src/api/client.ts: Dispatch silent that long cannot be reached. The body is the
+        // client's to bound, as every read's body is, and the client's own deadline covers this
+        // read from the moment it takes it.
+        var silence = setTimeout(() => early.abort(), 30000);
+        window.__dispatchEarlyDocumentRead = {
+          abort: (reason) => {
+            clearTimeout(silence);
+            early.abort(reason);
+          },
+          path: path,
+          response: fetch(path, { credentials: "same-origin", signal: early.signal }).then(
+            (response) => {
+              clearTimeout(silence);
+              return response;
+            }
+          ),
+        };
+        // Nothing waits on it until the page takes it, so its refusal is answered here rather
+        // than left to the window as an unhandled rejection.
+        window.__dispatchEarlyDocumentRead.response.catch(() => undefined);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

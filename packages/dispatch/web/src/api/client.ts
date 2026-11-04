@@ -9,7 +9,7 @@ import {
   IDEMPOTENCY_REPLAYED_HEADER,
   type IdempotencyLandedCode,
 } from "@legion/contracts";
-
+import { takeEarlyDocumentRead } from "./early-document-read";
 import { reachable, routeOf, unreachable } from "./reachability";
 
 import type {
@@ -1545,13 +1545,20 @@ export class DispatchApiClient {
 
 /** A client over `fetchImpl`. The page's own (`api`) sends its uploads through `XMLHttpRequest`
  *  (`xhrUpload`), so their progress counts against the silence deadline; one given a `fetchImpl`
- *  of its own sends them through it unless it is given an `upload` too. */
+ *  of its own sends them through it unless it is given an `upload` too. The page's own also
+ *  takes the one read `web/index.html` started before this module existed
+ *  (`takeEarlyDocumentRead`), so that read is this client's in every other way: the same
+ *  deadline on Dispatch's silence, the same abort, the same refusals and the same reachability.
+ *  A client of a caller's own `fetchImpl` takes nothing: the early read is the page's. */
 export function createApiClient(
   fetchImpl?: FetchImplementation,
   upload?: UploadImplementation
 ): DispatchApiClient {
   return fetchImpl === undefined
-    ? new DispatchApiClient((...args) => fetch(...args), upload ?? xhrUpload())
+    ? new DispatchApiClient(
+        (input, init) => takeEarlyDocumentRead(input, init) ?? fetch(input, init),
+        upload ?? xhrUpload()
+      )
     : new DispatchApiClient(fetchImpl, upload);
 }
 
