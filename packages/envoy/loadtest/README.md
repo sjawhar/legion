@@ -1488,14 +1488,16 @@ not 0. `TABLES.md` repeats this under the table when a row has the mark.
 **Why the harness reads no heap profile in the window.** By default the sampler takes no heap
 profile from Dispatch while the window runs: it sends no request to `/debug/pprof/heap` at all,
 `heap live MiB p50 / max` shows `-`, and Dispatch's resident memory (`Dispatch RSS max MiB`, read
-from `/proc`) is the memory the tables show. Rendering `/debug/pprof/heap?debug=1` runs inside
-Dispatch, and it was about half of all the CPU the replay measured for Dispatch: over six GC-pass
-runs, `runtime/pprof.writeHeap`'s cumulative time was 46% to 51% of the profile's total (`go tool
-pprof -top -cum -nodecount=100000 <dispatch binary> cpu.pprof`, the `runtime/pprof.writeHeap`
-line's cum). A sampler that reads it charges its own sampling to the process it measures. On an
-older Dispatch build the render buffered gigabytes in `text/tabwriter`; a client that timed out
-(30 s) left the render running, and the renders piled up until one run grew Dispatch's RSS to
-9.4 GB and the pod was OOM-killed. The goroutine profile is far cheaper to render and stays. The
+from `/proc`) is the memory the tables show. Dispatch writes any heap profile itself, inside its
+own process, so every profile read inside the window is charged to the CPU this harness measures
+for Dispatch, and the binary profile `-heap-samples` reads (below) has had no measurement of its
+own share in a replay. The text form this sampler read before shows what such a read can cost:
+over six GC-pass runs, `runtime/pprof.writeHeap`'s cumulative time was 46% to 51% of the
+profile's total (`go tool pprof -top -cum -nodecount=100000 <dispatch binary> cpu.pprof`, the
+`runtime/pprof.writeHeap` line's cum). On an older Dispatch build that text render buffered
+gigabytes in `text/tabwriter`; a client that timed out (30 s) left the render running, and the
+renders piled up until one run grew Dispatch's RSS to 9.4 GB and the pod was OOM-killed. No
+sampler reads the text form now. The goroutine profile is far cheaper to render and stays. The
 binary profiles at the window's edges stay too (`heap-start.pprof`, `heap-end.pprof`, and
 `heap.pprof` and `heap.txt` after the CPU profile): they are taken before the window's measured
 work, or once it has ended.

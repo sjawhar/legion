@@ -610,10 +610,10 @@ A room whose replica holds no state, or that lists none, has no document to clon
 The cold fork, read from the store, stays a decode (`coldFork`).
 
 Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
-the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.atPoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
+the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.atPoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/replica.go`.
 This stays deadlock-free because of one rule for all three:
 their callers hold no room state lock and run inside no Yjs transaction, and only a Yjs transaction's own function holds a document's lock, taking neither of the others.
-So nothing waits on the state lock while one of them waits for the replica's, and neither the encode of live a read of a room with no replica state takes, nor the read lock `crdt.Doc.Clone` takes on the replica document itself, ever meets a held state lock.
+So nothing waits on the state lock while one of them waits for the replica's, and neither the encode of live that a read of a room with no replica state takes, nor the read lock `crdt.Doc.Clone` takes on the replica document itself, ever meets a held state lock.
 Every other acquisition of the replica's lock only tries it, and never while holding the live document's lock:
 the caller of `readLive` or `holdLive` must not run inside a Yjs transaction on the document, since the copy encodes under that lock.
 A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads and holds the room:

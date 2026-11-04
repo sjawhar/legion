@@ -253,11 +253,10 @@ func applyAskPartIDs(asks []*model.Ask, partIDs []refs.AskIDs) {
 	}
 }
 
-// attachAskReadFields is what every list and detail read of an ask attaches beyond its row: its
-// inbound graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its
-// answer with its part revision (attachAskPartIDs). A write attaches neither. The two are always
-// read together and in this order, so the reads a caller pays for, and the error it reports, are
-// the same at every site.
+// attachAskReadFields is what the read of one ask (getAsk) attaches beyond its row: its inbound
+// graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its answer
+// with its part revision (attachAskPartIDs). A write attaches neither. A list of asks reads the
+// same fields, with their identity events, in one batch instead (queueAskDetails, loadAskDetails).
 func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) error {
 	if err := attachAskBacklinkCounts(ctx, q, asks); err != nil {
 		return err

@@ -264,13 +264,14 @@ func samplerRun(t *testing.T, heapSamples bool, d time.Duration) ([]string, []sa
 	return slices.Clone(asked), s.all()
 }
 
-// TestSamplerAsksDispatchForNoHeapProfile: Dispatch writes its own heap profile, and rendering
-// /debug/pprof/heap?debug=1 was about half of all the CPU the replay measured for Dispatch (46-51%
-// over six runs), so a heap read in the window measures the harness's own sampling (README.md,
-// "Why the harness reads no heap profile in the window"). Without -heap-samples the sampler must
-// ask Dispatch for its goroutine profile and for no form of /debug/pprof/heap. Only the sampler is
-// driven here: the binary profiles at the window's edges (heap-start.pprof and heap-end.pprof in
-// runReplay, heap.pprof and heap.txt in step.profile) stay, and driving them needs a whole run.
+// TestSamplerAsksDispatchForNoHeapProfile: Dispatch writes any heap profile itself, so a heap read
+// in the window is charged to the CPU the harness measures for Dispatch - the text form this
+// sampler once read was about half of it (46-51% over six runs) - and measures the harness's own
+// sampling (README.md, "Why the harness reads no heap profile in the window"). Without
+// -heap-samples the sampler must ask Dispatch for its goroutine profile and for no form of
+// /debug/pprof/heap. Only the sampler is driven here: the binary profiles at the window's edges
+// (heap-start.pprof and heap-end.pprof in runReplay, heap.pprof and heap.txt in step.profile)
+// stay, and driving them needs a whole run.
 func TestSamplerAsksDispatchForNoHeapProfile(t *testing.T) {
 	asked, _ := samplerRun(t, false, 3*time.Second)
 	goroutines := 0
@@ -288,8 +289,8 @@ func TestSamplerAsksDispatchForNoHeapProfile(t *testing.T) {
 }
 
 // TestSamplerUnderHeapSamplesReadsTheBinaryHeapProfile: with -heap-samples on, the sampler does
-// read Dispatch's heap, and reads the binary profile alone, never ?debug=1 (whose render is the
-// cost the default avoids). The read lands in a sample, as heap_live_bytes and heap_live_objects.
+// read Dispatch's heap, and reads the binary profile alone, never ?debug=1, the text form no
+// sampler reads now. The read lands in a sample, as heap_live_bytes and heap_live_objects.
 func TestSamplerUnderHeapSamplesReadsTheBinaryHeapProfile(t *testing.T) {
 	asked, samples := samplerRun(t, true, 7*time.Second)
 	heaps := 0
