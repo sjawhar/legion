@@ -328,7 +328,11 @@ test("a link to a block of a comment stops showing the block's text once its aut
 // A link to a block of a document reads the same block read, which a version of the document
 // fetches again: a document edit that deletes the cited block makes it answer 404, and the open
 // card and the link stop showing the block's text without a reload, reading as a freshly loaded
-// page reads the same link (no text of a block the document no longer holds).
+// page reads the same link (no text of a block the document no longer holds). The link then
+// reads the address its author wrote, where it read the short form `CORE-1 spec block` before
+// INFRA-869, whose R4 says: "A reference whose target is missing shows its address as written."
+// The hover card is not the reference's own words: it heads with the route's short form, as it
+// does for every target it has not read yet, so the two read differently on purpose.
 test("a link to a block of a spec stops showing the block's text once a document edit deletes it, with no reload", async ({
   page,
 }) => {
@@ -364,7 +368,8 @@ test("a link to a block of a spec stops showing the block's text once a document
   await expect(card).not.toContainText("Gamma soon deleted.", { timeout: 5_000 });
   await expect(card).toHaveText(`${issue.key} spec block`);
   await expect(turns.getByRole("link", { name: "Gamma soon deleted." })).toHaveCount(0);
-  await expect(turns.getByRole("link", { name: `${issue.key} spec block` })).toHaveAttribute(
+  const written = `dispatch://${issue.key}/spec#b-${paragraph}`;
+  await expect(turns.getByRole("link", { exact: true, name: written })).toHaveAttribute(
     "href",
     `/issues/${issue.key}/spec#b-${paragraph}`
   );
@@ -373,7 +378,7 @@ test("a link to a block of a spec stops showing the block's text once a document
   await page.reload();
   const fresh = page
     .getByRole("list", { name: "Conversation turns" })
-    .getByRole("link", { name: `${issue.key} spec block` });
+    .getByRole("link", { exact: true, name: written });
   await expect(fresh).toHaveAttribute("href", `/issues/${issue.key}/spec#b-${paragraph}`);
   await expect(await openCard(page, fresh)).toHaveText(`${issue.key} spec block`);
 });

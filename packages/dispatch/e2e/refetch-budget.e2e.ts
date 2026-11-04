@@ -181,9 +181,13 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
     const traffic = watchTraffic(page);
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    await expect(turns.getByRole("link", { name: /^Budget reference \d\d$/ })).toHaveCount(50, {
-      timeout: 60_000,
-    });
+    // INFRA-869's R4: "A `dispatch://` reference reads as its target's title ... an issue as
+    // its key and title", so each of the 50 links reads `CORE-<n> Budget reference <nn>` where
+    // it read the title alone before.
+    await expect(turns.getByRole("link", { name: /^CORE-\d+ Budget reference \d\d$/ })).toHaveCount(
+      50,
+      { timeout: 60_000 }
+    );
     await eventBarrier(page, traffic, source.key, source.title);
     await settled(traffic);
     traffic.reset();
@@ -211,9 +215,9 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
     // A change the page shows still lands: a referenced issue's new title in its reference ...
     const renamed = `${targets[0]?.title ?? ""} renamed`;
     await patchIssue(targets[0]?.key ?? "", { title: renamed }, bob);
-    await expect(turns.getByRole("link", { exact: true, name: renamed })).toBeVisible({
-      timeout: 2_000,
-    });
+    await expect(
+      turns.getByRole("link", { exact: true, name: `${targets[0]?.key ?? ""} ${renamed}` })
+    ).toBeVisible({ timeout: 2_000 });
 
     // ... and a child's new status in the open parent's Children tab, which reads the parent's
     // own detail: only the child's event can refresh it once the tab shows the old status.

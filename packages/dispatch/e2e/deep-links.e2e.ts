@@ -776,12 +776,20 @@ test("a resolving reference above a linked card does not end the hold", async ({
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
     await expect(card).toBeInViewport();
-    await expect(sheet.getByText(target.key, { exact: true }).first()).toBeVisible();
-    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(0);
+    // Each ask above the card cites the target issue. INFRA-869's R4: "A `dispatch://`
+    // reference reads as its target's title wherever Dispatch shows text ... an issue as its
+    // key and title. A reference whose target is missing shows its address as written." The
+    // summary read is held, so until it lands the words the author wrote stand - the short form
+    // `CORE-2` this read before the issue - and once it lands the key and the long title do,
+    // which is the growth above the card this test is about.
+    const written = `dispatch://${target.key}`;
+    const resolved = `${target.key} ${target.title}`;
+    await expect(sheet.getByRole("link", { exact: true, name: written }).first()).toBeVisible();
+    await expect(sheet.getByRole("link", { exact: true, name: resolved })).toHaveCount(0);
     await landingSettled(sheet);
 
     referenceHeld.resolve();
-    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(2);
+    await expect(sheet.getByRole("link", { exact: true, name: resolved })).toHaveCount(2);
     const before = "Paragraph 34: surrounding context for a long document.";
     const inserted = Array.from(
       { length: 30 },
