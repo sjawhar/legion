@@ -412,6 +412,18 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 	if _, err := database.Pool.Exec(ctx, `vacuum analyze write_suggestions`); err != nil {
 		t.Fatalf("vacuum write_suggestions: %v", err)
 	}
+	// The events table's statistics are this half's own rows, as write_suggestions' are. A
+	// database the harness recycled carries the statistics of whatever the test before it wrote:
+	// its reset is a truncate, which empties a table without analysing it, so pg_statistic still
+	// describes the rows that stood there (the reset of storetest.Open's free list). That decided
+	// the plan of the two rules that probe events by issue and by document, and so how many rows
+	// of events the page read: 8 for a half on a freshly cloned database against 10 for a half on
+	// the database recycled from the test that analyses a log of 200,000 events, which is CI run
+	// 41789493503's failure, reproduced by running that test and this one in one go. Both halves
+	// hold the same nine events, so statistics read from them are the same statistics.
+	if _, err := database.Pool.Exec(ctx, `analyze events`); err != nil {
+		t.Fatalf("analyze events: %v", err)
+	}
 
 	// The page is bounded by this database's own event head, not by the safe horizon. Both are
 	// an id every event at or below which is final, and here every event is this test's and

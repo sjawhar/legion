@@ -68,12 +68,20 @@ func holdEventWriterTransactionID(t *testing.T, database *store.Store) (release 
 }
 
 // liveHorizonHeartbeat is the heartbeat of these tests' servers, which is how a socket waiting on
-// a held horizon says it is still open (awaitHeartbeat): short, so the wait for that frame is the
-// shortest statement of it. A socket waits two heartbeats for its page's pong (serveLiveSocket),
-// and here every socket is read by a client whose read goroutine answers each ping at once and
-// outlives its hold by well under a second, these tests running one at a time in this package's
-// sequential phase.
-const liveHorizonHeartbeat = 200 * time.Millisecond
+// a held horizon says it is still open (awaitHeartbeat).
+//
+// A second, and no less. A socket's read deadline is two heartbeats, and only its page's pong
+// moves it on (serveLiveSocket); the server sends its first ping one heartbeat after the socket
+// opens, so one heartbeat is all the room a loaded machine has to run that ping, the test
+// client's read goroutine and its pong before Dispatch ends the socket as a page that has gone.
+// A socket ended that early carries its subscription away with it, and the test then waits out
+// its whole bound on something that will never happen: at 200 ms, CI run 41789493503 ended this
+// file's socket before its subscribe frame reached the relay, and
+// TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBootIsOpen waited 30 s
+// for a first start that had not begun, with nothing in the log to say so. Set to 2 ms here, that
+// run's failure comes back word for word. The cost is a second at worst for each of this file's
+// four waits on a heartbeat.
+const liveHorizonHeartbeat = time.Second
 
 // awaitHeartbeat waits for client's next frame, which must be a heartbeat: the socket is open and
 // alive, and nothing of the subscription has arrived, since one still waiting for its relay
@@ -600,7 +608,7 @@ func holdEventInsert(t *testing.T, database *store.Store) (id int64, release fun
 // one. Every event at or below the horizon the process before it proved is final, whichever process
 // proved it, so the start reads only above the horizon that process persisted (event_horizon),
 // not the whole log, and is still sent the open event and what committed while it waited, in id
-// order. Here the log holds 200,000 events and the start may read at most a tenth of them.
+// order. Here the log holds 20,000 events and the start may read at most a tenth of them.
 func TestTheRelaysFirstStartReadsAboveThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen(t *testing.T) {
 	// 20,000, not 200,000: the start's cost must not grow with the log, and what it may read
 	// is a tenth of it, so the count has only to be large enough that a start reading every
