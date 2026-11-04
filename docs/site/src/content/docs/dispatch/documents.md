@@ -155,6 +155,16 @@ comment's or message's id. A longer one is no link: your text is posted as writt
 bound decides only what links: a document with a longer name is still read, edited and opened as
 any other.
 
+An id can be written short: 8 or more of the characters it starts with name the one item that
+carries them, on a page address and in a reference alike, and the page then puts the whole id back
+in its address, so an address you copy from the page keeps working. A short id two items share
+opens a page listing both.
+
+An issue key on its own, such as `CORE-12`, links to that issue once that issue exists, and `#`
+with a question block's id links to that question of the document the text belongs to. Both show
+their target's title and both join the **Referenced by** list below, as a `dispatch://` reference
+does.
+
 Every issue, document, and ask has a **Referenced by** list of what links to it. A document page
 shows the list open; an issue shows it in its header.
 

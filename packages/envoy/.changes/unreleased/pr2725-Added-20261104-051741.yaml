@@ -1,0 +1,5 @@
+kind: Added
+body: 'Text stored before this release gets the bare issue keys, the `#id`s and the short ids with no edit and no command run: a queue of its own, `refs_grammar_owed`, is seeded by its migration and drained in the background by the block-index reconciliation.'
+time: 2026-11-04T05:17:41.324035772Z
+custom:
+    Issue: pr2725

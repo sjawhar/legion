@@ -1,0 +1,5 @@
+kind: Added
+body: An issue key written on its own, such as `CORE-12`, links to that issue when the issue exists, and `#` with a question block's id links to that question of the document the text belongs to. Both enter the reference graph, so the target lists the text that cites them, and both read as their target's title.
+time: 2026-11-04T05:17:33.831301388Z
+custom:
+    Issue: pr2725

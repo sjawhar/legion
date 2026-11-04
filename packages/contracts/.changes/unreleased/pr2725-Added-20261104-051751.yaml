@@ -1,0 +1,5 @@
+kind: Added
+body: The shared reference table `DISPATCH_TEXT_REFERENCES` carries the issue keys, question blocks and item ids each row's text names, what the server indexes and what a renderer links, so one table holds the Go reader and the dashboard's to the bare issue key, the `#id` and the short id. `ID_AMBIGUOUS` is exported with the candidate shape its refusal carries.
+time: 2026-11-04T05:17:51.658573241Z
+custom:
+    Issue: pr2725

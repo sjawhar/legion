@@ -79,7 +79,7 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole.
+A bare id, filename or path is no reference, nor `dispatch://` outside Dispatch: give `dispatch`'s `https://` link. Write ids whole; a unique short id resolves.
 
 ## Setup and the HTTP API
 

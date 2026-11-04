@@ -303,6 +303,18 @@ dispatch://PROJECT/artifact/<document>/comment/<id>#b-<block>[@v<N>]
 
 `dispatch read` on any of them shows what it is and everything that references it.
 
+Write each id whole. Where one reaches you short, Dispatch still resolves it: 8 or more of the
+characters an id starts with name the one ask, comment, message, document or block that carries
+them, in a reference, in a page address and on the API routes that take an id in their path, and
+what is stored is the whole id. A short id two items share resolves to neither: the API answers
+`409 ID_AMBIGUOUS` with the matches, and the text stays as written.
+
+Two forms need no `dispatch://`. An issue key on its own, `CORE-12`, links to that issue when that
+issue exists, and `#` with a question block's id links to that question of the document the text
+belongs to — its own text, its questions and replies, and comments anchored to it; text on an issue
+but on no document resolves against the issue's spec. Both enter the reference graph, so
+`dispatch read` on the target lists the text that wrote them.
+
 A comment or message is made of blocks, one per paragraph, list or other top-level block, named
 `b1`, `b2` and so on. `#b-<block>` names one of them, and a link in a comment or issue message
 starts at the block that holds it. A comment block keeps its id when its author moves, rewords or

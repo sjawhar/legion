@@ -1,0 +1,5 @@
+kind: Added
+body: 'Dispatch resolves an id written short: 8 or more of the characters an ask''s, comment''s, message''s, document''s or document block''s id starts with name that item in a reference, in a page address and on every API route that takes an id in its path, and the whole id is what the reference graph stores. A short id two items share is refused `409 ID_AMBIGUOUS` with the matches; one that names nothing answers the 404 that route answers for a whole id that names nothing.'
+time: 2026-11-04T05:17:25.309503112Z
+custom:
+    Issue: pr2725
