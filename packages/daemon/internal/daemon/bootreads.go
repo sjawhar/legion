@@ -73,9 +73,10 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 			return bootReads{}, err
 		}
 	}
-	// The project's memory instructions, read as the deployment's are and refused the same way: an
-	// off project passes none of its `memory` keys on, so its file is not read at all.
-	if memory := cfg.Projects[cfg.Project].Memory; !memory.Off() && memory.InstructionsPath != "" {
+	// The project's memory instructions, read as the deployment's are and refused the same way.
+	// The mode does not decide it: a tree already drawn into the memory group is given them
+	// whatever the mode is now, and only removing the key takes them away.
+	if memory := cfg.Projects[cfg.Project].Memory; memory.InstructionsPath != "" {
 		if r.memoryInstructions, err = config.ReadMemoryInstructions(memory.InstructionsPath); err != nil {
 			return bootReads{}, err
 		}
@@ -174,8 +175,9 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 // block, that is not a file a pane that names it could read, naming the key and the file: a
 // pane's Oh My Pi refuses to start on an overlay it cannot read, and every pane of the daemon
 // runs on this host as this daemon's user. Under kubernetes the files are the pods' mounts',
-// which only the image probe reads. An off project passes its memory keys on to no pane, so its
-// own files are left alone here.
+// which only the image probe reads. The memory overlays are read whatever the project's mode is:
+// a tree already drawn into the memory group names them under any mode, and only removing them
+// from the block takes them away.
 func checkRoleConfigFiles(cfg config.Config) error {
 	for _, role := range config.RoleConfigRoles {
 		for _, file := range cfg.RoleConfigFiles[role] {
@@ -184,7 +186,7 @@ func checkRoleConfigFiles(cfg config.Config) error {
 			}
 		}
 	}
-	if memory := cfg.Projects[cfg.Project].Memory; !memory.Off() {
+	if memory := cfg.Projects[cfg.Project].Memory; len(memory.ConfigFiles) > 0 {
 		field := "projects." + cfg.Project + ".memory.config_files"
 		for _, file := range memory.ConfigFiles {
 			if err := podsafety.CheckOverlay(file); err != nil {

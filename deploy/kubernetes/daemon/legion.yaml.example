@@ -57,7 +57,9 @@ projects:
   #                                    # and the tree keeps it for its whole life; a tree first
   #                                    # opened before this release has no group and runs without
   #                                    # memory, and a change of mode reaches only the trees opened
-  #                                    # after it
+  #                                    # after it: a tree already drawn into the memory group keeps
+  #                                    # these files under any mode, and only taking them out of
+  #                                    # the block takes them away
   #     config_files: [/etc/legion-memory/memory.yml] # Oh My Pi overlays every role of a
   #                                    # memory-group tree names in PI_CONFIG_FILES after pod.env's
   #                                    # and the role's own (role_config_files), so they outrank

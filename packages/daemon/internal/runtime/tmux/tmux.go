@@ -133,8 +133,8 @@ type Options struct {
 	// MemoryConfigFiles is the project's `memory.config_files`: absolute paths of Oh My Pi
 	// settings overlays a pane whose tree is in the memory group (runtime.SpawnSpec.Memory) names
 	// last in PI_CONFIG_FILES, after PiConfigFiles and the role's own, so they outrank both. The
-	// daemon hands them over only while the project's mode is not off, so a deployment at off
-	// builds the pane it built before the block existed. Nil is none.
+	// daemon hands them over whatever the project's mode is, since a tree already drawn into the
+	// memory group names them under any mode; a project with no block names none. Nil is none.
 	MemoryConfigFiles []string
 	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
 	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""

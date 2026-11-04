@@ -444,16 +444,22 @@ provider_keys:
   Every role of a memory-group tree names the memory overlays last in `PI_CONFIG_FILES`, after
   `pi_config_files` and the role's own, and ends its one `--append-system-prompt` value with the
   memory instructions, after the deployment's own.
-  The controller and every role of a no-memory tree get neither, and `mode: on` with no
+  The controller and every role of a no-memory tree get neither, and a block with no
   `instructions` appends nothing.
-  The loader refuses a `mode` that is no word of the three, a mode other than `off` that names no
-  `config_files`, and a mode other than `off` while `worker_backends` puts an issue role on Claude
-  Code, which reads no `PI_CONFIG_FILES`.
+  The launch follows the record, not the mode:
+  a tree the daemon drew into the memory group keeps its overlays and its instructions while the
+  block still names them, whatever the mode is now, so `mode: off` stops new draws and takes
+  memory from no tree already running with it.
+  Taking the files away is removing them from the block.
+  The loader refuses a `mode` that is no word of the three, and a mode other than `off` that names
+  no `config_files`.
+  It refuses a block that names `config_files` while `worker_backends` puts an issue role on
+  Claude Code, which reads no `PI_CONFIG_FILES`, whatever the mode, since a drawn tree's role
+  would be given overlays Claude Code never reads.
   Boot refuses an overlay no pane could read, naming the key and the file, as it does one of
-  `role_config_files`, and an `instructions` file it cannot read or that holds nothing.
+  `role_config_files`, and an `instructions` file it cannot read or that holds nothing; neither
+  reads the mode either.
   `legion start --check-config` makes every one of these refusals and starts nothing.
-  `off` with the two path keys set is accepted and passes nothing on, so a project moved to `on`
-  moves one key.
   `docs/kubernetes.md` ("Operator configuration") has what the block does under `runtime:
   kubernetes`.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project

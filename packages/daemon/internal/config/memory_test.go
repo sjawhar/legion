@@ -20,28 +20,28 @@ func kubernetesMemoryFile(block string) string {
 
 // projects.<KEY>.memory carries the mode, the overlays and the instructions path the file names,
 // the overlays in file order; a key the block leaves out, and a project with no block at all, are
-// the zero value, which is off.
+// the zero value, whose mode a draw records as the word `off`.
 func TestProjectMemoryCarriesTheModeTheOverlaysAndTheInstructions(t *testing.T) {
 	for _, tc := range []struct {
 		name, block string
 		want        Memory
-		wantOff     bool
+		word        MemoryMode
 	}{
 		{"all three keys", "{mode: on, config_files: [/etc/legion-operator/memory.yml, /etc/legion-operator/memory-extra.yml], instructions: /etc/legion-operator/memory.md}",
 			Memory{
 				Mode:             MemoryOn,
 				ConfigFiles:      []string{"/etc/legion-operator/memory.yml", "/etc/legion-operator/memory-extra.yml"},
 				InstructionsPath: "/etc/legion-operator/memory.md",
-			}, false},
+			}, MemoryOn},
 		{"no instructions", "{mode: random, config_files: [/etc/legion-operator/memory.yml]}",
-			Memory{Mode: MemoryRandom, ConfigFiles: []string{"/etc/legion-operator/memory.yml"}}, false},
+			Memory{Mode: MemoryRandom, ConfigFiles: []string{"/etc/legion-operator/memory.yml"}}, MemoryRandom},
 		{"no mode", "{config_files: [/etc/legion-operator/memory.yml], instructions: /etc/legion-operator/memory.md}",
 			Memory{
 				ConfigFiles:      []string{"/etc/legion-operator/memory.yml"},
 				InstructionsPath: "/etc/legion-operator/memory.md",
-			}, true},
-		{"the mode alone", "{mode: off}", Memory{Mode: MemoryOff}, true},
-		{"an empty block", "{}", Memory{}, true},
+			}, MemoryOff},
+		{"the mode alone", "{mode: off}", Memory{Mode: MemoryOff}, MemoryOff},
+		{"an empty block", "{}", Memory{}, MemoryOff},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := Load(writeConfigFile(t, memoryFile(tc.block, "")), noEnv)
@@ -52,8 +52,8 @@ func TestProjectMemoryCarriesTheModeTheOverlaysAndTheInstructions(t *testing.T) 
 			if !reflect.DeepEqual(memory, tc.want) {
 				t.Fatalf("Memory = %+v, want %+v", memory, tc.want)
 			}
-			if memory.Off() != tc.wantOff {
-				t.Errorf("Memory.Off() = %v, want %v", memory.Off(), tc.wantOff)
+			if memory.Word() != tc.word {
+				t.Errorf("Memory.Word() = %q, want %q", memory.Word(), tc.word)
 			}
 		})
 	}
@@ -63,8 +63,8 @@ func TestProjectMemoryCarriesTheModeTheOverlaysAndTheInstructions(t *testing.T) 
 		t.Fatalf("Load without the key: %v", err)
 	}
 	memory := cfg.Projects["DEMO"].Memory
-	if !reflect.DeepEqual(memory, Memory{}) || !memory.Off() {
-		t.Errorf("Memory without the key = %+v (off %v), want the zero value, which is off", memory, memory.Off())
+	if !reflect.DeepEqual(memory, Memory{}) || memory.Word() != MemoryOff {
+		t.Errorf("Memory without the key = %+v (word %q), want the zero value, whose word is off", memory, memory.Word())
 	}
 }
 
@@ -104,7 +104,7 @@ func TestProjectMemoryRefusals(t *testing.T) {
 		{"a mode with no overlays", "{mode: on, instructions: /etc/legion-operator/memory.md}", "",
 			"projects.DEMO.memory is on and names no config_files: a memory-group tree's roles read their memory overlays from that key, so name at least one, or set mode: off"},
 		{"a role on claude", "{mode: random, config_files: [/etc/a.yml]}", "worker_backends: {implementer: claude}\n",
-			"projects.DEMO.memory is random, and worker_backends.implementer is claude, which reads no PI_CONFIG_FILES: put every issue role on omp, or set mode: off"},
+			"projects.DEMO.memory names config_files, and worker_backends.implementer is claude, which reads no PI_CONFIG_FILES: put every issue role on omp, or take the overlays out of the block"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Load(writeConfigFile(t, memoryFile(tc.block, tc.extra)), noEnv)
@@ -146,13 +146,14 @@ func TestProjectMemoryUnderKubernetesMustBeInTheOperatorsMounts(t *testing.T) {
 	}
 }
 
-// `mode: off` with the two path keys is accepted and kept as written, so an operator moving a
-// project to `on` moves one key rather than three. Nothing of an off block reaches a tree, so what
-// the other refusals ask of a live block is not asked of this one: a role on Claude Code and an
-// overlay outside every pod mount are both accepted while the mode is off.
-func TestProjectMemoryOffKeepsThePathsItIsGiven(t *testing.T) {
+// `mode: off` keeps the two path keys as written, so an operator moving a project to `on` moves
+// one key rather than three — and the files it keeps are not inert: a tree already drawn into the
+// memory group names them under any mode, so every refusal about the files themselves is asked of
+// an off block too. A role on Claude Code, which reads no PI_CONFIG_FILES, and an overlay outside
+// every pod mount are each refused while the mode is off.
+func TestProjectMemoryOffKeepsThePathsItIsGivenAndIsHeldToThem(t *testing.T) {
 	block := "{mode: off, config_files: [/etc/legion-operator/memory.yml], instructions: /etc/legion-operator/memory.md}"
-	cfg, err := Load(writeConfigFile(t, memoryFile(block, "worker_backends: {implementer: claude}\n")), noEnv)
+	cfg, err := Load(writeConfigFile(t, memoryFile(block, "")), noEnv)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -161,12 +162,19 @@ func TestProjectMemoryOffKeepsThePathsItIsGiven(t *testing.T) {
 		ConfigFiles:      []string{"/etc/legion-operator/memory.yml"},
 		InstructionsPath: "/etc/legion-operator/memory.md",
 	}
-	memory := cfg.Projects["DEMO"].Memory
-	if !reflect.DeepEqual(memory, want) || !memory.Off() {
-		t.Fatalf("Memory = %+v (off %v), want %+v and off", memory, memory.Off(), want)
+	if memory := cfg.Projects["DEMO"].Memory; !reflect.DeepEqual(memory, want) {
+		t.Fatalf("Memory = %+v, want %+v", memory, want)
 	}
 
-	if _, err := LoadForValidation(writeConfigFile(t, kubernetesMemoryFile("{mode: off, config_files: [/etc/legion-operator/memory.yml]}")), noEnv); err != nil {
-		t.Fatalf("LoadForValidation with an off block outside every mount: %v", err)
+	_, err = Load(writeConfigFile(t, memoryFile(block, "worker_backends: {implementer: claude}\n")), noEnv)
+	wantErr := "projects.DEMO.memory names config_files, and worker_backends.implementer is claude, which reads no PI_CONFIG_FILES: put every issue role on omp, or take the overlays out of the block"
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("Load of an off block naming overlays beside a Claude role = %v, want %q", err, wantErr)
+	}
+
+	_, err = LoadForValidation(writeConfigFile(t, kubernetesMemoryFile("{mode: off, config_files: [/etc/legion-operator/memory.yml]}")), noEnv)
+	wantErr = "projects.LEGSMOKE.memory.config_files entry /etc/legion-operator/memory.yml is under no runtime.kubernetes.pod.volume_mounts mount_path: a role's pod and the image probe's see only the image and the operator's mounts, so mount the ConfigMap that holds it there"
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("LoadForValidation of an off block outside every mount = %v, want %q", err, wantErr)
 	}
 }

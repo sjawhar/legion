@@ -388,8 +388,15 @@ What each part is for:
   hands over as a tree of its own keeps its old tree's draw.
   A tree first opened before this release has no group and runs without memory, nothing draws for
   it later, and a change of mode reaches only the trees opened after it.
+  The launch follows the record, not the mode: a tree the daemon drew into the memory group keeps
+  its overlays and its instructions while the block still names them, whatever the mode is now, so
+  `mode: off` stops new draws and takes memory from no tree already running with it, and taking
+  the files away is removing them from the block.
+  That is why the overlay rules — the Kubernetes mount check, the readability check at boot, and
+  the refusal of a block that names overlays while `worker_backends` puts an issue role on Claude
+  Code — hold whatever the mode is.
   The controller is in no memory group, a tree drawn `none` runs exactly as it ran before the block
-  existed, and `mode: on` with no `instructions` appends nothing.
+  existed, and a block with no `instructions` appends nothing.
   `legion state` prints one `memory:` line counting the trees drawn under each group and mode, and
   `legion state --json` shows each issue its tree's group, the mode it was drawn under and when.
 - **`repository_renames`** (optional) tells the daemon that two names are one repository, for a

@@ -33,10 +33,6 @@ type specs struct {
 	instructions string
 	secrets      map[string]string
 	prompts      *prompts.Composer
-	// memory is the project's `memory` block (config.Memory): while its mode is off no launch
-	// carries memory at all, whatever a tree's record says, so a project moved to off runs every
-	// tree as it ran before the block existed.
-	memory config.Memory
 	// memoryInstructions is the daemon's copy of the block's instructions file
 	// (config.WriteMemoryInstructions), the last fragment of a memory-group launch's system
 	// prompt; "" when the block names none, which `mode: on` may, and nothing is then appended.
@@ -186,11 +182,13 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		Addressing:                 addressing,
 		DeploymentInstructionsPath: s.instructions,
 	}
-	// The memory group is the tree's, read from its root's record and asked for only while the
-	// project's mode is not off: a specs with no reader (memoryGroup nil, a test's) asks nothing, so
-	// none of its launches carries memory. A project whose block names no instructions file
-	// appends nothing, and its memory-group panes are the overlays alone.
-	if !s.memory.Off() && s.memoryGroup != nil {
+	// The memory group is the tree's, read from its root's record alone: a tree the daemon drew
+	// into the memory group keeps its overlays and its instructions while the block names them,
+	// whatever the project's mode is now — the mode decides which new trees are drawn, and only
+	// removing the keys takes the files away. A specs with no reader (memoryGroup nil, a test's)
+	// asks nothing, so none of its launches carries memory, and a project whose block names no
+	// instructions file appends nothing, its memory-group panes being the overlays alone.
+	if s.memoryGroup != nil {
 		memory, err := s.memoryGroup(ctx, c.Tree)
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the memory group of tree %s: %w", c.Tree, err)

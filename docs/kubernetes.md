@@ -4790,7 +4790,10 @@ each issue's pod (every role of it alike) and the image probe's.
   Its `PI_CONFIG_FILES` is the `pod.env` value, then its own files (`role_config_files`), then the project's memory overlays, which outrank both;
   its one `--append-system-prompt` value ends with the memory instructions, after the deployment's own.
   The controller is in no memory group whatever the mode says, since a memory group is a tree's and the controller runs in none;
-  a role of a tree drawn `none` is told exactly what it was told before the block existed; and `mode: on` with no `instructions` appends nothing.
+  a role of a tree drawn `none` is told exactly what it was told before the block existed; and a block with no `instructions` appends nothing.
+  The launch follows the record, not the mode:
+  a tree the daemon drew into the memory group keeps its overlays and its instructions while the block still names them, whatever the mode is now, so `mode: off` stops new draws and takes memory from no tree already running with it.
+  Taking the files away is removing them from the block.
   The memory overlays take part in everything `role_config_files` takes part in:
   the mount check at load (a file under no `pod.volume_mounts` mount is refused, naming `projects.<KEY>.memory.config_files`), the image probe's per-role value (they are passed for every workflow role and never for the controller, and a file the probe cannot read refuses the boot), the pod drift, and what a kept pod's role is told.
 
@@ -4800,10 +4803,12 @@ each issue's pod (every role of it alike) and the image probe's.
   A role of a memory-group tree started into a pod the launch keeps is told only the memory overlays that pod holds, as it is told only the role's own files that it holds, so it starts, pushes its work and answers the update round that replaces the pod.
 
 - **What is refused, and where the group shows.**
-  The loader refuses a `mode` that is no word of the three, a mode other than `off` that names no `config_files`, a mode other than `off` while `worker_backends` puts an issue role on Claude Code (which reads no `PI_CONFIG_FILES`), and an overlay under no `pod.volume_mounts` mount;
+  The loader refuses a `mode` that is no word of the three, a mode other than `off` that names no `config_files`, a block that names `config_files` while `worker_backends` puts an issue role on Claude Code (which reads no `PI_CONFIG_FILES`) whatever the mode, and an overlay under no `pod.volume_mounts` mount, also whatever the mode;
   boot refuses an `instructions` file it cannot read or that holds nothing.
   `legion start --check-config` makes every one of them.
-  `mode: off` with `config_files` and `instructions` still set is accepted and passes none of them on, so a project moved to `on` moves one key, and a deployment at `off` builds the pod it built before the block existed.
+  `mode: off` with `config_files` and `instructions` still set keeps them as written, so a project moved to `on` moves one key — and they are not inert there:
+  a tree already drawn into the memory group names them, which is why the mount check and the readability check hold at `off` too.
+  A project with no block at all is the pod every deployment built before the block existed.
   Every issue of `GET /legion/v1/state` carries its tree's `memoryGroup` (`memory` or `none`), `memoryDrawMode` and `memoryDrawnAt`, the three absent together while nothing has drawn for the tree (daemon API contract 47);
   `settings` carries the project's block; and `legion state` prints one `memory:` line counting the trees drawn under each group and mode, naming no issue, since the state names no tree.
 

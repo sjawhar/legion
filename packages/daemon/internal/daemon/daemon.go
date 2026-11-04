@@ -815,12 +815,13 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // checkPaneRoleOverlays is the boot gate's read of the overlays each role names beyond the
 // operator's own, as that role's pane will start Oh My Pi: its PI_CONFIG_FILES,
 // runtime.tmux.pi_config_files then the role's own files (role_config_files) and, for a workflow
-// role of a project whose memory is not off, the project's memory overlays after them, each file
+// role of a project whose block names memory overlays, those after them, each file
 // read and the role's own each read alone by image's Oh My Pi (capabilities.CheckOverlays), so a
 // file a pane's Oh My Pi would refuse refuses the boot, naming the key and the file, rather than
 // every launch that names it. Legion names no overlay of its own, so those lists are the whole of
-// a pane's PI_CONFIG_FILES. The controller is in no memory group, and a project at mode off gives
-// no pane its memory overlays, so neither is probed with them. A run that never reached an exit
+// a pane's PI_CONFIG_FILES. The controller is in no memory group, so it is never probed with
+// them; the mode is not read here, since a tree already drawn into the memory group names those
+// overlays whatever the mode is now. A run that never reached an exit
 // of its own is logged, not refused, as the model-fallback read is.
 func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabilities.Image, log *slog.Logger) error {
 	var every []string
@@ -837,7 +838,7 @@ func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabil
 		field := "role_config_files." + string(role)
 		// A memory-group pane of this role names the memory overlays last, so the gate reads the
 		// value that pane would start on rather than the role's half of it.
-		if !memory.Off() && role != claim.RoleController {
+		if len(memory.ConfigFiles) > 0 && role != claim.RoleController {
 			own = slices.Concat(own, memory.ConfigFiles)
 			if len(cfg.RoleConfigFiles[role]) == 0 {
 				field = memoryField
@@ -952,9 +953,10 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
 // stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
 // block's pane variables, Oh My Pi overlays and take_over among them, each role's own overlays
-// (role_config_files), and the project's memory overlays (`memory.config_files`), which a project
-// at mode off hands over not at all, so such a deployment builds the pane it built before the
-// block existed.
+// (role_config_files), and the project's memory overlays (`memory.config_files`), handed over
+// whatever the mode is: the mode decides which new trees are drawn into the memory group, and a
+// tree already drawn into it names those overlays under any mode. A project with no block hands
+// over none, which is the pane every deployment built before the block existed.
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	opts := tmux.Options{
 		Project:           project,
@@ -975,9 +977,7 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 	if block := cfg.Runtime.Tmux; block != nil {
 		opts.PaneEnv, opts.PiConfigFiles, opts.TakeOver = block.PaneEnv, block.PiConfigFiles, block.TakeOver
 	}
-	if memory := cfg.Projects[cfg.Project].Memory; !memory.Off() {
-		opts.MemoryConfigFiles = memory.ConfigFiles
-	}
+	opts.MemoryConfigFiles = cfg.Projects[cfg.Project].Memory.ConfigFiles
 	return opts
 }
 
@@ -1166,8 +1166,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
-			memory: cfg.Projects[cfg.Project].Memory, memoryInstructions: p.memoryInstructions,
-			memoryGroup: treeMemoryGroup(st),
+			memoryInstructions: p.memoryInstructions, memoryGroup: treeMemoryGroup(st),
 		},
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,

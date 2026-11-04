@@ -41,12 +41,6 @@ type Memory struct {
 	InstructionsPath string
 }
 
-// Off says whether the project gives no tree a memory group: `mode: off`, or no `memory` block at
-// all, whose zero value is the empty string. Every reader asks here, since two words mean off.
-func (memory Memory) Off() bool {
-	return memory.Mode == "" || memory.Mode == MemoryOff
-}
-
 // Word is the mode as a draw records it: one of the three words, never the empty string a project
 // that names no block leaves, so every record of a draw reads back a mode an operator could have
 // written and no reader of one needs a fourth name for the absent word.
@@ -124,25 +118,30 @@ func readMemoryConfigFiles(value *yaml.Node, key string) ([]string, error) {
 }
 
 // checkMemory refuses what a project's `memory` block asks for that no tree could run as asked,
-// once the rest of the file is settled: a mode other than off that names no overlay; a mode other
-// than off while worker_backends puts an issue role on a harness other than Oh My Pi, which reads
-// no PI_CONFIG_FILES; and, under runtime kubernetes, an overlay outside every
+// once the rest of the file is settled: a mode other than off that names no overlay; a block that
+// names overlays while worker_backends puts an issue role on a harness other than Oh My Pi, which
+// reads no PI_CONFIG_FILES; and, under runtime kubernetes, an overlay outside every
 // runtime.kubernetes.pod mount (checkRoleConfigMount), since a pod sees only the image and the
-// operator's mounts, and a file the image ships is no operator's. An off project passes nothing on,
-// so its own keys are read and then left alone here, a mount it names included.
+// operator's mounts, and a file the image ships is no operator's.
+//
+// Only the first is about the mode. The other two hold whenever the block names overlays, `off`
+// included: the mode decides which new trees are drawn into the memory group, and a tree already
+// drawn into it keeps its overlays while the block names them, so an overlay no role could load
+// would stop such a tree's roles under any mode. Taking the files away is removing them from the
+// block, not moving the mode.
 func checkMemory(cfg Config) error {
 	for _, name := range slices.Sorted(maps.Keys(cfg.Projects)) {
 		memory := cfg.Projects[name].Memory
-		if memory.Off() {
-			continue
-		}
 		field := "projects." + name + ".memory"
-		if len(memory.ConfigFiles) == 0 {
+		if memory.Mode != "" && memory.Mode != MemoryOff && len(memory.ConfigFiles) == 0 {
 			return fmt.Errorf("%s is %s and names no config_files: a memory-group tree's roles read their memory overlays from that key, so name at least one, or set mode: off", field, memory.Mode)
+		}
+		if len(memory.ConfigFiles) == 0 {
+			continue
 		}
 		for _, role := range claim.Roles {
 			if backend := cfg.BackendFor(role); backend != runtime.BackendOmp {
-				return fmt.Errorf("%s is %s, and worker_backends.%s is %s, which reads no PI_CONFIG_FILES: put every issue role on %s, or set mode: off", field, memory.Mode, role, backend, runtime.BackendOmp)
+				return fmt.Errorf("%s names config_files, and worker_backends.%s is %s, which reads no PI_CONFIG_FILES: put every issue role on %s, or take the overlays out of the block", field, role, backend, runtime.BackendOmp)
 			}
 		}
 		if k := cfg.Runtime.Kubernetes; k != nil {
