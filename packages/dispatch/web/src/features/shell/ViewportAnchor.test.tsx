@@ -203,6 +203,43 @@ test("the row under the pointer is the current node ahead of the centre, and is 
   }
 });
 
+test("the pointer moving onto the card a row opened keeps that row the current one, until the card closes", () => {
+  const view = render(<List rows={ids(12)} />);
+  // The one hover card (`features/refs/RefPreview.tsx`): `fixed` over the page and portaled into
+  // the body, so it is never inside the list whose row opened it.
+  const card = document.createElement("div");
+  card.id = "ref-preview";
+  document.body.append(card);
+  try {
+    setScrollY(100);
+    const hovered = document.querySelector<HTMLElement>('[data-row="r2"]');
+    const reference = hovered?.querySelector("button") ?? null;
+    if (hovered === null || reference === null) throw new Error("r2 missing");
+    fireEvent.pointerOver(reference);
+    expect(chosen()).toEqual({ id: "r2", via: "pointer" });
+
+    // The card opened over the resting pointer. `RefPreview` names its reference by
+    // `aria-describedby` for as long as it is shown, which is how the row is known to own it.
+    reference.setAttribute("aria-describedby", "ref-preview");
+    const hoveredTop = viewportTop("r2");
+    fireEvent.pointerOut(reference, { relatedTarget: card });
+
+    // A row arriving above r2 while the pointer reads r2's card leaves r2 where it was.
+    expect(chosen()).toEqual({ id: "r2", via: "pointer" });
+    view.rerender(<List rows={["a", ...ids(12)]} />);
+    expect(viewportTop("r2")).toBe(hoveredTop);
+
+    // The pointer left the card for somewhere else, and the card closed itself: the hand is off
+    // the row, and the centre has it again.
+    reference.removeAttribute("aria-describedby");
+    card.remove();
+    expect(chosen()?.via).toBe("center");
+  } finally {
+    view.unmount();
+    card.remove();
+  }
+});
+
 test("a disabled anchor measures nothing and leaves the scroll alone", () => {
   const view = render(<List enabled={() => false} rows={ids(12)} />);
   try {

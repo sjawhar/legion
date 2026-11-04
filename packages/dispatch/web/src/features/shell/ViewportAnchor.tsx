@@ -1,5 +1,7 @@
 import { Component, type ReactNode, type RefObject } from "react";
 
+import { refPreviewCardContains, refPreviewOpenedIn } from "../refs/ref-preview-card";
+
 export interface AnchorRow {
   id: string;
   /** How the row was chosen: keyboard focus within it, the pointer resting on it, or, failing
@@ -91,7 +93,9 @@ function rowWithin(root: HTMLElement, selector: string, node: Element | null): H
  * top of the page (the hand is on that row), the centre only once the reader has scrolled, since
  * a reader at the top is looking for arrivals and should see them land. A row that itself leaves
  * its place for another `group` (a section) is not followed: the reader's place is where the row
- * was, not where it went.
+ * was, not where it went. The pointer moving from a row onto the hover card a reference in that
+ * row opened keeps that row the current one while the card is open: the card is the row's own
+ * doing and sits outside the list only because it is `fixed`.
  *
  * Rows are the elements matching `[item]`, identified by that attribute's value, and must keep
  * their identity across the commit (a remounted row is a new node and cannot be found again).
@@ -111,6 +115,13 @@ function rowWithin(root: HTMLElement, selector: string, node: Element | null): H
 export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snapshot | null> {
   private root: HTMLElement | null = null;
   private hovered: HTMLElement | null = null;
+  /** Set while the pointer left the hovered row for the hover card a reference in that row
+   *  opened. The card is `fixed` and portaled into `document.body`
+   *  (`features/refs/RefPreview.tsx`), so no later boundary event on this root says where the
+   *  pointer went from there, and the row is held as the reader's place only for as long as
+   *  that card is open - once the pointer leaves it the card closes itself
+   *  (`REF_PREVIEW_CLOSE_DELAY_MS`) and `interacted` lets the row go. */
+  private onOwnCard = false;
 
   // Both listeners hang off the rendered root, not `document`: `pointerover`/`pointerout` bubble,
   // so a pointer entering a row still reaches the root, and leaving a row for anything outside
@@ -121,16 +132,27 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
       return;
     }
     this.hovered = rowWithin(root, `[${this.props.item}]`, event.target);
+    this.onOwnCard = false;
   };
 
+  // A pointer moving from a row onto the card that row's own reference opened has left nothing
+  // the reader can see leaving: the card is the row's doing, drawn outside the list only
+  // because it is `fixed`. Releasing the row there is what moved the row under the reader when
+  // a refetch landed with the pointer on the card.
   private readonly pointerOut = (event: PointerEvent): void => {
     const row = this.hovered;
     if (
-      row !== null &&
-      !(event.relatedTarget instanceof Node && row.contains(event.relatedTarget))
+      row === null ||
+      (event.relatedTarget instanceof Node && row.contains(event.relatedTarget))
     ) {
-      this.hovered = null;
+      return;
     }
+    if (refPreviewCardContains(event.relatedTarget) && refPreviewOpenedIn(row)) {
+      this.onOwnCard = true;
+      return;
+    }
+    this.hovered = null;
+    this.onOwnCard = false;
   };
 
   private readonly setRoot = (node: HTMLElement | null): void => {
@@ -154,7 +176,11 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     if (root === null) return null;
     const selector = `[${this.props.item}]`;
     const focused = rowWithin(root, selector, document.activeElement);
-    const hovered = this.hovered !== null && root.contains(this.hovered) ? this.hovered : null;
+    const resting =
+      this.hovered !== null && (!this.onOwnCard || refPreviewOpenedIn(this.hovered))
+        ? this.hovered
+        : null;
+    const hovered = resting !== null && root.contains(resting) ? resting : null;
     const chosen =
       focused !== null
         ? { row: focused, via: "focus" as const }
