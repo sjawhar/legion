@@ -25,7 +25,7 @@ type createAgentTokenResponse struct {
 }
 
 func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -63,7 +63,7 @@ func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
 // insert commits in a transaction of its own, which marks the key committed, and a repeat under the
 // key is 409 KEY_COMMITTED - the token was made and cannot be shown again - never a second token.
 func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -123,7 +123,7 @@ func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 // pool, as every keyed write does: the commit step marks the request's key committed with the
 // write itself (markRequestKeyCommitted).
 func (s *server) updateAgentTokenScopes(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -188,7 +188,7 @@ func tokenScopes(w http.ResponseWriter, actor model.Actor, requested *[]string) 
 	}
 	// At most the two scopes this deployment knows, whatever the body holds: an unknown word is
 	// refused and a repeat is folded, so a long array buys no room.
-	scopes := make([]string, 0, 2)
+	scopes := make([]string, 0, len(model.Scopes))
 	for _, scope := range *requested {
 		if scope != model.ScopePerson && scope != model.ScopeApprove {
 			writeError(w, codeTokenScopesInput, http.StatusBadRequest, fmt.Sprintf(
@@ -216,18 +216,18 @@ func tokenScopes(w http.ResponseWriter, actor model.Actor, requested *[]string) 
 	return scopes, true
 }
 
-// callerScopes is the set the caller's own credential holds: the scopes requireScope copied onto
+// callerScopes is the set the caller's own credential holds: the scopes actingPerson copied onto
 // Act for a token that acted for its person, and both scopes for a browser, whose cookie names
 // no agent because the person themselves acted.
 func callerScopes(actor model.Actor) []string {
 	if actor.Act != nil {
 		return actor.Act.Scopes
 	}
-	return []string{model.ScopePerson, model.ScopeApprove}
+	return model.Scopes
 }
 
 func (s *server) revokeAgentToken(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

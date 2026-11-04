@@ -43,7 +43,7 @@ func (s *server) rejectComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -125,7 +125,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -170,7 +170,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The author is compared as a writer and not field by field: requireScope hands back the
+	// The author is compared as a writer and not field by field: actingPerson hands back the
 	// person with the credential that acted beside them (model.ActorAct), so an agent editing
 	// its person's comment carries an Act the stored author has not, and the person is who the
 	// authorship is about.
@@ -259,7 +259,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if action == "resolve" {
 		actor, ok = s.requireActor(w, r, input.Actor)
 	} else {
-		actor, ok = s.requireScope(w, r, model.ScopePerson)
+		actor, ok = s.actingPerson(w, r)
 	}
 	if !ok {
 		return

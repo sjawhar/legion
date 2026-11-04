@@ -193,7 +193,7 @@ func (s *server) writeAdvice(
 	// otherwise run inside the write's own transaction while it holds the issue row. Such a
 	// write still gets the triage advice, which is true for a reader who may move the status.
 	// Two kinds of actor reach a write: a session, which every bearer naming itself becomes
-	// (bearerSessionActor), and the person, which a cookie is and which requireScope hands back
+	// (bearerSessionActor), and the person, which a cookie is and which actingPerson hands back
 	// for every credential holding the `person` scope, an agent's personal token among them.
 	// That agent gets the person's advice and not a session's, which is right: it is acting as
 	// the person, and the advice is about what the acting writer is told. The guard is on the

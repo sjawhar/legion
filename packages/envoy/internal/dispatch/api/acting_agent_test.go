@@ -152,7 +152,7 @@ func TestAnAgentsAnswerReviewAndSnoozeAreRecordedAsThePersonWithItsActBesideThem
 }
 
 // A broker-issued token proves its own session, so the act names that session and no token row;
-// a ?session= naming another session is the disagreement requireScope refuses.
+// a ?session= naming another session is the disagreement actingPerson refuses.
 func TestABrokerTokensAnswerActsAsTheSessionTheBrokerProved(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
@@ -540,5 +540,96 @@ func TestAnsweringAnApprovalAskNeedsTheApproveScope(t *testing.T) {
 		"selected": []string{"Yes"},
 	}); answered.Code != http.StatusOK {
 		t.Fatalf("answer an ordinary question with the same token: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+}
+
+// newestEventActor is the actor of the newest event of type on issueKey, read from the issue's
+// own event log as any reader of it would.
+func newestEventActor(t *testing.T, handler http.Handler, issueKey, eventType string) model.Actor {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/events", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read %s's events: status=%d body=%s", issueKey, response.Code, response.Body.String())
+	}
+	logged := decodeBody[[]struct {
+		Type  string      `json:"type"`
+		Actor model.Actor `json:"actor"`
+	}](t, response)
+	for index := len(logged) - 1; index >= 0; index-- {
+		if logged[index].Type == eventType {
+			return logged[index].Actor
+		}
+	}
+	t.Fatalf("%s holds no %s event", issueKey, eventType)
+	return model.Actor{}
+}
+
+// An agent acting on its own ask and its own following is doing its own work, not its person's,
+// so it is recorded as the session acting for its owner, exactly as it was before the person
+// scope existed. That matters beyond the record: events.Broker.Notify reads an actor of kind
+// user as a person's act and sends it on, so a session recorded as its person would be handed
+// back its own reword and its own follow as deliveries. The person's scope opens the other
+// half - another session's ask, another session's following - which the two tests after this
+// one hold.
+func TestAnAgentsOwnRewordAndFollowAreStillTheSessionsOwnAct(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "OWN", "An agent's own acts", "A spec")
+	token := mintPersonalToken(t, handler, "alice", actingTokenName, nil)
+	askID := openAskAs(t, handler, issue.Key, actingSession, "Which option?")
+
+	reworded := agentRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID,
+		map[string]any{
+			"question": "Which option, as the agent rewords its own?",
+			"actor":    map[string]any{"kind": "session", "id": actingSession},
+		}, token.Token)
+	if reworded.Code != http.StatusOK {
+		t.Fatalf("the agent rewords its own ask: status=%d body=%s", reworded.Code, reworded.Body.String())
+	}
+	if actor := newestEventActor(t, handler, issue.Key, "ask.edited"); actor.Kind != "session" || actor.ID != actingSession || actor.Act != nil {
+		t.Fatalf("ask.edited actor = %#v, want the session %s acting for its owner with no act", actor, actingSession)
+	}
+
+	// Another session's ask, since a session already follows every ask it opened and a repeated
+	// PUT is a no-op with no event: the agent joining that ask is still its own act.
+	otherAsk := openAskAs(t, handler, issue.Key, "session-somebody-else", "Which other option?")
+	followed := agentRequest(t, handler, http.MethodPut, "/api/v1/asks/"+otherAsk+"/followers/"+actingSession,
+		map[string]any{"actor": map[string]any{"kind": "session", "id": actingSession}}, token.Token)
+	if followed.Code != http.StatusNoContent {
+		t.Fatalf("the agent follows an ask for itself: status=%d body=%s", followed.Code, followed.Body.String())
+	}
+	if actor := newestEventActor(t, handler, issue.Key, "ask.follower_added"); actor.Kind != "session" || actor.ID != actingSession || actor.Act != nil {
+		t.Fatalf("ask.follower_added actor = %#v, want the session %s acting for its owner with no act", actor, actingSession)
+	}
+}
+
+// The other half: acting on another session's ask, or putting another session on one, is the
+// person's act, so it is recorded as the person with the agent named beside them.
+func TestAnAgentsActOnAnotherSessionIsRecordedAsThePerson(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "OTH", "An act for the person", "A spec")
+	token := mintPersonalToken(t, handler, "alice", actingTokenName, nil)
+	askID := openAskAs(t, handler, issue.Key, "session-somebody-else", "Which option?")
+
+	reworded := agentRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID,
+		map[string]any{
+			"question": "Which option, as her agent words it for her?",
+			"actor":    map[string]any{"kind": "session", "id": actingSession},
+		}, token.Token)
+	if reworded.Code != http.StatusOK {
+		t.Fatalf("the agent rewords another session's ask: status=%d body=%s", reworded.Code, reworded.Body.String())
+	}
+	actor := newestEventActor(t, handler, issue.Key, "ask.edited")
+	if actor.Kind != "user" || actor.ID != "alice" || actor.Act == nil || actor.Act.Session != actingSession {
+		t.Fatalf("ask.edited actor = %#v, want alice acting through session %s", actor, actingSession)
+	}
+
+	followed := agentRequest(t, handler, http.MethodPut, "/api/v1/asks/"+askID+"/followers/session-watching",
+		map[string]any{"actor": map[string]any{"kind": "session", "id": actingSession}}, token.Token)
+	if followed.Code != http.StatusNoContent {
+		t.Fatalf("the agent follows the ask for another session: status=%d body=%s", followed.Code, followed.Body.String())
+	}
+	added := newestEventActor(t, handler, issue.Key, "ask.follower_added")
+	if added.Kind != "user" || added.ID != "alice" || added.Act == nil || added.Act.Session != actingSession {
+		t.Fatalf("ask.follower_added actor = %#v, want alice acting through session %s", added, actingSession)
 	}
 }

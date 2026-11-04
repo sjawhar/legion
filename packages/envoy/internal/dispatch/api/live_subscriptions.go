@@ -44,7 +44,7 @@ type liveStreamer interface {
 	SendWait(ctx context.Context, frame any) error
 	// Holds reports whether the caller's credential holds one OAuth scope, as the socket kept
 	// that credential at the upgrade: the gate a view only a person's credential may watch uses,
-	// since requireScope gates a route and no frame carries a credential.
+	// since gateRouteScopes gates a route and no frame carries a credential.
 	Holds(scope string) bool
 }
 

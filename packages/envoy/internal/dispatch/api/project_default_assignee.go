@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // A project's default assignee is the last step of an issue create's assignee chain
@@ -28,7 +26,7 @@ type projectDefaultAssignee struct {
 // Settings page's one read. A project with no default is left out, and no default anywhere is
 // an empty list, never null.
 func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -60,7 +58,7 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 // typo never becomes a stored default; a default that goes stale later is not refused but
 // ignored, by the create chain.
 func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

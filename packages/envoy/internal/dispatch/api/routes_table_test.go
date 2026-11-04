@@ -225,14 +225,16 @@ func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string)
 
 // Every row's auth cell is checked against what its handler does to a cookie caller, a bearer,
 // and an anonymous request, so GET /api/v1 cannot describe a route the server refuses (or
-// admits) differently. A row that names OAuth scopes is checked against both bearers there are:
-// the deployment's shared token, which holds no scope and is refused OAUTH_SCOPE_REQUIRED, and a
-// person's own token holding the scopes the row declares, which is admitted. That is what keeps
-// this test able to fail on a table edit alone, now that the rows a person's credential opens
-// are authAny like every other.
+// admits) differently. A row that names OAuth scopes is checked against three bearers: the
+// deployment's shared token, which holds no scope and is refused OAUTH_SCOPE_REQUIRED; a
+// person's own token holding exactly the scopes the row declares, which is admitted; and, on a
+// row that names `approve`, a token of that person holding `person` alone, which is refused.
+// That last probe is what holds the gate to the table: without it a row the table declares
+// `approve` whose gate asked only for `person` would pass every test here.
 func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	personal := personalTokenHolding(t, database, model.ScopePerson, model.ScopeApprove)
+	personOnly := personalTokenHolding(t, database, model.ScopePerson)
 	probe := func(route apiRoute, credential string) *httptest.ResponseRecorder {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -284,6 +286,9 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 				expectAdmitted(t, route, "cookie")
 				if len(route.OAuthScopes) > 0 {
 					expectScopeRefusal(t, route, "bearer")
+					if slices.Contains(route.OAuthScopes, model.ScopeApprove) {
+						expectScopeRefusal(t, route, personOnly)
+					}
 					expectAdmitted(t, route, personal)
 					return
 				}

@@ -245,11 +245,10 @@ describe("dispatch inbox", () => {
     expect(stdout.trimEnd().endsWith("Credential requests 0")).toBe(true);
   });
 
-  test("a scope refusal from any of the three reads exits 1 naming the code and the scope", async () => {
+  // The two reads a scope can refuse. GET /api/v1/whoami needs none — it answers every caller
+  // its own scopes — so a refusal from it is one the server cannot give and no test fakes.
+  test("a scope refusal from either scoped read exits 1 naming the code and the scope", async () => {
     for (const refuse of [
-      () => {
-        whoamiAnswer = SCOPE_REFUSED;
-      },
       () => {
         inboxAnswer = SCOPE_REFUSED;
       },

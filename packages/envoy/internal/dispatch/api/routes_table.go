@@ -176,7 +176,7 @@ var writeClasses = map[string]writeScope{
 }
 
 // routeScopeSet is the OAuth scopes one route needs of the credential that calls it, every one
-// of which that credential must hold (requireScope). An empty set is a route any authenticated
+// of which that credential must hold (gateRouteScopes). An empty set is a route any authenticated
 // caller may reach.
 type routeScopeSet []string
 

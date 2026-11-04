@@ -358,7 +358,7 @@ func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 }
 
 // GET /whoami answers every caller the OAuth scopes its own credential holds, which is what
-// decides the routes it may call (requireScope): both for a person at a browser, the set its own
+// decides the routes it may call (gateRouteScopes): both for a person at a browser, the set its own
 // row names for a personal token, and none at all for the two credentials a deployment
 // configures rather than a person. A credential holding none is answered an empty array and
 // never null, so a reader need not tell "this credential holds no scope" from "this build does

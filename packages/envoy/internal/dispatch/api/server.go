@@ -617,6 +617,16 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
+		if len(route.OAuthScopes) > 0 {
+			// Ahead of the keyed layer and the project and session checks, so the row's own
+			// scopes are the first thing a request is held to: a credential that holds none is
+			// told so rather than told its write belongs to another project or another session,
+			// and its refusal claims no idempotency key, so the person who ticks the scope back
+			// is not answered the stored refusal under the same key. It is inside the drain, so
+			// a client that asked to be told to continue is handled as it is for every other
+			// early answer.
+			handler = s.gateRouteScopes(route.OAuthScopes, handler)
+		}
 		if route.Method != http.MethodGet {
 			// Every layer above may answer before the body is read; the answer waits for the body.
 			//
@@ -1026,11 +1036,11 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 // rather than of one request — a browser's cookie holds both scopes, and the shared token and a
 // service-account token hold none — and the cookie's is on the dashboard's hottest path, so
 // allocating either per request would be waste. Nothing writes a Credential or appends to its
-// Scopes: Holds reads, requireScope copies the slice header onto the act it records, and
+// Scopes: Holds reads, actingPerson copies the slice header onto the act it records, and
 // tokenScopes builds a set of its own.
 var (
 	scopelessCredential = &model.Credential{}
-	personCredential    = &model.Credential{Scopes: []string{model.ScopePerson, model.ScopeApprove}}
+	personCredential    = &model.Credential{Scopes: model.Scopes}
 )
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
@@ -1118,10 +1128,9 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 		Origin:  supplied.Origin,
 		Owner:   authenticated.Owner,
 		Service: authenticated.Service,
-		// The credential's own, as Owner and Service are: this branch rebuilds the actor field by
-		// field, so a credential left out here is one the caller proved and the request no longer
-		// carries.
-		Credential: authenticated.Credential,
+		// No Credential: this actor is one a handler records and compares, and a stored actor
+		// was decoded from JSON, which carries none (model.Actor.Recorded). A layer that needs
+		// the request's own credential reads it from optionalActor (callerHoldsScope).
 	}, nil
 }
 
@@ -1198,13 +1207,42 @@ func missingScopeError(scope, message string) *apiError {
 	return &apiError{status: http.StatusForbidden, code: codeScopeRequired, message: message, scope: scope}
 }
 
-// requireScope answers the person a request acts for, refusing a credential that does not hold
-// every scope named. The scopes are the route's own, which the table declares beside the row
-// (routeScopes); a credential the deployment configured rather than a person — the shared token,
-// a pod's service-account token — holds none of them, and a personal token holds the set its own
-// row names. The first scope the credential lacks, in the order the caller named them, is 403
+// gateRouteScopes is the one place a route's OAuth scopes are enforced: register wraps every row
+// that declares any (routeScopes) in it, ahead of the keyed, project and session layers, so the
+// table is what decides and a handler restates nothing. A credential the deployment configured
+// rather than a person — the shared token, a pod's service-account token, a broker-issued token
+// scoped to a project — holds none of them; a personal token holds the set its own row names.
+// The first scope the credential lacks, in the order the row declares them, is 403
 // OAUTH_SCOPE_REQUIRED (refuseMissingScope); a caller that does not resolve at all answers
 // through writeAuthenticationError, as every gate on this server does.
+//
+// The caller it resolved rides along (resolvedCallerKey), so no layer behind it verifies the
+// same bearer twice or presents the same DPoP proof twice.
+func (s *server) gateRouteScopes(scopes []string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			s.writeAuthenticationError(w, err)
+			return
+		}
+		for _, scope := range scopes {
+			if !actor.Credential.Holds(scope) {
+				refuseMissingScope(w, scope, fmt.Sprintf(
+					"this request's credential does not hold the %s scope, which this route requires", scope))
+				return
+			}
+		}
+		handler(w, r.WithContext(context.WithValue(
+			r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human})))
+	}
+}
+
+// actingPerson answers the person a request acts for, on a route gateRouteScopes has already
+// held to the `person` scope. It names no scope of the route's own: the table decides those, and
+// a handler that repeated them could drift from the row it serves. The refusal below is a
+// backstop the gate makes unreachable — a row that reaches one of these handlers and declares no
+// `person` is a table mistake, not a caller's — and it is the floor every one of them needs,
+// since without that scope there is no person to answer with.
 //
 // The actor it hands back is the person and not the agent beside them. Every route this opens
 // reads the person from actor.ID (inbox.go, agent_tokens.go, ask_transitions.go), and three
@@ -1223,21 +1261,19 @@ func missingScopeError(scope, message string) *apiError {
 // parameter names where the caller gives it, the convention messages.go already reads; one that
 // proved a session is refused a parameter naming another, 403 ACTOR_SESSION_MISMATCH, which is
 // what bearerSessionActor answers the same disagreement in a body.
-func (s *server) requireScope(w http.ResponseWriter, r *http.Request, scopes ...string) (model.Actor, bool) {
+func (s *server) actingPerson(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return model.Actor{}, false
 	}
-	for _, scope := range scopes {
-		if !actor.Credential.Holds(scope) {
-			refuseMissingScope(w, scope, fmt.Sprintf(
-				"this request's credential does not hold the %s scope, which this route requires", scope))
-			return model.Actor{}, false
-		}
+	if !actor.Credential.Holds(model.ScopePerson) {
+		refuseMissingScope(w, model.ScopePerson, fmt.Sprintf(
+			"this request's credential does not hold the %s scope, which this route requires", model.ScopePerson))
+		return model.Actor{}, false
 	}
-	// Past the loop the credential holds every scope named, so it is not nil: Credential.Holds
-	// answers false for nothing at all, and every call names at least one scope.
+	// Past that check the credential is not nil: Credential.Holds answers false for nothing at
+	// all.
 	credential := actor.Credential
 	person := actor.ID
 	if actor.Owner != nil {
@@ -1264,16 +1300,17 @@ func (s *server) requireScope(w http.ResponseWriter, r *http.Request, scopes ...
 	return model.Actor{Kind: "user", ID: model.CanonicalLogin(person), Act: act}, true
 }
 
-// actSessionFromBody records on actor's act the session the request body names, for the two
-// person-scope handlers that already decode a body actor: answerAsk and putUserState. A
+// actSessionFromBody records on actor's act the session the request body names, for the
+// person-scope handlers that already decode a body actor: answerAsk, putUserState, editAsk and
+// the follower routes. A
 // credential that proved no session of its own - a personal token - names its agent nowhere
 // else on a route whose body is already read, so the body's actor is taken for it, exactly as
-// `?session=` is taken on every other route (requireScope). A credential that did prove one - a
+// `?session=` is taken on every other route (actingPerson). A credential that did prove one - a
 // broker-issued token - decides it, and a body naming another session is the disagreement
-// bearerSessionActor and requireScope both refuse, 403 ACTOR_SESSION_MISMATCH, rather than a
+// bearerSessionActor and actingPerson both refuse, 403 ACTOR_SESSION_MISMATCH, rather than a
 // write recorded as a session the caller merely asked for.
 //
-// Only these two routes read it: decodeJSON refuses an unknown field, so a body actor on a route
+// Only those routes read it: decodeJSON refuses an unknown field, so a body actor on a route
 // whose input struct does not declare one is a 400, and four of the mutating rows a person's
 // scope opened are DELETEs with no body at all. A browser's actor names no agent (act is nil),
 // so there is nothing for a body to name, and its body actor is ignored here as it always was.
@@ -1290,7 +1327,7 @@ func actSessionFromBody(w http.ResponseWriter, actor model.Actor, supplied *mode
 			"this request acts for session %s; its actor names another session", actor.Act.Session))
 		return model.Actor{}, false
 	}
-	// A copy, so a handler holding the actor requireScope answered keeps the act it was given.
+	// A copy, so a handler holding the actor actingPerson answered keeps the act it was given.
 	act := *actor.Act
 	act.Session = named
 	actor.Act = &act

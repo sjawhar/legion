@@ -140,7 +140,7 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 	// person: it proves a session, not that any person stands behind the request.
 	var scopes []string
 	if caller.ProjectScope == brokertoken.ProjectScopePerson {
-		scopes = []string{model.ScopePerson, model.ScopeApprove}
+		scopes = model.Scopes
 	}
 	actor := model.Actor{
 		Kind:  "session",

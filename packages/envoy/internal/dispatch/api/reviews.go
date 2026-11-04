@@ -254,7 +254,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

@@ -20,6 +20,12 @@ const (
 	ScopeApprove = "approve"
 )
 
+// Scopes is every OAuth scope this deployment knows, in the order a credential holding both
+// carries them: the whole set a person's own credential holds, and the set a mint gives a token
+// when its body names none. Read it, never write it — every such credential shares this one
+// slice, as every surface shares DISPATCH_SCOPES in @legion/contracts.
+var Scopes = []string{ScopePerson, ScopeApprove}
+
 // ActorAct names the agent that acted when a credential acted for its person, so a write records
 // which credential made it and not only whom it was made for: Session is the session a
 // broker-issued token proved, TokenID and TokenName the personal token presented, and Scopes the
@@ -86,8 +92,8 @@ type Actor struct {
 	Act *ActorAct `json:"act,omitempty"`
 	// Credential is what authenticated the request: the OAuth scopes it holds and how it names
 	// the agent behind it. It is a fact of the request and never of the record, so it is not
-	// serialised; requireScope copies what it needs onto Act, and Recorded drops it from the
-	// actor a handler writes and compares.
+	// serialised; the scope gate and actingPerson read it, actingPerson copies what it needs
+	// onto Act, and Recorded drops it from the actor a handler writes and compares.
 	Credential *Credential `json:"-"`
 }
 
@@ -95,8 +101,10 @@ type Actor struct {
 // compares a stored actor with the caller's using == — a comment's author against the caller
 // editing it, a room's connected writers against the one that edited — and a stored actor was
 // decoded from JSON, which carries no credential, so an actor a handler records or compares
-// must carry none either. actorFrom and requireScope, the two helpers that hand a handler its
-// actor, are where the request's credential stops.
+// must carry none either. Nothing a handler records carries one: actorFrom drops it here,
+// bearerSessionActor builds a session actor without it, and actingPerson answers the person
+// with its Act alone. A layer that needs the request's own credential reads it from
+// optionalActor (callerHoldsScope).
 func (a Actor) Recorded() Actor {
 	a.Credential = nil
 	return a

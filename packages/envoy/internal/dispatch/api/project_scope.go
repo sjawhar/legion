@@ -329,7 +329,7 @@ func refuseWriteOutsideProjectScope(w http.ResponseWriter, covers, belongsTo str
 // into a session that is not theirs. Without this a person's own broker-issued credential could
 // only ever address the session it was issued for, which is nobody's conversation but its own.
 // A credential that holds none of the row's scopes is refused here as it always was, and the
-// handler's own requireScope refuses it again.
+// the route's own scope gate refuses it first (gateRouteScopes).
 //
 // Every other row returns the handler unchanged, so no route it does not cover pays for it.
 func (s *server) withinSessionScope(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {

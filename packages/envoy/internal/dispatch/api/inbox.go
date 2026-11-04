@@ -86,7 +86,7 @@ func (s *server) inboxAssigneeFilter(ctx context.Context, raw string, caller mod
 }
 
 func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireScope(w, r, model.ScopePerson)
+	caller, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

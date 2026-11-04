@@ -80,7 +80,7 @@ type dispatchUser struct {
 
 // listUsers returns everyone who has signed in, sorted by email: the assignee picker's options.
 func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `select email from people order by email`)
@@ -108,7 +108,7 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 // none, a person-scoped token included).
 //
 // Every caller is told the OAuth scopes its credential holds, which is what decides the routes it
-// may call (requireScope): both for a person at a browser, the set its own row names for a
+// may call (gateRouteScopes): both for a person at a browser, the set its own row names for a
 // personal token, and none for the shared token and a pod's service-account token. The kind stays
 // `agent` for a personal token holding the person scope, since the kind names the credential and
 // not the act; the person that token acts for is its `owner`, which the dispatch command reads.

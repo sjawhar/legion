@@ -110,7 +110,7 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
 				return model.Ask{}, err
 			}
-			// Act comes from the actor requireScope handed the handler: the answer is the
+			// Act comes from the actor actingPerson handed the handler: the answer is the
 			// person's, and the agent that made it for them is named beside it. A browser's
 			// actor carries none, and so does a write of docs' own (the carry's answer).
 			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: answeredAt.UTC(), Act: actor.Act}
@@ -171,7 +171,7 @@ func parseReplacesAnswer(raw json.RawMessage) (*time.Time, error) {
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireScope(w, r, model.ScopePerson)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
