@@ -133,8 +133,8 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 }
 
 // noticeAnswered is what the listener's answer to one notice publish decides for its row:
-// published is that answer, notice the Notice as it went out (Notice.Published) and tree the
-// snapshot the row was routed against.
+// published is that answer, payload the row's own Notice, which gives the notice as it went out
+// and its dedupe key (Notice.Published), and tree the snapshot the row was routed against.
 //
 // A delivery its architect's session did not confirm (504 `receipt_timeout`) is queued again as a
 // copy of its own (reholdNotice). A holder that does not advertise the notice's delivery mode, and
@@ -151,9 +151,13 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // A role no session holds is held for its architect while that architect's claim can hold it
 // again, and finishes undelivered once nobody will. Any other failure is the row's, retried on
 // its backoff.
-func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, payload, notice record.Notice,
-	tree treeSnapshot, architect claim.Token, key string, published error,
+func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, payload record.Notice,
+	tree treeSnapshot, architect claim.Token, published error,
 ) error {
+	// The same pair the publish went out as (Notice.Published): the notice as it was sent and the
+	// dedupe key it was sent under, derived here rather than passed in, so no caller can hand this
+	// answer one notice's text under another's key.
+	notice, key := payload.Published(row.ID)
 	var notDelivered notify.ErrNotDelivered
 	var refused notify.ErrRefusedByHolder
 	var denied notify.ErrPublishDenied

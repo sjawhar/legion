@@ -1185,7 +1185,7 @@ func TestANoticeIsKeptWhileItsArchitectsSessionIsUnresponsive(t *testing.T) {
 			noticeSummary(notice.Kind, row.Issue), notice, record.OutboxKey(row.ID))
 	}
 
-	kept := runner.noticeAnswered(context.Background(), row, notice, notice, treeSnapshot{}, architect, record.OutboxKey(row.ID), refused())
+	kept := runner.noticeAnswered(context.Background(), row, notice, treeSnapshot{}, architect, refused())
 	if !errors.Is(kept, notify.ErrHolderUnresponsive) || errors.Is(kept, errNoticeWaits) {
 		t.Fatalf("answer to an unresponsive holder = %v, want the row kept and retried on its backoff", kept)
 	}
@@ -1197,7 +1197,7 @@ func TestANoticeIsKeptWhileItsArchitectsSessionIsUnresponsive(t *testing.T) {
 	}
 
 	state = "gone"
-	if dropped := runner.noticeAnswered(context.Background(), row, notice, notice, treeSnapshot{}, architect, record.OutboxKey(row.ID), refused()); dropped != nil {
+	if dropped := runner.noticeAnswered(context.Background(), row, notice, treeSnapshot{}, architect, refused()); dropped != nil {
 		t.Fatalf("answer to a holder that is gone = %v, want the notice finished undelivered", dropped)
 	}
 }

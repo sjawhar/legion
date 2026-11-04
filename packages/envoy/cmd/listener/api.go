@@ -692,16 +692,6 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		// A session past the live window that receives on a serving port is refused: the push this
-		// listener would make goes to a server that is not answering, and a sender told nothing
-		// would wait for a reply that cannot come. One that receives on its own NATS
-		// subscription is accepted and the message stored for it, since that is exactly what a
-		// stalled session reads back when it returns (POST /v1/replay) - the whole point of not
-		// taking an unresponsive session for a dead one.
-		if state == session.Unresponsive && target.Port > 0 {
-			record.refuseWith(w, http.StatusNotFound, outcomeNoLiveSession, noLiveSession(d.sessions, targetSession, target, state))
-			return
-		}
 		if verdict := deliveryModeVerdict(targetSession, target, item.Payload); verdict.refusal != "" {
 			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, verdict.refusal)
 			return
