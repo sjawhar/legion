@@ -47,12 +47,12 @@ from any workflow of this repository, so the command pins the signer:
 ```sh
 version=<version>
 archive=pulumi-resource-envoy-infra-v$version-<os>-<arch>.tar.gz
-gh release download "envoy-infra-v$version" --repo sjawhar/legion --pattern "$archive"
-gh attestation verify "$archive" --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+gh release download "envoy-infra-v$version" --repo cybermonklabs/legion --pattern "$archive"
+gh attestation verify "$archive" --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 pulumi plugin install resource envoy-infra "$version" \
-  --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}' \
+  --server 'https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}' \
   --checksum "$(sha256sum "$archive" | cut -d' ' -f1)"
 ```
 
@@ -61,14 +61,14 @@ well. `--checksum` makes `pulumi` refuse a download whose SHA-256 is not the arc
 verified. Then add the package to the project:
 
 ```sh
-pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'
+pulumi package add envoy-infra@<version> --server 'https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}'
 ```
 
 Keep the single quotes: Pulumi fills in `${VERSION}` itself and downloads
 `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` from the GitHub release tagged
 `envoy-infra-v<version>`. The address after `--server` is the one the release built into the
 plugin from the repository it ran in,
-`https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}` today.
+`https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}` today.
 `pulumi package add` records the package in `Pulumi.yaml`:
 
 ```yaml
@@ -76,7 +76,7 @@ packages:
   envoy-infra:
     source: envoy-infra
     version: <version>
-    pluginDownloadURL: https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}
+    pluginDownloadURL: https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}
 ```
 
 It also generates an SDK for the project's language under `sdks/` and prints how to import it. A
@@ -93,9 +93,9 @@ with your cloud credentials, so check the archive's provenance before you instal
 amd64:
 
 ```sh
-gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
-gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+gh release download envoy-infra-v<version> --repo cybermonklabs/legion --pattern envoy-infra-linux-amd64.tar.gz
+gh attestation verify envoy-infra-linux-amd64.tar.gz --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 tar -xzf envoy-infra-linux-amd64.tar.gz
 envoy-infra-linux-amd64/envoy-infra --version
@@ -108,14 +108,14 @@ runner, so an archive attested by any other workflow, branch or runner in the re
 explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
 `PATH`; the commands below call it `envoy-infra`.
 
-To install it with mise, give it a tool alias: `github:sjawhar/legion` is also where the `legion`
+To install it with mise, give it a tool alias: `github:cybermonklabs/legion` is also where the `legion`
 command's releases come from, so a second pin of that repository needs a name of its own. Pin the
 tag, and name each platform's archive with its digest, since each release holds the plugin's
 archives beside the command's:
 
 ```toml
 [tool_alias]
-envoy-infra = "github:sjawhar/legion"
+envoy-infra = "github:cybermonklabs/legion"
 
 [tools.envoy-infra]
 version = "envoy-infra-v<version>"
@@ -127,7 +127,7 @@ platforms.macos-arm64 = { asset_pattern = "envoy-infra-darwin-arm64.tar.gz", che
 
 Each `<digest>` is the SHA-256 of that platform's archive: `sha256sum` of the one you verified
 above, or GitHub's digest for it, which
-`gh api repos/sjawhar/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
+`gh api repos/cybermonklabs/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
 lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
 and on `PATH`.
 
@@ -610,7 +610,7 @@ while sign-in was on included, since the deployment's own `DISPATCH_SIGNING_KEY`
 such a cookie for its thirty days and nobody is left to confirm the person is still a member. A
 personal agent token a person minted in Settings while sign-in was on keeps acting for that
 person, and with no sign-in nobody can sign in to revoke it, so revoke those tokens before a stack
-drops its sign-in inputs. Such a stack also pins an `envoyImage` built from a sjawhar/legion
+drops its sign-in inputs. Such a stack also pins an `envoyImage` built from a cybermonklabs/legion
 `main` commit at or after this change: `envoy-dispatch` in an older image exits 1 when it is given
 no `DISPATCH_SIGNIN_*` setting, so the app's pods never start. A
 group set in part is refused by the per-input refusal it always gave, trailing one clause that
@@ -664,7 +664,7 @@ takes. Its app gets no `DISPATCH_SIGNIN_*` setting, so nobody signs in through a
 request that needs a person answers `401 NO_IDENTITY`, one carrying a `dsession` cookie minted
 while a stack ran sign-in included: the deployment's own `DISPATCH_SIGNING_KEY` still verifies that
 cookie for its thirty days, and no membership check is left behind it. A sandbox stack pins an
-`envoyImage` built from a sjawhar/legion `main` commit at or after this change: `envoy-dispatch` in
+`envoyImage` built from a cybermonklabs/legion `main` commit at or after this change: `envoy-dispatch` in
 an older image exits 1 when it is given no `DISPATCH_SIGNIN_*` setting, so the app's pods never
 start.
 
@@ -1015,8 +1015,8 @@ the vectors' identity names the deployment, not the model (`packages/envoy/cmd/d
 this group renders.
 
 Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
-`ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
-[Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
+`ghcr.io/cybermonklabs/legion/envoy` before pinning it, with the `gh attestation verify` command
+[Running Dispatch](https://cybermonklabs.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
 namespaces, allowed namespaces, an `appCpu`, `appMemory`, `proxyCpu`, `proxyMemory`,
 `appEphemeralStorage` or `proxyEphemeralStorage` outside
@@ -1256,7 +1256,7 @@ replacing the app's pods alone, and nobody is signed out at the add or the promo
 Each apply leaves the incoming pods' key set sharing its current key with the pods still serving,
 which is what lets the roll pass the check that refuses a server whose keys a running server does
 not share. These are the three steps of
-[Changing the session key](https://sjawhar.github.io/legion/dispatch/running-dispatch/#changing-the-session-key),
+[Changing the session key](https://cybermonklabs.github.io/legion/dispatch/running-dispatch/#changing-the-session-key),
 which states the server-side rule the applies implement.
 
 The component sees one state and never the one before it, so the rest is the operator's to keep:
@@ -1593,7 +1593,7 @@ Its environment comes from the inputs:
 
 The listener serves on the host's loopback, `127.0.0.1:<port>`. This version sets no listen host,
 no API token and no webhook routes. The listener's other settings are on the documentation site's
-[Envoy page](https://sjawhar.github.io/legion/dispatch/envoy/#running-the-listener).
+[Envoy page](https://cybermonklabs.github.io/legion/dispatch/envoy/#running-the-listener).
 
 The listener's outputs are `containerName` and `port`.
 
@@ -1603,7 +1603,7 @@ The listener's outputs are `containerName` and `port`.
 | --- | --- | --- |
 | `machineId` | required | The listener's name, `ENVOY_MACHINE_ID`. It names the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>`; an interior ordinary space becomes a hyphen in both names. |
 | `natsUrls` | required | The NATS servers to connect to. May come from another resource or stack. |
-| `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
+| `image` | required | The listener image, such as `ghcr.io/cybermonklabs/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
 | `port` | `9020` | The port the listener serves and the health check calls. |
 | `seed` | unset | A secret: the nkey seed of the NATS user the listener connects as. May come from another resource or stack. |
@@ -1686,7 +1686,7 @@ from `starting` on, before the listener has connected to NATS. A listener is con
 `/healthz` answers `"status":"healthy"` or `"status":"degraded"`: a degraded answer is a
 dependency that repairs itself, such as a role claim view whose first scan has not delivered every
 claim, and the listener behind it is connected and serving. The answers are listed under
-[Health and readiness](https://sjawhar.github.io/legion/dispatch/envoy/#health-and-readiness).
+[Health and readiness](https://cybermonklabs.github.io/legion/dispatch/envoy/#health-and-readiness).
 
 `waitForHealthy: false` creates the container without waiting on its health check. Use it for a
 listener that cannot reach its NATS server when the stack is applied: Docker restarts the listener
@@ -1778,7 +1778,7 @@ packages:
   envoy-infra:
     source: envoy-infra
     version: <version>
-    pluginDownloadURL: https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}
+    pluginDownloadURL: https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}
 config:
   natsSeed:
     type: string
@@ -1796,7 +1796,7 @@ resources:
       machineId: example-host-a
       natsUrls:
         - nats://nats.internal.example:4222
-      image: ghcr.io/sjawhar/legion/envoy:<tag>
+      image: ghcr.io/cybermonklabs/legion/envoy:<tag>
       seed: ${natsSeed}
     options:
       providers:
@@ -1842,7 +1842,7 @@ const listener = new envoyInfra.host.Listener(
   {
     machineId: "example-host-a",
     natsUrls: nats.requireOutput("natsUrls"),
-    image: "ghcr.io/sjawhar/legion/envoy:<tag>",
+    image: "ghcr.io/cybermonklabs/legion/envoy:<tag>",
     watchdog: { host: "example-host-a.internal.example" },
   },
   { providers: [dockerHost, commandHost] }
@@ -2003,7 +2003,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | --- | --- | --- |
 | `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name. It names the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>`; an interior ordinary space becomes a hyphen in both names. |
 | `natsUrls` | required | The NATS servers. May come from another resource as an output of the whole list, such as `nats.internal_url.apply(lambda url: [url])`. |
-| `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy@sha256:<digest>`. |
+| `image` | required | The listener image, such as `ghcr.io/cybermonklabs/legion/envoy@sha256:<digest>`. |
 | `region` | required | The container's `awslogs-region`. |
 | `apiTokenSecretArn` | required | The secret holding the listener's API token. |
 | `apiTokenSecretVersionId` | required | The token's secret version. The component only orders the task definition after it, so pass your `SecretVersion`'s `versionId` output: a literal orders nothing. |

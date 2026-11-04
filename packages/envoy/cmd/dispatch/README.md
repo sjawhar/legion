@@ -61,7 +61,7 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_TEST_HOOKS`
 
   Set to `1` to mount test-only routes: `POST /api/v1/live/_test/disconnect` closes every open live socket with 1012 (restart), and `POST /api/v1/live/_test/rotate` closes every one with 4001 (`max age`);
-  `POST /api/v1/agents/{session_id}/stream/_test/publish` (human only) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`;
+  `POST /api/v1/agents/{session_id}/stream/_test/publish` (needs the `person` scope) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`;
   `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements;
   `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses;
   and `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms` once its key is claimed.
@@ -2333,7 +2333,7 @@ Each item below names a path with its method and identity, then its purpose.
 
   Close every open live socket on every process with 4001 (`max age`); not mounted otherwise.
 
-- `/api/v1/agents/{session_id}/stream/_test/publish` (POST; cookie or trusted header (human only); `DISPATCH_TEST_HOOKS=1`)
+- `/api/v1/agents/{session_id}/stream/_test/publish` (POST; cookie, trusted header, or bearer; needs the `person` scope; `DISPATCH_TEST_HOOKS=1`)
 
   Feed every process's in-memory agent relay;
   `as=drop` ends agent views as `dropped`, so the page subscribes again and rebuilds from the replay; not mounted otherwise.
@@ -2353,26 +2353,26 @@ Each item below names a path with its method and identity, then its purpose.
   A socket rotates with 4001 at a random age from 30 to 60 minutes;
   it closes with 1012 on restart, 1008 when its caller stops resolving, and 1013 when the hub queue fills.
 
-- `/api/v1/inbox?project=&assignee=` (GET; cookie or trusted header (human only))
+- `/api/v1/inbox?project=&assignee=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List open asks newest-first, including their issue key, title, and assignee.
   `assignee=me|unassigned|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person;
   an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`.
 
-- `/api/v1/me/answers?limit=&offset=` (GET; cookie or trusted header (human only))
+- `/api/v1/me/answers?limit=&offset=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List the caller's answers and replies on asks, newest first.
   A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link.
   Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row.
   `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`.
 
-- `/api/v1/me/replies?limit=&offset=&issue=|artifact=` (GET; cookie or trusted header (human only))
+- `/api/v1/me/replies?limit=&offset=&issue=|artifact=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists.
   A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time.
   `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50).
 
-- `/api/v1/me/threads/{id}/read` (PUT; cookie or trusted header (human only))
+- `/api/v1/me/threads/{id}/read` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 
   Move the caller's read mark on one thread forward to `{read_through}`;
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
@@ -2422,17 +2422,17 @@ Each item below names a path with its method and identity, then its purpose.
   `503 GITHUB_APP_UNCONFIGURED` when Dispatch holds no App key, `502 GITHUB_UNREADABLE` naming the repository and GitHub's error on any other failure.
   The Legion daemon asks it for every repository it serves, for `legion state`.
 
-- `/api/v1/settings/project-default-assignees` (GET; cookie or trusted header (human only))
+- `/api/v1/settings/project-default-assignees` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out.
-  Human-only, since the default names a person.
+  It needs the `person` scope, since the default names a person.
 
-- `/api/v1/projects/{key}/default-assignee` (PUT; cookie or trusted header (human only))
+- `/api/v1/projects/{key}/default-assignee` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 
   Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it):
   who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain.
   `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project.
-  Human-only: no agent surface sets it.
+  It needs the `person` scope too, and no agent surface sets it.
 
 - `/api/v1/delivery/session-groups` (POST; cookie, trusted header, or bearer)
 
@@ -2446,24 +2446,27 @@ Each item below names a path with its method and identity, then its purpose.
   or delete it, its sessions showing as themselves again.
   `400 SESSION_GROUP_ID_INPUT` for an id that is not a UUID, `404 NOT_FOUND` for one no group has.
 
-- `/api/v1/me/agent-tokens` (GET, POST; cookie or trusted header (human only))
+- `/api/v1/me/agent-tokens` (GET, POST; cookie, trusted header, or bearer; GET needs the `person` scope, POST `person` and `approve`)
 
-  List personal-token metadata or mint a personal agent token.
+  List personal-token metadata, each row with the `scopes` its token holds, or mint a personal agent token `{name, scopes?}`.
+  `scopes` defaults to the set the caller's own credential holds; a scope this deployment does not know, or `approve` without `person`, is `400 TOKEN_SCOPES_INPUT`, and a scope the caller does not hold itself is `403 OAUTH_SCOPE_REQUIRED`.
 
-- `/api/v1/me/agent-tokens/{id}` (DELETE; cookie or trusted header (human only))
+- `/api/v1/me/agent-tokens/{id}` (PATCH, DELETE; cookie, trusted header, or bearer; needs the `person` and `approve` scopes)
 
-  Revoke a personal agent token.
+  PATCH sets the token's scopes `{scopes}` — the whole set it is to hold, refused as the mint's are — and answers the token; DELETE revokes it.
+  Another person's token, or none, is `404 NOT_FOUND`.
 
-- `/api/v1/users` (GET; cookie or trusted header (human only))
+- `/api/v1/users` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options.
 
 - `/api/v1/whoami` (GET; cookie, trusted header, bearer, or a broker-issued DPoP token)
 
-  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
+  Who the server takes the caller for: `{kind: "user", login, scopes}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project, scopes}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
   `service` is a verified service-account token's Kubernetes subject, null for every other credential;
   `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise;
   `project` is the one project key that credential may write, null where it names none).
+  `scopes` is the OAuth scopes the credential holds, `[]` for one that holds none, and every caller is answered it.
 
 - `/api/v1/dashboard/builds` (GET; cookie, trusted header, or bearer)
 
@@ -2629,7 +2632,7 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/asks/{id}` (PATCH; cookie, trusted header, or bearer)
 
   Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask.
-  A bearer caller must be the asking session; a human may edit any open ask.
+  A credential holding the `person` scope may edit any open ask, and somebody else's is recorded as the person with the agent beside them; every other must be the asking session, whose own reword is recorded as that session, as it always was.
   The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`.
   Anchors are selected when the ask is created and cannot be changed by this route.
   On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it.
@@ -2642,7 +2645,7 @@ Each item below names a path with its method and identity, then its purpose.
   Text past what one write's markdown may make - weighed before it is rendered, an element for each backslash, `*`, `_`, `~`, backtick, `[`, `]` and `<` and two for each line feed, then as its markdown parses - is `413 CAP_EXCEEDED`.
   An edit of a block ask that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and the ask keeps its text.
 
-- `/api/v1/asks/{id}/answer` (POST; cookie or trusted header)
+- `/api/v1/asks/{id}/answer` (POST; cookie, trusted header, or bearer; needs the `person` scope, and `approve` besides for an ask of kind `approval`)
 
   Answer an open ask, or change the current answer with `expected_answer_at` set to that answer's `at`.
   Without it an answered ask is `409 ASK_CLOSED`.
@@ -2692,7 +2695,7 @@ Each item below names a path with its method and identity, then its purpose.
   While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing.
   `400 COMMENT_ID_INPUT` for a non-uuid id.
 
-- `/api/v1/comments/{id}` (PATCH; cookie or trusted header)
+- `/api/v1/comments/{id}` (PATCH; cookie, trusted header, or bearer; needs the `person` scope)
 
   Edit a comment body.
   Human authors only.
@@ -2705,18 +2708,18 @@ Each item below names a path with its method and identity, then its purpose.
 
   Resolve a comment.
 
-- `/api/v1/comments/{id}/reopen` (POST; cookie or trusted header)
+- `/api/v1/comments/{id}/reopen` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Reopen a resolved thread-root comment.
 
-- `/api/v1/comments/{id}/accept` (POST; cookie or trusted header)
+- `/api/v1/comments/{id}/accept` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Apply and accept an anchored suggestion.
   An accept that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and leaves the suggestion open.
   A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open;
   one removed after it answers `200` with `lost: true`.
 
-- `/api/v1/comments/{id}/reject` (POST; cookie or trusted header)
+- `/api/v1/comments/{id}/reject` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Reject a suggestion.
 
@@ -2836,7 +2839,7 @@ Each item below names a path with its method and identity, then its purpose.
   Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`:
   the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history.
 
-- `/api/v1/artifacts/{id}/rebuild` (POST; cookie or trusted header (human only))
+- `/api/v1/artifacts/{id}/rebuild` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads):
   deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`.

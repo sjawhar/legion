@@ -226,8 +226,9 @@ export function AskRecipients({
 }: AskRecipientsProps): ReactNode {
   const queryClient = useQueryClient();
   const subscription = ownerSubscription(owner);
-  // The subscribers endpoints are human-only; the card only asks once the signed-in principal
-  // is known to be a user, so no other bearer ever cycles on a 403.
+  // The subscribers endpoints need the `person` scope, which a signed-in browser holds; the card
+  // only asks once the sign-in read says the principal is a user, so nothing without the scope
+  // cycles on a 403.
   const human = useIsHuman();
   // Same key as the issue header (`IssueHeader`) and the project document page
   // (`DocumentPage`), so an Inbox of cards on one issue shares one fetch with its header. Each

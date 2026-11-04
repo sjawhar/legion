@@ -318,7 +318,7 @@ credential is configured.
 
 ## Running the listener
 
-The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image. Pin it by digest and
+The listener is `envoy-listener` in the `ghcr.io/cybermonklabs/legion/envoy` image. Pin it by digest and
 verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 
 | Setting | What it is |
@@ -407,7 +407,7 @@ servers on a GKE cluster whose optional tailnet hosts also run the listener. It 
 Dispatch on Google Cloud as `envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private
 Cloud SQL, and the tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders
 the NATS user `envoy-dispatch` shares with its listener. Its
-[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
+[README](https://github.com/cybermonklabs/legion/blob/main/packages/envoy/infra/README.md) says how to
 install it, what each component deploys and which settings it sets.
 
 ### Health and readiness
