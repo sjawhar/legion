@@ -1880,6 +1880,15 @@ What the rollback costs is the draws it does not make:
 a tree the earlier release opens carries no group, and this release draws for no tree whose lifecycle row already exists, so every such tree runs without memory for its whole life.
 A child handed over out of such a tree is settled at the hand-over, with the answer that tree has, which is no group.
 A hand-over the earlier release makes while the rollback holds is settled by nothing: that release writes `handed_over_from` and knows no `memory_carried`, and 20261104153554's backfill ran before the rollback, so such a child is drawn at its first open after the upgrade back.
+To settle those hand-overs as this release would have, run the backfill once more against the daemon's database with no daemon of the project running, after the earlier release stops and before this release starts again; the column is still there from the first upgrade, and the statement touches only rows with no draw:
+
+```sql
+update issues set memory_carried = true
+where handed_over_from <> '' and memory_drawn_at is null
+  and exists (select 1 from tree_lifecycles l
+              where l.project = regexp_replace(lower(issues.project), '[^a-z0-9]', '', 'g')
+                and l.tree = issues.handed_over_from);
+```
 
 ### Contract discipline
 

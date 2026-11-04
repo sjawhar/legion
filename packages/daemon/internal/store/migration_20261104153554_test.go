@@ -28,8 +28,8 @@ func TestThePreviousReleasesHandOversAreCarriedBy20261104153554(t *testing.T) {
 	store := emptyStore(t)
 	migrateThrough(t, store, issueMemoryCarriedVersion-1)
 
-	// Two of the three projects have a Dispatch key the runtime token is not equal to, so the
-	// backfill's regexp_replace is what matches them rather than the key itself.
+	// LEGION-X and Acme Widgets differ from their runtime tokens by more than case, so only the
+	// backfill's regexp_replace matches them, where lower() alone would not.
 	for _, row := range []struct {
 		key, project, from string
 		drawn              bool
