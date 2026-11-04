@@ -105,9 +105,13 @@ func TestStoredOrderPendingRows(t *testing.T) {
 	}
 	pred, dep, combined := pair(7)
 	otherPred, otherDep, otherCombined := pair(8)
-	delete1 := storedOrderHex(t, "000114010101")              // client 20, [1,2)
-	delete2 := storedOrderHex(t, "000114010201")              // client 20, [2,3)
-	filler := storedOrderHex(t, "01011400040101710361626300") // q = abc
+	integrated, _, _ := pair(9)
+	mixedPred, mixedDep, mixedCombined := pair(11)
+	delete1 := storedOrderHex(t, "000114010101")                   // client 20, [1,2)
+	delete2 := storedOrderHex(t, "000114010201")                   // client 20, [2,3)
+	filler := storedOrderHex(t, "01011400040101710361626300")      // q = abc
+	otherDelete := storedOrderHex(t, "000115010101")               // client 21, [1,2)
+	otherFiller := storedOrderHex(t, "01011500040101720361626300") // r = abc
 	p9 := storedOrderHex(t, "01010901840900016200")
 	p11 := storedOrderHex(t, "01010b01840b00016400")
 	f9 := storedOrderHex(t, "010109000401017402616200")
@@ -127,6 +131,11 @@ func TestStoredOrderPendingRows(t *testing.T) {
 		{name: "reincluded beside unresolved", updates: [][]byte{base, dep, otherDep, combined}, awaiting: 1},
 		{name: "reverse resolution", updates: [][]byte{base, dep, otherDep, otherPred, pred}, mismatches: []int64{3, 2}},
 		{name: "separate legitimate rows", updates: [][]byte{base, dep, otherDep, combined, otherCombined}},
+		{name: "mixed insert reincluded", updates: [][]byte{base, mergeStoredOrder(t, integrated, mixedDep), mixedCombined}},
+		{name: "mixed insert whole row reincluded", updates: [][]byte{base, mergeStoredOrder(t, integrated, mixedDep), mergeStoredOrder(t, integrated, mixedCombined)}},
+		{name: "mixed insert not reincluded", updates: [][]byte{base, mergeStoredOrder(t, integrated, mixedDep), mixedPred}, mismatches: []int64{2}},
+		{name: "mixed deletions reincluded", updates: [][]byte{mergeStoredOrder(t, base, filler), mergeStoredOrder(t, delete1, otherDelete), mergeStoredOrder(t, otherFiller, otherDelete)}},
+		{name: "mixed deletions not reincluded", updates: [][]byte{mergeStoredOrder(t, base, filler), mergeStoredOrder(t, delete1, otherDelete), otherFiller}, mismatches: []int64{2}},
 		{name: "only bad row blamed", updates: [][]byte{base, p9, p11, f9, f11}, mismatches: []int64{3}},
 		{name: "different pending deletions", updates: [][]byte{mergeStoredOrder(t, base, delete1), mergeStoredOrder(t, p9, delete2), f9, filler}, mismatches: []int64{2}},
 		{name: "delete range grows without count growth", updates: [][]byte{mergeStoredOrder(t, base, delete1), delete2, filler}, mismatches: []int64{2}},

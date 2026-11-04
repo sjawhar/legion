@@ -23,8 +23,8 @@ import (
 //     to: true when either side does not render, otherwise whether the rendered markdown differs
 //     (the measure updateChangesMarkdown applies to a live update).
 //  2. Versions. A version's markdown is the render of the fold through its doc_update_version.
-//  3. Pending. No update is stored ahead of one it depends on: a row after which the fold parks
-//     structs is a mismatch unless a later row carries what it parked again, which the commit
+//  3. Pending. No update is stored ahead of one it depends on: a row that adds parked structs or
+//     deletions is a mismatch unless a later row carries what it parked again, which the commit
 //     that integrates a peer's stored parked edit does (storeParked, judgeParkedRows). A row
 //     still parked when the history ends is counted as awaiting its predecessor, not reported:
 //     the store cannot tell an edit whose predecessor has not arrived from one whose dependency
@@ -438,9 +438,10 @@ type parkedRow struct {
 	through  int64
 }
 
-// judgeParkedRows checks each resolved row in a separate streamed prefix replay. Each comparison
-// holds two documents, regardless of how many rows waited together; extra prefix reads keep this
-// offline check from retaining a document copy per parked row or buffering the stored history.
+// judgeParkedRows checks each resolved row in a separate streamed prefix replay, omitting only
+// what that row newly parked and retaining what it integrated. Each comparison holds two documents,
+// regardless of how many rows waited together; extra prefix reads avoid retaining a document copy
+// per parked row or buffering the stored history.
 func judgeParkedRows(ctx context.Context, tx pgx.Tx, artifactID string, resolved []*parkedRow, report *StoredOrderReport) error {
 	for _, row := range resolved {
 		differs, err := compareParkedPrefix(ctx, tx, artifactID, row)
@@ -470,7 +471,20 @@ func compareParkedPrefix(ctx context.Context, tx pgx.Tx, artifactID string, omit
 		if err := rows.Scan(&version, &update); err != nil {
 			return false, fmt.Errorf("scan a stored document update: %w", err)
 		}
-		if err := decodeStoredState(full, update); err != nil {
+		var unsubscribe func()
+		if applies && version == omitted.mismatch.Update {
+			// OnUpdate carries only what integrated, not what parked. Earlier rows' parked
+			// content is already in without; retain this row's immediate changes too, so
+			// only its newly parked content must be supplied again by a later row.
+			unsubscribe = full.OnUpdate(func(integrated []byte, _ any) {
+				applies = decodeStoredState(without, integrated) == nil
+			})
+		}
+		err := decodeStoredState(full, update)
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+		if err != nil {
 			return false, fmt.Errorf("replay the fold through update %d: %w", version, err)
 		}
 		if applies && version != omitted.mismatch.Update {

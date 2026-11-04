@@ -9,9 +9,10 @@ body: |-
     waits for them and then closes it; and a browser's edit that reaches the server ahead of the
     edit it builds on is stored at once, even when the update then fails, so a restart before
     that earlier edit arrives no longer loses it. The stored-order check judges each parked row
-    independently: a later update that carries it again is accepted, a resolved row not carried
-    again is a mismatch even while unrelated edits still wait, and an unresolved row counts as
-    awaiting. Only a row whose omission changes replay is reported, including parked content.
+    independently: a later update that carries its newly parked content again is accepted, a
+    resolved row whose parked content is not carried again is a mismatch even while unrelated
+    edits still wait, and an unresolved row counts as awaiting. Replay keeps the part that
+    integrated immediately and compares actual parked content.
     Every write fork reads its client ID after decoding its history, so inserted text still gets
     the lost-write check when that decode changes the ID.
 time: 2026-11-02T14:00:00.000000000Z
