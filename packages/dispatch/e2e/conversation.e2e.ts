@@ -116,6 +116,7 @@ test("Conversation owns the route, lists one card per message newest first, and 
       "true"
     );
     await expect(page.getByRole("tablist", { name: "Issue detail" }).getByRole("tab")).toHaveText([
+      "Decisions",
       "Spec",
       "Verification",
       "Plan",
@@ -123,7 +124,6 @@ test("Conversation owns the route, lists one card per message newest first, and 
       "Children",
       "Artifacts1",
       "Activity",
-      "Decisions",
     ]);
 
     await page.goto(`/issues/${issue.key}/conversation`);

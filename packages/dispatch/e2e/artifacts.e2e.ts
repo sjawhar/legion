@@ -302,6 +302,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
   const viewport = page.viewportSize();
   await page.setViewportSize({ height: viewport?.height ?? 800, width: 390 });
   await expect(tabs).toHaveText([
+    "Decisions",
     "Spec",
     "Verification",
     "Plan",
@@ -309,18 +310,17 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     "Children",
     "Artifacts2",
     "Activity",
-    "Decisions",
   ]);
   expect(await tablist.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)).toBe(true);
-  await page.getByRole("tab", { name: "Spec" }).focus();
+  await page.getByRole("tab", { name: "Decisions" }).focus();
   for (const label of [
+    "Spec",
     "Verification",
     "Plan",
     "Conversation",
     "Children",
     "Artifacts (2)",
     "Activity",
-    "Decisions",
   ] as const) {
     await page.keyboard.press("ArrowRight");
     const tab = page.getByRole("tab", { exact: true, name: label });
@@ -329,10 +329,10 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     expect((await tab.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
   }
   await page.keyboard.press("Home");
-  const specTab = page.getByRole("tab", { name: "Spec" });
-  await expect(specTab).toBeFocused();
-  await insideTablist(specTab);
-  expect((await specTab.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+  const firstTab = page.getByRole("tab", { name: "Decisions" });
+  await expect(firstTab).toBeFocused();
+  await insideTablist(firstTab);
+  expect((await firstTab.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
   await page.setViewportSize({ height: viewport?.height ?? 800, width: viewport?.width ?? 1280 });
 
   await page.getByRole("tab", { name: "Activity" }).click();

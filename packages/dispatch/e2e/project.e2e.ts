@@ -285,6 +285,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     const tabs = page.getByRole("main").getByRole("tab");
     await expect(tabs).toHaveCount(8);
     for (const [index, name] of [
+      "Decisions",
       "Spec",
       "Verification",
       "Plan",
@@ -292,7 +293,6 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
       "Children",
       "Artifacts (2)",
       "Activity",
-      "Decisions",
     ].entries()) {
       await expect(tabs.nth(index)).toHaveAccessibleName(name);
     }
