@@ -569,12 +569,7 @@ test("models the Inbox's Reply and Agent rows and the read mark's event", () => 
   ]).toEqual([
     ["comment:reply", "ask:answer", "comment:reply", "agent:reply"],
     [1, 1, 0, 1],
-    [
-      ["2026-10-11T23:00:00Z"],
-      ["2026-10-11T23:00:00Z"],
-      ["2026-10-11T23:00:00Z"],
-      ["message-2"],
-    ],
+    [["2026-10-11T23:00:00Z"], ["2026-10-11T23:00:00Z"], ["2026-10-11T23:00:00Z"], ["message-2"]],
     "planner",
     "comment-1",
   ]);
