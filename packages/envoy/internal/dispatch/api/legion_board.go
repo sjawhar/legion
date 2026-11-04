@@ -411,10 +411,9 @@ func (p *legionBoardPopulation) issueKeys() map[string]struct{} {
 
 // treeRoot is the issue's tree root, by the one rule the metrics place an issue in a tree with
 // (legion.TreeRoot): the `tree` the daemon named where a read carried one (dispatch://INFRA-980),
-// and the topmost issue the daemon also reports on its parent chain otherwise. Every issue this
-// population holds is one the daemon reported, so every one of them is Legion's and the walk
-// climbs through all of them; an issue whose parent the daemon knows nothing of is a root of its
-// own, which keeps a Legion tree from climbing into the tracking issues above it.
+// and the topmost Legion issue of its parent chain otherwise. Every issue this population holds
+// is one the daemon reports, so legion.TreeNode's Legion is true for all of them; an issue this
+// population does not hold is one the daemon reports nothing of, and a chain stops below it.
 func (p *legionBoardPopulation) treeRoot(key string) string {
 	return legion.TreeRoot(key, func(key string) (legion.TreeNode, bool) {
 		issue, known := p.issues[key]

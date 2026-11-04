@@ -257,12 +257,14 @@ func (c *computation) finished() []*Issue {
 	return finished
 }
 
-// finishedInWindow is the finished rule itself, before any scope.
+// finishedInWindow is the finished rule itself, before any scope. It reads Legion phase work and
+// not the wider rule that places an issue in a tree (Population.isLegionIssue): an issue the
+// daemon reports and no role ever worked is in its tree, and finished nothing.
 func (c *computation) finishedInWindow(issue *Issue) bool {
 	if issue.ClosedAt == nil || issue.ClosedAt.Before(c.population.From) || !issue.ClosedAt.Before(c.population.To) {
 		return false
 	}
-	return len(issue.FirstRoleEvent) > 0 || len(issue.Handoffs) > 0
+	return c.population.hasPhaseWork(issue)
 }
 
 // treeRoot is the issue's tree root (Population.TreeRoot), computed once per key: the walk is a

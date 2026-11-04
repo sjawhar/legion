@@ -76,7 +76,9 @@ type Issue struct {
 
 	// Tree is the issue's tree root as the daemon named it, from the `tree` field
 	// dispatch://INFRA-980 adds to each issue of `GET /legion/v1/state`, where a read carried
-	// one. Empty is "no read named one", which is every daemon before that change: treeRoot then
+	// one. Every issue of the project carries the newest one the sampler recorded, whether or
+	// not the window's observation read covered the issue (readObservations, fillReportedTrees).
+	// Empty is "no read named one", which is every daemon before that change: TreeRoot then
 	// walks the parent chain. Nothing reads a slot to decide a root.
 	Tree string
 
@@ -138,6 +140,13 @@ type Population struct {
 	// Filed is every issue a Legion session created in the window, in creation order.
 	Filed []Filed
 
+	// reported is every issue of the project the daemon reports — the issues the sampler
+	// recorded any observation of — against the `tree` the daemon named for it, empty where it
+	// named none (readReported). Both halves of the one rule that places an issue in a tree
+	// (legion.TreeNode) are read project-wide rather than for the window's keys: an issue's
+	// tree is a fact of the project, not of the window.
+	reported map[string]string
+
 	// askTurns is every ask turn the read gathered, before the tree rule picked the ones that
 	// count for the issue they were opened on. The rule reads each issue's tree, which the
 	// observations of the same read name, so it runs once every read has landed (keepTreeAsks).
@@ -146,13 +155,14 @@ type Population struct {
 
 // Read is every database and GitHub read one metrics answer makes: the project's issues, the
 // Legion phase work the event log records for the ones that could have finished in the window,
-// the handoffs and observations of those issues, the issues Legion sessions created in the window,
-// and the merge time of each finished issue's pull request.
+// the handoffs and observations of those issues, the issues of the project the daemon reports,
+// the issues Legion sessions created in the window, and the merge time of each finished issue's
+// pull request.
 //
 // github may be nil, and a GitHub read that fails is not an error: a merge time Dispatch cannot
 // reach leaves that issue with none, since no metric's rule is written in terms of one.
 func Read(ctx context.Context, pool *store.Pool, github *githubapp.Client, project string, from, to time.Time) (*Population, error) {
-	population := &Population{Project: project, From: from, To: to, Issues: map[string]*Issue{}}
+	population := &Population{Project: project, From: from, To: to, Issues: map[string]*Issue{}, reported: map[string]string{}}
 	if err := population.readIssues(ctx, pool, project); err != nil {
 		return nil, err
 	}
@@ -160,9 +170,10 @@ func Read(ctx context.Context, pool *store.Pool, github *githubapp.Client, proje
 		return nil, err
 	}
 	keys := population.scopeKeys(from, to)
-	// The six reads below take only those keys and write disjoint fields of each issue, so they
-	// run together rather than one after another, as the delivery population's independent reads
-	// do (api/delivery.go). errgroup answers the first error recorded, so which of two failing
+	// The seven reads below write disjoint fields — six take the keys above and write fields of
+	// those issues, the seventh the project's reported set and its trees — so they run rather
+	// than one after another, as the delivery population's independent reads do
+	// (api/delivery.go). errgroup answers the first error recorded, so which of two failing
 	// reads names the failure is no longer fixed.
 	independent := []func(ctx context.Context) error{
 		func(ctx context.Context) error { return population.readRoleEvents(ctx, pool, keys) },
@@ -170,6 +181,7 @@ func Read(ctx context.Context, pool *store.Pool, github *githubapp.Client, proje
 		func(ctx context.Context) error { return population.readAskTurns(ctx, pool, keys) },
 		func(ctx context.Context) error { return population.readHandoffs(ctx, pool, keys) },
 		func(ctx context.Context) error { return population.readObservations(ctx, pool, project, keys) },
+		func(ctx context.Context) error { return population.readReported(ctx, pool, project) },
 		func(ctx context.Context) error { return population.readMergeTimes(ctx, pool, github, keys) },
 	}
 	reads, readsCtx := errgroup.WithContext(ctx)
@@ -190,6 +202,7 @@ func Read(ctx context.Context, pool *store.Pool, github *githubapp.Client, proje
 	if err := reads.Wait(); err != nil {
 		return nil, err
 	}
+	population.fillReportedTrees()
 	population.linkTrees()
 	population.keepTreeAsks()
 	return population, nil
@@ -596,6 +609,59 @@ func (p *Population) readObservations(ctx context.Context, pool *store.Pool, pro
 	return nil
 }
 
+// readReported reads what the daemon reports of every issue of the project: one row per issue
+// the sampler has recorded any observation of — the set the Legion view's own population holds
+// (api/legion_board.go's readObservations) — against the newest `tree` it recorded for that
+// issue, which is the row the view takes too. It reads the whole project rather than the
+// window's keys because both halves answer legion.TreeNode, and an issue's tree is a fact of
+// the project; it takes one row per issue and not the rows themselves, which readObservations
+// takes for the issues whose timelines the metrics measure.
+//
+// The rows under legion.AdmissionKey belong to no issue — the admission block, the daemon's
+// settings and where each setting came from — so they report nothing.
+func (p *Population) readReported(ctx context.Context, pool *store.Pool, project string) error {
+	rows, err := pool.Query(ctx, `
+		select issue_key,
+			coalesce((array_agg(value::text order by observed_at desc, id desc)
+				filter (where field = $3))[1], '')
+		from legion_observations
+		where project = $1 and issue_key <> $2
+		group by issue_key
+	`, project, legion.AdmissionKey, legion.FieldTree)
+	if err != nil {
+		return fmt.Errorf("read the issues %s's Legion daemon reports: %w", project, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, tree string
+		if err := rows.Scan(&key, &tree); err != nil {
+			return fmt.Errorf("scan an issue the Legion daemon reports: %w", err)
+		}
+		p.reported[key] = legion.JSONString([]byte(tree))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the issues %s's Legion daemon reports: %w", project, err)
+	}
+	return nil
+}
+
+// fillReportedTrees gives each issue the `tree` the daemon named for it where the window's own
+// observation read did not reach it. The scoped read took the same newest row for the issues it
+// covers (readObservations), so a tree it already set stands; outside its keys this is the only
+// read that carries one, and an issue the daemon named no tree for keeps none. It runs before
+// linkTrees, which is the first reader of a tree.
+func (p *Population) fillReportedTrees() {
+	for _, key := range p.Keys {
+		issue := p.Issues[key]
+		if issue.Tree != "" {
+			continue
+		}
+		if tree := p.reported[key]; tree != "" {
+			issue.Tree = tree
+		}
+	}
+}
+
 // readMergeTimes reads the merge time of each issue's pull request from the delivery population,
 // and fetches the ones that population does not hold yet from GitHub (delivery.FetchPullRequest),
 // up to fetchedMergeTimesCap of them. A fetch that fails leaves the issue with no merge time.
@@ -697,27 +763,38 @@ func (p *Population) linkTrees() {
 
 // TreeRoot is the issue's tree root, by the one rule the Legion view places an issue in a tree
 // with (legion.TreeRoot): the `tree` the daemon named where a read carried one, and the topmost
-// Legion issue of its parent chain otherwise. This population holds every issue of the project,
-// Legion's and the rest, so an issue carrying Legion phase work is what the walk climbs through;
-// an issue whose parent carries none is a root of its own, which is what keeps a Legion tree from
-// climbing into the tracking issues above it.
+// Legion issue of its parent chain otherwise. Both facts are the project's and not the window's
+// — Issue.Tree is the daemon's newest `tree` for every issue of the project (fillReportedTrees),
+// isLegionIssue reads the project's reported set — so this population answers what the view
+// answers. It holds every issue of the project, Legion's and the rest, and an issue whose parent
+// is no Legion issue is a root of its own, which is what keeps a Legion tree from climbing into
+// the tracking issues above it.
 func (p *Population) TreeRoot(key string) string {
 	return legion.TreeRoot(key, func(key string) (legion.TreeNode, bool) {
 		issue := p.Issues[key]
 		if issue == nil {
 			return legion.TreeNode{}, false
 		}
-		return legion.TreeNode{Tree: issue.Tree, Parent: issue.Parent, Legion: p.hasLegionWork(issue)}, true
+		return legion.TreeNode{Tree: issue.Tree, Parent: issue.Parent, Legion: p.isLegionIssue(issue)}, true
 	})
 }
 
-// isRoot is whether the issue is its own tree's root.
-func (p *Population) isRoot(key string) bool { return p.TreeRoot(key) == key }
+// isLegionIssue answers legion.TreeNode's Legion for this population, which states the rule: the
+// daemon reports the issue — it is in the project's reported set, or this read carried an
+// observation of it, which is that set narrowed to the window and is all a fixture built with no
+// reported set holds — or it carries Legion phase work. readReported reads the whole project, so
+// the answer does not move with the window being computed, which is what makes it the view's.
+func (p *Population) isLegionIssue(issue *Issue) bool {
+	_, reported := p.reported[issue.Key]
+	return reported || len(issue.Observed) > 0 || p.hasPhaseWork(issue)
+}
 
-// hasLegionWork is whether the issue carries Legion phase work: an event of a session titled
-// `Legion <role> · <its key>`, a handoff, or an observation the daemon's own state produced.
-func (p *Population) hasLegionWork(issue *Issue) bool {
-	return len(issue.FirstRoleEvent) > 0 || len(issue.Handoffs) > 0 || len(issue.Observed) > 0
+// hasPhaseWork is whether the issue carries Legion phase work: an event of a session titled
+// `Legion <role> · <its key>`, or a handoff. The rule that picks which finished issues a metric
+// counts reads this and not isLegionIssue (compute.go's finishedInWindow): an issue the daemon
+// reports and no role ever worked finished nothing, however its tree reads.
+func (p *Population) hasPhaseWork(issue *Issue) bool {
+	return len(issue.FirstRoleEvent) > 0 || len(issue.Handoffs) > 0
 }
 
 // issueEnd is where the issue's timeline stops: its close, or the window's end for one still open.

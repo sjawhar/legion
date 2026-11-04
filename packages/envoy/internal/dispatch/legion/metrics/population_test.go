@@ -175,6 +175,50 @@ func TestADaemonsTreeFieldNamesTheRootWhereAReadCarriedOne(t *testing.T) {
 	}
 }
 
+// TestADaemonsTreeFieldNamesTheRootOfAnIssueTheWindowDoesNotReach: the same rule for an issue no
+// read of the window covers. The metrics read the event log, the handoffs and the observations
+// of the issues the window could have finished and their trees (scopeKeys), and an open issue in
+// none of those carries no observation of its own; the daemon's `tree` for it is a fact of the
+// project all the same, and the Legion view reads it project-wide. Reading it for the window's
+// issues alone put one issue in two trees: the board's and the metrics'.
+func TestADaemonsTreeFieldNamesTheRootOfAnIssueTheWindowDoesNotReach(t *testing.T) {
+	database := corpus(t)
+	ctx := t.Context()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed (%s): %v", sql, err)
+		}
+	}
+	// A tree of its own, beside the one the corpus holds: none of these closed in the window,
+	// none filed anything in it and none is a filer's issue, so scopeKeys reaches no key of it.
+	exec(`insert into issues (key, project_key, number, title, status, rank, created_by, created_at)
+		values ('INFRA-6', 'INFRA', 6, 'An unrelated parent', 'in_progress', 'r', '{"kind":"user","id":"alice"}'::jsonb, $1)`, after(-1))
+	exec(`insert into issues (key, project_key, number, title, status, rank, parent_key, created_by, created_at)
+		values ('INFRA-7', 'INFRA', 7, 'An open issue', 'in_progress', 's', 'INFRA-6', '{"kind":"user","id":"alice"}'::jsonb, $1)`, after(0))
+	exec(`insert into issues (key, project_key, number, title, status, rank, created_by, created_at)
+		values ('INFRA-8', 'INFRA', 8, 'The tree the daemon names', 'in_progress', 't', '{"kind":"user","id":"alice"}'::jsonb, $1)`, after(-1))
+	// The daemon reports INFRA-7 in a tree its parent chain does not reach.
+	exec(`insert into legion_observations (project, issue_key, field, value, observed_at)
+		values ('INFRA', 'INFRA-7', $1, '"implementing"'::jsonb, $2)`, legion.FieldPhase, after(1))
+	exec(`insert into legion_observations (project, issue_key, field, value, observed_at)
+		values ('INFRA', 'INFRA-7', $1, '"INFRA-8"'::jsonb, $2)`, legion.FieldTree, after(2))
+
+	population, err := Read(ctx, database.Pool, nil, "INFRA", after(-2), after(24))
+	if err != nil {
+		t.Fatalf("read the population: %v", err)
+	}
+	if marks := population.Issues["INFRA-7"].Observed; len(marks) != 0 {
+		t.Fatalf("the window's observation read carried %v of INFRA-7, so the issue is not the one this test is about", marks)
+	}
+	if root := population.TreeRoot("INFRA-7"); root != "INFRA-8" {
+		t.Fatalf("the open issue's tree root = %q, want the INFRA-8 the daemon named for it", root)
+	}
+	if children := population.Issues["INFRA-8"].Children; len(children) != 1 || children[0] != "INFRA-7" {
+		t.Fatalf("INFRA-8's children = %v, want the issue whose tree it is", children)
+	}
+}
+
 // TestOnlyAnAskOpenedByASessionOfTheIssuesOwnTreeMakesItWaitOnAPerson: "An ask counts for an
 // issue when it is opened on that issue by any Legion session of the issue's tree, that is, a
 // session titled `Legion <role> · <KEY>` where KEY is any issue of the same tree, walked as for
