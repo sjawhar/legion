@@ -31,10 +31,11 @@ func TestUnifiedInboxDocumentAnswerOverlapAndMentionExpansion(t *testing.T) {
  insert into messages(id,author,body,target) values
  ('00000000-0000-0000-0000-000000000105','{"kind":"user","id":"bob"}','Private direct mention','session:other');
  insert into refs(from_kind,from_id,kind,to_kind,to_id,created_at) values
- ('message','00000000-0000-0000-0000-000000000104','mentions','person','alice',now()),
- ('message','00000000-0000-0000-0000-000000000105','mentions','person','alice',now()),
- ('block','CORE/artifact/notes#part:one','mentions','person','alice',now()),
- ('block','CORE-1/spec#part:one','mentions','person','alice',now());
+ ('message','00000000-0000-0000-0000-000000000104','mentions','person_mention','alice',now()),
+ ('message','00000000-0000-0000-0000-000000000105','mentions','person_mention','alice',now());
+ insert into block_refs(artifact_id,block_id,from_node,kind,to_kind,to_id) values
+ ('00000000-0000-0000-0000-000000000100','part:one','CORE/artifact/notes#part:one','mentions','person_mention','alice'),
+ ('00000000-0000-0000-0000-000000000200','part:one','CORE-1/spec#part:one','mentions','person_mention','alice');
  `); err != nil {
 		t.Fatal(err)
 	}

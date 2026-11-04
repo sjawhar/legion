@@ -74,16 +74,23 @@ const legacyInboxMembershipQuery = `with recursive ` + unreadDirectRepliesCTE + 
  union all
  select 'direct_reply', 'message', reply_id::text from unread_direct_replies`
 
-// inboxMentionVisibleSQL is the closed source visibility predicate shared by
-// expansion pages and counts. Apply it before LIMIT: private or deleted nodes
-// must not consume a page and hide older public mentions.
-const inboxMentionVisibleSQL = `(
- (g.from_kind='comment' and exists(
-   select 1 from comments visible left join artifacts owner on owner.id=visible.artifact_id
-   where visible.id::text=g.from_id and (visible.issue_key is not null or owner.project_key is not null)))
- or (g.from_kind='message' and exists(
-   select 1 from messages visible where visible.id::text=g.from_id and visible.issue_key is not null))
- or (g.from_kind='block' and exists(
-   select 1 from document_blocks visible join artifacts owner on owner.id=visible.artifact_id
-   where visible.node_id=g.from_id and (owner.issue_key is not null or owner.project_key is not null)))
-)`
+// Public source identities are shared by the expansion page and count. Visibility is
+// decided before each source-kind limit, so private/deleted nodes cannot hide a page.
+const inboxMentionCommentSourcesSQL = `select 'comment' as kind, visible.id::text as id, visible.created_at
+ from comments visible where visible.issue_key is not null or exists (
+ select 1 from artifacts owner where owner.id=visible.artifact_id and owner.project_key is not null)`
+const inboxMentionMessageSourcesSQL = `select 'message' as kind, visible.id::text as id, visible.created_at
+ from messages visible where visible.issue_key is not null`
+const inboxMentionBlockSourcesSQL = `select 'block' as kind, visible.node_id as id, visible.changed_at as created_at
+ from document_blocks visible join artifacts owner on owner.id=visible.artifact_id
+ where owner.issue_key is not null or owner.project_key is not null`
+const inboxMentionSourcesSQL = inboxMentionCommentSourcesSQL + ` union all ` + inboxMentionMessageSourcesSQL + ` union all ` + inboxMentionBlockSourcesSQL
+
+const inboxMentionPageSuffixSQL = ` visible cross join lateral (
+ select 1 from ` + refs.MentionEdgesSQL + ` g where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
+ and g.from_kind=visible.kind and g.from_id=visible.id limit 1
+ ) mention where not exists(select 1 from delivered d where d.kind=visible.kind and d.id::text=visible.id)
+ order by visible.created_at desc, visible.id limit $4::int + $5::int`
+const inboxMentionPagesSQL = `(select visible.kind as from_kind,visible.id as from_id,visible.created_at from (` + inboxMentionCommentSourcesSQL + `)` + inboxMentionPageSuffixSQL + `)
+ union all (select visible.kind,visible.id,visible.created_at from (` + inboxMentionMessageSourcesSQL + `)` + inboxMentionPageSuffixSQL + `)
+ union all (select visible.kind,visible.id,visible.created_at from (` + inboxMentionBlockSourcesSQL + `)` + inboxMentionPageSuffixSQL + `)`

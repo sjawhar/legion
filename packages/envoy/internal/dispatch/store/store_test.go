@@ -280,6 +280,19 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"events_person_words",
 		"comment_deliveries_session",
 		"message_deliveries_session_created",
+		"comments_session_owner",
+		"messages_session_owner",
+		"asks_session_owner",
+		"events_session_owner",
+		"comments_person_author",
+		"messages_person_author",
+		"asks_person_author",
+		"comments_created_text_id",
+		"messages_created_text_id",
+		"document_blocks_changed_node",
+		"comment_mentions_comment_id_text",
+		"comment_deliveries_comment_id_text",
+		"message_deliveries_message_id_text",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
@@ -290,7 +303,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		select viewname
 		from pg_views
 		where schemaname = current_schema()
-	`, []string{"graph_edges", "graph_inbox_edges", "graph_mention_edges", "graph_person_edges", "person_aliases"})
+	`, []string{"graph_edges", "graph_inbox_edges", "graph_mention_edges", "graph_mention_resolutions", "graph_person_edges", "person_aliases"})
 
 	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `

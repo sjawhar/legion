@@ -45,4 +45,29 @@ func TestPersonNodesIncludesIdentityMentionsFromEverySurfaceWithoutStorageKinds(
 	if strings.Contains(response.Body.String(), "_mention") {
 		t.Fatal("storage kind escaped")
 	}
+	response = dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/inbox?mentions=true", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("unified mentions = %d %s", response.Code, response.Body.String())
+	}
+	inbox := decodeBody[unifiedInboxPage](t, response)
+	if len(inbox.Expansions) != 3 {
+		t.Fatalf("unified mentions = %+v", inbox)
+	}
+	for _, row := range inbox.Expansions {
+		if row.Cause != "mention" || row.Href == "" || strings.HasSuffix(row.Kind, "_mention") {
+			t.Fatalf("unified mention = %+v", row)
+		}
+	}
+	other := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/inbox?mentions=true", nil, "bob")
+	if page := decodeBody[unifiedInboxPage](t, other); len(page.Expansions) != 0 {
+		t.Fatalf("another person's mentions leaked: %+v", page)
+	}
+	response = graphRequest(t, handler, map[string][]string{"to": {"dispatch://people/%20ALICE%20"}, "kind": {"mentions"}})
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "_mention") {
+		t.Fatalf("canonical person address = %d %s", response.Code, response.Body.String())
+	}
+	response = sessionRequest(t, handler, http.MethodGet, "/api/v1/references?to=dispatch://people/alice", nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("bearer identity traversal = %d %s", response.Code, response.Body.String())
+	}
 }

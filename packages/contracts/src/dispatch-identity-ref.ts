@@ -21,12 +21,14 @@ export function parseIdentityReference(value: string): IdentityReference | undef
   if (namespace === "people") id = id.trim().toLowerCase();
   if (!isSessionId(id) || !referenceTargetFits(id)) return undefined;
   const kind = namespace === "people" ? "person" : namespace === "sessions" ? "session" : "role";
+  if (kind === "session" && !/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
+  if (kind === "role" && !/^[a-z0-9-]+$/.test(id)) return undefined;
   const reference = `dispatch://${namespace}/${encodeURIComponent(id)}`;
   const href =
     kind === "person"
       ? `/people/${encodeURIComponent(id)}`
       : kind === "session"
         ? `/agents/${encodeURIComponent(id)}/live`
-        : `/agents?role=${encodeURIComponent(id)}`;
+        : "/agents";
   return { kind, id, reference, href };
 }

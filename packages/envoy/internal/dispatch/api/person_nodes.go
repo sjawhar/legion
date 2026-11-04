@@ -41,7 +41,7 @@ const personNodesQuery = `
 			join ` + refs.AllEdgesSQL + ` g on g.to_kind = 'session' and g.to_id = a.alias and g.kind = 'delivered_to'
 			where a.person = $1 and a.alias_kind = 'session' and g.from_kind in ('comment', 'message', 'ask')
 			union all
-			select g.from_kind, g.from_id, g.kind from ` + refs.AllEdgesSQL + ` g
+			select g.from_kind, g.from_id, g.kind from ` + refs.MentionEdgesSQL + ` g
 			where g.kind = 'mentions' and g.to_kind = 'person' and g.to_id = $1
 			  and g.from_kind in ('comment', 'message', 'block')
 		) edges group by from_kind, from_id

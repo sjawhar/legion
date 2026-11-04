@@ -1072,6 +1072,9 @@ export function eventRefreshTargets(event: Event, signedInLogin?: string): Refre
   ) {
     targets.push({ queryKey: ["unified-inbox"] });
   }
+  if (changesReferenceGraph(event) || isMessageEvent(event) || isCommentLikeEvent(event)) {
+    targets.push({ queryKey: ["person-nodes"] });
+  }
   const threadsIssue = askThreadsIssue(event);
   if (threadsIssue !== null) {
     targets.push(askThreadsOn(threadsIssue));

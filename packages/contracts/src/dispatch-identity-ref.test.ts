@@ -8,13 +8,16 @@ test("identity addresses canonicalize people without changing session or role id
     reference: "dispatch://people/alice%40example.com",
     href: "/people/alice%40example.com",
   });
-  expect(parseIdentityReference("dispatch://sessions/pi.worker-1")?.id).toBe("pi.worker-1");
+  expect(parseIdentityReference("dispatch://sessions/pi-worker-1")?.id).toBe("pi-worker-1");
   expect(parseIdentityReference("dispatch://roles/reviewer")?.id).toBe("reviewer");
   for (const value of [
     "dispatch://people/%00",
     "dispatch://sessions/a%2Fb",
     "dispatch://roles/a/b",
     "dispatch://people/alice#b-fake",
+    "dispatch://sessions/%2A",
+    "dispatch://roles/review%2A",
+    "dispatch://sessions/pi.worker-1",
   ])
     expect(parseIdentityReference(value)).toBeUndefined();
 });

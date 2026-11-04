@@ -36,6 +36,15 @@ test("identity mentions from comments messages and document blocks appear togeth
     await rows.filter({ hasText: "Document for" }).getByRole("link", { name: "Open" }).click();
     await expect(page).toHaveURL(/\/issues\/CORE-1\/artifacts\/mentions-md#b-/);
     await expect(page.locator("main")).toContainText("Document for");
+    await page.goto("/inbox/unified");
+    const inboxRows = page.getByRole("list", { name: "Unified inbox" }).getByRole("listitem");
+    await expect(inboxRows.filter({ hasText: "Mention · added to preview" })).toHaveCount(0);
+    await page.getByRole("checkbox", { name: "Include mentions (additional items)" }).check();
+    await expect(inboxRows.filter({ hasText: "Mention · added to preview" })).toHaveCount(3);
+    await expect(inboxRows.filter({ hasText: "Comment for" })).toBeVisible();
+    await expect(inboxRows.filter({ hasText: "Message for" })).toBeVisible();
+    await expect(inboxRows.filter({ hasText: "Document for" })).toBeVisible();
+    await expect(inboxRows.filter({ hasText: "Unrelated Bob" })).toHaveCount(0);
   } finally {
     await alice.close();
   }

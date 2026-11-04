@@ -328,7 +328,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		args = append(args, query.ID)
 	}
 	relation := "graph_edges"
-	if slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") {
+	if query.Kind == "person" || query.Kind == "session" || query.Kind == "role" || slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") {
 		relation = AllEdgesSQL
 	}
 	var arms string
@@ -462,6 +462,7 @@ var nodeLoaders = map[string]nodeLoader{
 	"message":       loadMessageNodes,
 	"component":     loadComponentNodes,
 	"session":       loadSessionNodes,
+	"role":          loadSessionNodes,
 	"person":        loadPersonNodes,
 	"block":         loadBlockNodes,
 	"ask_block":     loadAskBlockNodes,

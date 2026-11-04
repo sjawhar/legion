@@ -1480,6 +1480,12 @@ It compares the graph's `delivered_to` sets with recorded outbox topics and sent
 It prints JSON counts (`checked`, `by_kind`, `mismatched`, `missing` by source, `unexpected`), never message content, from one read-only repeatable-read snapshot, and never runs migrations.
 Exit `0` means a nonempty census with no mismatches, `1` means mismatches or no items to check, and `2` means the check could not run.
 
+`envoy-dispatch census --mentions` checks identity mentions for comments, messages and current document blocks from the last 30 days against their recorded targets and resolutions.
+It prints `checked`, `recorded`, `mismatched`, `by_kind`, `missing` and `unexpected` counts from one read-only snapshot, without migrating or returning content.
+It exits `1` on a difference or no recorded mentions, and `2` if it cannot run.
+Identity addresses use `dispatch://people/<login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>` in text, indexed by the same writer as citation references.
+Their unknown storage kinds let old builds skip them, but an old re-index drops them: after returning to this build, run `envoy-dispatch rebuild-refs`, let block-index reconciliation finish, then run the mention census.
+
 The census is one `repeatable read, read only` transaction over the migrations this binary carries that the database has not applied:
 every migration whose version `schema_migrations` does not record, the rule the runner applies them by (a database without that table records none, so everything is pending).
 For each it prints the tables the migration locks above ACCESS SHARE (`pgmigrate.CensusTables`), with each table's total size, its row count and the sessions holding locks on it;

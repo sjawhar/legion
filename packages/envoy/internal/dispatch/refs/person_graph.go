@@ -6,6 +6,10 @@ package refs
 // sibling remains in AllEdgesSQL for general readers; no source is dual-written.
 const PersonInboxEdgesSQL = "graph_inbox_edges"
 
+// MentionEdgesSQL is the typed identity-mention sibling for named mention reads.
+// It remains part of AllEdgesSQL; this avoids planning unrelated citation/delivery arms.
+const MentionEdgesSQL = "graph_mention_edges"
+
 // AllEdgesSQL is the complete derived graph for new named reads. The sibling relations
 // add identity, recorded delivery and indexed inbox delivery without changing graph_edges,
 // so existing builds retain their result sets and query plans during rollout and rollback.
@@ -17,5 +21,5 @@ const AllEdgesSQL = `(
 	union all
 	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from ` + PersonInboxEdgesSQL + `
 	union all
-	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from graph_mention_edges
+	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from ` + MentionEdgesSQL + `
 )`

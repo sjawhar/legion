@@ -1126,6 +1126,9 @@ a pinned session is only rechecked, and a resolve error settles the attempt `fai
 That once-only guarantee is attempt 1's:
 a person's Retry after attempt 1 has settled opens attempt 2, which resolves the mention afresh and can reach a route holder the route already reached, as a Retry always has - it is the person's explicit resend.
 A comment's lookups run at once, and so do its mentions' sends, so its request waits about one window however many mentions it carries.
+Every new comment also has an outbox route to sessions its indexed body addresses with `dispatch://sessions/<id>` and to its explicitly resolved mention sessions, including agent-authored comments, whether or not another route names them.
+It deduplicates body and explicit mentions, skips a session the explicit mention already reached, holds while that send is pending, sends after failure or an abandoned/missing attempt, and excludes the comment's own author.
+Identity references in messages and document blocks add inbox items but no Envoy notification.
 
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or leave a stranded attempt unresumable.
 A retry beside a live claim takes an attempt of its own; one beside an abandoned claim resumes the original attempt under its original number.
@@ -1191,6 +1194,10 @@ Mentions (`dispatch://` refs and same-origin dashboard URLs in a document versio
 `refs.ReplaceCountedEdit` for an edit of an ask's question, `refs.ReplaceCountedItem` and `refs.ReplaceCountedItemEdit` for a comment's or an issue message's write and a comment's edit (which first index the item's blocks, below), and `refs.ReplaceDocumentCounted` for a document version whose mentions its index has already extracted.
 All of them reconcile through the unexported `replaceRefs` rather than rewrite:
 an edge that survives keeps its `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right after the source's event is appended, in the same transaction).
+Identity addresses use `dispatch://people/<canonical-login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>` through that same extraction and indexer.
+Their stored target kinds end in `_mention`, which existing readers skip; `graph_mention_edges` maps them to person/session/role and derives explicit comment and message targets from their recorded resolution rows.
+The complete graph filters raw storage kinds, and `census --mentions` compares its mention sets with those records independently.
+An old build re-indexing the body drops identity addresses it cannot parse; `rebuild-refs` on this build restores them, then the existing block-index reconciliation restores document-block edges.
 Structural relations stay in the columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge relation:
 `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`), `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to` (comment and message threads), `followed_by` (`ask_followers`), since migration 0121 a block's `mentions` (`block_refs`) and its `part_of` edge to its document (`document_blocks`), since migration 0142 the same two for a block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and `message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`), since migration 20261101143211 the same two for a part of an ask (`ask_block_refs` and `ask_blocks`), which a reply naming the ask answers (`ask_id` with `reply_to_block`), and since migration 20261101144855 a typed block's `block[]` attribute makes `block_refs` edges of a kind named by the attribute (below the typed block rules);
 20261101143211 splits the reply arm by the node id `replies_to_block` holds, so one starting `ask/` is an edge to an `ask_block` and every other to a `comment_block`.

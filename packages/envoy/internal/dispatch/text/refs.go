@@ -231,6 +231,11 @@ func parseDispatch(value string) (Ref, bool) {
 		if err != nil || !IsSessionID(id) {
 			return Ref{}, false
 		}
+		if kind != "person" {
+			if _, err := model.ParseRoute(kind + ":" + id); err != nil {
+				return Ref{}, false
+			}
+		}
 		return Ref{Kind: kind, ID: id}, true
 	}
 	if issueKeyPattern.MatchString(key) {

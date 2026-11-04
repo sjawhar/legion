@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/mentiongraph"
 	"github.com/sjawhar/envoy/internal/dispatch/persongraph"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -45,8 +46,8 @@ func runCensus(ctx context.Context, args []string, databaseURL string, out, errO
 	if len(args) == 0 {
 		return census(ctx, databaseURL, out, errOut)
 	}
-	if len(args) != 1 || args[0] != "--deliveries" {
-		fmt.Fprintln(errOut, "usage: envoy-dispatch census [--deliveries]")
+	if len(args) != 1 || (args[0] != "--deliveries" && args[0] != "--mentions") {
+		fmt.Fprintln(errOut, "usage: envoy-dispatch census [--deliveries|--mentions]")
 		return 2
 	}
 	if strings.TrimSpace(databaseURL) == "" {
@@ -59,6 +60,25 @@ func runCensus(ctx context.Context, args []string, databaseURL string, out, errO
 		return 2
 	}
 	defer database.Pool.Close()
+	if args[0] == "--mentions" {
+		report, err := mentiongraph.Census(ctx, database.Pool, time.Now().Add(-30*24*time.Hour))
+		if err != nil {
+			fmt.Fprintln(errOut, "census:", err)
+			return 2
+		}
+		if err := json.NewEncoder(out).Encode(report); err != nil {
+			fmt.Fprintln(errOut, "census:", err)
+			return 2
+		}
+		if report.Checked == 0 || report.Recorded == 0 {
+			fmt.Fprintln(errOut, "census: no recorded identity mentions in the last 30 days")
+			return 1
+		}
+		if report.Mismatched != 0 {
+			return 1
+		}
+		return 0
+	}
 	report, err := persongraph.Census(ctx, database.Pool, time.Now().Add(-30*24*time.Hour))
 	if err != nil {
 		fmt.Fprintln(errOut, "census:", err)

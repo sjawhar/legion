@@ -160,9 +160,9 @@ func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error
 			// diff red. Only public issue/document content is eligible for this arm.
 			var count int
 			err := tx.QueryRow(ctx, unifiedInboxCandidates+` select count(*) from (
-    select distinct g.from_kind,g.from_id from `+refs.AllEdgesSQL+` g
+    select distinct g.from_kind,g.from_id from `+refs.MentionEdgesSQL+` g
+    join (`+inboxMentionSourcesSQL+`) visible on visible.kind=g.from_kind and visible.id=g.from_id
     where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
-      and `+inboxMentionVisibleSQL+`
       and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id::text=g.from_id)
    ) expansions`, p.login, p.login, nil).Scan(&count)
 			if err != nil {

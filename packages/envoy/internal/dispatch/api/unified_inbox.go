@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -118,14 +117,8 @@ func (s *server) listUnifiedInbox(w http.ResponseWriter, r *http.Request) {
 // their replies remain on the independently scoped direct-conversation arm.
 func readInboxMentions(ctx context.Context, q queryer, actorID string, limit, offset int) ([]unifiedInboxItem, error) {
 	args := append(unreadDirectRepliesArgs(actorID, nil), limit, offset)
-	rows, err := q.Query(ctx, unifiedInboxCandidates+`, mentioned as materialized (
-  select g.from_kind, g.from_id, max(g.created_at) as created_at
-  from `+refs.AllEdgesSQL+` g
-  where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
-    and `+inboxMentionVisibleSQL+`
-    and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id::text=g.from_id)
-  group by g.from_kind,g.from_id
-  order by max(g.created_at) desc, g.from_kind, g.from_id limit $4 offset $5
+	rows, err := q.Query(ctx, unifiedInboxCandidates+`, candidates as (`+inboxMentionPagesSQL+`), mentioned as (
+  select * from candidates order by created_at desc,from_kind,from_id limit $4 offset $5
  ) select x.from_kind,x.from_id,x.created_at,
    coalesce(c.body,m.body,b.excerpt,''), coalesce(c.author,m.author,'{"kind":"system","id":"document"}'::jsonb),
    coalesce(c.issue_key,m.issue_key,a.issue_key),a.project_key,a.slug,b.block_id,coalesce(a.is_primary,false)

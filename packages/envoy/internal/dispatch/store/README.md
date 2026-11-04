@@ -22,9 +22,9 @@ A migration that cannot be written that way is a stop-the-world migration, deplo
 
 ## Derived graph
 
-The graph combines `graph_edges`, `graph_person_edges` and `graph_inbox_edges` through `refs.AllEdgesSQL`.
-`graph_edges` retains the relations existing builds read; sibling views derive identity and delivery without changing those builds' results or query plans during rollout or rollback.
-None of the edge views stores or writes an edge.
+The complete graph uses `refs.AllEdgesSQL`: citation and structural `graph_edges`, identity and recorded-delivery `graph_person_edges`, indexed-inbox `graph_inbox_edges`, and identity-mention `graph_mention_edges`.
+`graph_edges` keeps its definition and existing builds' result sets; identity references are indexed under unknown storage target kinds `person_mention`, `session_mention` and `role_mention` that old readers skip.
+The complete union filters those storage kinds from its compatibility arm and maps them only through `graph_mention_edges`; none of these views stores or writes an edge.
 `person_aliases(person, alias_kind, alias)` derives canonical logins with `user_threads_login`, raw user actor ids, and session ids only where a stored session actor's server-verified `owner` identifies the person.
 Routes, claims and role holders do not prove person ownership, so there is no role alias.
 Delivery reads the four word-carrying event types used by `sessionanswers`, their `published_destinations`, and sent message/comment delivery attempts; a recorded role topic identifies the role, not a session or a person.
@@ -34,3 +34,10 @@ Delivery reads the four word-carrying event types used by `sessionanswers`, thei
 Its direct reply walk stops at depth 64 and guards visited ids; read marks, Clear and per-reply reads stay in their existing tables and are subtracted by the named read.
 `inbox_shadow_control`, `inbox_shadow_latest` and `inbox_shadow_days` store observation counts only, written by the one serialized comparison function, never another copy of an inbox or relation.
 The comparison checks all signed-in people, a superset of active users.
+
+Identity addresses are `dispatch://people/<login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>`; session and role ids follow the existing delivery route grammar.
+The existing reference indexer records their resolved target from the same extraction it uses for citations; people use `model.CanonicalLogin`, the same canonical identity `person_aliases` names.
+The mention view also reads explicit comment mentions, message targets and recorded delivery resolutions, expanding a session to a person only through a verified session alias.
+`envoy-dispatch census --mentions` independently compares source sets created, edited or resolved in the last 30 days in one read-only snapshot; exit 1 includes an empty recorded-mention set.
+An old build re-indexing identity-address text drops these unknown records; unchanged bodies are not automatically revisited by the owed sweep.
+After returning to the new build, run `envoy-dispatch rebuild-refs`, let the existing block-index reconciliation drain, then run the mention census.

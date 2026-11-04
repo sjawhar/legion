@@ -20,8 +20,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   It links to `/inbox/unified` (`UnifiedInboxPage.tsx`), which reads `GET /me/inbox` under `["unified-inbox", login, mentions]` so switching people never shows another person's cached rows, and keeps mentioned public nodes as a separately labelled, default-off expansion.
   The existing Inbox, Replies page, badges and CLI stay unchanged; cutover requires three complete UTC days at zero for every signed-in person, with no coverage gaps or errors.
 
-- `web/src/features/people/PersonPage.tsx` is `/people/<login>`, a paginated list of comments, messages and asks the person authored or their recorded session aliases received, from `GET /people/{login}/nodes` under `["person-nodes", login]`.
-  Each row shows Authored or Received, its first line, creation time and an Open link when it has a page; direct messages link to the session conversation and have no `dispatch://` reference.
+- `web/src/features/people/PersonPage.tsx` is `/people/<login>`, a paginated list of items the person authored, their recorded session aliases received, or that mention them, from `GET /people/{login}/nodes` under `["person-nodes", login]`.
+  Rows show Authored, Received or Mentioned in, their first line, creation time and an Open link; mentioned document blocks link to the block, while direct messages keep no `dispatch://` reference.
+  Identity addresses in text use `dispatch://people/<login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>`; they use the shared contracts parser and the server's existing reference indexer.
   The signed-in name in the navigation footer links to the caller's person page; other user bylines keep their existing text-only rendering.
 
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.

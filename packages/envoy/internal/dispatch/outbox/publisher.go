@@ -822,29 +822,22 @@ func (d *destinations) leftToMention(sessionID string) bool {
 // eventDestinations lists event's destinations in the order they are sent and recorded: its
 // owner's topic (ownerTopic), then - for an event that notifies and is not a targeted message - its
 // owner's route, its claimant route, its primary document's sessions and its author routes, then
-// its follower routes and the previous claimant's notice. mentionPending reports a session's copy
-// held back for a mention still being sent (destinations.leftToMention). The mention deliveries of
-// a new comment whose mentions resolved to a session are read before anything else, so a lookup of
-// them that fails leaves the event with no destination. Any other lookup that fails, or a route
+// its follower routes, explicit/indexed mention fallbacks and the previous claimant's notice.
+// mentionPending holds back a copy while its explicit send is still pending. New comments read
+// their indexed session targets and explicit delivery outcomes first; a failed lookup leaves no
+// destination. Any other lookup that fails, or a route
 // that does not parse, ends the list there: the destinations before it are returned with the
 // error, which backs the event off once they are sent. So a recipient read the batch has no answer
 // for (unansweredRecipients) still lets the owner topic, the route and the claimant go first.
 func eventDestinations(event model.Event, ownerTopic string, routing routing, look lookup) (list []destination, mentionPending bool, err error) {
 	d := &destinations{seen: map[string]struct{}{}}
-	if event.Type == "comment.created" && len(payloadMentionedSessions(event.Payload)) > 0 {
+	mentioned := payloadMentionedSessions(event.Payload)
+	if event.Type == "comment.created" && (len(mentioned) > 0 || uuid.Validate(payloadString(event.Payload, "id")) == nil) {
 		if d.mentions, err = look.mentionDeliveries(payloadString(event.Payload, "id")); err != nil {
 			return nil, false, err
 		}
 	}
 	d.add(ownerTopic, "publish owner topic", ownerTopic)
-	if event.Type == "comment.created" {
-		filter := newRecipientFilter(event, d)
-		for _, sessionID := range slices.Sorted(maps.Keys(payloadMentionedSessions(event.Payload))) {
-			if filter.keep(sessionID) {
-				d.addSessions([]string{sessionID}, "publish mention fallback to")
-			}
-		}
-	}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {
@@ -863,6 +856,17 @@ func eventDestinations(event model.Event, ownerTopic string, routing routing, lo
 	}
 	if err := addFollowerRoutes(event, look, d); err != nil {
 		return d.list, d.mentionPending, err
+	}
+	if event.Type == "comment.created" {
+		if mentioned == nil && len(d.mentions.indexed) > 0 {
+			mentioned = make(map[string]struct{}, len(d.mentions.indexed))
+		}
+		maps.Copy(mentioned, d.mentions.indexed)
+		for _, sessionID := range slices.Sorted(maps.Keys(mentioned)) {
+			if !event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) && !d.leftToMention(sessionID) {
+				d.addSessions([]string{sessionID}, "publish mention fallback to")
+			}
+		}
 	}
 	addPreviousClaimant(event, d)
 	return d.list, d.mentionPending, nil

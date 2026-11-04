@@ -2329,6 +2329,7 @@ export interface GraphNode {
     | "message"
     | "session"
     | "person"
+    | "role"
     | "component";
   readonly id: string;
   readonly block_id?: string;

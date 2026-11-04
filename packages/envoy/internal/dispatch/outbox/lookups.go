@@ -43,6 +43,8 @@ type mentionDeliveries struct {
 	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
 	// model.DeliveryClaimLapse.
 	pending map[string]struct{}
+	// indexed is the comment body's session targets, resolved by its existing ref indexer.
+	indexed map[string]struct{}
 }
 
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
@@ -248,7 +250,7 @@ func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error
 	}
 	_ = loadRecipients(ctx, db, loadDocumentSessionAuthors, documents, "document", found.documents, found.failed)
 	if err := loadMentionDeliveries(ctx, db, mentions, found); err != nil {
-		return nil, err
+		failRecipients(mentions, "mention", err, found.failed)
 	}
 	_ = loadRecipients(ctx, db, loadCommentRecipients, threads, "thread", found.threads, found.failed)
 	_ = loadRecipients(ctx, db, loadPrimaryDocumentAuthors, issues, "issue", found.primaries, found.failed)
@@ -473,19 +475,23 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 // its creation when no sender ever claimed it - is abandoned, the same lease the API's claimLapsed
 // gives a sender (internal/dispatch/api), so it no longer holds the outbox's copy back.
 var mentionDeliveryQuery = `
-	select comment_id::text, session_id,
-	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
-	from comment_deliveries
-	where comment_id = any($1::text[]::uuid[]) and session_id is not null
+	select comment_id, session_id, bool_or(sent), bool_or(pending), bool_or(indexed)
+	from (
+		select comment_id::text, session_id, state = 'sent' as sent,
+		       state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + ` as pending,
+		       false as indexed
+		from comment_deliveries
+		where comment_id = any($1::text[]::uuid[]) and session_id is not null
+		union all
+		select from_id, to_id, false, false, true from refs
+		where from_kind = 'comment' and from_id = any($1::text[]) and to_kind = 'session_mention'
+	) resolutions
 	group by comment_id, session_id
 `
 
-// loadMentionDeliveries reads what the mentions of every comment in ids delivered
-// (mentionDeliveries). Only a comment.created whose mentions resolved to a session asks
-// (eventDestinations): every other event, edits, resolutions and reopenings included, suppresses
-// nothing. A comment no attempt was recorded for answers empty sets, so it suppresses nothing
-// either.
+// loadMentionDeliveries reads indexed session targets and explicit delivery outcomes for new
+// comments. Edits, resolutions and reopenings neither send a body mention nor suppress a route.
+// A comment with no attempts suppresses nothing, but its indexed body targets still notify.
 func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
@@ -495,12 +501,15 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 		return fmt.Errorf("load the batch's mention deliveries: %w", err)
 	}
 	var commentID, sessionID string
-	var sent, pending bool
-	_, err = pgx.ForEachRow(rows, []any{&commentID, &sessionID, &sent, &pending}, func() error {
+	var sent, pending, indexed bool
+	_, err = pgx.ForEachRow(rows, []any{&commentID, &sessionID, &sent, &pending, &indexed}, func() error {
 		deliveries, ok := found.mentions[commentID]
 		if !ok {
-			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}}
+			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}, indexed: map[string]struct{}{}}
 			found.mentions[commentID] = deliveries
+		}
+		if indexed {
+			deliveries.indexed[sessionID] = struct{}{}
 		}
 		switch {
 		case sent:

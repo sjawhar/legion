@@ -17,8 +17,11 @@ import (
 type Edge struct{ FromKind, FromID, ToKind, ToID string }
 
 // SourcesSQL lists every current source in the window, including ones with no mention.
-const SourcesSQL = `select 'comment' as kind, id::text as id from comments where created_at >= $1
- union all select 'message', id::text from messages where created_at >= $1
+const SourcesSQL = `select 'comment' as kind, c.id::text as id from comments c
+ where c.created_at >= $1 or c.edited_at >= $1
+    or exists (select 1 from comment_deliveries d where d.comment_id=c.id and d.created_at >= $1)
+ union all select 'message', m.id::text from messages m
+ where m.created_at >= $1 or exists (select 1 from message_deliveries d where d.message_id=m.id and d.created_at >= $1)
  union all select 'block', node_id from document_blocks where changed_at >= $1`
 
 // Recorded reads the existing writers' records, not the graph or a re-parse of source text.
@@ -52,7 +55,8 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 		return nil, err
 	}
 	rows.Close()
-	rows, err = q.Query(ctx, `select m.comment_id::text,m.target,m.resolved_session_id from comment_mentions m join comments c on c.id=m.comment_id where c.created_at >= $1`, since)
+	rows, err = q.Query(ctx, `select m.comment_id::text,m.target,m.resolved_session_id from comment_mentions m
+ join (`+SourcesSQL+`) s on s.kind='comment' and s.id=m.comment_id::text`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -74,8 +78,10 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 		return nil, err
 	}
 	rows.Close()
-	rows, err = q.Query(ctx, `select 'comment',d.comment_id::text,d.session_id,d.resolve_error from comment_deliveries d join comments c on c.id=d.comment_id where c.created_at >= $1 and d.session_id <> ''
- union all select 'message',d.message_id::text,d.session_id,null::text from message_deliveries d join messages m on m.id=d.message_id where m.created_at >= $1 and d.session_id <> ''`, since)
+	rows, err = q.Query(ctx, `select 'comment',d.comment_id::text,d.session_id,d.resolve_error from comment_deliveries d
+ join (`+SourcesSQL+`) s on s.kind='comment' and s.id=d.comment_id::text where d.session_id <> ''
+ union all select 'message',d.message_id::text,d.session_id,null::text from message_deliveries d
+ join (`+SourcesSQL+`) s on s.kind='message' and s.id=d.message_id::text where d.session_id <> ''`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +100,8 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 		return nil, err
 	}
 	rows.Close()
-	rows, err = q.Query(ctx, `select id::text,target from messages where created_at >= $1 and target is not null`, since)
+	rows, err = q.Query(ctx, `select m.id::text,m.target from messages m
+ join (`+SourcesSQL+`) s on s.kind='message' and s.id=m.id::text where m.target is not null`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -129,19 +136,15 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 		return nil, err
 	}
 	rows.Close()
-	// Add to a separate slice: inserting into a map while ranging need not visit new entries.
-	edges := make([]Edge, 0, len(set))
+	// Expansion only inserts person targets; newly inserted entries need no further expansion.
 	for e := range set {
-		edges = append(edges, e)
-	}
-	for _, e := range edges {
 		if e.ToKind == "session" {
 			for _, person := range owners[e.ToID] {
 				add(e.FromKind, e.FromID, "person", person)
 			}
 		}
 	}
-	edges = edges[:0]
+	edges := make([]Edge, 0, len(set))
 	for e := range set {
 		edges = append(edges, e)
 	}
