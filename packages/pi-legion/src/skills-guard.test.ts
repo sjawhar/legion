@@ -322,15 +322,7 @@ test("no skill, agent or plugin file keeps work in the foreground, and each that
 // a later edit deletes the rule's key sentence; it does not show that an agent follows the rule,
 // which the issue's session runs measure. Whitespace is collapsed before the match, as
 // shipped-agents.test.ts collapses it, so a pin survives a rewrap of the file it reads.
-// Read once per file: a dozen pins read the same four references.
-const collapsedText = new Map<string, string>();
-function collapsed(file: string): string {
-  const seen = collapsedText.get(file);
-  if (seen !== undefined) return seen;
-  const text = readFileSync(file, "utf8").replace(/\s+/g, " ");
-  collapsedText.set(file, text);
-  return text;
-}
+const collapsed = (file: string) => readFileSync(file, "utf8").replace(/\s+/g, " ");
 
 // A sentence copied into several files is counted once per file, never over a composed prompt,
 // where a sentence in both roles/<role>.md and go/worker-common.md would appear twice. A file
@@ -363,7 +355,7 @@ test("the simplify pass reads every file of its scope and reports the defects it
   const prBody = collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"));
   expect(prBody).toContain("whatever the diff touches, a docs-only diff included.");
   expect(prBody).toContain(
-    "The pass covers every file of the diff, workflow YAML and documentation with the code, and a defect it reports is fixed outside the pass with the proof run again, never dropped as out of scope; the `Thermo` line's `defects reported` half names how many and the commit that fixed them"
+    "The pass covers every file of the diff, workflow YAML and documentation with the code, and a defect it reports is fixed outside the pass with the results recorded again, never dropped as out of scope; the `Thermo` line's `defects reported` half names how many and the commit that fixed them"
   );
   // The Thermo line is written on every diff now, and carries what the pass reported; only its
   // pair half is omitted on a docs-only one, which leaves the reviewer's pair where it was.
@@ -379,11 +371,11 @@ test("the simplify pass reads every file of its scope and reports the defects it
   expect(mergeGate).not.toContain("Skip the `Thermo` line entirely on a docs-only PR.");
 });
 
-// R2: a check that cannot fail is not a proof, and a documented procedure counts only when it ran
-// (dispatch://INFRA-142, dispatch://INFRA-198).
-test("a check that cannot fail is not a proof, and a documented procedure counts only when it ran", () => {
+// R2: a check that cannot fail is not a result, and a documented procedure counts only when it
+// ran (dispatch://INFRA-142, dispatch://INFRA-198).
+test("a check that cannot fail is not a result, and a documented procedure counts only when it ran", () => {
   const prBody = collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"));
-  expect(prBody).toContain("**A check that cannot fail is not a proof.**");
+  expect(prBody).toContain("**A check that cannot fail is not a result.**");
   expect(prBody).toContain(
     "A documented procedure counts only when it ran: reading it, or reading the document that describes it, is not a run"
   );
@@ -402,7 +394,7 @@ test("the forward-merge re-check searches the new head for each earlier finding'
     "the tester re-runs the bare gates only and the class search of every earlier round's findings at the new head;"
   );
   countedOncePerFile(
-    "forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings: <clean | what it found>",
+    "forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings clean",
     [
       "skills/legion-worker/references/pr-body.md",
       "packages/daemon/internal/prompts/roles/tester.md",
@@ -426,10 +418,10 @@ test("the reviewer treats a result with no report as a failed run, not a verdict
     "A result that carries no report, or that names another place for it, is a failed run, not a verdict"
   );
   expect(mergeGate).toContain(
-    "reading the diff yourself in the agent's place is the same thing wearing more work"
+    "Reading the agent's diff yourself and recording that in its place is the same as answering the rubric from a bare verdict"
   );
   expect(mergeGate).toContain(
-    "that half of the round has no review at all: say so to the architect, record no verdict for it, and do not fill the gap yourself"
+    "that half of the round has no review: tell the architect, do not approve, and wait with a `WAITING` line naming what you wait on until it answers"
   );
 });
 
@@ -454,13 +446,26 @@ test("every shipped prompt and bash-running agent says how to read a piped comma
   );
 });
 
-// R7: `READY_UNREVIEWED_CHANGE` has five causes, and the merger's own prompt part is the one
-// complete list, so neither file gets a second copy of it (dispatch://INFRA-427).
-test("retro and the merge gate say READY_UNREVIEWED_CHANGE has more causes than retro's own paths", () => {
+// R7: `READY_UNREVIEWED_CHANGE` has more causes than retro's own paths, and the merger's own
+// prompt part is the one complete list, so neither file gets a second copy of it
+// (dispatch://INFRA-427, and the spec's decision "A pointer, not a second list"). The pin counts
+// the pointer and refuses the list: a second copy would have to be kept equal to `ready.go`.
+test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CHANGE's causes", () => {
+  const files = ["skills/legion-worker/references/merge-gate.md", "skills/legion-retro/SKILL.md"];
   countedOncePerFile(
-    "A path outside retro's own is one of five causes of `READY_UNREVIEWED_CHANGE`: the others are a compare GitHub cut at its 300-file limit, a head that does not descend from the approved one, a compare that gives no file list, and an approved head GitHub does not know. Every one of them sends the head back to review and none is an error to retry; the complete list, with each remedy, is the merger's own role prompt part.",
-    ["skills/legion-worker/references/merge-gate.md", "skills/legion-retro/SKILL.md"]
+    "`READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own",
+    files
   );
+  countedOncePerFile(
+    "the complete list, with each remedy, is the merger's own role prompt part",
+    files
+  );
+  for (const file of files) {
+    const text = collapsed(path.join(staged, file.slice("skills/".length)));
+    expect(text, `${file} lists the causes instead of pointing at them`).not.toContain(
+      "300-file limit"
+    );
+  }
 });
 
 // R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes

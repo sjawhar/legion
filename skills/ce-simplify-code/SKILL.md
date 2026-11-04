@@ -29,7 +29,7 @@ Dispatch three generic subagents — code-reuse, code-quality, and efficiency re
 - `references/personas/code-quality-reviewer.md`
 - `references/personas/efficiency-reviewer.md`
 
-Do not paraphrase these rubrics from memory — read each file and pass it verbatim, or the reviewer loses the gating rules that keep the pass behavior-preserving. Pass Step 3's **A defect you see is reported, never dropped** paragraph to each reviewer beside its rubric and the scope: the rubrics are written for code, and without that paragraph a reviewer handed a document or a workflow file has no criterion its findings can come from, so a docs-only scope would come back "nothing to flag" whatever is wrong in it.
+Do not paraphrase these rubrics from memory — read each file and pass it verbatim, or the reviewer loses the gating rules that keep the pass behavior-preserving.
 
 **Bounded dispatch.** Queue the three reviewers and launch only as many as the harness accepts at once; treat a concurrency/active-agent-limit error as backpressure (leave the reviewer queued and retry after a slot frees), not as reviewer failure. If a dispatch fails for a reason that survives correcting the invocation, run that reviewer's pass inline in the parent context using the same prompt asset, and disclose the substitution in one line.
 

@@ -894,8 +894,10 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 	gone.DeletedAt = &deletedAt
 	untagged := policytest.Secret("UNTAGGED_KEY", "", "", "untagged-value")
 	untagged.Tags = nil
+	live := policytest.Secret("LIVE_KEY", "ada@example.com", policy.TierHuman, "live-value")
+	live.Tags[policy.TagDefaultGrant] = policy.DefaultGrantSession
 	local := secrets.NewLocal(
-		policytest.Secret("LIVE_KEY", "ada@example.com", policy.TierHuman, "live-value"),
+		live,
 		policytest.Secret("EMPTY_KEY", policy.OwnerShared, policy.TierAgent, ""),
 		gone, untagged,
 		secrets.LocalSecret{Name: "example/other/outside", KmsKeyID: policytest.KeyARN, Value: "outside-value"},
@@ -908,7 +910,7 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 	}
 	rows := map[string][]string{}
 	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "NAME OWNER TIER KIND MAX_GRANT VALUE DELETED EARLIEST_PURGE" {
+	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "NAME OWNER TIER KIND MAX_GRANT DEFAULT_GRANT VALUE DELETED EARLIEST_PURGE" {
 		t.Fatalf("header = %q", lines[0])
 	}
 	for _, line := range lines[1:] {
@@ -916,10 +918,10 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 		rows[fields[0]] = fields
 	}
 	want := map[string][]string{
-		"EMPTY_KEY":    {"EMPTY_KEY", "shared", "agent", "-", "-", "no", "-", "-"},
-		"GONE_KEY":     {"GONE_KEY", "ada@example.com", "agent", "-", "-", "yes", "2026-10-01T12:00:00Z", "2026-10-08T12:00:00Z"},
-		"LIVE_KEY":     {"LIVE_KEY", "ada@example.com", "human", "-", "-", "yes", "-", "-"},
-		"UNTAGGED_KEY": {"UNTAGGED_KEY", "-", "-", "-", "-", "yes", "-", "-"},
+		"EMPTY_KEY":    {"EMPTY_KEY", "shared", "agent", "-", "-", "-", "no", "-", "-"},
+		"GONE_KEY":     {"GONE_KEY", "ada@example.com", "agent", "-", "-", "-", "yes", "2026-10-01T12:00:00Z", "2026-10-08T12:00:00Z"},
+		"LIVE_KEY":     {"LIVE_KEY", "ada@example.com", "human", "-", "-", "session", "yes", "-", "-"},
+		"UNTAGGED_KEY": {"UNTAGGED_KEY", "-", "-", "-", "-", "-", "yes", "-", "-"},
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %v, want exactly %v", rows, want)
@@ -948,9 +950,15 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 		Created       *time.Time `json:"created"`
 		Deleted       *time.Time `json:"deleted"`
 		EarliestPurge *time.Time `json:"earliest_purge"`
+		DefaultGrant  string     `json:"default_grant"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &views); err != nil {
 		t.Fatalf("list --json is not a JSON array of secrets: %v: %s", err, stdout)
+	}
+	for _, v := range views {
+		if want := map[bool]string{true: "session", false: ""}[v.Name == "LIVE_KEY"]; v.DefaultGrant != want {
+			t.Fatalf("list --json %s default_grant = %q, want %q", v.Name, v.DefaultGrant, want)
+		}
 	}
 	if len(views) != 4 || views[1].Name != "GONE_KEY" || views[0].HasValue || views[1].Created != nil ||
 		views[1].Deleted == nil || !views[1].Deleted.Equal(deletedAt) ||

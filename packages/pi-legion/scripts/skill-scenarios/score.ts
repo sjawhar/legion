@@ -118,8 +118,11 @@ const DaemonLine = z.looseObject({
 const nonEmpty = z.string().min(1);
 /** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
  * daemon holds it to one), as far as the score reads it: the stamps the tester writes itself
- * (`schemaVersion` 1, `phase` test and its `issue`), the implementer's proof verdict, the
- * failures, and the tester's own proof, each entry's six fields non-empty. The body carries
+ * (`schemaVersion` 1, `phase` test and its `issue`), the verdict on the implementer's recorded
+ * results, and the failures, each naming the check it is against. What the tester ran is no part
+ * of the handoff: it is a result recorded against a `check` block of the issue's Verification
+ * document (`dispatch result`), which the pull request body carries one line of per check. The
+ * body carries
  * neither a time nor a `previousHandoff`, since Dispatch records when each handoff was written and
  * versions it; the object is loose, so a body from a checkout whose prompt still asks for
  * `previousHandoff` (main's, since sjawhar/legion#2585) or for a `completed` time (the prompt
@@ -132,19 +135,7 @@ export const TestHandoff = z.looseObject({
   phase: z.literal("test"),
   issue: nonEmpty,
   implementerProof: z.looseObject({ verdict: z.enum(["verified", "rejected"]), how: nonEmpty }),
-  failures: z.array(z.looseObject({ criterion: z.string(), evidence: z.string() })).optional(),
-  proof: z
-    .array(
-      z.looseObject({
-        criterion: nonEmpty,
-        surface: nonEmpty,
-        command: nonEmpty,
-        observed: nonEmpty,
-        headSha: nonEmpty,
-        negativeControl: nonEmpty,
-      })
-    )
-    .optional(),
+  failures: z.array(z.looseObject({ check: z.string(), evidence: z.string() })).optional(),
 });
 
 function lines(file: string): string[] {
@@ -653,10 +644,11 @@ function instant(text: string, what: string): bigint {
   return at;
 }
 
-/** tester-proof: the legion-worker skill's rule for a tester whose predecessor's proof holds.
- * worker_fixture's implement record (seed.ts implement-handoff) carries a proof that reproduces,
- * and its CLI meets all three acceptance criteria, so the skill's answer is `verified` with a proof
- * of the tester's own and no red test to push. Each fact is read from what recorded it: the
+/** tester-proof: the legion-worker skill's rule for a tester whose predecessor's results hold.
+ * worker_fixture's implement record (seed.ts implement-handoff) is the implementer's, and seed.ts
+ * records its passing result against the issue's one `before_merge` check, whose words the CLI
+ * meets, so the skill's answer is `verified` with a result of the tester's own and no red test to
+ * push. Each fact is read from what recorded it: the
  * tester's record from the run's issue on Dispatch (handoffs.json, `seed.ts capture-handoffs`),
  * timed at Dispatch's `created_at`; the accepted completion from the daemon stand-in's log
  * (daemon.log), its first 200 answer to `handoff/complete`, timed at the answer and naming the
@@ -672,12 +664,13 @@ function instant(text: string, what: string): bigint {
  *      the phase's newest record and refuses when there is none;
  *   3. that record is a `test` record this run's own session wrote (the transcript header's id, the
  *      session `dispatch handoff-write` names), whose body is a test handoff (TestHandoff) of this
- *      issue with `implementerProof.verdict` `verified`, no failures, and a proof whose every
- *      `headSha` names a commit of this run's own (namesOwnCommit); and the branch as the tester
+ *      issue with `implementerProof.verdict` `verified` and no failures; and the branch as the
+ *      tester
  *      completed it (its last push before the completion, if it pushed) changes nothing under the
  *      PR's head: the handoff is never a commit, and the fixture leaves no defect for a red test;
- *   4. the PR body the gh stand-in kept last has an `E2E (tester)` line, up to the next field, that
- *      names a commit of this run's own.
+ *   4. the PR body the gh stand-in kept last carries the line `dispatch result` printed for the
+ *      tester, `- Check <id> (<when>): <pass|fail> at <12 hex>, recorded by tester. <words>`,
+ *      naming a commit of this run's own.
  * Without an accepted completion, rule 3 reads the run's own newest test record, so the notes say
  * what was wrong with it. A line naming another run's PR head instead is two runs meeting in the
  * shared /tmp, where agents draft the body whatever TMPDIR says: a rig error, thrown, not a
@@ -769,15 +762,11 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
     const read = TestHandoff.safeParse(body);
     if (!read.success) problems.push(`not a test handoff: ${z.prettifyError(read.error)}`);
     else {
-      const { issue, implementerProof, failures = [], proof = [] } = read.data;
+      const { issue, implementerProof, failures = [] } = read.data;
       if (issue !== world.key) problems.push(`issue is ${issue}, not ${world.key}`);
       if (implementerProof.verdict !== "verified")
         problems.push(`implementerProof.verdict is ${implementerProof.verdict}`);
       if (failures.length > 0) problems.push(`${failures.length} failures`);
-      if (proof.length === 0) problems.push("no proof of the tester's own");
-      for (const [i, entry] of proof.entries())
-        if (!namesOwnCommit(entry.headSha, commits))
-          problems.push(`proof.${i}.headSha ${entry.headSha} is not this run's`);
     }
   }
   const tip = pushes.filter((p) => completedAt === undefined || p.at < completedAt).at(-1);
@@ -787,15 +776,15 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   }
   const proof = problems.length === 0;
   const bodies = calls.filter((c) => c.as === "gh" && c.exit === 0 && c.body !== undefined);
-  const edit = bodies.find((c) => c.body?.includes("E2E (tester)"));
+  const edit = bodies.find((c) => c.body?.includes("recorded by tester"));
   const testerLine =
-    /\*\*E2E \(tester\):\*\*[\s\S]*?(?=\n\*\*|$)/.exec(bodies.at(-1)?.body ?? "")?.[0] ?? "";
+    (bodies.at(-1)?.body ?? "")
+      .split("\n")
+      .find((line) => /^\s*-\s+Check .*recorded by tester\b/.test(line)) ?? "";
   const ownHead = namesOwnCommit(testerLine, commits);
   const foreign = heads.filter((head) => head !== world.head);
   if (!ownHead && namesOwnCommit(testerLine, foreign))
-    throw new Error(
-      `its PR body carries another run's E2E (tester) line: ${testerLine.slice(0, 160)}`
-    );
+    throw new Error(`its PR body carries another run's check line: ${testerLine.slice(0, 160)}`);
   const pass = ran && ordered && proof && ownHead;
   const opened = readCalls(entries).map((call) => call.target);
   const ref = opened.some((target) =>
@@ -849,7 +838,8 @@ const BATCH_DISPATCH_NOTE =
 // (turns.txt, state-<turn>.json), the captured issue (spec.md, spec-versions/, agent-asks.json,
 // agent-texts.json, documents/, plan.md) and the judges' answers (faults.json and the rest).
 
-/** The outline every spec must follow: its `##` headings, exactly and in this order. */
+/** The outline every spec must follow: its `##` headings, exactly and in this order. The checks
+ * are not among them: they live in the issue's Verification document, as `check` blocks. */
 export const OUTLINE = [
   "Summary",
   "Problem",
@@ -857,7 +847,6 @@ export const OUTLINE = [
   "Requirements",
   "Design",
   "Decisions",
-  "Acceptance",
 ] as const;
 /** The Dispatch skill the change removes. `routed` fails a run that reads it, so this name stays
  * when the skill is renamed everywhere else. */
@@ -1913,7 +1902,7 @@ function namedTasks(step: Step): { name: string; assignment: string }[] | undefi
   }
   return parts;
 }
-/** Whether a check's assignment is a spec-only check's: it holds the seven outline headings as `##`
+/** Whether a check's assignment is a spec-only check's: it holds the six outline headings as `##`
  * lines and names no path under a checkout in `reach`. */
 function specOnly(assignment: string, reach: string[]): boolean {
   const outlined = OUTLINE.every((heading) =>
@@ -1969,8 +1958,9 @@ function wordRuns(text: string): Set<string> {
     runs.add(words.slice(start, start + 5).join(" "));
   return runs;
 }
-/** Each spec an assignment pastes: from a `## Summary` line to the end of the `## Acceptance`
- * section after it (the next `#` or `##` heading, or the end), or to the next `## Summary` line.
+/** Each spec an assignment pastes: from a `## Summary` line to the end of the `## Decisions`
+ * section after it, the last of the outline (the next `#` or `##` heading, or the end), or to the
+ * next `## Summary` line.
  * What the assignment adds after a spec (instructions, the person's messages, the answered asks)
  * is in no slice, so it neither lowers nor raises a spec's share. */
 function specSlices(assignment: string): string[] {
@@ -1980,12 +1970,12 @@ function specSlices(assignment: string): string[] {
   for (let start = 0; start < lines.length; start++) {
     if (!summary.test(lines[start] ?? "")) continue;
     let end = start + 1;
-    let acceptance = false;
+    let decisions = false;
     for (; end < lines.length; end++) {
       const line = lines[end] ?? "";
       if (summary.test(line)) break;
-      if (/^[ \t]*## Acceptance[ \t]*$/.test(line)) acceptance = true;
-      else if (acceptance && /^[ \t]*#{1,2} /.test(line)) break;
+      if (/^[ \t]*## Decisions[ \t]*$/.test(line)) decisions = true;
+      else if (decisions && /^[ \t]*#{1,2} /.test(line)) break;
     }
     slices.push(lines.slice(start, end).join("\n"));
     start = end - 1;
@@ -1994,7 +1984,7 @@ function specSlices(assignment: string): string[] {
 }
 /** The least share of a version the run's session wrote that a pasted spec covers, for the check
  * to be of this run's spec. An agent that splits out a sibling issue can send the sibling's spec
- * for review, alone or after its own spec in one assignment; that spec holds the seven headings
+ * for review, alone or after its own spec in one assignment; that spec holds the six headings
  * too, but the report's findings on it are about another spec. Each spec of an assignment is
  * measured on its own (specWork's kindOf), and one that pastes both is `mixed`. The share is
  * recall over the written version (how much of the version's 5-word runs the pasted spec holds,
@@ -2021,7 +2011,7 @@ function ownSpecShares(assignment: string, versions: Set<string>[]): number[] {
 }
 /** The spec writes of the run's session (writesSpec, against the run's fixture.json) and the
  * spec-only checks before them: the one list of checks that both specRow's `checked` and the
- * findings judge (judgeInputs, judge.ts) read. A spec-only check's assignment holds the seven
+ * findings judge (judgeInputs, judge.ts) read. A spec-only check's assignment holds the six
  * outline headings as `##` lines and names no path under a checkout in `reach` (specOnly). A check
  * is either of:
  * - a `task` call of the session's transcript. It counts for the first spec write after it when its
@@ -2283,31 +2273,40 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
   };
 }
 
-/** Each `**R<n>.**` or `**A<n>.**` paragraph of a spec: its mark and its text, up to a blank line,
- * a heading or the next list item. */
-function marked(spec: string): { mark: string; body: string }[] {
-  const found: { mark: string; body: string }[] = [];
-  let current: { mark: string; body: string } | undefined;
-  for (const line of spec.split("\n")) {
-    const mark = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*([RA]\d+)\.\*\*/.exec(line)?.[1];
+/** Each `**R<n>.**` paragraph of a spec: its mark, the line it starts on, and its text, up to a
+ * blank line, a heading or the next list item. */
+function marked(spec: string): { mark: string; line: number; body: string }[] {
+  const found: { mark: string; line: number; body: string }[] = [];
+  let current: { mark: string; line: number; body: string } | undefined;
+  spec.split("\n").forEach((line, index) => {
+    const mark = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*(R\d+)\.\*\*/.exec(line)?.[1];
     if (mark !== undefined) {
-      current = { mark, body: line };
+      current = { mark, line: index, body: line };
       found.push(current);
     } else if (
       current === undefined ||
       line.trim() === "" ||
-      /^\s*(#|[-*+]\s|\d+[.)]\s)/.test(line)
+      /^\s*(#|:::|[-*+]\s|\d+[.)]\s)/.test(line)
     )
       current = undefined;
     else current.body += `\n${line}`;
-  }
+  });
   return found;
+}
+/** Every line of a spec that a `:::requirement` block holds. */
+function requirementBlockLines(spec: string): Set<number> {
+  const inside = new Set<number>();
+  let open = false;
+  spec.split("\n").forEach((line, index) => {
+    if (/^\s*:::+\s*requirement\b/.test(line)) open = true;
+    else if (/^\s*:::+\s*$/.test(line)) open = false;
+    else if (open) inside.add(index);
+  });
+  return inside;
 }
 /** The requirement marks of a spec (`R1`, `R2`, …), in order. */
 export function requirements(spec: string): string[] {
-  return marked(withoutFences(spec))
-    .map((paragraph) => paragraph.mark)
-    .filter((mark) => mark.startsWith("R"));
+  return marked(withoutFences(spec)).map((paragraph) => paragraph.mark);
 }
 /** Replaces each match of `pattern` with spaces and keeps the line breaks, so an offset into the
  * result still points into the text. */
@@ -2316,8 +2315,9 @@ function blank(text: string, pattern: RegExp): string {
 }
 const withoutFences = (text: string) => blank(text, /^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm);
 /** outline: what keeps a spec from the outline. Its `##` headings are exactly OUTLINE's, in order.
- * It holds a requirement and a check. Each `**R<n>.**` paragraph names its source after `From:`,
- * and each `**A<n>.**` paragraph names at least one `R<n>`. */
+ * It holds a requirement, each one a `:::requirement` block whose `**R<n>.**` paragraph names its
+ * source after `From:`. The checks are not in the spec: they are the `check` blocks of the issue's
+ * Verification document. */
 function outlineProblems(spec: string): string[] {
   const text = withoutFences(spec);
   const headings = [...text.matchAll(/^##[ \t]+(.+?)[ \t#]*$/gm)].map((hit) => hit[1] ?? "");
@@ -2326,15 +2326,13 @@ function outlineProblems(spec: string): string[] {
     problems.push(
       `headings are ${headings.map((heading) => `## ${heading}`).join(", ") || "none"}`
     );
-  const paragraphs = marked(text);
-  const reqs = paragraphs.filter((paragraph) => paragraph.mark.startsWith("R"));
-  const checks = paragraphs.filter((paragraph) => paragraph.mark.startsWith("A"));
+  const reqs = marked(text);
+  const inBlock = requirementBlockLines(text);
   if (reqs.length === 0) problems.push("no **R<n>.** requirement");
-  if (checks.length === 0) problems.push("no **A<n>.** check");
-  for (const req of reqs)
+  for (const req of reqs) {
     if (!/From:\s*\S/.test(req.body)) problems.push(`${req.mark} names no source (From:)`);
-  for (const check of checks)
-    if (!/\bR\d+\b/.test(check.body)) problems.push(`${check.mark} names no requirement`);
+    if (!inBlock.has(req.line)) problems.push(`${req.mark} is in no :::requirement block`);
+  }
   return problems;
 }
 

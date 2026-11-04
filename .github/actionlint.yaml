@@ -1,0 +1,19 @@
+# actionlint's configuration (rhysd/actionlint docs/config.md). Each entry below drops one finding
+# of actionlint 1.7.12, its newest release, that is not a defect of these workflows. Remove an
+# entry when a release that knows the key is the one in use.
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # `cache-mode` is a GitHub Actions job and workflow key (docs.github.com, "Dependency caching
+      # reference", "Controlling cache access with cache-mode"); every job that holds a credential
+      # sets `cache-mode: none` (.github/scripts/check-release-credentials.sh rule 1c). actionlint
+      # does not know it yet: rhysd/actionlint#745 adds it, and #762 reports it.
+      - 'unexpected key "cache-mode" for "job" section'
+      # `queue` is a GitHub Actions concurrency key (docs.github.com, "Control the concurrency of
+      # workflows and jobs"). actionlint does not know it yet: rhysd/actionlint#654 adds it.
+      - 'unexpected key "queue" for "concurrency" section'
+  .github/workflows/tests-closed.yaml:
+    ignore:
+      # The one job is skipped on purpose: the run joins ci.yaml's concurrency group and takes no
+      # runner (the file's header says why).
+      - 'constant expression "false" in condition'

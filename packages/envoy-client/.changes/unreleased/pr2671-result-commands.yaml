@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  `dispatch result` records what a check saw and prints the pull-request body line every writer writes; `dispatch results` prints each check of the issue's Verification document with its latest result and whether that result still stands.
+  `dispatch plan-approve` records a plan review's approval of a plan version.
+  `dispatch request-approval --include-verification` asks for one approval of the spec and the issue's Verification document together, and its answer names each requirement with no check, or says the spec marks no requirements.
+  `dispatch read --issue` prints those same coverage lines, `dispatch doc-read --blocks` prints each block's type with its `serves` and `needs`, and `dispatch read` of a block reference prints the block's type, every attribute it carries and what refers to it.
