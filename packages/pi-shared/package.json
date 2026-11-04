@@ -73,6 +73,10 @@
       "types": "./src/workspace-recreated.ts",
       "bun": "./src/workspace-recreated.ts"
     },
+    "./provider-refusal": {
+      "types": "./src/provider-refusal.ts",
+      "bun": "./src/provider-refusal.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"

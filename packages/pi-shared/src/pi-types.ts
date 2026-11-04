@@ -10,6 +10,14 @@ import type { Component } from "@oh-my-pi/pi-tui";
  * per extension — partial copies drift.
  */
 
+/** A model as the host names it: the provider and the id a model selector resolves to
+ * (`ExtensionModelQuery`, `packages/coding-agent/src/extensibility/extensions/types.ts:541-560` in
+ * Oh My Pi at the pinned tag `v18.16.0-sami.20261104-021732`). */
+export interface HostModel {
+  readonly provider: string;
+  readonly id: string;
+}
+
 export interface SessionContext {
   readonly cwd: string;
   /**
@@ -22,8 +30,10 @@ export interface SessionContext {
    */
   readonly hasUI: boolean;
   readonly taskDepth?: number;
-  /** Which runner the event belongs to: the top-level session's is `main`, a `task` subagent's `sub`. */
-  readonly agent?: { readonly kind: "main" | "sub" };
+  /** Which runner the event belongs to: the top-level session's is `main`, a `task` subagent's
+   * `sub`. `id` is the host's agent registry id for that runner (`ExtensionAgentIdentity`,
+   * `extensibility/extensions/types.ts:585-600` at the pinned tag). */
+  readonly agent?: { readonly kind: "main" | "sub"; readonly id?: string };
   readonly sessionManager: {
     readonly getSessionId: () => string;
     /**
@@ -92,6 +102,18 @@ export interface SessionContext {
    * a plain abort, whose queue the next run takes.
    */
   readonly hasPendingMessages?: () => boolean;
+  /** The models the host holds, the one the session runs now, and what one selector such as
+   * `anthropic/claude-opus-4-5` resolves to (`ExtensionModelQuery`,
+   * `extensibility/extensions/types.ts:541-560` at the pinned tag). */
+  readonly models?: {
+    readonly list: () => readonly HostModel[];
+    readonly current: () => HostModel | undefined;
+    readonly resolve: (spec: string) => HostModel | undefined;
+  };
+  /** Whether the host itself holds a model selector suppressed, which its own turn recovery reads
+   * before it picks a fallback (`session/turn-recovery.ts:2026` at the pinned tag). An extension
+   * that steps down the same chain asks this so it skips what the host already skips. */
+  readonly modelRegistry?: { readonly isSelectorSuppressed?: (selector: string) => boolean };
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     /**
@@ -101,6 +123,28 @@ export interface SessionContext {
      */
     readonly setWidget?: (key: string, lines: string[] | undefined) => void;
   };
+}
+
+/** The branch entry a model change leaves, as `sessionManager.getBranch()` hands it
+ * (`packages/coding-agent/src/session/session-entries.ts:132-152` at the pinned tag).
+ * `resolvedModelIsFallback` marks a change the host's own fallback walk made. */
+export interface ModelChangeEntry {
+  readonly type: "model_change";
+  readonly id: string;
+  readonly timestamp?: string;
+  readonly model?: string;
+  readonly role?: string;
+  readonly resolvedModelIsFallback?: boolean;
+}
+
+/** The branch entry a thinking-level change leaves (`session/session-entries.ts:132-152` at the
+ * pinned tag). */
+export interface ThinkingLevelChangeEntry {
+  readonly type: "thinking_level_change";
+  readonly id: string;
+  readonly timestamp?: string;
+  readonly thinkingLevel?: string | null;
+  readonly configured?: string | null;
 }
 
 /** A side turn: one question to the session's model, answered without touching the transcript. */
@@ -158,6 +202,18 @@ export interface AgentEndMessage {
   /** How an assistant reply ended: `stop` settled normally, `aborted` was an interrupt, `error` a
    * provider failure, `length` a truncation. */
   readonly stopReason?: string;
+  /** What the provider said about an `error` stop, when it said anything: Oh My Pi carries
+   * Anthropic's `stop_details` on its `AssistantMessage` (`packages/ai/src/types.ts:1463-1471`,
+   * `StopDetails` at `packages/ai/src/providers/anthropic-wire.ts:472-478`, at the pinned tag). */
+  readonly stopDetails?: {
+    readonly type?: string | null;
+    readonly category?: string | null;
+    readonly explanation?: string | null;
+  } | null;
+  /** The error text of an `error` stop, which each provider writes its own way (`AssistantMessage`,
+   * `packages/ai/src/types.ts:1463-1471` at the pinned tag). `classifyProviderTurn`
+   * (`./provider-refusal`) reads it to tell a content filter from any other provider failure. */
+  readonly errorMessage?: string;
 }
 
 export interface AgentEndEvent {
@@ -518,6 +574,15 @@ export interface PiApi {
   readonly setSessionName: (name: string) => Promise<void>;
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
+  /**
+   * Switches the session's model, as `/model` does; false when no API key for that model is
+   * available (`ExtensionAPI`, `extensibility/extensions/types.ts:2168-2177` at the pinned tag).
+   */
+  readonly setModel?: (model: HostModel) => Promise<boolean>;
+  /** The session's thinking level, and a setter for it (same `ExtensionAPI` block at the pinned
+   * tag): a model switch that leaves a level the new model refuses needs both. */
+  readonly getThinkingLevel?: () => string | undefined;
+  readonly setThinkingLevel?: (level: string) => void;
   readonly on: <Event extends keyof PiEventContract>(
     event: Event,
     handler: (
