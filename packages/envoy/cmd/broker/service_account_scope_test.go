@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,14 +13,14 @@ import (
 
 // TestAnAccountProvesOnlyTheServiceItIsListedFor drives the REAL compiled broker on a real
 // Postgres, over HTTP alone, with two registered services that each log in with a token of their
-// own: example-service runs its pods as two accounts, other-service as one. A pod's service is
-// its launcher's only when BROKER_SERVICES lists the pod's account for that same service, so an
+// own: example-service runs its pods as two accounts, other-service as one. A token login enrols
+// a pod only when BROKER_SERVICES lists that pod's account for the login's own service, so an
 // account listed for one service proves nothing under another service's launcher credential: a
 // pod enrolled by other-service's credential while running as one of example-service's accounts,
 // and a pod enrolled by example-service's credential while running as other-service's account,
-// are each denied both services' secrets, with no grant, no record and no approver. The pod
-// running as other-service's own account under its credential is granted that service's secret,
-// so the denials are the account check and not a service that cannot be served.
+// are each refused 403 POD_NOT_LAUNCHED, and no enrollment, grant or record is written for them.
+// The pod running as other-service's own account under its credential enrols and is granted that
+// service's secret, so the refusals are the account check and not a service that cannot be served.
 func TestAnAccountProvesOnlyTheServiceItIsListedFor(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
@@ -69,17 +70,18 @@ func TestAnAccountProvesOnlyTheServiceItIsListedFor(t *testing.T) {
 		t.Fatalf("other-service's own pod's request = %+v (approver %s), want granted with no record and approver null", own, own.Approver)
 	}
 
-	for who, p := range map[string]brokertest.Pod{
-		"a pod under other-service's credential running as example-service's account A": broker.Enroll(otherLauncher, "pod-other-as-a", accountA),
-		"a pod under other-service's credential running as example-service's account B": broker.Enroll(otherLauncher, "pod-other-as-b", accountB),
-		"a pod under example-service's credential running as other-service's account":   broker.Enroll(exampleLauncher, "pod-example-as-d", accountD),
+	for who, c := range map[string]struct {
+		by      brokertest.Launcher
+		runtime string
+		account string
+	}{
+		"a pod under other-service's credential running as example-service's account A": {otherLauncher, "pod-other-as-a", accountA},
+		"a pod under other-service's credential running as example-service's account B": {otherLauncher, "pod-other-as-b", accountB},
+		"a pod under example-service's credential running as other-service's account":   {exampleLauncher, "pod-example-as-d", accountD},
 	} {
-		for _, name := range []string{secretName, otherSecret} {
-			t.Logf("--- %s asks for %s", who, name)
-			reply := broker.Ask(p, name)
-			if reply.State != "denied" || reply.GrantID != nil || reply.RecordID != nil || string(reply.Approver) != "null" {
-				t.Errorf("%s asking for %s = %+v (approver %s), want denied with no grant, no record and approver null", who, name, reply, reply.Approver)
-			}
+		t.Logf("--- %s is refused", who)
+		if status, code := broker.EnrollRefused(c.by, c.runtime, c.account); status != http.StatusForbidden || code != "POD_NOT_LAUNCHED" {
+			t.Errorf("%s = %d %s, want 403 POD_NOT_LAUNCHED", who, status, code)
 		}
 	}
 }

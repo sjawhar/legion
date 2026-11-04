@@ -67,27 +67,37 @@ func TestAPodsAutomaticGrantIsOnEveryPersonsGrantList(t *testing.T) {
 	}
 }
 
-// TestAPodsAutomaticGrantStaysOffNobodysListWhenNoLoginHoldsIt: the new rows are a service login's
-// alone. A grant with neither an approver nor an operator under a person's own machine login
-// (service null) is still listed for nobody but that person, so the new disjunct cannot turn a
-// personal machine's grant into everybody's.
-func TestAPodsAutomaticGrantStaysOffNobodysListWhenNoLoginHoldsIt(t *testing.T) {
+// TestAGrantUnderNoServicesLoginStaysOffEveryoneElsesList: the new rows are a service login's
+// alone, so the disjunct is pinned on both of the other two columns. A pod no service's launcher
+// enrolled holds a grant with no approver and no operator under a credential naming no service:
+// it is on nobody's list, as before, and this is the case that fails if `c.service is not null`
+// is dropped. A grant on a person's own session stays that person's alone.
+func TestAGrantUnderNoServicesLoginStaysOffEveryoneElsesList(t *testing.T) {
 	m, _, _, operator := newFixture(t)
 	withSharedToken(t, m)
 	ctx := context.Background()
 
-	// A box session of the operator's own machine: its credential names no service.
+	// A pod no service's launcher enrolled: no operator on the enrollment, no service on the
+	// credential, and the policy gives it the shared agent-tier secret without asking.
+	plain, plainKey := insertEnrollment(t, m.Store, "pod", "plain-pod-"+t.Name(), nil, nil, new(handLaunchedAccount))
+	orphan, err := m.Create(ctx, plain, signRequest(t, m, plainKey, "need it", sharedToken), "")
+	if err != nil || orphan.GrantID == nil {
+		t.Fatalf("Create(a pod no service's launcher enrolled) = %+v, %v; want an automatic grant", orphan, err)
+	}
+
+	// A box session of the operator's own machine: its credential names no service either.
 	box, key := newEnrollment(t, m.Store, "session", "box-c-"+t.Name(), new(fixtureOperator), nil)
 	auto, err := m.Create(ctx, box, signRequest(t, m, key, "need it", sharedToken), "")
 	if err != nil || auto.GrantID == nil {
 		t.Fatalf("Create(the operator's session) = %+v, %v; want an automatic grant", auto, err)
 	}
+
 	if listed, err := m.GrantsForApprover(ctx, operator); err != nil || len(listed) != 1 || listed[0].GrantID != *auto.GrantID {
-		t.Fatalf("GrantsForApprover(%s) = %+v, %v; want the operator's own grant", operator, listed, err)
+		t.Fatalf("GrantsForApprover(%s) = %+v, %v; want the operator's own grant alone", operator, listed, err)
 	}
 	for _, viewer := range []string{otherPerson, carol} {
 		if listed, err := m.GrantsForApprover(ctx, viewer); err != nil || len(listed) != 0 {
-			t.Fatalf("GrantsForApprover(%s) = %+v, %v; want nothing: the grant is on a person's own session", viewer, listed, err)
+			t.Fatalf("GrantsForApprover(%s) = %+v, %v; want nothing: neither grant is held by a service's login", viewer, listed, err)
 		}
 	}
 }

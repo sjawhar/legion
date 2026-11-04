@@ -222,7 +222,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	serviceLogins := map[string]string{DaemonAccount: "legion-daemon"}
-	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
+	// BROKER_SERVICES: the account every pod MintPodToken mints a token for runs as, bound to the
+	// service DaemonAccount logs in as, which is what lets that login enrol those pods
+	// (enroll.Service.podUnderTokenLogin).
+	servicesByAccount := map[string]string{WorkerAccount: "legion-daemon"}
+	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins, ServicesByAccount: servicesByAccount}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 	var vmIssuer *oidctest.Issuer
 	var vmKey *oidctest.Key
@@ -472,7 +476,7 @@ func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (crede
 // internal/broker/enroll/enroll_test.go's own mintPodToken helper.
 func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
 	t.Helper()
-	claims := r.podIssuer.Claims("system:serviceaccount:legion:worker", podAudience)
+	claims := r.podIssuer.Claims(WorkerAccount, podAudience)
 	raw, err := json.Marshal(claims)
 	if err != nil {
 		t.Fatalf("marshal claims: %v", err)
@@ -489,6 +493,11 @@ func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
 // legion-daemon with its token (POST /v1/launcher-credentials/token), as a Legion daemon's own
 // account does.
 const DaemonAccount = "system:serviceaccount:legion-system:legion-daemon-test"
+
+// WorkerAccount is the ServiceAccount the pods MintPodToken mints tokens for run as, which every
+// Rig's BROKER_SERVICES binds to the service DaemonAccount logs in as, as a Legion worker pod's
+// account is bound to legion-daemon.
+const WorkerAccount = "system:serviceaccount:legion:worker"
 
 // VMIdentity is the VM a token MintVMToken mints names. Each field left zero takes the fleet's
 // default: VMAccount, VMProject, zone example-zone-a, instance example-vm-1 (which VMInstances

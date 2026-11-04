@@ -5,6 +5,7 @@
 -- Create can hold a pod that logs in as its own account to enrolling its own pod alone
 -- (enroll.Service.Create, ErrPodSelfEnrollOnly). It is null for a token bound to no pod, such as one
 -- `kubectl create token` mints, and for every login a person approved, whose subject is null.
--- Each login moves its account's one credential to the logging-in pod, so IssueTokenLogin's upsert
--- writes this column on every login, not only the first.
+-- Migration 0026 then makes the uniqueness of a machine login per pod rather than per account, so
+-- a login written here stays the logging-in pod's: IssueTokenLogin's upsert writes this column on
+-- every login of that same pod, and a second pod of the account gets a credential of its own.
 alter table launcher_credentials add column pod_uid text;

@@ -277,7 +277,11 @@ func TestARefusedTokenLoginStillSpendsItsAccountBucket(t *testing.T) {
 func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	ts := newTestServer(t)
 	firstKey := newSigningKey(t)
-	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
+	// One pod uid across both logins: a restart is the daemon's process starting again in the pod
+	// it already runs in, and a machine login is that pod's (migration 0026). A replaced pod is a
+	// different login, which TestAReplacedPodGetsALoginOfItsOwn drives.
+	daemonPod := uuid.NewString()
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, firstKey))
 	if status != http.StatusOK {
 		t.Fatalf("first boot's token login = %d %s, want 200", status, body)
 	}
@@ -289,7 +293,7 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	earlier := decode[wireEnrolled](t, body).EnrollmentID
 
 	restartKey := newSigningKey(t)
-	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, restartKey))
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, restartKey))
 	if status != http.StatusOK {
 		t.Fatalf("restart's token login = %d %s, want 200", status, body)
 	}
@@ -307,6 +311,47 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	}
 	if got := ts.column(t, `select count(*)::text from launcher_credentials`); !slices.Equal(got, []string{"1"}) {
 		t.Fatalf("launcher credentials = %v, want the account's one", got)
+	}
+}
+
+// TestAReplacedPodGetsALoginOfItsOwn: a machine login belongs to the pod whose token made it
+// (migration 0026), so a replaced pod of the same account gets a credential of its own rather
+// than taking the old pod's over. The old row stays live until its expiry, at most an hour, so
+// the enrollments it made are not the new credential's to end (403 NOT_ENROLLING_CREDENTIAL) and
+// end by their lease, or at once when a person revokes that old login. This is what lets several
+// pods of one account hold logins at the same time.
+func TestAReplacedPodGetsALoginOfItsOwn(t *testing.T) {
+	ts := newTestServer(t)
+	firstKey := newSigningKey(t)
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
+	if status != http.StatusOK {
+		t.Fatalf("the first pod's token login = %d %s, want 200", status, body)
+	}
+	first := decode[wireTokenLogin](t, body)
+	status, body = ts.enrollPodWith(t, firstKey, first.CredentialID)
+	if status != http.StatusCreated {
+		t.Fatalf("the first pod's enrollment = %d %s, want 201", status, body)
+	}
+	earlier := decode[wireEnrolled](t, body).EnrollmentID
+
+	nextKey := newSigningKey(t)
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, nextKey))
+	if status != http.StatusOK {
+		t.Fatalf("the replacement pod's token login = %d %s, want 200", status, body)
+	}
+	next := decode[wireTokenLogin](t, body)
+	if next.CredentialID == first.CredentialID {
+		t.Fatalf("the replacement pod took credential %s over, want one of its own", first.CredentialID)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials where subject=$1 and revoked_at is null`, daemonAccount); !slices.Equal(got, []string{"2"}) {
+		t.Fatalf("live credentials of the account = %v, want one per pod", got)
+	}
+	if status, body := ts.enrollPodWith(t, nextKey, next.CredentialID); status != http.StatusCreated {
+		t.Fatalf("the replacement pod's enrollment = %d %s, want 201", status, body)
+	}
+	if status, body := ts.launcher(t, nextKey, next.CredentialID, http.MethodDelete, "/v1/enrollments/"+earlier, nil); status != http.StatusForbidden ||
+		decode[wireError](t, body).Code != "NOT_ENROLLING_CREDENTIAL" {
+		t.Fatalf("the replacement ends the first pod's enrollment = %d %s, want 403 NOT_ENROLLING_CREDENTIAL", status, body)
 	}
 }
 
@@ -417,11 +462,12 @@ func TestAnyoneRevokesAServicesTokenLoginAndItLogsInAgain(t *testing.T) {
 	}
 }
 
-// TestAPodsOwnLoginEnrolsOnlyItsOwnPodOverTheWire: a login whose token came from a pod enrols that
-// pod when the pod presents its own token, and any other pod of the same account is 403
-// POD_SELF_ENROLL_ONLY. A pod running as another account — every pod this login launches — enrols
-// as before.
-func TestAPodsOwnLoginEnrolsOnlyItsOwnPodOverTheWire(t *testing.T) {
+// TestATokenLoginEnrolsOnlyItsOwnPodAndItsServicesOverTheWire: a login whose token came from a pod
+// enrols that pod when the pod presents its own token; any other pod of the same account is 403
+// POD_SELF_ENROLL_ONLY; a pod of the account BROKER_SERVICES binds to its service — every pod this
+// login launches — enrols as before; and a pod of an account no setting binds is 403
+// POD_NOT_LAUNCHED.
+func TestATokenLoginEnrolsOnlyItsOwnPodAndItsServicesOverTheWire(t *testing.T) {
 	ts := newTestServer(t)
 	key := newSigningKey(t)
 	ownPod := uuid.NewString()
@@ -431,18 +477,21 @@ func TestAPodsOwnLoginEnrolsOnlyItsOwnPodOverTheWire(t *testing.T) {
 	}
 	credentialID := decode[wireTokenLogin](t, body).CredentialID
 
-	enrol := func(podUID string) (int, []byte) {
+	enrol := func(account, podUID string) (int, []byte) {
 		t.Helper()
 		return ts.launcher(t, key, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
 			"kind": "pod", "runtime_id": podUID, "thumbprint": thumbprintOf(t, newSigningKey(t)),
-			"pod_token": ts.podToken(t, daemonAccount, podUID),
+			"pod_token": ts.podToken(t, account, podUID),
 		})
 	}
-	if status, body := enrol(uuid.NewString()); status != http.StatusForbidden || decode[wireError](t, body).Code != "POD_SELF_ENROLL_ONLY" {
+	if status, body := enrol(daemonAccount, uuid.NewString()); status != http.StatusForbidden || decode[wireError](t, body).Code != "POD_SELF_ENROLL_ONLY" {
 		t.Fatalf("enrol another pod of its own account = %d %s, want 403 POD_SELF_ENROLL_ONLY", status, body)
 	}
-	if status, body := enrol(ownPod); status != http.StatusCreated {
+	if status, body := enrol(daemonAccount, ownPod); status != http.StatusCreated {
 		t.Fatalf("enrol its own pod = %d %s, want 201", status, body)
+	}
+	if status, body := enrol("system:serviceaccount:other:stranger", uuid.NewString()); status != http.StatusForbidden || decode[wireError](t, body).Code != "POD_NOT_LAUNCHED" {
+		t.Fatalf("enrol a pod of an account no setting binds = %d %s, want 403 POD_NOT_LAUNCHED", status, body)
 	}
 	if status, body := ts.enrollPodWith(t, key, credentialID); status != http.StatusCreated {
 		t.Fatalf("enrol a pod of the account it launches = %d %s, want 201", status, body)

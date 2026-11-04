@@ -141,6 +141,9 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	case errors.Is(err, enroll.ErrPodSelfEnrollOnly):
 		writeError(w, http.StatusForbidden, "POD_SELF_ENROLL_ONLY", err.Error())
 		return
+	case errors.Is(err, enroll.ErrPodNotLaunched):
+		writeError(w, http.StatusForbidden, "POD_NOT_LAUNCHED", err.Error())
+		return
 	case errors.Is(err, enroll.ErrVMNotListed):
 		writeError(w, http.StatusForbidden, "VM_NOT_LISTED", err.Error())
 		return

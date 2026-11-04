@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+  A machine login is per pod, not per account. A login a pod's own projected token made is
+  unique per ServiceAccount and pod, and a login from a token bound to no pod stays its
+  account's one credential, so every pod of an account may hold a login at the same time, each
+  with its own key. A process that logs in again from the pod it already runs in keeps its
+  credential, so every pod it enrolled stays under it. A **replaced** pod gets a credential of
+  its own rather than taking the old pod's over: the enrollments the old credential made are no
+  longer the new one's to end (`403 NOT_ENROLLING_CREDENTIAL`, which a launcher already treats
+  as final) and end one lease after their renewer stops, or at once when a person revokes that
+  old login on the machine-login page.
+custom:
+  Issue: pr2777

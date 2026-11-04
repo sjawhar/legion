@@ -54,15 +54,20 @@ var (
 	// login (RevokeCredential), or its lease, ends it.
 	ErrVMEndsByRevokingItsLogin = errors.New("a VM's enrollment ends when its machine login is revoked on Dispatch's machine-login page, or with its lease; no launcher credential ends it")
 	ErrPodTokenRequired         = errors.New("a pod enrollment's renewal must carry its projected token")
-	// ErrPodSelfEnrollOnly refuses a pod enrollment whose launcher credential is the enrolling
-	// pod's own token login — its subject is the very ServiceAccount the presented pod token
-	// proves — and whose runtime id names another pod. Such a credential belongs to one pod, the
-	// pod whose token logged in (launcher_credentials.pod_uid), so it enrols that pod and nothing
-	// else, the narrowing kind vm makes with ErrVMIdentity. It never refuses a launcher's
-	// enrollment of the pods it launches, the Legion daemon's included: BROKER_SERVICE_LOGINS may
-	// not name an account BROKER_SERVICES binds for a service's pods (config.Load), so a
-	// launcher's subject is never the subject of a pod token it presents.
+	// ErrPodSelfEnrollOnly refuses a pod enrollment under the enrolling pod's own token login —
+	// one whose subject is the very ServiceAccount the presented pod token proves — whose runtime
+	// id names another pod. Such a credential belongs to one pod, the pod whose token logged in
+	// (launcher_credentials.pod_uid), so it enrols that pod and nothing else, the narrowing kind
+	// vm makes with ErrVMIdentity.
 	ErrPodSelfEnrollOnly = errors.New("a pod's own machine login enrols that pod alone")
+	// ErrPodNotLaunched refuses a pod enrollment under a token login that neither belongs to that
+	// pod nor launches the pods of the account its token proves: BROKER_SERVICES does not bind
+	// that account to the login's service. Nothing but the deployment's own settings says a
+	// service launches an account's pods, and a token login is authorized by those settings
+	// alone, so a token it was handed proves whose pod it is and never who may enrol it. A
+	// service's login a person approved carries no subject and keeps that person's approval as
+	// its authorization, so this never reaches one.
+	ErrPodNotLaunched = errors.New("this machine login does not launch the pods of that service account")
 	// ErrVMIdentity is a VM identity token that does not prove this VM: one that does not verify
 	// (another issuer or audience, a bad signature, no verified email, no Compute Engine claims),
 	// another instance's or account's token, or a vm enrollment under a launcher credential that
@@ -180,6 +185,12 @@ type Service struct {
 	// with its token, answering that service. AuthenticateLauncher reads it for every credential a
 	// Kubernetes token login issued.
 	ServiceLogins map[string]string
+	// ServicesByAccount is BROKER_SERVICES: each ServiceAccount a service's pods run as, answering
+	// that service. It is the deployment's own statement of which pods a service launches, and so
+	// of which pods a service's token login may enrol besides its own (Create, ErrPodNotLaunched);
+	// requests.Machine reads the same setting to decide whether an enrolled pod is that service's.
+	// Unset, a token login enrols its own pod alone.
+	ServicesByAccount map[string]string
 	// VMServicesByAccount, VMProjects and VMInstancePatterns are BROKER_VM_SERVICES,
 	// BROKER_VM_PROJECTS and BROKER_VM_INSTANCES, each keyed by a Google service account's email:
 	// the service its VMs log in as, the one project they run in, and the instance-name glob
@@ -245,26 +256,37 @@ type TokenLogin struct {
 }
 
 // IssueTokenLogin issues or moves the launcher credential of a service's token login, which no
-// person approves (machine.Service.TokenLogin verified everything in login). The subject holds one
-// live credential, created at its first login: each login moves it to login's key and expiry under
-// the same id, so a login proving the key the credential already holds changes only its expiry and
-// every pod the account enrolled stays under it. A VM's subject is its own runtime id, so each VM of
-// a fleet holds a credential of its own and one VM's login never moves another's. Its host is
-// login's, and its pod the one whose token it presented, which moves with the credential: a pod of
-// the account that logs in next takes it over, and Create holds each to enrolling its own pod
-// (ErrPodSelfEnrollOnly). Each login writes a launcher_credential.token_login audit row naming the
-// subject, the pod the token is bound to, the key, and both expiries. A key another live
-// credential holds is a unique violation (store.IsUniqueViolation), and nothing is written.
+// person approves (machine.Service.TokenLogin verified everything in login). A machine login is
+// per pod, not per account (migration 0026): a login a pod's own projected token made belongs to
+// that pod, so every pod of an account may hold one at the same time, each with its own key, and
+// a login from a token bound to no pod — a launcher's, which names no pod of its own — is its
+// account's one such credential. Either way the credential is created at its first login and
+// each later login of the same pod, or of the same account from no pod, moves it to that login's
+// key and expiry under the same id, so a login proving the key the credential already holds
+// changes only its expiry and every pod it enrolled stays under it. A VM's subject is its own
+// runtime id, so each VM of a fleet holds a credential of its own and one VM's login never moves
+// another's. Its host and its pod are login's. Each login writes a
+// launcher_credential.token_login audit row naming the subject, the pod the token is bound to,
+// the key, and both expiries. A key another live credential holds is a unique violation
+// (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.UUID, error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
+	// Postgres takes one conflict target, so the login's own index is named: a pod's login
+	// matches the row of that subject and pod, a pod-less login the row of that subject with no
+	// pod. Neither can match the other's row, which is what lets several pods of an account hold
+	// logins at once without one taking another's over.
+	conflict := `(subject) where subject is not null and pod_uid is null and revoked_at is null`
+	if login.PodUID != "" {
+		conflict = `(subject, pod_uid) where subject is not null and pod_uid is not null and revoked_at is null`
+	}
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, pod_uid, expires_at)
 		values ($1, null, $2, $3, $4, $5, null, $6, nullif($7::text,''), $8)
-		on conflict (subject) where subject is not null and revoked_at is null
+		on conflict `+conflict+`
 		do update set service=excluded.service, host=excluded.host, key_thumbprint=excluded.key_thumbprint,
 			public_jwk=excluded.public_jwk, pod_uid=excluded.pod_uid, expires_at=excluded.expires_at
 		returning id`,
@@ -393,9 +415,11 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 // A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
-// not prove this pod is ErrPodIdentity. A pod presenting its own token under a login of its own
-// account — the self-enrolling pod of selfEnrolment — enrols the pod that login belongs to and no
-// other pod of that account (ErrPodSelfEnrollOnly). A vm enrollment is a Google VM enrolling itself: its runtime
+// not prove this pod is ErrPodIdentity. Under a token login, whose whole authorization is the
+// deployment's settings, the pod must be one of two (podUnderTokenLogin): the login's own pod,
+// when the token proves the login's own account (ErrPodSelfEnrollOnly for any other pod of it),
+// or a pod of an account BROKER_SERVICES binds to the login's service, which is the deployment
+// saying that service launches those pods (ErrPodNotLaunched for anything else). A vm enrollment is a Google VM enrolling itself: its runtime
 // id must be the one its VM identity token proves (VMClaims.RuntimeID), and its credential the one
 // that VM's own login holds (its subject is that runtime id), so one VM of a fleet never enrolls
 // another; a VM token past its expiry is ErrVMTokenExpired, and every other mismatch ErrVMIdentity.
@@ -423,8 +447,8 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		if claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
 		}
-		if selfEnrolment(cred, claims) && cred.PodUID != in.RuntimeID {
-			return Enrollment{}, fmt.Errorf("%w: this login is pod %s's, the enrollment names %q", ErrPodSelfEnrollOnly, cred.PodUID, in.RuntimeID)
+		if err := s.podUnderTokenLogin(cred, claims, in.RuntimeID); err != nil {
+			return Enrollment{}, err
 		}
 		in.Subject = &claims.Subject
 	}
@@ -856,19 +880,44 @@ func authorized(cred Credential, kind string, operator *string) bool {
 	return true
 }
 
-// selfEnrolment reports whether cred is the enrolling pod's own machine login rather than a
-// launcher's: a token login (no operator, a subject) whose subject is the very ServiceAccount the
-// pod token it presents proves. Only a pod running as that account holds such a login, so Create
-// holds it to the one pod the login belongs to (Credential.PodUID, ErrPodSelfEnrollOnly), as kind
-// vm holds a VM's login to its own VM.
+// podUnderTokenLogin holds a service's token login to the pods the deployment's settings give it,
+// and lets every other credential through. A token login is authorized by those settings and by
+// nothing else — no person approved it — so a projected token handed to it proves whose pod the
+// token is and never who may enrol that pod. There are two pods it may enrol:
 //
-// A launcher is never one. The accounts a service's pods run as (BROKER_SERVICES) and the accounts
-// that log a service in (BROKER_SERVICE_LOGINS) are disjoint sets, which config.Load refuses to
-// let overlap, "since every such pod holds a token for it": so the Legion daemon's login, whose
-// subject is the daemon's own account, never matches the subject of a worker pod's token, and the
-// pods it launches enrol as before.
-func selfEnrolment(cred Credential, claims PodClaims) bool {
-	return cred.Operator == nil && cred.Subject != nil && *cred.Subject == claims.Subject
+//   - its own, when the token proves the login's own account (cred.Subject). Only a pod running
+//     as that account holds such a login, and the login belongs to the one pod whose token made
+//     it (Credential.PodUID, from its kubernetes.io pod uid), so it enrols that pod and no other
+//     pod of the account — the narrowing kind vm makes for a VM of a fleet. A login from a token
+//     bound to no pod has no pod of its own and so enrols none of them.
+//
+//   - a pod of an account BROKER_SERVICES binds to the login's own service, which is the
+//     deployment saying that service launches those pods. That is how the Legion daemon enrols
+//     its workers, and it is the same fact requests.Machine reads to decide an enrolled pod is
+//     that service's, so nothing new has to be configured for a deployment that already serves a
+//     service's secrets to its pods.
+//
+// A credential a person approved — a person's own machine login, or a service's login approved
+// through a machine-login code, neither of which carries a subject — keeps that person's approval
+// as its authorization and is not held to either rule.
+func (s *Service) podUnderTokenLogin(cred Credential, claims PodClaims, runtimeID string) error {
+	if cred.Operator != nil || cred.Subject == nil {
+		return nil
+	}
+	if *cred.Subject == claims.Subject {
+		if cred.PodUID != runtimeID {
+			return fmt.Errorf("%w: this login is pod %q's, the enrollment names %q", ErrPodSelfEnrollOnly, cred.PodUID, runtimeID)
+		}
+		return nil
+	}
+	service := ""
+	if cred.Service != nil {
+		service = *cred.Service
+	}
+	if bound, listed := s.ServicesByAccount[claims.Subject]; !listed || bound != service {
+		return fmt.Errorf("%w: BROKER_SERVICES does not bind %s to %q, the service %s logs in as", ErrPodNotLaunched, claims.Subject, service, *cred.Subject)
+	}
+	return nil
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request
