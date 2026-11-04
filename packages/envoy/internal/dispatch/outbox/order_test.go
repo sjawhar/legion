@@ -739,11 +739,14 @@ func TestAPublishedEventIsWrittenOnce(t *testing.T) {
 	}
 }
 
-// planNode is one node of EXPLAIN (FORMAT JSON)'s plan.
+// planNode is one node of EXPLAIN (FORMAT JSON)'s plan. Rows and Loops are what the node actually
+// read, the loops counting a node a nested loop ran once per outer row.
 type planNode struct {
 	NodeType         string     `json:"Node Type"`
 	Relation         string     `json:"Relation Name"`
 	Index            string     `json:"Index Name"`
+	Rows             float64    `json:"Actual Rows"`
+	Loops            float64    `json:"Actual Loops"`
 	RemovedByFilter  float64    `json:"Rows Removed by Filter"`
 	RemovedByRecheck float64    `json:"Rows Removed by Index Recheck"`
 	Plans            []planNode `json:"Plans"`
@@ -758,13 +761,25 @@ func (n planNode) walk(visit func(planNode)) {
 
 // The statement that chooses a batch reads neither the pending subscription commands, which are
 // never published, nor the backed-off events of owners that have nothing due: with 5,000 of each
-// in the table, no node of its plan that reads events removes a row by filter or recheck, none
-// scans events in full, and it runs in under half a millisecond.
+// in the table, no node of its plan that reads events scans the table or removes a row by filter
+// or recheck, and the rows it reads out of events stay within one batch, whatever else the log
+// holds.
+//
+// What it reads is the statement's own property; how long it takes is the runner's. This test
+// asserted that the claim ran in under half a millisecond, and that bound failed in CI run
+// 41821928631 at 0.5 ms and on a two-core pod at 0.65 ms, with a plan that skipped every row it
+// had to (dispatch://INFRA-1075). A plan that stopped skipping them reads those thousands of
+// rows, by a scan of events or by an index scan that filters them out afterwards, and both show
+// in the nodes below.
 func TestTheClaimSkipsPendingCommandsAndBackedOffRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
+	// The rows the claim must skip: the backed-off events and the pending commands seeded below,
+	// 5,000 each. A multi-statement Exec takes no parameter, so the two counts are written out.
+	const skipped = 5_000 + 5_000
 	if _, err := database.Pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, created_by, rank)
 		select 'O-' || n, 'TT', 100 + n, 'Waiting', '{"kind":"user","id":"alice"}', 'W'
@@ -803,42 +818,41 @@ func TestTheClaimSkipsPendingCommandsAndBackedOffRows(t *testing.T) {
 	// Ten more due events, so the statement explained has a batch to choose.
 	fresh()
 
-	fastest := math.Inf(1)
-	var plan []byte
-	// The fastest of several runs: the box is small and shared, and a run another test's work
-	// delayed says nothing about the statement.
-	const runs = 20
-	for range runs {
-		tx, err := database.Pool.Begin(ctx)
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		if err := tx.QueryRow(ctx, "explain (analyze, buffers, format json) "+claim.sql, claim.args...).Scan(&plan); err != nil {
-			_ = tx.Rollback(ctx)
-			t.Fatalf("explain the claim: %v\n%s", err, claim.sql)
-		}
-		_ = tx.Rollback(ctx)
-		var explained []struct {
-			Plan          planNode `json:"Plan"`
-			ExecutionTime float64  `json:"Execution Time"`
-		}
-		if err := json.Unmarshal(plan, &explained); err != nil || len(explained) != 1 {
-			t.Fatalf("decode the plan: %v\n%s", err, plan)
-		}
-		explained[0].Plan.walk(func(node planNode) {
-			if node.Relation != "events" {
-				return
-			}
-			if node.NodeType == "Seq Scan" || node.RemovedByFilter != 0 || node.RemovedByRecheck != 0 {
-				t.Fatalf("the claim's %s of events (%s) removed %.0f rows by filter and %.0f by recheck, want none:\n%s",
-					node.NodeType, node.Index, node.RemovedByFilter, node.RemovedByRecheck, plan)
-			}
-		})
-		fastest = min(fastest, explained[0].ExecutionTime)
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
 	}
-	t.Logf("the claim ran in %.3f ms at its fastest of %d:\n%s", fastest, runs, plan)
-	if fastest >= 0.5 {
-		t.Fatalf("the claim ran in %.3f ms at its fastest, want under 0.5 ms:\n%s", fastest, plan)
+	defer tx.Rollback(ctx)
+	var plan []byte
+	if err := tx.QueryRow(ctx, "explain (analyze, format json) "+claim.sql, claim.args...).Scan(&plan); err != nil {
+		t.Fatalf("explain the claim: %v\n%s", err, claim.sql)
+	}
+	var explained []struct {
+		Plan planNode `json:"Plan"`
+	}
+	if err := json.Unmarshal(plan, &explained); err != nil || len(explained) != 1 {
+		t.Fatalf("decode the plan: %v\n%s", err, plan)
+	}
+	var read float64
+	explained[0].Plan.walk(func(node planNode) {
+		// A node that reads the table itself names it; a bitmap index scan names only the index
+		// it read entries from, and each of those entries is a row of events read as well.
+		if node.Relation != "events" && !strings.HasPrefix(node.Index, "events_") {
+			return
+		}
+		if node.NodeType == "Seq Scan" || node.RemovedByFilter != 0 || node.RemovedByRecheck != 0 {
+			t.Fatalf("the claim's %s of events (%s) removed %.0f rows by filter and %.0f by recheck, want none:\n%s",
+				node.NodeType, node.Index, node.RemovedByFilter, node.RemovedByRecheck, plan)
+		}
+		read += node.Rows * node.Loops
+	})
+	t.Logf("the claim read %.0f rows of events, of the %d it must skip", read, skipped)
+	// A batch is batchSize events at most, and the claim reads the ids of the due ones, each
+	// chosen owner's unpublished events, and then each kept row by its id: 50 rows measured for
+	// the twenty due events seeded here, and no more as the rows it must skip grow.
+	if read > batchSize {
+		t.Fatalf("the claim read %.0f rows of events, want at most %d: it is reading the rows it must skip:\n%s",
+			read, batchSize, plan)
 	}
 }
 

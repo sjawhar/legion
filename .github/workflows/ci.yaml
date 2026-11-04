@@ -2630,11 +2630,16 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_connections = 500"
           docker restart "${{ job.services.postgres.id }}"
+          # The wait is on the new limit, not on a ready socket: pg_isready can answer from a
+          # server the restart has not taken down yet, and a green step that left the limit at
+          # 100 would turn up later as a test refused its connection.
           for _ in $(seq 60); do
-            if docker exec "${{ job.services.postgres.id }}" pg_isready -U postgres; then break; fi
+            limit=$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_connections" 2>/dev/null || true)
+            if [ "$limit" = "500" ]; then break; fi
             sleep 1
           done
-          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_connections"
+          [ "$limit" = "500" ] || { echo "::error::the Postgres service still reports max_connections=$limit"; exit 1; }
+          echo "max_connections=$limit"
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
       # reason the action gives.

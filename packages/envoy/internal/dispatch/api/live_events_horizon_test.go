@@ -35,13 +35,38 @@ func relayStartReads(served *server) <-chan struct{} {
 // what the tests of that cursor turn on. Every caller holds the horizon back (a transaction open
 // elsewhere on the instance, or an event id still open in this database), so the start is waiting
 // on Horizon.Await by then and cannot finish until the caller lets it.
-func awaitRelayStart(t *testing.T, read <-chan struct{}) {
+func awaitRelayStart(t *testing.T, client *socketClient, read <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-read:
 	case <-time.After(eventFeedWait):
-		t.Fatalf("the relay's first start did not read the event log within %s", eventFeedWait)
+		t.Fatalf("the relay's first start did not read the event log within %s; the socket sent %s",
+			eventFeedWait, framesSoFar(client))
 	}
+}
+
+// framesSoFar is every frame the socket has sent that no one has read yet, and how it ended when
+// it has. A first start that failed leaves an ended frame there (endEventsAfterFailure) and
+// nothing else happens, so without this the wait above times out saying only that it waited.
+func framesSoFar(client *socketClient) string {
+	var sent []string
+	for reading := true; reading; {
+		select {
+		case data := <-client.frames:
+			sent = append(sent, string(data))
+		default:
+			reading = false
+		}
+	}
+	select {
+	case <-client.ended:
+		sent = append(sent, fmt.Sprintf("and the socket ended: %v", client.err))
+	default:
+	}
+	if len(sent) == 0 {
+		return "nothing"
+	}
+	return strings.Join(sent, ", ")
 }
 
 // holdEventWriterTransactionID opens a transaction in Dispatch's own database and takes a
@@ -306,7 +331,7 @@ func TestAColdSubscriptionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(
 	started := relayStartReads(rig.served)
 	client := rig.dial(t, withBearer("agent-token"))
 	sendEventsSubscribe(t, client, "events", nil)
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	renameIssue(t, rig.handler, issue.Key, "Renamed while the relay starts")
 	committed := eventHead(t, rig.database)
 	release()
@@ -329,7 +354,7 @@ func TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRe
 	started := relayStartReads(rig.served)
 	client := rig.dial(t, withBearer("agent-token"))
 	sendEventsSubscribe(t, client, "events", nil)
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	renameIssue(t, rig.handler, issue.Key, "Renamed while the relay starts")
 	committed := eventHead(t, rig.database)
 	release()
@@ -357,7 +382,7 @@ func TestTheFirstColdSubscriptionIsSentAnEventCommittedWhileAWriteFromBeforeBoot
 	started := relayStartReads(rig.served)
 	client := rig.dial(t, withBearer("agent-token"))
 	sendEventsSubscribe(t, client, "events", nil)
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	renameIssue(t, rig.handler, issue.Key, "Renamed while the relay starts")
 	committed := eventHead(t, rig.database)
 	release()
@@ -366,21 +391,11 @@ func TestTheFirstColdSubscriptionIsSentAnEventCommittedWhileAWriteFromBeforeBoot
 	expectEventsInOrder(t, client, "events", committed)
 }
 
-// eventsTuplesRead is how many rows of events every statement so far has read, by a sequential
-// scan of the table or through its primary key: the cost of a read of the event log, whichever
-// plan Postgres chose for it. A backend keeps its statistics until it has been idle for up to ten
-// seconds or exits, so the read first ends every other connection to this database but one that
-// holds a transaction id (a test's open writer): each flushes its statistics as it exits, and the
-// pools dial again on their next use.
+// eventsTuplesRead is how many rows of events every statement whose statistics have reached the
+// collector has read, by a sequential scan of the table or through its primary key: the cost of a
+// read of the event log, whichever plan Postgres chose for it.
 func eventsTuplesRead(t *testing.T, database *store.Store) int64 {
 	t.Helper()
-	if _, err := database.Pool.Exec(t.Context(), `
-		select pg_terminate_backend(pid, 5000) from pg_stat_activity
-		where datname = current_database() and backend_type = 'client backend' and pid <> pg_backend_pid()
-			and pid not in (select pid from pg_locks where locktype = 'transactionid' and mode = 'ExclusiveLock')
-	`); err != nil {
-		t.Fatalf("end the other connections so they flush their statistics: %v", err)
-	}
 	var read int64
 	if err := database.Pool.QueryRow(t.Context(), `
 		select coalesce((select seq_tup_read from pg_stat_user_tables where relname = 'events'), 0)
@@ -389,6 +404,35 @@ func eventsTuplesRead(t *testing.T, database *store.Store) int64 {
 		t.Fatalf("read the events table's statistics: %v", err)
 	}
 	return read
+}
+
+// eventsTuplesReadFlushed is eventsTuplesRead once every backend that read the log has reported
+// what it read. A backend keeps its statistics until it has been idle for up to ten seconds or
+// exits, so this first ends every other connection to this database but one that holds a
+// transaction id (a test's open writer): each flushes its statistics as it exits, and the pools
+// dial again on their next use.
+//
+// It is the reading taken after the work measured, never the one before it. Ending the server's
+// connections leaves its pools holding dead ones: pgxpool pings a connection idle for more than a
+// second before handing it out and redials when that ping fails, but one idle for less than a
+// second goes out as it is and the statement on it fails with "terminating connection due to
+// administrator command" (57P01) -- 20 of 20 measured on a two-core pod, against 0 of 20 when the
+// pool is used 1.2 s later. Taken before the subscription, that is the error the relay's first
+// start met in CI run 41821928631: its mark of the event log failed, the subscription ended
+// behind, the start's hook never ran, and the test waited out its whole 30 s for a start that had
+// already given up (dispatch://INFRA-1075). The reading before the work needs no flush: what the
+// setup's backends have not yet reported is a handful of rows against a bound of a tenth of the
+// log.
+func eventsTuplesReadFlushed(t *testing.T, database *store.Store) int64 {
+	t.Helper()
+	if _, err := database.Pool.Exec(t.Context(), `
+		select pg_terminate_backend(pid, 5000) from pg_stat_activity
+		where datname = current_database() and backend_type = 'client backend' and pid <> pg_backend_pid()
+			and pid not in (select pid from pg_locks where locktype = 'transactionid' and mode = 'ExclusiveLock')
+	`); err != nil {
+		t.Fatalf("end the other connections so they flush their statistics: %v", err)
+	}
+	return eventsTuplesRead(t, database)
 }
 
 // TestTheRelaysFirstStartDoesNotReadTheWholeEventLog: the relay's first start runs on every process
@@ -414,12 +458,14 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLog(t *testing.T) {
 	if _, err := rig.database.Pool.Exec(t.Context(), `analyze events`); err != nil {
 		t.Fatalf("analyze events: %v", err)
 	}
-	// No wait on either side of the subscription: eventsTuplesRead ends every other backend and
-	// waits for it to go, which is what flushes its statistics, and subscribeEvents returns on
-	// the events_start frame, which the start sends once its read of the log is done.
+	// No wait on either side of the subscription: subscribeEvents returns on the events_start
+	// frame, which the start sends once its read of the log is done, and the reading after it
+	// ends every other backend and waits for it to go, which is what flushes its statistics.
 	before := eventsTuplesRead(t, rig.database)
 	subscribeEvents(t, rig.dial(t, withBearer("agent-token")), "events", nil)
-	if read := eventsTuplesRead(t, rig.database) - before; read > logSize/10 {
+	read := eventsTuplesReadFlushed(t, rig.database) - before
+	t.Logf("the relay's first start read %d rows of events on a log of %d", read, logSize)
+	if read > logSize/10 {
 		t.Fatalf("the relay's first start read %d rows of events on a log of %d events, want at most %d: its cost grows with the whole log", read, logSize, logSize/10)
 	}
 }
@@ -466,7 +512,7 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBoo
 	if _, err := rig.database.Pool.Exec(t.Context(), `analyze events`); err != nil {
 		t.Fatalf("analyze events: %v", err)
 	}
-	// No wait before the read, and none after the start: eventsTuplesRead ends every other
+	// No wait before the read, and none after the start: the reading after it ends every other
 	// backend and waits for it to go, which is what flushes its statistics.
 	before := eventsTuplesRead(t, rig.database)
 	started := relayStartReads(rig.served)
@@ -475,10 +521,12 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBoo
 	// awaitRelayStart returns with the start already waiting on Horizon.Await for this writer,
 	// so the writer has outlived the start's beginning; ending it here is the write that held
 	// its id across a boot ending.
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	release()
 	eventsStartID(t, client, "events")
-	if read := eventsTuplesRead(t, rig.database) - before; read > logSize/10 {
+	read := eventsTuplesReadFlushed(t, rig.database) - before
+	t.Logf("the relay's first start read %d rows of events on a log of %d while a writer from before the boot mark was open", read, logSize)
+	if read > logSize/10 {
 		t.Fatalf("the relay's first start read %d rows of events on a log of %d events while a writer from before the boot mark was open, want at most %d: it read the whole log", read, logSize, logSize/10)
 	}
 }
@@ -497,7 +545,7 @@ func TestTheFirstColdSubscriptionIsSentAnEventThatDrewItsIdBeforeIt(t *testing.T
 	sendEventsSubscribe(t, client, "events", nil)
 	// The start's gap read finds low missing and then waits on it: low's own transaction holds a
 	// transaction id in this database, so no horizon is proven while it is open.
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	commitLow()
 
 	eventsStartID(t, client, "events")
@@ -531,7 +579,7 @@ func TestTheFirstColdSubscriptionSkipsAnIdThatRolledBack(t *testing.T) {
 	started := relayStartReads(rig.served)
 	client := rig.dial(t, withBearer("agent-token"))
 	sendEventsSubscribe(t, client, "events", nil)
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	release()
 	if start := eventsStartID(t, client, "events"); start != backlog {
 		t.Fatalf("the first cold subscription starts after event %d, want the log's newest id %d: the gap that rolled back moved its cursor", start, backlog)
@@ -657,17 +705,19 @@ func TestTheRelaysFirstStartReadsAboveThePersistedHorizonWhileAnEventInsertFromB
 	t.Cleanup(server.Close)
 	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(server.URL, "http")+"/ws/live", withBearer("agent-token")).read()
 	sendEventsSubscribe(t, client, "events", nil)
-	awaitRelayStart(t, started)
+	awaitRelayStart(t, client, started)
 	renameIssue(t, first, issue.Key, "Renamed while the insert is open")
 	committed := eventHead(t, database)
 	release()
 
 	eventsStartID(t, client, "events")
 	expectEventsInOrder(t, client, "events", open, committed)
-	// server.Close returns once every handler has, and eventsTuplesRead ends every backend left
-	// and waits for it to go, which is what flushes its statistics.
+	// server.Close returns once every handler has, and eventsTuplesReadFlushed ends every
+	// backend left and waits for it to go, which is what flushes its statistics.
 	server.Close()
-	if read = eventsTuplesRead(t, database) - read; read > logSize/10 {
+	read = eventsTuplesReadFlushed(t, database) - read
+	t.Logf("the relay's first start read %d rows of events on a log of %d while an event insert from before boot was open", read, logSize)
+	if read > logSize/10 {
 		t.Fatalf("the relay's first start read %d rows of events on a log of %d events while an event insert from before boot was open, want at most %d: it read the whole log, not above the persisted horizon", read, logSize, logSize/10)
 	}
 }

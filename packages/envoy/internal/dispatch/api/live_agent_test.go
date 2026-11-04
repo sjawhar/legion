@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // plannerSessionID is the session whose conversation the agent views below watch: an agent view
@@ -369,9 +370,7 @@ func TestAFrameThatIsNotJSONIsSkipped(t *testing.T) {
 	// lock on purpose out of the parallel set left five of these timing out on events_start;
 	// the whole family is out of it (dispatch://INFRA-1075).
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	source := agentstream.NewMemory()
 	source.SetReplay(plannerSessionID, agentstream.Frame(`replay-secret not json`))
 	rig := newLiveSocketRig(t, testServerOptions{agentStream: source}, nil)
