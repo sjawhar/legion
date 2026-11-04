@@ -8,7 +8,7 @@ import { baseUrl, e2eAgentToken } from "./api";
 const dispatchEntry = fileURLToPath(new URL("../../envoy-client/bin/dispatch.ts", import.meta.url));
 
 /** The session the command acts as: the server records it as each write's actor, and a personal
- *  token's act names it (`requireScope` in `packages/envoy/internal/dispatch/api/server.go`). */
+ *  token's act names it (`actingPerson` in `packages/envoy/internal/dispatch/api/server.go`). */
 export const cliSession = "e2e-dispatch-cli";
 
 export interface CliRun {

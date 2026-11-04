@@ -569,8 +569,8 @@ func newestEventActor(t *testing.T, handler http.Handler, issueKey, eventType st
 // scope existed. That matters beyond the record: events.Broker.Notify reads an actor of kind
 // user as a person's act and sends it on, so a session recorded as its person would be handed
 // back its own reword and its own follow as deliveries. The person's scope opens the other
-// half - another session's ask, another session's following - which the two tests after this
-// one hold.
+// half - another session's ask, another session's following - which the test after this one
+// holds.
 func TestAnAgentsOwnRewordAndFollowAreStillTheSessionsOwnAct(t *testing.T) {
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "OWN", "An agent's own acts", "A spec")

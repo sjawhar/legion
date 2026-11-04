@@ -1239,10 +1239,11 @@ func (s *server) gateRouteScopes(scopes []string, handler http.HandlerFunc) http
 
 // actingPerson answers the person a request acts for, on a route gateRouteScopes has already
 // held to the `person` scope. It names no scope of the route's own: the table decides those, and
-// a handler that repeated them could drift from the row it serves. The refusal below is a
-// backstop the gate makes unreachable — a row that reaches one of these handlers and declares no
-// `person` is a table mistake, not a caller's — and it is the floor every one of them needs,
-// since without that scope there is no person to answer with.
+// a handler that repeated them could drift from the row it serves. On a row the table gives the
+// `person` scope, the refusal below is a backstop the gate makes unreachable. On the calls whose
+// row declares no scope — `GET /api/v1/issues?pinned=true` (issue_queries.go), a reword of
+// another session's ask (asks.go) and a follow for another session (ask_followers.go) — it is
+// the only check of the scope, and those calls must not lose it.
 //
 // The actor it hands back is the person and not the agent beside them. Every route this opens
 // reads the person from actor.ID (inbox.go, agent_tokens.go, ask_transitions.go), and three

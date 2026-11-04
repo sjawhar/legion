@@ -125,7 +125,7 @@ async function railCount(page: Page, name: RegExp): Promise<number | undefined> 
 }
 
 /** One write an agent makes for its person: the person's own token as the bearer, and `session=`
- *  naming the agent, which the server records as the act beside them (`requireScope`). */
+ *  naming the agent, which the server records as the act beside them (`actingPerson`). */
 function withToken(path: string, token: string, body: object): Promise<Response> {
   const url = new URL(path, baseUrl);
   url.searchParams.set("session", cliSession);

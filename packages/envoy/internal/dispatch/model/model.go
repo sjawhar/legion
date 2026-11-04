@@ -86,7 +86,7 @@ type Actor struct {
 	Service *string      `json:"service,omitempty"`
 	Project *string      `json:"project,omitempty"`
 	// Act names the agent that made this act for the person, and is set only where a
-	// credential acted as its person (requireScope). A browser's act carries none, and so
+	// credential acted as its person (actingPerson). A browser's act carries none, and so
 	// does an agent's own write on a route that always took tokens, which is recorded as the
 	// session it always was.
 	Act *ActorAct `json:"act,omitempty"`

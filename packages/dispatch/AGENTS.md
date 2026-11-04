@@ -963,18 +963,19 @@ reads and the machine lookup return the broker's JSON body as `json.RawMessage`,
 unmodified. The listed account's token is the approval credential: the broker takes the approving
 human from the request body on that caller's word, so Dispatch builds every decision
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
-is always `canonicalLogin` of the person `requireScope` resolved and `Code` is the only field read from the
+is always `canonicalLogin` of the person `actingPerson` resolved and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
 `RevokeByApprover`, `MachineLogins` and `RevokeMachineLogin` send only the caller's canonical login
 as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
 `packages/envoy/internal/dispatch/api/credential_requests.go` mounts
-the eight `human`-auth proxy rows every page above calls: `GET /api/v1/credential-requests`,
-`POST /api/v1/credential-requests/{id}/approve|deny`,
+the eight proxy rows every page above calls, each held to the `person` scope:
+`GET /api/v1/credential-requests`, `POST /api/v1/credential-requests/{id}/approve|deny`,
 `POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
 `POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
-`POST /api/v1/machine-logins/{id}/revoke`. Every handler requires a human caller first, then a
+`POST /api/v1/machine-logins/{id}/revoke`; each decision and revoke needs `approve` as well. Every
+handler is reached only past that scope gate (`gateRouteScopes`), then needs a
 configured client (`404 FEATURE_OFF` on a nil one), except the pending list, which answers `null`
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own

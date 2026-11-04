@@ -603,7 +603,8 @@ scopes a route needs stand beside the table in `routeScopes`, keyed by `"<method
 which `routes()` stamps onto `apiRoute.OAuthScopes`: a positional row literal would make every
 one of the 151 rows carry a sixth value, and most rows need no scope. A name in that map which is
 no row of the table refuses to mount (`scopedRoutesNotMounted`), as an unclassed mutating row
-does. `requireScope` is the gate every scoped handler calls, and `envoy-dispatch routes` prints
+does. `register` gates every row that map names (`gateRouteScopes`) ahead of the keyed, project
+and session layers, so no handler restates a scope, and `envoy-dispatch routes` prints
 each route's `scopes` as `GET /api/v1` does. An unknown path
 under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
 `routes/router.go` with `404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET
