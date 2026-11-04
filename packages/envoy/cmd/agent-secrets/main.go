@@ -84,6 +84,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/buildversion"
@@ -140,7 +141,7 @@ var commands = []command{
 	{"renew", "agent-secrets renew [--pod-token-file FILE | --vm [--audience <aud>]]",
 		"Keep an agent box's, pod's or VM's enrollment lease alive, renewing it until interrupted. A\npod names its projected service-account token's file and a VM reads a fresh token from its\nmetadata server before each renewal: each renewal sends the token of that moment, which the\nbroker checks names the pod or VM the enrollment was made for. POD_TOKEN_REQUIRED,\nVM_TOKEN_REQUIRED, VM_NOT_LISTED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID\nsaying \"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
-		"Request secrets and print the request's id, state and source, and who approves it and\nwhere while it waits; exit 75 while it waits for approval and 77 when it is denied. The\ngrant lasts --ttl, or until this session ends."},
+		"Request secrets and print the request's id, state and source, and who approves it and\nwhere while it waits; exit 75 while it waits for approval and 77 when it is denied. The\ngrant lasts --ttl, or 12 hours (until this session ends when every secret is\ntagged default-grant=session)."},
 	{"status", "agent-secrets status <request_id> [--json]",
 		"Print a request's state, the broker and store it is at, who approves it and where while it\nwaits, its grant once granted, and who decided it."},
 	{"cancel", "agent-secrets cancel <request_id>",
@@ -154,7 +155,7 @@ var commands = []command{
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
 	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or 12 hours (until this session ends when every secret is tagged default-grant=session). --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -532,19 +533,17 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// retryCap is how far the 2 s backoff every poll loop in this package uses grows. renew takes it
-// as --retry-cap because it is the longest a renewer whose broker has come back can take to
-// renew: a test that drives a real broker outage waits that wait out, so it passes a short one
-// (cmd/broker/outage_test.go, dispatch://INFRA-1075).
+// retryCap is how far the backoff the poll loops of this package keep grows. It is this
+// package's own ten seconds and not leasetime's: those polls are nobody's lease, and a change
+// made to move the broker's lease floor is not a change to how often `agent-secrets request
+// --wait` asks.
 const retryCap = 10 * time.Second
 
-// nextBackoff advances the 2 s -> limit backoff every poll loop in this package uses.
+// nextBackoff advances the backoff a poll loop of this package keeps: two seconds, doubling to
+// limit. The renewer's own step is leasetime's, which the broker's lease bound walks it by
+// (renewLoop).
 func nextBackoff(cur, limit time.Duration) time.Duration {
-	next := cur * 2
-	if next > limit {
-		next = limit
-	}
-	return next
+	return min(2*cur, limit)
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +615,12 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	podTokenFile := flags.String("pod-token-file", "", "a pod's projected service-account token file, read again before every renewal")
 	vmFlag := flags.Bool("vm", false, "a Google Cloud VM: ask the metadata server for a fresh identity token before every renewal")
 	audience := flags.String("audience", os.Getenv(vmAudienceVar), "--vm: the audience the broker verifies Google identity tokens for (default "+vmAudienceVar+")")
-	retryWait := flags.Duration("retry-cap", retryCap, "the longest wait between two failed renewals; the renewer backs off from 2s up to it")
+	// --retry-cap is the longest wait between two failed renewals. Its default is the schedule
+	// internal/broker/leasetime models and internal/broker/config refuses a too-short lease
+	// against, so a deployed renewer keeps that schedule; a test that drives a real broker
+	// outage passes a shorter one rather than waiting the production cap out
+	// (dispatch://INFRA-1075).
+	retryWait := flags.Duration("retry-cap", leasetime.RenewBackoffMax, "the longest wait between two failed renewals; the renewer backs off from 2s up to it")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -681,7 +685,11 @@ func tokenUnreadable(enrollmentID string, carry renewToken, err error) string {
 }
 
 func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time, retryLimit time.Duration) int {
-	backoff := 2 * time.Second
+	// The renewer walks leasetime's own schedule, with the cap --retry-cap carries in place of
+	// leasetime.RenewBackoffMax, which is that flag's default.
+	schedule := leasetime.Production()
+	schedule.BackoffMax = retryLimit
+	backoff := schedule.BackoffInitial
 	for {
 		var token string
 		var tokenErr error
@@ -716,10 +724,10 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				return 0
 			case <-after(backoff):
 			}
-			backoff = nextBackoff(backoff, retryLimit)
+			backoff = schedule.NextBackoff(backoff)
 			continue
 		}
-		backoff = 2 * time.Second
+		backoff = schedule.BackoffInitial
 		lease := time.Until(expires)
 		if lease <= 0 {
 			lease = time.Second
@@ -727,7 +735,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 		select {
 		case <-ctx.Done():
 			return 0
-		case <-after(lease / 3):
+		case <-after(leasetime.RenewAfter(lease)):
 		}
 	}
 }
@@ -975,7 +983,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		githubRepos = append(githubRepos, name)
 		return nil
 	})
-	githubReadOnly := flags.Bool("github-read-only", false, "narrow the GitHub App token further, to contents: read and metadata: read")
+	githubReadOnly := flags.Bool("github-read-only", false, "narrow the GitHub App token further, to contents: read, metadata: read and pull_requests: read")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}

@@ -1,0 +1,4 @@
+kind: Fixed
+body: |-
+  `scripts/e2e-local.sh` no longer dies at startup when its first read of a process log runs before
+  the backgrounded redirect created the file.

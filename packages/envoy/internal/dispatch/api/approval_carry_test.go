@@ -1108,3 +1108,85 @@ func TestADocumentApprovedAtVersionOneCarriesOnItsFirstBlocksAnswer(t *testing.T
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
 	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 3, 1, nil)
 }
+
+// requestApprovalWithVerification opens the asking agent's approval request on the document and
+// the issue's Verification document together, and returns the ask the route answers with.
+func requestApprovalWithVerification(t *testing.T, handler http.Handler, artifactID string) carriedAsk {
+	t.Helper()
+	requested := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "include_verification": true})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval of both documents: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	return decodeBody[struct {
+		Ask carriedAsk `json:"ask"`
+	}](t, requested).Ask
+}
+
+// A request that covers a spec and its issue's Verification document is answered only once both
+// stand approved at the versions it names. A carry on the spec writes the spec's review in the
+// human's name and leaves the request open, because nobody has approved the Verification
+// document; his approval of that document then answers the request, reviewing both.
+func TestACarryOnOneDocumentOfATwoDocumentRequestLeavesItOpen(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Carry one of two", "Context\n")
+	verification := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", "# Verification\n\nOne.\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	asks := insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 2, map[string]string{"wave": "How many regions take the first wave?"})
+	request := requestApprovalWithVerification(t, handler, issue.PrimaryArtifactID)
+	if request.Approval.Version != 2 || request.Approval.Approved == nil || request.Approval.Approved.Version != 1 {
+		t.Fatalf("request = %#v, want one at spec version 2 following the approval of version 1", request.Approval)
+	}
+
+	// His answer is the whole change since the version he approved, so the spec's review is
+	// carried; the Verification document, which nobody has approved, keeps the request open.
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
+	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 3, 1, &request.ID)
+	if still := readBlockAsk(t, handler, request.ID); still.State != "open" {
+		t.Fatalf("request after the carry = %q, want it still open for the Verification document", still.State)
+	}
+	requireNoCarry(t, handler, verification.Artifact.ID, 0, "awaiting")
+
+	// Approving the Verification document answers that request, and reviews both documents at the
+	// versions it names.
+	reviewDocument(t, handler, verification.Artifact.ID, "alice", "approved", "")
+	answered := readBlockAsk(t, handler, request.ID)
+	if answered.State != "answered" {
+		t.Fatalf("request after the Verification document's approval = %q, want answered", answered.State)
+	}
+	for _, both := range []struct {
+		artifactID string
+		version    int
+	}{{issue.PrimaryArtifactID, 3}, {verification.Artifact.ID, 1}} {
+		got := readApproval(t, handler, both.artifactID)
+		if got.Approval == nil || got.Approval.State != "approved" || got.Approval.Version == nil || *got.Approval.Version != both.version {
+			t.Fatalf("approval of %s = %#v, want approved at version %d", both.artifactID, got.Approval, both.version)
+		}
+	}
+}
+
+// The mirror: the spec already stands approved at the version the request names, so a carry on
+// the Verification document answers that request in the same transaction, as a carry on a
+// one-document request does.
+func TestACarryOnTheVerificationDocumentAnswersTheRequestWhenTheSpecStandsApproved(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Carry the verification", "Context\n")
+	verification := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", "# Verification\n\nOne.\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	reviewDocument(t, handler, verification.Artifact.ID, "alice", "approved", "")
+	asks := insertDecisionBlocks(t, handler, issue.Key, verification.Artifact.ID, waveAsk, 2, map[string]string{"wave": "How many regions take the first wave?"})
+	request := requestApprovalWithVerification(t, handler, issue.PrimaryArtifactID)
+	if request.Approval.Version != 1 {
+		t.Fatalf("request = %#v, want one at spec version 1", request.Approval)
+	}
+
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	waitForArtifactVersion(t, handler, verification.Artifact.ID, 3)
+	requireCarriedReview(t, handler, verification.Artifact.ID, 3, 1, &request.ID)
+	answered := readBlockAsk(t, handler, request.ID)
+	if answered.State != "answered" || answered.Answer == nil || answered.Answer.User != "alice" ||
+		!reflect.DeepEqual(answered.Answer.Selected, []string{"Approve"}) {
+		t.Fatalf("request after the carry = state %q answer %#v, want Approve by alice", answered.State, answered.Answer)
+	}
+}

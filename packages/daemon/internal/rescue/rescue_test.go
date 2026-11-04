@@ -6,10 +6,13 @@ package rescue_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/rescue"
@@ -78,8 +81,21 @@ func TestAnUnpushedGitCommitOnTheWorkspaceHeadIsRescued(t *testing.T) {
 	rescuedTo(t, d, only(t, d, d.Check(context.Background(), prefix)), commit)
 }
 
-// A commit on a local git branch of the clone that no remote ref holds is rescued, though neither
-// the workspace's HEAD nor jj names it.
+// A commit on the issue's own branch that no remote ref holds is rescued, though the workspace's
+// HEAD does not name it: the branch is the issue's, whichever worktree last worked on it.
+func TestAnUnpushedCommitOnTheIssuesOwnBranchIsRescued(t *testing.T) {
+	d := rescuetest.New(t, issue)
+	tree := d.Run(d.Clone, "git", "rev-parse", d.Base+"^{tree}")
+	commit := d.Run(d.Clone, "git", "commit-tree", tree, "-p", d.Base, "-m", "work on the issue's branch")
+	d.Run(d.Clone, "git", "branch", "--force", d.Branch, commit)
+	if head := d.Git("rev-parse", "HEAD"); head != d.Base {
+		t.Fatalf("the workspace's git HEAD is %s, want %s: only the issue's branch may name the commit", head, d.Base)
+	}
+	rescuedTo(t, d, only(t, d, d.Check(context.Background(), prefix)), commit)
+}
+
+// A commit a role made in the pod on a local git branch of another name than the issue's is
+// rescued, though neither the workspace's HEAD nor jj's own line names it.
 func TestAnUnpushedCommitOnALocalGitBranchIsRescued(t *testing.T) {
 	d := rescuetest.New(t, issue)
 	tree := d.Run(d.Clone, "git", "rev-parse", d.Base+"^{tree}")
@@ -133,15 +149,13 @@ func TestADirtyTreeIsRescuedAsOneCommitWithoutChangingTheWorkspace(t *testing.T)
 	}
 }
 
-// A commit jj alone holds — `jj commit` with no bookmark, never pushed, and the working copy moved
-// back onto the issue's bookmark since, so neither the workspace's git HEAD nor any git branch
-// names it — is rescued.
+// A commit only jj names — the working copy described with the work in it, so the workspace's git
+// HEAD is still the pushed commit under it — is rescued as jj holds it, on the workspace's own line.
 func TestAJJOnlyCommitIsRescued(t *testing.T) {
 	d := rescuetest.New(t, issue)
 	d.Write(d.Workspace, "feature.txt", "work jj alone holds\n")
-	d.JJ("commit", "-m", "work jj alone holds")
-	commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
-	d.JJ("new", `bookmarks(exact:"`+d.Branch+`")`)
+	d.JJ("describe", "-m", "work jj alone holds")
+	commit := d.JJ("log", "--no-graph", "-r", "@", "-T", "commit_id")
 	if head := d.Git("rev-parse", "HEAD"); head != d.Base {
 		t.Fatalf("the workspace's git HEAD is %s, want %s: only jj may name the commit", head, d.Base)
 	}
@@ -152,7 +166,8 @@ func TestAJJOnlyCommitIsRescued(t *testing.T) {
 // changed", because the bookmark still names the commit the remote has, and the merge is on the
 // disk alone. It is empty — both of its parents are pushed and it resolves nothing — but it is
 // described, and it is rescued, whatever the bookmarks say: with the working copy still on top of
-// it, and with the working copy moved back onto the bookmark since, where jj alone names it.
+// it, and with the working copy moved back onto the bookmark since, where it is on neither line and
+// is the pod's own because the pod made it.
 func TestAMergeWhoseBookmarkWasNotMovedOntoItIsRescued(t *testing.T) {
 	for name, moveOn := range map[string]bool{"the working copy on top of it": false, "the working copy moved back onto the bookmark": true} {
 		t.Run(name, func(t *testing.T) {
@@ -221,18 +236,18 @@ func TestARescueBranchSkipsANumberTheRemoteHoldsAndReportsIt(t *testing.T) {
 	}
 }
 
-// A commit only a stale remote-tracking ref names — its branch deleted on the remote since the
-// pod last fetched — is a commit the remote may no longer hold, and it is rescued.
-func TestACommitOnlyAStaleRemoteTrackingRefNamesIsRescued(t *testing.T) {
+// A commit of the issue's own branch that only a stale remote-tracking ref names — the branch
+// deleted on the remote since the pod last fetched — is a commit the remote may no longer hold,
+// and it is rescued.
+func TestAnOwnCommitOnlyAStaleRemoteTrackingRefNamesIsRescued(t *testing.T) {
 	d := rescuetest.New(t, issue)
 	tree := d.Run(d.Clone, "git", "rev-parse", d.Base+"^{tree}")
 	commit := d.Run(d.Clone, "git", "commit-tree", tree, "-p", d.Base, "-m", "pushed once, then deleted on the remote")
-	d.Run(d.Clone, "git", "branch", "topic", commit)
-	d.Run(d.Clone, "git", "push", "--quiet", "origin", "topic")
-	d.Run(d.Clone, "git", "fetch", "--quiet", "origin", "topic:refs/remotes/origin/topic")
-	d.Run(d.Remote, "git", "branch", "--quiet", "-D", "topic")
-	if tracked := d.Run(d.Clone, "git", "rev-parse", "refs/remotes/origin/topic"); tracked != commit {
-		t.Fatalf("the clone's origin/topic is %s, want the stale %s", tracked, commit)
+	d.Run(d.Clone, "git", "branch", "--force", d.Branch, commit)
+	d.Run(d.Clone, "git", "push", "--quiet", "origin", d.Branch)
+	d.Run(d.Remote, "git", "branch", "--quiet", "-D", d.Branch)
+	if tracked := d.Run(d.Clone, "git", "rev-parse", "refs/remotes/origin/"+d.Branch); tracked != commit {
+		t.Fatalf("the clone's origin/%s is %s, want the stale %s", d.Branch, tracked, commit)
 	}
 	rescuedTo(t, d, only(t, d, d.Check(context.Background(), prefix)), commit)
 }
@@ -315,5 +330,29 @@ func TestAPushTheRemoteRefusesIsAnError(t *testing.T) {
 	}
 	if held := d.RemoteBranch(prefix + "-1"); held != "" {
 		t.Errorf("the remote holds %s-1 at %s, want no such branch", prefix, held)
+	}
+}
+
+// The tests' environment lets git use no transport but local files, whatever the repository's own
+// configuration allows: a clone whose origin is a loopback HTTP server, and whose configuration
+// allows http itself, is an error before the server sees one request.
+func TestTheTestsEnvironmentReachesNoNetworkRemote(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "no", http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	d := rescuetest.New(t, issue)
+	d.Write(d.Workspace, "feature.txt", "work that must not leave the test\n")
+	d.JJ("commit", "-m", "work that must not leave the test")
+	d.Run(d.Clone, "git", "remote", "set-url", "origin", server.URL+"/owner/repo.git")
+	d.Run(d.Clone, "git", "config", "protocol.http.allow", "always")
+	w := only(t, d, d.Check(context.Background(), prefix))
+	if w.Status != rescue.Failed || !strings.Contains(w.Error, "transport 'http' not allowed") {
+		t.Errorf("the check reported %+v, want git's refusal of the http transport", w)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the loopback server received %d requests, want none", n)
 	}
 }

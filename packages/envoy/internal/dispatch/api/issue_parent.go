@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // parseIssueParent decodes the tri-state `parent` field of an issue PATCH. Absent →
@@ -38,12 +39,14 @@ func parseIssueParent(raw json.RawMessage) (parent *string, provided bool, err e
 
 // parentDepthCap is the most links an issue may sit below its root: a create or reparent that
 // would put an issue deeper is refused (refuseParentTooDeep), so it bounds every recursive issue
-// walk — the ancestor walk, the children subtree walk, the components and repository laterals'
-// owner searches, the architecture tree's containment walks, and the legion-label walk below
+// walk — the ancestor walk (refs.IssueAncestors, the one issueAncestors and the cycle refusal
+// below read), the children subtree walk, the components and repository laterals' owner
+// searches, the architecture tree's containment walks, and the legion-label walk below
 // (legionManagedStatusSQL) — like refs.Closure's depth cap: the queries terminate even if a
-// raced reparent ever commits a cycle. parentDepthCapSQL is the same number spliced into the
-// walks built as SQL text.
-const parentDepthCap = 32
+// raced reparent ever commits a cycle. It is refs.IssueDepthCap, where the ancestor walk lives
+// so that docs and refs can read it too: one bound for every issue walk in the server.
+// parentDepthCapSQL is the same number spliced into the walks built as SQL text.
+const parentDepthCap = refs.IssueDepthCap
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
 
@@ -217,34 +220,19 @@ func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent st
 	if parentProject != project {
 		return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent must be in the same project")
 	}
-	rows, err := tx.Query(ctx, `
-		with recursive ancestors as (
-			select key, parent_key, 1 as depth from issues where key = $1
-			union
-			select i.key, i.parent_key, a.depth + 1
-			from issues i join ancestors a on i.key = a.parent_key
-			where a.depth < $2
-		)
-		select key from ancestors order by depth
-	`, parent, parentDepthCap)
+	// parent and the issues above it, parent first: the server's one ancestor walk
+	// (refs.IssueAncestors) with parent itself at its head, since a parent key already stands
+	// above would make a cycle, as parent being key would.
+	above, err := refs.IssueAncestors(ctx, tx, parent)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	chain := []string{}
-	for rows.Next() {
-		var ancestor string
-		if err := rows.Scan(&ancestor); err != nil {
-			return err
-		}
-		chain = append(chain, ancestor)
+	chain := append([]string{parent}, above...)
+	for index, ancestor := range chain {
 		if ancestor == key {
-			path := key + " → " + strings.Join(chain, " → ")
+			path := key + " → " + strings.Join(chain[:index+1], " → ")
 			return errorf(http.StatusConflict, "PARENT_INPUT", "would create a cycle: %s", path)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	return refuseParentTooDeep(ctx, tx, key, parent)
 }

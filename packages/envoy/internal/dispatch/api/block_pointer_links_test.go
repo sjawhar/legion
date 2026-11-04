@@ -87,9 +87,9 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
 	// No t.Parallel: pmdoctest.UseBlockSchema swaps pmdoc's package-level block schema,
 	// which every test in this process parses against.
-	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(map[string]pmdoc.BlockAttributeSchema{
-		"serves":  {Kind: "block[]", Targets: []string{"requirement"}},
-		"answers": {Kind: "block[]"},
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(pmdoc.BlockAttributes{
+		{Name: "serves", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList, Targets: []string{"requirement"}}},
+		{Name: "answers", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList}},
 	}))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)

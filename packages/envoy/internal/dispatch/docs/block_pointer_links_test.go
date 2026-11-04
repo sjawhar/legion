@@ -140,8 +140,8 @@ func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
 	// No room reads the schema across the swap.
 	closeDocumentRoom(t, service, target)
 	closeDocumentRoom(t, service, checks)
-	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(map[string]pmdoc.BlockAttributeSchema{
-		"serves": {Kind: "block[]", Targets: []string{"requirement", "callout"}},
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(pmdoc.BlockAttributes{
+		{Name: "serves", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList, Targets: []string{"requirement", "callout"}}},
 	}))
 	requireLinksTo(t, database, "serves allowing callouts, checks.md not yet indexed", "CORE-1/target#r1")
 

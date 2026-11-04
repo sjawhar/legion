@@ -45,7 +45,7 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 		t.Fatalf("open the session registry: %v", err)
 	}
 	for _, id := range []string{readable, unreadable} {
-		if err := sessions.Put(id, session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/test/" + id, Title: id}); err != nil {
+		if err := sessions.Put(id, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + id, Title: id}); err != nil {
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}

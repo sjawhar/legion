@@ -43,12 +43,10 @@ var cutRewatchCaches = []string{
 func TestASilentCutRewatchesTheCachesWithNoErrorLine(t *testing.T) {
 	t.Parallel()
 	server, uri := testnats.Start(t)
-	// The live topics lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS (liveLaneEnv), and both
-	// clients connect before the listener reports itself healthy.
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch", liveLaneEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch")
 	listener.waitHealthy(t)
 
-	thaw, output := freezeUntilBothClientsReportTheCut(t, server, listener)
+	thaw, output := freezeUntilTheClientReportsTheCut(t, server, listener)
 	thaw()
 
 	// Every cache is rewatched on the reconnect, and each replacement's warm-up line says so.

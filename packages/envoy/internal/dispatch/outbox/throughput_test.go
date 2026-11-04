@@ -259,9 +259,9 @@ func unpublishedCount(t *testing.T, database *store.Store) int {
 	return count
 }
 
-// streamOrder reads every message the notification stream holds, in stream order, and returns the
-// dispatch event id each carries, grouped by subject, and the ids of all of them in stream order.
-func streamOrder(t *testing.T, conn *natsgo.Conn) (map[string][]int64, []int64) {
+// streamMessages reads every message the notification stream holds, in stream order: the one walk
+// of the stream the checks of what it holds share (streamOrder, assertKeptLaneInOrder).
+func streamMessages(t *testing.T, conn *natsgo.Conn) []*natsgo.RawStreamMsg {
 	t.Helper()
 	js, err := conn.JetStream()
 	if err != nil {
@@ -271,13 +271,24 @@ func streamOrder(t *testing.T, conn *natsgo.Conn) (map[string][]int64, []int64) 
 	if err != nil {
 		t.Fatalf("read the stream: %v", err)
 	}
-	bySubject := map[string][]int64{}
-	var all []int64
+	var messages []*natsgo.RawStreamMsg
 	for sequence := info.State.FirstSeq; sequence <= info.State.LastSeq && info.State.Msgs > 0; sequence++ {
 		message, err := js.GetMsg(bus.Stream, sequence)
 		if err != nil {
 			t.Fatalf("read stream message %d: %v", sequence, err)
 		}
+		messages = append(messages, message)
+	}
+	return messages
+}
+
+// streamOrder is streamMessages read as the dispatch event id each message carries, grouped by
+// subject, and the ids of all of them in stream order.
+func streamOrder(t *testing.T, conn *natsgo.Conn) (map[string][]int64, []int64) {
+	t.Helper()
+	bySubject := map[string][]int64{}
+	var all []int64
+	for _, message := range streamMessages(t, conn) {
 		id := envelopeEventID(t, message.Data)
 		bySubject[message.Subject] = append(bySubject[message.Subject], id)
 		all = append(all, id)
@@ -285,12 +296,20 @@ func streamOrder(t *testing.T, conn *natsgo.Conn) (map[string][]int64, []int64) 
 	return bySubject, all
 }
 
+// envelopeEventID is the dispatch event id data's envelope carries (sourceEventID).
 func envelopeEventID(t *testing.T, data []byte) int64 {
 	t.Helper()
 	var envelope contracts.Envelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		t.Fatalf("decode an envelope: %v", err)
 	}
+	return sourceEventID(t, envelope)
+}
+
+// sourceEventID is the dispatch event id envelope was made of, for a caller that has decoded it
+// already.
+func sourceEventID(t *testing.T, envelope contracts.Envelope) int64 {
+	t.Helper()
 	id, err := strconv.ParseInt(envelope.SourceEventID, 10, 64)
 	if err != nil {
 		t.Fatalf("envelope source event id %q: %v", envelope.SourceEventID, err)

@@ -62,7 +62,7 @@ func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValu
 // something false about role state.
 func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 	t.Parallel()
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role        = "reviewer"
 		oldHolder   = "ses_lapsed"
@@ -105,7 +105,7 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
 	})
-	config = wireTestDeliveryWorkers(t, config)
+	config = wireTestRoleForwarder(t, config)
 
 	item := listenerTestEnvelope(roleSubject, "core-role-supersession-race")
 	roleTopicDelivery(config, deliveryMessage{mode: coreDelivery}, item)

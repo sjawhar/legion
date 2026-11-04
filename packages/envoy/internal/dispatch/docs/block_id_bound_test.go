@@ -173,7 +173,7 @@ func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
 		return tree
 	})
 	settleCurrentGeneration(t, service, original)
-	if line := logs.Lines("54000"); line != "" {
+	if line := logs.Lines("SQLSTATE 54000"); line != "" {
 		t.Fatalf("the settlement of the long-id ask block failed: %.400s", line)
 	}
 	if ask := blockAskOn(t, service, original, long); ask.State != "open" || ask.Question != "Ship on Monday?" {
@@ -199,7 +199,7 @@ func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
 		t.Fatalf("the copy opened %d asks, want none", count)
 	}
 	requireCopiedStates(t, service, copied, copiedFrom(t, service, ask.ID, original))
-	if line := logs.Lines("54000"); line != "" {
+	if line := logs.Lines("SQLSTATE 54000"); line != "" {
 		t.Fatalf("a settlement failed on an index key past its limit: %.400s", line)
 	}
 }

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"errors"
-	"net/http"
 	"strings"
 	"testing"
 
@@ -16,14 +14,17 @@ import (
 // subject index) before it decodes the message, and acknowledges at once one no session needs from
 // it: on a subject nobody here follows, on one only a session that takes stored messages itself
 // follows (counted as its skipped delivery), or on the agent subject of another listener's session.
-// A followed subject, and the agent subject of a session nobody has, are decoded as before. Every
-// message here is undecodable, so a decode shows as the handler's decode failure.
+// A followed subject whose session the durable path must still deliver to, and the agent subject
+// of a session nobody has, are decoded as before. Every message here is undecodable, so a decode
+// shows as the handler's decode failure.
 func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testing.T) {
 	t.Parallel()
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("unexpected prompt_async request")
-	}))
-	harness.registerTarget(t, "ses_core", "notifications.dispatch.issue.FOLLOWED-1.>")
+	harness := newListenerDeliveryHarness(t)
+	// An interest whose session entry has lapsed: the durable cannot read a record saying the
+	// session takes the message itself, so it decodes and delivers it (durableNeedsDelivery).
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_followed", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.FOLLOWED-1.>"}); err != nil {
+		t.Fatalf("register the followed session's interest: %v", err)
+	}
 	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_self", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
 		t.Fatalf("register the self-subscribed session's interest: %v", err)
 	}

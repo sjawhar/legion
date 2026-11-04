@@ -5,38 +5,14 @@ import (
 	"testing"
 )
 
-// The subscribe payload carries whether the claiming process is driving the
-// session; it must reach the session registry so competing claims can be
-// arbitrated (see session.mergeForClaim). Dropping it silently reinstates
-// last-writer-wins routing.
-func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
-	t.Parallel()
-	got := sessionEntryFromSubscribe(subscribeBody{
-		SessionID: "ses_x",
-		Dir:       "/work",
-		Port:      42145,
-		Title:     "ipi eval",
-		Driving:   true,
-	}, "devbox-sami", sessionDeliveryOutcome{})
-
-	if !got.Driving {
-		t.Fatalf("expected Driving to be carried into the session entry, got %+v", got)
-	}
-	if got.Port != 42145 || got.Dir != "/work" || got.Title != "ipi eval" || got.MachineID != "devbox-sami" {
-		t.Fatalf("unexpected entry mapping: %+v", got)
-	}
-}
-
-// envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names
-// where the session process actually runs, which is the address a listener reaches the session's
-// serving port at when no host bridge of its own machine applies. It must reach the session entry
-// as Host, kept separate from MachineID (always the registering listener's own machine, never the
-// caller's), which decides which listener fans a topic out to the session.
+// envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names where
+// the session process actually runs. No delivery reads it, and it must still reach the session
+// entry as Host, kept separate from MachineID (always the registering listener's own machine,
+// never the caller's), which decides which listener fans a topic out to the session.
 func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID: "ses_z",
-		Port:      1,
 		Host:      "example-host-a",
 	}, "example-listener", sessionDeliveryOutcome{})
 
@@ -51,10 +27,9 @@ func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 	t.Parallel()
 	// An older plugin's subscribeBody has no "host" key; sessionEntryFromSubscribe must not
-	// invent one: an empty Host is what sends the owning listener's delivery (the only one; no
-	// other listener delivers to the session) to its fallback, host.docker.internal, and display
-	// to MachineID (HostOrMachine).
-	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener", sessionDeliveryOutcome{})
+	// invent one: an empty Host is what sends the session list's display to MachineID
+	// (HostOrMachine).
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old"}, "example-listener", sessionDeliveryOutcome{})
 
 	if got.Host != "" {
 		t.Fatalf("expected Host to stay empty for a payload without the field, got %+v", got)
@@ -92,7 +67,6 @@ func TestSessionEntryFromSubscribe_CarriesTheClientInstanceID(t *testing.T) {
 	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID:        "ses_instance",
-		Port:             42145,
 		ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a",
 	}, "example-listener", sessionDeliveryOutcome{})
 
@@ -125,15 +99,6 @@ func TestSessionEntryFromSubscribe_DefaultsTheClientInstanceIDEmpty(t *testing.T
 
 	if got.ClientInstanceID != "" {
 		t.Fatalf("expected no client instance id for a payload without the field, got %+v", got)
-	}
-}
-
-func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
-	t.Parallel()
-	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami", sessionDeliveryOutcome{})
-
-	if got.Driving {
-		t.Fatalf("expected a payload without the flag to claim non-driving, got %+v", got)
 	}
 }
 

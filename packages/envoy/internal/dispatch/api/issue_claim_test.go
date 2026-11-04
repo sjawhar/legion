@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // liveRegistry is the roster the Envoy listener answers from, which a test moves to start or
@@ -77,11 +78,13 @@ func claimListener(t *testing.T, live *liveRegistry, gate func(lookup int)) *htt
 }
 
 // claimHandler is a server whose Envoy listener lists exactly the sessions in live and never
-// holds a lookup open, with the database behind it for a test that reaches past the routes.
-func claimHandler(t *testing.T, live *liveRegistry) (http.Handler, *store.Store) {
+// holds a lookup open, with the database behind it, and its Deps for a test that needs to run one
+// request on a connection of its own (oneConnectionHandler), for a test that reaches past the
+// routes.
+func claimHandler(t *testing.T, live *liveRegistry) (http.Handler, *store.Store, Deps) {
 	t.Helper()
-	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
-	return handler, database
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
+	return handler, database, deps
 }
 
 // claimWalkHandler is claimHandler whose legion-label walk runs sql in place of the production
@@ -190,7 +193,7 @@ func TestClaimRefusesALiveHolderAndPassesOnWhenThatSessionEnds(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 
 	first := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -324,7 +327,7 @@ func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 
 	// A human's claim is the human's, whatever session the body names: a cookie caller's
@@ -376,7 +379,7 @@ func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 
 	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -445,7 +448,7 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 
 	lowercase := labelledIssueKey(t, handler, "TEST", "Rotate the staging certificates", []string{"legion"}, "")
 	uppercase := labelledIssueKey(t, handler, "TEST", "Back up the metrics volume", []string{"Legion"}, "")
@@ -639,7 +642,7 @@ func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	claim := func(id string) *httptest.ResponseRecorder {
 		return bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -695,7 +698,7 @@ func TestClosingAnIssueReleasesItsClaimAndAClosedIssueTakesNone(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -751,7 +754,7 @@ func TestClaimIsOnEveryIssueRead(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _ := claimHandler(t, live)
+	handler, _, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -1045,15 +1048,15 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	t.Run("a stale self-release", func(t *testing.T) {
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
-		handler, database := claimHandler(t, live)
+		handler, database, deps := claimHandler(t, live)
 		key := claimIssueKey(t, handler, "todo")
 		if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 			"actor": claimActorBody("session-one", "First holder"),
 		}); response.Code != http.StatusOK {
 			t.Fatalf("first claim: status=%d body=%s", response.Code, response.Body.String())
 		}
-		answer := whileTheRowIsHeld(t, database, key, "session-two", func() *httptest.ResponseRecorder {
-			return bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/claim", map[string]any{
+		answer := whileTheRowIsHeld(t, database, deps, key, "session-two", func(callHandler http.Handler) *httptest.ResponseRecorder {
+			return bearerRequest(t, callHandler, http.MethodDelete, "/api/v1/issues/"+key+"/claim", map[string]any{
 				"actor": claimActorBody("session-one", "First holder"),
 			})
 		})
@@ -1063,10 +1066,10 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	t.Run("a claim judged against nobody", func(t *testing.T) {
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
-		handler, database := claimHandler(t, live)
+		handler, database, deps := claimHandler(t, live)
 		key := claimIssueKey(t, handler, "todo")
-		answer := whileTheRowIsHeld(t, database, key, "session-two", func() *httptest.ResponseRecorder {
-			return bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		answer := whileTheRowIsHeld(t, database, deps, key, "session-two", func(callHandler http.Handler) *httptest.ResponseRecorder {
+			return bearerRequest(t, callHandler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 				"actor": claimActorBody("session-one", "First holder"),
 			})
 		})
@@ -1079,9 +1082,14 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 // `select ... for no key update` claimWrite takes — waits until the request is queued behind that
 // lock, writes the new holder and commits, so the change lands inside the request with no
 // production seam and no second server.
+//
+// The request runs through a handler of its own whose store holds one connection
+// (oneConnectionHandler), so the wait watches the backend of the request under test. A count of
+// the backends behind the row would also take the issue's document settlement, which locks the
+// same row, for the request, and the test would go on before the request had queued.
 func whileTheRowIsHeld(
-	t *testing.T, database *store.Store, key string, holder string,
-	request func() *httptest.ResponseRecorder,
+	t *testing.T, database *store.Store, deps Deps, key string, holder string,
+	request func(http.Handler) *httptest.ResponseRecorder,
 ) *httptest.ResponseRecorder {
 	t.Helper()
 	ctx := context.Background()
@@ -1093,9 +1101,12 @@ func whileTheRowIsHeld(
 	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
 		t.Fatalf("hold the issue row: %v", err)
 	}
+	callHandler, callPID := oneConnectionHandler(t, deps)
 	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- request() }()
-	awaitRowLockWaiter(t, database)
+	go func() { answered <- request(callHandler) }()
+	if response, early := storetest.WaitForQueuedBehind(t, tx, callPID, answered, 10*time.Second); early {
+		t.Fatalf("the request answered %d before it queued behind the issue row: %s", response.Code, response.Body.String())
+	}
 	holderActor := model.Actor{
 		Kind:   "session",
 		ID:     holder,
@@ -1136,7 +1147,7 @@ func TestAClaimWriteThatWaitedNeverMovesUpdatedAtBackward(t *testing.T) {
 		t.Run(write.name, func(t *testing.T) {
 			live := &liveRegistry{}
 			live.set("session-one")
-			handler, database := claimHandler(t, live)
+			handler, database, deps := claimHandler(t, live)
 			key := claimIssueKey(t, handler, "todo")
 			if write.method == http.MethodDelete {
 				if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{}, "alice"); response.Code != http.StatusOK {
@@ -1152,11 +1163,17 @@ func TestAClaimWriteThatWaitedNeverMovesUpdatedAtBackward(t *testing.T) {
 			if err := holder.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
 				t.Fatalf("hold the issue row: %v", err)
 			}
+			// The write runs on a connection of its own, and the test goes on once that backend is
+			// queued behind the issue row. A count of waiters would also take the issue's document
+			// settlement, which locks the same row, for the write under test.
+			callHandler, callPID := oneConnectionHandler(t, deps)
 			answered := make(chan *httptest.ResponseRecorder, 1)
 			go func() {
-				answered <- dispatchRequest(t, handler, write.method, "/api/v1/issues/"+key+"/claim", write.body, "alice")
+				answered <- dispatchRequest(t, callHandler, write.method, "/api/v1/issues/"+key+"/claim", write.body, "alice")
 			}()
-			waitForDatabaseLocks(t, holder, 1)
+			if response, early := storetest.WaitForQueuedBehind(t, holder, callPID, answered, 10*time.Second); early {
+				t.Fatalf("%s answered %d before it queued behind the issue row: %s", write.name, response.Code, response.Body.String())
+			}
 			var stamped time.Time
 			if err := holder.QueryRow(ctx, `
 				update issues set updated_at = clock_timestamp() where key = $1 returning updated_at
@@ -1198,7 +1215,7 @@ func TestAnIssueWriteKeepsAnUpdatedAtAheadOfItsClock(t *testing.T) {
 	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, database := claimHandler(t, live)
+	handler, database, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	future := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
 	if _, err := database.Pool.Exec(context.Background(), `update issues set updated_at = $2 where key = $1`, key, future); err != nil {
@@ -1221,30 +1238,6 @@ func TestAnIssueWriteKeepsAnUpdatedAtAheadOfItsClock(t *testing.T) {
 		if got := decodeBody[model.Issue](t, response).UpdatedAt; !got.Equal(future) {
 			t.Fatalf("%s answered updated_at %s, want the later %s the row held", write.name, got, future)
 		}
-	}
-}
-
-// awaitRowLockWaiter waits until a backend of this test's own database is waiting on a lock:
-// the request under test, stopped at the issue's row lock inside claimWrite. Scoped to
-// current_database() because one Postgres serves every test in the package.
-func awaitRowLockWaiter(t *testing.T, database *store.Store) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var waiting int
-		if err := database.Pool.QueryRow(context.Background(), `
-			select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()
-		`).Scan(&waiting); err != nil {
-			t.Fatalf("read pg_stat_activity: %v", err)
-		}
-		if waiting > 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the request never reached the issue's row lock")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 

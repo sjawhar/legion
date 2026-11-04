@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/redact"
@@ -30,7 +31,10 @@ type Server struct {
 	Hostname string
 	PeerOf   func(*net.UnixConn) (*Peer, error)
 	Log      *slog.Logger
-	// MinRenew floors the renew cadence; the interval is a third of the lease the broker gave.
+	// MinRenew floors the renew cadence; the interval is a third of the lease the broker gave,
+	// never below it (leasetime.HelperRenewAfter). Every caller sets it:
+	// cmd/agent-secrets-helper sets leasetime.HelperMinRenew, the wait the broker's lease bound
+	// counts this renewer by, and a test sets a shorter one to drive the loop in real time.
 	MinRenew time.Duration
 	// EnrollRetryMin and EnrollRetryMax are the first and the longest wait of the retry that
 	// enrolls a session and revokes a lapsed enrollment, and RevokeRetry the one wait of the
@@ -644,7 +648,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 // retry: a corrected clock can make the next proof valid.
 func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) bool {
 	for {
-		interval := max(s.MinRenew, time.Until(lease)/3)
+		interval := leasetime.HelperRenewAfter(time.Until(lease), s.MinRenew)
 		select {
 		case <-time.After(interval):
 		case <-sess.stop:

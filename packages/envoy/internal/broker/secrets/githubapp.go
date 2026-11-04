@@ -79,7 +79,7 @@ type githubAccessTokensBody struct {
 
 // readOnlyPermissions are the permissions a read-only narrowing asks GitHub for, and the most a
 // token minted for one may hold.
-var readOnlyPermissions = map[string]string{"contents": "read", "metadata": "read"}
+var readOnlyPermissions = map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read"}
 
 // narrowsToken reports whether n narrows the token GitHub mints, not only which installation it is
 // minted for: whether it sends GitHub an access_tokens body.
@@ -167,10 +167,10 @@ func (n *GitHubNarrowing) heldBy(token githubInstallationToken) error {
 		}
 		for _, permission := range slices.Sorted(maps.Keys(token.Permissions)) {
 			if _, asked := readOnlyPermissions[permission]; !asked {
-				return errors.New("GitHub's token holds a permission past contents and metadata")
+				return errors.New("GitHub's token holds a permission past contents, metadata and pull requests")
 			}
 			if token.Permissions[permission] != readOnlyPermissions[permission] {
-				return errors.New("GitHub's token holds more than read access to contents or metadata")
+				return errors.New("GitHub's token holds more than read access to contents, metadata or pull requests")
 			}
 		}
 	}

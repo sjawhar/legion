@@ -89,7 +89,7 @@ func TestSendReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	const target = "ses_cold_cache_target"
 	registrar, cold := trailingListeners(t)
 	if err := registrar.sessions.Put(target, session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "cold target",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "cold target",
 	}); err != nil {
 		t.Fatalf("register %s through the other listener: %v", target, err)
 	}
@@ -170,7 +170,7 @@ func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 		t.Fatalf("open the session registry: %v", err)
 	}
 	if err := sessions.Put(target, session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "cut target",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "cut target",
 	}); err != nil {
 		t.Fatalf("register %s: %v", target, err)
 	}
@@ -284,7 +284,7 @@ func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testin
 				t.Fatalf("open the session registry: %v", err)
 			}
 			if err := sessions.Put(target, session.SessionEntry{
-				Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "frozen target",
+				SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "frozen target",
 			}); err != nil {
 				t.Fatalf("register %s: %v", target, err)
 			}
@@ -346,7 +346,7 @@ func TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish(t *testing.T) 
 	t.Parallel()
 	const target = "ses_refused_publish_target"
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{target})
 	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	// The stream goes after every store is open: opening one reconciles the stream back.
 	if err := client.JS().DeleteStream(bus.Stream); err != nil {
@@ -446,7 +446,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 	const target = "ses_recorded_target"
 	const sender = "ses_recorded_sender"
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1, sender: 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{target, sender})
 	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	send := func(body string) (*httptest.ResponseRecorder, map[string]any) {
 		t.Helper()
@@ -583,30 +583,32 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"payload_summary": "deploy complete",
 	})
 
+	// A role nobody holds: the listener keeps the message for the role's next holder and answers
+	// 202, so the line is an accepted one. There is still no holder to name.
 	unclaimed := contracts.RoleTopicPrefix + "recorded-unclaimed"
-	refused, refusedRecord := publish(sendBody(map[string]any{
+	keptUnclaimed, keptUnclaimedRecord := publish(sendBody(map[string]any{
 		"topic":          unclaimed,
 		"source":         "agent",
 		"source_session": sender,
 		"message":        "nobody holds this",
 	}))
-	if refused.Code != http.StatusNotFound {
-		t.Fatalf("a publish to a role nobody holds: status %d, body %s; want 404", refused.Code, refused.Body.String())
+	if keptUnclaimed.Code != http.StatusAccepted {
+		t.Fatalf("a publish to a role nobody holds: status %d, body %s; want 202 for a kept message", keptUnclaimed.Code, keptUnclaimed.Body.String())
 	}
-	assertRecordFields(t, refusedRecord, map[string]any{
+	assertRecordFields(t, keptUnclaimedRecord, map[string]any{
 		"msg":            "listener publish",
-		"level":          "WARN",
-		"outcome":        "role_unclaimed",
-		"status":         float64(http.StatusNotFound),
+		"level":          "INFO",
+		"outcome":        "accepted",
+		"status":         float64(http.StatusAccepted),
 		"topic":          unclaimed,
 		"source_session": sender,
 	})
-	if holder, ok := refusedRecord["holder"]; ok {
+	if holder, ok := keptUnclaimedRecord["holder"]; ok {
 		t.Fatalf("the unclaimed role's line names holder %v: there is no holder to name", fmt.Sprint(holder))
 	}
 
-	// The role is claimed, but by a session the store does not hold: the claim has lapsed, and the
-	// line names the holder the answer's own body names.
+	// The role is claimed, but by a session the store does not hold: the claim has lapsed, its
+	// message is kept too, and the line names the holder the answer's own body names.
 	const lapsedHolder = "ses_recorded_lapsed_holder"
 	lapsedRole := "recorded-lapsed"
 	if _, err := registry.SetRole(lapsedHolder, "test-machine", lapsedRole, false); err != nil {
@@ -619,14 +621,14 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"source_session": sender,
 		"message":        "is the holder still there?",
 	}))
-	if lapsed.Code != http.StatusNotFound {
-		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 404", lapsed.Code, lapsed.Body.String())
+	if lapsed.Code != http.StatusAccepted {
+		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 202 for a kept message", lapsed.Code, lapsed.Body.String())
 	}
 	assertRecordFields(t, lapsedRecord, map[string]any{
 		"msg":             "listener publish",
-		"level":           "WARN",
-		"outcome":         "role_lapsed",
-		"status":          float64(http.StatusNotFound),
+		"level":           "INFO",
+		"outcome":         "accepted",
+		"status":          float64(http.StatusAccepted),
 		"topic":           lapsedTopic,
 		"source":          "agent",
 		"source_session":  sender,

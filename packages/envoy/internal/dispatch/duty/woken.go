@@ -43,10 +43,6 @@ type WokenLoop struct {
 	Idle func()
 }
 
-// exclusiveFunc is Exclusive's signature: RunWoken passes Exclusive itself, and a test of the
-// schedule passes a lease of its own making in its place.
-type exclusiveFunc func(ctx context.Context, leases Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool
-
 // RunWoken runs loop until ctx is cancelled: one pass at once, then a pass on each wake and at each
 // due time a pass returned, never sooner than loop.MinGap after the previous pass started. Between
 // those it holds no timer and makes no statement, so a loop with nothing to do costs nothing - the
@@ -63,7 +59,7 @@ func RunWoken(ctx context.Context, loop WokenLoop) {
 	loop.run(ctx, Exclusive)
 }
 
-func (l WokenLoop) run(ctx context.Context, exclusive exclusiveFunc) {
+func (l WokenLoop) run(ctx context.Context, exclusive ExclusiveFunc) {
 	if l.Lease != "" && l.MinGap <= 0 {
 		panic("duty: a leased WokenLoop needs a positive MinGap")
 	}
@@ -141,7 +137,7 @@ func (l WokenLoop) run(ctx context.Context, exclusive exclusiveFunc) {
 
 // attempt runs one pass, under the lease when the loop has one, and reports whether it ran and
 // the due time it returned.
-func (l WokenLoop) attempt(ctx context.Context, exclusive exclusiveFunc) (next time.Time, ran bool) {
+func (l WokenLoop) attempt(ctx context.Context, exclusive ExclusiveFunc) (next time.Time, ran bool) {
 	if l.Lease == "" {
 		return l.Pass(ctx), true
 	}
