@@ -148,10 +148,13 @@ func TestAClaimSurvivesItsHoldersSilenceForTheGrace(t *testing.T) {
 	grace := contracts.IssueClaimUnresponsiveGrace
 	for _, rule := range []struct {
 		name string
-		humanRule
+		personRule
 	}{
-		{name: "a claim", humanRule: humanRule{forcible: true}},
-		{name: "a release", humanRule: humanRule{override: true}},
+		{name: "a claim", personRule: personRule{forcible: true}},
+		// A release carries no force, and its override is the `person` scope the request's own
+		// credential holds (handleIssueClaimDelete), which another agent does not: the rule it
+		// reaches claimBlockedBy with is the zero one.
+		{name: "an agent's release", personRule: personRule{}},
 	} {
 		for _, tc := range []struct {
 			name    string
@@ -167,7 +170,7 @@ func TestAClaimSurvivesItsHoldersSilenceForTheGrace(t *testing.T) {
 			{name: "once the holder is gone", state: envoy.StateGone, now: lastSeen.Add(2 * time.Hour)},
 		} {
 			judged := unresponsiveHolder(holder, tc.state, lastSeen)
-			blocked := claimBlockedBy(holder, contender, rule.humanRule, judged, tc.now)
+			blocked := claimBlockedBy(holder, contender, rule.personRule, judged, tc.now)
 			if (blocked != nil) != tc.blocked {
 				t.Fatalf("%s %s: %v, want blocked=%v", rule.name, tc.name, blocked, tc.blocked)
 			}
@@ -197,7 +200,7 @@ func TestAClaimSurvivesItsHoldersSilenceForTheGrace(t *testing.T) {
 	// release route; the grace holds agents apart, never a human off the issue.
 	human := model.Actor{Kind: "user", ID: "alice@example.com"}
 	judged := unresponsiveHolder(holder, envoy.StateUnresponsive, lastSeen)
-	for _, rule := range []humanRule{{override: true, forcible: true}, {override: true}} {
+	for _, rule := range []personRule{{override: true, forcible: true}, {override: true}} {
 		if blocked := claimBlockedBy(holder, human, rule, judged, lastSeen.Add(time.Minute)); blocked != nil {
 			t.Fatalf("a person over an unresponsive holder: %v, want it allowed", blocked)
 		}
@@ -212,7 +215,7 @@ func TestAnUndatedSilenceKeepsTheClaim(t *testing.T) {
 	judged := judgement{holder: holder, live: holderLiveness{fetched: true, holder: &envoy.Session{
 		SessionID: "ses-stalled", State: envoy.StateUnresponsive,
 	}}}
-	blocked := claimBlockedBy(holder, model.Actor{Kind: "session", ID: "ses-two"}, humanRule{forcible: true}, judged, time.Now())
+	blocked := claimBlockedBy(holder, model.Actor{Kind: "session", ID: "ses-two"}, personRule{forcible: true}, judged, time.Now())
 	if blocked == nil {
 		t.Fatal("an unresponsive holder with no last_seen lost its claim; nothing established when it was last seen")
 	}
@@ -254,7 +257,7 @@ func TestTheRefusalAndTheIssueReadShareTheGracesBoundary(t *testing.T) {
 		{name: "a millisecond past it", now: takeableAt.Add(time.Millisecond)},
 	} {
 		judged := unresponsiveHolder(holder, envoy.StateUnresponsive, lastSeen)
-		blocked := claimBlockedBy(holder, contender, humanRule{forcible: true}, judged, tc.now)
+		blocked := claimBlockedBy(holder, contender, personRule{forcible: true}, judged, tc.now)
 		if (blocked != nil) != tc.blocked {
 			t.Fatalf("%s: a take is refused with %v, want blocked=%v", tc.name, blocked, tc.blocked)
 		}
