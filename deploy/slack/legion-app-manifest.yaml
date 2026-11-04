@@ -9,6 +9,12 @@
 #   - store the Bot User OAuth Token (xoxb-…) in the secrets broker as LEGION_SLACK_BOT_TOKEN, owner
 #     legion-daemon, tier agent;
 #   - invite the app to every channel a project's slack_channels names (`/invite @Legion`).
+#
+# The controller reads the thread of a mention posted inside one, with Slack's
+# conversations.replies method, which needs channels:history in a public channel and
+# groups:history in a private one. An app made before these two scopes were listed here does not
+# hold them: an operator adds them to the app's bot scopes and reinstalls the app to the
+# workspace, and Slack answers the read missing_scope until they do.
 display_information:
   name: Legion
   description: Ask the project's Legion controller from its Slack channel.
@@ -21,6 +27,8 @@ oauth_config:
     bot:
       - app_mentions:read
       - chat:write
+      - channels:history
+      - groups:history
 settings:
   event_subscriptions:
     request_url: https://envoy.internal.example/webhook/slack
