@@ -863,9 +863,8 @@ func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
 	// The body's own size is measured once, as one value, and the allocation below takes that
 	// value and no arithmetic of its own: a reader of this function, and the analysis CI runs
 	// over it, sees the number the buffer is made from bounded by the constant on the line
-	// before. The subtraction keeps the measurement itself under the bound, and a size that is
-	// not positive is a sum that wrapped, which no caller can produce and which is refused here
-	// rather than passed to make.
+	// before. A size that is not positive is a sum that wrapped, which no caller can produce and
+	// which is refused here rather than passed to make.
 	size := len(head) + 1 + len(b.Bundle)
 	if size <= 0 || size > MaxWorkspaceBundleBodyBytes {
 		return nil, fmt.Errorf("%w: a workspace bundle of %d bytes and a header of %d are over the %d a launcher_bundle sequence carries",

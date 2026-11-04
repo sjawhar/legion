@@ -153,10 +153,10 @@ func (s *Store) WorkspaceBundleSize(ctx context.Context, issue string) (int, boo
 	return size, true, nil
 }
 
-// DeleteWorkspaceBundle drops issue's bundle whatever release saved it: a wake cancelled the
-// release before the pod went, the release saved a workspace with nothing unpushed, or the
-// issue's work is over. Deleting one the table does not hold is success, so a retried delete
-// finishes.
+// DeleteWorkspaceBundle drops issue's bundle whatever release saved it: the release saved a
+// workspace with nothing unpushed, or the issue's work is over. A cancelled release deletes its
+// own bundle in its cancel's transaction (CancelIssueRelease), not here. Deleting one the table
+// does not hold is success, so a retried delete finishes.
 func (s *Store) DeleteWorkspaceBundle(ctx context.Context, issue string) error {
 	if _, err := s.pool.Exec(ctx, `delete from workspace_bundles where issue = $1`, issue); err != nil {
 		return fmt.Errorf("delete the workspace bundle of %s: %w", issue, err)
