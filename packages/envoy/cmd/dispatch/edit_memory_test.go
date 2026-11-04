@@ -3,18 +3,26 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 )
 
 // A one-word edit of the heaviest documents the element limit admits, and the settlement after it,
 // hold at most the bound above the idle memory of a server that has not loaded the document, on a
-// real Dispatch process (LEGION-504). Each document is edited on peakRuns fresh servers and the
-// least of their peaks is held to the bound, since garbage the collector has not reclaimed only
-// adds to one run's peak (peaksAboveIdle has the numbers).
+// real Dispatch process (LEGION-504). Each document is edited once, on a fresh server of its own.
+//
+// The row failed at random in CI for two reasons, both of them repaired (INFRA-985). A measured
+// server could start while a document was owed a block index or a settlement, so the block-index
+// pass - which reads another, far heavier document - ran inside the measured window and the peak
+// was that pass's memory and not the edit's; the harness now leaves nothing owed when it starts a
+// server and fails where a pass logs inside a window (memoryHarness.drainBeforeStart,
+// memoryServer.peakAboveIdle). And the server ran at Go's default GOGC=100, where the collector
+// lets the heap grow to twice the live set before it collects, so the peak carried an unbounded
+// amount of garbage and varied from run to run; every measured server now runs at GOGC=25. With
+// the window holding only the edit and the collector's margin bounded, one run per document says
+// what the edit holds, and the least of three runs this test used to hold to the bound is no
+// longer needed.
 func TestAColdEditOfTheHeaviestDocumentsStaysWithinTheMemoryBound(t *testing.T) {
 	memory := newMemoryHarness(t)
 	writer := memory.start(t)
@@ -31,35 +39,23 @@ func TestAColdEditOfTheHeaviestDocumentsStaysWithinTheMemoryBound(t *testing.T) 
 	writer.stop(t)
 	for _, document := range documents {
 		t.Run(document.name, func(t *testing.T) {
-			// Each run swaps the sentinel word for its other spelling and back, so every run is a
-			// one-word edit of the same document.
-			words := [2]string{sentinelWord, "wird"}
-			run := 0
-			peaks := memory.peaksAboveIdle(t, peakRuns, func(server *memoryServer) {
-				from, to := words[run%2], words[(run+1)%2]
-				run++
-				answer := server.edit(t, document.artifactID, map[string]any{"op": "replace", "find": from, "with": to})
+			server := memory.start(t)
+			// The edit swaps the sentinel word for its other spelling, so it is one word of the
+			// document and leaves the document's length as it was.
+			peak := server.peakAboveIdle(t, func() {
+				answer := server.edit(t, document.artifactID, map[string]any{"op": "replace", "find": sentinelWord, "with": "wird"})
 				if answer.status != http.StatusOK {
 					t.Fatalf("a one-word edit of %s answered %d %.300s, want 200", document.name, answer.status, answer.body)
 				}
 				memory.waitForSettled(t, document.artifactID)
 			})
-			least := slices.Min(peaks)
-			t.Logf("%s: a cold one-word edit and its settlement, %d MiB above idle at least (%s)", document.name, least>>20, mebibytes(peaks))
-			if least > requestMemoryBound {
-				t.Errorf("a cold one-word edit of %s held %d MiB above idle in each of %d runs, want at most %d MiB", document.name, least>>20, peakRuns, requestMemoryBound>>20)
+			server.stop(t)
+			t.Logf("%s: a cold one-word edit and its settlement, %d MiB above idle", document.name, peak>>20)
+			if peak > requestMemoryBound {
+				t.Errorf("a cold one-word edit of %s held %d MiB above idle, want at most %d MiB", document.name, peak>>20, requestMemoryBound>>20)
 			}
 		})
 	}
-}
-
-// mebibytes lists peaks in MiB, as the test logs them.
-func mebibytes(peaks []int64) string {
-	shown := make([]string, len(peaks))
-	for index, peak := range peaks {
-		shown[index] = fmt.Sprintf("%d MiB", peak>>20)
-	}
-	return strings.Join(shown, ", ")
 }
 
 // sentinelWord is a word no heaviest admitted document holds but where withSentinelWord puts it.

@@ -27,6 +27,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -120,6 +122,7 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	t.Helper()
 	held := cmdtest.HoldPort(t)
 	port := strconv.Itoa(held.Port)
+	h.drainBeforeStart(t, port)
 	command := exec.Command(os.Args[0])
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -135,6 +138,13 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_PORT=" + port,
 		"DISPATCH_WEB_DIST=" + t.TempDir(),
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
+		// Every measured server collects at GOGC=25, so a peak above idle reads the memory a
+		// request holds plus the collector's margin at that setting, not the resident memory
+		// production shows at Go's default GOGC=100, where the collector lets the heap grow to
+		// twice the live set before it collects and an edit can raise resident memory by up to
+		// about twice what it holds. A test that needs another value sets GOGC in
+		// memoryHarness.env, which is appended after this and wins.
+		"GOGC=25",
 	}
 	command.Env = append(command.Env, h.env...)
 	held.Pass(command, "DISPATCH_LISTEN_FD")
@@ -182,6 +192,183 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	return server
 }
 
+// owedBeforeStart is what the test's database owes when a server is about to start: the documents
+// owed a block index, the items owed an index with the block grammar, the comments, messages and
+// asks owed a block index of their own blocks, and the documents owed a settlement.
+type owedBeforeStart struct {
+	documents   int
+	items       int
+	itemBlocks  int
+	settlements int
+}
+
+// readOwed reads in one statement everything a starting server would find owed.
+func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
+	t.Helper()
+	var owed owedBeforeStart
+	if err := h.database.Pool.QueryRow(context.Background(), `
+		select (select count(*) from document_block_versions where version is null),
+		       (select count(*) from block_grammar_owed),
+		       (select count(*) from comment_block_state where owed_at is not null)
+		         + (select count(*) from message_block_state where owed_at is not null)
+		         + (select count(*) from ask_block_state where owed_at is not null),
+		       (select count(*) from doc_settlements_pending)
+	`).Scan(&owed.documents, &owed.items, &owed.itemBlocks, &owed.settlements); err != nil {
+		t.Fatalf("read what a starting server would find owed: %v", err)
+	}
+	return owed
+}
+
+// drainBeforeStart leaves the database owing nothing the server about to start would do inside a
+// measured window. A fresh server arms the settlement of every row older than a minute at start
+// and every minute after (internal/dispatch/docs/resume.go:14,22) and indexes the blocks of every
+// document owed one, both of which read whole documents: left owed, either runs inside the next
+// window, and the peak measured there is that work's memory and not the request's.
+func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
+	t.Helper()
+	owed := h.readOwed(t)
+	if owed.settlements > 0 {
+		h.awaitOwedSettlements(t)
+	}
+	var documents, items, itemBlocks int
+	if owed.documents+owed.items+owed.itemBlocks > 0 {
+		documents, items, itemBlocks = h.writeOwedBlockIndex(t, port)
+	}
+	t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed 0",
+		t.Name(), documents, items, itemBlocks)
+}
+
+// awaitOwedSettlements waits for the settlements owed before a server starts to go. A running
+// server settles a write two seconds after it and nothing in this test process settles anything,
+// so a row that stands past the wait is one no server will clear: the test that wrote the document
+// must wait for it.
+func (h *memoryHarness) awaitOwedSettlements(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		pending := h.pendingSettlements(t)
+		if len(pending) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a settlement was still owed ten seconds before a measured server started (%s); the test must call memory.waitForSettled on each document it wrote before it starts a measured server",
+				strings.Join(pending, "; "))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// pendingSettlements names each document owed a settlement, with the marked_at of its row.
+func (h *memoryHarness) pendingSettlements(t *testing.T) []string {
+	t.Helper()
+	rows, err := h.database.Pool.Query(context.Background(),
+		`select artifact_id::text, marked_at from doc_settlements_pending order by marked_at`)
+	if err != nil {
+		t.Fatalf("read the documents owed a settlement: %v", err)
+	}
+	defer rows.Close()
+	var pending []string
+	for rows.Next() {
+		var artifactID string
+		var markedAt time.Time
+		if err := rows.Scan(&artifactID, &markedAt); err != nil {
+			t.Fatalf("read a document owed a settlement: %v", err)
+		}
+		pending = append(pending, fmt.Sprintf("%s marked at %s", artifactID, markedAt.Format(time.RFC3339Nano)))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the documents owed a settlement: %v", err)
+	}
+	return pending
+}
+
+// writeOwedBlockIndex writes the block index the server would have written, through a service of
+// this test process on the test's database, and reports what it indexed. ServerURL is the port the
+// test already holds, the one refs.ReindexOwedItem hands text.ExtractAt, so the index is the one
+// the server would have written. The service is built only where something is owed and is shut
+// down before the server starts, so neither its compaction queue nor a lease of its own outlives
+// this step.
+func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, port string) (documents, items, itemBlocks int) {
+	t.Helper()
+	service := docs.New(docs.Deps{Store: h.database, Events: events.NewBroker(), ServerURL: "http://127.0.0.1:" + port})
+	defer service.Shutdown(context.Background())
+	ctx := context.Background()
+	deadline := time.Now().Add(120 * time.Second)
+	var cursor string
+	// liveAheadTicks counts the ticks in a row that indexed nothing and found a document live
+	// ahead: two of them say the drain cannot finish, since only a settlement moves such a
+	// document on and nothing here settles one.
+	liveAheadTicks := 0
+	for {
+		tick, err := service.ReconcileBlockIndex(ctx, cursor, nil)
+		if err != nil {
+			t.Fatalf("write the block index a starting server would write: %v", err)
+		}
+		cursor = tick.Cursor
+		documents += tick.Documents
+		items += tick.Items
+		itemBlocks += tick.ItemBlocks
+		indexed := tick.Documents + tick.Items + tick.ItemBlocks
+		if tick.OwedDocuments+tick.OwedItems+tick.OwedItemBlocks == 0 {
+			return documents, items, itemBlocks
+		}
+		if indexed == 0 && tick.LiveAhead > 0 {
+			liveAheadTicks++
+			if liveAheadTicks > 1 {
+				t.Fatalf("the block index is owed documents whose stored text is ahead of their latest version, which nothing in this test process settles: %s",
+					strings.Join(h.owedDocumentNames(t), "; "))
+			}
+		} else {
+			liveAheadTicks = 0
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the block index was still owed %d documents, %d items and %d item blocks two minutes into the drain: %s",
+				tick.OwedDocuments, tick.OwedItems, tick.OwedItemBlocks, strings.Join(h.owedDocumentNames(t), "; "))
+		}
+		if indexed == 0 {
+			// A document the tick could not index is logged and left owed, so a loop that indexes
+			// nothing would otherwise read the whole owed set as fast as the database answers
+			// until the deadline. Wait as the settlement poll does, so the drain costs the
+			// database no more than ten reads a second while it gets nowhere.
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// owedDocumentNames names each document still owed a block index, with the marked_at of its
+// pending settlement where it has one: a document live ahead owes one.
+func (h *memoryHarness) owedDocumentNames(t *testing.T) []string {
+	t.Helper()
+	rows, err := h.database.Pool.Query(context.Background(), `
+		select owed.artifact_id::text, pending.marked_at
+		from document_block_versions owed
+		left join doc_settlements_pending pending on pending.artifact_id = owed.artifact_id
+		where owed.version is null
+		order by owed.artifact_id
+	`)
+	if err != nil {
+		t.Fatalf("read the documents owed a block index: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var artifactID string
+		var markedAt *time.Time
+		if err := rows.Scan(&artifactID, &markedAt); err != nil {
+			t.Fatalf("read a document owed a block index: %v", err)
+		}
+		if markedAt == nil {
+			names = append(names, artifactID+" owing no settlement")
+			continue
+		}
+		names = append(names, fmt.Sprintf("%s marked at %s", artifactID, markedAt.Format(time.RFC3339Nano)))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the documents owed a block index: %v", err)
+	}
+	return names
+}
+
 func (p *memoryServer) stop(t *testing.T) {
 	t.Helper()
 	select {
@@ -226,32 +413,21 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
 		t.Fatalf("reset the server's peak memory: %v", err)
 	}
+	written := p.output.len()
 	during()
-	return p.resident(t, "VmHWM") - p.idle
-}
-
-// peakRuns is how many fresh servers peaksAboveIdle measures a request on.
-const peakRuns = 3
-
-// peaksAboveIdle runs during on runs fresh servers, each started for it and stopped after, and
-// returns each server's peak above idle. One run's peak is the memory the request holds plus the
-// garbage the collector had not yet reclaimed when the peak came, and how much garbage that is
-// depends on when the collector ran: one cold edit and settlement of the heaviest two-column table
-// peaked from 190 to 263 MiB above idle over five runs on one machine, while in two runs traced
-// with GODEBUG=gctrace=1 the heap it held live after each collection never passed about 130 MiB.
-// That garbage only adds to a peak, so the least of several runs is the nearest to what the
-// request holds, though it still carries some garbage and the runtime's own memory beside the live
-// heap. A change that makes the request hold more raises every run, and fails a test that holds
-// the least run to a bound once it lifts that run past the bound.
-func (h *memoryHarness) peaksAboveIdle(t *testing.T, runs int, during func(server *memoryServer)) []int64 {
-	t.Helper()
-	peaks := make([]int64, runs)
-	for index := range peaks {
-		server := h.start(t)
-		peaks[index] = server.peakAboveIdle(t, func() { during(server) })
-		server.stop(t)
+	// A block-index pass reads whole documents of its own, so one inside the window would make the
+	// peak that pass's memory rather than the request's. start leaves nothing owed, and a pass
+	// that finds nothing owed logs nothing, so a clean window holds no such line. One case stays:
+	// a window that itself stores a document of more than 2,000 blocks leaves its index to the
+	// server's next pass, 30 s after start, which is past the end of every window here. The
+	// handler is slog.NewTextHandler (main.go:163), which writes the message mid-line as
+	// msg="dispatch: block index", so the substring is the match and not a line's prefix.
+	for _, line := range strings.Split(p.output.from(written), "\n") {
+		if strings.Contains(line, "dispatch: block index") {
+			t.Fatalf("the server indexed blocks inside the measured window, so the peak is that pass's memory: %s", line)
+		}
 	}
-	return peaks
+	return p.resident(t, "VmHWM") - p.idle
 }
 
 type response struct {
@@ -441,6 +617,24 @@ func (b *lockedBuffer) tail() string {
 		output = output[len(output)-4000:]
 	}
 	return output
+}
+
+// len is how much the server has written, and from everything it wrote past offset: what one
+// measured window logged (peakAboveIdle), which tail's last 4,000 bytes do not answer for.
+func (b *lockedBuffer) len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Len()
+}
+
+func (b *lockedBuffer) from(offset int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	output := b.buffer.String()
+	if offset >= len(output) {
+		return ""
+	}
+	return output[offset:]
 }
 
 // coldPeaks reads and edits a document on servers that have not loaded it (coldReads, coldEdit)

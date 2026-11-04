@@ -24,7 +24,11 @@ import (
 const (
 	// requestMemoryBound is the most one request may raise a fresh server's resident memory above
 	// what it held idle, and concurrentMemoryBound the most two at once may (LEGION-481). Production
-	// runs one task of 4,096 MiB.
+	// runs one task of 4,096 MiB. Every measured server collects at GOGC=25 (memoryHarness.start),
+	// so what these hold is the memory a request holds plus the collector's margin at that
+	// setting, and not the resident memory production shows at Go's default GOGC=100, where the
+	// collector lets the heap grow to twice the live set before it collects and a request can
+	// raise resident memory by up to about twice what it holds. Neither number changes for it.
 	requestMemoryBound    = 256 << 20
 	concurrentMemoryBound = 512 << 20
 	documentCap           = 1 << 20
@@ -467,6 +471,9 @@ func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			if upload.status != http.StatusCreated {
 				t.Errorf("an upload of the document's own %d-byte text answered %d %.300s, want 201", len(text), upload.status, upload.body)
 			}
+			// The subtest after this one starts a server it measures, which must find this
+			// upload settled rather than settling it inside a measured window.
+			memory.waitForSettlement(t, upload)
 		})
 	}
 }
