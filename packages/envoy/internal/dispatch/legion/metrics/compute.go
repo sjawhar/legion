@@ -32,15 +32,14 @@ func ParseScope(raw string) (Scope, error) {
 }
 
 // The bars of metric 2: the six roles, each holding the phases that role works, and the seventh
-// for every hour of the issue's work time those six leave — the phases no role works
-// (`awaiting_person` and `held`), and the hours the timeline gives to no phase at all, such as
-// the wait between a handoff and the next role's first event. Time in the queue is on no bar, and
-// neither is an hour the work time leaves out, so the seven bars of an issue add up to its work
-// time (phaseTime).
+// for the phases no role works. "A seventh bar, 'no role', holds the phases no role works:
+// `awaiting_person` and `held`", and the spec's "Phase boundaries before observations" holds it
+// to those two alone — a handoff starts the next phase, so no hour falls between two phases for
+// it to hold. Time in the queue is on no bar, and neither is an hour the work time leaves out,
+// so the seven bars of an issue add up to its work time (phaseTime).
 const barNoRole = "no_role"
 
-// bars are the seven stacked bars in the order the card draws them. The seventh names no phase:
-// it is what the six above did not take.
+// bars are the seven stacked bars in the order the card draws them.
 var bars = []struct {
 	Role   string
 	Phases []string
@@ -51,7 +50,7 @@ var bars = []struct {
 	{"tester", []string{phaseTesting}},
 	{"reviewer", []string{phaseReviewing}},
 	{"merger", []string{phaseRetro, phaseMerging, phaseAwaitingMerge}},
-	{barNoRole, nil},
+	{barNoRole, []string{phaseAwaitingPerson, phaseHeld}},
 }
 
 // The four classes of issue a Legion session filed (metric 4).
@@ -360,6 +359,14 @@ func (c *computation) workedSpansOf(issue *Issue) []Span {
 	return c.workedOf(issue).worked
 }
 
+// barSpansOf is the hours of an issue its seven bars share out: the work time metric 1 reports,
+// less the time it sat in the queue, which is on no bar. Metric 2's bars and metric 3's hours
+// after the first review are both the measure of these spans, so no table of a card counts an
+// hour the card's own bars leave out.
+func (c *computation) barSpansOf(issue *Issue) []Span {
+	return subtract(c.workedSpansOf(issue), phaseSpansOf(c.phasesOf(issue), phaseQueued))
+}
+
 // workedOf is the memoised answer of computeWorkTime.
 func (c *computation) workedOf(issue *Issue) workTimeRow {
 	if held, computed := c.workTimes[issue.Key]; computed {
@@ -421,9 +428,10 @@ func firstWorkerEvent(issue *Issue) (time.Time, bool) {
 // The hours shared out are the issue's work time and nothing else (the spec's "Rule details —
 // Parked and pre-work hours in phase time": "An hour that work time to merge leaves out is on no
 // bar of phase time ... So the bars of an issue add up to its work time, and the two cards
-// agree"). The six roles take the phases they work, the queue is dropped because its time is on
-// no bar, and the seventh bar takes what is left, so the seven are a partition of the work time
-// whatever the timeline holds.
+// agree"). Each bar takes the phases it holds and the queue is on none of them, so the seven are
+// a partition of the work time: the timeline leaves no hour between two phases (the spec's
+// "Phase boundaries before observations"), and every phase an issue can be in is on one of the
+// seven bars.
 func (c *computation) phaseTime(finished []*Issue) PhaseTime {
 	metric := PhaseTime{Bars: make([]RoleBar, len(bars))}
 	perIssue := make([][]float64, len(bars))
@@ -433,20 +441,19 @@ func (c *computation) phaseTime(finished []*Issue) PhaseTime {
 	}
 	for _, issue := range finished {
 		view := c.viewOf(issue)
-		left := subtract(c.workedSpansOf(issue), phaseSpansOf(view.timeline, phaseQueued))
+		shared := c.barSpansOf(issue)
 		for index, bar := range bars {
-			spans := left
-			if bar.Role != barNoRole {
-				spans = intersect(phaseSpansOf(view.timeline, bar.Phases...), left)
-				left = subtract(left, spans)
-			}
+			spans := intersect(phaseSpansOf(view.timeline, bar.Phases...), shared)
+			segments := view.split(spans)
+			// Every issue of the population counts towards each bar's median, one the role
+			// never worked as a zero, so the seven medians describe one population and not
+			// seven.
+			perIssue[index] = append(perIssue[index], segments.total())
 			if len(spans) == 0 {
 				continue
 			}
-			segments := view.split(spans)
 			metric.Bars[index].Segments.addSegments(segments)
 			metric.Bars[index].Issues++
-			perIssue[index] = append(perIssue[index], segments.total())
 		}
 	}
 	var whole, idle float64
@@ -474,8 +481,8 @@ func (c *computation) rework(finished []*Issue) Rework {
 		phases := c.timelineOf(issue)
 		timeline := phases.spans
 		row := ReworkIssue{Key: issue.Key, ReviewRounds: reviewRounds(issue, phases), SentBack: sentBackOnce(issue, phases)}
-		if at, reviewed := firstEntry(timeline, phaseReviewing); reviewed {
-			after := []Span{{From: at, To: c.population.issueEnd(issue)}}
+		if at, reviewed := firstReview(issue, phases); reviewed {
+			after := intersect(c.barSpansOf(issue), []Span{{From: at, To: c.population.issueEnd(issue)}})
 			row.ImplementingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, phaseImplementing), after)))
 			row.TestingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, phaseTesting), after)))
 		}
@@ -503,7 +510,7 @@ func (c *computation) rework(finished []*Issue) Rework {
 // observed round of any hour it lived, so its rounds are its status entries.
 func reviewRounds(issue *Issue, timeline phaseTimeline) int {
 	if !timeline.observed {
-		return statusEntries(issue, "needs_review")
+		return statusEntries(issue, statusNeedsReview)
 	}
 	rounds := 0
 	for index, span := range timeline.spans {
@@ -516,9 +523,8 @@ func reviewRounds(issue *Issue, timeline phaseTimeline) int {
 
 // sentBackOnce is "a move from `testing`, `reviewing` or `accepting` to `implementing`": off the
 // observed timeline where the sampler drew one, and off the status history before observations,
-// as the review rounds beside it are. No fallback timeline can hold a send-back of its own, since
-// it places one span per phase in workflow order, so an issue the sampler never saw would record
-// none at all.
+// as the review rounds beside it are, since `needs_review` is the status of both reviewing and
+// accepting and `in_progress` the status of implementing.
 func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
 	if !timeline.observed {
 		return statusMoved(issue, sentBackStatuses, statusImplementing)
@@ -543,6 +549,17 @@ func firstEntry(timeline []PhaseSpan, phase string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// firstReview is when the issue was first reviewed: the first `reviewing` stretch of the
+// timeline the sampler drew, and the first entry into status `needs_review` before observations,
+// where the rounds and the send-back beside it are read off the same status history ("Rule
+// details — Review rounds and send-backs before observations").
+func firstReview(issue *Issue, timeline phaseTimeline) (time.Time, bool) {
+	if !timeline.observed {
+		return firstStatusEntry(issue, statusNeedsReview)
+	}
+	return firstEntry(timeline.spans, phaseReviewing)
 }
 
 // splitting is metric 4: each issue a Legion session created in the window, by the parent it had

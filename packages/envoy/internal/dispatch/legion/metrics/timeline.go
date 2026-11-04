@@ -58,25 +58,59 @@ var childWorkingPhases = []string{
 // when it parks a root, and the gate treats both as parked (daemon workflow/gate.go).
 var parkedStatuses = []string{"backlog", "icebox"}
 
-// sentBackStatuses are the statuses a send-back moves out of before observations exist: the
-// workflow writes `testing` for the tester's phase and `needs_review` for both the reviewer's and
-// the architect's, and `in_progress` for the implementer's, so those are the words a move back to
-// implementing is read by (daemon workflow/table.go's statusForBackward).
-var sentBackStatuses = []string{"testing", "needs_review"}
+// The statuses the workflow writes with the phases a fallback timeline reads: the implementer's
+// `in_progress`, the tester's `testing`, `needs_review` for both the reviewer's and the
+// architect's, and the merger's `retro` (daemon workflow/table.go and its statusForBackward).
+const (
+	statusImplementing = "in_progress"
+	statusTesting      = "testing"
+	statusNeedsReview  = "needs_review"
+	statusRetro        = "retro"
+)
 
-// statusImplementing is the status the workflow writes with the implementer's phase, which a
-// send-back moves into.
-const statusImplementing = "in_progress"
+// sentBackStatuses are the statuses a send-back moves out of before observations exist:
+// `needs_review` is the status of both reviewing and accepting, and `testing` is its own, so
+// those are the words "a move from `testing`, `reviewing` or `accepting` to `implementing`" is
+// read by.
+var sentBackStatuses = []string{statusTesting, statusNeedsReview}
 
-// handoffWords is the handoff each phase ends with and the phase it therefore starts, as the
-// daemon's phase.Handoff pairs them: the planner's `plan`, the implementer's `implement`, the
-// tester's `test` and the reviewer's `review`. Retro, the merger's READY and the architect's
-// sign-off write none.
-var handoffWords = map[string]string{
-	phasePlanning:     "plan",
-	phaseImplementing: "implement",
-	phaseTesting:      "test",
-	phaseReviewing:    "review",
+// queuedStatuses are the statuses an issue waits in before the daemon admits it, which is what
+// tells the workflow's admission write of `in_progress` from its send-back write of the same
+// word (statusPhase).
+var queuedStatuses = []string{"todo", "triage"}
+
+// phaseOrder is the workflow's order of the phases a fallback timeline names, the order the
+// daemon's table moves an issue through. One rule reads it: a role's first event starts that
+// role's phase only where the issue has not reached that phase already (phaseSteps).
+var phaseOrder = []string{
+	phaseDesign, phasePlanning, phaseImplementing, phaseTesting, phaseReviewing, phaseAccepting,
+	phaseRetro,
+}
+
+// rolePhase is the phase each role works, which its first event on the issue starts. The merger's
+// three phases cannot be told apart before observations exist — Dispatch's event log carries one
+// status, `retro`, for all three — so its first event starts the first of them and the merger's
+// bar holds all three.
+var rolePhase = map[string]string{
+	"architect":   phaseDesign,
+	"planner":     phasePlanning,
+	"implementer": phaseImplementing,
+	"tester":      phaseTesting,
+	"reviewer":    phaseReviewing,
+	"merger":      phaseRetro,
+}
+
+// handoffStarts is the phase each handoff word starts, as the daemon's phase.Handoff pairs them:
+// the planner's `plan` starts implementing, the implementer's `implement` starts testing, the
+// tester's `test` starts reviewing and the reviewer's `review` starts accepting ("Accepting
+// starts at the `review` handoff"). The spec's "a handoff starts the next phase" is this map: a
+// handoff ends the phase it names and leaves no hour between the two. Retro, the merger's READY
+// and the architect's sign-off write none, and a word Legion never writes names no phase.
+var handoffStarts = map[string]string{
+	"plan":      phaseImplementing,
+	"implement": phaseTesting,
+	"test":      phaseReviewing,
+	"review":    phaseAccepting,
 }
 
 // PhaseSpan is one stretch of one phase.
@@ -86,16 +120,14 @@ type PhaseSpan struct {
 }
 
 // Phases is the issue's phase timeline and whether the sampler observed it: the daemon's own
-// where it did, and the event log's fallback where it did not. The fallback is the spec's
-// "Before observations exist, each role's phase starts at the first event of a session titled
-// `Legion <role> · <KEY>` for the issue, or at the status or handoff that marks it, and ends
-// where the next role's phase starts".
+// where it did, and the event log's fallback where it did not (fallbackPhases, the spec's "Phase
+// boundaries before observations").
 //
 // Where the timeline came from is the answer's second half because an issue whose only
 // observation is the mark the sampler left after it closed has no observed hour of its own life:
 // the stretch that mark opens has no duration, so observedPhases keeps nothing of it, and the
-// rules that read a phase before observations (metric 3's review rounds and send-backs) must read
-// the status history instead.
+// rules that read a phase before observations (metric 3's review rounds, its send-backs and the
+// first review its hours are counted from) must read the status history instead.
 func (p *Population) Phases(issue *Issue) ([]PhaseSpan, bool) {
 	if observed := p.observedPhases(issue); len(observed) > 0 {
 		return observed, true
@@ -149,97 +181,185 @@ func (p *Population) slotSpans(issue *Issue, end time.Time) []Span {
 	})
 }
 
-// fallbackPhases is the timeline the event log draws for an issue the sampler never observed: one
-// mark per role's phase, each phase ending where the next starts, and a handoff ending its own
-// phase where it comes before that next start.
-func (p *Population) fallbackPhases(issue *Issue) []PhaseSpan {
-	root := p.isRoot(issue.Key)
-	type mark struct {
-		phase string
-		at    time.Time
-		order int
-	}
-	var marks []mark
-	add := func(phase string, order int, at time.Time, ok bool) {
-		if ok {
-			marks = append(marks, mark{phase: phase, at: at, order: order})
-		}
-	}
-	// A root's architect titles its session by the root's key, so only a root has a design
-	// phase; a child's architect bar is its accepting phase alone.
-	if root {
-		at, ok := issue.FirstRoleEvent["architect"]
-		add(phaseDesign, 0, at, ok)
-	}
-	at, ok := issue.FirstRoleEvent["planner"]
-	add(phasePlanning, 1, at, ok)
-	at, ok = p.firstOf(issue, "implementer", "plan", "in_progress")
-	add(phaseImplementing, 2, at, ok)
-	at, ok = p.firstOf(issue, "tester", "implement", "testing")
-	add(phaseTesting, 3, at, ok)
-	at, ok = p.firstOf(issue, "reviewer", "test", "needs_review")
-	add(phaseReviewing, 4, at, ok)
-	at, ok = handoffAt(issue, "review")
-	add(phaseAccepting, 5, at, ok)
-	at, ok = p.firstOf(issue, "merger", "", "retro")
-	add(phaseRetro, 6, at, ok)
+// phaseMark is one moment the event log says the issue's phase changed, and what says so.
+type phaseMark struct {
+	at     time.Time
+	source markSource
+	phase  string
+}
 
-	slices.SortFunc(marks, func(a, b mark) int {
-		if at := a.at.Compare(b.at); at != 0 {
-			return at
-		}
-		return a.order - b.order
-	})
+// markSource is which of the three sources wrote a mark. It is also the order two marks of one
+// moment are read in, and the last of them is the phase: a role's first event is the earliest
+// word on a change, the handoff that starts the phase is the next, and the status the workflow
+// wrote with it is the last.
+type markSource int
+
+const (
+	sourceRole markSource = iota
+	sourceHandoff
+	sourceStatus
+)
+
+// fallbackPhases is the timeline the event log draws for an issue the sampler never observed:
+// the phase the issue is in, as its role events, its handoffs and its Dispatch statuses move it,
+// each phase running to the next one's start.
+//
+// The spec's "Phase boundaries before observations": "Each phase ends, and the next one starts,
+// at the earlier of the phase's own handoff and the next role's first event ... So a handoff
+// starts the next phase, and no hour between phases is left over ... After a send-back, the
+// Dispatch status sets the phase". The three sources are therefore one list of marks and the
+// timeline is the step function they draw, with no gap between one phase and the next — which is
+// what lets the seven bars of metric 2 add up to the work time while the no-role bar holds
+// `awaiting_person` and `held` alone.
+func (p *Population) fallbackPhases(issue *Issue) []PhaseSpan {
+	steps := phaseSteps(p.fallbackMarks(issue))
+	if len(steps) == 0 {
+		return nil
+	}
+	// An hour of the work time before the first mark is on the bar of the phase the issue is
+	// first seen in: no hour of the work time is off every bar (the spec's "Parked and pre-work
+	// hours in phase time"), and a handoff whose word names no phase can open the work time
+	// ahead of every mark.
+	if at, worked := firstWorkerEvent(issue); worked && at.Before(steps[0].at) {
+		steps[0].at = at
+	}
 	end := p.issueEnd(issue)
-	var timeline []PhaseSpan
-	for index, one := range marks {
-		span := Span{From: one.at, To: end}
-		if index+1 < len(marks) {
-			span.To = marks[index+1].at
-		}
-		// A handoff ends its phase only where it comes before the next phase's start: the time
-		// between a finished handoff and the next role's first event is on no bar.
-		if word, written := handoffWords[one.phase]; written {
-			if at, found := handoffAfter(issue, word, span.From); found && at.Before(span.To) {
-				span.To = at
-			}
+	timeline := make([]PhaseSpan, 0, len(steps))
+	for index, step := range steps {
+		span := Span{From: step.at, To: end}
+		if index+1 < len(steps) {
+			span.To = steps[index+1].at
 		}
 		if span.Duration() == 0 {
 			continue
 		}
-		timeline = append(timeline, PhaseSpan{Phase: one.phase, Span: span})
+		timeline = append(timeline, PhaseSpan{Phase: step.phase, Span: span})
 	}
 	return timeline
 }
 
-// firstOf is where a phase starts in the fallback: the first event of its role's session, else
-// the handoff that marks it (the one the phase before it ends with), else the issue's first entry
-// into the status the workflow sets with it.
-func (p *Population) firstOf(issue *Issue, role, handoffWord, status string) (time.Time, bool) {
-	if at, ok := issue.FirstRoleEvent[role]; ok {
-		return at, true
+// fallbackMarks is every mark the event log holds of an issue's phase, in time order: each role's
+// first event on the issue, each handoff, and each change of its Dispatch status.
+func (p *Population) fallbackMarks(issue *Issue) []phaseMark {
+	architect, hasArchitect := issue.FirstRoleEvent["architect"]
+	var marks []phaseMark
+	add := func(source markSource, at time.Time, phase string) {
+		marks = append(marks, phaseMark{at: at, source: source, phase: phase})
 	}
-	if handoffWord != "" {
-		if at, ok := handoffAt(issue, handoffWord); ok {
-			return at, true
+	for role, at := range issue.FirstRoleEvent {
+		if phase, works := rolePhase[role]; works && role != "architect" {
+			add(sourceRole, at, phase)
 		}
 	}
-	return firstStatusEntry(issue, status)
-}
-
-// handoffAt is when the issue's first handoff of word was recorded.
-func handoffAt(issue *Issue, word string) (time.Time, bool) {
-	return handoffAfter(issue, word, time.Time{})
-}
-
-// handoffAfter is the issue's first handoff of word at or after from.
-func handoffAfter(issue *Issue, word string, from time.Time) (time.Time, bool) {
+	// "An issue has a design phase when a session titled `Legion architect · <its own key>` wrote
+	// an event on it ... whether or not it has a parent. The design phase runs from the issue's
+	// first slot, or else from that architect's first event". A slot the sampler recorded after
+	// the architect had spoken is a later admission, not the start of the design, so the earlier
+	// of the two opens the phase.
+	if hasArchitect {
+		if slots := p.slotSpans(issue, p.issueEnd(issue)); len(slots) > 0 && slots[0].From.Before(architect) {
+			architect = slots[0].From
+		}
+		add(sourceRole, architect, phaseDesign)
+	}
 	for _, handoff := range issue.Handoffs {
-		if handoff.Phase == word && !handoff.At.Before(from) {
-			return handoff.At, true
+		if phase, starts := handoffStarts[handoff.Phase]; starts {
+			add(sourceHandoff, handoff.At, phase)
 		}
 	}
-	return time.Time{}, false
+	previous := ""
+	for _, mark := range issue.StatusMarks {
+		if mark.Value == previous {
+			continue
+		}
+		if phase, named := statusPhase(previous, mark.Value, hasArchitect); named {
+			add(sourceStatus, mark.At, phase)
+		}
+		previous = mark.Value
+	}
+	slices.SortFunc(marks, func(a, b phaseMark) int {
+		if at := a.at.Compare(b.at); at != 0 {
+			return at
+		}
+		if source := int(a.source) - int(b.source); source != 0 {
+			return source
+		}
+		return phaseRank(a.phase) - phaseRank(b.phase)
+	})
+	return marks
+}
+
+// phaseSteps is the step function the marks draw: the phase the issue is in, changing only where
+// a mark changes it.
+func phaseSteps(marks []phaseMark) []phaseMark {
+	var steps []phaseMark
+	reached := -1
+	for _, mark := range marks {
+		rank := phaseRank(mark.phase)
+		// A role's first event starts that role's phase only where the issue has not reached
+		// that phase already: the boundary the spec draws is "the next role's first event", so a
+		// role that speaks again after its phase has passed — an implementer answering during
+		// retro — does not send the issue back. A handoff and a status do send it back, which is
+		// how a send-back reads before observations.
+		if mark.source == sourceRole && rank <= reached {
+			continue
+		}
+		reached = max(reached, rank)
+		last := len(steps) - 1
+		if last >= 0 && steps[last].phase == mark.phase {
+			continue
+		}
+		if last >= 0 && steps[last].at.Equal(mark.at) {
+			// Two marks of one moment are one change, and the last word on it is the phase.
+			steps[last].phase = mark.phase
+			if last > 0 && steps[last-1].phase == mark.phase {
+				steps = steps[:last]
+			}
+			continue
+		}
+		steps = append(steps, mark)
+	}
+	return steps
+}
+
+// phaseRank is a phase's place in the workflow's order, and -1 for one the fallback never names.
+func phaseRank(phase string) int {
+	return slices.Index(phaseOrder, phase)
+}
+
+// statusPhase is the phase a status change sets before observations exist: the spec's "After a
+// send-back, the Dispatch status sets the phase: `in_progress` after `testing` or `needs_review`
+// is implementing, `testing` is testing, and `needs_review` is reviewing until the `review`
+// handoff of that round, then accepting until the status changes" — the handoff mark is what
+// turns that last stretch into accepting.
+//
+// The statuses that name no phase of their own — `todo`, `triage`, `backlog`, `icebox` and
+// `done` — leave the phase as it was. The hours they stand for are the queue's and the parked
+// ones, which the work time drops whatever phase the issue was in.
+func statusPhase(previous, status string, hasArchitect bool) (string, bool) {
+	switch status {
+	case statusTesting:
+		return phaseTesting, true
+	case statusNeedsReview:
+		return phaseReviewing, true
+	case statusRetro:
+		return phaseRetro, true
+	case statusImplementing:
+		// The workflow writes `in_progress` twice over: once where it admits an issue out of the
+		// queue or out of parked, and once for every send-back to implementing, whatever phase
+		// the issue comes back from (workflow/table.go's TriggerTesterFailed,
+		// TriggerReviewRejected and TriggerChecksRed all write it). The admission is the issue
+		// entering its own work, which is its design phase where it has architect events and its
+		// planning phase where it has none; every later one is the send-back.
+		if previous == "" || slices.Contains(queuedStatuses, previous) || slices.Contains(parkedStatuses, previous) {
+			if hasArchitect {
+				return phaseDesign, true
+			}
+			return phasePlanning, true
+		}
+		return phaseImplementing, true
+	}
+	return "", false
 }
 
 // enteredStatus is whether the mark at index is where the issue's status became status: the mark
