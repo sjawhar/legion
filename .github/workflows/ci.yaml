@@ -23,9 +23,10 @@ name: CI
 # job's last step (a job that calls a workflow passes `ci-ok-changes` to it, and that workflow's
 # job ends with the step, as docs-site.yaml's and worker-image.yaml's do), and a gate in
 # .github/scripts/ci_job_reads.py. An output an event must force is written in `changes`' outputs
-# rather than left to its filter, as every output's workflow_dispatch case is. The ci-filters job's
-# .github/scripts/check-ci-filters.sh holds the filter to that gate, CI_OK_SELECTED_BY to the
-# `if:`s and the report step to every job.
+# rather than left to its filter, as every output's workflow_dispatch case is, and so is one an
+# event must hold back, as the nine slow suites' pull-request case is (the comment on them
+# below). The ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to that gate,
+# CI_OK_SELECTED_BY to the `if:`s and the report step to every job.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no job of this workflow saves an Actions cache entry. setup-go caches nothing here
@@ -155,20 +156,32 @@ jobs:
       pi_shared: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.pi_envoy }}
       pi_legion: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.pi_legion }}
-      dispatch: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.dispatch }}
+      # The nine slow suites, whose runner time dwarfs every other job's. The merge queue runs
+      # them on the tree the change lands as, and that is where their result normally comes from;
+      # a pull request runs them only when it carries the label `full-ci`. Each is false on a
+      # pull-request run without that label, so the skip is one `changes` chose: ci-ok reads it as
+      # it reads any other output, and no job's `if:` knows about the label. The label is read
+      # from the pull request the run's own event carries, so it takes effect at the next push,
+      # reopen or ready-for-review, not when it is added: this workflow takes no `labeled`
+      # trigger, which would start a run that joins the concurrency group above and cancels the
+      # pull request's run in progress.
+      dispatch: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.dispatch || 'false' }}
       dispatch_browser_multiprocess: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.dispatch_browser_multiprocess }}
       claude_envoy: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.claude_envoy }}
-      envoy_go: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_go }}
+      # A slow suite, gated as the comment above `dispatch` says.
+      envoy_go: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go || 'false' }}
       envoy_infra_go: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_infra_go }}
-      envoy_go_race: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_go_race }}
-      envoy_go_race_pmdoc: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_go_race_pmdoc }}
-      envoy_go_race_api: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_go_race_api }}
-      envoy_go_race_docs: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_go_race_docs }}
-      dispatch_memory: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.dispatch_memory }}
-      dispatch_multiprocess: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.dispatch_multiprocess }}
+      # Six slow suites, gated as the comment above `dispatch` says.
+      envoy_go_race: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go_race || 'false' }}
+      envoy_go_race_pmdoc: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go_race_pmdoc || 'false' }}
+      envoy_go_race_api: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go_race_api || 'false' }}
+      envoy_go_race_docs: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go_race_docs || 'false' }}
+      dispatch_memory: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.dispatch_memory || 'false' }}
+      dispatch_multiprocess: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.dispatch_multiprocess || 'false' }}
       listener_server_change: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.listener_server_change }}
       broker_multiprocess: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.broker_multiprocess }}
-      envoy_smoke: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_smoke }}
+      # A slow suite, gated as the comment above `dispatch` says.
+      envoy_smoke: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_smoke || 'false' }}
       envoy_e2e_local: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_e2e_local }}
       envoy_session_stall: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_session_stall }}
       go_notices: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.go_notices }}
