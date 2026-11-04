@@ -103,7 +103,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorBody(invalidOperatorToken))
 		return
 	}
-	if s.controllerLaunched {
+	if s.controllerLaunched() {
 		s.log.Warn("api: refused a controller secret: this daemon launches the project's controller itself")
 		writeJSON(w, http.StatusConflict, errorBody(
 			"this daemon launches the project's controller itself (controller: daemon), so legion controller start has none to start"))
@@ -152,7 +152,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 // call, as controllerSecret does, since its controller's tokens live in its pod's Secret and no
 // `legion controller start` runs against it.
 func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
-	if s.controllerLaunched {
+	if s.controllerLaunched() {
 		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
 		writeFailure(w, http.StatusConflict, "CONTROLLER_LAUNCHED",
 			"this daemon launches the project's controller itself (controller: daemon), so legion controller start has none to start")
@@ -365,7 +365,7 @@ func controllerSessionRegistered(record controller.Record, session, secret strin
 // so there is no relaunch to wait for: it is stale, with claim.StaleControllerContract's sentence,
 // whenever its recorded contract differs at all.
 func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request, record controller.Record) bool {
-	if !s.controllerLaunched {
+	if !s.controllerLaunched() {
 		if record.PluginContract == DaemonAPIVersion {
 			return false
 		}

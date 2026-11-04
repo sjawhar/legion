@@ -257,7 +257,7 @@ func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecord
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{engine, facts}, Dispatch: h.handoffs,
 		Tokens: handoffTokens{}, GitHubAPI: github.url,

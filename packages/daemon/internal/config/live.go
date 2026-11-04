@@ -75,8 +75,8 @@ type Live struct {
 	env  func(string) string
 	// settled is the resolved configuration, never nil once the holder is built.
 	settled atomic.Pointer[Config]
-	// normalize is the caller's own fix of what the file says, run over every resolution before it
-	// settles (Normalize); nil fixes nothing.
+	// normalize is the caller's own fix of what the file says, run over every resolution before
+	// it settles (NewLive); nil fixes nothing.
 	normalize func(*Config) error
 	// mu orders the applies against each other and guards overlay and observers. An observer runs
 	// under it, in registration order, so no observer may call Apply, Snapshot excepted.
@@ -87,12 +87,21 @@ type Live struct {
 	observers []func(cfg *Config, applied []Change)
 }
 
-// NewLive resolves path once, with overlay laid over it, and holds the result. env is the
-// daemon's environment lookup, as Load takes it; overlay is the route overlay the caller's store
-// holds, and may be nil.
-func NewLive(path string, env func(string) string, overlay map[string]any) (*Live, error) {
-	live := &Live{path: path, env: env, overlay: map[string]any{}}
-	maps.Copy(live.overlay, overlay)
+// NewLive resolves path once and holds the result.
+//
+// env is the daemon's environment lookup, as Load takes it. normalize is the caller's own fix of
+// what the file says — `legion start`'s absolute state_dir and the plugin pair its binary links
+// — which every resolution runs over the loaded configuration before it settles, so a file read
+// again under a running daemon settles exactly as this read did; nil fixes nothing. It must
+// decide from the configuration alone, since every later resolution runs it again, and a
+// resolution whose normalize fails changes nothing.
+//
+// The holder is built with no route overlay over it: the route changes a restart keeps are laid
+// back over the file by the boot's own restore, through the route arm every other change takes
+// (internal/settings' Keeper.Restore), so the file is read once here and the daemon resolves it
+// a second time only when its store holds a change.
+func NewLive(path string, env func(string) string, normalize func(*Config) error) (*Live, error) {
+	live := &Live{path: path, env: env, normalize: normalize, overlay: map[string]any{}}
 	cfg, err := live.resolve(live.overlay)
 	if err != nil {
 		return nil, err
@@ -111,31 +120,22 @@ func Settled(cfg Config) *Live {
 	return live
 }
 
-// Normalize registers fn, which every resolution runs over the loaded configuration before it
-// settles, and resolves once more so the configuration the holder already settled carries it too.
-// It is the caller's own fix of what the file says — `legion start`'s absolute state_dir and the
-// plugin pair its binary links — so a file read again under a running daemon settles exactly as
-// the boot's read did. fn must decide from the configuration alone, since every later resolution
-// runs it again; a resolution whose fn fails changes nothing.
-//
-// One fn at a time: a second call replaces the first. Register it before anything takes a
-// snapshot.
-func (l *Live) Normalize(fn func(*Config) error) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	previous := l.normalize
-	l.normalize = fn
-	cfg, err := l.resolve(l.overlay)
-	if err != nil {
-		l.normalize = previous
-		return err
-	}
-	l.settled.Store(&cfg)
-	return nil
-}
-
 // Snapshot is the configuration the daemon is running on, never nil.
 func (l *Live) Snapshot() *Config { return l.settled.Load() }
+
+// WhileSettled runs fn under the holder's lock, with the configuration the daemon is running
+// on: work of the caller's own that must not run beside an Apply, because it touches the very
+// things an apply's observers rebuild. The daemon's reread of its credential files is that work
+// (internal/daemon's rereadCredentials): a file rotated in place names no changed setting, so
+// nothing of it reaches an observer, and a reread that ran outside this lock would rebuild a
+// holder a route change was rebuilding at the same moment.
+//
+// fn reads the configuration it is handed and must not call Apply, OnChange or WhileSettled.
+func (l *Live) WhileSettled(fn func(cfg *Config)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fn(l.settled.Load())
+}
 
 // Path is the configuration file this holder reads, "" for a holder built from a configuration
 // value (Settled). The file watcher watches the directory holding it (internal/settings).
@@ -432,8 +432,19 @@ func Render(value reflect.Value) string {
 	return string(encoded)
 }
 
-// diff is one Change per path whose value the two configurations disagree on, in path order.
-func diff(old, next map[string]setting, source, by string) []Change {
+// Changed is one path two readings of the settings disagree on, with what each reading holds and
+// UnsetValue for a reading that does not carry the path at all.
+type Changed struct{ Path, Old, New string }
+
+// Compare is every path the two readings of the settings disagree on, in path order. A path one
+// reading does not carry reads as UnsetValue there, so a key that arrived or was dropped is a
+// change naming what it was and what it is.
+//
+// It is the one comparison of two readings the daemon has: config's own diff of two resolved
+// configurations reads through it, and runtime/sandbox compares a pod's recorded launch keys
+// against the runtime's through it (launchSettingsDrift), so the two can never disagree about
+// which paths moved or about how a path only one of them carries reads.
+func Compare(old, next map[string]string) []Changed {
 	paths := slices.Collect(maps.Keys(next))
 	for path := range old {
 		if _, held := next[path]; !held {
@@ -442,25 +453,54 @@ func diff(old, next map[string]setting, source, by string) []Change {
 	}
 	slices.Sort(paths)
 
-	var changes []Change
+	changed := make([]Changed, 0, len(paths))
 	for _, path := range paths {
 		before, hadBefore := old[path]
 		after, hasAfter := next[path]
 		if !hadBefore {
-			before = setting{compared: UnsetValue, shown: UnsetValue}
+			before = UnsetValue
 		}
 		if !hasAfter {
-			after = setting{compared: UnsetValue, shown: UnsetValue}
+			after = UnsetValue
 		}
-		if before.compared == after.compared {
+		if before == after {
 			continue
 		}
-		row, _ := ClassOf(path)
+		changed = append(changed, Changed{Path: path, Old: before, New: after})
+	}
+	return changed
+}
+
+// diff is one Change per path whose value the two configurations disagree on, in path order. A
+// secret is compared by its value and shown as "(withheld)" (setting), so a rotation is a change
+// without being printed.
+func diff(old, next map[string]setting, source, by string) []Change {
+	var changes []Change
+	for _, moved := range Compare(comparedValues(old), comparedValues(next)) {
+		row, _ := ClassOf(moved.Path)
 		changes = append(changes, Change{
-			Path: path, Old: before.shown, New: after.shown,
+			Path: moved.Path, Old: shownValue(old, moved.Path), New: shownValue(next, moved.Path),
 			Class: row.Class, Outcome: row.Class.Outcome(), Holder: row.Holder,
 			Source: source, By: by,
 		})
 	}
 	return changes
+}
+
+// comparedValues is each path's value as the comparison reads it, and shownValue one path's
+// value as a Change prints it, UnsetValue for a path the configuration does not carry.
+func comparedValues(settings map[string]setting) map[string]string {
+	values := make(map[string]string, len(settings))
+	for path, value := range settings {
+		values[path] = value.compared
+	}
+	return values
+}
+
+func shownValue(settings map[string]setting, path string) string {
+	value, held := settings[path]
+	if !held {
+		return UnsetValue
+	}
+	return value.shown
 }

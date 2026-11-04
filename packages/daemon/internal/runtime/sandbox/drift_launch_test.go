@@ -140,11 +140,13 @@ func TestALaunchReplacesTheControllersPodWhoseLaunchKeysMoved(t *testing.T) {
 				t.Fatalf("Resume replaced the controller's pod: %t, want %t (pod %s, then %s)",
 					replaced, tc.replaced, loc.Sandbox.PodUID, next.Sandbox.PodUID)
 			}
+			// The record a pod carries is its own kind's: the launch keys that kind's launch
+			// reads, the other kind's reservation left out (launchSettingsFor).
 			recorded := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation]
-			switch want := LaunchSettings(moved); {
+			switch want := launchSettingsFor(LaunchSettings(moved), controllerPod{}); {
 			case tc.replaced && recorded != want:
 				t.Errorf("the controller's new pod records %s, want the launch keys as they now read, %s", recorded, want)
-			case !tc.replaced && recorded != built:
+			case !tc.replaced && recorded != launchSettingsFor(built, controllerPod{}):
 				t.Errorf("the kept pod's template records %s, want the launch keys its pod was built with, %s", recorded, built)
 			}
 		})

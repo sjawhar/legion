@@ -84,14 +84,11 @@ var renamedLegion = ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybe
 
 // renamedEngine is the workflow tests' engine (testEngine) under the repository equivalence
 // renames: the one field of Config a configured rename changes, read through the engine's own
-// configuration (ReadConfigFrom), so these tests read the one config every other workflow test
-// reads.
+// configuration, so these tests read the one config every other workflow test reads.
 func renamedEngine(renames ghrepo.Renames) *Engine {
-	engine := testEngine(config.DesignGateRootIssues, nil)
-	cfg := engine.settings()
+	cfg := testEngine(config.DesignGateRootIssues, nil).settings()
 	cfg.RepositoryRenames = renames
-	engine.ReadConfigFrom(func() Config { return cfg })
-	return engine
+	return NewReading(record.NewStore(), func() Config { return cfg }, nil)
 }
 
 // seedRenamedTree seeds LEGION-209, a child of the open tree recorded on sjawhar/legion and in

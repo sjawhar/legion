@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -97,5 +98,22 @@ func readSettingsRoute(value *yaml.Node, key string) (*SettingsRoute, error) {
 	if err != nil || issuer.Scheme == "" || issuer.Host == "" {
 		return nil, fmt.Errorf("%s.oidc_issuer must be the cluster's OIDC issuer URL, as its tokens' iss claim writes it, and is %q", key, route.OIDCIssuer)
 	}
+	// The issuer's keys are what every admitted token is checked against, so they are read over a
+	// transport nobody on the path can rewrite: a plaintext issuer would let whoever holds that
+	// path mint a token for any ServiceAccount the deployment names. A loopback issuer is the one
+	// exception, since nothing is on the path: it is how a test runs its own issuer.
+	if issuer.Scheme != "https" && !loopbackHost(issuer.Hostname()) {
+		return nil, fmt.Errorf("%s.oidc_issuer must be an https URL (%q is not): the daemon reads the issuer's signing keys from it and checks every admitted token against them", key, route.OIDCIssuer)
+	}
 	return route, nil
+}
+
+// loopbackHost is whether a host is this machine's own, which an issuer may be served over plain
+// http on: a literal loopback address or `localhost`.
+func loopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.IsLoopback()
 }

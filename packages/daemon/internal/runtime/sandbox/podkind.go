@@ -44,8 +44,11 @@ type podKind interface {
 	// secretAnnotations are the annotations each of the pod's Secrets carries.
 	secretAnnotations(l launch) map[string]string
 	// resources are the reservation every container of the pod carries, its init containers'
-	// included (Options.Resources).
+	// included (Options.Resources), and resourcesPath the dotted `legion.yaml` key it is read
+	// from: the one launch key a pod of this kind reads that the other kind's pod does not, so a
+	// change of the other's is no drift of this one (launchSettingsFor).
 	resources(r *Runtime) corev1.ResourceRequirements
+	resourcesPath() string
 	// initContainers are the pod's init containers, and initVolumes the volumes only they mount,
 	// besides the pod's own volume and config home.
 	initContainers(r *Runtime, l launch) []corev1.Container
@@ -97,6 +100,8 @@ func (issuePod) resources(r *Runtime) corev1.ResourceRequirements { return r.res
 func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token, error) {
 	return claim.NewToken(project, issue, role)
 }
+
+func (issuePod) resourcesPath() string { return "runtime.kubernetes.resources.issue" }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
 // the workspace's place on the issue's disk. It runs at every launch and expects nothing of that
@@ -390,6 +395,8 @@ func (controllerPod) resources(r *Runtime) corev1.ResourceRequirements { return 
 func (controllerPod) claimToken(project, _ string, _ claim.Role) (claim.Token, error) {
 	return claim.ControllerToken(project), nil
 }
+
+func (controllerPod) resourcesPath() string { return "runtime.kubernetes.resources.controller" }
 
 // prepare works in the root of the controller's own volume.
 func (controllerPod) prepare(l *launch) error {

@@ -268,7 +268,7 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 		reportedContextErr: reportedContextErr,
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
-		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
+		Supervisor: sup, BootTokens: tokens, Project: testProject, Settings: operatorSettings(), Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, PluginRelaunchable: relaunchable,
 		ClaimReady:   func(c supervise.Claim) { *readied = append(*readied, c) },
 		PromptAgents: testPromptAgents,
@@ -279,6 +279,12 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	})
 	h.handler = server.Handler
 	return h
+}
+
+// operatorSettings is what a test's server holds when the operator bearer is the whole of its
+// configuration (Options.Settings).
+func operatorSettings() *LiveSettings {
+	return NewLiveSettings(HeldSettings{OperatorToken: testOperatorToken})
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is

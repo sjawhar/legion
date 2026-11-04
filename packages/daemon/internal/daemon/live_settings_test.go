@@ -220,6 +220,15 @@ func (h *countingHolder) rebuild(*config.Config) error {
 	return nil
 }
 
+// countingCredentialHolder is a countingHolder that reads credential files of its own, which it
+// names as every credential holder does (credentialReader).
+type countingCredentialHolder struct {
+	countingHolder
+	files func(cfg *config.Config) []string
+}
+
+func (h *countingCredentialHolder) credentialFiles(cfg *config.Config) []string { return h.files(cfg) }
+
 // The file watcher wakes on the state of a whole directory, so a projected token the kubelet
 // refreshed wakes it beside credentials that did not move. A reread rebuilds a credential holder
 // only when the files that holder reads have moved: the wake that follows a kubelet refresh of
@@ -236,8 +245,14 @@ func TestARereadRebuildsOnlyTheHoldersWhoseCredentialFilesMoved(t *testing.T) {
 	}
 	cfg := &config.Config{OperatorTokenFile: operatorFile, NatsNkeySeedFile: seedFile}
 	rebuild := newRebuilder(quietLogger())
-	server := &countingHolder{name: config.HolderAPIServer}
-	natsClient := &countingHolder{name: config.HolderNATS}
+	server := &countingCredentialHolder{
+		countingHolder: countingHolder{name: config.HolderAPIServer},
+		files:          func(cfg *config.Config) []string { return []string{cfg.OperatorTokenFile} },
+	}
+	natsClient := &countingCredentialHolder{
+		countingHolder: countingHolder{name: config.HolderNATS},
+		files:          func(cfg *config.Config) []string { return []string{cfg.NatsNkeySeedFile} },
+	}
 	rebuild.register(server, natsClient)
 
 	// The first reread holds no digest of its own, so it reads every holder's files: the daemon
@@ -332,7 +347,7 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	}
 	rebuild := newRebuilder(w.log)
 	live.OnChange(rebuild.observe)
-	w.nats = newNATSHolder(conn, consumers, open)
+	w.nats = newNATSHolder(conn, consumers, w.log, open)
 	rebuild.register(w.nats)
 	t.Cleanup(w.stop)
 	before := w.nats.connection()

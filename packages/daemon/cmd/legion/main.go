@@ -357,16 +357,12 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		// is a harmless second close after.
 		defer inherited.Close()
 	}
-	// The daemon's one settings holder: it resolves legion.yaml here and nothing resolves it
-	// again. Its normalizer is this command's own fix of what the file says — the plugin pair
-	// this binary links when the file names none, and the state directory as an absolute path —
-	// so a file read again under the running daemon settles exactly as this read did.
-	live, err := config.NewLive(configPath, nil, nil)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion start: %v\n", err)
-		return 1
-	}
-	if err := live.Normalize(func(c *config.Config) error {
+	// The daemon's one settings holder: it resolves legion.yaml here, with this command's own
+	// fix of what the file says — the plugin pair this binary links when the file names none,
+	// and the state directory as an absolute path — run over that resolution and over every
+	// later one, so a file read again under the running daemon settles exactly as this read
+	// did. Nothing resolves it again.
+	live, err := config.NewLive(configPath, nil, func(c *config.Config) error {
 		applyLinkedPlugins(c)
 		// The state directory is where the worker stream socket, the panes' secret files, and
 		// their home live; the registry refuses a second live legion on it, which only holds if
@@ -377,7 +373,8 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 		c.StateDir = dir
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}

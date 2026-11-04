@@ -194,7 +194,8 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		PluginContract: api.DaemonAPIVersion,
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
-		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
+		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, Log: quiet,
+		Settings: api.NewLiveSettings(api.HeldSettings{OperatorToken: claimsOperatorToken}),
 	}).Handler
 
 	d := &operatorDaemon{t: t, runtime: rt, claimSupervisor: claims, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}

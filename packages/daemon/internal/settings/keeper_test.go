@@ -76,7 +76,7 @@ func TestARouteChangeIsLaidBackOverTheFileAtTheNextBoot(t *testing.T) {
 	path := configFile(t, minimalFile)
 	keeper := keeperOn(t, path, store)
 
-	applied, refused, err := keeper.Route(ctx, "ana@example.com", map[string]any{"admission_cap": 7})
+	applied, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": 7})
 	if err != nil || len(refused) != 0 {
 		t.Fatalf("Route: %v, refused %+v", err, refused)
 	}
@@ -101,6 +101,42 @@ func TestARouteChangeIsLaidBackOverTheFileAtTheNextBoot(t *testing.T) {
 	}
 }
 
+// A secret path is applied and never stored: the value — a credential, the path of a file
+// holding one, or an address that may carry one — stays out of the database every project's
+// daemon shares, where a plain value of the same call is kept. The row of such a path goes with
+// it, so a restart reads the file's own value for it.
+func TestACredentialChangedThroughTheRouteIsAppliedAndNotStored(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	keeper := keeperOn(t, configFile(t, minimalFile), store)
+
+	applied, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{
+		"operator_token_file": "/etc/legion/operator-token",
+		"admission_cap":       7,
+	})
+	if err != nil || len(refused) != 0 {
+		t.Fatalf("Route: %v, refused %+v", err, refused)
+	}
+
+	paths := map[string]bool{}
+	for _, change := range applied {
+		paths[change.Path] = true
+	}
+	if !paths["operator_token_file"] || !paths["admission_cap"] {
+		t.Fatalf("the route applied %+v, want both paths", applied)
+	}
+	if file := keeper.Live().Snapshot().OperatorTokenFile; file != "/etc/legion/operator-token" {
+		t.Fatalf("the daemon reads operator_token_file %q, want the one the route set", file)
+	}
+	rows, err := store.Rows(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Path != "admission_cap" {
+		t.Fatalf("the store holds %+v, want the plain value alone and no credential", rows)
+	}
+}
+
 // The file takes its key back: a change of that key in the file itself, while the daemon was
 // down, outlives the route change above it, and the row goes with it. A route change of another
 // key stands (acceptance A5, "until the file changes that key").
@@ -109,7 +145,7 @@ func TestTheFileTakesBackOnlyTheKeysItChanged(t *testing.T) {
 	store := testStore(t)
 	path := configFile(t, minimalFile)
 	keeper := keeperOn(t, path, store)
-	if _, _, err := keeper.Route(ctx, "ana@example.com", map[string]any{"admission_cap": 7, "max_fix_attempts": 5}); err != nil {
+	if _, _, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": 7, "max_fix_attempts": 5}); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 
@@ -145,7 +181,7 @@ func TestTheFileArmTakesBackTheKeysTheFileChangedUnderTheRunningDaemon(t *testin
 	store := testStore(t)
 	path := configFile(t, minimalFile)
 	keeper := keeperOn(t, path, store)
-	if _, _, err := keeper.Route(ctx, "ana@example.com", map[string]any{"admission_cap": 7, "max_fix_attempts": 5}); err != nil {
+	if _, _, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": 7, "max_fix_attempts": 5}); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 
@@ -184,11 +220,11 @@ func TestARouteWithdrawalGivesTheKeyBackToTheFile(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	keeper := keeperOn(t, configFile(t, minimalFile), store)
-	if _, _, err := keeper.Route(ctx, "ana@example.com", map[string]any{"admission_cap": 7}); err != nil {
+	if _, _, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": 7}); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 
-	applied, _, err := keeper.Route(ctx, "ana@example.com", map[string]any{"admission_cap": nil})
+	applied, _, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": nil})
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -211,7 +247,7 @@ func TestAFixedPathIsRefusedAndStoredNowhere(t *testing.T) {
 	store := testStore(t)
 	keeper := keeperOn(t, configFile(t, minimalFile), store)
 
-	applied, refused, err := keeper.Route(ctx, "ana@example.com", map[string]any{"bind": "0.0.0.0", "admission_cap": 6})
+	applied, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"bind": "0.0.0.0", "admission_cap": 6})
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/oidc"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/settings"
 )
 
 // SettingsChangeRequest is the body of `PUT /legion/v1/operator/settings`: the dotted
@@ -76,9 +78,11 @@ func (a SettingsRouteAuth) configured() bool {
 
 // ApplySettings is how the route reaches the daemon's one settings holder (internal/settings'
 // Keeper.Route): it applies the change, records it so it survives the daemon's next restart, and
-// answers what it applied and what it refused. Nil is a daemon that changes no setting, and the
-// route answers 503.
-type ApplySettings func(ctx context.Context, by string, changes map[string]any) ([]config.Change, []config.Refusal, error)
+// answers what it applied and what it refused. caller is the arm the request came in on, which
+// decides what it may set: the operator bearer sets every path the loader takes, and a projected
+// ServiceAccount token only a path whose value is plain data (config.Caller). Nil is a daemon
+// that changes no setting, and the route answers 503.
+type ApplySettings func(ctx context.Context, caller config.Caller, by string, changes map[string]any) ([]config.Change, []config.Refusal, error)
 
 // invalidSettingsCaller is the settings route's one refusal of a caller it does not admit: the
 // operator bearer, or a ServiceAccount token this deployment named, and nothing else. It never
@@ -89,7 +93,7 @@ const invalidSettingsCaller = "Invalid operator token or ServiceAccount token"
 // the configuration file under the daemon, and the same way — both arms call the one settings
 // holder, which resolves the whole file under the change (internal/settings).
 func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
-	by, authorized := s.settingsCaller(r)
+	by, caller, authorized := s.settingsCaller(r)
 	if !authorized {
 		writeJSON(w, http.StatusForbidden, errorBody(invalidSettingsCaller))
 		return
@@ -118,8 +122,19 @@ func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorBody("this daemon holds no settings it can change"))
 		return
 	}
-	applied, refused, err := s.applySettings(r.Context(), by, changes)
-	if err != nil {
+	applied, refused, err := s.applySettings(r.Context(), caller, by, changes)
+	var notRecorded *settings.NotRecorded
+	switch {
+	case errors.As(err, &notRecorded):
+		// The daemon applied the change and could not keep it: it is running on the new value,
+		// and its next restart reads the file's own value for those paths. Saying the change was
+		// refused would be false, so the answer names each key's verdict as it stands and the
+		// status says the daemon did not finish the work the caller asked for.
+		s.log.Error("api: a settings change was applied and not recorded; the daemon runs on it and its next restart will not",
+			"by", by, "paths", slices.Sorted(maps.Keys(changes)), "error", err)
+		writeJSON(w, http.StatusInternalServerError, SettingsChangeResponse{Settings: settingResults(changes, applied, refused)})
+		return
+	case err != nil:
 		// The loader refused the configuration the change makes — a value of the wrong shape, a
 		// key whose neighbours now contradict it — or the file could not be read. Either way the
 		// daemon changed nothing and keeps running on what it had.
@@ -157,35 +172,38 @@ func settingResults(changes map[string]any, applied []config.Change, refused []c
 	return results
 }
 
-// settingsCaller is who this request is, and whether the daemon admits them: the operator bearer
-// (api/operator.go's own comparison), or a ServiceAccount token projected with this daemon as its
-// audience, signed by the cluster issuer the deployment named and naming a ServiceAccount it
-// named (`settings_route`). A call with no bearer is nobody.
+// settingsCaller is who this request is, which arm it came in on, and whether the daemon admits
+// it at all: the operator bearer (api/operator.go's own comparison), or a ServiceAccount token
+// projected with this daemon as its audience, signed by the cluster issuer the deployment named
+// and naming a ServiceAccount it named (`settings_route`). A call with no bearer is nobody.
 //
-// The answer is the caller's own identity — "operator", or the token's ServiceAccount — which
-// the change's author defaults to when the body names no person.
-func (s *server) settingsCaller(r *http.Request) (string, bool) {
+// The identity is the caller's own — "operator", or the token's ServiceAccount — which the
+// change's author defaults to when the body names no person. The arm is what that caller may
+// set: the operator bearer every path the loader takes, and a projected token only a path whose
+// value is plain data, whoever the body names as the person (config.Caller). A Dispatch caller
+// with deployment scope, a person or an agent, reaches the daemon on the projected arm.
+func (s *server) settingsCaller(r *http.Request) (string, config.Caller, bool) {
 	presented, carried := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !carried || presented == "" {
-		return "", false
+		return "", "", false
 	}
 	if s.operatorBearer(presented, carried) {
-		return "operator", true
+		return "operator", config.CallerOperator, true
 	}
 	auth := s.settings.load().SettingsRoute
 	if !auth.configured() || !oidc.LooksLikeJWT(presented) {
-		return "", false
+		return "", "", false
 	}
 	claims, err := auth.Verifier.Verify(r.Context(), presented)
 	if err != nil {
 		s.log.Warn("api: a settings call presented a token this daemon will not take",
 			"reason", oidc.Reason(err), "route", "settings")
-		return "", false
+		return "", "", false
 	}
 	if !slices.Contains(auth.ServiceAccounts, claims.Subject) {
 		s.log.Warn("api: a settings call presented a token of a ServiceAccount this deployment does not name",
 			"subject", claims.Subject, "route", "settings")
-		return "", false
+		return "", "", false
 	}
-	return claims.Subject, true
+	return claims.Subject, config.CallerProjected, true
 }

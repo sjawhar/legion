@@ -178,8 +178,8 @@ func logPlugins(log *slog.Logger, plugins *runtime.PluginInstall, source string)
 func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, reads bootReads, p *plan) error {
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
 	if o.runtime != nil {
-		p.newRuntime, p.probe = o.runtime, o.probe
-		// A test handed the daemon its runtime: a rebuild builds the same one again.
+		p.probe = o.probe
+		// A test handed the daemon its runtime: every build answers that one.
 		p.runtimeFor = func(config.Config) (runtimeFactory, error) { return o.runtime, nil }
 		return nil
 	}
@@ -187,10 +187,10 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, reads boot
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.sandbox.client, reads.sandbox.opts, p.repositories.Owners, cfg.RepositoryRenames)
-	// A `runtime.kubernetes.*` change rebuilds the runtime (config.HolderRuntime): the cluster
-	// client and every pod option are read again from the configuration the rebuild is given,
-	// through the same boot read, so a changed kubeconfig is read again too.
+	// The boot's own runtime and every rebuild of it are built here (config.HolderRuntime): the
+	// cluster client and every pod option are read from the configuration the build is given,
+	// through the same boot read, so a changed kubeconfig is read again and the boot and a
+	// rebuild can never build different things.
 	lookup := environLookup(o.environment())
 	p.runtimeFor = func(c config.Config) (runtimeFactory, error) {
 		next, err := readSandbox(c, p.project, reads.dispatchToken, reads.nats.paneNatsUser, lookup, log)

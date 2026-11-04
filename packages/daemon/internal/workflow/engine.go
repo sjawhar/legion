@@ -73,39 +73,58 @@ type Config struct {
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
 type Engine struct {
 	store record.Store
-	// readConfig is where every decision reads the configuration (settings): the value New was
-	// given, or, once the daemon has registered its settings holder (ReadConfigFrom), that
-	// holder's current one. A decision-class setting — the review round cap, the fix attempts, the
-	// linger, the production-check bound, the design gate — is read as the decision is made and
-	// never copied into this struct, so a change of it takes effect at once.
+	// readConfig is where a decision's configuration comes from: the value New was given, or the
+	// read of the daemon's settings holder NewReading was given. A decision-class setting — the
+	// review round cap, the fix attempts, the linger, the production-check bound, the design
+	// gate — is never copied into this struct, so a change of it takes effect at the next
+	// decision.
 	readConfig func() Config
-	log        *slog.Logger
+	// settled is the one configuration this decision reads, read once as the decision began
+	// (decision); nil in the engine the daemon holds, which no decision is running on.
+	settled *Config
+	log     *slog.Logger
 }
 
 var _ intake.Handler = (*Engine)(nil)
 
-// New constructs a workflow engine with the shipped review and fix caps when callers omit them.
+// New constructs a workflow engine on one configuration, with the shipped review and fix caps
+// where the caller omits them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
-	settled := defaulted(cfg)
+	settled := cfg
+	return NewReading(store, func() Config { return settled }, log)
+}
+
+// NewReading constructs a workflow engine that reads its configuration through read at every
+// decision, in place of a value settled once: the daemon hands a read of its settings holder
+// (config.Live.Snapshot) composed into a workflow.Config, so a change of `review_round_cap`,
+// `max_fix_attempts`, `linger_hours`, `production_check_hours` or `gates.design` reaches the
+// next decision with nothing rebuilt. Each read is given the same defaults New fills.
+func NewReading(store record.Store, read func() Config, log *slog.Logger) *Engine {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{store: store, readConfig: func() Config { return settled }, log: log}
+	return &Engine{store: store, readConfig: func() Config { return defaulted(read()) }, log: log}
 }
 
-// ReadConfigFrom makes every decision read its configuration through read, in place of the value
-// New was given: the daemon hands a read of its settings holder (config.Live.Snapshot) composed
-// into a workflow.Config, so a change of `review_round_cap`, `max_fix_attempts`, `linger_hours`,
-// `production_check_hours` or `gates.design` reaches the next decision with nothing rebuilt. Each
-// read is given the same defaults New fills. A nil read leaves the configuration as it was.
-func (e *Engine) ReadConfigFrom(read func() Config) {
-	if read != nil {
-		e.readConfig = func() Config { return defaulted(read()) }
+// decision is this engine reading one configuration for the whole of one decision: the
+// configuration is read once, here, and every step of that decision reads the same one, so a
+// change applied while a fact is being decided moves nothing under it. The engine itself holds
+// no decision's configuration — two facts are decided at once, each on its own — so this is a
+// copy of it, which is three fields and the one read.
+func (e *Engine) decision() *Engine {
+	settled := e.readConfig()
+	return &Engine{store: e.store, readConfig: e.readConfig, settled: &settled, log: e.log}
+}
+
+// settings is the configuration this decision reads: the one place the engine asks for it. A
+// call outside a decision — the daemon's own reads of the engine, which are no fact's — reads
+// the holder as it stands now.
+func (e *Engine) settings() Config {
+	if e.settled != nil {
+		return *e.settled
 	}
+	return e.readConfig()
 }
-
-// settings is the configuration this decision reads: the one place the engine asks for it.
-func (e *Engine) settings() Config { return e.readConfig() }
 
 // defaulted is cfg with the shipped caps, bound and clock filled where the caller omitted them.
 // Every read runs through it, so a configuration read again under a running daemon is defaulted
@@ -143,6 +162,7 @@ func (e *Engine) sameRepository(a, b string) bool { return e.settings().Reposito
 // Apply changes workflow-owned phase state for one durable intake fact. It never performs I/O;
 // every externally visible consequence is an outbox row committed with the record change.
 func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	e = e.decision()
 	switch fact := fact.(type) {
 	case intake.DispatchIssue:
 		return e.dispatchIssue(ctx, tx, fact)
@@ -451,6 +471,7 @@ func recordedResolution(issue record.Issue) Resolution {
 // (markCheckClosed). The run's generation fences a completion left by an interrupted phase, and
 // the closed check refuses an old look's report, so both claims stay live.
 func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
+	e = e.decision()
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
 		return err
@@ -1046,6 +1067,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 // which the caller read; the slots are read once (their own read, since promotion has just
 // written to them); and the gates of the candidate trees come in one read (record.Store.Gates).
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
+	e = e.decision()
 	var candidates []record.Issue
 	trees := map[string]struct{}{}
 	for _, issue := range issues {

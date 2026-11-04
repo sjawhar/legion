@@ -97,7 +97,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
-	w.nats = newNATSHolder(nil, consumers, nil)
+	w.nats = newNATSHolder(nil, consumers, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done, refreshed := make(chan error, 1), make(chan struct{})
 	go func() { done <- w.nats.intake().Run(ctx) }()

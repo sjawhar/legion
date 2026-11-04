@@ -92,8 +92,9 @@ type workflowRuntime struct {
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
-	// controllerWake is tickController's period (`controller_wake_interval_seconds`); zero, in a
-	// test that builds the runtime by hand, means the configuration's default hour.
+	// controllerWake is the wake a runtime a test builds by hand runs the controller tick on
+	// (`controller_wake_interval_seconds`), where no keeper holder was built for it; zero means
+	// the configuration's default hour. A daemon's own runtime reads the holder (wakeInterval).
 	controllerWake time.Duration
 	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
 	controllerFirstWake time.Duration
@@ -323,7 +324,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 		tokens: tokens, forget: forget, installs: installs, dispatch: client, repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
+		githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
 		defaultBranches: newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
 	}
 	rebuild.register(client)
@@ -351,19 +352,16 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
-	engineCfg := engineConfig(&cfg, reviewAppLogin, build)
-	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
-	w.engine = workflow.New(w.records, engineCfg, log)
 	// Every decision-class value the engine and admission read — the review round cap, the fix
 	// attempts, the linger, the production-check bound, the design gate, the admission cap — is
-	// read as the decision is made, from the settings holder, and never copied into either.
-	w.engine.ReadConfigFrom(func() workflow.Config {
+	// read as the decision is made, from the settings holder, and never copied into either:
+	// each is built on that read and on nothing else.
+	w.engine = workflow.NewReading(w.records, func() workflow.Config {
 		settings := engineConfig(live.Snapshot(), reviewAppLogin, build)
 		settings.Repositories, settings.NoteUnread = w, w.noteUnread
 		return settings
-	})
-	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
-	w.admission.ReadCapFrom(func() int { return live.Snapshot().AdmissionCap })
+	}, log)
+	w.admission = admit.NewReading(w.records, w.engine, func() int { return live.Snapshot().AdmissionCap }, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
 	// whether to start a child and admission whether to admit a root inside this same
 	// transaction, from the mirror's rows, so the row an event carries must already be written
@@ -440,7 +438,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	if err != nil {
 		return err
 	}
-	w.nats = newNATSHolder(conn, consumers, open)
+	w.nats = newNATSHolder(conn, consumers, w.log, open)
 	rebuild.register(w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
@@ -1031,7 +1029,7 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 // reads no events looks healthy and does nothing.
 func (w *workflowRuntime) runIntake(ctx context.Context) error {
 	for {
-		consumers, running, generation := w.nats.begin(ctx)
+		consumers, running, generation, settled := w.nats.begin(ctx)
 		conn := w.nats.connection()
 		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
 		sub, err := subscribeNoticeExceptions(conn, func(data []byte) {
@@ -1040,10 +1038,15 @@ func (w *workflowRuntime) runIntake(ctx context.Context) error {
 			}
 		})
 		if err != nil {
+			close(settled)
 			return err
 		}
 		err = consumers.Run(running, w.handlers...)
 		_ = sub.Unsubscribe()
+		// This generation has settled every message it was holding: a rebuild waiting to close
+		// the connection this run was on may close it now, and nothing in flight is acked on a
+		// closed connection (natsHolder.rebuild).
+		close(settled)
 		switch {
 		case ctx.Err() != nil:
 			return nil

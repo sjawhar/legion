@@ -652,13 +652,13 @@ type plan struct {
 	roleReferences promptrefs.Names
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials
 	// it, or advertise_host at its port when the file sets one (shimAddress).
-	stream     string
-	newRuntime runtimeFactory
-	// runtimeFor is newRuntime for a configuration that has changed: the runtime is a rebuildable
-	// holder (config.HolderRuntime), and everything it is built from but the configuration — the
-	// launchers, the provider key directory, the cluster client's own reads — is resolved here at
-	// boot and read again where the configuration names it. nil for a runtime handed to the
-	// daemon by a test, which has nothing of its own to build again.
+	stream string
+	// runtimeFor is the factory this daemon's runtime is built with, for the configuration it is
+	// built from: the boot's own build and every rebuild call it (config.HolderRuntime), so the
+	// two can never build different things. Everything it is built from but the configuration —
+	// the launchers, the provider key directory, the cluster client's own reads — is resolved at
+	// boot and read again where the configuration names it. A test that hands the daemon its
+	// runtime answers that one for every configuration.
 	runtimeFor func(cfg config.Config) (runtimeFactory, error)
 	// gate is the plugin gate run before anything is opened (pluginGate); nil under a runtime with
 	// no host Oh My Pi, and for a replaced runtime without one.
@@ -797,10 +797,10 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 // read are Oh My Pi's, since the architect runs on it alone (runtime.Backends).
 func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, reads tmuxReads, p *plan) error {
 	invocation := reads.launches[runtime.BackendOmp].invocation
-	p.newRuntime, p.gate = o.runtime, o.gate
+	p.gate = o.gate
 	if o.runtime != nil {
-		// A test handed the daemon its runtime: a rebuild builds the same one again, from the
-		// same factory, since nothing of it comes from the configuration.
+		// A test handed the daemon its runtime: every build, the boot's and every rebuild's,
+		// answers that one, since nothing of it comes from the configuration.
 		p.runtimeFor = func(config.Config) (runtimeFactory, error) { return o.runtime, nil }
 	}
 	p.stream = "unix://" + filepath.Join(cfg.StateDir, streamSocket)
@@ -811,7 +811,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			continue
 		}
 		launchers[backend] = read.launcher
-		if p.newRuntime == nil {
+		if p.runtimeFor == nil {
 			read.log(log)
 		}
 	}
@@ -828,7 +828,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	if err != nil {
 		return err
 	}
-	if p.newRuntime == nil {
+	if p.runtimeFor == nil {
 		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir, cfg.Runtime.Tmux)
 		if err != nil {
 			return err
@@ -861,10 +861,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
 		// Everything but the configuration — the launchers, the provider key directory, the
 		// Dispatch token file, the gh boot resolved — is this boot's; the rest is read again from
-		// the configuration a rebuild is given.
+		// the configuration each build is given, the boot's own included.
 		p.runtimeFor = func(c config.Config) (runtimeFactory, error) {
 			return tmuxRuntime(c, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log), nil
 		}
@@ -1152,7 +1151,25 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, err
 	}
-	built, err := p.newRuntime(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
+	// buildRuntime is the one way this daemon's runtime is built, the boot's build and every
+	// rebuild alike: the factory for the configuration it is given, over this same listener and
+	// address, on a context of the runtime's own. That context is supervision's lifetime cut
+	// short by the stop the build answers, so the holder can end the informers, the caches and
+	// the credential refresher of a runtime it replaces (runtimeHolder.rebuild).
+	buildRuntime := func(c config.Config) (runtime.Runtime, context.CancelFunc, error) {
+		factory, err := p.runtimeFor(c)
+		if err != nil {
+			return nil, nil, err
+		}
+		living, stop := context.WithCancel(supervising)
+		next, err := factory(living, listener, dial, apps, p.repository, st, p.repositories.Accepted)
+		if err != nil {
+			stop()
+			return nil, nil, err
+		}
+		return next, stop, nil
+	}
+	built, stopBuilt, err := buildRuntime(cfg)
 	if err != nil {
 		cancel()
 		endDrain()
@@ -1161,16 +1178,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	// The runtime behind its holder: a `runtime.*` change builds the runtime again over this same
 	// listener and address and swaps it, and every reader — the machines, the supervision, the
 	// API's tree releaser — holds the holder.
-	rt := newRuntimeHolder(built, func(c config.Config) (runtime.Runtime, error) {
-		if p.runtimeFor == nil {
-			return nil, errors.New("this daemon's runtime was handed to it rather than built from the configuration")
-		}
-		factory, err := p.runtimeFor(c)
-		if err != nil {
-			return nil, err
-		}
-		return factory(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
-	})
+	rt := newRuntimeHolder(built, stopBuilt, buildRuntime)
 	// The launch specs behind theirs: everything a launch reads that the claim does not carry,
 	// built again from the configuration a `launch` change settled, read by the next launch.
 	buildSpecs := func(c config.Config) (specs, error) {
@@ -1692,6 +1700,31 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	sources := api.NewSettingProvenance(startedAt)
 	sources.Restore(restoredSources(p.restored))
 	p.live.OnChange(sources.Observe)
+	group, serving := errgroup.WithContext(ctx)
+	// The keeper's loop runs under a context of its own, so the holder can stop it when
+	// `controller` moves to the operator and start it again when it moves back, and ends with
+	// serving either way. The holder is the one thing that starts it (keeperHolder.begin) and
+	// the one thing that knows whether this daemon launches the controller now, which the API
+	// reads at every request that turns on it.
+	keeping := newKeeperHolder(cfg.ControllerWakeInterval, keeper != nil, func() context.CancelFunc {
+		kept, stop := context.WithCancel(serving)
+		running := ensureKeeper()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			running.run(kept, p.orphanSweep)
+		}()
+		return stop
+	})
+	p.rebuild.register(keeping)
+	if workflow != nil {
+		workflow.keeper = keeping
+	}
+	// The project's repository mapping as a holder of the deployment's repository equivalence:
+	// a change of `repository_renames` reaches it as it reaches the API server's settings, the
+	// intake consumers and the runtime's gh bundles (config.Row.Also).
+	p.rebuild.register(newMappingHolder(p.repositories))
+
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -1720,7 +1753,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Settings:           held.settings,
 		ApplySettings:      p.settings.Route,
 		Controller:         st,
-		ControllerLaunched: keeper != nil,
+		ControllerLaunched: keeping.launchedNow,
 		PluginRelaunchable: p.pluginRelaunchable,
 		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(*p.live.Snapshot(), c) },
 		Stopping:           s.stopping,
@@ -1746,7 +1779,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		CapabilityReported: s.capabilityReported,
 	})
 
-	group, serving := errgroup.WithContext(ctx)
 	serverStarted := make(chan struct{})
 	group.Go(func() error {
 		close(serverStarted)
@@ -1772,8 +1804,10 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	watcher := settings.NewWatcher(p.settings, s.log)
 	// A credential rotated in place names no changed setting — its path is what the
 	// configuration holds, and the path has not moved — so the file arm is also what asks every
-	// holder that reads a credential file to read it again (rebuilder.rereadCredentials).
-	watcher.Settled = func(settled *config.Config, _ []config.Change) { p.rebuild.rereadCredentials(settled) }
+	// holder that reads a credential file to read it again (rebuilder.rereadCredentials). It
+	// runs under the settings holder's own lock (config.Live.WhileSettled), where an applied
+	// change's rebuilds run, so a reread and a route change never build one holder at once.
+	watcher.Settled = func(*config.Config, []config.Change) { p.live.WhileSettled(p.rebuild.rereadCredentials) }
 	group.Go(func() error {
 		watcher.Run(serving)
 		return nil
@@ -1819,31 +1853,10 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			return nil
 		})
 	}
-	// The keeper's loop runs under a context of its own, so the holder can stop it when
-	// `controller` moves to the operator and start it again when it moves back. The loop ends
-	// with serving either way.
-	keeping := newKeeperHolder(cfg.ControllerWakeInterval, keeper != nil, func() context.CancelFunc {
-		kept, stop := context.WithCancel(serving)
-		running := ensureKeeper()
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			running.run(kept, p.orphanSweep)
-		}()
-		return stop
-	}, nil)
-	p.rebuild.register(keeping)
-	if workflow != nil {
-		workflow.keeper = keeping
-	}
-	if keeper != nil {
-		group.Go(func() error {
-			kept, stop := context.WithCancel(serving)
-			keeping.hold(stop)
-			keeper.run(kept, p.orphanSweep)
-			return nil
-		})
-	}
+	// The keeper's loop, where this daemon launches the controller itself: started through the
+	// holder, which is also what a change of `controller` starts and stops it through, so the
+	// loop has one beginning (keeperHolder.begin).
+	keeping.begin()
 	group.Go(func() error {
 		watchController(serving, st, cfg, p, s.log)
 		return nil
@@ -2075,33 +2088,35 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 	}
 }
 
-// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime that
-// keeps them, and nil under any other. A runtime behind its holder answers through the holder, so
-// a rebuild of the runtime moves the answer with it.
+// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime
+// that keeps them, and nil under any other. The Sandbox runtime behind rt is read at every call
+// (sandboxOf), which is what makes the answer follow a rebuild of the runtime: the holder's
+// readers hold the holder, and the runtime inside it is replaced under them.
 func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
-	switch held := rt.(type) {
-	case *runtimeHolder:
-		if _, sandboxed := sandboxOf(held); !sandboxed {
+	if _, sandboxed := sandboxOf(rt); !sandboxed {
+		return nil
+	}
+	return func() []sandbox.CacheStatus {
+		sandboxed, ok := sandboxOf(rt)
+		if !ok {
 			return nil
 		}
-		return held.repositoryCaches
-	case *sandbox.Runtime:
-		return held.RepositoryCaches
+		return sandboxed.RepositoryCaches()
 	}
-	return nil
 }
 
 // callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that runs
-// pods, and nil under any other (api's Options.CallerPod).
+// pods, and nil under any other (api's Options.CallerPod). It reads the Sandbox runtime behind
+// rt at every call, as repositoryCachesOf does.
 func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
-	switch held := rt.(type) {
-	case *runtimeHolder:
-		if _, sandboxed := sandboxOf(held); !sandboxed {
-			return nil
-		}
-		return held.podAt
-	case *sandbox.Runtime:
-		return held.PodAt
+	if _, sandboxed := sandboxOf(rt); !sandboxed {
+		return nil
 	}
-	return nil
+	return func(addr netip.Addr) (string, bool) {
+		sandboxed, ok := sandboxOf(rt)
+		if !ok {
+			return "", false
+		}
+		return sandboxed.PodAt(addr)
+	}
 }

@@ -211,16 +211,16 @@ func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intak
 	// the approval; a test that reads other issues replaces the map.
 	facts, statuses := &factRecorder{refusal: refusal}, &statusRecorder{issues: map[string]dispatch.Issue{"LEGION-208": {Key: "LEGION-208", LastSeq: 7}}}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor:    h.supervisor,
-		BootTokens:    h.tokens,
-		Project:       testProject,
-		OperatorToken: testOperatorToken,
-		Controller:    h.store,
-		Grants:        grants,
-		Pool:          h.store.Pool(),
-		Record:        record.NewStore(),
-		Handlers:      []intake.Handler{facts},
-		Dispatch:      statuses,
+		Supervisor: h.supervisor,
+		BootTokens: h.tokens,
+		Project:    testProject,
+		Settings:   operatorSettings(),
+		Controller: h.store,
+		Grants:     grants,
+		Pool:       h.store.Pool(),
+		Record:     record.NewStore(),
+		Handlers:   []intake.Handler{facts},
+		Dispatch:   statuses,
 	}).Handler
 	return h, facts, statuses
 }

@@ -61,7 +61,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !known {
-		if s.controllerLaunched {
+		if s.controllerLaunched() {
 			writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
 			return
 		}
@@ -74,7 +74,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m.Claim().Role == claim.RoleController {
-		if !s.controllerLaunched {
+		if !s.controllerLaunched() {
 			s.log.Warn("api: refused a launched controller's registration: this daemon leaves the controller to its operator",
 				"claim", launch.Claim, "generation", launch.Generation, "session", req.SessionID)
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(

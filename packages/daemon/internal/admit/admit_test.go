@@ -977,11 +977,12 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 
 func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cap := 1
+	admission := newAdmissionReading(t, func() int { return cap }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedWaiting(t, pool, "LEGION-B", "B")
 	seedWaiting(t, pool, "LEGION-A", "A")
 	seedWaiting(t, pool, "LEGION-C", "C")
-	admission.ReadCapFrom(func() int { return 2 })
+	cap = 2
 	summaries := []dispatch.IssueSummary{
 		{Key: "LEGION-C", ResolvedRepo: "acme/widgets", Title: "C", Status: "todo", Rank: "C", HandedOver: handed},
 		{Key: "LEGION-B", ResolvedRepo: "acme/widgets", Title: "B", Status: "todo", Rank: "B", HandedOver: handed},

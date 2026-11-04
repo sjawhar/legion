@@ -81,26 +81,24 @@ func (a *Admission) ReportCapabilities(open func() []string) {
 	a.openCapabilities = open
 }
 
-// ReadCapFrom makes admission read the cap through read at every decision that needs one, in
-// place of the constant New was given: the daemon hands a read of its settings holder
-// (config.Live.Snapshot), so a change of `admission_cap` takes effect at once, with nothing
-// rebuilt. A nil read is ignored, leaving the cap as it was.
-func (a *Admission) ReadCapFrom(read func() int) {
-	if read != nil {
-		a.readCap = read
-	}
-}
-
 var _ intake.Handler = (*Admission)(nil)
 
-// New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
-// with intake's other handler: reenterStrandedChildren calls its exported ReenterChild rather than
-// keeping a second copy of re-entry and gate-open behavior.
+// New creates an admission handler on one admission cap, for one Dispatch project. engine is the
+// workflow's own, shared with intake's other handler: reenterStrandedChildren calls its exported
+// ReenterChild rather than keeping a second copy of re-entry and gate-open behavior.
 func New(store record.Store, engine *workflow.Engine, cap int, project string, log *slog.Logger) *Admission {
+	return NewReading(store, engine, func() int { return cap }, project, log)
+}
+
+// NewReading creates an admission handler that reads the cap through read at every decision that
+// needs one, in place of a constant settled once: the daemon hands a read of its settings holder
+// (config.Live.Snapshot), so a change of `admission_cap` takes effect at the next decision, with
+// nothing rebuilt.
+func NewReading(store record.Store, engine *workflow.Engine, read func() int, project string, log *slog.Logger) *Admission {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, engine: engine, readCap: func() int { return cap }, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
+	return &Admission{store: store, engine: engine, readCap: read, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer

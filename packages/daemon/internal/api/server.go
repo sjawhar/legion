@@ -61,13 +61,13 @@ type Options struct {
 	// the token is the lowercase of a key that must start uppercase.
 	Project         string
 	DispatchProject string
-	// OperatorToken is the bearer every operator route compares against; empty admits no one.
-	OperatorToken string
-	// Settings is where every request reads the configuration the server holds: nil, which every
-	// caller but the daemon means, is the OperatorToken, DesignGate, RepositoryRenames and
-	// MergeRules stated beside it, settled once. The daemon hands one of its own and swaps it
-	// when one of those settings changes (NewLiveSettings, LiveSettings.Store), so the change
-	// takes effect without rebinding the listening socket or dropping a request.
+	// Settings is the configuration the server holds, behind the pointer every request reads
+	// through: the operator bearer, the design gate, the repository equivalence, the projects'
+	// merge rules and the settings route's own admission rule. It is the one way a caller states
+	// them. A caller whose settings never change hands NewLiveSettings(HeldSettings{…}) and
+	// leaves it at that; the daemon swaps its own when one of them changes (LiveSettings.Store),
+	// so the change takes effect without rebinding the listening socket or dropping a request.
+	// Nil holds the zero value, which admits no operator bearer.
 	Settings *LiveSettings
 	// ApplySettings is how `PUT /legion/v1/operator/settings` changes a setting: the daemon's one
 	// settings holder and the store of what the route changed (internal/settings' Keeper.Route).
@@ -77,13 +77,16 @@ type Options struct {
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
 	Controller ControllerStore
-	// DesignGate is the project's `gates.design`, which the controller secret route answers.
-	DesignGate config.DesignGate
-	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
-	// daemon`): one controller runs per project, so the controller secret route refuses the operator
-	// and a registration registers the controller only from a launch of the controller's claim.
-	// Unset (`controller: operator`), only the operator's capability registers it.
-	ControllerLaunched bool
+	// ControllerLaunched is whether the daemon launches the project's controller itself
+	// (`controller: daemon`), read at every request that needs it: one controller runs per
+	// project, so the controller secret route refuses the operator and a registration registers
+	// the controller only from a launch of the controller's claim. Nil, and a daemon under
+	// `controller: operator`, answers false, and only the operator's capability registers it.
+	//
+	// It is read rather than stated because `controller` is a setting that changes under a
+	// running daemon: the keeper's holder answers what the daemon does now (internal/daemon's
+	// keeperHolder), so a change of the mode moves this answer with it.
+	ControllerLaunched func() bool
 	// PluginRelaunchable is supervise.Deps.PluginRelaunchable as the API sees it: whether this
 	// daemon can relaunch a stale process onto a plugin at all. False is Kubernetes's degraded
 	// mode, where a stale registration is recorded and the process is left running: nothing here
@@ -124,10 +127,6 @@ type Options struct {
 	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
 	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
 	GitHubOwners func() []string
-	// RepositoryRenames is the deployment's repository equivalence
-	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
-	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
-	RepositoryRenames ghrepo.Renames
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -138,8 +137,6 @@ type Options struct {
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
 	GitHubAPI string
-	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
-	MergeRules func(project string) config.MergeRules
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -264,8 +261,9 @@ type server struct {
 	// server answers the new value without rebinding its socket or dropping a request.
 	settings   *LiveSettings
 	controller ControllerStore
-	// controllerLaunched is Options.ControllerLaunched.
-	controllerLaunched bool
+	// controllerLaunched is Options.ControllerLaunched, read at every request that needs it and
+	// never nil here: NewServer fills a caller's nil with the daemon that launches no controller.
+	controllerLaunched func() bool
 	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
 	pluginRelaunchable bool
 	noPluginInstall    func(c supervise.Claim) bool
@@ -349,12 +347,10 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		decisions:          opts.Decisions,
 	}
 	if s.settings == nil {
-		s.settings = NewLiveSettings(HeldSettings{
-			OperatorToken:     opts.OperatorToken,
-			DesignGate:        opts.DesignGate,
-			RepositoryRenames: opts.RepositoryRenames,
-			MergeRules:        opts.MergeRules,
-		})
+		s.settings = NewLiveSettings(HeldSettings{})
+	}
+	if s.controllerLaunched == nil {
+		s.controllerLaunched = func() bool { return false }
 	}
 	if s.grants == nil {
 		s.grants = credential.New(nil)

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
-	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -256,16 +255,53 @@ func podLaunchPath(path string) bool {
 	return !strings.HasPrefix(path, "runtime.tmux.")
 }
 
+// resourcesPrefix is where the two pod kinds' reservations are written, one key per kind
+// (podKind.resourcesPath).
+const resourcesPrefix = "runtime.kubernetes.resources."
+
+// launchSettingsFor is the record a pod of kind carries: the launch keys of the whole record
+// (LaunchSettings) less the keys another kind's launch reads and this one's does not. Today that
+// is the other kind's reservation alone (podKind.resourcesPath), which only the launch of the
+// pod it names ever reads.
+//
+// It is why a changed `runtime.kubernetes.resources.controller` opens no update round over every
+// issue pod of the fleet: a round opens for each pod whose own launch reads the key that moved
+// and for no other (INFRA-1077's acceptance A5). A record this package cannot read is carried as
+// it is, and compares as every unreadable record does.
+func launchSettingsFor(record string, kind podKind) string {
+	if record == "" {
+		return ""
+	}
+	settings, err := launchSettingsOf(record)
+	if err != nil {
+		return record
+	}
+	maps.DeleteFunc(settings, func(path, _ string) bool {
+		return strings.HasPrefix(path, resourcesPrefix) && path != kind.resourcesPath()
+	})
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return record
+	}
+	return string(encoded)
+}
+
 // launchSettingsDrift names what the pod whose template records held read at its launch that a
-// pod launched now would be handed otherwise (want, LaunchSettings), one short phrase per key:
-// `launch setting <path> <held>, now <handed>`, and for a secret key, whose value is a digest,
-// `launch setting <path> changed (withheld)`. Nil means nothing drifted.
+// pod launched now would be handed otherwise (want, the runtime's record for that pod's kind),
+// one short phrase per key: `launch setting <path> <held>, now <handed>`, and for a secret key,
+// whose value is a digest, `launch setting <path> changed (withheld)`. Nil means nothing drifted.
 //
 // A template recording no launch settings at all was written before this release: it reads as no
 // drift, whatever the configuration now says, since nothing recorded what that pod's launch read
 // and a guess would open an update round over every pod of the fleet at once. A runtime that
 // records none itself compares nothing for the same reason.
-func launchSettingsDrift(held, want string, now map[string]string) []string {
+//
+// The two records are strings until they differ, so the steady state — every pod of the fleet
+// carrying what the runtime holds — costs the one comparison above this and no decoding at all;
+// a pod whose record has moved is the pod a round is about to be opened over. Which paths moved
+// is config's own comparison of two readings of the settings (config.Compare), so a key only one
+// of them carries reads here exactly as it reads in a settings change's own answer.
+func launchSettingsDrift(held, want string) []string {
 	if held == want || held == "" || want == "" {
 		return nil
 	}
@@ -273,37 +309,19 @@ func launchSettingsDrift(held, want string, now map[string]string) []string {
 	if err != nil {
 		return []string{fmt.Sprintf("its recorded launch settings %q cannot be read: %v", held, err)}
 	}
-	if now == nil {
-		// want could not be decoded (launchSettingsRecord), which is the no-drift answer this
-		// function has always given a record it cannot read as the one a launch now holds.
+	now, err := launchSettingsOf(want)
+	if err != nil {
+		// The runtime's own record cannot be read, which is the no-drift answer this function
+		// has always given where the record a launch now holds is unreadable.
 		return nil
 	}
-	paths := slices.Collect(maps.Keys(now))
-	for path := range was {
-		if _, held := now[path]; !held {
-			paths = append(paths, path)
-		}
-	}
-	slices.Sort(paths)
-
 	var drifted []string
-	for _, path := range paths {
-		before, had := was[path]
-		after, has := now[path]
-		if before == after {
+	for _, moved := range config.Compare(was, now) {
+		if row, known := config.ClassOf(moved.Path); known && row.Secret {
+			drifted = append(drifted, "launch setting "+moved.Path+" "+withheldLaunchValue)
 			continue
 		}
-		if row, known := config.ClassOf(path); known && row.Secret {
-			drifted = append(drifted, "launch setting "+path+" "+withheldLaunchValue)
-			continue
-		}
-		if !had {
-			before = config.UnsetValue
-		}
-		if !has {
-			after = config.UnsetValue
-		}
-		drifted = append(drifted, "launch setting "+path+" "+before+", now "+after)
+		drifted = append(drifted, "launch setting "+moved.Path+" "+moved.Old+", now "+moved.New)
 	}
 	return drifted
 }
@@ -315,17 +333,6 @@ func launchSettingsOf(record string) (map[string]string, error) {
 		return nil, err
 	}
 	return settings, nil
-}
-
-// launchSettingsRecord is one encoded record decoded once, nil when it cannot be read: what the
-// runtime holds beside the record it was built with, so a drifted pod is compared against a map
-// already in hand rather than one decoded again per pod (launchSettingsDrift).
-func launchSettingsRecord(record string) map[string]string {
-	settings, err := launchSettingsOf(record)
-	if err != nil {
-		return nil
-	}
-	return settings
 }
 
 // shapeDrift is why the pod of the Sandbox read as s, a pod of kind, was built from a
@@ -341,17 +348,18 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 	return podShapeDrift(s, r.podShapes[kind])
 }
 
-// launchDrift is which launch keys the pod of the Sandbox read as s was launched with that a
-// launch now reads otherwise (launchSettingsDrift against the record this runtime holds,
-// r.launchSettings), read from the stored template as shapeDrift reads the shape.
+// launchDrift is which launch keys the pod of the Sandbox read as s, a pod of kind, was launched
+// with that a launch of that kind now reads otherwise (launchSettingsDrift against the record
+// this runtime holds for the kind, r.launchSettings), read from the stored template as
+// shapeDrift reads the shape.
 //
 // It is the launch's own reading of what a round names in its reasons (PodDrift), so the two can
 // never disagree about whether a pod's launch keys have moved. A pod a round covers is never
 // read by it: that pod's launch keeps the pod and leaves it to its round, which replaces the pod
 // only once every worker in it has pushed. A pod no round covers — the project controller's — is
 // replaced by its own next launch, which is the only way such a change reaches it.
-func (r *Runtime) launchDrift(s *sandbox) []string {
-	return launchSettingsDrift(s.Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation], r.launchSettings, r.launchSettingsNow)
+func (r *Runtime) launchDrift(s *sandbox, kind podKind) []string {
+	return launchSettingsDrift(s.Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation], r.launchSettings[kind])
 }
 
 // PodDrift satisfies runtime.Runtime: why the pod k's process runs in no longer matches the
@@ -442,11 +450,11 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 		}
 		drifted = r.shapeDrift(s, kind)
 	}
-	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", launchSettingsAnnotation); held != r.launchSettings {
+	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", launchSettingsAnnotation); held != r.launchSettings[kind] {
 		// The record is read from the stored template alone, as the shape is: the steady state
 		// costs the one string compare above, and a template that records none — every pod built
 		// before this release — answers nothing.
-		drifted = append(drifted, launchSettingsDrift(held, r.launchSettings, r.launchSettingsNow)...)
+		drifted = append(drifted, launchSettingsDrift(held, r.launchSettings[kind])...)
 	}
 	for _, moved := range r.driftedInPod(pod, role) {
 		drifted = append(drifted, moved.String())

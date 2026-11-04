@@ -636,8 +636,8 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		},
 		Spec: spec,
 	}
-	if r.launchSettings != "" {
-		template.Metadata.Annotations[launchSettingsAnnotation] = r.launchSettings
+	if record := r.launchSettings[l.kind]; record != "" {
+		template.Metadata.Annotations[launchSettingsAnnotation] = record
 	}
 	return template
 }

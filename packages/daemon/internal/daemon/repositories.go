@@ -153,7 +153,29 @@ func (r *repositories) same(a, b string) bool {
 	if r == nil {
 		return strings.EqualFold(a, b)
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.renames.Same(a, b)
+}
+
+// Renames is the deployment's repository equivalence as it now stands, for a caller that
+// compares names itself (ghrepo.Under and its neighbours). A nil mapping configures none.
+func (r *repositories) Renames() ghrepo.Renames {
+	if r == nil {
+		return ghrepo.Renames{}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.renames
+}
+
+// setRenames replaces the equivalence with the one the configuration now names: the mapping is
+// a holder of `repository_renames` (mappingHolder), so a change of that key reaches every
+// comparison this mapping makes without the mapping itself being read again from Dispatch.
+func (r *repositories) setRenames(renames ghrepo.Renames) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.renames = renames
 }
 
 // ownerAliases is the mapping's answer for ghrepo.Renames.OwnerAliases: each owner a configured
@@ -625,7 +647,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 // it, which is how a pair configured before the transfer stands. It changes nothing else: the
 // served set is Dispatch's mapping alone, and no rename is ever read from GitHub.
 func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
-	for _, pair := range w.repositories.renames.Pairs() {
+	for _, pair := range w.repositories.Renames().Pairs() {
 		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return strings.EqualFold(mapped.Repo.String(), pair.To.String()) }) {
 			continue
 		}
@@ -1254,7 +1276,7 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 	// would otherwise match against no published subject at all; the pair's spelling is used only
 	// for a name nothing else names. Both sides are read before either is added, so neither
 	// addition is seen by the other's test.
-	for _, pair := range w.repositories.renames.Pairs() {
+	for _, pair := range w.repositories.Renames().Pairs() {
 		from, to := strings.ToLower(pair.From.String()), strings.ToLower(pair.To.String())
 		_, heardFrom := heard[from]
 		_, heardTo := heard[to]

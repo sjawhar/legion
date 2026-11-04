@@ -30,6 +30,7 @@ import (
 // returns the roots that entered awaiting_person, whose slots the caller releases, and whether it
 // wrote any issue of the snapshot, which the caller then reads again.
 func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, slots []record.Slot, held func(string) bool) ([]string, bool, error) {
+	e = e.decision()
 	changed, err := e.answerOpenGates(ctx, tx, project, issues, held)
 	if err != nil {
 		return nil, false, err
@@ -414,6 +415,7 @@ func (e *Engine) tellInPlace(ctx context.Context, tx pgx.Tx, root record.Issue, 
 // here, and only a hand-back after it starts the next wait. When the gate is open it advances the
 // now-admitted tree only after the root has its slot again.
 func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
+	e = e.decision()
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
 		return err

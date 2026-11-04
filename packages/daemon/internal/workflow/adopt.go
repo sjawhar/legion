@@ -23,6 +23,7 @@ import (
 // Admission's sweep of its queue (adoptQueuedRoots) leaves a refused root queueing as a root of
 // its own; a release of children answers the refusal. Callers check it before Adopt.
 func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Issue, tree string) (*intake.Refusal, error) {
+	e = e.decision()
 	if issue.Tree == tree {
 		return nil, nil
 	}
@@ -59,6 +60,7 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 // back, though it never took a slot. Only a labelled root that never left a tree and never ran
 // (one a person made a child of a live tree) is adopted.
 func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, error) {
+	e = e.decision()
 	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
 		return "", err
@@ -90,6 +92,7 @@ func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (
 // Every write of an observation's chain to a record goes through this, with the record as it will
 // be written: RanAsRoot reads its run's mark.
 func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, chain []string) ([]string, error) {
+	e = e.decision()
 	if len(chain) == 0 {
 		return nil, nil
 	}
@@ -113,6 +116,7 @@ func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, ch
 // The tree's architect is told with a child-status notice. Everything is written in the caller's
 // transaction.
 func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue, parent string) error {
+	e = e.decision()
 	members, err := e.store.TreeIssues(ctx, tx, issue.Key)
 	if err != nil {
 		return err

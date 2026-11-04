@@ -8,13 +8,20 @@ import (
 )
 
 // newLive is a holder over a fresh copy of the smallest file that loads, with the route overlay
-// the caller's store would have seeded. It answers the file's path so a test can rewrite it.
+// the caller's store would have seeded laid back over it through the route arm, as the boot's
+// own restore lays it (internal/settings' Keeper.Restore). It answers the file's path so a test
+// can rewrite it.
 func newLive(t *testing.T, body string, overlay map[string]any) (*Live, string) {
 	t.Helper()
 	path := writeConfigFile(t, body)
-	live, err := NewLive(path, noEnv, overlay)
+	live, err := NewLive(path, noEnv, nil)
 	if err != nil {
 		t.Fatalf("NewLive: %v", err)
+	}
+	if len(overlay) > 0 {
+		if _, refused, err := live.Apply(SourceRoute, "", overlay); err != nil || len(refused) > 0 {
+			t.Fatalf("lay the stored overlay back over %s: %v, refused %+v", path, err, refused)
+		}
 	}
 	return live, path
 }

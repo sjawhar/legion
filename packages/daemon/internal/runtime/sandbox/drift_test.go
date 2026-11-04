@@ -861,7 +861,8 @@ func TestPodDriftNamesTheLaunchKeyThatMoved(t *testing.T) {
 			built := LaunchSettings(launchFixture())
 			g := newRig(t, nil, withOptions(func(o *Options) { o.LaunchSettings = built }))
 			loc := g.spawn(workerSpec(t))
-			if recorded := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation]; recorded != built {
+			// An issue pod records its own kind's launch keys (launchSettingsFor).
+			if recorded := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation]; recorded != launchSettingsFor(built, issuePod{}) {
 				t.Fatalf("the pod template records %q, want the launch settings its launch read", recorded)
 			}
 
@@ -888,20 +889,62 @@ func TestPodDriftNamesTheLaunchKeyThatMoved(t *testing.T) {
 // compared against nothing.
 func TestLaunchSettingsDriftReadsAnUnreadableAndAnAbsentRecord(t *testing.T) {
 	built := LaunchSettings(launchFixture())
-	now := launchSettingsRecord(built)
-	if drifted := launchSettingsDrift("{not json", built, now); len(drifted) != 1 || !strings.Contains(drifted[0], "cannot be read") {
+	if drifted := launchSettingsDrift("{not json", built); len(drifted) != 1 || !strings.Contains(drifted[0], "cannot be read") {
 		t.Errorf("launchSettingsDrift of an unreadable record = %q, want one reason naming it", drifted)
 	}
-	if drifted := launchSettingsDrift("", built, now); drifted != nil {
+	if drifted := launchSettingsDrift("", built); drifted != nil {
 		t.Errorf("launchSettingsDrift of a pod that records none = %q, want nothing", drifted)
 	}
-	if drifted := launchSettingsDrift(built, "", launchSettingsRecord("")); drifted != nil {
+	if drifted := launchSettingsDrift(built, ""); drifted != nil {
 		t.Errorf("launchSettingsDrift against a runtime that records none = %q, want nothing", drifted)
 	}
-	if drifted := launchSettingsDrift(built, built, now); drifted != nil {
+	if drifted := launchSettingsDrift(built, "{not json either"); drifted != nil {
+		t.Errorf("launchSettingsDrift against a record a launch cannot read = %q, want nothing", drifted)
+	}
+	if drifted := launchSettingsDrift(built, built); drifted != nil {
 		t.Errorf("launchSettingsDrift of one record against itself = %q, want nothing", drifted)
 	}
-	if drifted := launchSettingsDrift(`{"instructions":"/etc/legion/instructions.md"}`, `{}`, launchSettingsRecord(`{}`)); !slices.Equal(drifted, []string{"launch setting instructions /etc/legion/instructions.md, now " + config.UnsetValue}) {
+	if drifted := launchSettingsDrift(`{"instructions":"/etc/legion/instructions.md"}`, `{}`); !slices.Equal(drifted, []string{"launch setting instructions /etc/legion/instructions.md, now " + config.UnsetValue}) {
 		t.Errorf("launchSettingsDrift of a key the configuration dropped = %q, want it named as unset", drifted)
+	}
+}
+
+// Each kind of pod records the launch keys its own launch reads and no other kind's: the record
+// an issue pod carries holds `runtime.kubernetes.resources.issue` and not the controller pod's
+// reservation, and the controller pod's the other way round. So a change of the controller's
+// reservation is no drift of an issue pod, and no update round is opened over every issue pod
+// of the fleet for a key none of their launches read (spec A5: a round opens for each issue pod
+// whose launch reads the key and for no other).
+func TestEachKindRecordsOnlyTheLaunchKeysItsOwnLaunchReads(t *testing.T) {
+	built := LaunchSettings(launchFixture())
+	moved := launchFixture()
+	moved.Runtime.Kubernetes.Resources.Controller.CPURequest = "2"
+	shifted := LaunchSettings(moved)
+	if built == shifted {
+		t.Fatal("the whole record did not move with the controller's reservation, so this proves nothing")
+	}
+	for kind, other := range map[podKind]string{
+		issuePod{}:      "runtime.kubernetes.resources.controller",
+		controllerPod{}: "runtime.kubernetes.resources.issue",
+	} {
+		record, err := launchSettingsOf(launchSettingsFor(built, kind))
+		if err != nil {
+			t.Fatalf("the record of %T cannot be read: %v", kind, err)
+		}
+		if _, held := record[kind.resourcesPath()]; !held {
+			t.Errorf("the record of %T holds no %s, which its own launch reads", kind, kind.resourcesPath())
+		}
+		if _, held := record[other]; held {
+			t.Errorf("the record of %T holds %s, which no launch of its reads", kind, other)
+		}
+	}
+	// The issue pod's own record does not move with the controller's reservation, so no issue
+	// pod has drifted; the controller pod's does, and its own next launch replaces it.
+	if before, after := launchSettingsFor(built, issuePod{}), launchSettingsFor(shifted, issuePod{}); before != after {
+		t.Errorf("a controller-only change moved the issue pod's record:\n%s\n%s", before, after)
+	}
+	if drifted := launchSettingsDrift(launchSettingsFor(built, controllerPod{}), launchSettingsFor(shifted, controllerPod{})); len(drifted) != 1 ||
+		!strings.Contains(drifted[0], "runtime.kubernetes.resources.controller") {
+		t.Errorf("the controller pod's drift = %q, want its own reservation named", drifted)
 	}
 }

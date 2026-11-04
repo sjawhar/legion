@@ -90,11 +90,25 @@ func (s *Store) Rows(ctx context.Context) ([]Change, error) {
 	return stored, nil
 }
 
-// Record writes each change, replacing the row that path already holds: the latest change of a
-// key wins, and the row carries who made that latest one and when.
-func (s *Store) Record(ctx context.Context, changes []Change) error {
-	if len(changes) == 0 {
+// Write records each change and forgets each of paths, in one transaction: a change of a key
+// and the withdrawal of another are one act of one caller, and a restart that read half of it
+// would run on a configuration nobody asked for. A row is written over the one its path already
+// holds — the latest change of a key wins, and the row carries who made it and when — and a
+// forgotten path keeps no row at all, since the file's own value stands for it again.
+func (s *Store) Write(ctx context.Context, changes []Change, paths []string) error {
+	if len(changes) == 0 && len(paths) == 0 {
 		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("record the settings changes of %s: %w", s.project, err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if len(paths) > 0 {
+		if _, err := tx.Exec(ctx, `delete from settings_overlay where project = $1 and path = any($2)`,
+			s.project, paths); err != nil {
+			return fmt.Errorf("forget the settings changes of %s: %w", s.project, err)
+		}
 	}
 	batch := &pgx.Batch{}
 	for _, change := range changes {
@@ -104,21 +118,13 @@ func (s *Store) Record(ctx context.Context, changes []Change) error {
 				source = excluded.source, changed_by = excluded.changed_by, changed_at = excluded.changed_at`,
 			s.project, change.Path, []byte(change.Value), change.FileDigest, change.Source, change.By, change.At.UTC())
 	}
-	if err := s.pool.SendBatch(ctx, batch).Close(); err != nil {
-		return fmt.Errorf("record the settings change of %s: %w", s.project, err)
+	if batch.Len() > 0 {
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return fmt.Errorf("record the settings changes of %s: %w", s.project, err)
+		}
 	}
-	return nil
-}
-
-// Forget deletes the rows of paths: the file has changed those keys, so the route change that
-// stood above each is over.
-func (s *Store) Forget(ctx context.Context, paths []string) error {
-	if len(paths) == 0 {
-		return nil
-	}
-	if _, err := s.pool.Exec(ctx, `delete from settings_overlay where project = $1 and path = any($2)`,
-		s.project, paths); err != nil {
-		return fmt.Errorf("forget the settings changes of %s: %w", s.project, err)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("record the settings changes of %s: %w", s.project, err)
 	}
 	return nil
 }

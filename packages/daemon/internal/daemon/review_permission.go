@@ -103,7 +103,7 @@ func (w *workflowRuntime) reviewedRepository(ctx context.Context, review intake.
 	var pr *record.PullRequest
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		var err error
-		pr, err = ghrepo.Under(w.repositories.renames, review.Repo, func(name string) (*record.PullRequest, error) {
+		pr, err = ghrepo.Under(w.repositories.Renames(), review.Repo, func(name string) (*record.PullRequest, error) {
 			return w.records.PullRequestByNumber(ctx, tx, name, review.Number)
 		})
 		return err

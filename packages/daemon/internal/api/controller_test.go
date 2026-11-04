@@ -33,8 +33,8 @@ func newControllerHarness(t *testing.T, launched bool) *harness {
 func (h *harness) serve(controllerLaunched bool) {
 	h.t.Helper()
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: controllerLaunched,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
+		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: func() bool { return controllerLaunched },
 	}).Handler
 }
 
@@ -120,8 +120,8 @@ func newControllerCredentialHarness(t *testing.T, tokens appauth.Tokens, launche
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: launched,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
+		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: func() bool { return launched },
 		Tokens: tokens, GitHubOwners: func() []string { return []string{"sjawhar", "acme"} },
 	}).Handler
 	return h
@@ -473,7 +473,7 @@ func TestControllerGitHubCredential(t *testing.T) {
 func TestControllerGitHubCredentialWithoutAnOwner(t *testing.T) {
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
 		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubOwners: func() []string { return nil },
 	}).Handler
 	secret := h.mintedSecret()

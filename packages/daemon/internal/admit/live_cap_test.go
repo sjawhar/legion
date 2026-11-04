@@ -21,8 +21,7 @@ import (
 func TestTheAdmissionCapChangedThroughTheSettingsHolderIsUsedByTheNextDecision(t *testing.T) {
 	pool := migratedPool(t)
 	live := liveCap(t, 1)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	admission.ReadCapFrom(func() int { return live.Snapshot().AdmissionCap })
+	admission := newAdmissionReading(t, func() int { return live.Snapshot().AdmissionCap }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedWaiting(t, pool, "LEGION-A", "A")
 	seedWaiting(t, pool, "LEGION-B", "B")
 	seedWaiting(t, pool, "LEGION-C", "C")

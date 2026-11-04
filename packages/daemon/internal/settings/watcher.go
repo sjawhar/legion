@@ -45,10 +45,11 @@ type Watcher struct {
 	// Interval and Debounce are WatchInterval and WatchDebounce; a test shortens them.
 	Interval time.Duration
 	Debounce time.Duration
-	// Settled is told what each apply applied, after the apply (nil tells nobody). The daemon
-	// hands it the reread of its credential files: a credential rotated in place names no changed
-	// setting — its path is what the configuration holds, and the path has not moved — so the
-	// file arm is also what asks the holders to read their files again.
+	// Settled is told what each apply applied, after the apply and outside it (nil tells
+	// nobody). The daemon hands it the reread of its credential files, which it runs under the
+	// settings holder's own lock (config.Live.WhileSettled): a credential rotated in place
+	// names no changed setting — its path is what the configuration holds, and the path has not
+	// moved — so the file arm is what asks the holders to read their files again.
 	Settled func(cfg *config.Config, applied []config.Change)
 	// watched is told after every reading of the watched directories: a test that changes a file
 	// must know the watcher has read the state it starts from, since a change made before that

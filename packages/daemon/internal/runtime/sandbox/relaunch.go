@@ -173,7 +173,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	// account grants.
 	replace := !live || accountDrifted || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
-		(!installing && !roundCovers(l.kind) && (len(r.shapeDrift(s, l.kind)) > 0 || len(r.launchDrift(s)) > 0))
+		(!installing && !roundCovers(l.kind) && (len(r.shapeDrift(s, l.kind)) > 0 || len(r.launchDrift(s, l.kind)) > 0))
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {

@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -247,6 +249,113 @@ func TestTheSettingsRouteTakesTheServiceAccountTokensItNames(t *testing.T) {
 	}
 	if cap := live.Snapshot().AdmissionCap; cap != 8 {
 		t.Fatalf("admission_cap = %d, want the 8 the admitted token applied and nothing the refused ones asked for", cap)
+	}
+}
+
+// What a projected ServiceAccount token may change, and what it may not (INFRA-1077's spec,
+// "Which settings a projected token may change"). Dispatch's path is this arm, whoever the
+// person behind it is, so a key that names a command the daemon runs is refused by name here
+// and nowhere else: a caller that could set `github_apps.<app>.private_key_command` would be
+// running its own command inside the daemon at every resolve of the configuration.
+func TestAProjectedTokenChangesTheDecisionKeysAndNoCommandCredentialOrAddress(t *testing.T) {
+	issuer := oidctest.New(t)
+	key := issuer.PublishKey(t, "cluster-key")
+	const audience = "legion-daemon"
+	const dispatch = "system:serviceaccount:dispatch:dispatch"
+	handler, live := settingsRouteServer(t, SettingsRouteAuth{
+		Verifier:        oidc.NewLazyVerifier(issuer.URL(), audience),
+		ServiceAccounts: []string{dispatch},
+	})
+	projected := issuer.Mint(t, key, issuer.Claims(dispatch, audience))
+
+	// A key whose value is a command the daemon runs is refused by name, and the daemon keeps
+	// the App credentials it has.
+	recorder := settingsCall(t, handler, projected, SettingsChangeRequest{
+		By:      "ana@example.com",
+		Changes: map[string]json.RawMessage{"github_apps.implement.private_key_command": json.RawMessage(`"/bin/sh -c id"`)},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the settings route = %d; body %s", recorder.Code, recorder.Body)
+	}
+	result := settingsAnswer(t, recorder)["github_apps.implement.private_key_command"]
+	if result.Applied != "" || result.Refused == "" {
+		t.Fatalf("the answer for the command key = %+v, want it refused and nothing applied", result)
+	}
+	if command := live.Snapshot().GitHubApps.Implement.PrivateKeyCommand; command != "" {
+		t.Fatalf("the daemon runs the App key command %q, want the file's own (none)", command)
+	}
+
+	// A key the daemon reads at each decision is plain data, and this caller sets it.
+	recorder = settingsCall(t, handler, projected, SettingsChangeRequest{
+		By:      "ana@example.com",
+		Changes: map[string]json.RawMessage{"admission_cap": json.RawMessage(`9`)},
+	})
+	if got := settingsAnswer(t, recorder)["admission_cap"]; got.Refused != "" || got.New != "9" {
+		t.Fatalf("the answer for admission_cap = %+v, want it applied to 9", got)
+	}
+	if cap := live.Snapshot().AdmissionCap; cap != 9 {
+		t.Fatalf("admission_cap = %d, want the applied 9", cap)
+	}
+}
+
+// The operator bearer keeps the whole table: the same two keys the projected arm is held to one
+// of, both applied, the command key included.
+func TestTheOperatorBearerChangesACommandKeyAndADecisionKeyAlike(t *testing.T) {
+	handler, live := settingsRouteServer(t, SettingsRouteAuth{})
+
+	recorder := settingsCall(t, handler, testOperatorToken, SettingsChangeRequest{
+		By: "ana@example.com",
+		Changes: map[string]json.RawMessage{
+			"github_apps.implement.app_id":              json.RawMessage(`4242`),
+			"github_apps.implement.private_key_command": json.RawMessage(`"/bin/echo key"`),
+			"github_apps.review.app_id":                 json.RawMessage(`4343`),
+			"github_apps.review.private_key_command":    json.RawMessage(`"/bin/echo key"`),
+			"projects":                                  json.RawMessage(`{"DEMO":{}}`),
+			"admission_cap":                             json.RawMessage(`9`),
+		},
+	})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the settings route = %d; body %s", recorder.Code, recorder.Body)
+	}
+	answer := settingsAnswer(t, recorder)
+	for _, path := range []string{"github_apps.implement.private_key_command", "admission_cap"} {
+		if got := answer[path]; got.Refused != "" || got.Applied == "" {
+			t.Fatalf("the answer for %s = %+v, want it applied", path, got)
+		}
+	}
+	if command := live.Snapshot().GitHubApps.Implement.PrivateKeyCommand; command != "/bin/echo key" {
+		t.Fatalf("the App key command = %q, want the one the operator set", command)
+	}
+	if cap := live.Snapshot().AdmissionCap; cap != 9 {
+		t.Fatalf("admission_cap = %d, want the applied 9", cap)
+	}
+}
+
+// A change the daemon applied and could not record is answered as what it is: the keys' own
+// verdicts, and a status that says the daemon did not finish what the caller asked for. The old
+// answer was a 400 saying the configuration does not resolve, which was false of a change the
+// daemon is running on (internal/settings' NotRecorded).
+func TestASettingsChangeAppliedAndNotRecordedIsNotAnsweredAsARefusal(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewServer("127.0.0.1", 8439, Options{
+		Project: testProject, Log: quiet, Settings: NewLiveSettings(HeldSettings{OperatorToken: testOperatorToken}),
+		ApplySettings: func(context.Context, config.Caller, string, map[string]any) ([]config.Change, []config.Refusal, error) {
+			applied := []config.Change{{Path: "admission_cap", Old: "4", New: "9", Class: config.ClassDecision, Outcome: config.OutcomeAtOnce}}
+			return applied, nil, &settings.NotRecorded{Paths: []string{"admission_cap"}, Err: errors.New("the store is unreachable")}
+		},
+	})
+
+	recorder := settingsCall(t, server.Handler, testOperatorToken, SettingsChangeRequest{
+		Changes: map[string]json.RawMessage{"admission_cap": json.RawMessage(`9`)},
+	})
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("the settings route = %d; body %s", recorder.Code, recorder.Body)
+	}
+	want := SettingResult{Applied: string(config.OutcomeAtOnce), Old: "4", New: "9"}
+	if got := settingsAnswer(t, recorder)["admission_cap"]; got != want {
+		t.Fatalf("the answer = %+v, want the change the daemon applied, %+v", got, want)
 	}
 }
 

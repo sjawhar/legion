@@ -263,6 +263,7 @@ func (e *Engine) DecidesRound(review intake.PullRequestReview, reviewerSession s
 // by itself. The daemon's read of a pull request's reviews asks it before DecidesRound, as review
 // does, so both judge a review-App review alike.
 func (e *Engine) ReviewerSession(ctx context.Context, tx pgx.Tx, issue string) (string, error) {
+	e = e.decision()
 	reviewer, err := e.phaseRow(ctx, tx, issue, claim.RoleReviewer)
 	if err != nil {
 		return "", err

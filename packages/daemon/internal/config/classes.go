@@ -70,6 +70,9 @@ const (
 	HolderRuntime = "runtime"
 	// HolderLaunchSpecs is the launch specs the supervisor builds each claim's process from.
 	HolderLaunchSpecs = "launch-specs"
+	// HolderRepositoryMapping is the project's repository mapping, which holds the deployment's
+	// repository equivalence (`repository_renames`) it compares two names with.
+	HolderRepositoryMapping = "repository-mapping"
 )
 
 // Row is one settable unit of `legion.yaml`, keyed by the Go field it is read into.
@@ -87,8 +90,13 @@ type Row struct {
 	Class Class
 	// Holder is what must be built again for the change to reach anything, "" when nothing holds
 	// the value. Required on a rebuild row; a launch row names the holder the next launch reads
-	// the value from.
+	// the value from. It is the one holder an operator is told was rebuilt (Change.Holder); a
+	// value more than one thing holds names the rest in Also.
 	Holder string
+	// Also are the other holders a change of this row must build again, beside Holder: each is
+	// built again in the daemon's registration order, and none is named in the answer the caller
+	// reads, which says what the change did and not how many things the daemon holds it in.
+	Also []string
 	// Why is why a fixed path is refused, as the refusal says it; "" for every other class.
 	Why string
 	// Block is whether the field is a block the diff descends into rather than a value it
@@ -115,6 +123,61 @@ const (
 	whyNamespc = "every Sandbox, pod, volume, Service and Secret the daemon works with lives in it: a daemon that changed it would see none of the pods it is supervising"
 	whyTakeOve = "it is read once at boot, when the daemon adopts the claims of the tmux server it takes over; a later change has nothing left to adopt"
 )
+
+// Caller is which arm asked for a change through the settings route: what that caller may set.
+//
+// It is the rule of INFRA-1077's spec, "Which settings a projected token may change": the
+// operator bearer and the daemon's own file may change every key except those fixed for the
+// process, and a projected ServiceAccount token — Dispatch's path, whose caller is any
+// deployment-scoped Dispatch user, a person or an agent — only a key whose value is plain data.
+type Caller string
+
+const (
+	// CallerOperator is the operator bearer, and the boot's own restore of what the store kept:
+	// every path the loader takes, which is every row but one fixed for the process.
+	CallerOperator Caller = "operator"
+	// CallerProjected is a caller holding a projected ServiceAccount token: only a row whose
+	// value is plain data (Row.Plain). Every other path is refused by name.
+	CallerProjected Caller = "projected"
+)
+
+// The two reasons a projected ServiceAccount token is refused a path, by what the value is. Both
+// are quoted in a Refusal, so a caller reads which of the two it met.
+const (
+	whyNotData = "a projected ServiceAccount token changes only the settings the daemon reads at each decision, and this one names a command to run, a credential, the file holding one, or an address the daemon connects to"
+	whyNotRead = "a projected ServiceAccount token changes only the settings the daemon reads at each decision, and this one is held by a client, a listener, a launch, or the rule of who may call this route"
+)
+
+// Admits is whether this caller may set path, and why not when it may not. A path the class
+// table does not hold is admitted here and refused by Apply as an unknown setting, so no caller
+// learns from this answer alone which paths the daemon has.
+func (c Caller) Admits(path string) (bool, string) {
+	row, known := ClassOf(path)
+	if !known || c != CallerProjected || row.Plain() {
+		return true, ""
+	}
+	if row.Secret {
+		return false, whyNotData
+	}
+	return false, whyNotRead
+}
+
+// Plain is whether this row's value is plain data: a value the daemon reads at each decision and
+// hands to nothing else — no command it runs, no credential, no file holding one, no address it
+// connects to or listens on, and none of the rules of who may call the settings route. It is
+// exactly what a change under a projected ServiceAccount token may set.
+//
+// It is a property of the row and no second list: the class says the daemon reads the value as
+// it decides rather than handing it to a client, a listener, a launch or a command, which leaves
+// out every command, address, listener and `settings_route` key, each of them held; and Secret
+// says the value is a credential, the source of one, the path of a file holding one, or an
+// address that may carry one. Today the rows it admits are `admission_cap`, the supervision
+// limits and timeouts (`launch_failure_limit`, `prompt_failure_limit`, `prompt_retire_limit`,
+// `worker_boot_timeout_seconds`, `worker_boot_registration_deadline_intervals`,
+// `tree_stop_timeout_seconds`), the workflow's own bounds (`linger_hours`,
+// `production_check_hours`, `pod_update_retask_hours`, `pod_update_notice_hours`,
+// `review_round_cap`, `max_fix_attempts`), `capabilities.decided` and `gates.design`.
+func (r Row) Plain() bool { return r.Class == ClassDecision && !r.Secret }
 
 // Classes is every settable unit of `legion.yaml`, one row per field the loader reads it into.
 //
@@ -199,8 +262,13 @@ var Classes = []Row{
 	{Field: "SettingsRoute.OIDCIssuer", Path: "settings_route.oidc_issuer", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "SettingsRoute.Audience", Path: "settings_route.audience", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "SettingsRoute.ServiceAccounts", Path: "settings_route.service_accounts", Class: ClassRebuild, Holder: HolderAPIServer},
-	// The repository equivalence the API server and the workflow compare names with.
-	{Field: "Config.RepositoryRenames", Path: "repository_renames", Class: ClassRebuild, Holder: HolderAPIServer},
+	// The repository equivalence every comparison of two repository names reads. Four things
+	// hold it: the API server's settings, the project's repository mapping, the intake
+	// consumers' own decoding of a GitHub fact, and the gh bundles the runtime's launches hand
+	// each role. The operator is told the API server was rebuilt, and the other three are built
+	// again with it, so no reader is left comparing names by the boot's value.
+	{Field: "Config.RepositoryRenames", Path: "repository_renames", Class: ClassRebuild, Holder: HolderAPIServer,
+		Also: []string{HolderRepositoryMapping, HolderNATS, HolderRuntime}},
 	// The projects block: the API server holds each project's merge rules, and the supervisor's
 	// launch specs copy its merge rules and its Slack channels, which reach a role at its next
 	// launch; the stricter class is the server's rebuild.

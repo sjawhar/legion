@@ -132,6 +132,7 @@ func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 
 // ParkedDecisionTask is ParkedDecisionTask over the engine's store and design gate.
 func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
+	e = e.decision()
 	return ParkedDecisionTask(ctx, tx, e.store, e.settings().DesignGate, root)
 }
 

@@ -36,13 +36,13 @@ func newCredentialHarness(t *testing.T, tokens appauth.Tokens) *harness {
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor:    h.supervisor,
-		BootTokens:    h.tokens,
-		Project:       testProject,
-		OperatorToken: testOperatorToken,
-		Controller:    h.store,
-		Grants:        credential.New(nil),
-		Tokens:        tokens,
+		Supervisor: h.supervisor,
+		BootTokens: h.tokens,
+		Project:    testProject,
+		Settings:   operatorSettings(),
+		Controller: h.store,
+		Grants:     credential.New(nil),
+		Tokens:     tokens,
 	}).Handler
 	return h
 }
