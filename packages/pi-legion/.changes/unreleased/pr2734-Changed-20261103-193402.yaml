@@ -1,0 +1,5 @@
+kind: Changed
+body: The package `repository.url`, which is the repository link on its npm page, names `cybermonklabs/legion`.
+time: 2026-11-03T19:34:02.474655456Z
+custom:
+    Issue: pr2734
