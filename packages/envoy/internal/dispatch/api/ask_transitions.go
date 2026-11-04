@@ -249,9 +249,10 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	// the person scope the table declares for this route. The check cannot sit at the gate: an
 	// ask's kind is known only once its row is read, and reading it before the transaction would
 	// decide on a row another writer could still move. It sits here instead, inside Apply, under
-	// the row lock the answer is written beneath, so the kind checked is the kind answered; the
-	// refusal is the gate's own (missingScopeError), which writeHandlerError gives the challenge
-	// header.
+	// the ask's owner lock (requireOpenOwner in transitionAskTx), which every writer of an ask
+	// takes first and which the transaction holds until Commit writes the queued answer, so the
+	// kind checked is the kind answered; the refusal is the gate's own (missingScopeError), which
+	// writeHandlerError gives the challenge header.
 	recordAnswer := transition.Apply
 	transition.Apply = func(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, ask model.Ask) (model.Ask, error) {
 		if ask.Kind == "approval" && !actor.Act.Holds(model.ScopeApprove) {

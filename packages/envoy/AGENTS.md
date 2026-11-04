@@ -3020,7 +3020,7 @@ a name in that map that is no row of the table refuses to mount (`scopedRoutesNo
 `api.gateRouteScopes` is the gate: `register` wraps every row `routeScopes` names in it, ahead of the keyed, project and session layers, and the first scope the credential lacks, in the order the row names them, is `403 OAUTH_SCOPE_REQUIRED` naming that scope, under `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"` (RFC 6750 section 3.1).
 A handler restates no scope; `api.actingPerson` builds the person it acts for, with the agent beside them.
 Three checks cannot sit at that gate and answer the same refusal from where they can:
-answering an ask of kind `approval` needs `approve`, read inside the transaction under the ask's row lock, since an ask's kind is known only once its row is read (`missingScopeError`);
+answering an ask of kind `approval` needs `approve`, read inside the transaction under the ask's owner lock (`transitionAskTx`), since an ask's kind is known only once its row is read (`missingScopeError`);
 the claim's `{"force": true}` needs `person` of a caller the route itself admits whatever its scopes (`requireCallerScope`, `api/issue_claim.go`);
 and the live socket's `agent` view needs `person`, read at the upgrade, answering `OAUTH_SCOPE_REQUIRED` on the subscription id with no challenge header, since a frame carries no HTTP header.
 
