@@ -428,6 +428,34 @@ provider_keys:
   every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
   the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
   overlay file; only loading is per role, so never put a secret in one.
+- **`projects.<KEY>.memory`**, the project's own block, is the second thing that appends to a
+  pane's `PI_CONFIG_FILES`
+  (`memory: {mode: random, config_files: [/etc/legion-memory/memory.yml], instructions: /etc/legion-daemon/memory-instructions.md}`).
+  `mode` is `off`, `on` or `random`: `off` gives no tree a memory group and is what a project with
+  no block gets, `on` gives every new tree one, and `random` draws a fair coin for each new tree.
+  `config_files` are the Oh My Pi overlays a memory-group tree's panes name, and `instructions` the
+  one markdown file the daemon reads at boot and appends to their prompt; both are absolute paths.
+  The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
+  root issue record with the mode it was drawn under and the time of the draw.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
+  hands over as a tree of its own keeps its old tree's draw verbatim.
+  A tree first opened before this release has no group and runs without memory, nothing draws for
+  it later, and a change of mode reaches only the trees opened after it.
+  Every role of a memory-group tree names the memory overlays last in `PI_CONFIG_FILES`, after
+  `pi_config_files` and the role's own, and ends its one `--append-system-prompt` value with the
+  memory instructions, after the deployment's own.
+  The controller and every role of a no-memory tree get neither, and `mode: on` with no
+  `instructions` appends nothing.
+  The loader refuses a `mode` that is no word of the three, a mode other than `off` that names no
+  `config_files`, and a mode other than `off` while `worker_backends` puts an issue role on Claude
+  Code, which reads no `PI_CONFIG_FILES`.
+  Boot refuses an overlay no pane could read, naming the key and the file, as it does one of
+  `role_config_files`, and an `instructions` file it cannot read or that holds nothing.
+  `legion start --check-config` makes every one of these refusals and starts nothing.
+  `off` with the two path keys set is accepted and passes nothing on, so a project moved to `on`
+  moves one key.
+  `docs/kubernetes.md` ("Operator configuration") has what the block does under `runtime:
+  kubernetes`.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a

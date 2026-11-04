@@ -362,6 +362,36 @@ What each part is for:
   Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
   repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
   does any key it does not know.
+- **`projects.<KEY>.memory`** (optional) decides what each tree that project opens runs with.
+  `mode` is `off`, the default and what a project with no block gets, `on`, which gives every new
+  tree a memory group, or `random`, a fair coin for each new tree:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      memory:
+        mode: random
+        config_files: [/etc/legion-memory/memory.yml]
+        instructions: /etc/legion-daemon/memory-instructions.md
+  ```
+
+  `config_files` are Oh My Pi settings overlays that every role of a memory-group tree names last
+  in its `PI_CONFIG_FILES`, after the operator's own and the role's own, and at least one is
+  required while the mode is not `off`.
+  `instructions` is optional and names one markdown file on the daemon's own disk, which the daemon
+  reads at boot and appends to such a role's system prompt after the deployment's own instructions.
+  Both keys take absolute paths, and under `runtime: kubernetes` each overlay must be a file one of
+  the operator's pod mounts carries.
+  The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
+  root issue record with the mode it was drawn under and the time of the draw.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
+  hands over as a tree of its own keeps its old tree's draw.
+  A tree first opened before this release has no group and runs without memory, nothing draws for
+  it later, and a change of mode reaches only the trees opened after it.
+  The controller is in no memory group, a tree drawn `none` runs exactly as it ran before the block
+  existed, and `mode: on` with no `instructions` appends nothing.
+  `legion state` prints one `memory:` line counting the trees drawn under each group and mode, and
+  `legion state --json` shows each issue its tree's group, the mode it was drawn under and when.
 - **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
   repository that moved: after a transfer GitHub's events name the new repository while every tree
   Legion has already recorded names the old one.
