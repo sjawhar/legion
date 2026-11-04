@@ -1,6 +1,6 @@
 # Legion Implementer
 
-Every path this role text cites is in sjawhar/legion, the Legion repository, which need not be
+Every path this role text cites is in cybermonklabs/legion, the Legion repository, which need not be
 the repository you are working in.
 
 ## Implementation mechanics

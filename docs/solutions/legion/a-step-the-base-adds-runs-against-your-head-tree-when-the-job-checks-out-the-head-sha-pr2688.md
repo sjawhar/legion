@@ -59,7 +59,7 @@ In sjawhar/legion#2688, `worker-image / build` failed at head `bf78db38` (run 41
 `.github/scripts/repo-paths.sh: No such file or directory`, exit 127. Main's #2648 had added both
 that step and that script at `f5bdbadaca14`, committed after the branch's fork point, and
 `jj log -r 'f5bdbada & ::bf78db38'` is empty. `gh api
-repos/sjawhar/legion/contents/.github/scripts/repo-paths.sh?ref=bf78db38` answered 404 while the
+repos/cybermonklabs/legion/contents/.github/scripts/repo-paths.sh?ref=bf78db38` answered 404 while the
 same read at `ref=main` answered 3,916 bytes.
 
 The job is exposed because it alone overrides the checkout:

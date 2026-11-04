@@ -116,7 +116,7 @@
     },
     {
       "script": "dispatch-session-settings.sh",
-      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
+      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into cybermonklabs/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
     },
     {
       "script": "dispatch-user-turns.sh",
