@@ -47,7 +47,7 @@ const unifiedInboxCandidates = `with recursive ` + unreadDirectRepliesCTE + `,
   join messages root on root.id = d.root_id
  ), delivered as (
   select c.* from inbox_candidates c
-  where exists (select 1 from ` + refs.AllEdgesSQL + ` g
+  where exists (select 1 from ` + refs.PersonInboxEdgesSQL + ` g
     where g.kind = 'delivered_to' and g.to_kind = 'person' and g.to_id = $1
       and g.from_kind = c.kind and g.from_id = c.id::text)
  )`

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 type unifiedInboxItem struct {
@@ -127,11 +128,11 @@ func readInboxMentions(ctx context.Context, q queryer, actorID string, limit, of
   order by max(g.created_at) desc, g.from_kind, g.from_id limit $4 offset $5
  ) select x.from_kind,x.from_id,x.created_at,
    coalesce(c.body,m.body,b.excerpt,''), coalesce(c.author,m.author,'{"kind":"system","id":"document"}'::jsonb),
-   coalesce(c.issue_key,m.issue_key,a.issue_key),a.project_key,a.slug,b.block_id
+   coalesce(c.issue_key,m.issue_key,a.issue_key),a.project_key,a.slug,b.block_id,coalesce(a.is_primary,false)
  from mentioned x
  left join comments c on x.from_kind='comment' and c.id::text=x.from_id
  left join messages m on x.from_kind='message' and m.id::text=x.from_id and m.issue_key is not null
- left join document_blocks b on x.from_kind='block' and b.node_id=x.from_id and b.position is not null
+ left join document_blocks b on x.from_kind='block' and b.node_id=x.from_id
  left join artifacts a on a.id=coalesce(c.artifact_id,b.artifact_id)
  where c.id is not null or m.id is not null or b.node_id is not null`, args...)
 	if err != nil {
@@ -143,7 +144,8 @@ func readInboxMentions(ctx context.Context, q queryer, actorID string, limit, of
 		var item unifiedInboxItem
 		var author []byte
 		var issue, project, slug, block *string
-		if err := rows.Scan(&item.Kind, &item.ID, &item.CreatedAt, &item.Body, &author, &issue, &project, &slug, &block); err != nil {
+		var primary bool
+		if err := rows.Scan(&item.Kind, &item.ID, &item.CreatedAt, &item.Body, &author, &issue, &project, &slug, &block, &primary); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(author, &item.Author); err != nil {
@@ -154,12 +156,12 @@ func readInboxMentions(ctx context.Context, q queryer, actorID string, limit, of
 		switch {
 		case item.Kind == "block" && slug != nil:
 			if issue != nil {
-				item.Href = "/issues/" + *issue + "/artifacts/" + url.PathEscape(*slug)
+				item.Href = issueDocumentHref("/issues/"+*issue, &model.SearchArtifact{Slug: *slug}, primary)
 			} else if project != nil {
 				item.Href = "/projects/" + *project + "/documents/" + url.PathEscape(*slug)
 			}
 			if block != nil {
-				item.Href += "#b-" + url.PathEscape(*block)
+				item.Href += "#b-" + text.EncodeBlockID(*block)
 			}
 		case issue != nil:
 			item.Href = "/issues/" + *issue + "/" + item.Kind + "s/" + item.ID

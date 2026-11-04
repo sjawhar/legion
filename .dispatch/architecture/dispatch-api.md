@@ -10,4 +10,12 @@ The named person read (`GET /api/v1/people/{login}/nodes`) lists authored and re
 It is human-only, like agent conversations, and direct messages have no `dispatch://` reference.
 `persongraph.Census` compares recorded delivery sets independently of the view SQL; `envoy-dispatch census --deliveries` runs it in a read-only snapshot without migrating.
 
+The own-inbox read (`GET /api/v1/me/inbox`, `authOwnInbox`) joins indexed candidates to `delivered_to -> person` through that shared graph.
+It preserves canonical thread/read identities and raw Clear identities, includes direct and broadcast replies, and accepts no person selector.
+The default-off mention expansion is separate from legacy membership.
+`RunInboxShadowSweep` compares every signed-in person's legacy and graph sets in one snapshot each minute; one locked control row serializes observations, and only counts are persisted.
+`GET /api/v1/me/inbox/shadow` refreshes and reports counts, cause categories and user coverage without inbox content.
+The dashboard's comparison and opt-in unified pages do not change the current Inbox, Replies or CLI.
+
+
 It also runs the suggestion outcome sweep (`RunSuggestionOutcomeSweep`), which judges whether a write's `advice.suggestions` were acted on or overridden: a woken loop (`duty.RunWoken`, with no lease: each page holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes) on `dispatch_events`, passes at least a minute apart, each reading only the events after its cursor (`suggestion_outcome_cursor`) and at or below the safe horizon of the server's one `events.Horizon`, which the server hands it (`Background.EventHorizon`) and which the live event feed reads through too, and the suggestions not yet swept (`write_suggestions.swept`), so its work follows what changed rather than how many suggestions are still pending, and its cursor never passes an event that could still commit. The keyed writes' maintenance sweep (`RunMaintenanceSweep`: the Idempotency-Keys past their window, then the deliveries a dead process left owed) is a timer of its own, once a minute across the processes under lease `suggestion-outcomes`, because no commit announces either.

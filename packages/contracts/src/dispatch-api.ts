@@ -1166,6 +1166,58 @@ export interface MyRepliesResponse {
   readonly offset: number;
 }
 
+/** Opt-in own-inbox graph read. Legacy pages and their response shapes are unchanged. */
+export interface UnifiedInboxItem {
+  readonly cause: "ask" | "thread_reply" | "direct_reply" | "mention";
+  readonly kind: "ask" | "comment" | "message" | "block";
+  readonly id: string;
+  readonly thread_id: string;
+  readonly created_at: string;
+  readonly body: string;
+  readonly author: Actor;
+  readonly href: string;
+  readonly subject: string;
+  readonly snoozed_until: string | null;
+}
+
+export interface UnifiedInboxPage {
+  readonly person: string;
+  readonly rows: UnifiedInboxItem[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+  readonly horizon: number;
+  readonly expansions: UnifiedInboxItem[];
+}
+
+export interface InboxShadowUser {
+  readonly person: string;
+  readonly checked_items: number;
+  readonly mismatched: number;
+  readonly errors: number;
+  readonly missing: Record<string, number>;
+  readonly unexpected: Record<string, number>;
+  readonly expansions: Record<string, number>;
+}
+
+/** Observation counts only: this read never exposes another person's inbox content. */
+export interface InboxShadowReport {
+  readonly checked_at: string | null;
+  readonly horizon: number;
+  readonly active_users: number;
+  readonly checked_users: number;
+  readonly uncovered_users: number;
+  readonly mismatched: number;
+  readonly daily_mismatched: number;
+  readonly errors: number;
+  readonly missing: Record<string, number>;
+  readonly unexpected: Record<string, number>;
+  readonly expansions: Record<string, number>;
+  readonly users: InboxShadowUser[];
+  readonly ready: boolean;
+  readonly complete_zero_days: number;
+}
+
 /** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
  *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
  *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it

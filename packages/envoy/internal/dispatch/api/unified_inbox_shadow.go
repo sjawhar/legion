@@ -163,6 +163,7 @@ func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error
     select distinct g.from_kind,g.from_id from `+refs.AllEdgesSQL+` g
     where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
       and g.from_kind in ('comment','message','block')
+      and (g.from_kind<>'message' or exists(select 1 from messages m where m.id::text=g.from_id and m.issue_key is not null))
       and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id::text=g.from_id)
    ) expansions`, p.login, p.login, nil).Scan(&count)
 			if err != nil {

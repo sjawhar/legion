@@ -22,10 +22,15 @@ A migration that cannot be written that way is a stop-the-world migration, deplo
 
 ## Derived graph
 
-The graph is the union of `graph_edges` and `graph_person_edges`, through `refs.AllEdgesSQL`.
-`graph_edges` retains the citation and structural relations existing builds read; `graph_person_edges` derives `authored_by` and `delivered_to` without changing old builds' results or query plans, during a rollout or a rollback.
-Neither view stores or writes an edge.
+The graph combines `graph_edges`, `graph_person_edges` and `graph_inbox_edges` through `refs.AllEdgesSQL`.
+`graph_edges` retains the relations existing builds read; sibling views derive identity and delivery without changing those builds' results or query plans during rollout or rollback.
+None of the edge views stores or writes an edge.
 `person_aliases(person, alias_kind, alias)` derives canonical logins with `user_threads_login`, raw user actor ids, and session ids only where a stored session actor's server-verified `owner` identifies the person.
 Routes, claims and role holders do not prove person ownership, so there is no role alias.
 Delivery reads the four word-carrying event types used by `sessionanswers`, their `published_destinations`, and sent message/comment delivery attempts; a recorded role topic identifies the role, not a session or a person.
 `envoy-dispatch census --deliveries` independently compares the graph's recipient sets with those records for every comment, message and ask created in the last 30 days.
+
+`graph_inbox_edges` derives delivery to people from assigned asks, the existing `user_threads` index and direct-message roots (broadcast copies included).
+Its direct reply walk stops at depth 64 and guards visited ids; read marks, Clear and per-reply reads stay in their existing tables and are subtracted by the named read.
+`inbox_shadow_control`, `inbox_shadow_latest` and `inbox_shadow_days` store observation counts only, written by the one serialized comparison function, never another copy of an inbox or relation.
+The comparison checks all signed-in people, a superset of active users.

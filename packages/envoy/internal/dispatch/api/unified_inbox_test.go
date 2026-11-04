@@ -85,16 +85,22 @@ func TestUnifiedInboxKeepsLegacyMembershipAndOwnScope(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `insert into user_agent_state (login,session_id,cleared_before) values ('ALICE','agent',now())`); err != nil {
 		t.Fatal(err)
 	}
-	response = dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/inbox", nil, "ALICE")
-	cleared := decodeBody[page](t, response)
+	// HeaderIdentity canonicalizes HTTP callers, so exercise the preserved raw-id
+	// read boundary directly rather than pretending a header can bypass identity.
+	cleared, err := readUnifiedInbox(ctx, database.Pool, "ALICE", 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cleared.Total != 2 {
 		t.Fatalf("Clear did not subtract direct reply: %+v", cleared)
 	}
 	if _, err := database.Pool.Exec(ctx, `update user_threads set read_through = now() where login='alice'`); err != nil {
 		t.Fatal(err)
 	}
-	response = dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/inbox", nil, "ALICE")
-	read := decodeBody[page](t, response)
+	read, err := readUnifiedInbox(ctx, database.Pool, "ALICE", 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if read.Total != 1 || read.Rows[0].Cause != "ask" {
 		t.Fatalf("read marks=%+v", read)
 	}

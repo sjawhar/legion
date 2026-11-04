@@ -1062,6 +1062,16 @@ function askThreadsOn(issue: string): RefreshTarget {
  */
 export function eventRefreshTargets(event: Event, signedInLogin?: string): RefreshTarget[] {
   const targets = [...ownerTargets(event, signedInLogin), ...changedReferenceTargets(event)];
+  if (
+    targets.some(
+      (target) =>
+        target.queryKey[0] === "inbox" ||
+        target.queryKey[0] === "user-agent-state" ||
+        (target.queryKey[0] === "me" && target.queryKey[1] === "replies")
+    )
+  ) {
+    targets.push({ queryKey: ["unified-inbox"] });
+  }
   const threadsIssue = askThreadsIssue(event);
   if (threadsIssue !== null) {
     targets.push(askThreadsOn(threadsIssue));

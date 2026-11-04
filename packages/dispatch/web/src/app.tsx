@@ -150,6 +150,14 @@ const RepliesPage = lazy(() =>
 const PersonPage = lazy(() =>
   import("./features/people/PersonPage").then((module) => ({ default: module.PersonPage }))
 );
+const UnifiedInboxPage = lazy(() =>
+  import("./features/inbox/UnifiedInboxPage").then((module) => ({
+    default: module.UnifiedInboxPage,
+  }))
+);
+const InboxShadowPage = lazy(() =>
+  import("./features/inbox/InboxShadowPage").then((module) => ({ default: module.InboxShadowPage }))
+);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -222,6 +230,9 @@ function InboxPage(): ReactNode {
         <h1 className="text-[22px] font-semibold tracking-tight">Inbox</h1>
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to={ANSWERS_PATH}>
           Answered by you
+        </Link>
+        <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/inbox/shadow">
+          Inbox comparison
         </Link>
       </div>
       <Inbox />
@@ -807,6 +818,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <Suspense fallback={<IssuePageFallback />}>
               <Routes>
                 <Route element={<InboxPage />} path="/" />
+                <Route element={<UnifiedInboxPage />} path="/inbox/unified" />
+                <Route element={<InboxShadowPage />} path="/inbox/shadow" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 <Route element={<RepliesPage />} path={REPLIES_PATH} />
                 <Route element={<PersonPage />} path="/people/:login" />
