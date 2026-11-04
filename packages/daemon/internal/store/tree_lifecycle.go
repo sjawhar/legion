@@ -15,9 +15,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
-// OpenTreeLifecycle is the explicit authority entry point. Workflow admission calls it inside its
-// fact transaction; a test and a seed open a tree through this one too. The operator route has
-// one of its own (OpenOperatorTreeLifecycle), because its open runs the tree's draw.
+// OpenTreeLifecycle opens a tree in a transaction of its own and runs nothing beside the open; a
+// test and a seed open a tree through it. Workflow admission opens a tree inside its fact
+// transaction through record.Store.OpenTreeLifecycle instead, and the operator route through
+// OpenOperatorTreeLifecycle, because its open runs the tree's draw.
 func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
 	return s.openTreeLifecycle(ctx, project, tree, authority, runNothing)
 }

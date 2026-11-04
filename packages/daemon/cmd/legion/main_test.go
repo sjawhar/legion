@@ -1594,7 +1594,7 @@ func TestPlainStateCountsTheIssuesDrawnIntoAMemoryGroup(t *testing.T) {
 	child := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"admitted","status":"in_progress",` +
 		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
 	// A tree of its own, handed over from that one: its draw is the old tree's verbatim, the
-	// instant included, which is why a count of distinct draws counted the two trees as one.
+	// instant included, so it counts as one more issue under the same group and mode.
 	handedOver := `"LEGION-210":{"key":"LEGION-210","generation":1,"phase":"planning","status":"in_progress",` +
 		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
 	// A second tree the same mode drew the other way, and a third an earlier mode drew.
