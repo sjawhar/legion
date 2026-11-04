@@ -1,0 +1,21 @@
+-- 20261104153554_issue_memory_carried.up.sql — the hand-over's own answer about a root's memory.
+--
+-- A child its root hands over as a tree of its own keeps the group its work has been running
+-- under, and the hand-over is where that is settled (record.Store.CarryMemory): a tree the daemon
+-- had opened hands its answer over — its draw verbatim where it had one, and no draw at all where
+-- it had none — and a tree nothing ever opened hands nothing over, so the child is drawn at its own
+-- first open like any other new tree.
+--
+-- memory_carried is that answer where it is no draw: true says the hand-over settled this root's
+-- memory, so record.Store.DrawMemory writes nothing for it afterwards. Without it the draw would
+-- have to read the old tree's lifecycle rows itself, at the later moment the child is first opened,
+-- and the answer would turn on which of the two roots is promoted first.
+--
+-- The column is written by record.Store.CarryMemory alone and read by record.Store.DrawMemory
+-- alone. It is in issueColumns, scanIssue, PutIssue and record.Issue nowhere: the two statements
+-- name it themselves, and no reader of an issue has anything to do with it.
+--
+-- No backfill: false for every row recorded before this migration, which is right because the
+-- three memory columns are unreleased (20261104073148_issue_memory_group), so no deployment holds a
+-- root whose memory a hand-over settled.
+alter table issues add column memory_carried boolean not null default false;

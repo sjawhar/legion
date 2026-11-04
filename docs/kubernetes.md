@@ -1868,12 +1868,14 @@ A release at contract 47 carries, on every issue of `GET /legion/v1/state`, the 
 `memoryGroup` (`memory` or `none`), `memoryDrawMode` (the `projects.<KEY>.memory.mode` in force at the draw) and `memoryDrawnAt`, the three absent together while nothing has drawn for the tree.
 A caller in a pod whose claims record a contract below 47 is served the state without the three, so a pod of the release before this one reads it as it always did.
 Store migration 20261104073148_issue_memory_group adds the three columns they are read from to `issues` — `memory_group`, `memory_draw_mode` and `memory_drawn_at` — written once, when the tree's lifecycle row is first created, and backfilled for no row.
+Store migration 20261104153554_issue_memory_carried adds `memory_carried` beside them, the hand-over's own answer about a root handed over out of another tree, which no caller of the state reads and which is false for every row recorded before it.
 
 To roll this release back to contract 46, put `legion.yaml` back without `projects.<KEY>.memory`, which the earlier release refuses as a key it does not know, and re-pin it.
 There is no SQL to run and no column to drop:
 the earlier release names every column it reads and writes on `issues` (`issueColumns` and `PutIssue` in `internal/record/store.go`), so it boots with the three in place, reads none of them and writes none of them, and an upgrade back to this release reads the draws it left.
 What the rollback costs is the draws it does not make:
 a tree the earlier release opens carries no group, and this release draws for no tree whose lifecycle row already exists, so every such tree runs without memory for its whole life.
+A child handed over out of such a tree is settled at the hand-over, with the answer that tree has, which is no group.
 
 ### Contract discipline
 
@@ -4780,11 +4782,12 @@ each issue's pod (every role of it alike) and the image probe's.
 
 - **The draw is the tree's, and is made once.**
   It is made when the tree's lifecycle row is first created, in that row's own transaction, on both paths that open a tree — admission's own and the operator's `POST /legion/v1/operator/claims` — and is kept on the tree's root issue record with the mode it was drawn under and the time of the draw.
-  A re-admission, a new generation and the next epoch after a cleanup keep it, since none of them creates that row again, and a child its finished root hands over as a tree of its own takes a copy of its old tree's draw, the draw time included.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, since none of them creates that row again, and a child its finished root hands over as a tree of its own is settled at the hand-over, with the answer of the tree it leaves: that tree's draw, the draw time included, where it had one.
   Every issue of a tree carries its root's group, so a child is never drawn for.
   A tree first opened before this release has no group and runs without memory, and nothing draws for it later:
-  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change, and a child handed over out of such a tree is never drawn for either, since a root that left a tree the daemon had opened keeps that tree's answer whether it is a draw or none.
-  A root that left a tree the daemon never opened — one with no lifecycle row, whose work never ran — takes no answer with it, so its own first open draws it like any other new tree.
+  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change, and a child handed over out of such a tree is never drawn for either, since the hand-over gives it that tree's answer whether it is a draw or none.
+  A root out of a tree the daemon never opened — one with no lifecycle row, whose work never ran — takes no answer with it, so its own first open draws it like any other new tree.
+  The hand-over decides both, in the transaction that records it, so which of the two roots is promoted first changes nothing.
   An operator's spawn whose tree has no issue record records no draw and runs without memory; nothing is refused and no record is invented.
 
 - **What a memory-group role is given.**

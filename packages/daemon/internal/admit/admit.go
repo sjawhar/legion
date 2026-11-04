@@ -979,19 +979,22 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
 	// it would read a later daemon todo of this root (a controller's reopen) as the stale hand-over.
-	// It takes its old tree's answer about memory with it too: the carry copies that tree's draw
-	// verbatim, with the time that tree was drawn, so the work goes on running under the group it
-	// has been running under. The carry is only half of it, because an old tree first opened
-	// before this release has no draw to copy: the record itself draws no root that left a tree
-	// it had opened (record.Store.DrawMemory reads handed_over_from, which stored.HandedOverFrom
-	// was just written with, against the tree_lifecycles rows), so this child's own first
-	// promotion draws nothing either, whatever the project's mode reads now. A child out of a
-	// tree that was never opened has run under nothing, and its own first promotion draws it.
+	// The hand-over settles its memory too, here and not at its own first open: it takes the answer
+	// of the tree it leaves, that tree's draw verbatim with the time it was drawn where it had one,
+	// so the work goes on running under the group it has been running under, and no draw at all
+	// where that tree had been opened with none — a tree first opened before this release, which
+	// nothing draws for. A child out of a tree nothing ever opened has run under nothing, so the
+	// carry writes it nothing and its own first promotion draws it. Claims and tree lifecycles are
+	// keyed by the normalized project token, as promoteHolds reads them.
 	if oldTree != stored.Key {
 		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
 			return err
 		}
-		if _, err := a.store.CarryMemory(ctx, tx, stored.Key, oldTree); err != nil {
+		project, err := claim.ProjectToken(a.project)
+		if err != nil {
+			return fmt.Errorf("carry the memory of re-admitted %s: %w", stored.Key, err)
+		}
+		if _, err := a.store.CarryMemory(ctx, tx, project, stored.Key, oldTree); err != nil {
 			return err
 		}
 	}

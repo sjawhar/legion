@@ -205,7 +205,8 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	// and CarryMemory's, so a copy of the issue read before any of them never writes them back.
 	// That last is what makes a tree's memory group write-once: a re-admission, a new generation
 	// and ClearTreeGeneration each record the issue again from a copy read before the draw, and
-	// each keeps it.
+	// each keeps it. memory_carried, the hand-over's own answer, is named here no more than it is
+	// on Issue: CarryMemory writes it and DrawMemory reads it, and no other statement touches it.
 	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo,
 		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since,
 		ancestry, handed_over_from)
@@ -1381,38 +1382,48 @@ func (s *Postgres) RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string)
 // with, and a key with no record — an operator's spawn, whose tree's root the daemon never
 // recorded — takes none. Neither writes a row, and neither is an error.
 //
-// Nor is a root that left another tree the daemon had opened: handed_over_from naming a tree that
-// holds a tree_lifecycles row, the store's own fact that the tree was really opened, and nothing
-// outside a test deletes those rows. Such a root takes its old tree's answer with it, which
-// CarryMemory copies when that tree had a draw, and which is no draw at all when it had none — a
-// tree first opened before this release, whose work has been running with no memory. Without the
-// condition, that child's own first OpenTreeLifecycle reports Created and would draw it under
-// whatever mode the project reads now.
+// Nor is a root whose memory a hand-over has already settled (memory_carried, which CarryMemory
+// alone writes): a child handed over out of a tree the daemon had opened takes that tree's answer,
+// which is no draw at all when the tree had none — a tree first opened before this release, whose
+// work has been running with no memory. The refusal is the hand-over's, decided in the transaction
+// that recorded the hand-over and written down there, so the draw reads nothing that moves: of the
+// two roots, whichever is promoted first, the child's answer is the one its hand-over settled.
 //
-// A root whose old tree was never opened has run under nothing at all, so its own first open
-// draws it like any other new tree, and an empty handed_over_from matches no row and draws. The
-// match is on the tree alone: tree_lifecycles.project is the normalized runtime token while
-// issues.project is the Dispatch key, and an issue key is unique across projects.
+// A root out of a tree nothing ever opened carries no such answer, so its own first open draws it
+// like any other new tree.
 func (s *Postgres) DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error) {
 	tag, err := tx.Exec(ctx, `update issues set memory_group = $2, memory_draw_mode = $3, memory_drawn_at = $4
-		where key = $1 and memory_drawn_at is null
-		and not exists (select 1 from tree_lifecycles where tree_lifecycles.tree = issues.handed_over_from)`, root, group, mode, at)
+		where key = $1 and memory_drawn_at is null and not memory_carried`, root, group, mode, at)
 	if err != nil {
 		return false, fmt.Errorf("draw the memory group of %s: %w", root, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-// CarryMemory copies the draw of from onto key verbatim, its draw time included: a child handed
-// over as a tree of its own keeps the group it has been running under, drawn under the mode and at
-// the time its old tree was drawn. It writes nothing when key already carries a draw of its own or
-// from has none to give, neither of which is an error.
-func (s *Postgres) CarryMemory(ctx context.Context, tx pgx.Tx, key, from string) (bool, error) {
-	tag, err := tx.Exec(ctx, `update issues target set memory_group = source.memory_group,
-		memory_draw_mode = source.memory_draw_mode, memory_drawn_at = source.memory_drawn_at
-		from issues source
-		where target.key = $1 and target.memory_drawn_at is null
-		and source.key = $2 and source.memory_drawn_at is not null`, key, from)
+// CarryMemory settles the memory of key, a child handed over as a tree of its own, from the tree
+// it left: from's draw verbatim, the original draw time included, where that tree had one, and no
+// draw at all where it had none. Either way the row is marked carried, so DrawMemory writes
+// nothing for it later. It reports whether the hand-over settled this root's memory, which is
+// wider than whether a draw was copied: a tree opened with no draw settles the child at no draw
+// and reports true.
+//
+// The driver row is the old tree's lifecycle row, under project, the normalized runtime token
+// tree_lifecycles is keyed by (issues.project is the Dispatch key). A tree with no such row was
+// never opened and hands nothing over: nothing is written, and key's own first open draws it. The
+// old tree's issue record is optional — an operator opened a tree the daemon recorded no root for
+// — so the source is joined in, not required: such a tree was opened and hands over the answer it
+// has, which is no draw. Writing nothing is no error, and a key that already carries a draw of its
+// own, or whose memory a hand-over settled before, keeps what it has.
+func (s *Postgres) CarryMemory(ctx context.Context, tx pgx.Tx, project, key, from string) (bool, error) {
+	tag, err := tx.Exec(ctx, `update issues target set
+		memory_group = coalesce(source.memory_group, ''),
+		memory_draw_mode = coalesce(source.memory_draw_mode, ''),
+		memory_drawn_at = source.memory_drawn_at,
+		memory_carried = true
+		from tree_lifecycles life
+		left join issues source on source.key = $3
+		where life.project = $1 and life.tree = $3
+		and target.key = $2 and target.memory_drawn_at is null and not target.memory_carried`, project, key, from)
 	if err != nil {
 		return false, fmt.Errorf("carry the memory group of %s to %s: %w", from, key, err)
 	}

@@ -385,12 +385,12 @@ What each part is for:
   The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
   root issue record with the mode it was drawn under and the time of the draw.
   A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
-  hands over as a tree of its own keeps its old tree's answer: that tree's draw where it had one,
-  and no draw at all where that tree had been opened with none.
+  hands over as a tree of its own takes the answer of the tree it leaves at the hand-over: that
+  tree's draw where it had one, and no draw at all where that tree had been opened with none.
   A tree first opened before this release has no group and runs without memory, nothing draws for
   it later, and a change of mode reaches only the trees opened after it.
-  A child out of a tree the daemon never opened has run under nothing, so its own first open draws
-  it like any other new tree.
+  A child out of a tree the daemon never opened has run under nothing and the hand-over gives it
+  nothing, so its own first open draws it like any other new tree.
   The launch follows the record, not the mode: a tree the daemon drew into the memory group keeps
   its overlays and its instructions while the block still names them, whatever the mode is now, so
   `mode: off` stops new draws and takes memory from no tree already running with it, and taking

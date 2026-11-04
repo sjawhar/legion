@@ -12,14 +12,47 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
+// treeLifecyclesToken is the project tree_lifecycles is keyed by in these tests: the normalized
+// runtime token, where the issue records are under the Dispatch project key LEGION. The hand-over
+// is handed the token, so a lifecycle row of another project's tree of the same key is not this
+// project's.
+const treeLifecyclesToken = "legion"
+
+// drawnAs is the three memory columns as a reader sees them, so two records are compared whole and
+// a failure names what each carries.
+func drawnAs(issue Issue) string {
+	at := "no draw"
+	if issue.MemoryDrawnAt != nil {
+		at = issue.MemoryDrawnAt.Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("group %q drawn as %q at %s", issue.MemoryGroup, issue.MemoryDrawMode, at)
+}
+
+// putHandedOverRoot records key as a tree of its own that was handed over out of left, the shape
+// admit's readmit leaves behind: the root is recorded and the tree it left written over it, since
+// PutIssue is the one way a test writes a record.
+func putHandedOverRoot(t *testing.T, ctx context.Context, records Store, tx pgx.Tx, key, left string) {
+	t.Helper()
+	putRoot(t, ctx, records, tx, key)
+	stored, err := records.Issue(ctx, tx, key)
+	must(t, err)
+	if stored == nil {
+		t.Fatalf("%s is not recorded", key)
+	}
+	stored.HandedOverFrom = left
+	must(t, records.PutIssue(ctx, tx, *stored))
+}
+
 // A tree's memory group is drawn once and then kept. The first DrawMemory of a root writes the
 // group, the mode it was drawn under and the time, and reports that it wrote; a second draw of the
 // same root writes nothing and reports it, whatever the project's mode says by then; and a draw of
 // a key the daemon has no record of — an operator's spawn — writes nothing and is no error.
-// CarryMemory is the hand-over: it copies the three verbatim, the original draw time included, and
-// writes nothing when the source has no draw to give or the target already carries one of its own.
-// PutIssue names none of the three, so a copy of the issue read before the draw, written back over
-// it, keeps what the record holds: that is what makes a re-admission, a new generation and
+// CarryMemory is the hand-over: out of a tree the daemon had opened it copies the three verbatim,
+// the original draw time included, and where that tree had no draw it settles the target at no
+// draw, which the target's own first open then writes nothing over. Out of a tree nothing ever
+// opened it writes nothing at all, and a target that already carries a draw of its own keeps it.
+// PutIssue names none of the columns, so a copy of the issue read before the draw, written back
+// over it, keeps what the record holds: that is what makes a re-admission, a new generation and
 // ClearTreeGeneration keep the draw.
 func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 	ctx := context.Background()
@@ -33,16 +66,7 @@ func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 	)
 	drawnAt := time.Date(2026, 11, 4, 7, 31, 48, 123456000, time.UTC)
 	later := drawnAt.Add(time.Hour)
-	// draw is the three columns as a reader sees them, so two rows are compared whole and a
-	// failure names what each carries.
-	draw := func(issue Issue) string {
-		at := "no draw"
-		if issue.MemoryDrawnAt != nil {
-			at = issue.MemoryDrawnAt.Format(time.RFC3339Nano)
-		}
-		return fmt.Sprintf("group %q drawn as %q at %s", issue.MemoryGroup, issue.MemoryDrawMode, at)
-	}
-	none := draw(Issue{})
+	none := drawnAs(Issue{})
 
 	inTx(t, st, func(tx pgx.Tx) {
 		read := func(key string) Issue {
@@ -54,11 +78,17 @@ func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 			}
 			return *issue
 		}
-		for _, key := range []string{"LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4"} {
+		for _, key := range []string{"LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6"} {
 			putRoot(t, ctx, records, tx, key)
 		}
+		// The trees the carries below read: LEGION-1 and LEGION-4 were opened, LEGION-6 never was.
+		for _, tree := range []string{"LEGION-1", "LEGION-4"} {
+			if _, err := treelifecycle.Open(ctx, tx, treeLifecyclesToken, tree, treelifecycle.AuthorityWorkflow); err != nil {
+				t.Fatalf("open the tree %s: %v", tree, err)
+			}
+		}
 		stale := read("LEGION-1")
-		if got := draw(stale); got != none {
+		if got := drawnAs(stale); got != none {
 			t.Fatalf("a freshly recorded root carries %s, want %s: nothing has drawn for it", got, none)
 		}
 
@@ -68,8 +98,8 @@ func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 		if !drew {
 			t.Fatal("the first DrawMemory wrote no row, want it to draw the tree's group")
 		}
-		want := draw(Issue{MemoryGroup: "memory", MemoryDrawMode: random, MemoryDrawnAt: &drawnAt})
-		if got := draw(read("LEGION-1")); got != want {
+		want := drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: random, MemoryDrawnAt: &drawnAt})
+		if got := drawnAs(read("LEGION-1")); got != want {
 			t.Fatalf("after the draw the root carries %s, want %s", got, want)
 		}
 
@@ -80,7 +110,7 @@ func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 		if again {
 			t.Fatal("a second DrawMemory of the same root wrote a row, want the draw written once")
 		}
-		if got := draw(read("LEGION-1")); got != want {
+		if got := drawnAs(read("LEGION-1")); got != want {
 			t.Fatalf("after a second draw the root carries %s, want the first draw's %s", got, want)
 		}
 
@@ -98,99 +128,145 @@ func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 
 		// The copy read before the draw, written back over it, keeps what the record holds.
 		must(t, records.PutIssue(ctx, tx, stale))
-		if got := draw(read("LEGION-1")); got != want {
+		if got := drawnAs(read("LEGION-1")); got != want {
 			t.Fatalf("after a stale copy was written back the root carries %s, want the draw kept as %s", got, want)
 		}
 
 		// The hand-over copies all three verbatim, the original draw time included.
-		carried, err := records.CarryMemory(ctx, tx, "LEGION-2", "LEGION-1")
+		carried, err := records.CarryMemory(ctx, tx, treeLifecyclesToken, "LEGION-2", "LEGION-1")
 		must(t, err)
 		if !carried {
 			t.Fatal("CarryMemory wrote no row, want the hand-over to take the tree's draw with it")
 		}
-		if got := draw(read("LEGION-2")); got != want {
+		if got := drawnAs(read("LEGION-2")); got != want {
 			t.Fatalf("the handed-over root carries %s, want its old tree's %s verbatim", got, want)
 		}
 
-		// A source with no draw has nothing to give.
-		empty, err := records.CarryMemory(ctx, tx, "LEGION-3", "LEGION-4")
+		// A source whose tree the daemon opened and drew nothing for has no draw to give, and that
+		// is its answer: the target is settled at no draw, and its own first open writes nothing.
+		settled, err := records.CarryMemory(ctx, tx, treeLifecyclesToken, "LEGION-3", "LEGION-4")
+		must(t, err)
+		if !settled {
+			t.Fatal("CarryMemory from an opened tree with no draw wrote no row, want the hand-over to settle the target at no draw")
+		}
+		if got := drawnAs(read("LEGION-3")); got != none {
+			t.Fatalf("after a carry from an opened tree with no draw the target carries %s, want %s", got, none)
+		}
+		refused, err := records.DrawMemory(ctx, tx, "LEGION-3", "memory", on, later)
+		must(t, err)
+		if refused {
+			t.Fatal("DrawMemory drew a root whose hand-over settled it at no draw, want its old tree's answer kept")
+		}
+		if got := drawnAs(read("LEGION-3")); got != none {
+			t.Fatalf("after its own first open the settled root carries %s, want %s", got, none)
+		}
+
+		// A source whose tree nothing ever opened hands nothing over.
+		empty, err := records.CarryMemory(ctx, tx, treeLifecyclesToken, "LEGION-5", "LEGION-6")
 		must(t, err)
 		if empty {
-			t.Fatal("CarryMemory from a root with no draw wrote a row, want nothing written")
+			t.Fatal("CarryMemory from a tree nothing ever opened wrote a row, want nothing written")
 		}
-		if got := draw(read("LEGION-3")); got != none {
-			t.Fatalf("after a carry from a root with no draw the target carries %s, want %s", got, none)
+		if got := drawnAs(read("LEGION-5")); got != none {
+			t.Fatalf("after a carry from a tree nothing ever opened the target carries %s, want %s", got, none)
 		}
 
 		// A target that already carries a draw — a tree off at its own draw is still drawn — keeps
 		// its own.
-		own, err := records.DrawMemory(ctx, tx, "LEGION-3", "none", off, later)
+		own, err := records.DrawMemory(ctx, tx, "LEGION-5", "none", off, later)
 		must(t, err)
 		if !own {
 			t.Fatal("DrawMemory under mode off wrote no row, want an off tree's draw recorded too")
 		}
-		kept := draw(Issue{MemoryGroup: "none", MemoryDrawMode: off, MemoryDrawnAt: &later})
-		over, err := records.CarryMemory(ctx, tx, "LEGION-3", "LEGION-1")
+		kept := drawnAs(Issue{MemoryGroup: "none", MemoryDrawMode: off, MemoryDrawnAt: &later})
+		over, err := records.CarryMemory(ctx, tx, treeLifecyclesToken, "LEGION-5", "LEGION-1")
 		must(t, err)
 		if over {
 			t.Fatal("CarryMemory onto a root that already carries a draw wrote a row, want nothing written")
 		}
-		if got := draw(read("LEGION-3")); got != kept {
+		if got := drawnAs(read("LEGION-5")); got != kept {
 			t.Fatalf("after a carry onto a drawn root it carries %s, want its own %s", got, kept)
 		}
 	})
 }
 
-// The draw reads what the store holds about the tree a root left, not the fact that it left one.
-// A root whose handed_over_from names a tree with a tree_lifecycles row takes that tree's answer
-// and is drawn by nothing: the tree ran, and CarryMemory has already copied its draw where it
-// had one. A root whose old tree holds no such row left a tree nothing ever opened, so its work
-// never ran under a group at all and its own first open draws it like any other new tree. An
-// empty handed_over_from names no tree and matches no row.
-func TestADrawIsRefusedOnlyForARootWhoseOldTreeWasOpened(t *testing.T) {
+// The hand-over settles a handed-over root's memory, and what it settles is the answer of the tree
+// the root leaves, read in the transaction that records the hand-over. A tree the daemon had
+// opened hands its draw over where it had one and no draw at all where it had none, and either way
+// the root's own first open writes nothing over that answer. A tree the daemon had opened but
+// recorded no root for — an operator's — hands its answer over all the same. A tree nothing ever
+// opened hands nothing over, so the root is drawn at its own first open like any other new tree,
+// and a lifecycle row of another project's tree of the same key is no tree of this project's.
+func TestTheHandOverSettlesTheMemoryOfARootOutOfAnOpenedTree(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
+	drawnAt := time.Date(2026, 11, 4, 13, 0, 0, 0, time.UTC)
 	at := time.Date(2026, 11, 4, 14, 30, 0, 0, time.UTC)
+	none := drawnAs(Issue{})
+	ownDraw := drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: string(config.MemoryOn), MemoryDrawnAt: &at})
 	inTx(t, st, func(tx pgx.Tx) {
-		// LEGION-1 left LEGION-9, which was opened; LEGION-2 left LEGION-8, which never was.
-		for _, root := range []struct{ key, left string }{{"LEGION-1", "LEGION-9"}, {"LEGION-2", "LEGION-8"}} {
-			putRoot(t, ctx, records, tx, root.key)
-			stored, err := records.Issue(ctx, tx, root.key)
-			must(t, err)
-			stored.HandedOverFrom = root.left
-			must(t, records.PutIssue(ctx, tx, *stored))
-		}
-		if _, err := treelifecycle.Open(ctx, tx, "legion", "LEGION-9", treelifecycle.AuthorityWorkflow); err != nil {
-			t.Fatalf("open the tree LEGION-1 left: %v", err)
-		}
-
-		refused, err := records.DrawMemory(ctx, tx, "LEGION-1", "memory", string(config.MemoryOn), at)
-		must(t, err)
-		if refused {
-			t.Error("DrawMemory drew a root that left a tree the daemon had opened, want its old tree's answer kept")
-		}
-		drew, err := records.DrawMemory(ctx, tx, "LEGION-2", "memory", string(config.MemoryOn), at)
-		must(t, err)
-		if !drew {
-			t.Error("DrawMemory drew no root that left a tree nothing ever opened, want it drawn like any other new tree")
-		}
-
-		read := func(key string) string {
-			t.Helper()
-			stored, err := records.Issue(ctx, tx, key)
-			must(t, err)
-			when := "no draw"
-			if stored.MemoryDrawnAt != nil {
-				when = stored.MemoryDrawnAt.Format(time.RFC3339Nano)
+		// The trees the roots below left: LEGION-11 was opened and drawn, LEGION-12 opened with no
+		// draw, LEGION-13 opened with no issue record of its own, LEGION-14 never opened, and
+		// LEGION-15 opened only as the tree of another project.
+		for _, old := range []struct {
+			key, project  string
+			recorded, has bool
+		}{
+			{key: "LEGION-11", project: treeLifecyclesToken, recorded: true, has: true},
+			{key: "LEGION-12", project: treeLifecyclesToken, recorded: true},
+			{key: "LEGION-13", project: treeLifecyclesToken},
+			{key: "LEGION-14"},
+			{key: "LEGION-15", project: "widgets"},
+		} {
+			if old.recorded {
+				putRoot(t, ctx, records, tx, old.key)
 			}
-			return fmt.Sprintf("group %q drawn as %q at %s", stored.MemoryGroup, stored.MemoryDrawMode, when)
+			if old.project != "" {
+				if _, err := treelifecycle.Open(ctx, tx, old.project, old.key, treelifecycle.AuthorityWorkflow); err != nil {
+					t.Fatalf("open the tree %s of project %s: %v", old.key, old.project, err)
+				}
+			}
+			if old.has {
+				drew, err := records.DrawMemory(ctx, tx, old.key, "memory", string(config.MemoryRandom), drawnAt)
+				must(t, err)
+				if !drew {
+					t.Fatalf("the draw of the old tree %s wrote no row", old.key)
+				}
+			}
 		}
-		if got, want := read("LEGION-1"), `group "" drawn as "" at no draw`; got != want {
-			t.Errorf("the root out of an opened tree carries %s, want %s", got, want)
-		}
-		if got, want := read("LEGION-2"), `group "memory" drawn as "on" at `+at.Format(time.RFC3339Nano); got != want {
-			t.Errorf("the root out of a tree never opened carries %s, want %s", got, want)
+
+		for _, tc := range []struct {
+			name, root, left string
+			// settled is whether the hand-over answered this root's memory, which is also exactly
+			// what its own first open then writes nothing over.
+			settled bool
+			want    string
+		}{
+			{name: "out of a tree opened and drawn", root: "LEGION-1", left: "LEGION-11", settled: true,
+				want: drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: string(config.MemoryRandom), MemoryDrawnAt: &drawnAt})},
+			{name: "out of a tree opened with no draw", root: "LEGION-2", left: "LEGION-12", settled: true, want: none},
+			{name: "out of an operator's tree, with no issue record", root: "LEGION-3", left: "LEGION-13", settled: true, want: none},
+			{name: "out of a tree nothing ever opened", root: "LEGION-4", left: "LEGION-14", want: ownDraw},
+			{name: "out of a tree of that key in another project", root: "LEGION-5", left: "LEGION-15", want: ownDraw},
+		} {
+			putHandedOverRoot(t, ctx, records, tx, tc.root, tc.left)
+			settled, err := records.CarryMemory(ctx, tx, treeLifecyclesToken, tc.root, tc.left)
+			must(t, err)
+			if settled != tc.settled {
+				t.Errorf("%s: the hand-over of %s reported %t, want %t", tc.name, tc.root, settled, tc.settled)
+			}
+			drew, err := records.DrawMemory(ctx, tx, tc.root, "memory", string(config.MemoryOn), at)
+			must(t, err)
+			if want := !tc.settled; drew != want {
+				t.Errorf("%s: the first open of %s drew %t, want %t: the draw is what the hand-over left open",
+					tc.name, tc.root, drew, want)
+			}
+			stored, err := records.Issue(ctx, tx, tc.root)
+			must(t, err)
+			if got := drawnAs(*stored); got != tc.want {
+				t.Errorf("%s: %s carries %s, want %s", tc.name, tc.root, got, tc.want)
+			}
 		}
 	})
 }

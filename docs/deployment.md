@@ -438,12 +438,13 @@ provider_keys:
   The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
   root issue record with the mode it was drawn under and the time of the draw.
   A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
-  hands over as a tree of its own keeps its old tree's answer: that tree's draw verbatim where it
-  had one, and no draw at all where that tree had been opened with none.
+  hands over as a tree of its own takes the answer of the tree it leaves at the hand-over: that
+  tree's draw verbatim where it had one, and no draw at all where that tree had been opened with
+  none.
   A tree first opened before this release has no group and runs without memory, nothing draws for
   it later, and a change of mode reaches only the trees opened after it.
-  A child out of a tree the daemon never opened has run under nothing, so its own first open draws
-  it like any other new tree.
+  A child out of a tree the daemon never opened has run under nothing and the hand-over gives it
+  nothing, so its own first open draws it like any other new tree.
   Every role of a memory-group tree names the memory overlays last in `PI_CONFIG_FILES`, after
   `pi_config_files` and the role's own, and ends its one `--append-system-prompt` value with the
   memory instructions, after the deployment's own.

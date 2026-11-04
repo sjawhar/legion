@@ -198,27 +198,13 @@ func TestAHandedOverChildCarriesItsOldTreesMemoryGroupVerbatim(t *testing.T) {
 	if got := memoryOf(t, pool, root); got != want {
 		t.Fatalf("the admitted root carries %s, want %s", got, want)
 	}
-	parent := root
-	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1,
-		Status: "done", Rank: "B", LastDispatchSeq: 2})
-	if got := memoryOf(t, pool, child); got != noDraw {
-		t.Fatalf("a child of the tree carries %s, want %s: only a tree's root carries the group", got, noDraw)
-	}
 	// The root signs off and lingers; an hour later the project is off, and the child is handed to
 	// Legion as a root of its own.
-	linger(t, pool, root)
 	later := fixedNow.Add(time.Hour)
-	admission.now = func() time.Time { return later }
 	admission.UseMemory(config.Memory{Mode: config.MemoryOff})
 
-	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
-		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: handed}, engine)
+	handedOver := handOverChild(t, pool, admission, engine, root, child, "B", later)
 
-	handedOver := issue(t, pool, child)
-	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
-		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
-	}
 	if got := drawnAs(handedOver.MemoryGroup, handedOver.MemoryDrawMode, handedOver.MemoryDrawnAt); got != want {
 		t.Fatalf("the handed-over child carries %s, want its old tree's %s verbatim", got, want)
 	}
@@ -286,13 +272,12 @@ func TestARootWithNoMemoryBeforeThisReleaseIsNeverDrawnAndItsChildCarriesNone(t 
 }
 
 // A child handed over from a tree nothing ever drew for is never drawn either: a root that leaves
-// another tree takes that tree's answer with it, and the answer of a tree opened before this
-// release is no draw at all. The carry has none to copy, and the draw its own first promotion
-// would make is refused by the record itself (record.Store.DrawMemory, which draws no root that
-// left a tree the daemon had opened — the lifecycle row this test seeds for the old tree is that
-// fact). The project here is at `on` with a coin nothing may flip, so a draw would be loud: the
-// child would carry `memory`, drawn as `on`, at the hour of its hand-over, where the tree it left
-// carries nothing at all.
+// another tree takes that tree's answer at the hand-over, and the answer of a tree opened before
+// this release is no draw at all. The carry has no draw to copy and settles the child at none,
+// which is the answer its own first promotion then writes nothing over (record.Store.CarryMemory,
+// which the lifecycle row this test seeds for the old tree is what it reads). The project here is
+// at `on` with a coin nothing may flip, so a draw would be loud: the child would carry `memory`,
+// drawn as `on`, at the hour of its hand-over, where the tree it left carries nothing at all.
 func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -316,23 +301,12 @@ func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 	if got := memoryOf(t, pool, root); got != noDraw {
 		t.Fatalf("a root whose tree was open before the draw existed carries %s, want %s", got, noDraw)
 	}
-	parent := root
-	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1,
-		Status: "done", Rank: "B", LastDispatchSeq: 2})
 	// The root signs off and lingers; an hour later the child is handed to Legion as a root of its
 	// own, and the hand-over records which tree it left (record.Issue.HandedOverFrom).
-	linger(t, pool, root)
 	later := fixedNow.Add(time.Hour)
-	admission.now = func() time.Time { return later }
 
-	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
-		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: handed}, engine)
+	handedOver := handOverChild(t, pool, admission, engine, root, child, "B", later)
 
-	handedOver := issue(t, pool, child)
-	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
-		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
-	}
 	if got := drawnAs(handedOver.MemoryGroup, handedOver.MemoryDrawMode, handedOver.MemoryDrawnAt); got != noDraw {
 		t.Fatalf("the handed-over child carries %s, want %s: its old tree had none to give it", got, noDraw)
 	}
@@ -358,10 +332,11 @@ func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 // tree: the answer it takes with it is its old tree's, and a tree with no tree_lifecycles row was
 // never opened, so its work never ran under a group at all. Here the old root waits for a slot
 // this admission never gives it, a child is recorded under it, and the person takes the root out
-// of todo, which brings the child back as a root of its own (record.Issue.HandedOverFrom, which
-// the carry finds nothing to copy for). The project is at `random` with the coin pinned to
-// memory, so the pass that re-admits that child opens its own tree — the one moment a lifecycle
-// row is created — and draws it `memory`, recorded as `random` at the hour of that pass.
+// of todo, which brings the child back as a root of its own (record.Issue.HandedOverFrom, whose
+// tree the carry finds no lifecycle row for, so it settles nothing). The project is at `random`
+// with the coin pinned to memory, so the pass that re-admits that child opens its own tree — the
+// one moment a lifecycle row is created — and draws it `memory`, recorded as `random` at the hour
+// of that pass.
 func TestAChildHandedOverFromATreeNeverOpenedIsDrawnAtItsOwnFirstOpen(t *testing.T) {
 	pool := migratedPool(t)
 	admission := quiet(t, 2)
@@ -373,26 +348,15 @@ func TestAChildHandedOverFromATreeNeverOpenedIsDrawnAtItsOwnFirstOpen(t *testing
 	// The old tree as the record holds it: a root recorded and waiting for a slot, and a child
 	// recorded under it. No pass admits the root here, so nothing ever opens its tree.
 	seedWaiting(t, pool, root, "A")
-	parent := root
-	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1,
-		Status: "done", Rank: "B", LastDispatchSeq: 2})
 	if rows := lifecycleRows(t, pool, root); rows != 0 {
 		t.Fatalf("the old tree has %d lifecycle rows, want none: nothing ever opened it", rows)
 	}
 	// The person takes the root out of todo; an hour later the child comes back as a root of its
 	// own, and the hand-over records which tree it left.
-	linger(t, pool, root)
 	later := fixedNow.Add(time.Hour)
-	admission.now = func() time.Time { return later }
 
-	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
-		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: handed}, engine)
+	handOverChild(t, pool, admission, engine, root, child, "B", later)
 
-	handedOver := issue(t, pool, child)
-	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
-		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
-	}
 	if rows := lifecycleRows(t, pool, child); rows != 1 {
 		t.Fatalf("the child's own tree has %d lifecycle rows, want the one its promotion created", rows)
 	}
@@ -411,13 +375,125 @@ func TestAChildHandedOverFromATreeNeverOpenedIsDrawnAtItsOwnFirstOpen(t *testing
 	}
 }
 
-// lifecycleRows is how many tree_lifecycles rows the store holds for tree, the fact that says
-// whether that tree was ever opened (record.Store.DrawMemory reads it the same way, by the tree
-// alone).
+// The hand-over decides a handed-over child's memory, so the order the two roots are promoted in
+// changes nothing. The tree this child leaves is one nothing ever opened at the moment of the
+// hand-over, which settles the child at no answer, so its own first open draws it like any other
+// new tree. The old root is handed back to Legion too, and one pass with slots for both takes
+// them in rank order, in one transaction: this test runs that pass both ways round — the slots
+// they take say which went first — and reads the same triple off the child in each. A draw that
+// read the old tree's lifecycle rows at the child's own first open would refuse the child its
+// draw in the run where the old root goes first, and draw it in the other.
+func TestAHandedOverChildsMemoryDoesNotTurnOnWhichRootIsPromotedFirst(t *testing.T) {
+	const root, child = "LEGION-1", "LEGION-2"
+	later := fixedNow.Add(time.Hour)
+	for _, tc := range []struct {
+		name, childRank string
+		order           []string
+	}{
+		{name: "the old root promoted first", childRank: "C", order: []string{root, child}},
+		{name: "the child promoted first", childRank: "A", order: []string{child, root}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			// No slot stands free while the hand-over and the hand-back run, so neither root is
+			// promoted before the one pass below, and the coin fails the test if anything draws.
+			handing := quiet(t, 0)
+			handing.UseMemory(config.Memory{Mode: config.MemoryRandom})
+			handing.coin = refusingCoin(t)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+				DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			// The old tree as the record holds it: a root waiting for a slot it never gets, so
+			// nothing ever opens its tree.
+			seedWaiting(t, pool, root, "B")
+			if rows := lifecycleRows(t, pool, root); rows != 0 {
+				t.Fatalf("the old tree has %d lifecycle rows, want none: nothing ever opened it", rows)
+			}
+
+			handedOver := handOverChild(t, pool, handing, engine, root, child, tc.childRank, later)
+			if got := drawnAs(handedOver.MemoryGroup, handedOver.MemoryDrawMode, handedOver.MemoryDrawnAt); got != noDraw {
+				t.Fatalf("the handed-over child carries %s, want %s: the tree it left was never opened", got, noDraw)
+			}
+			// The person hands the old root back to Legion, so both roots wait for a slot.
+			apply(t, pool, handing, "root-handed-back", intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: 4,
+				Type: "issue.updated", Status: "todo", Title: root, Rank: "B", HandedOver: handed}, engine)
+
+			promoting := quiet(t, 2)
+			promoting.UseMemory(config.Memory{Mode: config.MemoryRandom})
+			promoting.coin = func() (bool, error) { return true, nil }
+			promoting.now = func() time.Time { return later }
+
+			tick(t, pool, promoting, "promote-both-roots")
+
+			if got := slotOrder(t, pool); !reflect.DeepEqual(got, tc.order) {
+				t.Fatalf("the pass promoted %v, want %v: this run is meant to be the other order", got, tc.order)
+			}
+			want := drawnAs(string(memorygroup.GroupMemory), string(config.MemoryRandom), &later)
+			if got := memoryOf(t, pool, child); got != want {
+				t.Fatalf("after its own first open the child carries %s, want %s", got, want)
+			}
+			if got := memoryOf(t, pool, root); got != want {
+				t.Fatalf("the old root carries %s, want %s: its own first open drew it", got, want)
+			}
+		})
+	}
+}
+
+// handOverChild records child in root's tree, signs root off, and hands child to Legion as a tree
+// of its own at at, the hour of the hand-over, which is where every test of a hand-over above
+// starts. The child is recorded carrying no memory of its own, as every child of a tree is, since
+// only a tree's root carries the group; the record the hand-over leaves says which tree it left
+// (record.Issue.HandedOverFrom) and carries whatever that hand-over settled, which this returns.
+func handOverChild(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler,
+	root, child, rank string, at time.Time) record.Issue {
+	t.Helper()
+	parent := root
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1,
+		Status: "done", Rank: rank, LastDispatchSeq: 2})
+	if got := memoryOf(t, pool, child); got != noDraw {
+		t.Fatalf("a child of the tree carries %s, want %s: only a tree's root carries the group", got, noDraw)
+	}
+	linger(t, pool, root)
+	admission.now = func() time.Time { return at }
+	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
+		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: rank, HandedOver: handed}, engine)
+	handedOver := issue(t, pool, child)
+	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
+		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
+	}
+	return handedOver
+}
+
+// slotOrder is the issues holding admission slots, in the order a pass took them: each takes the
+// lowest free index (nextSlotIndex), so index order is the order they were promoted in.
+func slotOrder(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `select issue from slots order by index`)
+	if err != nil {
+		t.Fatalf("list the admission slots: %v", err)
+	}
+	defer rows.Close()
+	var issues []string
+	for rows.Next() {
+		var issue string
+		if err := rows.Scan(&issue); err != nil {
+			t.Fatalf("read an admission slot: %v", err)
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list the admission slots: %v", err)
+	}
+	return issues
+}
+
+// lifecycleRows is how many tree_lifecycles rows the store holds for this project's tree, the fact
+// that says whether that tree was ever opened and the fact the hand-over reads
+// (record.Store.CarryMemory, by the project and the tree).
 func lifecycleRows(t *testing.T, pool *pgxpool.Pool, tree string) int {
 	t.Helper()
 	var rows int
-	if err := pool.QueryRow(context.Background(), `select count(*) from tree_lifecycles where tree = $1`, tree).Scan(&rows); err != nil {
+	if err := pool.QueryRow(context.Background(), `select count(*) from tree_lifecycles where project = 'legion' and tree = $1`, tree).Scan(&rows); err != nil {
 		t.Fatalf("count the lifecycle rows of %s: %v", tree, err)
 	}
 	return rows

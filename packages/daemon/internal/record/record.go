@@ -1190,18 +1190,23 @@ type Store interface {
 	// already carries a draw keeps it, whatever the project's mode says now, and a tree whose root
 	// has no issue record — an operator's spawn — records no draw at all.
 	//
-	// Nor is a root that left another tree the daemon had opened (Issue.HandedOverFrom, which
-	// admit's readmit writes for every member that becomes a root of its own, naming a tree that
-	// holds a tree_lifecycles row): it takes its old tree's answer with it, which CarryMemory
-	// copies when that tree had a draw and which is no draw at all when it had none — a tree
-	// first opened before this release, which nothing draws for. A root whose old tree was never
-	// opened has run under nothing, so its own first open draws it like any other new tree.
+	// Nor is a root whose memory its hand-over settled: a child handed over out of a tree the
+	// daemon had opened takes that tree's answer, which CarryMemory wrote at the hand-over — the
+	// tree's draw where it had one, and no draw at all where it had none, a tree first opened
+	// before this release, which nothing draws for. The draw reads that written answer, not the
+	// old tree's state, so the order the two roots are promoted in changes nothing. A root out of
+	// a tree nothing ever opened takes no answer with it, so its own first open draws it like any
+	// other new tree.
 	DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error)
-	// CarryMemory copies the draw of from onto key verbatim, the original draw time included: the
-	// hand-over of a child to a tree of its own, which keeps the group it has been running under.
-	// It reports whether it wrote, and writes nothing when key already carries a draw of its own or
-	// from has none to give.
-	CarryMemory(ctx context.Context, tx pgx.Tx, key, from string) (bool, error)
+	// CarryMemory settles the memory of key, a child handed over as a tree of its own, from the
+	// tree it left: from's draw verbatim, the original draw time included, where that tree had one,
+	// and no draw at all where it had none, and either way DrawMemory writes nothing for key
+	// afterwards. project is the normalized runtime token tree_lifecycles is keyed by, whose row
+	// for from is the fact that the tree was opened at all: a tree with no row hands nothing over,
+	// and key's own first open draws it. It reports whether the hand-over settled key's memory,
+	// which is wider than whether a draw was copied, and writes nothing when key already carries a
+	// draw of its own or a hand-over settled it before.
+	CarryMemory(ctx context.Context, tx pgx.Tx, project, key, from string) (bool, error)
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
