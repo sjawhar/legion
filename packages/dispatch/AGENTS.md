@@ -1644,7 +1644,10 @@ and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` 
 `pinnedTo` in `e2e/harness-processes.ts` builds the header for a plain fetch. `e2e/preflight.ts`
 asks each process, pinned, for this run's fake Envoy session, then signs a person in on A and
 requires B to know them. The proxy shares its relay with the plain-HTTP proxy
-(`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it),
+(`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it,
+and drops the `content-encoding` and `content-length` of an answer its own `fetch` already
+inflated — Dispatch gzips JSON for a caller that takes gzip, and forwarding the inflated body
+under those headers fails the browser's inflate with `incorrect header check`),
 and `e2e/__tests__/round-robin-proxy.test.ts` (`bun run test`) runs it against two Bun servers.
 Specs named `*.multiprocess.e2e.ts` run only there: the default run ignores them, and two-process
 mode runs them alone (the sign-in spec only under `DISPATCH_E2E_SIGNIN=oidc`, below), in the
