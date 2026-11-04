@@ -12,7 +12,6 @@ import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
-import { CreateIssueButton } from "./features/issue/CreateIssueButton";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
@@ -33,13 +32,18 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
-import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
-import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
+import {
+  appKeymap,
+  type KeyBindingDescription,
+  MOD_KEY_LABEL,
+  useKeymap,
+} from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
+import { RailButton } from "./features/shell/RailButton";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import {
   SIGN_OUT_SETTLE_MS,
@@ -300,8 +304,8 @@ function NavigationContents({
   closeButtonRef,
   compact,
   onClose,
-  onHideSidebar,
   onCreateIssue,
+  onHideSidebar,
   onOpenInboxDrawer,
   onSearch,
   onSignOut,
@@ -339,17 +343,27 @@ function NavigationContents({
           </button>
         ) : null}
       </div>
-      <SearchButton
+      <RailButton
+        ariaKeyshortcuts="Control+K Meta+K"
+        className="mt-4"
+        label="Search"
         onOpen={() => {
           onClose();
           onSearch();
         }}
+        shortcut={MOD_KEY_LABEL === "⌘" ? "⌘K" : "Ctrl K"}
       />
-      <CreateIssueButton
+      {/* The hint is `AppShell`'s global `create` binding, written as `?` and the palette write
+          it (`c`); `aria-keyshortcuts` names the same key in ARIA's uppercase form. */}
+      <RailButton
+        ariaKeyshortcuts="C"
+        className="mt-1"
+        label="New issue"
         onOpen={() => {
           onClose();
           onCreateIssue();
         }}
+        shortcut="c"
       />
       <Sidebar
         onHide={compact ? undefined : onHideSidebar}
