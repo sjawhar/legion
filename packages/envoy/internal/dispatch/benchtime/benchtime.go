@@ -19,11 +19,11 @@
 // smaller than the run-to-run spread of the parts it shares a statement with: the gate then
 // belongs on the piece whose text differs, and the pair over that piece is what fails.
 //
-// A statement whose gain needs an index or a table this change adds has no such pair: no one
-// schema holds both sides of it. Before and After measure one side of such a statement alone,
-// each line naming the side it read, the after side on this release's schema and the before
-// side on a database migrated from the release before this one, which holds none of this
-// change's migrations, 20261101182419 to 20261101182522; that is protocol 2.
+// A statement whose gain needs an index or a table a migration of this release adds has no such
+// pair: no one schema holds both sides of it. Before and After measure one side of such a
+// statement alone, each line naming the side it read, the after side on this release's schema
+// and the before side on a database migrated from the release before it, which holds none of
+// this release's migrations, 20261101182419 to 20261101182522; that is protocol 2.
 //
 // It is an ordinary package rather than a _test.go file because all three statement-owning
 // packages (api, refs, docs) run it and Go cannot share test-only code across packages, which is

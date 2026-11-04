@@ -47,16 +47,17 @@ const (
 //     and reported whole beside it, for the reason given where that pair is measured.
 //
 //   - Protocol 2, one side alone: listIssueAsksQueryAll, listIssueRootMessagesQuery and
-//     listArtifactAsksQueryOpen, whose texts this change does not edit at all - their gain is
+//     listArtifactAsksQueryOpen, whose texts this release does not edit at all - their gain is
 //     asks_issue_key (20261101182426) and messages_issue_roots (20261101182433), and for the
 //     artifact list the drop of asks_open_artifact (20261101182440), whose before side needs
-//     that index present. No one schema holds both sides of those, so each is measured here as
-//     its after side, with its plan, and seam 7's two-commit run takes the before side by
-//     running this same measurement against a database migrated from the release before this
-//     change, which holds none of this change's migrations. That database also has no
+//     that index present. No one schema holds both sides of those, so each is measured alone,
+//     with its plan: on a database at this release's schema that reading is the after side, and
+//     on one migrated from the release before it the same three readings are the before side,
+//     which is what the after side is compared with. That older database also has no
 //     document_search (20261101182447), so this release's text of the five document-arm
-//     statements cannot run on it: there each of the five is measured as its before text
-//     alone, under the name its pair carries here.
+//     statements cannot run on it: there each of the five is measured as its before text alone,
+//     under the name it carries here - a pair's name for the three gated whole, and a Report's
+//     name for the two related statements that are gated on the arm they share.
 //
 // Every before text is the text the release before this change runs, which this package already
 // holds as an oracle - issue_list_equality_test.go, agent_activity_test.go,
@@ -94,11 +95,20 @@ func TestStatementTimings(t *testing.T) {
 		benchtime.Statement{SQL: mainIssueChildrenQuery, Args: []any{subjects.Issue}},
 		benchtime.Statement{SQL: issueChildrenQuery, Args: []any{subjects.Issue}})
 
-	runner.After(t, "listIssueAsksQueryAll",
+	// Which side these three readings are is the schema's answer, not the statement's: their
+	// text is the same on both databases, and what differs is whether the indexes a migration
+	// of this release adds are there. The same answer chooses the document arm's branch below,
+	// so it is read once.
+	thisReleasesSchema := databaseHoldsDocumentSearch(t, runner)
+	oneSide := runner.After
+	if !thisReleasesSchema {
+		oneSide = runner.Before
+	}
+	oneSide(t, "listIssueAsksQueryAll",
 		benchtime.Statement{SQL: listIssueAsksQueryAll, Args: []any{subjects.Issue}})
-	runner.After(t, "listIssueRootMessagesQuery",
+	oneSide(t, "listIssueRootMessagesQuery",
 		benchtime.Statement{SQL: listIssueRootMessagesQuery, Args: []any{subjects.Issue}})
-	runner.After(t, "listArtifactAsksQueryOpen",
+	oneSide(t, "listArtifactAsksQueryOpen",
 		benchtime.Statement{SQL: listArtifactAsksQueryOpen, Args: []any{subjects.AnchoredDocument}})
 
 	// Search is measured on the middling word: a word in a handful of items ranks almost
@@ -148,11 +158,11 @@ func TestStatementTimings(t *testing.T) {
 	// texts run alternately on one connection and the runner fails a pair whose after median is
 	// not below its before. A database migrated from the release before holds no
 	// document_search (migration 20261101182447), so this release's text cannot run there at
-	// all: each before text is measured alone instead, under the name its pair carries here,
-	// which is the reading seam 7's two-commit run sets beside that pair's own before side. The
-	// two-commit run is therefore this one test against two databases rather than a second
-	// harness.
-	if !databaseHoldsDocumentSearch(t, runner) {
+	// all: each before text is measured alone instead, under the name it carries here, and the
+	// reading to compare it with is this schema's own reading of the same before text, which
+	// every pair below logs beside its after text. The two-commit run is therefore this one
+	// test against two databases rather than a second harness.
+	if !thisReleasesSchema {
 		runner.Before(t, "searchQuery, keywords only",
 			benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments})
 		runner.Before(t, "searchQueryMeaning",
@@ -272,7 +282,7 @@ func databaseHoldsDocumentSearch(t *testing.T, runner *benchtime.Runner) bool {
 }
 
 // TestRelatedTermsRefreshTiming is protocol 3, the refresh's own, and it is a Go test rather
-// than a line of seam 7's script because the pass it times is Go: refreshSearchTermStats is
+// than a measurement script because the pass it times is Go: refreshSearchTermStats is
 // unexported in this package, and nothing outside it can run one pass of this build.
 //
 // The refresh has no statement pair. The released refresh is a per-project ts_stat rebuild and

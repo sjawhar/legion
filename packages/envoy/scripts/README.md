@@ -300,13 +300,10 @@ measurement.
 
 `internal/dispatch/benchtime` is the runner, and each package that owns statement texts carries
 its own `statement_timing_test.go`, all named `TestStatementTimings`: `internal/dispatch/api`,
-`internal/dispatch/refs` and `internal/dispatch/docs`. The runner takes a named pair of statement
-texts with their arguments, runs `EXPLAIN (ANALYZE, BUFFERS)` of each alternately on one
-connection, reports planning plus execution as the median of runs 2 to 12, prints both plans and
-fails when the after text's median is not below the before text's. It records the server settings
-it found and the subjects it bound (the largest project, its most heavily linked issue, the most
-anchored document, five sessions, an embedding and three words), each read from the database at
-run time, so a re-seed moves them with it.
+`internal/dispatch/refs` and `internal/dispatch/docs`.
+`Pair` takes a named pair of statement texts with their arguments, runs `EXPLAIN (ANALYZE, BUFFERS)` of each alternately on one connection, reports planning plus execution as the median of runs 2 to 12, prints both plans and fails when the after text's median is not below the before text's.
+`Report` is that same two-sided reading with no bound, for a statement whose gain is real but smaller than the run-to-run spread of the parts it shares a statement with: the gate then sits on the piece whose text differs, as a pair of its own.
+The runner records the server settings it found and the subjects it bound (the largest project, its most heavily linked issue, the most anchored document, five sessions, an embedding and three words), each read from the database at run time, so a re-seed moves them with it.
 
 ```bash
 cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
@@ -314,10 +311,10 @@ cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
   ./internal/dispatch/api ./internal/dispatch/refs ./internal/dispatch/docs
 ```
 
-A statement whose gain needs an index or a table this change adds has no such pair, because one
-schema cannot hold both sides of it. Each of those carries its head text alone, measured the same
-way with no bound; its before side is this same test run against a database migrated from a
-checkout of main. Each test file says which statement is under which protocol and why.
+A statement whose gain needs an index or a table a migration of this release adds has no such pair, because one schema cannot hold both sides of it.
+`Before` and `After` measure one side of such a statement alone, with its plan and no bound, each line naming the side it read: the after side on a database at this release's schema, the before side on one migrated from the release before it.
+Running this same test against each of the two databases is what puts the two sides together.
+Each test file says which statement is under which protocol and why.
 
 `TestRelatedTermsRefreshTiming`, in `internal/dispatch/api`, measures the related-terms refresh,
 which has no statement pair: it times one whole pass of the release before this one, one whole
