@@ -640,10 +640,12 @@ export interface MarkdownHeadline {
  * Multilingual Plane). Blocks and hard breaks become single spaces. `cut` says whether the
  * text was cut, which an ellipsis the author typed cannot fake.
  *
- * `markdown` is for the three texts Dispatch does not store, which carry no tree and so have
- * no reading to take the words from: a refused broadcast send's row names its own text on
- * hover (`BroadcastSends.tsx`). It is read only where `tree` is absent, and it is parsed, as
- * everything about such a text is.
+ * `markdown` is for a text that carries no tree to take the words from. That is the three texts
+ * Dispatch does not store — a refused broadcast send's row names its own text on hover
+ * (`BroadcastSends.tsx`) — and it is also a stored text whose answer carries no tree: a caller
+ * that did not ask for one, or a server that has not rolled, which a deploy serving two builds
+ * puts in front of one dashboard (`reference-target.ts`). It is read only where `tree` is
+ * absent, and it is parsed, as everything about such a text is.
  *
  * `undefined` where neither is given, until the engine has answered (one pre-paint commit once
  * it is loaded on the page, and for a parsed body until the worker's answer lands), and for a

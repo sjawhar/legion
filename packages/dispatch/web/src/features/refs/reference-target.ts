@@ -493,7 +493,13 @@ export function useReferenceTarget(
       authoredTree = block === undefined ? undefined : blockTextTree(block.node);
       break;
   }
-  const headline = useMarkdownHeadline(authoredTree, TITLE_HEADLINE_MAX);
+  // The tree is the reading Go made of this text, and where there is one nothing here parses
+  // markdown. An answer that carries none still has a title: a server that has not rolled yet,
+  // or any caller that did not ask for trees, answers the markdown alone, and a deploy serving
+  // two builds has a dashboard reading both at once. `useMarkdownHeadline` reads the fallback
+  // only where `tree` is undefined, so a stored text that came with its tree is still parsed
+  // nowhere (`e2e/parse-count.e2e.ts`).
+  const headline = useMarkdownHeadline(authoredTree, TITLE_HEADLINE_MAX, authored);
 
   if (kind === "message") {
     return {
