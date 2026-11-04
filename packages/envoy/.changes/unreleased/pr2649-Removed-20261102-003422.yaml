@@ -1,5 +1,0 @@
-kind: Removed
-body: 'The secrets broker no longer answers `GET /v1/credential-requests/{record}`, and Dispatch no longer relays it as `GET /api/v1/credential-requests/{id}`: a secret request is read and decided on the broker''s own approval page. `agent-secrets` names that page for a pending request, and the approver alone when the broker names none; `AGENT_SECRETS_APPROVE_URL` now serves `machine login` alone.'
-time: 2026-11-02T00:34:22.50575657Z
-custom:
-    Issue: pr2649

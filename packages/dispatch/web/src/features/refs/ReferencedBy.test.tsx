@@ -341,3 +341,37 @@ test("a block of a project document's comment links to its comment, with no frag
     `/projects/CORE/documents/handbook-md?comment=${comment}`
   );
 });
+
+// `serves` and `needs` are the edge kinds a typed block's `block[]` attributes make
+// (`blocks.json`): a check or a plan task naming a requirement, and a plan task naming another.
+// Read from the block that is named, the edge says what the citing block does for it.
+test("a serves edge reads as served by and a needs edge as needed by", async () => {
+  const plan = "dispatch://CORE-1/artifact/plan-md";
+  const verification = "dispatch://CORE-1/artifact/verification-md";
+  const { getReferences, view } = renderPanel(
+    {
+      edges: [
+        { ...blockEdge(verification, "CORE-1", "c1", "c1", "Run the suite."), kind: "serves" },
+        { ...blockEdge(plan, "CORE-1", "t1", "t1", "Write the panel."), kind: "needs" },
+      ],
+      node: {
+        block_id: "r1",
+        document: "dispatch://CORE-1/spec",
+        id: "CORE-1/spec#r1",
+        issue_key: "CORE-1",
+        kind: "block",
+        ref: "dispatch://CORE-1/spec#b-r1",
+      },
+    },
+    "dispatch://CORE-1/spec#b-r1"
+  );
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  await within(panel).findByText("Run the suite.");
+  expect(within(panel).getByRole("link", { name: "served by · CORE-1" })).toBeTruthy();
+  expect(within(panel).getByRole("link", { name: "needed by · CORE-1" })).toBeTruthy();
+});

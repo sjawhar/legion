@@ -126,8 +126,9 @@ type bootConfig struct {
 	// by the broker client on each call, never here: a projected token rotates.
 	AgentSecretsURL       string
 	AgentSecretsTokenFile string
-	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
-	// Empty keeps them in Postgres.
+	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in,
+	// gs://<bucket> for Cloud Storage or an S3 bucket's name (files.Open). Empty keeps them in
+	// Postgres.
 	FileStoreBucket string
 	// ListenAddr is the address the server serves on: the inherited socket's own address with
 	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
@@ -573,7 +574,7 @@ func main() {
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
-		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder whose entry records a port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
 	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
@@ -591,6 +592,7 @@ func main() {
 			Listen:          database.Pool.Listener,
 			RoleClaims:      holders,
 			Sessions:        holders,
+			KeptLanes:       natsClient,
 			PublishFailures: outboxPublishFailures,
 		})
 		outboxStopped = make(chan struct{})
@@ -1401,18 +1403,15 @@ func parsePort(name, raw string) (int, error) {
 	return port, nil
 }
 
-// openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
-// unset, which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's
-// nil check reads the setting: NewS3's (*S3)(nil) on failure is not passed through as a Store.
+// openFileStore is the uploaded-file store boot names (files.Open: gs://<bucket> is a Cloud
+// Storage bucket, a bare name an S3 bucket), or nil when DISPATCH_FILE_STORE_BUCKET is unset,
+// which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's nil
+// check reads the setting.
 func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	if boot.FileStoreBucket == "" {
 		return nil, nil
 	}
-	bucketStore, err := files.NewS3(ctx, boot.FileStoreBucket)
-	if err != nil {
-		return nil, err
-	}
-	return bucketStore, nil
+	return files.Open(ctx, boot.FileStoreBucket)
 }
 
 // serverBus is the options every NATS connection of the server is made with: it connects in the

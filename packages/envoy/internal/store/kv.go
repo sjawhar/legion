@@ -688,19 +688,30 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // The merged row keeps no topic reaching a private stream subject other than the
 // session's own agent subject (dropPrivateStreamTopics): a row stored before the
 // listener refused such a topic is cleaned at the session's next registration.
+//
+// The machine id and the directory are the requesting registration's, and the stored row is the
+// fallback for whichever of the two the request leaves empty. A session that registers again
+// through another listener therefore moves its row to that listener, and every reader of the row
+// - the fan-out index (subjectIndex.set, which moves the session's subjects to the new root),
+// Registry.Match, the durable path's ownership check and the sender stamp of a message the
+// session sends (cmd/listener's senderStamp) - names the listener the session is registered
+// through now. A request that names no machine or no directory says nothing about where the
+// session runs, so for it the stored value stands: a role claim carries the claiming listener's
+// machine id and no directory (SetRoleWithPrevious), and claiming a role must not clear the
+// row's Cwd.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
-	sessionID := item.SessionID
+	requested := item
 	if getErr == nil {
 		item = cur
 	}
-	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
-	item.Dir = first(item.Dir, curValue(cur.Dir))
+	item.MachineID = first(requested.MachineID, cur.MachineID)
+	item.Dir = first(requested.Dir, cur.Dir)
 	item.UpdatedAt = now
 	item = Merge(item, topics)
-	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
+	item.Topics = dropPrivateStreamTopics(requested.SessionID, item.Topics)
 	sort.Strings(item.Topics)
 	return item, nil
 }
@@ -1026,9 +1037,14 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // it does for any other live holder.
 //
 // Each bucket call waits no longer than ctx (bus.Bounded): POST /v1/roles/set passes its request's
-// own context. A call ctx abandoned may still land after this answer. The claim's create or update
-// is conditional on the revision the claim was read at, so it lands only if no other claim did
-// since, and makes sessionID the holder it asked to be; the interest write is UpsertWithin's.
+// own context. A call ctx abandoned may still land after this answer. A hard claim that names no
+// ifClaimRevision is last-claim-wins, so its write names no revision: it lands whatever the bucket
+// holds, and two honest concurrent claimants both land, the later write holding the role. A soft
+// claim's create or update is conditional on the revision its claim was read at, so it lands only
+// if no other claim did since; the loser of that race is answered *ErrRoleHeld for the holder it
+// then reads, never a storage failure. A claim that names an ifClaimRevision is conditional too,
+// hard or soft, since that revision is the precondition described below. Either way the claim that
+// lands makes sessionID the holder it asked to be; the interest write is UpsertWithin's.
 //
 // The claim alone says who holds the role (RolesHeldBy, and role delivery), so the two cleanups
 // that follow are best-effort tidying of interest topics, within ctx like the rest: the rollback of
@@ -1091,11 +1107,32 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 	}
 	epoch := r.roleHolderEpoch()
 	roles := r.roles()
+	// A hard claim that names no precondition writes unconditionally. The conditional write this
+	// once made refused the loser of two honest concurrent claims with JetStream's wrong last
+	// sequence (error 10071, which nats.go answers as an *nats.APIError matching
+	// nats.ErrKeyExists), which storeAnswered counts as the store's own answer, so POST
+	// /v1/roles/set wrote it as a 500 - an answer that route's contract does not have, since a hard
+	// claim has no refusal at all. A bounded retry over a freshly read revision would only narrow
+	// the window: one conditional write lands per revision, so N claimants of one role need N
+	// rounds and the unluckiest loses N-1 of them, which no constant bound covers. Writing the
+	// claim the way its contract reads - the last write wins - removes the race instead of
+	// shrinking it, and leaves the holder one of the claimants either way.
+	//
+	// A soft claim keeps the conditional write, because its refusal is the point: it read a holder
+	// it was allowed to take the role from, and a claim that landed since must not be taken
+	// silently. A claim carrying ifClaimRevision keeps it for the same reason, hard or soft: the
+	// revision it requires is weighed a second time by the write itself, so a claim that landed
+	// between this call's read and its write refuses this one rather than being overwritten by it.
+	// Both losers are answered below.
 	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) {
-		if entry == nil {
+		switch {
+		case !soft && ifClaimRevision == nil:
+			return roles.Put(role, data)
+		case entry == nil:
 			return roles.Create(role, data)
+		default:
+			return roles.Update(role, data, entry.Revision())
 		}
-		return roles.Update(role, data, entry.Revision())
 	})
 	if !answered {
 		err = fmt.Errorf("write role %s's claim: %w", role, err)
@@ -1135,8 +1172,8 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 				Holder:   holder,
 			}
 		}
-		// A soft claim that lost the CAS race lost to a concurrent claimant;
-		// report that as held rather than as a storage failure.
+		// A soft claim that lost its conditional write (wrong last sequence, nats.ErrKeyExists)
+		// lost to a concurrent claimant; report that as held rather than as a storage failure.
 		if soft && holder != "" {
 			return Interest{}, &ErrRoleHeld{Role: role, Holder: holder}
 		}
@@ -1325,10 +1362,6 @@ func first(value string, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func curValue(value string) string {
-	return value
 }
 
 const (

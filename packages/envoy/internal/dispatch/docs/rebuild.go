@@ -91,7 +91,7 @@ func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err er
 // Every refusal comes before the first write: a room resident in this server whose document is far
 // from both caps, a history that loads and is not near a cap, a closed issue (for supplied
 // markdown, which changes the document), and markdown that is not a Proof document, drops an open
-// ask block, or introduces a block pointer to a block of a type its attribute does not allow
+// ask block, or introduces a block pointer at a block the attribute may not name
 // (refuseBlockPointers, against the latest version). Supplied markdown is caller text: it is
 // parsed as an upload is, and its rendering is weighed as a new document's is (SeedText). The
 // latest version is the server's own rendering of the document, read back as every stored

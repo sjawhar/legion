@@ -5,10 +5,8 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -21,8 +19,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// implementTokens is the harness's ProvisionTokens: the implement App's installation token,
-// minted in-process from the key the devbox's secret store holds (Sami's ruling on ask e3943412).
+// implementTokens is the harness's ProvisionTokens: the implement App's installation token, from
+// the token command the script hands the harness (resolveApp), so the harness holds no App key.
 // owners are the owners of the run's repositories, the first the run's repository's owner.
 type implementTokens struct {
 	apps   *appauth.Manager
@@ -64,25 +62,22 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 	return bundle, nil
 }
 
-// resolveApp reads the implement App's key by running, with `sh -c`, the key command the script
-// hands the harness (LEGION_E2E_IMPLEMENT_APP_KEY_COMMAND): lib/github-apps.sh's own
-// app_key_command, which puts the key in one child's environment through the key runner and prints
-// its PEM, so the runner's argv lives in the lib alone, as real_github_test.go's liveProofApps runs
-// the same lib's output. It then mints the App's installation token for each of the run's two
-// repositories' owners, and with them reads each repository's default branch as GitHub names it,
-// the base every launch on it provisions at; the key stays in this process's memory.
-func (r *liveRig) resolveApp() error {
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(r.ctx, "sh", "-c", r.env.appKeyCommand)
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("reading %s through its key command: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))
-	}
-	pem := strings.TrimSpace(stdout.String())
-	if !strings.HasPrefix(pem, "-----BEGIN") {
-		return fmt.Errorf("%s: its key command printed no PEM block (-----BEGIN …)", r.env.appKeyName)
-	}
-	apps := appauth.New(config.GitHubApps{Implement: config.GitHubApp{AppID: r.env.appID, PrivateKey: pem}}, appauth.Options{})
+// resolveApp mints the implement App's tokens through the token command the script hands the
+// harness (LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND): lib/github-apps.sh's own app_token_command,
+// which asks the secrets broker's github-app secret for a release of installation tokens, so the
+// broker client's argv lives in the lib alone, as real_github_test.go's liveProofApps runs the same
+// lib's output. The token manager runs it in token mode (appauth's TokenCommand) for each of the
+// run's two repositories' owners, and with those tokens reads each repository's default branch as
+// GitHub names it, the base every launch on it provisions at. No key reaches the harness.
+func (r *liveRig) resolveApp() (err error) {
+	apps := appauth.New(config.GitHubApps{Implement: config.GitHubApp{AppID: r.env.appID, TokenCommand: r.env.appTokenCommand}}, appauth.Options{})
+	// The rig owns the manager once it is stored in r.tokens, and closes it in close; until then a
+	// failure closes it here, so a token command still running never outlives the harness.
+	defer func() {
+		if err != nil {
+			apps.Close()
+		}
+	}()
 	branches := make([]string, 2)
 	var identity runtime.GitIdentity
 	for i, repo := range []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner} {

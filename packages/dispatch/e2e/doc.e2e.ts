@@ -453,9 +453,17 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
     const scrollPosition = await page.evaluate(() => window.scrollY);
     expect(scrollPosition).toBeGreaterThan(0);
 
-    await page.getByRole("tab", { name: "Conversation" }).press("ArrowLeft");
+    // Three tabs sit between them — Spec, Verification, Plan, Conversation — and the arrow
+    // activates each tab it lands on, so the walk back mounts the two in between on the way.
+    for (const from of ["Conversation", "Plan", "Verification"]) {
+      await page.getByRole("tab", { name: from }).press("ArrowLeft");
+    }
+    await expect(page.getByRole("tab", { name: "Spec" })).toBeFocused();
     await expect(editor).toContainText("stay mounted");
-    await page.getByRole("tab", { name: "Spec" }).press("ArrowRight");
+    for (const from of ["Spec", "Verification", "Plan"]) {
+      await page.getByRole("tab", { name: from }).press("ArrowRight");
+    }
+    await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
     await expect(page.getByText("Existing message 29")).toBeVisible();
     await expect.poll(sockets).toBe(1);
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);

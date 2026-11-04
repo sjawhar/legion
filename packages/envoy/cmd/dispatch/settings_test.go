@@ -1576,6 +1576,11 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if store, err := openFileStore(context.Background(), resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": ""})); err != nil || store != nil {
 				t.Errorf("openFileStore with no bucket = %v, %v, want nil, nil", store, err)
 			}
+			// gs:// is read by files.Open, the one place the server and backfill-files choose their
+			// store: a value that names no Cloud Storage bucket refuses the boot, with no store.
+			if store, err := openFileStore(context.Background(), resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": "gs://Example_Files"})); err == nil || store != nil || !strings.Contains(err.Error(), "not a Cloud Storage bucket name") {
+				t.Errorf("openFileStore with gs://Example_Files = %v, %v, want nil and a refusal of the bucket name", store, err)
+			}
 			// backfill-files reads it too, trimmed, and refuses to run without it before it opens the
 			// database.
 			var stdout, stderr bytes.Buffer
