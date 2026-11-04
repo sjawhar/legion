@@ -290,23 +290,11 @@ test("two readers' suggestions keep both action-bar anchors @phone", async ({
 
 type RecordKind = "Comment" | "Suggest" | "Ask";
 
-const overlapKinds: { kind: RecordKind; noun: string }[] = [
-  { kind: "Comment", noun: "comment" },
-  { kind: "Suggest", noun: "suggestion" },
-  { kind: "Ask", noun: "ask" },
-];
-
-// The marks are made in both orders because the order decides which span nests inside the other,
-// and the narrower mark has to open from its text either way.
-const overlapOrders: { name: string; quotes: [string, string] }[] = [
-  { name: "the wider made first", quotes: ["quick brown", "brown"] },
-  { name: "the narrower made first", quotes: ["brown", "quick brown"] },
-];
-
 /** Writes the record of `kind` on `quote` through the API and answers it with the mark it left
  *  in the document. What the click below reads is the two marks, whoever wrote them; the rows
  *  above prove the selection bar and the composer write the same records, so these rows no
- *  longer pay two composer round trips for a fixture. */
+ *  longer pay two composer round trips for a fixture - and no longer lose a mark to the margin's
+ *  refusal of a selection-bar action while an open composer's send is still outstanding. */
 async function seedOverlapRecord(
   issueKey: string,
   kind: RecordKind,
@@ -325,6 +313,19 @@ async function seedOverlapRecord(
   return { id: record.id, markId: record.anchor.mark_id };
 }
 
+const overlapKinds: { kind: RecordKind; noun: string }[] = [
+  { kind: "Comment", noun: "comment" },
+  { kind: "Suggest", noun: "suggestion" },
+  { kind: "Ask", noun: "ask" },
+];
+
+// The marks are made in both orders because the order decides which span nests inside the other,
+// and the narrower mark has to open from its text either way.
+const overlapOrders: { name: string; quotes: [string, string] }[] = [
+  { name: "the wider made first", quotes: ["quick brown", "brown"] },
+  { name: "the narrower made first", quotes: ["brown", "quick brown"] },
+];
+
 for (const { kind, noun } of overlapKinds) {
   for (const order of overlapOrders) {
     test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name} @phone`, async ({
@@ -337,13 +338,15 @@ for (const { kind, noun } of overlapKinds) {
         title: "Overlap click",
       });
       const project = testInfo.project.name;
-      // In the row's order: the second mark nests inside or around the first, which is what the
-      // two orders are here to cover.
-      const marks = [];
+      // Written in the row's order: the second mark nests inside or around the first, which is
+      // what the two orders are here to cover. They are kept by their quote, since the click
+      // below names the narrower record whichever order wrote it.
+      const marks: Record<string, { id: string; markId: string }> = {};
       for (const quote of order.quotes) {
-        marks.push(await seedOverlapRecord(issue.key, kind, quote));
+        marks[quote] = await seedOverlapRecord(issue.key, kind, quote);
       }
-      const [wide, narrow] = order.quotes[0] === "quick brown" ? marks : [marks[1], marks[0]];
+      const wide = marks["quick brown"];
+      const narrow = marks.brown;
       const context = await asUser(browser, "alice");
 
       try {

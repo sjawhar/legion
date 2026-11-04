@@ -1,4 +1,8 @@
-import type { EditArtifactInput } from "@legion/contracts";
+import type {
+  CheckResultRecorded,
+  EditArtifactInput,
+  RecordCheckResultInput,
+} from "@legion/contracts";
 import type { Cookie } from "@playwright/test";
 import type {
   Actor,
@@ -34,6 +38,7 @@ import type {
   HandoffSummary,
   InboxRow,
   Issue,
+  IssueCoverage,
   IssueDetails,
   IssueSummary,
   ItemBlocks,
@@ -365,6 +370,32 @@ export function patchIssue(
   options: ApiOptions = {}
 ): Promise<Issue> {
   return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
+}
+
+/** `POST /api/v1/issues/{key}/results`: one result of one check, recorded on `issue`, which
+ *  need not be the issue whose Verification document holds the check. The answer carries the
+ *  stored result and the pull-request body line it implies. */
+export function recordCheckResult(
+  issue: string,
+  input: RecordCheckResultInput,
+  options: ApiOptions = { as: "agent" }
+): Promise<CheckResultRecorded> {
+  return request<CheckResultRecorded>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/results`,
+    "POST",
+    input,
+    options
+  );
+}
+
+/** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. */
+export function getIssueCoverage(issue: string, options: ApiOptions = {}): Promise<IssueCoverage> {
+  return request<IssueCoverage>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/coverage`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 /** The project list in the server's order: lifecycle status, then rank. */
@@ -749,6 +780,21 @@ export function requestApproval(
     `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
     "POST",
     input,
+    options
+  );
+}
+
+/** `POST /api/v1/artifacts/{id}/plan-reviews`: the plan review's approval of one plan version,
+ *  which is the only way a plan is approved. */
+export function createPlanReview(
+  id: string,
+  version: number,
+  options: ApiOptions = { as: "agent" }
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/plan-reviews`,
+    "POST",
+    { version },
     options
   );
 }

@@ -53,9 +53,19 @@ and every claim the round is blocked on (`waiting`, each with its `claim` token,
 and `answered`). Nothing marks a worker whose plugin is too old to call `ready_for_update`: such
 a worker is asked like any other and answers by ending the turn the daemon's task started, so a
 round over one finishes by itself and no drain is asked of anybody. A `failed` claim is never in
-a pod round's `waiting`: it runs no turn on the pod, so the round does not wait for it, and what it left
-unpushed on the pod's disk goes with the pod. Its retry is the architect's or the operator's as
-for any failed role, and a retried claim is asked like any other.
+a pod round's `waiting`: it runs no turn on the pod, so the round does not wait for it. Its retry
+is the architect's or the operator's as for any failed role, and a retried claim is asked like any
+other.
+
+Before it replaces the pod, the daemon checks every workspace on the pod's disk for work the
+remote lacks, a failed claim's included, and pushes what it finds to a rescue branch of its own,
+`legion/<KEY>-rescue-<pod>-<n>`. When it pushed one, it writes the issue a message naming each
+rescue branch and its commit, for the issue's roles to merge into the issue branch; that message
+asks nothing of you. When the check or a push fails for any workspace, the daemon does not replace
+the pod, and this wake's `reason` says that the check for unpushed work failed and names the claim
+the check ran through, each workspace and its error. Everything else of the pod's disk goes with
+the pod: the round's task tells each worker to put any scratch evidence it still needs on Dispatch
+before it answers.
 One round wakes you once, however many sweeps find it open, so handle it when it arrives.
 Read `read_state` and the issue first, as for every wake: a round that finished since needs
 nothing.
@@ -64,9 +74,9 @@ Take each `waiting` entry by its shape:
 
 | Entry | What it is | What you do |
 |---|---|---|
-| `answered: true` | It has already answered this round. The round is blocked on the daemon's own side: a turn that has not ended, or a pod replacement the cluster keeps refusing. `reason` names which. | Send it nothing. A message to it starts a turn, and a turn after its answer takes that answer back from a worker whose plugin has `ready_for_update`, which puts the round further from finishing. Open a finding ask naming the issue, the round and `reason`, with the turn or the `ReplacePod` error it names, so an operator reads the pod. |
+| `answered: true` | It has already answered this round. The round is blocked on the daemon's own side: a turn that has not ended, a check for unpushed work that fails, or a pod replacement the cluster keeps refusing. `reason` names which. | Send it nothing. A message to it starts a turn, and a turn after its answer takes that answer back from a worker whose plugin has `ready_for_update`, which puts the round further from finishing. Open a finding ask naming the issue, the round and `reason`, with the turn, the workspace and its push error, or the `ReplacePod` error it names, so an operator reads the pod. |
 | `state: "suspended"` | An operator's own suspension holds it: the daemon revives a suspension of its own for the task. The claim already holds the task and takes it on the resume. | Open a finding ask naming the issue and the role, so the operator resumes it. |
-| any other state | Its worker holds the task and has not answered. The daemon asks it again every `pod_update_retask_hours`. | `envoy_publish` to `notifications.role.<claim>` with the issue and the update task's three steps (push every commit to keep to the issue branch, call the `legion` tool with `op: "ready_for_update"` and the `round` this notice names, which is the id the worker's own task carries, end the turn), and say in the same message that a worker whose `legion` tool has no `ready_for_update` operation does step 1 and step 3 alone. Name it in your summary. Your publish starts a turn of its own, which answers nothing: only the end of the turn the daemon's own task started is that worker's answer, so what your message buys is the next ask. |
+| any other state | Its worker holds the task and has not answered. The daemon asks it again every `pod_update_retask_hours`. | `envoy_publish` to `notifications.role.<claim>` with the issue and the update task's three steps (push every commit to keep to the issue branch and put any scratch evidence still needed on Dispatch, call the `legion` tool with `op: "ready_for_update"` and the `round` this notice names, which is the id the worker's own task carries, end the turn), and say in the same message that a worker whose `legion` tool has no `ready_for_update` operation does step 1 and step 3 alone. Name it in your summary. Your publish starts a turn of its own, which answers nothing: only the end of the turn the daemon's own task started is that worker's answer, so what your message buys is the next ask. |
 
 Park nothing and write no status for this wake. The issue's workflow runs on while the round
 waits, and replacing the pod is the daemon's own move once every worker has answered.

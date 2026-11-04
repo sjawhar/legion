@@ -2,7 +2,7 @@
 // and the daemon's worker stream. The shim always dials the daemon — the stream is the daemon's
 // listener, never the shim's — authenticates with the pane's boot token, and spawns OMP only
 // once the daemon has acked it. From then on it carries OMP's stdio NDJSON to the stream and
-// back, answers the frames that are its own (`shutdown`, `adopt-working-copy`, a repeated
+// back, answers the frames that are its own (`shutdown`, `adopt-working-copy`, `rescue-unpushed`, a repeated
 // delivery), and outlives any one connection: a dropped stream is redialled, and what OMP says
 // meanwhile waits in a bounded backlog.
 //
@@ -30,6 +30,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
+	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -66,7 +68,8 @@ const (
 	// `worker_stop_timeout_seconds` under `runtime: kubernetes` at configuration load
 	// (internal/config).
 	MinStopGrace = DefaultGrace + DrainTimeout + MinWarmUpDrain
-	// adoptionWaitDelay bounds the wait for jj's stderr once jj has been killed at its budget.
+	// adoptionWaitDelay bounds the wait for jj's output once jj has exited or been killed at its
+	// budget, for a child of jj's still holding the pipes.
 	adoptionWaitDelay = time.Second
 )
 
@@ -309,7 +312,7 @@ func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
 		switch typ := frameType(line); typ {
-		case shimwire.TypeAdoptWorkingCopy, shimwire.TypeAgentSecretsEnrollment, shimwire.TypeAgentSecretsToken:
+		case shimwire.TypeAdoptWorkingCopy, shimwire.TypeRescueUnpushed, shimwire.TypeAgentSecretsEnrollment, shimwire.TypeAgentSecretsToken:
 			// The daemon is its only sender, and it is never OMP's to read.
 			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
@@ -323,6 +326,9 @@ func (s *shim) fromDaemon(line []byte) {
 		return
 	case shimwire.AdoptWorkingCopy:
 		go s.adopt(f)
+		return
+	case shimwire.RescueUnpushed:
+		go s.rescue(f)
 		return
 	case shimwire.AgentSecretsEnrollment:
 		s.enroll(f)
@@ -598,6 +604,34 @@ func (s *shim) adopt(request shimwire.AdoptWorkingCopy) {
 	s.toDaemon(result)
 }
 
+// rescue answers `rescue-unpushed`: every workspace on the pod's disk is checked for work its
+// remote lacks, and that work is pushed to rescue branches, as this role and with its own
+// credential (internal/rescue). The disk is the one the shim's LEGION_WORKSPACE is on; a shim
+// without one (the project controller's) has no workspace and refuses.
+func (s *shim) rescue(request shimwire.RescueUnpushed) {
+	result := shimwire.RescueUnpushedResult{ID: request.ID, OK: true}
+	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
+	if err := request.Validate(); err != nil {
+		if request.ID == "" {
+			s.log.Printf("[worker-shim] refusing a rescue-unpushed frame: %v", err)
+			return
+		}
+		result.OK, result.Error = false, err.Error()
+	} else if workspace == "" {
+		result.OK, result.Error = false, "worker-shim: LEGION_WORKSPACE is not set; no disk to check"
+	} else {
+		timeout := time.Duration(request.TimeoutMs) * time.Millisecond
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		result.Workspaces = rescue.Run(ctx, rescue.Request{
+			StateDir: rescue.StateDirOf(workspace), Branch: request.Branch, Env: s.cfg.Env,
+			WorkspaceTimeout: time.Duration(request.WorkspaceTimeoutMs) * time.Millisecond,
+			Deadline:         time.Now().Add(timeout),
+		})
+		cancel()
+	}
+	s.toDaemon(result)
+}
+
 // adoptionArgs is the one adoption command both executors run (adoptWorkingCopyCommand,
 // packages/workspace/src/workspace.ts): the working copy's author becomes the identity in
 // the command's environment, and only while it is undescribed — a described working copy is a
@@ -636,7 +670,7 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	defer cancel()
 	env := append(slices.Clone(s.cfg.Env), "JJ_USER="+request.JJUser, "JJ_EMAIL="+request.JJEmail)
 	started := time.Now()
-	described, err := runAdoptionCommand(ctx, budget, started, env, describedArgs(jj, workspace))
+	described, err := runAdoptionCommand(ctx, budget, started, workspace, env, describedArgs(jj, workspace))
 	if err != nil {
 		return err
 	}
@@ -644,29 +678,40 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	if described != "" {
 		change = []string{jj, "new", "-R", workspace}
 	}
-	_, err = runAdoptionCommand(ctx, budget, started, env, change)
+	_, err = runAdoptionCommand(ctx, budget, started, workspace, env, change)
 	return err
 }
 
-// runAdoptionCommand runs one adoption command within the adoption's budget and returns its
-// trimmed standard output. A failure's report ends with a note on each stale git lock it names
-// (staleGitLockNote).
-func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.Time, env, args []string) (string, error) {
+// runAdoptionCommand runs one adoption command in dir, the workspace it names with -R, within the
+// adoption's budget and returns its trimmed standard output. jj also reads the repository of the
+// directory it runs in, whatever -R names, and migrates that repository's legacy configuration, so
+// the command never runs in the shim's own directory. A failure's report ends with a note on each
+// stale git lock it names (staleGitLockNote). The command timed out only when the budget ended it:
+// once jj has exited on its own, adoptionWaitDelay can hold Run open past the budget for a child
+// still holding jj's pipes, and jj's exit is then its answer. A command that never started because
+// an earlier one spent the budget timed out too.
+func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.Time, dir string, env, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = dir
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = adoptionWaitDelay
+	killed := procgroup.KilledByContext(cmd)
 	err := cmd.Run()
-	if err == nil {
+	command := strings.Join(args, " ")
+	timedOut := killed() || (cmd.Process == nil && errors.Is(err, context.DeadlineExceeded))
+	if runErr := procgroup.Err(err); runErr != nil && !timedOut {
+		return "", fmt.Errorf("run %s: %w", command, runErr)
+	}
+	if !timedOut && cmd.ProcessState.ExitCode() == 0 {
 		return strings.TrimSpace(stdout.String()), nil
 	}
-	command := strings.Join(args, " ")
 	report := strings.TrimSpace(stderr.String())
 	if note := staleGitLockNote(report, time.Now()); note != "" {
 		report += "\n" + note
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if timedOut {
 		message := fmt.Sprintf("Command timed out after %s s (ran %.1f s): %s",
 			strconv.FormatFloat(budget.Seconds(), 'f', -1, 64), time.Since(started).Seconds(), command)
 		if report != "" {
@@ -674,11 +719,7 @@ func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.
 		}
 		return "", errors.New(message)
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return "", fmt.Errorf("Command failed (exit %d): %s\n%s", exit.ExitCode(), command, report)
-	}
-	return "", fmt.Errorf("run %s: %w", command, err)
+	return "", fmt.Errorf("Command failed (exit %d): %s\n%s", cmd.ProcessState.ExitCode(), command, report)
 }
 
 // envValue is name's value in env, the last assignment winning as it does for a process started

@@ -344,7 +344,6 @@ func listenerSeedRows() []seedRow[envoyaws.WebhookListenerArgs] {
 		{input: "cpu", set: func(a *A, s bool) string { a.Cpu = pick(s, testSeed, "512"); return a.Cpu }},
 		{input: "memory", set: func(a *A, s bool) string { a.Memory = pick(s, testSeed, "1024"); return a.Memory }},
 		{input: "listenHost", set: func(a *A, s bool) string { a.ListenHost = pick(s, splitSeed("."), "::"); return a.ListenHost }},
-		{input: "hostBridge", set: func(a *A, s bool) string { a.HostBridge = pick(s, lowerSeed, "127.0.0.2"); return a.HostBridge }},
 		{input: "mentionTrigger", set: func(a *A, s bool) string {
 			a.MentionTrigger = pulumi.StringRef("@" + pick(s, lowerSeed, "other"))
 			return *a.MentionTrigger

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -248,7 +249,7 @@ func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
 		t.Fatalf("set statement_timeout: %v", err)
 	}
 	started := time.Now()
-	rows, err := tx.Query(ctx, `select i.key, `+issueRepoColumns+` from issues i `+issueRepoLateral+` where i.project_key = 'DEEP'`)
+	rows, err := tx.Query(ctx, `select i.key, `+refs.IssueRepoColumns+` from issues i `+refs.IssueRepoLateral+` where i.project_key = 'DEEP'`)
 	if err != nil {
 		t.Fatalf("walk %d issues: %v", length, err)
 	}
