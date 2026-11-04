@@ -235,7 +235,12 @@ test("a soft claim another live session refuses removes the role record, which n
       removed.resolve()
       return { claimed: false, holder: "ses_newer" }
     },
-    getRole: async () => ({ role: "legion-claim", holder: "ses_newer", last_seen: 1, state: "live" as const }),
+    getRole: async () => ({
+      role: "legion-claim",
+      holder: "ses_newer",
+      last_seen: 1,
+      state: "live" as const,
+    }),
     replay: emptyReplay,
   }
   const session = await startChannelSession({

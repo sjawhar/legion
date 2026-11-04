@@ -8,11 +8,11 @@
 # production settle logic.
 #
 # Role messages: the run proves the listener's kept lane end to end. A publish to a role nobody
-# holds, and one to a role whose holder's registration is gone, are each kept rather than refused
-# and answered 202 with kept_reason unclaimed or holder_lapsed; each kept message then reaches the
-# session stand-in that claims the role exactly once, as a frame of its own consumer carrying
-# kept_at. A publish to a role that live session holds still answers 200 naming the holder, with
-# no kept field.
+# holds is kept rather than refused and answered 202 with kept_reason unclaimed; that kept message
+# then reaches the session stand-in that claims the role exactly once, as a frame of its own
+# consumer carrying kept_at. A publish to a role whose holder's registration is gone keeps
+# nothing, since that claim stands, and is refused 404 holder_lapsed naming the holder. A publish
+# to a role that live session holds still answers 200 naming the holder, with no kept field.
 #
 # Ports: the OS chooses each one, and each URL is built from the port its own process reports
 # (natsd's "Listening for client connections on" line, the listener's "envoy-listener listening"
@@ -33,10 +33,11 @@ Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
 fixtures plus one direct message to a session that takes them from its own NATS
 consumer, prove that a registration naming a port is refused and how a send to
 an unknown session and a send whose bus is gone are refused, prove the kept
-lane — a role message nobody holds and one whose holder's claim has lapsed are
-kept and answered 202, and each reaches the session that claims the role next
-exactly once, carrying kept_at, while a role a live session holds still answers
-200 — and write raw and rendered acceptance evidence to
+lane — a role message nobody holds is kept and answered 202 and reaches the
+session that claims the role next exactly once, carrying kept_at, while a role
+whose holder's claim has lapsed keeps nothing and is refused 404 and a role a
+live session holds still answers 200 — and write raw and rendered acceptance
+evidence to
 packages/envoy/out/e2e/. NATS is a server of this checkout's own build
 (internal/testnats/cmd/natsd), so no container runtime is needed.
 EOF
@@ -624,12 +625,13 @@ if [[ "$missing_status" != 404 ]] || ! jq -e --arg session_id "$missing_session_
   exit 1
 fi
 
-# The kept lane. A role message the listener cannot deliver is not lost and the sender is not
-# left to queue it: the listener keeps the message and hands it to whoever claims the role within
-# the hour. Both windows the keep covers are proved here, each on a role of its own: (i) nobody
-# holds the role, and (ii) a holder whose registration is gone, its claim lapsed. In each, the
-# session stand-in then claims the role and must be handed the kept message exactly once, carrying
-# kept_at, the time the listener took it in.
+# The kept lane. A role message no claim holds is not lost and the sender is not left to queue
+# it: the listener keeps the message and hands it to whoever claims the role within the hour.
+# Both windows a give-up reaches are proved here, each on a role of its own: (i) nobody holds the
+# role, where the session stand-in then claims the role and must be handed the kept message
+# exactly once, carrying kept_at, the time the listener took it in; and (ii) a holder whose
+# registration is gone, its claim lapsed, which keeps nothing, since that claim stands until the
+# role-claim reaper releases it and a copy kept for it would wait for a claim that never comes.
 
 # count_session_frames reports how many frames of its own consumer the session took that carry
 # event_id. The drain forwards a kept copy to the holder's agent subject, which the stream stores
@@ -779,10 +781,12 @@ if [[ "$held_status" != 200 ]] || ! jq -e --arg session_id "$session_id" \
 fi
 
 # Window (ii): a claim that lapsed. The session claims a role of its own, and then its
-# registration is removed through the listener, rather than waiting out the five minutes a claim
-# takes to go stale. A registration and a role claim are separate records, and removing the first
+# registration is removed through the listener, rather than waiting out the window a claim takes
+# to go stale. A registration and a role claim are separate records, and removing the first
 # leaves the second naming a session nothing can reach: the role has a holder on paper and none
-# to deliver to, so the publish is kept under kept_reason holder_lapsed, naming that holder.
+# to deliver to. That claim stands - no resolution of this build releases one, and the role-claim
+# reaper is the one caller that ever does - so nothing is kept for it and the publish is refused
+# 404 holder_lapsed, naming the holder and its retained claim (dispatch://INFRA-392).
 printf 'publishing to a role whose holder has gone\n'
 lapsed_role="e2e-escalation"
 curl -fsS -X POST -H 'Content-Type: application/json' \
@@ -798,18 +802,18 @@ lapsed_status="$(curl -sS -o "$lapsed_role_response_file" -w '%{http_code}' \
   -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/messages/publish" \
   -d "{\"topic\":\"notifications.role.${lapsed_role}\",\"message\":\"Lapsed-claim role delivery.\"}")"
-if [[ "$lapsed_status" != 202 ]] || ! jq -e --arg role "$lapsed_role" --arg session_id "$session_id" \
-  '.kept == true and .kept_reason == "holder_lapsed" and .holder == $session_id and .topic == ("notifications.role." + $role)' \
+if [[ "$lapsed_status" != 404 ]] || ! jq -e --arg session_id "$session_id" \
+  '.reason == "holder_lapsed" and .holder == $session_id and .claim_released == false and (has("kept") | not)' \
   "$lapsed_role_response_file" >/dev/null; then
-  printf 'ERR: a publish to the role whose holder is gone answered HTTP %s, not a 202 keeping it with kept_reason holder_lapsed naming %s.\n' \
+  printf 'ERR: a publish to the role whose holder is gone answered HTTP %s, not a 404 holder_lapsed naming %s with its claim retained and nothing kept.\n' \
     "$lapsed_status" "$session_id" >&2
   cat "$lapsed_role_response_file" >&2
   exit 1
 fi
-lapsed_event_id="$(jq -r '.event_id' "$lapsed_role_response_file")"
+printf 'lapsed-claim window: the publish was refused 404 holder_lapsed, the claim stands and nothing was kept\n'
 
-# The session registers again, with the registration it first made, and claims the role again: the
-# kept copy waits for the claim, not for the registration.
+# The session registers again, with the registration it first made, and claims the role again:
+# its own claim never left it, so the claim answers as the same session's.
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
 curl -fsS -X POST -H 'Content-Type: application/json' \
@@ -819,7 +823,6 @@ jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_
   printf 'ERR: the re-registered session did not claim the lapsed role again.\n' >&2
   exit 1
 }
-wait_for_kept_delivery 'lapsed-claim window' "$lapsed_event_id"
 
 # The keep-false control, read now: its claim went in before the lapsed window, whose own bounded
 # wait has since seen a kept message delivered, so a drain of the unkept role would have run by
@@ -866,23 +869,24 @@ post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-merge-queue.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_consumer_frame_count 17
+wait_for_consumer_frame_count 16
 
 # What the session itself took, which is the whole point of a consumer: every GitHub delivery, the
-# direct message and all three role forwards reached it as frames of its own consumer, each
-# exactly once, with no connection opened to it from anywhere. Two of the role forwards are the
-# reviewer role's — the copy kept while nobody held it and the publish its live holder took — and
-# the third is the escalation role's copy, kept while its holder's claim had lapsed.
+# direct message and both role forwards reached it as frames of its own consumer, each exactly
+# once, with no connection opened to it from anywhere. Both role forwards are the reviewer role's
+# — the copy kept while nobody held it and the publish its live holder took. The escalation role
+# has none: its holder's claim stood while the holder was gone, so the listener kept nothing for
+# it and refused that publish (dispatch://INFRA-392).
 printf 'consumer frames by topic:\n'
 jq -r '.topic' "$session_frames_file" | sort | uniq -c
 jq -es --arg session_id "$session_id" --arg role_topic "notifications.role.${role}" \
   --arg lapsed_role_topic "notifications.role.${lapsed_role}" --arg message "$direct_message" '
   (map(select(.topic == "notifications.agent." + $session_id)) | length == 1 and .[0].payload == $message)
   and (map(select(.topic == $role_topic)) | length) == 2
-  and (map(select(.topic == $lapsed_role_topic)) | length) == 1
+  and (map(select(.topic == $lapsed_role_topic)) | length) == 0
   and (map(select(.topic | startswith("notifications.github.example-org.example-repo."))) | length) == 13
 ' "$session_frames_file" >/dev/null || {
-  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its three role forwards from its consumer.\n' >&2
+  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its two reviewer-role forwards from its consumer, with nothing for the lapsed role.\n' >&2
   exit 1
 }
 
