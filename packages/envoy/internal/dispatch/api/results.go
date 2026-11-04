@@ -226,39 +226,12 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	artifact, held, err := s.verificationDocument(r.Context(), s.deps.Store.Pool, issueKey, "")
+	answer, err := s.verificationGraph(r.Context(), s.deps.Store.Pool, issueKey, newCurrencyReader(s))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	body := map[string]any{"issue": issueKey, "verification_artifact_id": artifact.ID, "checks": []model.CheckBlock{}}
-	if !held {
-		WriteJSON(w, http.StatusOK, body)
-		return
-	}
-	checks, err := s.checkBlocksOf(r.Context(), s.deps.Store.Pool, artifact)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	recorded, err := loadCheckResults(r.Context(), s.deps.Store.Pool, artifact.ID)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	currency := newCurrencyReader(s)
-	for index := range checks {
-		results := recorded[checks[index].BlockID]
-		if results == nil {
-			results = []model.CheckResult{}
-		}
-		for result := range results {
-			results[result].Currency = currency.of(r.Context(), checks[index], results[result])
-		}
-		checks[index].Results = results
-	}
-	body["checks"] = checks
-	WriteJSON(w, http.StatusOK, body)
+	WriteJSON(w, http.StatusOK, answer.checkResultsRead)
 }
 
 // refusal is every refusal a result's own fields earn, before anything is read.

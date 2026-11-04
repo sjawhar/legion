@@ -54,9 +54,14 @@ func (s *server) getIssueCoverage(w http.ResponseWriter, r *http.Request) {
 }
 
 // issueCoverage reads the issue's requirements and what serves each. The documents' blocks are
-// read from the block index (document_blocks and block_refs), which every accepted write leaves
-// in step with the document it wrote; the requirements' order and words come from the live spec.
+// read through graph_edges, which the existing block index derives from the document;
+// the requirements' order and words come from the live spec.
 func (s *server) issueCoverage(ctx context.Context, q queryer, issueKey string) (model.IssueCoverage, error) {
+	return s.issueCoverageUsing(ctx, q, issueKey, servingBlockCountsSQL)
+}
+
+// The census supplies the pre-cutover relation query; formatting and live words are shared.
+func (s *server) issueCoverageUsing(ctx context.Context, q queryer, issueKey, countsSQL string) (model.IssueCoverage, error) {
 	coverage := model.IssueCoverage{Issue: issueKey, Requirements: []model.RequirementCoverage{}, Gaps: []string{}}
 	err := q.QueryRow(ctx, `
 		select coalesce((select a.id::text from artifacts a where a.issue_key = $1 and a.is_primary), ''),
@@ -81,7 +86,7 @@ func (s *server) issueCoverage(ctx context.Context, q queryer, issueKey string) 
 	if err != nil {
 		return model.IssueCoverage{}, err
 	}
-	served, err := servingBlockCounts(ctx, q, coverage.SpecArtifactID, append([]string{issueKey}, descendants...))
+	served, err := readServingBlockCounts(ctx, q, countsSQL, coverage.SpecArtifactID, append([]string{issueKey}, descendants...))
 	if err != nil {
 		return model.IssueCoverage{}, err
 	}
@@ -153,17 +158,23 @@ type servingCounts struct {
 // servingBlockCounts counts, for each block of the spec, the `check` and `plan_task` blocks of
 // the documents of issues that name it in `serves`. Both ends are current blocks of their
 // documents: deleting the check deletes its row, so its requirement is uncovered again.
+var servingBlockCountsSQL = `
+	select t.block_id, s.type, count(*)
+	from document_blocks t
+	join graph_edges e on e.to_id = t.node_id and e.to_kind = 'block' and e.kind = 'serves' and e.from_kind = 'block'
+	join document_blocks s on s.node_id = e.from_id
+	join artifacts a on a.id = s.artifact_id
+	where t.artifact_id = $1::uuid and t.type = 'requirement'
+	  and a.issue_key = any($2) and s.type in ('check', 'plan_task')
+	group by t.block_id, s.type
+`
+
 func servingBlockCounts(ctx context.Context, q queryer, specArtifactID string, issues []string) (map[string]servingCounts, error) {
-	rows, err := q.Query(ctx, `
-		select t.block_id, s.type, count(*)
-		from block_refs r
-		join document_blocks t on t.node_id = r.to_id and t.artifact_id = $1::uuid and t.type = 'requirement'
-		join document_blocks s on s.artifact_id = r.artifact_id and s.block_id = r.block_id
-		join artifacts a on a.id = r.artifact_id
-		where r.kind = 'serves' and r.to_kind = 'block'
-		  and a.issue_key = any($2) and s.type in ('check', 'plan_task')
-		group by t.block_id, s.type
-	`, specArtifactID, issues)
+	return readServingBlockCounts(ctx, q, servingBlockCountsSQL, specArtifactID, issues)
+}
+
+func readServingBlockCounts(ctx context.Context, q queryer, sql, specArtifactID string, issues []string) (map[string]servingCounts, error) {
+	rows, err := q.Query(ctx, sql, specArtifactID, issues)
 	if err != nil {
 		return nil, fmt.Errorf("read what serves the requirements of %s: %w", specArtifactID, err)
 	}

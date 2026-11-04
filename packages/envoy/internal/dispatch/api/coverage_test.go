@@ -34,6 +34,7 @@ func readCoverage(t *testing.T, handler http.Handler, issueKey string) model.Iss
 	if response.Code != http.StatusOK {
 		t.Fatalf("read the coverage of %s: status=%d body=%s", issueKey, response.Code, response.Body.String())
 	}
+	assertVerificationShadow(t, handler)
 	return decodeBody[model.IssueCoverage](t, response)
 }
 

@@ -79,6 +79,7 @@ func readResults(t *testing.T, handler http.Handler, issue string) issueResults 
 	if response.Code != http.StatusOK {
 		t.Fatalf("read the results of %s: status=%d body=%s", issue, response.Code, response.Body.String())
 	}
+	assertVerificationShadow(t, handler)
 	return decodeBody[issueResults](t, response)
 }
 

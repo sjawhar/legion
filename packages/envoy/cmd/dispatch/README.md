@@ -2581,6 +2581,22 @@ Each item below names a path with its method and identity, then its purpose.
   A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.
   The answer is `{result, line}`, `line` the pull-request body line the result implies, which carries no link to Dispatch.
 
+- `/api/v1/issues/{key}/verification` (GET; cookie, trusted header, or bearer)
+
+  The Verification tab's named graph read: the `/results` shape plus `serves`, a map from check block id to its served requirement references.
+  One SQL graph query selects the document's checks through `part_of` and their `serves` edges, with all recorded results joined in that query.
+  The live document supplies words, attributes and document order; result currency uses the same delivery policy as `/results`.
+  The tab shows the served requirement links beside each check.
+
+- `/api/v1/verification-shadow` (GET; cookie, trusted header, or bearer)
+
+  Read-only equality census over every issue with a Verification document, including documents whose role is still null during a rolling deploy.
+  Answers `{issues, mismatches, by_cause, details}`; `details` lists issue keys and causes, never document bodies.
+  Causes are `check_membership`, `check_attributes`, `results` and `coverage`.
+  `mismatches` counts issue/cause pairs; an empty database reports `issues: 0`, not evidence of equality on live data.
+  After deployment, read this route with the deployment's usual authentication and require `issues > 0` and `mismatches == 0` before accepting the cutover.
+  It compares the graph-backed results and coverage with the retained pre-cutover computations; it writes no source records or indexes.
+
 - `/api/v1/issues/{key}/coverage` (GET; cookie, trusted header, or bearer)
 
   What each requirement of the issue's spec lacks: `{issue, spec_artifact_id, has_plan, requirements, gaps}`.
@@ -2588,6 +2604,7 @@ Each item below names a path with its method and identity, then its purpose.
   A requirement is a `requirement` block of the spec, and `requirements` lists them in document order, each with its block reference, its words, and how many `check` and `plan_task` blocks name it in `serves`.
 
   A block counts when it is in any document of the issue or of any descendant issue, at any status; the descendants are one recursive `child_of` walk bounded by `refs.IssueDepthCap` (`refs.IssueDescendants`).
+  Counts are derived from `graph_edges`' typed `serves` relations, with current requirement and serving block types checked at both ends.
 
   `gaps` is one line per gap, `<block id> has no check` and `<block id> has no plan task`, the second only once the issue has a plan document, or the single line `the spec marks no requirements` for a spec that marks none.
 
