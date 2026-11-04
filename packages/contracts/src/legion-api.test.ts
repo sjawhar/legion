@@ -1071,8 +1071,9 @@ test("a flat map of paths is no settings change answer", () => {
 });
 
 test("a verdict carries the daemon's own fields and nothing else", () => {
-  expect(LegionSettingResult.safeParse({ applied: "rebuilt", holder: "the NATS client" }).success)
-    .toBeTrue();
+  expect(
+    LegionSettingResult.safeParse({ applied: "rebuilt", holder: "the NATS client" }).success
+  ).toBeTrue();
   expect(LegionSettingResult.safeParse({ refused: "no such setting" }).success).toBeTrue();
   expect(LegionSettingResult.safeParse({}).success).toBeTrue();
   expect(LegionSettingResult.safeParse({ applied: "" }).success).toBeFalse();
