@@ -522,7 +522,12 @@ func planChains(events []*batchEvent) []*chain {
 // settled is called once per owner, as soon as the last chain of that owner has finished - its
 // sends all answered, or the rest of them held back or never made - so the batch can settle,
 // record and release that owner while the other owners' chains are still sending (publishBatch).
+//
+// The keeps this batch makes share one record of what their own handovers delivered to a role's
+// holder (keptHandovers, handOverKept), made here because it is this batch's: a handover writes
+// no cursor, and keptHandovers' doc holds what the record is for.
 func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*chain, settled func(owner string)) {
+	handed := newKeptHandovers()
 	stopped := false
 	var inflight []*chain
 	left := map[string]int{}
@@ -552,7 +557,7 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 		case forward.err != nil:
 			send.answer = failedAnswer(forward.err)
 		default:
-			send.answer = forward.send(sender, routed)
+			send.answer = forward.send(ctx, deps, sender, routed, handed)
 		}
 		inflight = append(inflight, c)
 	}
@@ -609,7 +614,7 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			send.state = lost
 			send.connection = errors.Is(err, bus.ErrUnavailable)
 			stopped = true
-		case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		case lostToContextEnd(ctx, err):
 			send.state = lost
 		default:
 			// Counted under the reason the send came to (countPublishFailure): a send the server

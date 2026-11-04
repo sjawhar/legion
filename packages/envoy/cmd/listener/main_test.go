@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -562,7 +563,7 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 	// Set B as the KV value that the route must resolve. This models a
 	// publish that races the handover: the single listener chooses one current
 	// owner, rather than relying on two holders to observe the change first.
-	claimDeps := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
+	claimDeps := &listenerDeps{registry: harness.registry, sessions: harness.sessions, delivery: &harness.config}
 	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
 		MachineID:      "test-machine",
 		SelfSubscribed: true,
@@ -701,7 +702,7 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
-	claimState := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
+	claimState := &listenerDeps{registry: harness.registry, sessions: harness.sessions, delivery: &harness.config}
 	if err := harness.sessions.Put("ses_deaf", session.SessionEntry{
 		MachineID:      "test-machine",
 		SelfSubscribed: true,
@@ -1125,14 +1126,14 @@ func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
 func TestIsValidRole(t *testing.T) {
 	valid := []string{"legion-controller", "pi_dev", "r2d2", "a"}
 	for _, role := range valid {
-		if !isValidRole(role) {
+		if !roles.Valid(role) {
 			t.Fatalf("expected role %q to be valid", role)
 		}
 	}
 
 	invalid := []string{"", "Legion", "-bad", "bad.role", "bad role"}
 	for _, role := range invalid {
-		if isValidRole(role) {
+		if roles.Valid(role) {
 			t.Fatalf("expected role %q to be invalid", role)
 		}
 	}
@@ -1215,7 +1216,7 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 
 func TestRoleSetHandler_SetsRole(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := withRoleClaimDrain(t, &listenerDeps{client: setupPublishTestClient(t), registry: registry, sessions: sessions})
 	handler := roleSetHandler(state, "test-machine", logging.New("test"))
 	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register role session: %v", err)
@@ -2743,7 +2744,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrated consumer: %v", err)
 	}
-	if consumerInfo.Config.FilterSubject != "" || len(consumerInfo.Config.FilterSubjects) != len(bus.StreamSubjects()) {
+	if consumerInfo.Config.FilterSubject != "" || !slices.Equal(consumerInfo.Config.FilterSubjects, bus.StreamSubjects()) {
 		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
 	}
 	if consumerInfo.Config.InactiveThreshold != consumerInactiveThreshold {
@@ -2815,7 +2816,9 @@ func TestIsControlTopic(t *testing.T) {
 	}
 }
 
-func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing.T) {
+// A role whose claim its replacement released has no holder, so the lane keeps the message for
+// the role's next holder and publishes no delivery exception.
+func TestListenerDeliveryHandler_RoleReleasedByReplacementIsKeptForItsNextHolder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	const controller = "legion-controller"
 	if _, err := harness.registry.SetRole("ses_role", "test-machine", controller, false); err != nil {
@@ -2847,9 +2850,14 @@ func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing
 	if err := harness.client.PublishCore(item); err != nil {
 		t.Fatalf("publish released controller role: %v", err)
 	}
-	assertDeliveryException(t, probe, item, "no_holder")
+	kept := waitForKeptRoleMessage(t, harness.client, controller, item.EventID)
+	if kept.Topic != controllerTopic {
+		t.Fatalf("the kept copy's topic is %q, want the role topic %s it was published on", kept.Topic, controllerTopic)
+	}
+	noException(t, probe)
 }
-func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.T) {
+
+func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAndKeepsTheMessage(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	const role = "expired-holder"
 	if _, err := harness.registry.SetRole("ses_expired", "test-machine", role, false); err != nil {
@@ -2873,7 +2881,11 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 	if err := harness.client.PublishCore(item); err != nil {
 		t.Fatalf("publish role delivery: %v", err)
 	}
-	assertDeliveryException(t, probe, item, "delivery_failed")
+	kept := waitForKeptRoleMessage(t, harness.client, role, item.EventID)
+	if kept.Topic != item.Topic {
+		t.Fatalf("the kept copy's topic is %q, want the role topic %s it was published on", kept.Topic, item.Topic)
+	}
+	noException(t, probe)
 	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != "" {
 		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)
 	}
@@ -3179,12 +3191,17 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 	}
 }
 
-func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
+// A control topic with no holder: an agent subject nobody has is still the no_holder exception,
+// while a role nobody holds is kept for the role's next holder and raises none.
+func TestListenerDeliveryHandler_NoHolderKeepsARoleAndExceptsAnAgent(t *testing.T) {
 	cases := []struct {
 		name  string
 		topic string
+		// role is the role a kept copy is read back under; empty for the agent subject, which
+		// keeps nothing.
+		role string
 	}{
-		{name: "role", topic: contracts.RoleTopicPrefix + "unheld"},
+		{name: "role", topic: contracts.RoleTopicPrefix + "unheld", role: "unheld"},
 		{name: "agent", topic: contracts.AgentSubject("ses_unheld")},
 	}
 
@@ -3222,7 +3239,15 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 			}
 
 			// Then
-			assertDeliveryException(t, probe, item, "no_holder")
+			if tc.role == "" {
+				assertDeliveryException(t, probe, item, "no_holder")
+				return
+			}
+			kept := waitForKeptRoleMessage(t, harness.client, tc.role, item.EventID)
+			if kept.Topic != tc.topic {
+				t.Fatalf("the kept copy's topic is %q, want the role topic %s it was published on", kept.Topic, tc.topic)
+			}
+			noException(t, probe)
 		})
 	}
 }
@@ -3605,9 +3630,11 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client) listenerDeli
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
-		// The handler refuses a config without its deferral set, as main.go's always has one;
-		// the harness's two handlers share this one as main.go's do.
+		roleKeptExpired:   met.NewCounter("test_role_kept_expired", "test"),
+		// The handler refuses a config without its deferral set or its kept-lane drain guards, as
+		// main.go's always has both; the harness's two handlers share these as main.go's do.
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		roleKeepDrains:      newRoleKeepGuards(),
 	}
 	// The role lane's forwards run on the role forwarder, as main.go wires them: it is the one
 	// path those messages take. It is wired last, from the configuration above, so a test that

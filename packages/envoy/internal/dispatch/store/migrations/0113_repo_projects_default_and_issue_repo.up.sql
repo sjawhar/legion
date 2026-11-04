@@ -5,7 +5,7 @@
 -- must be a mapping of its project: the composite foreign key makes that a database invariant, so a
 -- mapping an issue names cannot be deleted or moved to another project (23503, which the API answers
 -- REPO_PROJECT_IN_USE). Resolution through the parent chain is computed on read
--- (refs.IssueRepoLateral), as component attachments are (0038).
+-- (refs.IssueRepoTerms), as component attachments are (0038).
 --
 -- An issue sits at most 32 links below its root (parentDepthCap, api/issue_parent.go). A release
 -- before this one let a create build a chain of any depth; this one refuses to build one and fails

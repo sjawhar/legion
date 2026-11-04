@@ -27,21 +27,22 @@ name: CI
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
-# here (`cache: false` on every step). The jobs that cache Go restore one of five families with
+# here (`cache: false` on every step). The jobs that cache Go restore one of six families with
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-infra
-# (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry, keyed on the
-# Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum
-# change downloads only the changed modules, and Go's build cache is content-addressed, so a stale
-# entry costs a run only what changed; a key on the go.sum files left a whole entry, up to a
-# gigabyte, per change for seven days. Only a run off main falls back, when the exact key misses, to
-# the family's newest entry by its prefix; a run on main restores by the exact key only, so the
-# entry it saves after a Go bump holds nothing the older Go built. Each family is saved with
-# actions/cache/save as the last step of a job that runs on main, and only on a push to main whose
-# job succeeded and whose restore missed the exact key. setup-bun reads and writes its cache only on
-# main (.github/actions/setup-bun).
+# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-test (envoy-go
+# alone, which saves it: it builds the test binary of every package of the envoy module, a set no
+# other job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each
+# family keeps one entry, keyed on the Go version its job's setup-go installed, so it is refreshed
+# only when Go is bumped. A go.sum change downloads only the changed modules, and Go's build cache
+# is content-addressed, so a stale entry costs a run only what changed; a key on the go.sum files
+# left a whole entry, up to a gigabyte, per change for seven days. Only a run off main falls back,
+# when the exact key misses, to the family's newest entry by its prefix; a run on main restores by
+# the exact key only, so the entry it saves after a Go bump holds nothing the older Go built. Each
+# family is saved with actions/cache/save as the last step before the ci-ok report of a job that
+# runs on main, and only on a push to main whose job succeeded and whose restore missed the exact
+# key. setup-bun reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -990,6 +991,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/accesslog/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
+              # docs/statement_timing_test.go measures this package's statements through it.
+              - 'packages/envoy/internal/dispatch/benchtime/*'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
@@ -1074,6 +1077,9 @@ jobs:
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
+              # cmd/listener/dispatch_kept_role_test.go drives Dispatch's outbox end to end, so the
+              # serverchange soak compiles this package: a change to it must re-run that soak.
+              - 'packages/envoy/internal/dispatch/outbox/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/rank/*'
@@ -1518,8 +1524,8 @@ jobs:
       # evicted, and refreshed only when Go is bumped. Keyed on the go.sum files it would leave a
       # 2.2 GB entry per key change; keyed on the Go version, a go.sum change only downloads the
       # changed modules and rebuilds the changed packages, since Go's build cache is
-      # content-addressed. Restored and saved only when the notices step runs; saved by this job's
-      # last step.
+      # content-addressed. Restored and saved only when the notices step runs; saved by the last step
+      # before this job's ci-ok report.
       - id: go-cache
         if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1940,7 +1946,7 @@ jobs:
       # deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
       # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
       # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
       # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
@@ -2591,10 +2597,21 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # go-envoy-test: this job builds and runs the test binary of every package of the envoy
+      # module, a set no other job builds, so it keeps a family of its own and saves it below.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -2634,15 +2651,15 @@ jobs:
       # delays.
       - name: Unit test envoy Go package
         run: |
-          go test -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
+          go test -count=1 -timeout 20m ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
       # behind the natslive tag, and this step is where it runs (INFRA-250).
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -tags natslive ./internal/testnats/
+        run: go test -count=1 -tags natslive ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -2693,6 +2710,13 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+      - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -2920,6 +2944,10 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The broker's store, which the package's contract tests open (brokerstoretest.Open in
+      # internal/dispatch/api/contract_test.go) and skip without; a skip is a pass, so without this
+      # variable they never run under the race detector.
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -1,5 +1,24 @@
 # Changelog
 
+## [16.2.1] - 2026-11-04
+
+### Fixed
+
+- A new session that registers while its NATS connection is down is shown, once it reconnects,
+  every message stored for it during the outage. The listener stores those messages and pushes none
+  of them, and the session's first sweep used to start its replay cursor past them. Before that
+  registration the session now starts its cursors at the stream's end. If the stream's position
+  cannot be read either, its own inbox is read from the stream's oldest message once it reconnects,
+  and it asks for no consumer delivery until that read has run. The session still registers at
+  once, so a Legion worker's role claim is not held up by the outage.
+
+## [16.2.0] - 2026-11-04
+
+### Changed
+
+- `envoy_publish` to a role nobody holds now reports that Envoy kept the message for the session
+  that claims the role next, instead of failing.
+
 ## [16.1.0] - 2026-11-04
 
 ### Changed

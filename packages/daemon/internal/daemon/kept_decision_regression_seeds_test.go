@@ -19,7 +19,13 @@ import (
 // claimed were named again (DropCatchUps now keeps every row of a telling one of whose rows is
 // leased); 262 named one decision in two catch-ups of one launch, so a composer named what another
 // telling owned (UnclaimedKept now locks the rows before it reads them, and ClaimKeptDecisions
-// claims everything a row names or fails); 701 spent a catch-up's re-holds while
+// claims everything a row names or fails), and later, on a schedule where a lane's lease of a
+// catch-up committed while a composer's drop of the root's catch-ups was already reading it, the
+// drop deleted the row it had read unleased — the delete's lease check is a subquery over other
+// rows, which Postgres does not recheck against a concurrently committed lease — so the lane
+// published the dropped row, its re-held copy named the decision again beside the fresh catch-up,
+// and the architect was told it twice (DropCatchUps now locks the issue's catch-ups before it
+// reads their leases, record's TestDroppingCatchUpsLeavesTheRowALaneIsLeasing); 701 spent a catch-up's re-holds while
 // its architect held its launch, and the row's deletion left the decision with nothing to name it
 // (reholdNotice now hands it to a fresh catch-up, spentKept); 41 published a catch-up (row 112)
 // whose own telling write then failed, so the decision stood kept and a later catch-up (row 115)

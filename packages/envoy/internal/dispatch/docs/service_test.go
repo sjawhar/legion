@@ -464,10 +464,8 @@ func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	`, askID, answerJSON); err != nil {
 		t.Fatalf("answer indexed ask: %v", err)
 	}
-	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-		tree.Children[0].Attrs["state"] = "open"
-		return tree
-	})
+	// The block still reads state="open" while its row is answered: a browser's edit setting it to
+	// open again would change nothing, and a transaction that changes nothing commits nothing.
 	settleCurrentGeneration(t, service, artifactID)
 	waitForDocumentText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\""+answer.At.Format(time.RFC3339Nano)+"\" selected=\"[]\"}\nShip it?\n:::\n")
 	var repaired int
