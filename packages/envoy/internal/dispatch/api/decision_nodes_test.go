@@ -114,3 +114,44 @@ func TestDecisionConversionRestoresTheOriginalAnsweredAskRow(t *testing.T) {
  var count int
  if err:=database.Pool.QueryRow(t.Context(),`select count(*) from asks where issue_key=$1`,issue.Key).Scan(&count);err!=nil||count!=1{t.Fatalf("ask rows=%d err=%v",count,err)}
 }
+
+func TestDecisionQueryPlanOnIndexedCorpus(t *testing.T) {
+ _,database,_:=newTestServer(t,testServerOptions{})
+ ctx:=t.Context()
+ for _,statement:=range []string{
+  `insert into projects(key,name) values ('CORE','Corpus')`,
+  `insert into issues(key,project_key,number,title,created_by) select 'CORE-'||n,'CORE',n,'Corpus issue '||n,'{"kind":"session","id":"corpus"}'::jsonb from generate_series(1,1000)n`,
+  `insert into artifacts(issue_key,project_key,slug,name,kind,created_by) select i.key,'CORE','doc-'||n,'document-'||n||'.md','doc','{"kind":"session","id":"corpus"}'::jsonb from issues i cross join generate_series(1,4)n`,
+  `insert into document_blocks(artifact_id,block_id,node_id,type,text_sha256,excerpt,changed_version,changed_at) select a.id,'b-'||n,a.ref_key||'#b-'||n,case when n=1 then 'decision' else 'paragraph' end,repeat('a',64),'Corpus paragraph',1,now() from artifacts a cross join generate_series(1,25)n`,
+  `analyze artifacts; analyze document_blocks; analyze block_refs; analyze refs`,
+ }{if _,err:=database.Pool.Exec(ctx,statement);err!=nil{t.Fatalf("seed corpus: %v",err)}}
+ rows,err:=database.Pool.Query(ctx,"explain (analyze,buffers,format text) "+decisionDocumentsQuery,"CORE-1")
+ if err!=nil{t.Fatal(err)}
+ var plan strings.Builder
+ for rows.Next(){var line string;if err:=rows.Scan(&line);err!=nil{rows.Close();t.Fatal(err)};plan.WriteString(line+"\n")}
+ rows.Close();if err:=rows.Err();err!=nil{t.Fatal(err)}
+ t.Logf("1000 issues, 4000 documents, 100000 blocks:\n%s",plan.String())
+ rows,err=database.Pool.Query(ctx,decisionDocumentsQuery,"CORE-1")
+ if err!=nil{t.Fatal(err)}
+ count:=0
+ for rows.Next(){count++}
+ rows.Close();if err:=rows.Err();err!=nil{t.Fatal(err)}
+ if count!=4{t.Fatalf("scoped graph query returned %d documents, want 4",count)}
+ if strings.Contains(plan.String(),"Seq Scan on document_blocks"){t.Fatalf("decision read scans the whole corpus:\n%s",plan.String())}
+}
+
+func TestAgentsCannotRemoveAPersonsAnsweredDecisionFromTheSpec(t *testing.T) {
+ handler,_,_:=newTestServer(t,testServerOptions{settle:20*time.Millisecond})
+ createReferenceAPIProject(t,handler,"CORE")
+ issue:=createSpecIssue(t,handler,"CORE","Context.\n\n:::ask{#retained}\nWhich choice?\n:::\n")
+ view,_:=waitForOpenQuestions(t,handler,issue.Key,1)
+ ask:=view.OpenQuestions[0].Ask
+ answer:=dispatchRequest(t,handler,http.MethodPost,"/api/v1/asks/"+ask.ID+"/answer",map[string]any{"selected":[]string{},"text":"Keep these words.","expected_edited_at":ask.EditedAt},"alice")
+ if answer.Code!=http.StatusOK{t.Fatalf("answer: %d %s",answer.Code,answer.Body.String())}
+ response:=sessionRequest(t,handler,http.MethodPost,"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits",map[string]any{"actor":sessionActor(),"ops":[]map[string]any{{"op":"delete","block":"retained"}}})
+ if response.Code!=http.StatusBadRequest||!strings.Contains(response.Body.String(),"answered decision"){t.Fatalf("agent removed answered decision: %d %s",response.Code,response.Body.String())}
+ response=sessionRequest(t,handler,http.MethodPost,"/api/v1/issues/"+issue.Key+"/artifacts",map[string]any{"actor":sessionActor(),"name":"spec.md","content":"Context.\n"})
+ if response.Code!=http.StatusBadRequest||!strings.Contains(response.Body.String(),"answered decision"){t.Fatalf("agent upload removed answered decision: %d %s",response.Code,response.Body.String())}
+ decision:=decisionNamed(t,readIssueDecisions(t,handler,issue.Key),"Which choice?")
+ if !strings.Contains(decision.Text,"Keep these words."){t.Fatalf("answer was changed: %#v",decision)}
+}

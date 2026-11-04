@@ -45,17 +45,15 @@ type BlockAttributeSchema struct {
 	Scope   BlockAttributeScope `json:"scope,omitempty"`
 }
 
-// BlockAttributeScope limits where a `block[]` attribute may point. `document` points only at a
-// block of the document holding it: a plan task's `needs` orders the tasks of one plan, so it names
-// a task of its own document and never another plan's. An attribute declaring no scope points at a
-// block of its document's own issue or of any issue above it, which every pointer is held to
-// anyway. It is a server rule, which the server checks on a write it accepts (pmdoc's
-// CheckBlockPointers), not something an editor draws, so declaring it leaves the schema version
-// alone.
+// BlockAttributeScope limits a block[] relation's target document. document means the writing
+// document itself. spec means the primary document of the writing issue. With no scope, a pointer
+// may name blocks of its own issue or ancestors. The server enforces scope on writes; it does not
+// change the JSON value's format.
 type BlockAttributeScope string
 
 const (
 	BlockAttributeScopeDocument BlockAttributeScope = "document"
+	BlockAttributeScopeSpec     BlockAttributeScope = "spec"
 )
 
 // BlockContentRule describes the block children a typed node may contain.

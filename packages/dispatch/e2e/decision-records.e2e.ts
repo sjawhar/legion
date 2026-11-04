@@ -1,14 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createIssueArtifact, createProject, editArtifact, getArtifact } from "./api";
+import { createIssue, createProject, editArtifact, getArtifact } from "./api";
 import { blockId } from "./editor";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
-// The decision records end to end, against the real server: an agent writes `decisions.md` with
-// one decision that links two spec blocks, and a person reads it on the Spec tab beside those
-// blocks and on the Decisions tab, answers it with Keep and Change, and sees each block the
-// decision has changed since marked out of date until that block changes too.
+// An agent's decision is one typed node in the spec. A person sees it beside each shaped
+// passage and in the Decisions tab, uses Keep/Change on that node, and sees stale relations
+// clear only when the passage has caught up.
 //
 // Every block id comes from `GET /api/v1/artifacts/<id>/blocks` (`blockId`), never from a guess,
 // and every seed goes through the API the agent uses.
@@ -37,14 +36,11 @@ test("a decision links the spec blocks it shaped, goes out of date with them, an
   const specVersions = spec.versions.length;
 
   const reference = `dispatch://${issue.key}/spec`;
-  const decisions = await createIssueArtifact(issue.key, {
-    content: `## ${DECISION}\n\n${REASON} Shapes ${reference}#b-${stored} and ${reference}#b-${newest}.\n`,
-    name: "decisions.md",
+  await editArtifact(spec.id, {
+    ops: [{ op: "insert", after: "end", markdown: `:::decision{#notice-storage title="${DECISION}" shaped="${reference}#b-${stored} ${reference}#b-${newest}"}\n${REASON}\n:::\n` }],
   });
-  expect(decisions.artifact.slug).toBe("decisions-md");
-
-  // Writing decisions.md writes the spec no version of its own.
-  expect((await getArtifact(spec.id)).versions).toHaveLength(specVersions);
+  const decisions = spec;
+  expect((await getArtifact(spec.id)).versions).toHaveLength(specVersions + 1);
 
   // The Spec tab: the decision is a margin card, and no block is out of date yet.
   await page.goto(`/issues/${issue.key}/spec`);
@@ -71,7 +67,7 @@ test("a decision links the spec blocks it shaped, goes out of date with them, an
 
   // The agent changes the decision's text: both blocks it links are out of date, on the Decisions
   // tab and as a mark on the Spec tab.
-  await editArtifact(decisions.artifact.id, {
+  await editArtifact(decisions.id, {
     ops: [{ find: REASON, op: "replace", with: `${REASON} Measured against the file store.` }],
     summary: "measured",
   });

@@ -18,6 +18,7 @@ import {
 } from "../../api/client";
 import { artifactBlocksQuery } from "../../api/queries";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
 import {
@@ -964,6 +965,7 @@ export function ProofDocument({
           {readLineText(specMarks.changed)}
         </p>
       )}
+      {decisionView.isError ? <QueryError message="Could not load the decisions that shaped this document." onRetry={() => void decisionView.refetch()} retrying={decisionView.isFetching} /> : null}
       {shownLoadError === undefined ||
       repairError !== undefined ||
       rebuildError !== undefined ? null : (

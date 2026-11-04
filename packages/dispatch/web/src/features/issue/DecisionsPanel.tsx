@@ -190,23 +190,6 @@ function ChangeComposer({
   );
 }
 
-function PersonAnswer({ askId }: { askId: string }): ReactNode {
-  const read = useQuery({ queryFn: () => api.getAsk(askId), queryKey: ["ask", askId] });
-  if (read.isPending) return <LoadingSkeleton label="Decision answer loading" />;
-  if (read.isError) return <QueryError message="Could not load the person's answer." onRetry={() => void read.refetch()} retrying={read.isFetching} />;
-  const { ask } = read.data;
-  return (
-    <div className="space-y-2">
-      <ul>{ask.options.map((option) => <li key={option.label}>{option.label}{option.description ? `: ${option.description}` : ""}</li>)}</ul>
-      {ask.answer === null ? null : <>
-        <p className={`text-xs ${textSecondaryOnSurface}`}>{ask.answer.user} chose:</p>
-        {ask.answer.selected.map((label) => <p key={label}>{label}</p>)}
-        <div className="whitespace-pre-wrap" data-testid="decision-answer">{ask.answer.text}</div>
-      </>}
-    </div>
-  );
-}
-
 function decisionDocument(artifacts: readonly Artifact[], decision: Decision): Artifact | undefined {
   const route = parseDispatchReference(decision.ref);
   return artifacts.find((artifact) => artifact.kind === "doc" && (
@@ -229,7 +212,7 @@ function DecisionCard({
     <li className={`space-y-2 rounded-lg border p-3 ${card}`} data-decision={decision.block_id}>
       <h3 className={`text-[15px] font-medium ${textPrimaryOnSurface}`}>{decision.heading}</h3>
       <p className={`text-xs ${textSecondaryOnSurface}`}>{decision.kind === "person" ? "A person's decision" : "Agent's decision"}</p>
-      {decision.kind === "person" && decision.asks[0] !== undefined ? <PersonAnswer askId={decision.asks[0]} /> : decisionParagraphs(decision.text).map((paragraph, index) =>
+      {decision.kind === "person" ? <div className="whitespace-pre-wrap" data-testid="decision-answer">{decision.text.startsWith(decision.heading) ? decision.text.slice(decision.heading.length).replace(/^\n\n/u, "") : decision.text}</div> : decisionParagraphs(decision.text).map((paragraph, index) =>
         paragraph.unsure ? (
           <div
             className={`border-l-2 pl-2 ${decisionUnsureAccent}`}

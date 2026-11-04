@@ -224,16 +224,20 @@ func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) e
 	default:
 		return fmt.Errorf("type %q attribute %q has unknown kind %q", typeName, name, attr.Kind)
 	}
-	if attr.Kind == BlockAttributeBlockList {
+  if attr.Kind == BlockAttributeBlockList || attr.Kind == BlockAttributeAsk || attr.Kind == BlockAttributePerson {
 		if !linkKindPattern.MatchString(name) {
-			return fmt.Errorf("type %q attribute %q is a block[] attribute, whose name is the kind of the links it makes and must match %s", typeName, name, linkKindPattern)
+      return fmt.Errorf("type %q attribute %q is a %s attribute, whose name is the kind of the links it makes and must match %s", typeName, name, attr.Kind, linkKindPattern)
 		}
 		if slices.Contains(model.GraphEdgeKinds, name) {
-			return fmt.Errorf("type %q attribute %q is a block[] attribute named after a structural edge kind (%s)", typeName, name, strings.Join(model.GraphEdgeKinds, ", "))
+      return fmt.Errorf("type %q attribute %q is a %s attribute named after a structural edge kind (%s)", typeName, name, attr.Kind, strings.Join(model.GraphEdgeKinds, ", "))
 		}
-	} else if attr.Targets != nil {
+  }
+  if attr.Kind != BlockAttributeBlockList && attr.Targets != nil {
 		return fmt.Errorf("type %q attribute %q has targets, which only a block[] attribute may carry", typeName, name)
 	}
+  if attr.Scope != "" && (attr.Kind != BlockAttributeBlockList || attr.Scope != BlockAttributeScopeDocument && attr.Scope != BlockAttributeScopeSpec) {
+    return fmt.Errorf("type %q attribute %q has unsupported pointer scope %q",typeName,name,attr.Scope)
+  }
 	if attr.Kind == BlockAttributeEnum {
 		if len(attr.Choices) == 0 {
 			return fmt.Errorf("type %q attribute %q enum has no choices", typeName, name)

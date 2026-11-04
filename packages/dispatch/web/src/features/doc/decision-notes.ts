@@ -3,6 +3,7 @@ import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { Decoration, DecorationSet, type EditorView } from "@milkdown/kit/prose/view";
 
 import type { Decision, DecisionLink } from "../../api/types";
+import { card, linkText, textPrimaryOnSurface } from "../../theme/classes";
 import { loadedEngine } from "../refs/markdown-engine";
 import { buildReferencePath, parseDispatchReference } from "../refs/routes";
 
@@ -54,7 +55,7 @@ function decorations(doc: ProseMirrorNode, notes: Notes): DecorationSet {
   for (const { node, pos, decision, link, candidates } of decisionNoteMatches(doc, notes)) {
       widgets.push(Decoration.widget(pos + node.nodeSize, () => {
         const aside = document.createElement("aside");
-        aside.className = "not-prose my-2 rounded border-l-2 border-sky-500 bg-sky-50 p-3 text-sm text-slate-900 dark:bg-slate-800 dark:text-slate-100";
+        aside.className = `not-prose my-2 rounded border border-l-2 p-3 text-sm ${card} ${textPrimaryOnSurface}`;
         aside.dataset.decisionShaped = decision.ref;
         aside.contentEditable = "false";
         const label = document.createElement("p");
@@ -68,8 +69,9 @@ function decorations(doc: ProseMirrorNode, notes: Notes): DecorationSet {
         const title = document.createElement("a");
         const route = parseDispatchReference(decision.ref);
         if (route !== undefined) title.href = buildReferencePath(route);
+        title.dataset.dispatchHref = decision.ref;
         title.textContent = decision.heading;
-        title.className = "font-medium underline";
+        title.className = `font-medium underline ${linkText}`;
         aside.append(title);
         const text = document.createElement("div");
         text.className = "whitespace-pre-wrap";

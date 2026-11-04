@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+  "github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -62,6 +63,14 @@ func BlockPointers(tree *Node) []BlockPointer {
 			}
 			held[id] = struct{}{}
 		}
+    // An answered ask is the decision itself. Its existing server-owned answer metadata
+    // supplies the relation; no second decided_by attribute copies that fact into the document.
+    if node.Type == "ask" && node.Attrs["state"] == "answered" {
+      if author, ok := node.Attrs["answered_by"].(string); ok && model.CanonicalLogin(author) != "" {
+        login := model.CanonicalLogin(author)
+        pointers = append(pointers, BlockPointer{Block:id, BlockType:node.Type, Attribute:"decided_by", Ref:login, Target:text.Ref{Kind:"person",ID:login}})
+      }
+    }
 		for _, name := range schemaPointerAttributes[node.Type] {
       declared := typ.Attributes.Get(name)
       values, _ := stringSlice(node.Attrs[name])
@@ -99,6 +108,7 @@ type BlockTarget struct {
 	Types    []string
 	Document string
 	Issue    string
+  Primary bool
 }
 
 // BlockWriting is where the write holding the pointers lands: the document it writes (an
@@ -147,7 +157,7 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (Blo
 	var introduced []BlockPointer
 	var targets []text.Ref
 	for _, pointer := range pointers {
-		if len(pointer.Targets) == 0 {
+    if len(pointer.Targets) == 0 && pointer.Scope == "" {
 			continue
 		}
 		if _, unchanged := held[[4]string{pointer.Block, pointer.BlockType, pointer.Attribute, pointer.Ref}]; unchanged {
@@ -176,7 +186,7 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (Blo
 			return fmt.Errorf("%w: %s, which no document holds", ErrBlockPointer, at())
 		}
 		for _, typ := range target.Types {
-			if !slices.Contains(pointer.Targets, typ) {
+      if len(pointer.Targets)>0 && !slices.Contains(pointer.Targets, typ) {
 				return fmt.Errorf("%w: %s, a %q block; it points only at %s",
 					ErrBlockPointer, at(), typ, strings.Join(pointer.Targets, ", "))
 			}
@@ -195,6 +205,9 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (Blo
 			return fmt.Errorf("%w: %s, a block of %s; it points only at a block of its own document, %s",
 				ErrBlockPointer, at(), target.Document, writing.Document)
 		}
+    if pointer.Scope == BlockAttributeScopeSpec && (!target.Primary || writing.Issue=="" || target.Issue!=writing.Issue) {
+      return fmt.Errorf("%w: %s; it points only at a block of the writing issue's spec",ErrBlockPointer,at())
+    }
 	}
 	return nil
 }
