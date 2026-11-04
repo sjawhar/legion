@@ -70,13 +70,13 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
-  IssueCheckResults,
   IssueCoverage,
   IssueDecisions,
   IssueDetails,
   IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
+  IssueVerification,
   ItemBlocks,
   ListUsersResponse,
   MachineLoginsResponse,
@@ -1001,11 +1001,8 @@ export class DispatchApiClient {
     );
   }
 
-  /** `GET /api/v1/issues/{key}/results`: the checks of the issue's Verification document in
-   *  document order, each with every result recorded against it from any issue, newest first,
-   *  and each result's currency as the server judged it against the repository. */
-  getIssueResults(key: string): Promise<IssueCheckResults> {
-    return this.json<IssueCheckResults>(`/api/v1/issues/${pathSegment(key)}/results`);
+  getIssueVerification(key: string): Promise<IssueVerification> {
+    return this.json<IssueVerification>(`/api/v1/issues/${pathSegment(key)}/verification`);
   }
 
   /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. The

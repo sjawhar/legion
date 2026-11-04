@@ -101,13 +101,11 @@ export const issueCoverageQuery = (key: string) =>
     queryFn: () => api.getIssueCoverage(key),
   });
 
-/** The checks of the issue's Verification document and the results recorded against them
- *  (`GET /api/v1/issues/{key}/results`), which the Verification tab draws. Under the issue's key
- *  for the same reason as the coverage. */
-export const issueResultsQuery = (key: string) =>
+/** The Verification tab's checks, results and served requirements from one graph read. */
+export const issueVerificationQuery = (key: string) =>
   queryOptions({
-    queryKey: ["issue", key, "results"],
-    queryFn: () => api.getIssueResults(key),
+    queryKey: ["issue", key, "verification"],
+    queryFn: () => api.getIssueVerification(key),
   });
 
 /** The live blocks of one document (`GET /api/v1/artifacts/{id}/blocks`): the document's own

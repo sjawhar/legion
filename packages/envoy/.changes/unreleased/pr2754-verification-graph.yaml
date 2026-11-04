@@ -1,0 +1,2 @@
+kind: Changed
+body: Verification results and requirement coverage read typed graph edges; the Verification tab shows the requirements each check serves.

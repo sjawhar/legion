@@ -171,6 +171,7 @@ export type {
   IssueReferences,
   IssueRouteReach,
   IssueSummary,
+  IssueVerification,
   ItemBlock,
   ItemBlocks,
   ListUsersResponse,

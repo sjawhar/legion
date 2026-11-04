@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { issueResultsQuery } from "../../api/queries";
+import { issueVerificationQuery } from "../../api/queries";
 import type { Artifact, CheckBlock, CheckResult, CheckResultCurrency } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { pillClassName, pillShapeClassName } from "../../components/Pill";
@@ -155,7 +155,7 @@ function Result({ result }: { result: CheckResult }): ReactNode {
   );
 }
 
-function Check({ check }: { check: CheckBlock }): ReactNode {
+function Check({ check, serves }: { check: CheckBlock; serves: readonly string[] }): ReactNode {
   const state = checkState(check);
   return (
     <li
@@ -186,6 +186,14 @@ function Check({ check }: { check: CheckBlock }): ReactNode {
           {check.negative_control}
         </Fact>
       </dl>
+      {serves.length === 0 ? null : (
+        <div className={`flex flex-wrap items-baseline gap-2 text-sm ${textMutedOnSurface}`}>
+          <span>Serves</span>
+          {serves.map((reference) => (
+            <ReferenceLink key={reference} label={reference} reference={reference} />
+          ))}
+        </div>
+      )}
       <BlockReferences reference={check.ref} />
       {check.results.length === 0 ? (
         <p className={`text-sm ${textMutedOnSurface}`} data-testid="verification-check-no-results">
@@ -207,7 +215,7 @@ function Check({ check }: { check: CheckBlock }): ReactNode {
 }
 
 function Checks({ issueKey }: { issueKey: string }): ReactNode {
-  const results = useQuery(issueResultsQuery(issueKey));
+  const results = useQuery(issueVerificationQuery(issueKey));
 
   if (results.isPending) {
     return (
@@ -237,7 +245,11 @@ function Checks({ issueKey }: { issueKey: string }): ReactNode {
   return (
     <ul aria-label="Checks" className="space-y-3" data-testid="verification-checks">
       {results.data.checks.map((check) => (
-        <Check check={check} key={check.block_id} />
+        <Check
+          check={check}
+          key={check.block_id}
+          serves={results.data.serves[check.block_id] ?? []}
+        />
       ))}
     </ul>
   );

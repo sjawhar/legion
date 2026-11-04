@@ -69,9 +69,10 @@ const verification: Artifact = {
 };
 
 function renderTab(artifact: Artifact | undefined, checks: CheckBlock[]) {
-  const getIssueResults = spyOn(api, "getIssueResults").mockResolvedValue({
+  const getIssueResults = spyOn(api, "getIssueVerification").mockResolvedValue({
     checks,
     issue: "CORE-1",
+    serves: {},
     verification_artifact_id: artifact?.id ?? "",
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

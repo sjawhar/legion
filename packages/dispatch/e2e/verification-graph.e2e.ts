@@ -10,7 +10,7 @@ test.beforeEach(async () => {
 
 test("Verification shows the requirements each check serves from one named graph read", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "VGR", name: "Verification graph" });
   const issue = await createIssue({
     project: "VGR",
@@ -27,18 +27,35 @@ test("Verification shows the requirements each check serves from one named graph
     const reads: string[] = [];
     page.on("request", (request) => {
       const path = new URL(request.url()).pathname;
-      if (request.method() === "GET" && /\/(verification|results|coverage)$/.test(path)) {
+      if (request.method() === "GET" && /^\/api\/v1\/issues\/[^/]+\/(verification|results|coverage)$/.test(path)) {
         reads.push(path);
       }
     });
     await page.goto(`/issues/${issue.key}/verification`);
     await expect(page.getByTestId("verification-check")).toHaveCount(2);
-    const serving = page.getByTestId("verification-check").filter({ hasText: "The answer round trips." });
-    const requirement = serving.getByRole("link", { name: "dispatch://" + issue.key + "/spec#b-r1", exact: true });
+    const serving = page
+      .getByTestId("verification-check")
+      .filter({ hasText: "The answer round trips." });
+    const requirement = serving.getByRole("link", {
+      name: `dispatch://${issue.key}/spec#b-r1`,
+      exact: true,
+    });
     await expect(requirement).toBeVisible();
     await expect(requirement).toHaveAttribute("href", `/issues/${issue.key}/spec#b-r1`);
-    await expect(page.getByTestId("verification-check-state")).toHaveText(["No result", "No result"]);
+    await expect(page.getByTestId("verification-check-state")).toHaveText([
+      "No result",
+      "No result",
+    ]);
     expect(reads).toEqual([`/api/v1/issues/${issue.key}/verification`]);
+    const census = await page.request.get("/api/v1/verification-shadow");
+    expect(census.status()).toBe(200);
+    expect(await census.json()).toEqual({
+      by_cause: {},
+      details: [],
+      issues: 1,
+      mismatches: 0,
+    });
+    await page.screenshot({ path: testInfo.outputPath("verification-serves.png") });
   } finally {
     await alice.close();
   }

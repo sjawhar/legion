@@ -1024,12 +1024,8 @@ test("an architecture event refreshes the source lists and the project's model",
   }
 });
 
-// A recorded result moves two reads and no more: the results of the check's issue, where the
-// event sits, and the results of the issue that recorded it, which lists what it recorded. A
-// result recorded on the check's own issue names one. Each key is the one the Verification tab
-// reads under (`issueResultsQuery`), so a result recorded while that tab is open appears without
-// a reload. event-refresh's switches all have a default, so this pins the decision rather than
-// the compiler.
+// A result refreshes the check's issue and the recording issue; the Verification tab's
+// single graph read must refresh without a reload even when a child recorded the run.
 test("a recorded result refreshes the results of the check's issue and of the recording issue", () => {
   const own = event("result.recorded", {
     check_block_id: "k1",
@@ -1043,7 +1039,7 @@ test("a recorded result refreshes the results of the check's issue and of the re
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues", "project", "CORE"],
-    ["issue", "CORE-1", "results"],
+    ["issue", "CORE-1", "verification"],
   ]);
   const child = event("result.recorded", {
     check_block_id: "k1",
@@ -1057,8 +1053,8 @@ test("a recorded result refreshes the results of the check's issue and of the re
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues", "project", "CORE"],
-    ["issue", "CORE-1", "results"],
-    ["issue", "CORE-9", "results"],
+    ["issue", "CORE-1", "verification"],
+    ["issue", "CORE-9", "verification"],
   ]);
 });
 
@@ -1073,7 +1069,7 @@ test("a document version refreshes the issue's coverage and its recorded results
     JSON.stringify(target.queryKey)
   );
   expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "coverage"]));
-  expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "results"]));
+  expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "verification"]));
 });
 
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here

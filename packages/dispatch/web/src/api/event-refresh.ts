@@ -762,7 +762,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       // version of the Verification document moves which checks there are: the two reads hang
       // under the issue's key but are named here, since every issue target is `exact`.
       { exact: true, queryKey: ["issue", key, "coverage"] },
-      { exact: true, queryKey: ["issue", key, "results"] }
+      { exact: true, queryKey: ["issue", key, "verification"] }
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
@@ -799,9 +799,9 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   // issue detail carries one — and this switch has a default, so the branch is deliberate and
   // its test pins it.
   if (event.type === "result.recorded") {
-    targets.push({ exact: true, queryKey: ["issue", key, "results"] });
+    targets.push({ exact: true, queryKey: ["issue", key, "verification"] });
     if (event.payload.issue !== key) {
-      targets.push({ exact: true, queryKey: ["issue", event.payload.issue, "results"] });
+      targets.push({ exact: true, queryKey: ["issue", event.payload.issue, "verification"] });
     }
     return targets;
   }

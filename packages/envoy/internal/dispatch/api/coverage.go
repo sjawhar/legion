@@ -155,23 +155,29 @@ type servingCounts struct {
 	planTasks int
 }
 
-// servingBlockCounts counts, for each block of the spec, the `check` and `plan_task` blocks of
+// servingBlockCountsSQL counts, for each block of the spec, the `check` and `plan_task` blocks of
 // the documents of issues that name it in `serves`. Both ends are current blocks of their
 // documents: deleting the check deletes its row, so its requirement is uncovered again.
+// OFFSET 0 keeps the graph and source-node lookups parameterized by each requirement,
+// rather than letting the planner hash the unrelated block index before filtering it.
 var servingBlockCountsSQL = `
 	select t.block_id, s.type, count(*)
 	from document_blocks t
-	join graph_edges e on e.to_id = t.node_id and e.to_kind = 'block' and e.kind = 'serves' and e.from_kind = 'block'
-	join document_blocks s on s.node_id = e.from_id
+	cross join lateral (
+		select e.from_id from graph_edges e
+		where e.to_id = t.node_id and e.to_kind = 'block' and e.kind = 'serves' and e.from_kind = 'block'
+		offset 0
+	) e
+	cross join lateral (
+		select s.type, s.artifact_id from document_blocks s
+		where s.node_id = e.from_id and s.type in ('check', 'plan_task')
+		offset 0
+	) s
 	join artifacts a on a.id = s.artifact_id
 	where t.artifact_id = $1::uuid and t.type = 'requirement'
-	  and a.issue_key = any($2) and s.type in ('check', 'plan_task')
+	  and a.issue_key = any($2)
 	group by t.block_id, s.type
 `
-
-func servingBlockCounts(ctx context.Context, q queryer, specArtifactID string, issues []string) (map[string]servingCounts, error) {
-	return readServingBlockCounts(ctx, q, servingBlockCountsSQL, specArtifactID, issues)
-}
 
 func readServingBlockCounts(ctx context.Context, q queryer, sql, specArtifactID string, issues []string) (map[string]servingCounts, error) {
 	rows, err := q.Query(ctx, sql, specArtifactID, issues)

@@ -2555,6 +2555,12 @@ export interface IssueCheckResults {
   readonly checks: readonly CheckBlock[];
 }
 
+/** `GET /api/v1/issues/{key}/verification`: one graph read for the Verification tab. */
+export interface IssueVerification extends IssueCheckResults {
+  /** Served requirement references by check block id, in reference order. */
+  readonly serves: Readonly<Record<string, readonly string[]>>;
+}
+
 /** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line it
  *  implies, which Dispatch writes so every writer writes one grammar and which carries no link
  *  to Dispatch. */
