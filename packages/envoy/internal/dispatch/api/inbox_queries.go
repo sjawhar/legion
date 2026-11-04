@@ -97,7 +97,7 @@ func (s *server) loadAskThreads(ctx context.Context, askIDs []string, trees bool
 		threads[askID] = askThread{
 			Replies:   []commentRead{},
 			Edits:     []askEditRead{},
-			Answers:   []askAnswerRead{},
+			Answers:   []model.AskAnswerWithTree{},
 			Followers: []model.AskFollower{},
 		}
 	}

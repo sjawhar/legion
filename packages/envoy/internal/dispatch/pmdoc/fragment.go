@@ -52,7 +52,7 @@ func SearchSnippetMarkdown(snippet string) string {
 func countWords(text string) int {
 	words, inWord := 0, false
 	for _, char := range text {
-		if fragmentWhitespace(char) {
+		if literalEnd(char) {
 			inWord = false
 			continue
 		}
@@ -288,14 +288,14 @@ func lastBacktickRun(text string) (start, stop int) {
 // identifier - holds none.
 func proseFollows(text string) bool {
 	for index, char := range text {
-		if !fragmentWhitespace(char) {
+		if !literalEnd(char) {
 			continue
 		}
 		rest := text[index+utf8.RuneLen(char):]
 		word := 0
 		for word < len(rest) {
 			next, size := utf8.DecodeRuneInString(rest[word:])
-			if fragmentWhitespace(next) {
+			if literalEnd(next) {
 				break
 			}
 			word += size
@@ -305,7 +305,7 @@ func proseFollows(text string) bool {
 		}
 		_, size := utf8.DecodeRuneInString(rest[word:])
 		if tail := rest[word+size:]; tail != "" {
-			if next, _ := utf8.DecodeRuneInString(tail); !fragmentWhitespace(next) {
+			if next, _ := utf8.DecodeRuneInString(tail); !literalEnd(next) {
 				return true
 			}
 		}
@@ -351,23 +351,11 @@ func classifyAt(text string, index int) fragmentGroup {
 // name reader does (directivePunctuation).
 func classifyFragmentCharacter(char rune) fragmentGroup {
 	switch {
-	case fragmentWhitespace(char):
+	case literalEnd(char):
 		return fragmentSpace
 	case directivePunctuation(char):
 		return fragmentPunctuation
 	default:
 		return fragmentWord
 	}
-}
-
-// fragmentWhitespace is JavaScript's `\s`, which micromark's unicodeWhitespace tests the
-// character against: the ASCII blanks, the Unicode space separators, the line and paragraph
-// separators, and the byte-order mark. Go's unicode.IsSpace is not it - that one holds U+0085 and
-// not U+FEFF - and this reading has to be the browser's, character for character.
-func fragmentWhitespace(char rune) bool {
-	switch char {
-	case '\t', '\n', '\v', '\f', '\r', ' ', 0x00a0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff:
-		return true
-	}
-	return char >= 0x2000 && char <= 0x200a
 }

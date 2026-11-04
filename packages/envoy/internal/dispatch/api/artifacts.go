@@ -736,8 +736,13 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	answer := map[string]any{"markdown": markdown, "version": version, "token": token}
-	if tree := displayTree(markdown); wantsDisplayTrees(r) && tree != nil {
-		answer["markdown_tree"] = tree
+	// The tree is built only for a caller that asked for one: the command line and the agent
+	// clients read this route for its markdown, and a tree they discard would cost them the
+	// read and evict from the cache what a browser is reading.
+	if wantsDisplayTrees(r) {
+		if tree := displayTree(markdown); tree != nil {
+			answer["markdown_tree"] = tree
+		}
 	}
 	WriteJSON(w, http.StatusOK, answer)
 }

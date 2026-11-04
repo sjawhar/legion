@@ -115,12 +115,6 @@ type askOptionRead struct {
 	DescriptionTree json.RawMessage `json:"description_tree,omitempty"`
 }
 
-// askAnswerRead is a human's answer with the tree of the text they wrote with it.
-type askAnswerRead struct {
-	model.AskAnswer
-	TextTree json.RawMessage `json:"text_tree,omitempty"`
-}
-
 // askResolutionRead is why an ask no longer needs an answer, with the tree of that reason.
 type askResolutionRead struct {
 	model.AskResolution
@@ -145,24 +139,17 @@ type askEditRead struct {
 // option, of its answer's text and of its resolution's reason.
 type askRead struct {
 	model.Ask
-	QuestionTree json.RawMessage    `json:"question_tree,omitempty"`
-	Options      []askOptionRead    `json:"options"`
-	Answer       *askAnswerRead     `json:"answer"`
-	Resolution   *askResolutionRead `json:"resolution,omitempty"`
+	QuestionTree json.RawMessage          `json:"question_tree,omitempty"`
+	Options      []askOptionRead          `json:"options"`
+	Answer       *model.AskAnswerWithTree `json:"answer"`
+	Resolution   *askResolutionRead       `json:"resolution,omitempty"`
 }
 
 // shape rebuilds the shadowing fields from the ask they stand in front of, and reads each of its
 // texts for display when the caller asked for the trees.
 func (a *askRead) shape(trees bool) {
 	a.Options = askOptionReads(a.Ask.Options, trees)
-	a.Answer = nil
-	if a.Ask.Answer != nil {
-		answer := askAnswerRead{AskAnswer: *a.Ask.Answer}
-		if trees {
-			answer.TextTree = displayTreeOf(a.Ask.Answer.Text)
-		}
-		a.Answer = &answer
-	}
+	a.Answer = newAskAnswerWithTree(a.Ask.Answer, trees)
 	a.Resolution = nil
 	if a.Ask.Resolution != nil {
 		resolution := askResolutionRead{AskResolution: *a.Ask.Resolution}
@@ -213,13 +200,13 @@ func askReads(asks []model.Ask, trees bool) []askRead {
 }
 
 // askAnswerReads is a thread's answers with the trees of their texts.
-func askAnswerReads(answers []model.AskAnswer, trees bool) []askAnswerRead {
+func askAnswerReads(answers []model.AskAnswer, trees bool) []model.AskAnswerWithTree {
 	if answers == nil {
 		return nil
 	}
-	reads := make([]askAnswerRead, len(answers))
+	reads := make([]model.AskAnswerWithTree, len(answers))
 	fillReads(trees, len(answers), func(index int) {
-		reads[index] = askAnswerRead{AskAnswer: answers[index]}
+		reads[index] = model.AskAnswerWithTree{AskAnswer: answers[index]}
 		if trees {
 			reads[index].TextTree = displayTreeOf(answers[index].Text)
 		}

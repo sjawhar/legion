@@ -200,6 +200,35 @@ await test('a copy of a list keeps every nested id on its holder, and a moved bl
   }
 });
 
+await test('a batch that deletes a block and copies another stamps the copy', async () => {
+  setBlockIdGenerator(counter('local'));
+  try {
+    const { schema, parseMarkdown } = await createHeadlessProof({ blockId: counter('b') });
+    const doc = parseMarkdown('first\n\nsecond\n\nthird\n');
+    const state = EditorState.create({ schema, doc, plugins: [createBlockIdsPlugin()] });
+    // Two steps in one transaction: the first block goes, and the second is copied to the end.
+    // The copy duplicates `b-2`, so the pass must stamp it. Each step's old span is read in the
+    // document that step saw, which is the one before it, not the one the whole batch produced.
+    const second = state.doc.child(1);
+    assert(blockIdOf(second) === 'b-2', `second block id = ${blockIdOf(second)}`);
+    const tr = state.tr.delete(0, state.doc.child(0).nodeSize);
+    tr.insert(tr.doc.content.size, second);
+    const next = state.apply(tr);
+    const ids = (document: typeof next.doc) => {
+      const out: (string | null)[] = [];
+      document.forEach((node) => out.push(blockIdOf(node)));
+      return out;
+    };
+    const after = ids(next.doc);
+    assert(next.doc.childCount === 3, `expected three blocks, got ${next.doc.childCount}`);
+    assert(after[0] === 'b-2' && after[1] === 'b-3', `the kept blocks lost their ids: ${after}`);
+    assert(after[2] !== null && after[2] !== 'b-2', `the copy kept the id it duplicated: ${after}`);
+    assert(after[2]!.startsWith('local-'), `the copy was not stamped locally: ${after}`);
+  } finally {
+    setBlockIdGenerator(null);
+  }
+});
+
 await test('a remote (collaboration) transaction is never stamped locally', async () => {
   setBlockIdGenerator(counter('local'));
   try {

@@ -1,3 +1,4 @@
+import { documentFromJSON } from "@legion/proof-editor/document-json";
 import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
 import { DOMSerializer, type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
@@ -163,13 +164,13 @@ function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): Mark
     draw(tree) {
       try {
         // Built node by node rather than through `Node.fromJSON`, for the reason
-        // `documentFromJSON` gives: that checks every attribute against the type its schema
-        // declares, and a value this page's own parser writes can fail the check - milkdown
-        // writes `title: null` for an image with no title, where `image.title` validates as a
-        // string. Go's reading of a text is that same document, so it carries the same
-        // attribute, and the check is for JSON from somewhere else than these two readers.
-        // `DisplayTree` is the same JSON `DocumentJSON` describes - one ProseMirror node -
-        // typed openly because a response carries whatever the server's schema wrote.
+        // `@legion/proof-editor/document-json` gives: that checks every attribute against the
+        // type its schema declares, and a value this page's own parser writes can fail the
+        // check - milkdown writes `title: null` for an image with no title, where `image.title`
+        // validates as a string. Go's reading of a text is that same document, so it carries
+        // the same attribute, and the check is for JSON from somewhere else than these two
+        // readers. `DisplayTree` is the same JSON `DocumentJSON` describes - one ProseMirror
+        // node - typed openly because a response carries whatever the server's schema wrote.
         const node = tree as unknown as DocumentJSON;
         return documentFromJSON(displaySchema, node);
       } catch (error) {
@@ -285,25 +286,6 @@ let createParseWorker: ParseWorkerFactory | undefined;
 /** `PARSE_TIME_LIMIT_MS`, unless a test shortened it through `setParseDeadline`. */
 let deadlineMs = PARSE_TIME_LIMIT_MS;
 const answers = new Map<string, ParsedAnswer>();
-
-/**
- * The document `json` describes, as a document of `schema`.
- *
- * `Schema.nodeFromJSON` is not what builds it: that checks every attribute against the type its
- * schema gives it, and this page's own parser writes values its schema does not - milkdown's
- * Markdown parser writes `title: null` for an image with no title, where `image.title` is a string
- * defaulting to `""` - so a body holding a picture could never be rebuilt, though the page's own
- * parse of it holds exactly the same attribute. That check is for JSON from somewhere else; this
- * JSON is the page's own worker's parse of the body, with the page's own schema.
- */
-function documentFromJSON(schema: Schema, json: DocumentJSON): ProseMirrorNode {
-  const marks = json.marks?.map(({ attrs, type }) => schema.marks[type].create(attrs));
-  if (json.type === "text") {
-    return schema.text(json.text ?? "", marks);
-  }
-  const content = json.content?.map((child) => documentFromJSON(schema, child));
-  return schema.nodes[json.type].create(json.attrs, content, marks);
-}
 
 /** Parses `body` here, for a worker that could not: the reader waits for a parse on their own
  *  thread, and then reads the body formatted. */

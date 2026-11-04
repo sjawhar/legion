@@ -2,10 +2,11 @@ package pmdoc
 
 import (
 	"bytes"
-	"container/list"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/bytelru"
 )
 
 // The display tree a response carries is ReadForDisplay's own tree as the wire encoding writes
@@ -30,31 +31,34 @@ func TestDisplayJSONIsTheDisplayReadsTreeAndIsKept(t *testing.T) {
 	}
 }
 
-// The cache holds at most what it is given room for, counted as the bytes of the JSON it holds,
-// and the least recently read entry is the one that leaves.
+// The cache the display trees are kept in holds at most what it is given room for, counted as
+// the bytes of the JSON it holds, and the least recently read entry is the one that leaves. The
+// cache itself is shared (bytelru), which has its own tests; this one holds the trees to the
+// bound DisplayCacheBytes promises, under the key this package builds.
 func TestTheDisplayCacheHoldsItsBound(t *testing.T) {
-	cache := &displayTreeCache{limit: 64, items: map[displayCacheKey]*list.Element{}, order: list.New()}
+	const limit int64 = 64
+	cache := bytelru.New[displayCacheKey, json.RawMessage](limit)
 	first := displayCacheKey{sum: [32]byte{1}}
 	second := displayCacheKey{sum: [32]byte{2}}
 	third := displayCacheKey{sum: [32]byte{3}}
-	cache.put(first, make(json.RawMessage, 32))
-	cache.put(second, make(json.RawMessage, 32))
-	if _, held := cache.get(first); !held {
+	cache.Put(first, make(json.RawMessage, 32))
+	cache.Put(second, make(json.RawMessage, 32))
+	if _, held := cache.Get(first); !held {
 		t.Fatalf("the first tree left while the cache still had room")
 	}
 	// Reading the first put the second at the back, so the third evicts it.
-	cache.put(third, make(json.RawMessage, 32))
-	if _, held := cache.get(second); held {
+	cache.Put(third, make(json.RawMessage, 32))
+	if _, held := cache.Get(second); held {
 		t.Errorf("the least recently read tree stayed")
 	}
-	if _, held := cache.get(first); !held {
+	if _, held := cache.Get(first); !held {
 		t.Errorf("the most recently read tree left")
 	}
-	if cache.held > cache.limit {
-		t.Errorf("the cache holds %d bytes, over its %d bound", cache.held, cache.limit)
+	if cache.Held() > limit {
+		t.Errorf("the cache holds %d bytes, over its %d bound", cache.Held(), limit)
 	}
-	cache.put(displayCacheKey{sum: [32]byte{4}}, make(json.RawMessage, 65))
-	if _, held := cache.get(displayCacheKey{sum: [32]byte{4}}); held {
+	cache.Put(displayCacheKey{sum: [32]byte{4}}, make(json.RawMessage, 65))
+	if _, held := cache.Get(displayCacheKey{sum: [32]byte{4}}); held {
 		t.Errorf("a tree larger than the whole cache was kept")
 	}
 }

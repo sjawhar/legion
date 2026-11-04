@@ -119,7 +119,8 @@ func compressibleAnswer(header http.Header) bool {
 
 // gzipWriters keeps the compressors between answers: a gzip.Writer carries deflate's whole window
 // and hash tables, which is hundreds of kilobytes an answer this layer would otherwise allocate
-// and drop.
+// and drop. A pooled writer keeps the level it was made at, so every writer in here is
+// gzip.BestSpeed's.
 var gzipWriters sync.Pool
 
 // compressingWriter is the answer's writer while the choice between gzip and the bytes as they
@@ -156,7 +157,14 @@ func (w *compressingWriter) settle(compress bool) {
 			pooled.Reset(w.ResponseWriter)
 			w.gzip = pooled
 		} else {
-			w.gzip = gzip.NewWriter(w.ResponseWriter)
+			// gzip.BestSpeed, not the default 6: a warm read is dominated by encoding and
+			// compressing the answer, and the trees this layer now carries make the body
+			// larger. On the 103 KB comment list of BenchmarkCompressingAnAnswer, level 1
+			// takes 284us and sends 7,698 bytes where level 6 takes 861us and sends 6,882 -
+			// a third of the time for a ninth more bytes, and the bytes are the side of the
+			// trade with room to give. The level is a constant, so NewWriterLevel cannot
+			// refuse it.
+			w.gzip, _ = gzip.NewWriterLevel(w.ResponseWriter, gzip.BestSpeed)
 		}
 	}
 	status := w.status

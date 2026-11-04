@@ -27,10 +27,10 @@ type inboxDocument struct {
 // fetch per ask. `answers` is empty on an Inbox row, which is an open ask; the issue ask list
 // fills it for the answered asks on the page.
 type askThread struct {
-	Replies   []commentRead       `json:"replies"`
-	Edits     []askEditRead       `json:"edits"`
-	Answers   []askAnswerRead     `json:"answers"`
-	Followers []model.AskFollower `json:"followers"`
+	Replies   []commentRead             `json:"replies"`
+	Edits     []askEditRead             `json:"edits"`
+	Answers   []model.AskAnswerWithTree `json:"answers"`
+	Followers []model.AskFollower       `json:"followers"`
 	askReach
 }
 

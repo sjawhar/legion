@@ -47,23 +47,40 @@ function textLength(node: DisplayTree, limit: number): number {
   return length;
 }
 
-/** One node cut to what is left of the budget: a text node whole where it fits and cut at its
- *  last whitespace otherwise, a node with children keeping the children that fit. The cut falls
- *  at the budget itself where the budget's second half holds no whitespace - one long URL or
- *  path - so the head still shows what it can, and never inside a surrogate pair. */
+/**
+ * The start of one run of characters: `text` itself where it is at most `max` characters
+ * (UTF-16 units), and otherwise its last whitespace within `max`, with the space the cut left
+ * trimmed off. Where the budget's second half holds no whitespace - one long URL or path - the
+ * cut falls at `max` itself, and never inside a surrogate pair.
+ *
+ * This is the cut a text node takes below, and it is also the one a caller makes on the
+ * markdown it hands `MarkdownPreview` beside a cut tree. That markdown is the preview's
+ * fallback: without an engine, or for a tree the schema refuses, `useRenderedMarkdown` writes
+ * it into the element as literal text, which a screen reader then reads as the row's whole
+ * name. Bounding it keeps that fallback the same length as the tree the preview usually draws.
+ */
+export function textHead(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const space = /\s\S*$/u.exec(text.slice(0, max + 1))?.index ?? -1;
+  let end = space >= max / 2 ? space : max;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  return text.slice(0, end).trimEnd();
+}
+
+/** One node cut to what is left of the budget: a text node whole where it fits and cut by
+ *  `textHead` otherwise, a node with children keeping the children that fit. */
 function cutNode(node: DisplayTree, left: number): CutNode {
   const text = textOf(node);
   if (text !== undefined) {
     if (text.length <= left) {
       return { left: left - text.length, node };
     }
-    const space = /\s\S*$/u.exec(text.slice(0, left + 1))?.index ?? -1;
-    let end = space >= left / 2 ? space : left;
-    const last = text.charCodeAt(end - 1);
-    if (last >= 0xd800 && last <= 0xdbff) {
-      end -= 1;
-    }
-    const kept = text.slice(0, end).trimEnd();
+    const kept = textHead(text, left);
     return { left: 0, node: kept === "" ? undefined : { ...node, text: kept } };
   }
   const children = childrenOf(node);

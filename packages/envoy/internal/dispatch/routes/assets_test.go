@@ -871,37 +871,34 @@ func TestStaticHandlerReadsTheStoreOnceForConcurrentMisses(t *testing.T) {
 
 // The cache keeps at most maxCachedAssetBytes however much it is handed, and evicts the object used
 // least recently: one read again since it was stored stays, so the chunks a tab is still opening
-// are not the ones lost.
+// are not the ones lost. That the bytes it counts are the bytes it holds is the shared cache's
+// own invariant (bytelru).
 func TestAssetCacheKeepsAtMostItsLimitEvictingTheLeastRecentlyUsed(t *testing.T) {
 	cache := newAssetCache(maxCachedAssetBytes)
 	sizes := []int64{MaxRetainedAssetSize, 3 << 20, 1, MaxRetainedAssetSize - 1, 5 << 20, 1747955}
 	for i := range 60 {
-		cache.put(fmt.Sprintf("assets/chunk-%d.js", i), make([]byte, sizes[i%len(sizes)]))
-		var held int64
-		for element := cache.order.Front(); element != nil; element = element.Next() {
-			held += int64(len(element.Value.(*cachedAsset).content))
-		}
-		if held > maxCachedAssetBytes || held != cache.held {
-			t.Fatalf("after %d objects the cache holds %d bytes and counts %d, want at most %d and the same count", i+1, held, cache.held, maxCachedAssetBytes)
+		cache.Put(fmt.Sprintf("assets/chunk-%d.js", i), make([]byte, sizes[i%len(sizes)]))
+		if held := cache.Held(); held > maxCachedAssetBytes {
+			t.Fatalf("after %d objects the cache holds %d bytes, want at most %d", i+1, held, maxCachedAssetBytes)
 		}
 	}
 
 	cache = newAssetCache(maxCachedAssetBytes)
 	full := int(maxCachedAssetBytes / MaxRetainedAssetSize)
 	for i := range full {
-		cache.put(fmt.Sprintf("assets/chunk-%d.js", i), make([]byte, MaxRetainedAssetSize))
+		cache.Put(fmt.Sprintf("assets/chunk-%d.js", i), make([]byte, MaxRetainedAssetSize))
 	}
-	if _, ok := cache.get("assets/chunk-0.js"); !ok {
+	if _, ok := cache.Get("assets/chunk-0.js"); !ok {
 		t.Fatal("the first object was evicted from a cache it fits in")
 	}
-	cache.put("assets/one-more.js", make([]byte, MaxRetainedAssetSize))
-	if _, ok := cache.get("assets/chunk-0.js"); !ok {
+	cache.Put("assets/one-more.js", make([]byte, MaxRetainedAssetSize))
+	if _, ok := cache.Get("assets/chunk-0.js"); !ok {
 		t.Error("the object read most recently was evicted")
 	}
-	if _, ok := cache.get("assets/chunk-1.js"); ok {
+	if _, ok := cache.Get("assets/chunk-1.js"); ok {
 		t.Error("the object used least recently was kept past the limit")
 	}
-	if _, ok := cache.get("assets/one-more.js"); !ok {
+	if _, ok := cache.Get("assets/one-more.js"); !ok {
 		t.Error("the newest object was not kept")
 	}
 }

@@ -87,9 +87,9 @@ func (l *Ledger) RenderStampOf(artifactID, markdown string) RenderStamp {
 // stamp are for a version written before the stamp existed or by a write holding no tree.
 const storedVersionSQL = `
 		select v.markdown, v.document_token, v.head_version, v.doc_update_row, v.renderer_version,
-			h.version, coalesce(u.xmin::text, '') as row_xmin
-		from (select ` + headVersion + ` as version) h
-		left join doc_updates u on u.artifact_id = $1 and u.version = h.version
+			s.version, s.row_xmin
+		from (` + documentStampSQL + `
+		) s
 		left join lateral (
 			select markdown, document_token, head_version, doc_update_row, renderer_version
 			from artifact_versions where artifact_id = $1 order by number desc limit 1

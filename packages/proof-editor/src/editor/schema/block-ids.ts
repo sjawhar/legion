@@ -246,10 +246,16 @@ function changedSpans(
   const steps: Step[] = [];
   for (const tr of transactions) steps.push(...tr.steps);
   const mapping = new Mapping(steps.map((step) => step.getMap()));
+  // `Mapping.invert` inverts every map the mapping holds, the bounds of a slice included, so
+  // slicing before inverting would return the whole batch's inverse however few steps it names.
+  // The inverses are built once instead, in application order for a walk back from any step:
+  // `inverted` is `inv_last … inv_0`, and its last `index` maps are `inv_{index-1} … inv_0`.
+  // Neither mapping carries mirrored maps, so `map` honours the bounds of a slice of either.
+  const inverted = new Mapping(mapping.maps.map((map) => map.invert()).reverse());
   const oldSpans: Span[] = [];
   const newSpans: Span[] = [];
   steps.forEach((step, index) => {
-    const back = mapping.slice(0, index).invert();
+    const back = inverted.slice(steps.length - index, steps.length);
     const forward = mapping.slice(index + 1);
     let moved = false;
     mapping.maps[index].forEach((oldStart, oldEnd, newStart, newEnd) => {

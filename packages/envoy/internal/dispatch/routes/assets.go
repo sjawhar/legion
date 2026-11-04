@@ -1,13 +1,13 @@
 package routes
 
 import (
-	"container/list"
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/sjawhar/envoy/internal/dispatch/bytelru"
 )
 
 const (
@@ -42,58 +42,13 @@ type AssetStore interface {
 // assetCache keeps the objects the store answered, whole and by key, so a burst of one stale
 // tab's chunks, or every tab of another build asking for the same ones, reads each from the store
 // once. A key names content-hashed build output, which never changes under its name, so an entry
-// is never stale. It holds at most limit bytes, evicting the least recently used entry first, and
-// collapses concurrent misses of one key into one store read (reads).
+// is never stale. It holds at most the bytes it was made with, evicting the least recently used
+// entry first (bytelru), and collapses concurrent misses of one key into one store read (reads).
 type assetCache struct {
-	limit int64
+	*bytelru.Cache[string, []byte]
 	reads singleflight.Group
-
-	mu    sync.Mutex
-	held  int64
-	order *list.List // of *cachedAsset, the most recently used at the front
-	byKey map[string]*list.Element
-}
-
-type cachedAsset struct {
-	key     string
-	content []byte
 }
 
 func newAssetCache(limit int64) *assetCache {
-	return &assetCache{limit: limit, order: list.New(), byKey: make(map[string]*list.Element)}
-}
-
-// get returns key's object and marks it the most recently used.
-func (c *assetCache) get(key string) ([]byte, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	element, ok := c.byKey[key]
-	if !ok {
-		return nil, false
-	}
-	c.order.MoveToFront(element)
-	return element.Value.(*cachedAsset).content, true
-}
-
-// put keeps content under key, evicting the least recently used entries until it fits. An object
-// larger than the whole cache is not kept.
-func (c *assetCache) put(key string, content []byte) {
-	size := int64(len(content))
-	if size > c.limit {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if element, ok := c.byKey[key]; ok {
-		c.order.MoveToFront(element)
-		return
-	}
-	for c.held+size > c.limit {
-		oldest := c.order.Back()
-		evicted := c.order.Remove(oldest).(*cachedAsset)
-		delete(c.byKey, evicted.key)
-		c.held -= int64(len(evicted.content))
-	}
-	c.byKey[key] = c.order.PushFront(&cachedAsset{key: key, content: content})
-	c.held += size
+	return &assetCache{Cache: bytelru.New[string, []byte](limit)}
 }

@@ -10,7 +10,7 @@ import {
 import { AskResolutionLine } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
-import { treeHead } from "../refs/tree-fragment";
+import { textHead, treeHead } from "../refs/tree-fragment";
 
 function askStateLabel(ask: SearchAsk): string {
   if (ask.state === "open") return "Open";
@@ -59,7 +59,7 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
         <MarkdownPreview
           className={`mt-1 ${muted ? textMutedOnSelectedCard : textPrimaryOnSurface}`}
           lines={3}
-          markdown={answer.text}
+          markdown={textHead(answer.text, ANSWER_PREVIEW_CHARS)}
           tree={
             answer.text_tree === undefined
               ? undefined

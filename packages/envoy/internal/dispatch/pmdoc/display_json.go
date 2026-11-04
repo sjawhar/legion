@@ -1,12 +1,12 @@
 package pmdoc
 
 import (
-	"container/list"
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
 	"strings"
-	"sync"
+
+	"github.com/sjawhar/envoy/internal/dispatch/bytelru"
 )
 
 // DisplayCacheBytes is how much of the display trees' JSON one process keeps: the bytes of the
@@ -29,7 +29,7 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 		return nil
 	}
 	key := displayCacheKey{sum: sha256.Sum256([]byte(markdown)), mode: mode}
-	if tree, held := displayCache.get(key); held {
+	if tree, held := displayCache.Get(key); held {
 		return tree
 	}
 	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
@@ -37,7 +37,7 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 		slog.Warn("dispatch: display tree encoding failed", "error", err)
 		return nil
 	}
-	displayCache.put(key, tree)
+	displayCache.Put(key, tree)
 	return tree
 }
 
@@ -153,64 +153,6 @@ type displayCacheKey struct {
 
 // displayCache is the process's one display-tree cache, held for the process's life: a tree is
 // the reading of the text its key hashes, so nothing in it ever goes stale, and an entry leaves
-// only to make room for another (DisplayCacheBytes).
-var displayCache = &displayTreeCache{
-	limit: DisplayCacheBytes,
-	items: map[displayCacheKey]*list.Element{},
-	order: list.New(),
-}
-
-// displayTreeCache is the trees kept by their text, least recently read first out. It counts the
-// bytes of the encodings it holds and nothing else, which is what a reader of DisplayCacheBytes
-// is promised.
-type displayTreeCache struct {
-	mu    sync.Mutex
-	limit int
-	held  int
-	items map[displayCacheKey]*list.Element
-	order *list.List
-}
-
-// displayCacheEntry is one kept tree, with the key that finds it, so eviction can drop the map's
-// entry from the list's own element.
-type displayCacheEntry struct {
-	key  displayCacheKey
-	tree json.RawMessage
-}
-
-func (c *displayTreeCache) get(key displayCacheKey) (json.RawMessage, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	element, held := c.items[key]
-	if !held {
-		return nil, false
-	}
-	c.order.MoveToFront(element)
-	return element.Value.(*displayCacheEntry).tree, true
-}
-
-// put keeps tree under key and drops the least recently read entries until what is held fits the
-// limit. A tree larger than the whole limit is answered to its caller and never kept, so one
-// enormous document cannot empty the cache for everybody else.
-func (c *displayTreeCache) put(key displayCacheKey, tree json.RawMessage) {
-	if len(tree) > c.limit {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if element, held := c.items[key]; held {
-		c.order.MoveToFront(element)
-		return
-	}
-	c.items[key] = c.order.PushFront(&displayCacheEntry{key: key, tree: tree})
-	c.held += len(tree)
-	for c.held > c.limit {
-		oldest := c.order.Back()
-		if oldest == nil {
-			return
-		}
-		entry := c.order.Remove(oldest).(*displayCacheEntry)
-		delete(c.items, entry.key)
-		c.held -= len(entry.tree)
-	}
-}
+// only to make room for another (DisplayCacheBytes). It counts the bytes of the encodings it
+// holds and nothing else, which is what a reader of DisplayCacheBytes is promised.
+var displayCache = bytelru.New[displayCacheKey, json.RawMessage](DisplayCacheBytes)
