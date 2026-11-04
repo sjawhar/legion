@@ -1182,6 +1182,8 @@ jobs:
               - '.github/actions/pull-test-images/**'
               # The download URL the schema step stamps into the plugin and asserts on.
               - '.github/scripts/repo-paths.sh'
+              # The disk the live tests leave: the two steps around them run this sampler.
+              - '.github/scripts/disk_watch.py'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, runs it.
@@ -1820,6 +1822,9 @@ jobs:
 
       - name: Test the race memory sampler
         run: .github/scripts/race_memory.test.sh
+
+      - name: Test the disk watch
+        run: .github/scripts/disk_watch.test.sh
 
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
@@ -3430,11 +3435,25 @@ jobs:
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
         working-directory: packages/envoy/infra
+      # The live tests build container images on this runner's disk, and a job that runs out of
+      # space says only that it did. The pair around the step measures it: `start` prints what
+      # each file system the job writes to has free and leaves a sampler watching the one that
+      # holds /tmp, `report` stops the sampler and prints the free space the step began with,
+      # the least it ever had and the difference, with `margin short` when the step used more
+      # than half of what it started with (dispatch://INFRA-1085). The report prints and never
+      # fails the job: this is the measurement, not a new gate. The two steps share their state
+      # through a file under $RUNNER_TEMP rather than $GITHUB_ENV, which every later step of the
+      # job would inherit and check-ci-filters.sh treats as reaching the job's go commands.
+      - name: Start the disk watch over the live tests
+        run: .github/scripts/disk_watch.py start --path /tmp --state "$RUNNER_TEMP/disk-watch.json"
       - name: Live tests of envoy-infra's host:Listener
         run: go test -tags pulumilive -v -timeout 15m ./host/
         working-directory: packages/envoy/infra
         env:
           ENVOY_INFRA_DOCKER_PLUGIN: ${{ steps.docker-plugin.outputs.tarball }}
+      - name: Report the disk the live tests used
+        if: always()
+        run: .github/scripts/disk_watch.py report --state "$RUNNER_TEMP/disk-watch.json"
       # The schema carries both of the things the release build stamps into the plugin: the
       # version, and the download URL .github/scripts/repo-paths.sh derives from the repository
       # the run is in (release-envoy-infra.yaml's "Derive the plugin's download URL" and its

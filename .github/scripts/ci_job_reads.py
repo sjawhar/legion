@@ -775,6 +775,9 @@ GATES = [
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
         (".github/scripts/repo-paths.sh",
          f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
+        (".github/scripts/disk_watch.py",
+         f"{at('envoy-smoke', 'Start the disk watch over the live tests')} and "
+         f"{at('envoy-smoke', 'Report the disk the live tests used')} run it"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[
