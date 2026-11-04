@@ -27,11 +27,7 @@ func oracleAsWritten(doc *Node) *Node {
 
 func oracleWriteNulsAsReplacement(node *Node) {
 	node.Text = nulAsReplacement(node.Text)
-	if !IsTypedBlock(node.Type) {
-		writeNulsInAttrs(node.Attrs)
-	} else if id, ok := node.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
-		node.Attrs[BlockIDAttr] = nulAsReplacement(id)
-	}
+	writeNulsInAttrs(node.Attrs)
 	for _, mark := range node.Marks {
 		writeNulsInAttrs(mark.Attrs)
 	}

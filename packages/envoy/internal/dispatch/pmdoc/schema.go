@@ -386,7 +386,11 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 	case BlockAttributeStringList:
 		var value []string
 		if err := json.Unmarshal([]byte(text), &value); err != nil {
-			return nil, fmt.Errorf("must be a JSON string array: %w", err)
+			legacy, ok := stringListWrittenWithGoEscapes(text)
+			if !ok {
+				return nil, fmt.Errorf("must be a JSON string array: %w", err)
+			}
+			value = legacy
 		}
 		if err := validateAttributeValue(attr, value); err != nil {
 			return nil, err
@@ -397,6 +401,28 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 	default:
 		return nil, fmt.Errorf("has unknown kind %q", attr.Kind)
 	}
+}
+
+// stringListWrittenWithGoEscapes reads a `string[]` attribute a version stored before this reader
+// read an attribute as the browser editor reads one: the writer quoted the value with Go's own
+// quoting then, so a list holding a quote was written with a backslash before the quote's
+// character reference, and the backslash is the value's own text to both parsers now, which no
+// JSON array holds. Such a value is read by taking Go's escapes out once, as that writer put them
+// in, so the document still opens and its next write stores the list as the browser editor reads
+// it. Nothing else is read this way: a value that is no JSON array after that is refused.
+func stringListWrittenWithGoEscapes(text string) ([]string, bool) {
+	if !strings.Contains(text, `\`) {
+		return nil, false
+	}
+	unquoted, err := strconv.Unquote(`"` + strings.ReplaceAll(text, `"`, `\"`) + `"`)
+	if err != nil {
+		return nil, false
+	}
+	var value []string
+	if err := json.Unmarshal([]byte(unquoted), &value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 func defaultAttributes(typ BlockTypeSchema) Attrs {
