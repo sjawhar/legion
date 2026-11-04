@@ -4394,6 +4394,13 @@ A grant ends for good when a release finds its secret's kind changed (a moved so
 a change reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
 `policy.Kinds`, `ValidKind`, `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES` separates its entries, a form an AWS tag value and a Secret Manager annotation both hold;
 a comma is refused `ErrGitHubOwnersComma`), and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`) the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and `agent-secrets secret` create and retag all apply.
+The kinds are `github-app` (installation tokens from the stored App key), `google-login` (an access token from the stored authorized-user credential) and `azure-login` (`secrets.AzureLogin`, in `internal/broker/secrets/azurelogin.go`).
+An Azure login stores only `{"tenant_id":"<tenant>","client_id":"<client>"}` and releases JSON with those ids, `federated_token` and `expires_at` (RFC3339 UTC from the JWT `exp`).
+`BROKER_AZURE_TOKEN_FILE` names the broker pod's projected ServiceAccount token, default `/var/run/secrets/azure/tokens/azure-identity-token`, read anew on every release, not at boot.
+An unreadable, malformed or expired token refuses that release as `ErrMintUpstream`; a malformed stored identity is `ErrMintStoredValue`, and neither error quotes token bytes, stored fields or file paths.
+The deployment mounts a read-only projection in the broker container alone, with audience `api://AzureADTokenExchange` and a one-hour lifetime, and only one Entra identity trusts the subject: the released token can sign in to every identity that trusts it.
+Entra verifies the token during the caller's exchange; the broker reads its own trusted mount to determine expiry, not to authenticate a caller.
+`agent-secrets secret` create and retag validation and help take their accepted kinds from `policy.Kinds`.
 A `github-app` secret whose `github-owners` names no account is refused `github-owners-missing`, and one whose list holds a comma `github-owners-malformed`.
 `Secret.MaxGrant` is a `time.Duration` (0:
 none) and `Secret.GitHubOwners` the lowercased, sorted, single-spaced list as one string, so a `Secret` compares equal to an unchanged reread of itself.

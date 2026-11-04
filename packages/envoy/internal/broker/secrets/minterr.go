@@ -2,9 +2,9 @@ package secrets
 
 import "errors"
 
-// MintRequest is one release's input to a minter (GitHubApp.Mint, GoogleLogin.Mint): the secret's
-// stored value, and the policy's facts about it a minter needs. GitHubOwners is a github-app
-// secret's github-owners tag as lowercase logins; every other kind leaves it nil. GitHubNarrowing
+// MintRequest is one release's input to a minter: the secret's stored value, and the policy's
+// facts about it a minter needs. GitHubOwners is a github-app secret's github-owners tag as
+// lowercase logins; every other kind leaves it nil. GitHubNarrowing
 // is the narrowing a release asked for, nil for the owner-wide tokens; only the github-app minter
 // reads it.
 type MintRequest struct {
@@ -40,9 +40,9 @@ type GitHubNarrowing struct {
 // cannot be released or revoked.
 const MaxNarrowedRepositories = 100
 
-// The classes of a minter's failure (GitHubApp.Mint, GoogleLogin.Mint). Every error a minter
-// returns wraps exactly one, so the broker's log names the class an operator acts on without
-// reading the message, which never holds the stored value or a token.
+// The classes of a minter's failure. Every error a minter returns wraps exactly one, so the
+// broker's log names the class an operator acts on without reading the message, which never
+// holds the stored value or a token.
 var (
 	// ErrMintStoredValue: the secret's stored value cannot be minted from (it does not decode, its
 	// key does not parse, it names no App id). Its owner stores a new value.
@@ -61,8 +61,9 @@ var (
 	ErrMintNarrowingRefused = errors.New("the narrowing cannot be served")
 	// ErrMintUpstream: GitHub or Google could not be asked or answered no usable reply (the network,
 	// a 5xx, a rate limit, a body past its cap or one that does not decode, a token GitHub describes
-	// as wider than the narrowing asked, which GitHubApp.Mint revokes at GitHub before it refuses).
-	// The broker's operator looks at egress and the upstream's status.
+	// as wider than the narrowing asked, which GitHubApp.Mint revokes at GitHub before it refuses),
+	// or the broker's Azure projected token is unreadable, malformed or expired.
+	// The broker's operator looks at the projected volume, egress and the upstream's status.
 	ErrMintUpstream = errors.New("the upstream could not be asked")
 )
 

@@ -41,6 +41,18 @@ Current secret names:
 - `ENVOY_SLACK_SIGNING_SECRET`
 - `ENVOY_GITHUB_WEBHOOK_SECRET`
 
+The secrets broker (`cmd/broker`) supports these kinds for `agent-secrets secret create --kind` and `secret retag --kind`:
+
+- `github-app`: stores an App id and private key; releases installation tokens for its listed GitHub owners.
+- `google-login`: stores an `authorized_user` credential; releases a Google access token, not the refresh token.
+- `azure-login`: stores `{"tenant_id":"<tenant>","client_id":"<client>"}`; releases JSON with `tenant_id`, `client_id`, `federated_token` and `expires_at` (RFC3339 UTC, from the token's JWT `exp`).
+  Each release reads the broker pod's projected ServiceAccount token from `BROKER_AZURE_TOKEN_FILE`, default `/var/run/secrets/azure/tokens/azure-identity-token`.
+  Unreadable, malformed or expired tokens refuse the release; token bytes never enter an error or log.
+  Mount the token read-only in the broker container alone, with audience `api://AzureADTokenExchange` and a one-hour lifetime.
+  Exactly one Entra identity may trust that ServiceAccount subject, since a released token can sign in to every identity that trusts it.
+
+Without a kind, the broker releases the stored value unchanged.
+
 ## Layout
 
 - `internal/contracts/generated.go` — generated Go contract output from `packages/contracts/scripts/gen-go.ts`

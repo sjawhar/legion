@@ -88,6 +88,23 @@ func TestLoadRequiresMachineLoginURL(t *testing.T) {
 	}
 }
 
+func TestLoadKeepsTheAzureProjectedTokenPathForEachRelease(t *testing.T) {
+	for _, row := range []struct{ configured, want string }{
+		{"", "/var/run/secrets/azure/tokens/azure-identity-token"},
+		{"/not-mounted-at-boot/azure-token", "/not-mounted-at-boot/azure-token"},
+	} {
+		e := validEnv()
+		e["BROKER_AZURE_TOKEN_FILE"] = row.configured
+		cfg, err := Load(env(e))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.AzureTokenFile != row.want {
+			t.Errorf("AzureTokenFile = %q, want %q", cfg.AzureTokenFile, row.want)
+		}
+	}
+}
+
 // TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
 // that carries a credential and is refused names the variable and the value as
 // redact.NotPrinted, never the user name, password or query; a clean refused value is named as

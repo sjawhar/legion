@@ -1,0 +1,10 @@
+kind: Added
+body: >-
+  Add the azure-login broker secret kind: store only an Entra tenant and client id,
+  then release the broker pod's current projected ServiceAccount token with its
+  expiry. BROKER_AZURE_TOKEN_FILE selects the token file, read anew on each release;
+  unreadable, malformed or expired tokens are refused without logging their bytes.
+  agent-secrets secret create and retag accept the kind and list it in their help.
+time: 2026-11-04T04:47:16Z
+custom:
+  Issue: pr2750
