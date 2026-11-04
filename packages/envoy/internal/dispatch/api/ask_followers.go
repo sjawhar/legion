@@ -115,10 +115,10 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 			return
 		}
 		// The session this credential acts as, where it acts as one, is bearerSessionActor's
-		// own answer and nothing read a second way: the session a broker-issued token proved,
-		// else the one the body names, as that call would record it. A credential that acts as
-		// the addressed session follows it as it always did, recorded as that session, since
-		// that is its own act and no person's; nothing of what a session reads back changes.
+		// own answer: the session a broker-issued token proved, else the one the body names, as
+		// that call records it. A credential that acts as the addressed session follows it as it
+		// always did, recorded as that session, since that is its own act and no person's;
+		// nothing of what a session reads back changes.
 		acting, actingErr := bearerSessionActor(r, actor, input.Actor)
 		switch {
 		case actingErr == nil && acting.ID == sessionID:

@@ -97,14 +97,16 @@ type Actor struct {
 	Credential *Credential `json:"-"`
 }
 
-// Recorded is the actor as a write records it: the request's credential dropped. Dispatch
-// compares a stored actor with the caller's using == — a comment's author against the caller
-// editing it, a room's connected writers against the one that edited — and a stored actor was
-// decoded from JSON, which carries no credential, so an actor a handler records or compares
-// must carry none either. Nothing a handler records carries one: actorFrom drops it here,
-// bearerSessionActor builds a session actor without it, and actingPerson answers the person
-// with its Act alone. A layer that needs the request's own credential reads it from
-// optionalActor (callerHoldsScope).
+// Recorded is the actor as a write records it: the request's credential dropped. A stored actor
+// is decoded from JSON, which carries no credential, so the credential never reaches a row.
+// Dispatch decides "the same writer" by kind and id (SameAs); the one == left is the document
+// rooms' lost-write notice (docs/lostedit.go), so an actor handed to the document service must
+// carry none. actorFrom drops it here, bearerSessionActor builds a session actor without it, and
+// actingPerson answers the person with its Act alone. The handlers that record optionalActor's
+// own actor for a browser caller (messages.go, message_delivery.go, comment_delivery.go,
+// issue_claim.go) keep the cookie's credential in memory and hand that actor to no document
+// write. A layer that needs the request's own credential reads it from optionalActor
+// (callerHoldsScope).
 func (a Actor) Recorded() Actor {
 	a.Credential = nil
 	return a

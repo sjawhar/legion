@@ -186,7 +186,7 @@ func tokenScopes(w http.ResponseWriter, actor model.Actor, requested *[]string) 
 	if requested == nil {
 		return callerScopes(actor), true
 	}
-	// At most the two scopes this deployment knows, whatever the body holds: an unknown word is
+	// At most the scopes this deployment knows, whatever the body holds: an unknown word is
 	// refused and a repeat is folded, so a long array buys no room.
 	scopes := make([]string, 0, len(model.Scopes))
 	for _, scope := range *requested {
