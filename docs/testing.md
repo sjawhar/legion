@@ -45,12 +45,16 @@ rather than beside the module's other Postgres-backed packages: together they sh
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
-`packages/daemon/internal/daemon` is the daemon's such package. On CI's runners it took up to
-694 s without `-race`, under the test job's `go test -timeout 20m ./...`, and 306 to 600 s under
-`-race`, where go test's own ten minutes ran out on main at 2201840998; the test job's race step
-gives it 30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared
-devbox), so a command that runs the whole package, alone or in a pattern that includes it,
-passes `-timeout 30m`:
+`packages/daemon/internal/daemon` is the daemon's slow, Postgres-backed package. The test job now
+runs it only under the race detector, in its race step, once per job; the plain step ("Test the Go
+daemon") leaves it out, and `go vet -tags e2e ./...` in the `typecheck` job still compiles it
+without the detector. On CI's runners, while the plain step still ran it, it took at most 625 s
+there over the 49 green main `test` jobs of 2026-11-01 to 2026-11-03, and up to 733.581 s in the
+jobs whose race step timed out (job 125688799071). Under `-race` it took 306 to 570 s over the 51
+green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709 measured, on main and on
+pull requests, and ran go test's own ten minutes out on main at 2201840998; the race step gives it
+30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared devbox), so a
+command that runs the whole package, alone or in a pattern that includes it, passes `-timeout 30m`:
 
 ```sh
 cd packages/daemon

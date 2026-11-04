@@ -470,9 +470,11 @@ jobs:
               - '.github/actions/install-jj/**'
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
-            # What `go test ./...` in packages/daemon reads, for the test job's "Test the Go daemon"
-            # step. The packages it compiles, the Dispatch server
-            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what its tests read
+            # What the test job's two Go steps read together — the plain step, which tests every
+            # package of packages/daemon but the four concurrent ones, and the race step, which
+            # tests those four — so the filter still covers the whole module's closure. The
+            # packages they compile, the Dispatch server
+            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what their tests read
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
@@ -543,7 +545,8 @@ jobs:
               # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
               # scripts/build-inputs.txt matches.
               - '.github/workflows/claude-envoy-rebuild.yaml'
-            # The daemon's tests (`go test ./...`, the -race subset, and the daemon
+            # The daemon's tests (every package once: the four concurrent packages under the race
+            # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
               - '.github/workflows/ci.yaml'
@@ -1732,10 +1735,14 @@ jobs:
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
-    # prints the dump that names it: about 5 minutes of the steps before the Go daemon's, then
-    # that step's 20 minutes and the race step's 30, then a minute for the Stage 1 proof, which
-    # is 56.
-    timeout-minutes: 60
+    # prints the goroutine dump that names it. A step's worst case is therefore its largest
+    # measured green duration plus its own -timeout, not its compile plus its -timeout: 325 s of
+    # setup before the plain step starts, then that step's 839 s (measured while it still ran
+    # internal/daemon, so an upper bound for it now) and its 15 minutes, then the race step's
+    # 694 s and its 30, then 13 s for the steps after it and 7 s for the cache save that runs only
+    # on a miss, which is 4578 s, or about 76 minutes (dispatch://INFRA-1052 measured them over the
+    # 30 newest counted test jobs of main push runs).
+    timeout-minutes: 80
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1949,16 +1956,23 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare --user --map-root-user true
 
+      # The step runs every package of the module except the four the race step below tests, so
+      # each of those runs once per job, under the detector. `set -o pipefail` is what makes a
+      # failed go list, or a pattern that matches every package, fail the step rather than pass it
+      # with nothing tested.
       - name: Test the Go daemon
-        run: go test -count=1 -timeout 20m ./...
+        run: |
+          set -o pipefail
+          go list ./... | grep -Ev '/(internal/daemon|internal/record|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
       # that share state with the intake's commit hooks and the API, so the packages the lanes and
-      # their store live in run again under the race detector; so do the session proxy and the
-      # launcher that wires it, whose accept loop, copy pairs, pair tracking and bounded drain share
-      # state across goroutines. The detector needs cgo, which the runners have gcc for. The lane
-      # tests hold a fake clock, so they are deterministic under it.
+      # their store live in run under the race detector once per job, the plain step above leaving
+      # them out; so do the session proxy and the launcher that wires it, whose accept loop, copy
+      # pairs, pair tracking and bounded drain share state across goroutines. The detector needs
+      # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
+      # deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
       # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
