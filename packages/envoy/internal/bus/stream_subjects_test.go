@@ -40,7 +40,9 @@ func TestSubjectsCaptureMatchesByNATSWildcardRules(t *testing.T) {
 }
 
 // ReadStreamSubjects answers from the server, so a subject another build added to the stream after
-// this binary started is in the list, though this binary does not compile it in.
+// this binary started is in the list, though this binary does not compile it in. What it reads at
+// the start is every subject the stream itself carries (streamCarriedSubjects), the listener's
+// kept lane included, which is one more than the consumer filters take (streamSubjects).
 func TestReadStreamSubjectsReadsASubjectAddedAtRuntime(t *testing.T) {
 	client, err := ConnectOwningStream([]string{testnats.URL(t)}, WithReplicas(1))
 	if err != nil {
@@ -48,8 +50,8 @@ func TestReadStreamSubjectsReadsASubjectAddedAtRuntime(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 	const added = "notifications.twobuild.>"
-	if subjects, err := ReadStreamSubjects(client.JS()); err != nil || !slices.Equal(subjects, streamSubjects) {
-		t.Fatalf("ReadStreamSubjects at start = %q, %v; want %q", subjects, err, streamSubjects)
+	if subjects, err := ReadStreamSubjects(client.JS()); err != nil || !slices.Equal(subjects, streamCarriedSubjects) {
+		t.Fatalf("ReadStreamSubjects at start = %q, %v; want %q", subjects, err, streamCarriedSubjects)
 	}
 
 	info, err := client.JS().StreamInfo(Stream)

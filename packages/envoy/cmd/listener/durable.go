@@ -232,12 +232,21 @@ func waitWithin(ctx context.Context, wg *sync.WaitGroup) bool {
 
 // durableNeedsDelivery reports whether the stored message on subject, stored at stream sequence
 // storedSeq, may need this listener's durable path, read from the subject alone, and when it does
-// not, how many sessions of this machine take it another way (takesStoredMessagesItself). A role
+// not, how many sessions of this machine take it another way (takesStoredMessagesItself). The
+// listener's own kept lane (bus.KeptTopicPrefix) never needs it and counts nothing: a kept copy
+// carries the role topic its sender published it on, so a listener that delivered it from the
+// durable would arbitrate that role message again on every pod of every machine, where the copy
+// is the role's next holder's alone and the kept lane's drain hands it over (role_keep.go). The
+// durable takes every subject the stream stores (consumerFilterAll), so this is what keeps the
+// lane out of delivery, rather than a filter no build-independent durable can carry. A role
 // lane's subject always needs it. A session's agent subject does unless the session takes it
 // another way or is another listener's (agentSubjectNeedsDelivery). Any other subject does when it
 // matches a topic of an interest of this machine (the registry's subject index) whose session does
 // not take it another way; with none, the fan-out would deliver it to nobody and report nothing.
 func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string, storedSeq uint64) (needed bool, skipped int) {
+	if strings.HasPrefix(subject, bus.KeptTopicPrefix) {
+		return false, 0
+	}
 	if strings.HasPrefix(subject, contracts.RoleTopicPrefix) {
 		return true, 0
 	}

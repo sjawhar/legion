@@ -93,7 +93,7 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	if origin != "" && bus.StreamCaptures(exception.Topic) {
 		// One stored copy however many listeners raise it, each reading the same message from its
 		// own durable: they agree on the origin, where they would each mint their own message id.
-		if err := client.PublishStoredAs(context.Background(), exception, "exception."+reason+"."+origin); err != nil {
+		if err := client.PublishStoredAs(context.Background(), exception.Topic, exception, "exception."+reason+"."+origin); err != nil {
 			return fmt.Errorf("publish delivery exception: %w", err)
 		}
 		return nil

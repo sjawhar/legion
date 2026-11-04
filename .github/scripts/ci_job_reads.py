@@ -337,8 +337,8 @@ def go_notices_runs():
 # simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
-go test -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m"""
+go test -count=1 -timeout 20m ./internal/dispatch/api
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -511,8 +511,9 @@ GATES = [
         ("skills/dispatch-writing-specs/SKILL.md", "packages/contracts/src/dispatch-tools.test.ts:1056 existsSync(skills/dispatch-writing-specs/SKILL.md)"),
         (f"{ENVOY}/internal/dispatch/text/testdata/dispatch-href-references.json", "packages/contracts/src/dispatch-href.test.ts:49-53"),
         (f"{ENVOY}/internal/dispatch/text/testdata/dispatch-text-references.json", "packages/contracts/src/dispatch-text-references.test.ts:10-14"),
-        (f"{ENVOY}/internal/contracts/generated.go", "packages/contracts/scripts/gen-go.test.ts:6,48-50 and gen-go.ts:516 (--check compares the committed file)"),
-        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,48-50 and gen-go.ts:520"),
+        (f"{ENVOY}/internal/contracts/generated.go", "packages/contracts/scripts/gen-go.test.ts:6,55-59 and gen-go.ts's outputs list (--check compares the committed file)"),
+        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,55-59 and gen-go.ts's outputs list"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema_generated.go", "packages/contracts/scripts/gen-go.test.ts:8-11,55-59 and gen-go.ts's outputs list (the block schema's shape, generated from schemas/block-schema.schema.json)"),
     ) + biome(at("contracts", "Lint contracts")) + bun_job("contracts") + CI_SELF),
 
     gate("conflicts_script", "conflicts-script", reads=reads(
@@ -638,7 +639,7 @@ GATES = [
     gate("envoy_go", "envoy-go", runs=[
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -tags natslive ./internal/testnats/", ENVOY,
+        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
                  ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
@@ -647,7 +648,7 @@ GATES = [
         # on the service's one checkpointer beside the other package binaries), then ./... but it
         # and internal/integration, which the integration step tests: counted as all of ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
+            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # The untagged kill-check guard by name, out of the package the unit step above already
@@ -664,9 +665,9 @@ GATES = [
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
         ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
-        ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts:65 reads schemas/envelope.schema.json"),
-        (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts:4-27 imports ../src/*"),
-        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts:520,528 --check compares it"),
+        ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts's envelopeFile and blockSchemaFile read schemas/"),
+        (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts's imports of ../src/*"),
+        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts's outputs list: --check compares it"),
         (f"{ENVOY}/internal/dispatch/pmdoc/gen/**", f"{at('envoy-go', 'Check pmdoc fixtures are up to date')} (gen.ts --check)"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/gen.ts:4-5 imports @legion/proof-editor (exports -> src/lib.ts, src/lib-headless.ts)"),
         (".github/actions/pull-test-images/**", at("envoy-go", "Pull test container images")),

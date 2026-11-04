@@ -1,5 +1,0 @@
-kind: Changed
-body: The serving clock's "could not beat" warning now names the clock it is about, with the process id its row carries, so a log carrying several brokers tells one clock's run of failures from another's.
-time: 2026-11-03T06:02:09.959507722Z
-custom:
-    Issue: pr2699

@@ -37,12 +37,12 @@
 # that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no
 # argv and no transcript.
 # The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through the App key runner
-# (LEGION_E2E_APP_KEY_RUNNER, `agent-secrets` by default; this
-# deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
-# lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
-# lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
-# shell), and the smoke repository
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through the secrets broker's
+# github-app secrets (`agent-secrets`; this deployment's own pair unless the four
+# LEGION_E2E_*_APP_* inputs name another deployment's, lib/github-apps.sh; each App's installation
+# tokens are released to the daemon's token_command and once to lib/app-logins.ts, which proves
+# they are its id's App's before the run writes anything, never in this shell), and the smoke
+# repository
 # sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
 set -Eeuo pipefail
 
@@ -562,7 +562,7 @@ if [ "$model_route" = key-file ]; then
 fi
 refuse_leftovers legion-e2ecc
 for tool in go docker jq curl python3 tmux bun mise gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-command -v "$app_key_runner" >/dev/null || fail "$app_key_runner, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required"
+command -v agent-secrets >/dev/null || fail "agent-secrets, the secrets broker's client each App's token_command runs, is required"
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
@@ -586,7 +586,7 @@ write_github_apps implement review
 # that build refuses any other (assertPinnedBun, LEGION-568). Checked here, before the first bun this
 # run starts (lib/app-logins.ts, just below), so a devbox whose version manager defaults to another
 # release is refused by name rather than at the build line in the rig. After write_github_apps, so
-# the App keys' own checks above run whatever the Bun.
+# the App inputs' own checks above run whatever the Bun.
 bun_pin=$(tr -d '[:space:]' <"$root/.bun-version")
 bun_running=$(bun --version 2>/dev/null | tr -d '[:space:]') || bun_running=
 [ "$bun_running" = "$bun_pin" ] ||

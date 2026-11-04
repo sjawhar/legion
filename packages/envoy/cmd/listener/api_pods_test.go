@@ -201,7 +201,9 @@ func TestARoleSetWhoseRegistrationWriteLosesEveryRaceAnswers503(t *testing.T) {
 func TestAHeartbeatAndARoleSetKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	client := setupPublishTestClient(t)
-	d := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	// The role set below lands, and a claim that lands hands its role's kept lane a drain
+	// (runKeptRoleDrain), so these deps carry the delivery configuration that drain runs on.
+	d := withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	const sessionID = "ses_newer_build"
 	bucket := func(name string) nats.KeyValue {
 		t.Helper()

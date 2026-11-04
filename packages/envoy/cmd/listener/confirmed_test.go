@@ -46,11 +46,14 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 	return confirmed
 }
 
-// withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// delivery config over d's stores with a delivery ledger, startRoleForward(client) as the
-// forward, a logger and a delivered counter, and a confirmation record. The ledger is this
-// process's own (dedupe.Memory), as a listener without the listener state bucket keeps it.
-func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
+// withRoleClaimDrain gives d the delivery configuration a route runs a kept-lane drain on, as main
+// wires it: a config over d's stores with the delivery ledger the drain takes its forward's
+// attempt from (walkKeptRole), startRoleForward(client) as the forward, a logger, a delivered
+// counter, the drain's kept-expired counter and the guards two drains of one role take
+// (roleKeepGuards). The ledger is this process's own (dedupe.Memory), as a listener without the
+// listener state bucket keeps it. POST /v1/roles/set hands a claim's handover this config
+// (runKeptRoleDrain), so a test that claims a role through that route needs it.
+func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {
@@ -66,7 +69,17 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 		ledger:            dedupe.NewMemory(deliveryHandlingLimit + ledgerTakeoverMargin),
 		logger:            logging.NewWithWriter("test", logs),
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
+		roleKeptExpired:   metrics.New().NewCounter("test_role_kept_expired", "test"),
+		roleKeepDrains:    newRoleKeepGuards(),
 	}
+	return d
+}
+
+// withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: the
+// delivery config a kept copy's drain runs on (withRoleClaimDrain) and a confirmation record.
+func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
+	t.Helper()
+	withRoleClaimDrain(t, d)
 	d.confirmed = newConfirmedRecord(t)
 	return d
 }

@@ -1135,6 +1135,7 @@ func main() {
 	messagesReceived := met.NewCounter("envoy_messages_received_total", "Total messages received by the listener")
 	messagesDelivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
 	messagesNAKed := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
+	roleKeptExpired := met.NewCounter("envoy_role_kept_expired_total", "Kept role messages a claim's drain dropped unforwarded, the stream having held them longer than the keep window")
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
 	// The CI summary loop runs only beside the GitHub webhook route (Phase 6b2), so only a listener
 	// that mounts it carries the gauge the loop sets.
@@ -1352,6 +1353,7 @@ func main() {
 		messagesDelivered: messagesDelivered,
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
+		roleKeptExpired:   roleKeptExpired,
 
 		unplaceableRetryWindow: unplaceableRetryWindow,
 		// One deferral set for the life of the process, shared by construction by every handler
@@ -1360,6 +1362,12 @@ func main() {
 		// so no handler opens a second budget beside the first (unplaceableDeferrals,
 		// unplaceable_delivery.go).
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		// One guard per role for the life of the process, held for a whole handover of that
+		// role's kept lane, so the handovers a claim, a keep and the sweep start never walk the
+		// lane together, and the sweep can tell a lane this listener is draining already
+		// (roleKeepGuards, role_keep.go). Every handler and route built from this one value
+		// shares it, as they share the deferral set above.
+		roleKeepDrains: newRoleKeepGuards(),
 	}
 	// The role lane's forwards run off its handler (roleForwarder): the handler resolves each
 	// role message's holder and hands the forward over, and the forwards to one holder are
@@ -1462,6 +1470,17 @@ func main() {
 			// The purge is idempotent. The JetStream context comes from the client at each pass,
 			// since a replaced connection reassigns it.
 			registry.StartInterestMarkerCollector(ctx, client.JS, 5*time.Minute),
+			// The sweep hands over the kept role lanes nothing is draining. A handover of a
+			// role's kept lane runs in a goroutine of the pod that started it, and only a claim
+			// or a keep starts one, so a pod restarted or replaced mid-handover leaves the
+			// copies behind its cursor for a claim that seldom comes inside roleKeepWindow: a
+			// live holder claims no second time. This is the backstop over them, on the reapers'
+			// cadence. The lanes and their cursors are the stream's, so the pod receiving the
+			// durable sweeps for the machine and its standby runs no pass of its own; whichever
+			// pod a claim or a keep reaches still starts that role's handover itself. It costs
+			// one stream read a pass while no role has a kept lane (startKeptRoleSweep,
+			// role_keep_sweep.go).
+			startKeptRoleSweep(ctx, deliveryConfig, 5*time.Minute),
 		}
 		// The CI summary loop, on a listener that opened the CI store, emits one pr.<n>.checks
 		// event once a commit's checks settle, for every commit of a pull request, its head or
