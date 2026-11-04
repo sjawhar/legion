@@ -1,5 +1,31 @@
 # Changelog
 
+## [29.5.0] - 2026-11-04
+
+### Added
+
+- Add the azure-login broker secret kind: store only an Entra tenant and client id, then release the broker pod's current projected ServiceAccount token with its expiry. Only the secret named by BROKER_AZURE_LOGIN_SECRET may release it, and it must be human tier with a person's approval for that name, never an automatic grant; unset, Azure releases are disabled. Other secrets retagged to azure-login, or the configured secret retagged to agent tier, release no token. BROKER_AZURE_TOKEN_FILE selects the token file, read anew on each release; unreadable, malformed or expired tokens are refused without logging their bytes. agent-secrets secret create and retag accept the kind and list it in their help.
+
+## [29.4.1] - 2026-11-04
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.1. Browser edits travel as smaller,
+  Yjs-shaped updates (an update carries only its own deletions, and a transaction that changes
+  nothing and keeps nothing for later sends and stores nothing); a joining editor gets the
+  document once instead of twice; a browser that stops reading is closed once 128 MiB is queued
+  for it instead of holding memory without bound; a room is no longer closed while a write, a
+  read or a browser's join is inside it, so closing an issue, evicting a room or shutting down
+  waits for them and then closes it; and a browser's edit that reaches the server ahead of the
+  edit it builds on is stored at once, even when the update then fails, so a restart before
+  that earlier edit arrives no longer loses it. The stored-order check judges each parked row
+  independently: a later update that carries its newly parked content again is accepted, a
+  resolved row whose parked content is not carried again is a mismatch even while unrelated
+  edits still wait, and an unresolved row counts as awaiting. Replay keeps the part that
+  integrated immediately and compares actual parked content.
+  Every write fork reads its client ID after decoding its history, so inserted text still gets
+  the lost-write check when that decode changes the ID.
+
 ## [29.4.0] - 2026-11-04
 
 ### Added
