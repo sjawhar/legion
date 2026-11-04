@@ -149,7 +149,18 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	load := value.(*roomLoad)
 	instance := load.start()
 	listResident(&s.instances, live, instance)
-	runtime.AddCleanup(live, func(load *roomLoad) { s.roomLoads.CompareAndDelete(room, load) }, load)
+	// The cleanup holds the service weakly because runtime.AddCleanup keeps a cleanup's closure
+	// alive for as long as the object it is attached to, and the service reaches every resident
+	// room document through ygo's room table (s.srv): a closure holding the service strongly
+	// would be a cycle through live, which would then never be collected, and nor would anything
+	// it holds. The nil check skips the delete only where the service went first, and a service
+	// that is gone has no map to delete from (dispatch://INFRA-1085).
+	owner := weak.Make(s)
+	runtime.AddCleanup(live, func(load *roomLoad) {
+		if s := owner.Value(); s != nil {
+			s.roomLoads.CompareAndDelete(room, load)
+		}
+	}, load)
 	return instance
 }
 
