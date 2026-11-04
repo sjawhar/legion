@@ -158,9 +158,6 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if s.afterReadWarm != nil {
-			s.afterReadWarm(artifactID)
-		}
 		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
 			select {
 			case updates <- struct{}{}:
@@ -173,6 +170,10 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return Anchored{}, err
+	}
+	// The room can be evicted from here on: no close retires a room while an Apply is inside it.
+	if s.afterReadWarm != nil {
+		s.afterReadWarm(artifactID)
 	}
 
 	timer := time.NewTimer(s.markWait)

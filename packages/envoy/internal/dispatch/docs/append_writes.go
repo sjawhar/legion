@@ -11,12 +11,14 @@ import (
 
 // browser is what a room's own append of one of its updates carries, nil for every other append
 // (BrowserAppend); flush is the run of a room instance's updates the transaction is storing, when
-// this append is one of them (RoomFlush); and roomLocked is whether the caller already holds
+// this append is one of them (RoomFlush); roomLocked is whether the caller already holds
 // room's advisory lock, so a second acquisition inside the transaction would cost a round trip
 // and grant what the caller has: appendUpdate takes the session-level lock on this connection
 // before the transaction begins and keeps it past the commit (withRoomLock), and every append of
-// a flush runs under a lock its caller took (AppendRoomUpdateTx, Service.flushThrough's rule).
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend, flush *RoomFlush, roomLocked bool) (persistence.Version, error) {
+// a flush runs under a lock its caller took (AppendRoomUpdateTx, Service.flushThrough's rule);
+// and owes is whether the update marks the document owing a settlement, false only for a room's
+// parked bytes, which change nothing a settlement reads (AppendParkedUpdate).
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend, flush *RoomFlush, roomLocked, owes bool) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -125,6 +127,12 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 			)
 			select `+announceDocumentHead("$5::text", "$2::bigint", "$6::text"),
 			room, int64(version), update, contentChanged, room, p.processID, latest > 0)
+	}
+	if !owes {
+		if err := writes.send(ctx, tx); err != nil {
+			return 0, err
+		}
+		return version, nil
 	}
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one

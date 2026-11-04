@@ -158,6 +158,7 @@ var settingsExcluded = map[string]string{
 	"GitHubApp.PrivateKey":          "a credential: Config holds the PEM resolved whatever the file's source",
 	"GitHubApp.PrivateKeyCommand":   "the source of a credential",
 	"GitHubApp.PrivateKeySecret":    "the source of a credential",
+	"GitHubApp.TokenCommand":        "the source of a credential: the command that prints the App's installation tokens",
 	"ProviderKey.Secret":            "the source of a credential: a secretsd key or a providers Secret key",
 	"ProviderKey.File":              "the path of a file holding a credential",
 	"Config.OperatorTokenFile":      "the path of a file holding a credential",
@@ -249,7 +250,7 @@ var settingsFixturePlanted = []string{
 
 // settingsForbiddenKeys are the legion.yaml keys that never appear in `settings`, at any depth.
 var settingsForbiddenKeys = []string{
-	"postgres_dsn", "private_key", "private_key_command", "private_key_secret",
+	"postgres_dsn", "private_key", "private_key_command", "private_key_secret", "token_command",
 	"kubeconfig", "context", "session_dsn_secret", "session_database", "pod", "env", "volumes", "volume_mounts", "service_account",
 }
 

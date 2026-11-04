@@ -64,12 +64,14 @@
 #     container on the devbox's own network (`docker run --network host --add-host <that
 #     name>:127.0.0.1`), a static build of it in a minimal image pinned by digest, as the devbox
 #     user, with every file legion.yaml names mounted at its own path and none of the caller's
-#     environment but what the runtime kubeconfig's auth plugin reads, passed by name. The key
-#     runner cannot run there (a broker that checks a process's ancestry finds none across the
-#     container's pid namespace), so prerequisites resolves both App keys on the devbox, through
-#     the runner, into owner-only files of a directory on the devbox user's tmpfs
-#     (XDG_RUNTIME_DIR, which must be the user's own, 0700 and a tmpfs), which the container mounts
-#     read-only and its key commands only read; the run's cleanup removes that directory. Production
+#     environment but what the runtime kubeconfig's auth plugin reads, passed by name. agent-secrets
+#     cannot run there (a broker that checks a process's ancestry finds none across the
+#     container's pid namespace), so prerequisites mints both Apps' installation tokens on the
+#     devbox, through agent-secrets, into owner-only release files of a directory on the devbox
+#     user's tmpfs (XDG_RUNTIME_DIR, which must be the user's own, 0700 and a tmpfs), and a
+#     refresher mints them again every 15 minutes; the container mounts that directory read-only
+#     and its token commands only read it; the run's cleanup stops the refresher and removes the
+#     directory. Production
 #     runs this daemon in a pod, so a static binary in a container is close to how operators run it.
 #     Prerequisites proves that container before the run creates anything. This mode needs docker,
 #     which both modes need anyway, and no root.
@@ -143,22 +145,23 @@
 #   devbox's security group admits from the Legion nodes, and under bridge a free port on the
 #   devbox, which the bridge forwards. There is no default: a default would pick a port another
 #   lane holds, and the repository carries no deployment's own.
-# - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
-#   LEGION_E2E_REVIEW_APP_KEY_NAME (optional) name the two role Apps the run acts as: each App's
-#   numeric id and the store key the key runner resolves to its private key, and
-#   LEGION_E2E_APP_KEY_RUNNER (optional) that runner, `agent-secrets` (the secrets broker's client)
-#   by default (lib/github-apps.sh). Each defaults to this deployment's own, so a run here sets none.
+# - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_SECRET, LEGION_E2E_REVIEW_APP_ID and
+#   LEGION_E2E_REVIEW_APP_SECRET (optional) name the two role Apps the run acts as: each App's
+#   numeric id and the secrets broker github-app secret `agent-secrets` releases its installation
+#   tokens from (lib/github-apps.sh). Each defaults to this deployment's own, so a run here sets
+#   none.
 # - CLAUDE_SANDBOX_E2E_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the
 #   transcript of the run, the daemon's log, the legion.yaml and pod fixture the run wrote, the
 #   implementer's Claude Code transcript as the session table holds it, and the namespace snapshots.
 #
 # Legion's role Apps resolve as the tmux proof's do (lib/github-apps.sh): under aws-private-ip the
-# daemon runs each App's private_key_command, `<runner> <key name> -- …`, never this shell; under
-# bridge prerequisites runs those commands once on the devbox into owner-only files on the user's
-# tmpfs (resolve_app_keys), and each App's private_key_command is `cat` of its file
-# (write_github_apps --key-dir), which the daemon's container mounts read-only, for the run's
-# lifetime alone. Either way prerequisites proves
-# each key is its id's App against GitHub's GET /app (lib/app-logins.ts) before the run writes
+# daemon runs each App's token_command, `agent-secrets <secret> … -- …`, never this shell; under
+# bridge prerequisites mints the releases once on the devbox into owner-only files on the user's
+# tmpfs (mint_app_tokens), a refresher mints them again every 15 minutes
+# (start_app_token_refresher), and each App's token_command is `cat` of the file of the owner the
+# daemon asks for (write_github_apps --token-dir), which the daemon's container mounts read-only,
+# for the run's lifetime alone. Either way prerequisites proves each App from its token against
+# GitHub (GraphQL's viewer, then GET /apps/<slug>, lib/app-logins.ts) before the run writes
 # anything; legion.yaml's github_apps is the block proved. The proof human is the devbox's ordinary
 # gh acting as sjawhar-agent[bot] (require_proof_human), so run it from the operator's own Oh My Pi
 # session, not a Legion pane, with no personal GH_TOKEN in its environment.
@@ -236,15 +239,16 @@ daemon_log=$evidence/logs/daemon.log
 # The daemon's container under bridge (daemon_run_args): its name, whose prefix and trailing pid
 # refuse_leftovers reads as it reads the other containers', and its image, busybox pinned by digest
 # and pulled through the mirror (AGENTS.md). The daemon is a static binary and needs nothing of an
-# image; the image is there for the `sh` and `cat` each App's private_key_command runs under bridge
-# (lib/github-apps.sh's write_github_apps --key-dir, after resolve_app_keys).
+# image; the image is there for the `sh`, `tr` and `cat` each App's token_command runs under bridge
+# (lib/github-apps.sh's write_github_apps --token-dir, after mint_app_tokens).
 daemon_container="legion-e2eccs-daemon-$$"
 daemon_image=mirror.gcr.io/library/busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
-# app_keys_dir is the directory under XDG_RUNTIME_DIR that prerequisites resolves the two App keys
-# into under bridge (resolve_app_keys), named legion-e2eccs-app-keys.<the driver's pid>.<random> so
-# a later run's prerequisites can tell a dead run's from a live one's, and set before a key is
-# resolved, so cleanup removes whatever part of it a run left. Empty under aws-private-ip.
-app_keys_dir=
+# app_tokens_dir is the directory under XDG_RUNTIME_DIR that prerequisites mints the two Apps'
+# token releases into under bridge (mint_app_tokens, then the refresher), named
+# legion-e2eccs-app-tokens.<the driver's pid>.<random> so a later run's prerequisites can tell a
+# dead run's from a live one's, and set before a release is minted, so cleanup removes whatever
+# part of it a run left. Empty under aws-private-ip.
+app_tokens_dir=
 # How long a planner the driver has told to plan gets to finish, as Stage 4b's plan_seconds: before
 # its handoff it runs its two model-backed plan checks, the gap analyst and up to three plan-review
 # rounds (each a subagent call), so planning takes a whole loop of its own (wait_for_phase). The
@@ -731,16 +735,16 @@ daemon_mount_add() {
 # container the daemon gets. It shares the devbox's network, so the services it dials on loopback
 # and the API and worker stream it binds are the devbox's own, and --add-host maps host, the bridge
 # Service's name legion.yaml carries, to loopback in its own /etc/hosts alone. It runs as the devbox
-# user, so what it writes under $work is that user's and the App key files it reads are its own.
+# user, so what it writes under $work is that user's and the App token files it reads are its own.
 # --init puts docker's reaper at its pid 1, which hands the daemon the TERM docker delivers and
-# reaps whatever a key command or an auth plugin run leaves orphaned, which the daemon at pid 1
+# reaps whatever a token command or an auth plugin run leaves orphaned, which the daemon at pid 1
 # would leave as zombies. $work is mounted read-write at its own path — the static binary,
 # legion.yaml, its state_dir and token files, every path legion.yaml names but the kubeconfig and
-# the App key files — and each path of daemon_mounts, app_keys_dir's among them, read-only at its
+# the App token files — and each path of daemon_mounts, app_tokens_dir's among them, read-only at its
 # own; --mount refuses a source that does not exist rather than making an empty directory of it.
 # Its environment is HOME, a directory of $work's, PATH, and the caller's variables the auth plugin
 # reads, passed by name alone (`-e NAME`, whose value docker takes from its own environment), so no
-# value is on an argv and nothing else of the caller's — the App keys, the key runner's own
+# value is on an argv and nothing else of the caller's — the App secrets, agent-secrets' own
 # settings, the NATS seeds, ANTHROPIC_API_KEY — enters it.
 daemon_run=()
 daemon_passed=()
@@ -774,17 +778,17 @@ exec_credential_said='
   else "kind \(.kind // "none"), apiVersion \(.apiVersion // "none"), status.token \(.status.token | if type == "string" then "of length \(length)" else type end)"
   end'
 # prove_daemon_container is prerequisites' proof of the daemon's container under bridge, before the
-# run creates anything, once resolve_app_keys has written the App key files and write_github_apps
+# run creates anything, once mint_app_tokens has written the App token files and write_github_apps
 # the block that reads them. It resolves what the container mounts beside $work, refusing by name
 # each path it cannot mount: the runtime kubeconfig; the auth plugin that kubeconfig's context's
 # user execs, if it names one, a regular executable found as the daemon finds it (by PATH for a
 # bare name, as client-go looks it up); the devbox's /etc/ssl/certs, for the daemon's HTTPS calls to
-# GitHub; the file GOOGLE_APPLICATION_CREDENTIALS names, if it names one; app_keys_dir; and
+# GitHub; the file GOOGLE_APPLICATION_CREDENTIALS names, if it names one; app_tokens_dir; and
 # LEGION_E2E_DAEMON_CONTAINER_MOUNTS. The container's PATH is the image's /bin, so its `sh` and
 # `cat` win, then the auth plugin's directory. A probe then runs with the daemon's own arguments
 # (daemon_run_args) and must print the devbox user's uid and gid, an /etc/hosts line mapping host
 # to 127.0.0.1, the auth plugin resolved by name at the path the devbox resolves it to, and exit 0
-# for each App's private_key_command of $work/github-apps.yaml, run with its stdout, the key, sent
+# for each App's token_command of $work/github-apps.yaml, run with its stdout, the release, sent
 # to /dev/null. A second run of the same container then runs the auth plugin as client-go runs it —
 # the exec stanza's args and env, KUBERNETES_EXEC_INFO naming its apiVersion — and must read an
 # ExecCredential with a non-empty status.token from it, of which it prints the length alone.
@@ -816,10 +820,10 @@ prove_daemon_container() {
   else
     gac=
   fi
-  [ -n "$app_keys_dir" ] && [ -d "$app_keys_dir" ] ||
-    fail "the App key directory is missing ('${app_keys_dir:-unset}'): resolve_app_keys must run before the daemon's container is proved"
+  [ -n "$app_tokens_dir" ] && [ -d "$app_tokens_dir" ] ||
+    fail "the App token directory is missing ('${app_tokens_dir:-unset}'): mint_app_tokens must run before the daemon's container is proved"
   daemon_mounts=()
-  for mount in "$runtime_kubeconfig" "$plugin" /etc/ssl/certs "$gac" "$app_keys_dir" "${daemon_extra_mounts[@]}"; do
+  for mount in "$runtime_kubeconfig" "$plugin" /etc/ssl/certs "$gac" "$app_tokens_dir" "${daemon_extra_mounts[@]}"; do
     [ -z "$mount" ] || daemon_mount_add "$mount"
   done
   # A variable the container is passed by name whose value is a path (the gcloud config) is useless
@@ -837,12 +841,12 @@ prove_daemon_container() {
   done < <(compgen -e)
   daemon_path=/bin
   [ -z "$plugin" ] || [ "$(dirname "$plugin")" = /bin ] || daemon_path+=":$(dirname "$plugin")"
-  # Each App's key command as the daemon will run it: the text of $work/github-apps.yaml, the block
-  # legion.yaml includes, which write_github_apps wrote as one JSON-quoted line a role.
+  # Each App's token command as the daemon will run it: the text of $work/github-apps.yaml, the
+  # block legion.yaml includes, which write_github_apps wrote as one JSON-quoted line a role.
   for role in implement review; do
-    key_command=$(awk -v role="$role" '/^  [^ ]/ { in_role = ($0 == "  " role ":") } in_role && sub(/^    private_key_command: /, "") { print }' \
+    key_command=$(awk -v role="$role" '/^  [^ ]/ { in_role = ($0 == "  " role ":") } in_role && sub(/^    token_command: /, "") { print }' \
       "$work/github-apps.yaml" | jq -er .) ||
-      fail "$work/github-apps.yaml holds no private_key_command for the $role App"
+      fail "$work/github-apps.yaml holds no token_command for the $role App"
     key_args+=("$role" "$key_command")
     key_commands[$role]=$key_command
   done
@@ -859,10 +863,14 @@ prove_daemon_container() {
       "$2" --help >/dev/null 2>&1; printf "plugin-exec %s\n" "$?"
     fi
     shift 2
+    # The stderr of each token command is cut at 64 KiB, redacted of every GitHub token form, and
+    # only its first 200 characters kept, so a token on it never reaches the transcript, nor does
+    # a command that writes without end fill the shell.
+    set -o pipefail
     while [ "$#" -ge 2 ]; do
-      said=$(sh -c "$2" 2>&1 >/dev/null)
+      said=$(sh -c "$2" 2>&1 >/dev/null | head -c 65536 | sed -E "s/(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/[redacted]/g" | tr "\n" " " | cut -c1-200)
       status=$?
-      printf "key %s %s %s\n" "$1" "$status" "$(printf %s "$said" | tr "\n" " " | cut -c1-200)"
+      printf "key %s %s %s\n" "$1" "$status" "$said"
       shift 2
     done' sh "$host" "$plugin_word" "${key_args[@]}" 2>&1) ||
     fail "the daemon's container ($daemon_image) could not run its probe: $(tr '\n' ' ' <<<"$inside" | cut -c1-300)"
@@ -883,12 +891,14 @@ prove_daemon_container() {
     fail "the daemon's container ran its probe as uid ${got_uid:-<none>} gid ${got_gid:-<none>}, want $(id -u) $(id -g), the devbox user's own"
   awk -v host="$host" '$1 == "127.0.0.1" { for (i = 2; i <= NF; i++) if ($i == host) found = 1 } END { exit !found }' <<<"$got_hosts" ||
     fail "the daemon's container's /etc/hosts names $host as '$got_hosts', want 127.0.0.1 (--add-host)"
-  # Each key command's exit status and the head of its stderr; its stdout, the key, went nowhere.
+  # Each token command's exit status and the head of its stderr; its stdout, the release, went
+  # nowhere. The probe's environment names no owner, so each reads the release of every
+  # installation, as the daemon's first read does.
   for role in implement review; do
     key_said=$(sed -n "s/^key $role //p" <<<"$inside")
     key_status=${key_said%% *}
     [ "$key_status" = 0 ] ||
-      fail "inside the daemon's container the $role App's private_key_command (${key_commands[$role]}) exited ${key_status:-nothing}: ${key_said#* }"
+      fail "inside the daemon's container the $role App's token_command (${key_commands[$role]}) exited ${key_status:-nothing}: ${key_said#* }"
   done
   plugin_said="the runtime kubeconfig's user execs no auth plugin"
   if [ -n "$plugin" ]; then
@@ -919,7 +929,7 @@ prove_daemon_container() {
     plugin_said="the auth plugin $plugin_word is $got_plugin, and run as client-go runs it, it answers an ExecCredential ($plugin_api) whose token is ${token_said#token } characters long"
   fi
   note "the daemon's container ($daemon_image, docker run --network host --add-host $host:127.0.0.1 --init): its probe ran as uid $got_uid gid $got_gid, the devbox user's; its /etc/hosts: $got_hosts"
-  note "inside it each App's private_key_command of github-apps.yaml exits 0 (implement, review), its output unprinted; $plugin_said; its PATH is $daemon_path"
+  note "inside it each App's token_command of github-apps.yaml exits 0 (implement, review), its output unprinted; $plugin_said; its PATH is $daemon_path"
   note "mounted at their own paths: $work read-write; read-only ${daemon_mounts[*]}"
   note "passed by name from the caller's environment: ${daemon_passed[*]:-nothing}"
 }
@@ -987,40 +997,41 @@ remove_run_branch() {
     printf 'could not delete %s branch legion/%s\n' "$repo" "$issue" >&2
   fi
 }
-# require_app_keys_home fails, naming what is wrong, unless XDG_RUNTIME_DIR, where the App key files
-# go under bridge, is set and is a directory the devbox user owns, of mode 0700, on a tmpfs (or a
-# ramfs): no other user can list or read the files, and they never reach a disk.
-require_app_keys_home() {
+# require_app_tokens_home fails, naming what is wrong, unless XDG_RUNTIME_DIR, where the App token
+# files go under bridge, is set and is a directory the devbox user owns, of mode 0700, on a tmpfs
+# (or a ramfs): no other user can list or read the files, and they never reach a disk.
+require_app_tokens_home() {
   local home=${XDG_RUNTIME_DIR:-} owner mode fs
   [ -n "$home" ] ||
-    fail "XDG_RUNTIME_DIR is unset: under bridge the two App keys are resolved into owner-only files on the devbox user's own tmpfs, the one XDG_RUNTIME_DIR names (a login session's /run/user/<uid>)"
+    fail "XDG_RUNTIME_DIR is unset: under bridge the two Apps' installation tokens are minted into owner-only files on the devbox user's own tmpfs, the one XDG_RUNTIME_DIR names (a login session's /run/user/<uid>)"
   [ -d "$home" ] || fail "XDG_RUNTIME_DIR names $home, which is not a directory"
   owner=$(stat -c %u -- "$home") && mode=$(stat -c %a -- "$home") && fs=$(stat -f -c %T -- "$home") ||
     fail "stat cannot read XDG_RUNTIME_DIR ($home)"
   [ "$owner" = "$(id -u)" ] ||
-    fail "XDG_RUNTIME_DIR ($home) is owned by uid $owner, not the devbox user's $(id -u): the App key files go there"
+    fail "XDG_RUNTIME_DIR ($home) is owned by uid $owner, not the devbox user's $(id -u): the App token files go there"
   [ "$mode" = 700 ] ||
-    fail "XDG_RUNTIME_DIR ($home) has mode $mode, not 700: the App key files go there, and no other user may list it"
+    fail "XDG_RUNTIME_DIR ($home) has mode $mode, not 700: the App token files go there, and no other user may list it"
   case "$fs" in
     tmpfs | ramfs) ;;
-    *) fail "XDG_RUNTIME_DIR ($home) is on a $fs file system, not a tmpfs: the App key files go there, and must never reach a disk" ;;
+    *) fail "XDG_RUNTIME_DIR ($home) is on a $fs file system, not a tmpfs: the App token files go there, and must never reach a disk" ;;
   esac
 }
-# remove_dead_app_keys removes, naming each in a note, every App key directory under XDG_RUNTIME_DIR
-# that an earlier run left when its driver died before its cleanup could run (SIGKILL, a crashed
-# host): one whose driver, the pid in its name (legion-e2eccs-app-keys.<pid>.<random>), is not a
-# live process that started no later than the directory last changed, by lib/leftovers.sh's
-# leftover_owner, so a later process given a dead driver's pid is not taken for it. The change time
-# is rounded up to the next whole second after boot (btime is a whole second, the mtime read here
-# too), so a live driver is never judged younger than its directory. It deletes where
-# refuse_leftovers refuses, since what a dead run left here is private keys that no one owns.
-remove_dead_app_keys() {
+# remove_dead_app_tokens removes, naming each in a note, every App token directory under
+# XDG_RUNTIME_DIR that an earlier run left when its driver died before its cleanup could run
+# (SIGKILL, a crashed host): one whose driver, the pid in its name
+# (legion-e2eccs-app-tokens.<pid>.<random>), is not a live process that started no later than the
+# directory last changed, by lib/leftovers.sh's leftover_owner, so a later process given a dead
+# driver's pid is not taken for it. The change time is rounded up to the next whole second after
+# boot (btime is a whole second, the mtime read here too), so a live driver is never judged younger
+# than its directory. It deletes where refuse_leftovers refuses, since what a dead run left here is
+# installation tokens that no one owns.
+remove_dead_app_tokens() {
   local dir owner changed boot ticks
   boot=$(awk '$1 == "btime" { print $2 }' /proc/stat)
   ticks=$(getconf CLK_TCK)
-  for dir in "$XDG_RUNTIME_DIR"/legion-e2eccs-app-keys.*; do
+  for dir in "$XDG_RUNTIME_DIR"/legion-e2eccs-app-tokens.*; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
-    owner=${dir##*/legion-e2eccs-app-keys.}
+    owner=${dir##*/legion-e2eccs-app-tokens.}
     owner=${owner%%.*}
     case $owner in '' | *[!0-9]*) continue ;; esac
     changed=$(stat -c %Y -- "$dir" 2>/dev/null) || continue
@@ -1028,17 +1039,19 @@ remove_dead_app_keys() {
     # A directory rm cannot remove is refused below, by name, rather than by the ERR trap.
     rm -rf -- "$dir" || true
     [ ! -e "$dir" ] ||
-      fail "the App key files of an earlier run whose driver (pid $owner) is gone remain in $dir, which this run cannot remove: remove it and run again"
-    note "removed $dir, the App key files of an earlier run whose driver (pid $owner) is gone"
+      fail "the App token files of an earlier run whose driver (pid $owner) is gone remain in $dir, which this run cannot remove: remove it and run again"
+    note "removed $dir, the App token files of an earlier run whose driver (pid $owner) is gone"
   done
 }
-# remove_app_keys removes the run's App key directory, when prerequisites made one, and prints a
-# FAIL line and returns 1 when it is still there: a key left on the devbox fails the run.
-remove_app_keys() {
-  [ -n "$app_keys_dir" ] || return 0
-  rm -rf -- "$app_keys_dir"
-  [ -e "$app_keys_dir" ] || return 0
-  printf 'FAIL cleanup: the App key files remain in %s\n' "$app_keys_dir" >&2
+# remove_app_tokens stops the token refresher, when one runs, then removes the run's App token
+# directory, when prerequisites made one, and prints a FAIL line and returns 1 when it is still
+# there: a token left on the devbox fails the run.
+remove_app_tokens() {
+  stop_app_token_refresher
+  [ -n "$app_tokens_dir" ] || return 0
+  rm -rf -- "$app_tokens_dir"
+  [ -e "$app_tokens_dir" ] || return 0
+  printf 'FAIL cleanup: the App token files remain in %s\n' "$app_tokens_dir" >&2
   return 1
 }
 
@@ -1060,9 +1073,10 @@ cleanup() {
   # Sandboxes. Nothing to remove under aws-private-ip. A driver killed outright leaves it for the
   # next run's refuse_leftovers, which names it.
   docker rm -f "$daemon_container" >/dev/null 2>&1 || true
-  # The App key files (bridge alone) next, once no container of the daemon's can read them; a
-  # partial directory, from a run that stopped while it resolved them, goes too.
-  remove_app_keys || status=1
+  # The App token files (bridge alone) next, once no container of the daemon's can read them, the
+  # refresher stopped first; a partial directory, from a run that stopped while it minted them, goes
+  # too.
+  remove_app_tokens || status=1
   # The bridge next, before the sweep below kills its chisel client, which its watchdog would read as
   # a dead tunnel; a no-op when bridge_start never ran.
   bridge_stop
@@ -1162,12 +1176,12 @@ if [ "$pod_reachability" = bridge ] && [ -n "$daemon_container_mounts" ]; then
       fail "LEGION_E2E_DAEMON_CONTAINER_MOUNTS names '$mount', which is not an existing absolute path holding no ',': each of its colon-separated entries is a host path the daemon's container mounts read-only at its own path"
   done
 fi
-# Under bridge the App keys are resolved into owner-only files on the devbox user's tmpfs
-# (resolve_app_keys, below), so where they go is refused here with the other inputs.
-[ "$pod_reachability" != bridge ] || require_app_keys_home
+# Under bridge the Apps' installation tokens are minted into owner-only files on the devbox user's
+# tmpfs (mint_app_tokens, below), so where they go is refused here with the other inputs.
+[ "$pod_reachability" != bridge ] || require_app_tokens_home
 # The run's two role Apps, this deployment's own unless the App inputs name another's
 # (lib/github-apps.sh); a malformed input is refused here by name, never printed. No process the run
-# starts inherits an App key: the listener and Dispatch run less app_key_unsets, the daemon under
+# starts inherits an App secret: the listener and Dispatch run less app_key_unsets, the daemon under
 # aws-private-ip less daemon_env_unset, which takes the same list here, and the daemon's container
 # under bridge carries none of the caller's environment but the names daemon_run_args passes.
 require_app_inputs implement review
@@ -1177,7 +1191,7 @@ tools=(go docker jq curl ss kubectl bun gh sha256sum)
 # getent holds the bridge Service's name to resolving nowhere on the devbox (prerequisites, below).
 [ "$pod_reachability" != bridge ] || tools+=(getent)
 for tool in "${tools[@]}"; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-command -v "$app_key_runner" >/dev/null || fail "$app_key_runner, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required"
+command -v agent-secrets >/dev/null || fail "agent-secrets, the secrets broker's client the App tokens come through, is required"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 refuse_leftovers legion-e2eccs
 ports_free "$port_daemon" "$port_worker_stream" "$port_dispatch" "$port_listener" "$port_nats" "$port_session_db"
@@ -1195,23 +1209,27 @@ note "the Claude Code implementer's key from $claude_key_file: ${preflight_base_
 [ "$model_route" != key-file ] || [ -z "$model_base_url" ] ||
   note "the pods' Oh My Pi roles call $model_base_url too, with the same key (the key-file route's models.yml)"
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh):
-# each App's key command runs as the daemon runs it, and GET /app under the key's JWT must answer
-# the App's id and the write permission its role needs. legion.yaml's github_apps is the block
-# proved, and every check that names an App compares with the login read here.
+# each App's token command runs as the daemon runs it, GraphQL's viewer under its token names the
+# bot, and GET /apps/<slug> must answer the App's id and the write permission its role needs.
+# legion.yaml's github_apps is the block proved, and every check that names an App compares with
+# the login read here.
 if [ "$pod_reachability" = bridge ]; then
-  # The daemon's container cannot run the key runner (a broker that checks a process's ancestry
-  # finds none across its pid namespace), so both keys are resolved here, through the runner, into
-  # owner-only files of a directory of the run's own on the devbox user's tmpfs, which the
-  # container mounts read-only and whose files its key commands only read; cleanup removes it.
-  # app_keys_dir is set before a key is resolved, so a run stopped mid-way leaves cleanup the part
-  # it wrote. A key whose store waits on a person's approval waits here, unbounded: a denial or an
-  # expired request fails the run.
-  remove_dead_app_keys
-  app_keys_dir=$(mktemp -d "$XDG_RUNTIME_DIR/legion-e2eccs-app-keys.$$.XXXXXXXX")
-  note "resolving the implement and review App keys through $app_key_runner into owner-only files of $app_keys_dir (a key whose store asks a person's approval waits for it)"
-  resolve_app_keys "$app_keys_dir" implement review
-  note "the App key files, which cleanup removes: $(stat -c '%n (mode %a)' -- "$app_keys_dir"/*.pem | paste -sd' ' -), on $(stat -f -c %T -- "$app_keys_dir")"
-  write_github_apps --key-dir "$app_keys_dir" implement review
+  # The daemon's container cannot run agent-secrets (a broker that checks a process's ancestry
+  # finds none across its pid namespace), so both Apps' releases are minted here, through
+  # agent-secrets, into owner-only files of a directory of the run's own on the devbox user's
+  # tmpfs, which the container mounts read-only and whose files its token commands only read: the
+  # release of every installation, and the run's one repository owner's, read-write and read-only.
+  # app_tokens_dir is set before a release is minted, so a run stopped mid-way leaves cleanup the
+  # part it wrote. A secret whose grant waits on a person's approval (the review App's, at its first
+  # grant) waits here, unbounded: a denial or an expired request fails the run. A token lasts an
+  # hour, so the refresher mints every file again every 15 minutes until cleanup stops it.
+  remove_dead_app_tokens
+  app_tokens_dir=$(mktemp -d "$XDG_RUNTIME_DIR/legion-e2eccs-app-tokens.$$.XXXXXXXX")
+  note "minting the implement and review Apps' installation tokens through agent-secrets into owner-only files of $app_tokens_dir (a secret whose grant asks a person's approval waits for it)"
+  mint_app_tokens "$app_tokens_dir" "${repo%%/*}"
+  start_app_token_refresher "$app_tokens_dir"
+  note "the App token files, which the refresher mints again every ${app_token_refresh_seconds}s and cleanup removes: $(stat -c '%n (mode %a)' -- "$app_tokens_dir"/*/*.json | paste -sd' ' -), on $(stat -f -c %T -- "$app_tokens_dir")"
+  write_github_apps --token-dir "$app_tokens_dir" implement review
 else
   write_github_apps implement review
 fi

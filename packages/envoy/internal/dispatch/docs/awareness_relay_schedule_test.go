@@ -65,7 +65,7 @@ const (
 	scheduleRoom = "schedule-doc"
 	// scheduleFirstClient is the first awareness client id a schedule's readers announce. The
 	// awareness of each room is its own client (scheduleRoomClient), far from these, since ygo
-	// refuses a removal of the client an awareness was built for (awareness/awareness.go:596).
+	// refuses a removal of the client an awareness was built for (awareness/awareness.go:695).
 	scheduleFirstClient uint64 = 101
 	// scheduleRoomClient is the client id the room's own awareness stands under on process A; B's
 	// is the next one.
@@ -649,7 +649,7 @@ func (s *relaySchedule) applies(process *relayProcess, update []byte, what strin
 // takesAway checks the removals update carries of clients that read on the other process, as
 // they land: a removal of a client that process holds live, at the removal's clock or below,
 // takes a reader who is in the room out of this one (b). ygo takes a null at the clock it holds
-// a client at (awareness/awareness.go:566-581), so the room this is applied to drops that
+// a client at (awareness/awareness.go:669-686), so the room this is applied to drops that
 // reader, and the reader's own process has nothing later to put it back with - its next frame
 // stands one clock on from where it is now, which is no higher than the removal.
 //

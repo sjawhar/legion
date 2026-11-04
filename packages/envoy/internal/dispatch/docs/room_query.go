@@ -464,9 +464,9 @@ func (s *Service) connectedActors(room string) []model.Actor {
 
 // unstoredSnapshot is every update live, room's resident instance, applied that has not left its
 // unstored updates yet (roomInstance.unstored), after draining the room's update log
-// (observeRoomUpdates) so every update committed to the room by now is classified, and listed.
+// (observeRoomDoc) so every update committed to the room by now is classified, and listed.
 func (s *Service) unstoredSnapshot(room string, live *crdt.Doc) []*queuedClass {
-	s.observeRoomUpdates(room, live)
+	s.observeRoomDoc(room, live)
 	instance := s.instanceOf(live)
 	if instance == nil {
 		return nil

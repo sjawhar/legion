@@ -542,6 +542,10 @@ func (p *stallingPublisher) Request(string, contracts.Envelope, bus.RequestOptio
 	return p.PublishAsync(contracts.Envelope{})
 }
 
+func (p *stallingPublisher) PublishStoredAsync(string, contracts.Envelope, string) <-chan error {
+	return p.PublishAsync(contracts.Envelope{})
+}
+
 func (p *stallingPublisher) Probe(time.Duration) error { return nil }
 
 // A graceful stop of the process that holds the publisher hold waits for its outbox before it

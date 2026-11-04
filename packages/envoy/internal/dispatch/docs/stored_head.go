@@ -126,9 +126,8 @@ const publishedLossTimeout = 10 * time.Second
 // document lock (readLive), since the room's peers write it while the check walks it, and the walk
 // (pmdoc.AuthoredTextRuns) takes no lock. The room's update observer has already brought its
 // replica up to date with this write, so the check reads the write's own blocks rather than a copy
-// of the whole document. It is deliberately taken without a Yjs transaction of its own: an empty
-// transaction still fires the room's update observers, so it would put an empty update through
-// ygo's persistence worker - a durable doc_updates row - on every edit.
+// of the whole document. It takes no Yjs transaction of its own, which would hold the room's
+// document lock, and so every browser's update to the room, for the whole walk.
 func (s *Service) recordPublishedLoss(write *liveWrite) {
 	if write.loss == nil {
 		write.lost, write.lostVerdict = nil, true

@@ -33,12 +33,6 @@ type roomInstance struct {
 	hold    roomHold
 	cursor  roomCursor
 	catchUp sync.Mutex
-	// loadedHead is the head the instance's load read (roomLoad.head), the version through which
-	// the document it loaded holds every stored update: the load folds the stored history through
-	// that head (servicePersistenceAdapter.LoadDoc, PgVersioned.Load). It is not the cursor's
-	// start, which also folds in the versions took recorded while the load ran - those are durable,
-	// but not in the loaded document. Set once, when the load starts the instance (roomLoad.start).
-	loadedHead int64
 
 	unstoredMu sync.Mutex
 	unstored   []*queuedClass
@@ -128,7 +122,7 @@ func (load *roomLoad) took(version persistence.Version) {
 func (load *roomLoad) start() *roomInstance {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: load.head}, loadedHead: load.head}
+	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: load.head}}
 	for _, version := range load.appended {
 		advanceRoomCursor(&load.instance.cursor, persistence.Version(version))
 	}

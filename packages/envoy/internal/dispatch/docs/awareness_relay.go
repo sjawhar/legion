@@ -83,7 +83,7 @@ const (
 	// enforces on every room's awareness (Server.MaxAwarenessClientsPerRoom in docs/service.go,
 	// which it forwards to awareness.Awareness.SetMaxClients): past it a client id the room has
 	// not seen before is refused, whether it arrives in a browser's frame or in another
-	// process's notification (awareness/awareness.go:608-623). A refused client is a reader
+	// process's notification (awareness/awareness.go:707-726). A refused client is a reader
 	// nobody sees - neither the room's own readers nor, since the relay sends what the room
 	// took, the readers of any other process - so the bound has to stand above every client
 	// real readers can put in a room, and it is derived from the two caps that bound them:
@@ -105,7 +105,7 @@ const (
 	// client id costs an entry whether its state is cursor-sized or null.
 	maxAwarenessClientsPerRoom = maxRoomConnections * maxAwarenessClientsPerSocket
 	// awarenessTombstoneAge is the age reclaimAwarenessSlots frees a room's tombstones from. ygo
-	// takes an age and refuses a non-positive one (awareness/awareness.go:883-886), so the
+	// takes an age and refuses a non-positive one (awareness/awareness.go:1071-1074), so the
 	// shortest positive one stands for "every tombstone the room holds now".
 	awarenessTombstoneAge = time.Nanosecond
 	// maxAwarenessBytesPerRoom is how many bytes of its clients' states, as they arrived on the
@@ -136,7 +136,7 @@ type awarenessMessage struct {
 type awarenessEntry struct {
 	client uint64
 	// clock is the clock the entry stands at: the one a receiver compares what it holds of that
-	// client against (awareness/awareness.go:566-581).
+	// client against (awareness/awareness.go:669-686).
 	clock uint64
 	// raw is the entry as the update encodes it: the client's id, its clock and its state JSON.
 	// It is nil for an entry the flush is to read from the room's awareness (resolve).
@@ -262,8 +262,8 @@ type awarenessRelay struct {
 	// record reads the room under it (awarenessClientStanding), and nothing of this package can
 	// hold ygo's awareness lock while it takes mu, since that lock is private to ygo and every
 	// path that fires a room's observers - ApplyUpdate, SetLocalState, Heartbeat, RemoveExpired
-	// - releases it first (awareness/awareness.go:726-732, 268-274, 309-312, 853-857), while
-	// PurgeTombstones and Destroy fire none (awareness/awareness.go:883-889, 804-808). A ygo
+	// - releases it first (awareness/awareness.go:871-877, 312-318, 353-356, 1041-1045), while
+	// PurgeTombstones and Destroy fire none (awareness/awareness.go:1071-1077, 992-996). A ygo
 	// that fired an observer under its own lock would invert the two; the test that catches it
 	// is TestARoomsAwarenessFiresItsObserversWithItsLockReleased.
 	mu sync.Mutex
@@ -430,7 +430,7 @@ func (r *awarenessRelay) Close() error {
 //     dropped by every process that took the later state, and the departed reader's cursor
 //     would sit in their rooms until it expired (awarenessExpiry, 30 s); at the list's clock
 //     every process takes it, since none holds a later state of a client this one has relayed
-//     nothing later of (awareness/awareness.go:566-581).
+//     nothing later of (awareness/awareness.go:669-686).
 //   - a state of a client the room holds live goes on the list at the clock the room holds it
 //     at, never below the clock the list already holds, and puts a nil in the batch for the
 //     flush to read (resolve). The client is in the room, so a removal pending for it must not
@@ -452,7 +452,7 @@ func (r *awarenessRelay) Close() error {
 // A removal at the very clock the list holds is applied as it stands: it is that state's own
 // removal, since a client's return always stands at a strictly higher clock than the tombstone
 // it replaces - ygo drops a state whose clock equals what it holds and takes a null at that
-// clock as the removal of it (awareness/awareness.go:566-581) - and it is the clock every other
+// clock as the removal of it (awareness/awareness.go:669-686) - and it is the clock every other
 // process takes the removal at for the same reason. A removal of a client the list does not
 // hold has no clock of this process's own to stand at and stands as the room's own observer
 // built it, at the clock that path's snapshot of the client gave (touched) - unless the batch
@@ -531,7 +531,7 @@ func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []
 // client's state and whether it holds a state of it at all - the one read that settles an entry
 // record cannot place by its clock alone. It reads the client's state and that state's clock
 // together, under the awareness's own lock, as every read of a client's standing does
-// (EncodeUpdate, awareness/awareness.go:458-480) - GetStates and Meta are two locks and so two
+// (EncodeUpdate, awareness/awareness.go:502-524) - GetStates and Meta are two locks and so two
 // moments. A snapshot that does not decode - ygo's own encoding of what it holds, so nothing
 // short of a bug - reads as a client the room does not hold, which sends the removal being
 // settled rather than dropping it, and drops a state the list cannot place rather than listing its
@@ -646,7 +646,7 @@ func (r *awarenessRelay) send(room string, batch map[uint64]awarenessEntry) {
 // the entry sent here is read from the room, which a heartbeat recorded after this read has
 // already moved on - and the removal that client's departure builds from the list, when a
 // purge has freed its tombstone before the relay reads it (touched), would be older than that
-// state: every other process drops it (awareness/awareness.go:566-581) and the departed
+// state: every other process drops it (awareness/awareness.go:669-686) and the departed
 // reader's cursor sits in their rooms until it expires (awarenessExpiry, 30 s).
 //
 // The read and the raise are two moments, and the room's own paths move the list in between: a
@@ -662,7 +662,7 @@ func (r *awarenessRelay) send(room string, batch map[uint64]awarenessEntry) {
 //     its batch, and the removal waiting for it stands at the clock the list held when it was
 //     recorded, which is below the state being sent. It is raised to the clock of the entry
 //     sent here, where it stands as the removal of that very state: every other process takes
-//     a null at the clock it holds the client at (awareness/awareness.go:566-581), and at the
+//     a null at the clock it holds the client at (awareness/awareness.go:669-686), and at the
 //     lower clock it would take none of them and keep the cursor of a reader who has left.
 //   - the room holds the client live: it is in the room again, and the waiting removal is of
 //     the life that ended before the state being sent - the return stands at a strictly higher
@@ -861,7 +861,7 @@ func (r *awarenessRelay) localClients(room string, aw *awareness.Awareness) map[
 
 // awarenessRemoval is the entry of an awareness update that takes client away at clock: a null
 // state, which every receiver holding that client at clock or below takes and the client's own
-// next announcement, one clock later, undoes (awareness/awareness.go:566-581). The clock is the
+// next announcement, one clock later, undoes (awareness/awareness.go:669-686). The clock is the
 // client's own, unbumped, as ygo's removal for a peer that disconnects stands at
 // (provider/websocket/peer.go, encodeAwarenessRemoval): bumped, it would be the clock the
 // rejoining client's next announcement carries, and one of the two would be dropped.
@@ -902,7 +902,7 @@ func (r *awarenessRelay) localRemoval(room string, aw *awareness.Awareness) []by
 // the room's observer, which ygo fires inside it, leaves them to the process they came from
 // rather than relaying them back. The entries of the clients that left are freed once the update
 // has landed (reclaimAwarenessSlots), because a removal of a client this process never held
-// leaves a tombstone ygo tells no observer about (awareness/awareness.go:669-686), so the
+// leaves a tombstone ygo tells no observer about (awareness/awareness.go:804-823), so the
 // observer a room's own departures run through never sees it, and a run of them - every reader
 // of a process that shut down, say - would otherwise sit in the room until a purge two expiries
 // later.
@@ -951,7 +951,7 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 // resident here and has any: each entry as it stands, which puts it in the room's pending batch
 // and refreshes the clock the relay holds for that client (record). It answers with states and
 // nothing else - a client its read finds a tombstone of, or nothing at all
-// (awareness/awareness.go:477-480), is left out of what it records: an answer relays no
+// (awareness/awareness.go:521-524), is left out of what it records: an answer relays no
 // departure of its own, since every departure is the room's own observer's to record (touched),
 // and a null of this read would stand in that removal's place in the batch at the clock this
 // read took it at rather than the one the room's own path settles it at.
@@ -1024,11 +1024,11 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 // Each removal is decided from one snapshot of its client - the client's state and its clock
 // read together, under the awareness's own lock - and never from one read of which clients are
 // live followed by another of the clock. ygo keeps that lock private (awareness/awareness.go:135)
-// and GetStates (awareness/awareness.go:344) and Meta (awareness/awareness.go:361) each take it
+// and GetStates (awareness/awareness.go:388) and Meta (awareness/awareness.go:405) each take it
 // for themselves, so two reads are two moments: a client returning between them is gone to the
 // first read, which builds a removal, and live to the second, which gives that removal the clock
 // of the state the client is live at - the one clock every other process takes it at. EncodeUpdate
-// takes the lock once for the clients it is asked for (awareness/awareness.go:458), and what it
+// takes the lock once for the clients it is asked for (awareness/awareness.go:502), and what it
 // writes for one of them says which of three that client is:
 //
 //   - a state that is not null: the client is in the room again - its own tab's frame having
@@ -1036,12 +1036,12 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 //     carries its state, and it stays on the list of clients this process relays and answers
 //     queries from (local, record), which only a relayed removal takes it off. A removal here
 //     would stand at the clock of the state the client is live at; every other process would
-//     take it, since it is no older than what it holds (awareness/awareness.go:566-581), and
+//     take it, since it is no older than what it holds (awareness/awareness.go:669-686), and
 //     the cursor of a reader who is in the room would go from all of them.
 //   - a null state at the tombstone's clock: the client is gone, and its removal stands at that
 //     clock or at the one the relay holds for it (local), whichever is the later.
 //   - a null state at a clock of 0, which is what EncodeUpdate writes for a client the room
-//     holds nothing of (awareness/awareness.go:477-480): ygo fires its update observers with
+//     holds nothing of (awareness/awareness.go:521-524): ygo fires its update observers with
 //     the awareness unlocked, and a purge of a tombstone this one's age (awarenessTombstoneAge,
 //     one nanosecond) runs after every inbound apply (received) and after every other removal
 //     of the room's own, so one can land between the change and this read. The removal then
@@ -1149,7 +1149,7 @@ func (r *awarenessRelay) mark(room string, entries []awarenessEntry, delta int) 
 // reclaimAwarenessSlots frees the entries of room's departed clients - every tombstone its
 // awareness holds. ygo keeps a removed client's entry for two expiries, a minute and a half
 // here, so that a state of that client still in flight when it left is dropped rather than
-// taken for a new one (awareness/awareness.go:861-882). A room of this service keeps it only
+// taken for a new one (awareness/awareness.go:1049-1070). A room of this service keeps it only
 // until the room's next change: a tab that opens and closes a document costs its process an
 // entry for a minute and a half otherwise, on every process its cursor reached, and the
 // cursors of a room nobody is in are memory and nothing else.

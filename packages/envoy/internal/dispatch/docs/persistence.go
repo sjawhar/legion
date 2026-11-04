@@ -192,7 +192,7 @@ func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentS
 
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, true, nil, nil)
+	return p.appendUpdate(ctx, room, update, true, nil, nil, true)
 }
 
 // AppendUpdateWithCredit validates and stores one incremental V1 update of a room, with its
@@ -206,14 +206,25 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 // it was handed with the room's earlier unstored ones through AppendRoomFlush instead, and
 // reaches this only for an update its update observer recorded no class for (StoreUpdateContext).
 func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, contentChanged, credit, browser)
+	return p.appendUpdate(ctx, room, update, contentChanged, credit, browser, true)
+}
+
+// AppendParkedUpdate stores a room's parked bytes - what a peer's update kept but could not
+// integrate, since it waits for an edit the room has not received (storeParked) - as one update
+// with no class, no credit and no pending authors, and without marking the document owing a
+// settlement: they change nothing a settlement reads, and the commit that later integrates them
+// marks the document owed itself. It is gated on the room's cursor and announces the change as
+// any append does.
+func (p *PgVersioned) AppendParkedUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, false, nil, nil, false)
 }
 
 // appendUpdate is a room's own append of update, in a transaction of its own under the document's
 // advisory lock. It is the whole store of one update: the room's persistence stores the update it
 // was handed with the room's earlier unstored ones instead (AppendRoomFlush), and reaches this
-// only for an update its update observer recorded no class for.
-func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
+// only for an update its update observer recorded no class for. owes is whether the update marks
+// the document owing a settlement.
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend, owes bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
@@ -235,7 +246,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		if version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, browser, nil, true); err != nil {
+		if version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, browser, nil, true, owes); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -336,7 +347,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 	if err := refuseUpdateItemCap(update); err != nil {
 		return 0, err
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil, nil, false)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil, nil, false, true)
 }
 
 // AppendRoomUpdateTx appends inside tx an update a room of this process has already applied, with
@@ -353,7 +364,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 // (Service.flushThrough states the rule and names the callers). A second acquisition would cost
 // a round trip per append and grant what the caller holds.
 func (p *PgVersioned) AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit, observed time.Time) (persistence.Version, error) {
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, &BrowserAppend{observed: observed}, flush, true)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, &BrowserAppend{observed: observed}, flush, true, true)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers

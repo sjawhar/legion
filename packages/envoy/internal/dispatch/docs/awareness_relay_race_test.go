@@ -220,7 +220,7 @@ func TestAReaderBackBeforeItsRemovalIsRecordedKeepsItsState(t *testing.T) {
 // holds for a client that is in the room at a later one - and then the removal that took her
 // away at the older clock, recorded after it, is no longer older than the list and is taken for
 // that state's own removal. Every other process accepts a null at the clock it holds a state at
-// (awareness/awareness.go:566-581), so the cursor of a reader who is in the room goes from all
+// (awareness/awareness.go:669-686), so the cursor of a reader who is in the room goes from all
 // of them.
 //
 // Here task A answers a query while alice is live at c, and the answer's record is held until
@@ -285,7 +285,7 @@ func TestAReaderBackWhileAnOlderStateOfHersIsAnsweredToAQueryKeepsItsState(t *te
 // batch. Recorded as it stands, the answer's older state would put her back on the list this
 // process relays and answers queries from and replace her removal in the batch - and every
 // other process drops a state at the clock it already holds
-// (awareness/awareness.go:566-581), so the removal would reach none of them and alice's cursor
+// (awareness/awareness.go:669-686), so the removal would reach none of them and alice's cursor
 // would sit in their rooms until it expired (awarenessExpiry, 30 s). Flushed before the answer
 // records, the removal does reach them - and the stale state is no safer behind it: every
 // process purges its room's tombstones as it applies what it is sent (received,
@@ -564,7 +564,7 @@ func TestAReadersHeartbeatRecordedOverItsOwnRemovalStillLeavesTheOtherProcess(t 
 // its own record not yet run. A removal of that client built from the list, as one is whenever
 // a purge has freed her tombstone before the relay's snapshot reads it (touched), is then older
 // than the state every other process holds, which drops it
-// (awareness/awareness.go:566-581) and keeps the departed reader's cursor until it expires
+// (awareness/awareness.go:669-686) and keeps the departed reader's cursor until it expires
 // (awarenessExpiry, 30 s).
 //
 // Alice beats twice here. The first beat's record is held until the second has been decided, so
