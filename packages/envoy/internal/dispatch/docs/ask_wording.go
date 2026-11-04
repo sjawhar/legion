@@ -10,25 +10,9 @@ import (
 )
 
 // The bound an ask's wording stands inside, in one place for the two doors into it: a document's
-// ask blocks, which the writes of this package are held to (readableAskBlock,
+// ask blocks, which the writes of this package are held to (readAskBlockStrictly,
 // validateWrittenAskBlocks), and the ask routes, which measure a question and its options the
 // same way (AskWordingUnits, read by api/asks.go and api/reviews.go).
-
-// readableAskBlock is why one ask block may not be written, nil where it may: its content rule
-// (pmdoc.AskContentError), then what settlement reads of it (parseAskBlock), then the bound its
-// question and options share (askWordingTooLong). A document may not carry in a wording the ask
-// routes would refuse: a decision block opens an ask like any other, whose ask.answered event
-// carries that wording, so a wording that cannot be answered must not be stored.
-func readableAskBlock(ask *pmdoc.Node) error {
-	if err := pmdoc.AskContentError(ask); err != nil {
-		return err
-	}
-	block, err := parseAskBlock(ask)
-	if err != nil {
-		return err
-	}
-	return askWordingTooLong(block)
-}
 
 // validateWrittenAskBlocks is why the asks of tree may not be written, nil where they may: the
 // content rule over every ask in it, then each ask's wording against the bound it shares. It is

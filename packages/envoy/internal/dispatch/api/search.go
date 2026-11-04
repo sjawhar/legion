@@ -305,10 +305,31 @@ var searchWindowLimit = "limit " + strconv.Itoa(searchWindowCandidates)
 //     hnsw.max_scan_tuples (20,000) is reached. Relaxed rather than strict: every arm re-ranks
 //     its rows by r (distinct on, then ranked), so nothing downstream reads the index's order.
 //
-// The related-item check sets the same two for the same reasons (relatedMeaningSearch).
+// Both meaning queries run in a transaction beginMeaningScan opens, and set them there.
 var searchMeaningScan = []string{
 	`set local hnsw.ef_search = 400`,
 	`set local hnsw.iterative_scan = relaxed_order`,
+}
+
+// beginMeaningScan opens the read transaction a meaning query runs in, searchMeaningScan's two
+// settings applied to it: `set local` holds them to this transaction, so a pooled connection
+// carries neither of them back to the next request. The caller ends the transaction, a rollback
+// deferred, since neither query writes; a transaction a setting failed on is rolled back here
+// and never handed back. Search's own query (runMeaningSearch) and the related-item check's
+// (relatedMeaningSearch) both start here, so neither can read the index on other settings than
+// the other.
+func (s *server) beginMeaningScan(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.deps.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, setting := range searchMeaningScan {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
+			return nil, err
+		}
+	}
+	return tx, nil
 }
 
 // searchQueryMeaning extends searchQuery with a second list per kind, ranked by cosine distance
@@ -615,21 +636,15 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 // the numnode check before ever reaching here (so it never pays for an embedding it would throw
 // away); this function assumes nodes > 0.
 //
-// It runs in a read transaction of its own, the one place searchMeaningScan's settings apply:
-// `set local` holds them to this transaction, so a pooled connection carries neither of them
-// back to the next request.
+// It runs in a read transaction of its own, the one place searchMeaningScan's settings apply
+// (beginMeaningScan).
 func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
 	started := time.Now()
-	tx, err := s.deps.Store.Pool.Begin(ctx)
+	tx, err := s.beginMeaningScan(ctx)
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	for _, setting := range searchMeaningScan {
-		if _, err := tx.Exec(ctx, setting); err != nil {
-			return model.SearchResponse{}, err
-		}
-	}
 	rows, err := tx.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
 		offset, contracts.SearchKindDepth, searchFusionK, embed.Literal(vector), searchMeaningFloor, s.deps.Embedder.Identity())
 	if err != nil {

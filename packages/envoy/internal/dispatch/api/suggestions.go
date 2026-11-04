@@ -590,23 +590,18 @@ func (s *server) relatedMeaningStage(ctx context.Context, project, text string, 
 	return relatedStage{response: response}
 }
 
-// relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own, so that the
-// check's meaning query reads the index as search's own does: it runs the same arms, and
-// searchMeaningScan is what either of them needs of the index scan (search's runMeaningSearch
-// sets the same two there, and says what each is for).
+// relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own
+// (beginMeaningScan), so that the check's meaning query reads the index as search's own does: it
+// runs the same arms, and searchMeaningScan, which that transaction sets, is what either of them
+// needs of the index scan (searchMeaningScan says what each setting is for).
 func (s *server) relatedMeaningSearch(
 	ctx context.Context, project string, picked relatedTerms, vector []float32,
 ) (model.SearchResponse, error) {
-	tx, err := s.deps.Store.Pool.Begin(ctx)
+	tx, err := s.beginMeaningScan(ctx)
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	for _, setting := range searchMeaningScan {
-		if _, err := tx.Exec(ctx, setting); err != nil {
-			return model.SearchResponse{}, err
-		}
-	}
 	return s.relatedSearch(ctx, tx, relatedMeaningQuery, project, picked, embed.Literal(vector),
 		searchMeaningFloor, s.deps.Embedder.Identity())
 }

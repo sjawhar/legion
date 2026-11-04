@@ -34,14 +34,14 @@ var identityRecheckInterval = 10 * time.Minute
 // written, and a row the trigger wrote is never seen as stale; from is the items search ranks
 // (api/search.go's meaning candidate CTEs), which the trigger can exceed.
 //
-// The issue is the only such kind (coverageSources). The window kinds
+// The issue is the only such kind (issueCoverage). The window kinds
 // (windowCoverageKinds) have no source table at all: their rows are the indexers' own, so no
 // statement of this pass builds one.
 type coverageSource struct {
 	kind, from, id, text, writtenAt string
 }
 
-// coverageSources is every kind whose rows this pass builds and repairs, which since the move
+// issueCoverage is the one kind whose rows this pass builds and repairs, which since the move
 // to windows is the issue alone: 0073's trigger, as 0140 replaced it, and 0140's trigger on a
 // new version of the issue's primary document enqueue new.key and
 // issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
@@ -49,14 +49,12 @@ type coverageSource struct {
 // An item whose text has nothing to embed (nothingToEmbed: the empty string, or only white
 // space) is not covered: it matches nothing by meaning, so items leaves it out and the queue
 // settles its row with no vector.
-var coverageSources = []coverageSource{
-	{
-		kind:      "issue",
-		from:      "issues i",
-		id:        "i.key",
-		text:      "issue_embedding_text(i.title, issue_embedding_spec(i.key))",
-		writtenAt: "i.created_at",
-	},
+var issueCoverage = coverageSource{
+	kind:      "issue",
+	from:      "issues i",
+	id:        "i.key",
+	text:      "issue_embedding_text(i.title, issue_embedding_spec(i.key))",
+	writtenAt: "i.created_at",
 }
 
 // windowCoverageKinds is every kind whose rows the indexers own: one row per window of a
@@ -145,7 +143,7 @@ func (s coverageSource) repairStale() string {
 // dropForeignVectors takes up to $3 of the kind's rows holding a vector another identity made
 // ($2 is the configured one) out of the HNSW index's rows: search compares a stored vector only
 // with a query vector of its own identity, and leaving foreign vectors in the index would cost
-// filtered search recall. Every row of the kind, not only coverageSources' items, so no foreign
+// filtered search recall. Every row of the kind, not only the ones this pass builds, so no foreign
 // vector survives anywhere. A row embedded at its current text (embedded_hash = content_hash) has
 // no claim on it, so it becomes pending now with fresh attempts; a row already pending keeps its
 // claim, backoff and pending_since. SKIP LOCKED leaves a row a worker is committing to the next
@@ -206,7 +204,7 @@ var settleDeadNothingToEmbed = `
 	from picked
 	where e.kind = picked.kind and e.id = picked.id`
 
-// foreignRows tells whether any row of coverageSources' kinds ($1) holds what dropForeignVectors
+// foreignRows tells whether any row of the covered kinds ($1) holds what dropForeignVectors
 // or readmitForeignDead would change for the configured identity ($2): a vector another identity
 // made, or a row dead under another identity. Each exists stops at the first such row, so a
 // database that holds some answers quickly; one that holds none reads every row once.
@@ -224,16 +222,10 @@ const foreignRowsLeft = `
 	       count(*) filter (where dead and dead_model is distinct from $2)
 	from embeddings where kind = any($1)`
 
-// coverageKinds is every kind meaning search covers, the ones this pass builds
-// (coverageSources) and the window kinds the indexers own (windowCoverageKinds), and the
-// argument foreignRows and foreignRowsLeft take.
-var coverageKinds = func() []string {
-	kinds := make([]string, 0, len(coverageSources)+len(windowCoverageKinds))
-	for _, source := range coverageSources {
-		kinds = append(kinds, source.kind)
-	}
-	return append(kinds, windowCoverageKinds...)
-}()
+// coverageKinds is every kind meaning search covers, the one this pass builds (issueCoverage)
+// and the window kinds the indexers own (windowCoverageKinds), and the argument foreignRows and
+// foreignRowsLeft take.
+var coverageKinds = append([]string{issueCoverage.kind}, windowCoverageKinds...)
 
 // coverStep is one statement of the coverage pass, run until it changes nothing.
 type coverStep struct {
@@ -308,7 +300,9 @@ type identityRun struct {
 }
 
 // runIdentitySteps decides whether to run the identity steps (decideIdentitySteps) and runs them
-// over every kind when it does.
+// over every covered kind when it does - the same kinds decideIdentitySteps looked for rows of
+// another identity in (coverageKinds), the windows the indexers own among them, since an
+// old-configuration process commits those vectors too.
 func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identityRun, error) {
 	run, skipped, err := decideIdentitySteps(ctx, deps, identity)
 	if err != nil {
@@ -318,12 +312,12 @@ func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identity
 	if !run {
 		return result, nil
 	}
-	for _, source := range coverageSources {
+	for _, kind := range coverageKinds {
 		for _, step := range []coverStep{
-			{&result.dropped, dropForeignVectors, []any{source.kind, identity, coverageStatementRows}},
-			{&result.readmitted, readmitForeignDead, []any{source.kind, identity, coverageStatementRows}},
+			{&result.dropped, dropForeignVectors, []any{kind, identity, coverageStatementRows}},
+			{&result.readmitted, readmitForeignDead, []any{kind, identity, coverageStatementRows}},
 		} {
-			if err := step.run(ctx, deps, source.kind); err != nil {
+			if err := step.run(ctx, deps, kind); err != nil {
 				return identityRun{}, err
 			}
 		}
@@ -332,7 +326,7 @@ func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identity
 }
 
 // Cover is the coverage pass: for every covered kind (coverageKinds) it settles each dead row
-// whose text has nothing to embed and, for a kind it builds (coverageSources), adds a row for
+// whose text has nothing to embed and, for the kind it builds (issueCoverage), adds a row for
 // each item that has none and repairs each row whose text is stale; then, once the configured
 // embedder has answered (decideIdentitySteps), it drops each vector another identity made and
 // re-admits each other row dead under another identity; and it logs one line with what it
@@ -358,8 +352,8 @@ func Cover(ctx context.Context, deps Deps) error {
 func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 	identity := deps.Embedder.Identity()
 	var added, repaired, settled int64
-	// Every covered kind settles its dead rows with nothing to embed; only a kind this pass
-	// builds (coverageSources) takes the other two steps, since no statement here may invent a
+	// Every covered kind settles its dead rows with nothing to embed; only the kind this pass
+	// builds (issueCoverage) takes the other two steps, since no statement here may invent a
 	// window.
 	for _, kind := range coverageKinds {
 		step := coverStep{&settled, settleDeadNothingToEmbed, []any{kind, identity, coverageStatementRows}}
@@ -367,14 +361,12 @@ func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 			return identityRun{}, err
 		}
 	}
-	for _, source := range coverageSources {
-		for _, step := range []coverStep{
-			{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
-			{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}},
-		} {
-			if err := step.run(ctx, deps, source.kind); err != nil {
-				return identityRun{}, err
-			}
+	for _, step := range []coverStep{
+		{&added, issueCoverage.insertMissing(), []any{issueCoverage.kind, coverageStatementRows}},
+		{&repaired, issueCoverage.repairStale(), []any{issueCoverage.kind, coverageStatementRows}},
+	} {
+		if err := step.run(ctx, deps, issueCoverage.kind); err != nil {
+			return identityRun{}, err
 		}
 	}
 	// Settling runs first, so a dead row with nothing to embed is never what makes the pass
@@ -453,7 +445,7 @@ func runCoverage(ctx context.Context, deps Deps) {
 }
 
 // coverageQuery counts, per covered kind, its items left-joined to their embeddings rows, in
-// one statement so every count reads one snapshot: a built kind's items are its source table's
+// one statement so every count reads one snapshot: the built kind's items are its source table's
 // (coverageSource.items), a window kind's its own rows (windowRows). $1 is the configured
 // identity, the empty string when there is none, and then no item is current. greatest ignores
 // a null, so an item with no row ages from when it was written; the oldest age is null when
@@ -462,10 +454,8 @@ var coverageQuery = func() string {
 	arm := func(kind, items string) string {
 		return fmt.Sprintf("select '%s'::text as kind, item.id, item.hash, item.written_at from (%s) item", kind, items)
 	}
-	arms := make([]string, 0, len(coverageSources)+len(windowCoverageKinds))
-	for _, source := range coverageSources {
-		arms = append(arms, arm(source.kind, source.items()))
-	}
+	arms := make([]string, 0, 1+len(windowCoverageKinds))
+	arms = append(arms, arm(issueCoverage.kind, issueCoverage.items()))
 	for _, kind := range windowCoverageKinds {
 		arms = append(arms, arm(kind, searchableItems(windowRows(kind))))
 	}
@@ -483,7 +473,7 @@ var coverageQuery = func() string {
 		group by kind`
 }()
 
-// Coverage reports how much of what meaning search covers (coverageSources) has a current vector
+// Coverage reports how much of what meaning search covers (coverageKinds) has a current vector
 // from identity, the configured embedder's (empty when none is configured). Its definitions are
 // model.SearchCoverageCounts'; Total sums the kinds, and its oldest lacking age is theirs.
 func Coverage(ctx context.Context, database *store.Store, identity string) (model.SearchCoverage, error) {

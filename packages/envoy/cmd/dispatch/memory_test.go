@@ -485,11 +485,9 @@ func refusedWithAdvice(answer response) bool {
 // so is every one after it; answers of 31,500 characters to them are all taken, each the document
 // has no room for kept on its ask and left out of its block. Either way the document stays within
 // the cap, still reads, and a one-word edit on a server that has not loaded it holds at most the
-// bound. Before the bound reached these routes, thirty-two edits of a 900 KB description grew one
-// document to 28.8 MB, on which a one-word edit held 1,204 MiB, and under the production task's
-// 1,024 MiB the server was killed; such a description is now refused outright, for the 32,000
-// characters an ask's question and options may hold together (INFRA-370), so the growth is written
-// here in texts that bound holds.
+// bound. The 900 KB description this test grew a document with before is refused outright now,
+// for the 32,000 characters an ask's question and options may hold together (INFRA-370), so the
+// growth is written here in texts that bound holds.
 func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	memory := newMemoryHarness(t)
 	// Forty writes of 31,500 characters are 1.26 MB, so the document meets the 1 MiB cap partway
@@ -569,9 +567,8 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 // one write may make, and an option description beside it - 6,000 characters of `)_`, or 3,000
 // lines - passes that, and is refused with 413 CAP_EXCEEDED naming the text's weight, within the
 // bound and in seconds. The whole wording is 31,999 characters, inside the 32,000 an ask's
-// question and options may hold together (INFRA-370): a description of 920 KB of `)_`, whose edit
-// held 417 MiB before its text was weighed, and one of 330,000 lines, whose edit did not answer
-// within twenty minutes, are refused by that bound now, before any of this.
+// question and options may hold together (INFRA-370), which refuses a longer description - the
+// 920 KB one this test took before - before any of this.
 func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 	memory := newMemoryHarness(t)
 	server := memory.start(t)

@@ -10,7 +10,7 @@
 -- an issue's primary document (a spec edit). Replacing a function's body locks no table, so the
 -- migration takes one table's lock, artifact_versions', for its trigger, as 0073-0077 each do.
 --
--- internal/dispatch/embedqueue's coverage pass builds the same text (coverageSources), so once an
+-- internal/dispatch/embedqueue's coverage pass builds the same text (issueCoverage), so once an
 -- embedder runs it re-queues every existing issue, whose stored text is its title alone.
 
 -- The text an issue embeds: its title alone when the spec is null or holds only white space (an
