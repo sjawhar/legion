@@ -36,7 +36,7 @@ const (
 func DeployedThreeCopyStream(change func(*natsgo.StreamConfig)) natsgo.StreamConfig {
 	deployed := natsgo.StreamConfig{
 		Name:       bus.Stream,
-		Subjects:   bus.StreamSubjects(),
+		Subjects:   bus.StreamCarriedSubjects(),
 		Retention:  natsgo.LimitsPolicy,
 		MaxAge:     contracts.DeliveryDuplicateWindow,
 		Duplicates: contracts.DeliveryDuplicateWindow,
@@ -69,7 +69,7 @@ func RequireKeptThreeCopyStream(t testing.TB, before natsgo.StreamConfig, after 
 	if got.MaxAge != contracts.DeliveryDuplicateWindow || got.Duplicates != contracts.DeliveryDuplicateWindow {
 		t.Errorf("stream age = %s and duplicate window = %s, want %s", got.MaxAge, got.Duplicates, contracts.DeliveryDuplicateWindow)
 	}
-	for _, subject := range bus.StreamSubjects() {
+	for _, subject := range bus.StreamCarriedSubjects() {
 		if !slices.Contains(got.Subjects, subject) {
 			t.Errorf("stream subjects = %v, want %s among them", got.Subjects, subject)
 		}
