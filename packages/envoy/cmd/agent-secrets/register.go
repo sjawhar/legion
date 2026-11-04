@@ -28,6 +28,19 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("register", stderr)
 	wait := flags.Int("wait", 0, "wait up to this many seconds for the helper to enroll the session (0 returns at once, as does a helper holding no launcher credential)")
 	doExec := flags.Bool("exec", false, "after registering, exec the command that follows as this same process")
+	// --session-id is what makes a broker identity outlive the process. Without it the helper
+	// names the session <hostname>:<pid>:<start ticks since boot>, which is a different string
+	// after a restart and necessarily a different one after a reboot, so the session enrols
+	// afresh and the requests it had pending and the grants it had been given — all bound to the
+	// enrollment id it no longer has — are cancelled with the old enrollment. With it the helper
+	// names the session `session-<id>`, keeps its key, and hands the same identity back to the
+	// same session id when it comes back, within DormantGrace (dispatch://INFRA-1167).
+	//
+	// A launcher that knows the id only once the agent has started (omp opens its transcript
+	// seconds in, so only a resumed session's id is in the launch argv) registers without one and
+	// runs `agent-secrets register --session-id <id>` again from inside the session; the helper
+	// takes the name then, at a point where no grant exists to lose.
+	sessionID := flags.String("session-id", "", "the omp session id this session keeps its broker identity under, across a restart of the helper or the machine")
 	if err := flags.Parse(args); err != nil {
 		return exitUsage(err)
 	}
@@ -50,7 +63,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	resp, err := registerWithPatience(sock, *wait, helperConnectPatience)
+	resp, err := registerWithPatience(sock, *wait, *sessionID, helperConnectPatience)
 	if !*doExec {
 		if err != nil {
 			fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)
@@ -92,12 +105,16 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 // with the user manager at boot), for patience at most, and retries a DRAINING answer (a helper
 // install is about to restart) until the larger of patience and the --wait seconds has passed, so
 // the session registers with the restarted helper rather than launching with no broker identity.
-func registerWithPatience(sock string, wait int, patience time.Duration) (helper.Response, error) {
+func registerWithPatience(sock string, wait int, sessionID string, patience time.Duration) (helper.Response, error) {
 	start := time.Now()
 	deadline := start.Add(patience)
 	drainDeadline := start.Add(max(patience, time.Duration(wait)*time.Second))
 	for {
-		resp, err := helper.Call(sock, helper.Request{Op: "register", WaitSeconds: wait}, time.Duration(wait+10)*time.Second)
+		req := helper.Request{Op: "register", WaitSeconds: wait}
+		if sessionID != "" {
+			req.SessionID = &sessionID
+		}
+		resp, err := helper.Call(sock, req, time.Duration(wait+10)*time.Second)
 		if err == nil {
 			if !resp.OK {
 				if resp.Code == helper.CodeDraining && time.Now().Before(drainDeadline) {

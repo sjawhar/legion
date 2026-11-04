@@ -5,10 +5,13 @@ package helper
 
 import (
 	"crypto/ecdsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -17,11 +20,21 @@ import (
 )
 
 // Session is one registered host process and the broker identity the helper holds for it. Key
-// never leaves this process; Record is what survives a restart.
+// never leaves this process beyond the records file, which holds it only for a session that has
+// an omp session id and is 0600 under a 0700 directory; Record is what survives a restart.
+//
+// SessionID is the omp session id the launcher named with `register --session-id`, and "" for a
+// session registered without one. It is what makes an identity outlive the process: the runtime
+// id of a session that has one is `session-<SessionID>`, which is the same string after a reboot,
+// while a pid-keyed session's `<host>:<pid>:<start ticks>` can never be (both halves are
+// boot-unique). Paired with the recorded key, it is what lets the broker hand the SAME enrollment
+// back — and with it the requests Sami has not yet answered and the grants he has given, all of
+// which are bound to the enrollment id alone and are cancelled when it ends (dispatch://INFRA-1167).
 type Session struct {
 	PID          int
 	StartTicks   uint64
 	RuntimeID    string
+	SessionID    string
 	Key          *ecdsa.PrivateKey
 	Thumbprint   string
 	RegisteredAt time.Time
@@ -44,20 +57,31 @@ type Session struct {
 	peer  *Peer
 }
 
-func newSession(pid int, ticks uint64, runtimeID string, peer *Peer) (*Session, error) {
-	key, err := proof.NewKey()
-	if err != nil {
-		return nil, err
+// newSession makes a session around key, or around a fresh key when key is nil. A caller passes
+// one in only to keep an identity the broker already knows: Recover re-pinning a recorded
+// session, or a register reclaiming a dormant one.
+func newSession(pid int, ticks uint64, runtimeID, sessionID string, key *ecdsa.PrivateKey, peer *Peer) (*Session, error) {
+	if key == nil {
+		generated, err := proof.NewKey()
+		if err != nil {
+			return nil, err
+		}
+		key = generated
 	}
 	tp, err := proof.Thumbprint(&key.PublicKey)
 	if err != nil {
 		return nil, err
 	}
 	return &Session{
-		PID: pid, StartTicks: ticks, RuntimeID: runtimeID, Key: key, Thumbprint: tp,
+		PID: pid, StartTicks: ticks, RuntimeID: runtimeID, SessionID: sessionID, Key: key, Thumbprint: tp,
 		RegisteredAt: time.Now(), ready: make(chan struct{}), stop: make(chan struct{}), peer: peer,
 	}, nil
 }
+
+// SessionRuntimeID is the runtime id of a session named by an omp session id. It is the one place
+// the shape is written; scripts/agentbox builds the same string for an agent box, so a session
+// that moves between a box and the host keeps one enrollment.
+func SessionRuntimeID(sessionID string) string { return "session-" + sessionID }
 
 func (s *Session) EnrollmentID() string {
 	s.mu.Lock()
@@ -165,16 +189,62 @@ func (s *Session) Info() SessionInfo {
 	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID, EnrollmentID: st.EnrollmentID, State: st.State, RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
 }
 
-// Record is a Session without its key: enough to re-pin the process after a helper restart and
-// to revoke the enrollment it had.
+// Record is a Session as the records file holds it: enough to re-pin the process after a helper
+// restart and to revoke the enrollment it had, and, for a session the launcher named with an omp
+// session id, enough to give that identity back to the same session when it comes back — the id
+// and the key, as PKCS#8 DER, base64 (standard, padded), the same shape machine.json uses. A
+// session with no SessionID carries no Key: its runtime id dies with the process anyway, so
+// keeping the key would be exposure that buys nothing.
+//
+// GoneAt is when the helper last found the session's process gone (Recover) or watched it exit
+// (retire): the record is dormant from then, and DormantGrace later its enrollment is revoked.
 type Record struct {
-	PID          int    `json:"pid"`
-	StartTicks   uint64 `json:"start_ticks"`
-	RuntimeID    string `json:"runtime_id"`
-	EnrollmentID string `json:"enrollment_id"`
+	PID          int        `json:"pid"`
+	StartTicks   uint64     `json:"start_ticks"`
+	RuntimeID    string     `json:"runtime_id"`
+	EnrollmentID string     `json:"enrollment_id"`
+	SessionID    string     `json:"session_id,omitempty"`
+	Key          string     `json:"key,omitempty"`
+	GoneAt       *time.Time `json:"gone_at,omitempty"`
 }
 
-// Registry is the live sessions plus the path their records are saved to.
+// Key reads a record's signing key, nil when it has none and an error when what it has is not a
+// P-256 PKCS#8 key (a records file edited or truncated): the caller then makes a fresh key, as
+// it did before records carried one at all.
+func (rec Record) PrivateKey() (*ecdsa.PrivateKey, error) {
+	if rec.Key == "" {
+		return nil, nil
+	}
+	der, err := base64.StdEncoding.DecodeString(rec.Key)
+	if err != nil {
+		return nil, fmt.Errorf("session %s: key: %w", rec.RuntimeID, err)
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("session %s: key: %w", rec.RuntimeID, err)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("session %s: key is not an ECDSA key", rec.RuntimeID)
+	}
+	return key, nil
+}
+
+// encodeKey is PrivateKey's inverse; a key that will not marshal is recorded as none, which costs
+// the session its continuity and nothing else.
+func encodeKey(key *ecdsa.PrivateKey) string {
+	if key == nil {
+		return ""
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(der)
+}
+
+// Registry is the live sessions, the dormant records of sessions that may come back, and the
+// path both are saved to.
 type Registry struct {
 	mu     sync.Mutex
 	saveMu sync.Mutex // serializes Save so the last rename is always the newest snapshot
@@ -182,6 +252,12 @@ type Registry struct {
 	closed bool
 	path   string
 	byPID  map[int]*Session
+	// dormant is, by omp session id, the identity of a session whose process is gone but which
+	// may come back: the key, the runtime id and the enrollment, kept until the same session id
+	// registers again (reclaimDormant) or DormantGrace passes (sweepDormant, which revokes).
+	// Only a session the launcher named can be here, since only its runtime id is the same
+	// after a reboot.
+	dormant map[string]Record
 	// parent reads a process's parent for the ancestry walks: procParent, or a test's fake.
 	parent func(int) (int, error)
 	// draining is set by Drain on a registry with no sessions and cleared only by Undrain: the
@@ -191,7 +267,89 @@ type Registry struct {
 }
 
 func NewRegistry(path string) *Registry {
-	return &Registry{path: path, byPID: map[int]*Session{}, parent: procParent}
+	return &Registry{path: path, byPID: map[int]*Session{}, dormant: map[string]Record{}, parent: procParent}
+}
+
+// Dormant is the record kept for sessionID, if any.
+func (r *Registry) Dormant(sessionID string) (Record, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.dormant[sessionID]
+	return rec, ok
+}
+
+// Park keeps rec for its session id, so the same session coming back gets its identity rather
+// than a new one. A record with no session id is not parked: nothing could ever claim it.
+func (r *Registry) Park(rec Record) bool {
+	if rec.SessionID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dormant[rec.SessionID] = rec
+	return true
+}
+
+// TakeDormant removes and returns the record kept for sessionID.
+func (r *Registry) TakeDormant(sessionID string) (Record, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.dormant[sessionID]
+	delete(r.dormant, sessionID)
+	return rec, ok
+}
+
+// ExpiredDormant removes and returns every dormant record that went dormant before cutoff: the
+// sessions that did not come back, whose enrollments the caller revokes.
+func (r *Registry) ExpiredDormant(cutoff time.Time) []Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []Record
+	for id, rec := range r.dormant {
+		if rec.GoneAt == nil || rec.GoneAt.Before(cutoff) {
+			out = append(out, rec)
+			delete(r.dormant, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
+	return out
+}
+
+// LiveSessionID reports whether a live session already holds sessionID: a second process must
+// not be handed an identity another one is signing with.
+func (r *Registry) LiveSessionID(sessionID string) *Session {
+	if sessionID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.byPID {
+		if s.SessionID == sessionID {
+			return s
+		}
+	}
+	return nil
+}
+
+// Rename gives a live session its omp session id and the runtime id that goes with it, and the
+// key an earlier incarnation of that session used when there is one. The enrollment it holds
+// becomes its lapsed one, so enrollLoop revokes that before enrolling the new runtime id. It
+// does nothing, and answers false, for a session that already has an id or has left the registry.
+func (r *Registry) Rename(s *Session, sessionID, runtimeID string, key *ecdsa.PrivateKey) bool {
+	r.mu.Lock()
+	if cur, ok := r.byPID[s.PID]; !ok || cur != s || s.SessionID != "" {
+		r.mu.Unlock()
+		return false
+	}
+	s.SessionID, s.RuntimeID = sessionID, runtimeID
+	if key != nil {
+		if tp, err := proof.Thumbprint(&key.PublicKey); err == nil {
+			s.Key, s.Thumbprint = key, tp
+		}
+	}
+	r.mu.Unlock()
+	s.markLapsed("this session has been named " + sessionID + "; enrolling it under that name")
+	return true
 }
 
 func (r *Registry) Add(s *Session) {
@@ -306,7 +464,9 @@ func (r *Registry) Draining() bool {
 	return r.draining
 }
 
-// Save writes every session's record, atomically, 0600. After Close it writes nothing.
+// Save writes every live session's record and every dormant one, atomically, 0600 in a directory
+// it makes 0700: a record of a named session holds that session's signing key, so nothing but
+// this user may read the file or list the directory. After Close it writes nothing.
 func (r *Registry) Save() error {
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
@@ -315,10 +475,23 @@ func (r *Registry) Save() error {
 	}
 	recs := make([]Record, 0)
 	for _, s := range r.List() {
-		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID()})
+		rec := Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID(), SessionID: s.SessionID}
+		if s.SessionID != "" {
+			rec.Key = encodeKey(s.Key)
+		}
+		recs = append(recs, rec)
 	}
+	r.mu.Lock()
+	for _, rec := range r.dormant {
+		recs = append(recs, rec)
+	}
+	r.mu.Unlock()
+	sort.Slice(recs, func(i, j int) bool { return recs[i].RuntimeID < recs[j].RuntimeID })
 	data, err := json.MarshalIndent(recs, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
 		return err
 	}
 	tmp := r.path + ".tmp"
@@ -326,6 +499,19 @@ func (r *Registry) Save() error {
 		return err
 	}
 	return os.Rename(tmp, r.path)
+}
+
+// LoadDormant takes the dormant records out of recs and keeps them, so a session that comes back
+// after this helper restarted finds its identity where a session that came back after a process
+// restart does. Recover calls it with what LoadRecords read.
+func (r *Registry) LoadDormant(recs []Record) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rec := range recs {
+		if rec.SessionID != "" && rec.GoneAt != nil {
+			r.dormant[rec.SessionID] = rec
+		}
+	}
 }
 
 // Close waits for a Save in progress, then makes every later Save write nothing, so a caller can

@@ -34,7 +34,7 @@ type Request struct {
 	WaitSeconds     int      `json:"wait_seconds,omitempty"`     // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
 	RuntimeID       string   `json:"runtime_id,omitempty"`       // enroll-session-key: the session's runtime id on this machine
 	Thumbprint      string   `json:"thumbprint,omitempty"`       // enroll-session-key: the session key's thumbprint
-	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id
+	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id; register: the omp session id this session is to be known by
 	EnrollmentID    string   `json:"enrollment_id,omitempty"`    // unenroll-session-key: which enrollment to end
 }
 

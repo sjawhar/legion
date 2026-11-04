@@ -4751,13 +4751,26 @@ Every other refusal keeps the retry backoff:
 
 The login that installs a credential, a resumed one included, wakes every registered session's enrollment retry, so those sessions reach the broker within about a second of it rather than when a backoff of up to a minute comes round.
 A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its enrollment becomes the session's lapsed id;
-so does a re-pinned session's recorded enrollment after a helper restart.
+so does a re-pinned session's recorded enrollment after a helper restart, unless that session is named (below), in which case it keeps the key and the enrollment its record holds and nothing is lapsed.
 Any other refused renew keeps the lease and retries.
 While it is lapsed and the helper holds a credential, sign answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-enrollment.
 The helper revokes a lapsed id before the session enrolls again, and while the session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any login, still revokes it.
 A session that ends first takes its record with it and hands the id to a bounded revoke (three tries);
 before a login those fail, and the broker's sweeper ends the id once its lease lapses.
 A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential) counts as done, and the session enrolls afresh.
+
+A machine session is named when its launcher passes `agent-secrets register --session-id <omp session id>`, and the name is what makes its broker identity outlive the process (dispatch://INFRA-1167).
+An unnamed session's `runtime_id` is `<hostname>:<pid>:<start ticks since boot>`: both halves are boot-unique, and its key lives only in the helper's memory, so after a reboot it can only enrol afresh — and since a credential request and a grant are bound to the enrollment id alone, and ending an enrollment cancels the one and revokes the other (`enroll.endEnrollment`), every request a person had not yet answered and every grant they had given was lost with the reboot.
+A named session's `runtime_id` is `session-<id>`, the same string at any pid after any restart, and the helper's records file keeps its key (PKCS#8 DER, base64, in a file it writes 0600 in a directory it makes 0700, the shape `machine.json` uses).
+The same key under the same runtime id gets the enrollment the broker already has (`enroll.recoverConflict`), so the identity, its pending requests and its grants come back with the session.
+`scripts/agentbox` in Sami's dotfiles builds the same `session-<id>` runtime id for an agent box, so a session keeps one enrollment across a box as well as across a reboot.
+A launcher knows an omp session id before the exec only for a resumed session (omp opens its transcript seconds after it starts), so a fresh one registers unnamed and runs `register --session-id` again from inside;
+the helper then moves it to the session-scoped runtime id, revoking the pid-derived enrollment it held for those seconds, before any grant exists to lose.
+A second process may not take a name a live session holds, nor rename a session that already has one (both `BAD_REQUEST`).
+A named session whose process goes away — watched exiting, or found gone at `Recover`, which is every recorded session after a reboot — is parked rather than revoked, and `SweepDormant` (a minute's tick) revokes its enrollment once `DormantGrace` (3 minutes) passes without the same session id registering again, well inside the broker's own 15-minute lease.
+An unnamed session's enrollment is still revoked the moment its process ends, since nothing could ever claim it, and its record carries no key.
+The threat model changes by exactly one step: the pidfd pin and the `/proc` ancestry walk still decide who may SIGN as a live session, and what a name now decides is who may be handed a session's identity once its process is gone — any process of this user that knows the session id.
+That is no widening: the records file, the helper socket and `machine.json` are all this user's already, and `enroll-session-key` lets any of this user's processes enrol a key of its own (`server.enrollSessionKey`), so a same-user attacker could always obtain a launcher-backed identity.
 `agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a launcher credential and prints `issued`.
 A re-login that is denied, expires unapproved or is still pending leaves the credential an earlier login installed in place, and the helper keeps enrolling sessions with it, so login-status still exits 0 and prints `issued`, and stderr names the most recent login and its code (`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s own poll reads).
 A helper from before that field reports only the most recent login, so there a denied re-login still reads `denied` and exits 1 until the helper restarts on a release that carries it.

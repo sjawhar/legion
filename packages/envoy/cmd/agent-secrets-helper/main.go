@@ -195,6 +195,9 @@ func serve(cfg config) error {
 		}
 	}()
 	srv.Recover(ctx)
+	// Sessions parked when their process went away are revoked once DormantGrace passes without
+	// them coming back. A minute's tick: the grace is minutes, and nothing waits on it.
+	go srv.SweepLoop(ctx, time.Minute)
 	// The version says which release a restart came up on. The credential's state is logged where
 	// it changes (the Broker's resume, machine-login, refresh, expiry-warning and drop lines). The
 	// broker's URL is logged without a credential it may carry.

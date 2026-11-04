@@ -6,6 +6,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,7 +89,11 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		if wait > 0 {
 			_ = conn.SetDeadline(time.Now().Add(wait + 5*time.Second))
 		}
-		resp = s.register(ctx, peer, pid, wait)
+		sessionID := ""
+		if req.SessionID != nil {
+			sessionID = *req.SessionID
+		}
+		resp = s.register(ctx, peer, pid, sessionID, wait)
 	case "sign":
 		// sign and unregister keep peer's pidfd open through Registry.Root's ancestry walk too,
 		// for the same pid-reuse reason register does (see register's doc comment below); each
@@ -160,21 +165,41 @@ func (s *Server) reply(conn net.Conn, resp Response) {
 // trusted only once peer.PID() is re-read here and still names pid — otherwise this answers
 // CodeUnidentified instead of adopting or handing back a session for a peer that no longer is
 // who it was.
-func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Duration) Response {
+//
+// sessionID is the omp session id the launcher names, or "" for a session with none. With one,
+// the runtime id is `session-<sessionID>` rather than `<host>:<pid>:<start ticks>`, and the
+// identity a dormant record holds for that session — its key and its enrollment — is taken back
+// rather than made afresh, so the broker answers the enrollment it already has (its conflict is
+// keyed on (launcher credential, runtime id), and the same key under the same runtime id gets
+// the same row). That is what carries a session's pending requests and its grants across a
+// reboot. A session already registered without an id takes one here (adoptSessionID), which is
+// how a launcher that learns the id only after the agent starts gives it.
+func (s *Server) register(ctx context.Context, peer *Peer, pid int, sessionID string, wait time.Duration) Response {
 	if existing := s.Registry.Root(pid); existing != nil {
 		if peer.PID() != pid {
 			peer.Close()
 			return Response{Code: CodeUnidentified, Error: "the peer no longer matches the identified pid"}
 		}
 		peer.Close()
+		if resp, refused := s.adoptSessionID(ctx, existing, sessionID); refused {
+			return resp
+		}
 		return s.registerReply(existing, wait)
+	}
+	if held := s.Registry.LiveSessionID(sessionID); held != nil {
+		peer.Close()
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("session %s is already registered as pid %d; a second process may not take its broker identity", sessionID, held.PID)}
 	}
 	ticks, err := StartTicks(pid)
 	if err != nil {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: err.Error()}
 	}
-	sess, err := newSession(pid, ticks, fmt.Sprintf("%s:%d:%d", s.Hostname, pid, ticks), peer)
+	runtimeID, key, taken := s.reclaimDormant(sessionID)
+	if runtimeID == "" {
+		runtimeID = fmt.Sprintf("%s:%d:%d", s.Hostname, pid, ticks)
+	}
+	sess, err := newSession(pid, ticks, runtimeID, sessionID, key, peer)
 	if err != nil {
 		peer.Close()
 		return Response{Code: CodeKeygen, Error: err.Error()}
@@ -197,8 +222,62 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 	}
 	s.save()
 	s.adopt(ctx, sess)
-	s.Log.Info("session registered", "pid", pid, "runtime_id", sess.RuntimeID)
+	if taken {
+		s.Log.Info("session registered, taking back the identity it had before", "pid", pid, "runtime_id", sess.RuntimeID, "session_id", sessionID)
+	} else {
+		s.Log.Info("session registered", "pid", pid, "runtime_id", sess.RuntimeID)
+	}
 	return s.registerReply(sess, wait)
+}
+
+// reclaimDormant is the identity kept for sessionID: its runtime id and its key, which make the
+// broker answer with the enrollment that session already has. Nothing kept, or no session id at
+// all, answers empty and the caller makes a new identity. A record whose key will not parse (a
+// records file edited or truncated) is dropped with a line in the journal; the session then gets
+// a new identity, which is what it got before records carried keys.
+func (s *Server) reclaimDormant(sessionID string) (runtimeID string, key *ecdsa.PrivateKey, taken bool) {
+	if sessionID == "" {
+		return "", nil, false
+	}
+	rec, ok := s.Registry.TakeDormant(sessionID)
+	if !ok {
+		return SessionRuntimeID(sessionID), nil, false
+	}
+	key, err := rec.PrivateKey()
+	if err != nil || key == nil {
+		if err != nil {
+			s.Log.Warn("the recorded key of a session coming back could not be read; it gets a new identity and its pending requests end with the old one", "session_id", sessionID, "error", err)
+		}
+		return SessionRuntimeID(sessionID), nil, false
+	}
+	return rec.RuntimeID, key, true
+}
+
+// adoptSessionID gives a session that registered without an omp session id the one its launcher
+// has since learnt: omp opens its transcript seconds after it starts, so a launcher cannot name
+// the id before the exec of a fresh session, only of a resumed one. The session's runtime id
+// becomes session-scoped and its current enrollment becomes its lapsed one, so enrollLoop
+// revokes that and enrolls the new runtime id — the same path a refused renew takes. It happens
+// seconds into a session, before any grant exists, which is why discarding that first enrollment
+// costs nothing. A session that already has a DIFFERENT id is refused: an identity a session is
+// signing with is not another caller's to change.
+func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID string) (Response, bool) {
+	if sessionID == "" || sess.SessionID == sessionID {
+		return Response{}, false
+	}
+	if sess.SessionID != "" {
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("this process is in session %s, which cannot become session %s", sess.SessionID, sessionID)}, true
+	}
+	if held := s.Registry.LiveSessionID(sessionID); held != nil {
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("session %s is already registered as pid %d; a second process may not take its broker identity", sessionID, held.PID)}, true
+	}
+	runtimeID, key, _ := s.reclaimDormant(sessionID)
+	if !s.Registry.Rename(sess, sessionID, runtimeID, key) {
+		return Response{}, false
+	}
+	s.save()
+	s.Log.Info("session named by its launcher; enrolling it under that name", "pid", sess.PID, "runtime_id", sess.RuntimeID, "session_id", sessionID)
+	return Response{}, false
 }
 
 // registerReply answers a register, first waiting up to wait for the session to enroll. Without a
@@ -695,8 +774,20 @@ func (s *Server) watchExit(ctx context.Context, sess *Session) {
 	s.retire(ctx, sess, "process exited")
 }
 
-// retire forgets the session, then revokes its enrollment (three tries; the lease is the
-// fallback). Idempotent: an unregister followed by the exit watch firing retires once.
+// DormantGrace is how long a named session's identity is kept after its process goes away,
+// before its enrollment is revoked. A session the launcher named can come back — an omp
+// restarted in its pane, a `agentbox move`, a reboot's resume — and ending its enrollment
+// cancels every request Sami has not yet answered and revokes every grant he has given, which
+// is what dispatch://INFRA-1167 is about. It is well under the broker's own 15-minute lease,
+// so a session that never comes back loses its grants here, not at the lease; and a session
+// with no omp session id is revoked at once, exactly as before, since nothing could claim it.
+var DormantGrace = 3 * time.Minute
+
+// retire forgets the session. One with no omp session id has its enrollment revoked at once
+// (three tries; the lease is the fallback), as before. A named one is parked instead, for
+// DormantGrace, so the same session coming back takes its identity — and its pending requests
+// and grants — rather than a new one; sweepDormant revokes it if it does not.
+// Idempotent: an unregister followed by the exit watch firing retires once.
 func (s *Server) retire(ctx context.Context, sess *Session, why string) {
 	if !s.Registry.Remove(sess) {
 		return
@@ -704,11 +795,54 @@ func (s *Server) retire(ctx context.Context, sess *Session, why string) {
 	if sess.peer != nil {
 		sess.peer.Close()
 	}
+	id := sess.EnrollmentID()
+	if sess.SessionID != "" && id != "" {
+		gone := time.Now()
+		s.Registry.Park(Record{
+			PID: sess.PID, StartTicks: sess.StartTicks, RuntimeID: sess.RuntimeID,
+			EnrollmentID: id, SessionID: sess.SessionID, Key: encodeKey(sess.Key), GoneAt: &gone,
+		})
+		s.save()
+		s.Log.Info("session retired; its identity is kept for it to come back to", "runtime_id", sess.RuntimeID, "why", why, "for", DormantGrace)
+		return
+	}
 	s.save()
-	if id := sess.EnrollmentID(); id != "" {
+	if id != "" {
 		s.revoke(ctx, id)
 	}
 	s.Log.Info("session retired", "runtime_id", sess.RuntimeID, "why", why)
+}
+
+// SweepDormant revokes the enrollment of every session that went dormant more than DormantGrace
+// ago and did not come back, and forgets it. The helper runs it on a ticker (SweepLoop); a test
+// calls it directly.
+func (s *Server) SweepDormant(ctx context.Context) {
+	expired := s.Registry.ExpiredDormant(time.Now().Add(-DormantGrace))
+	if len(expired) == 0 {
+		return
+	}
+	for _, rec := range expired {
+		s.Log.Info("a session did not come back; ending its enrollment", "runtime_id", rec.RuntimeID, "session_id", rec.SessionID, "enrollment_id", rec.EnrollmentID)
+		if rec.EnrollmentID != "" {
+			s.revoke(ctx, rec.EnrollmentID)
+		}
+	}
+	s.save()
+}
+
+// SweepLoop runs SweepDormant until ctx ends. every is the tick; cmd/agent-secrets-helper passes
+// a minute, and a test a short one.
+func (s *Server) SweepLoop(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			s.SweepDormant(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // revoke is the bounded revoke: three tries, 2 s apart, then the lease is the fallback. It uses
@@ -728,28 +862,44 @@ func (s *Server) save() {
 }
 
 // Recover runs at start, after the Broker has resumed any machine login it keeps (Broker.Start):
-// every recorded session whose process is still the same incarnation is pinned again with a fresh
-// key and adopted (enrolled and exit-watched); a recorded process that is gone just has its
-// enrollment revoked. A re-pinned session takes its recorded enrollment as its lapsed id
-// (setLapsed), so its own enrollLoop revokes that id before enrolling the fresh key, exactly as
-// after a refused renew: the real broker's idempotent-enroll conflict is keyed on
-// (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of the old row's revoke can
-// be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. While the
-// re-pinned session lives, the lapsed id is on its record from the save below until the revoke
-// lands, so a second restart before then — with no machine login kept on disk, no revoke can
-// succeed before the next login — still revokes it. That revoke runs inside the one goroutine
-// adopt starts for the re-pinned session, never on this loop's own goroutine, so one session
-// waiting on its own revoke never blocks Recover from moving on to the next recorded session.
-// Should that session end while the revoke is still retrying, its record goes with it, and
-// revokeLapsed hands the id to the bounded independent revoke; with no login those three tries
-// cannot succeed either, and the id ends with its lease (see revokeLapsed's doc comment).
+// every recorded session whose process is still the same incarnation is pinned again and adopted
+// (enrolled and exit-watched).
+//
+// A record that carries a key — one of a session its launcher named — is re-pinned with THAT
+// key under THAT runtime id, and keeps its enrollment: the broker's idempotent enroll answers
+// the same key under the same runtime id with the row it already has, so the session's pending
+// requests and its grants survive the restart. Nothing is lapsed, and nothing is revoked.
+//
+// A record with no key is re-pinned with a fresh one, as before, and takes its recorded
+// enrollment as its lapsed id (setLapsed), so its own enrollLoop revokes that id before
+// enrolling the fresh key, exactly as after a refused renew: the real broker's idempotent-enroll
+// conflict is keyed on (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of
+// the old row's revoke can be refused outright (409 ALREADY_ENROLLED) even though it carries a
+// fresh key. While the re-pinned session lives, the lapsed id is on its record from the save
+// below until the revoke lands, so a second restart before then — with no machine login kept on
+// disk, no revoke can succeed before the next login — still revokes it. That revoke runs inside
+// the one goroutine adopt starts for the re-pinned session, never on this loop's own goroutine,
+// so one session waiting on its own revoke never blocks Recover from moving on to the next
+// recorded session. Should that session end while the revoke is still retrying, its record goes
+// with it, and revokeLapsed hands the id to the bounded independent revoke; with no login those
+// three tries cannot succeed either, and the id ends with its lease (see revokeLapsed's doc
+// comment).
+//
+// A recorded process that is gone — every one of them after a reboot — is parked dormant when
+// the record names an omp session id, so the session resuming under that id takes its identity
+// back (reclaimDormant) and SweepDormant revokes it only if DormantGrace passes without it; one
+// with no session id has its enrollment revoked here, as before, since nothing could claim it.
 func (s *Server) Recover(ctx context.Context) {
 	recs, err := LoadRecords(s.Registry.path)
 	if err != nil {
 		s.Log.Error("reading recorded sessions", "error", err)
 		return
 	}
+	s.Registry.LoadDormant(recs)
 	for _, rec := range recs {
+		if rec.GoneAt != nil {
+			continue // already dormant when the helper stopped; LoadDormant has it
+		}
 		peer, err := PinPID(rec.PID)
 		alive := err == nil && peer.PID() == rec.PID
 		if alive {
@@ -760,16 +910,34 @@ func (s *Server) Recover(ctx context.Context) {
 			if peer != nil {
 				peer.Close()
 			}
+			gone := time.Now()
+			rec.GoneAt = &gone
+			if rec.EnrollmentID != "" && s.Registry.Park(rec) {
+				s.Log.Info("recorded session is gone; its identity is kept for it to come back to", "runtime_id", rec.RuntimeID, "session_id", rec.SessionID, "for", DormantGrace)
+				continue
+			}
 			s.Log.Info("recorded session is gone", "runtime_id", rec.RuntimeID)
 			if rec.EnrollmentID != "" {
 				go s.revoke(ctx, rec.EnrollmentID)
 			}
 			continue
 		}
-		sess, err := newSession(rec.PID, rec.StartTicks, rec.RuntimeID, peer)
+		key, err := rec.PrivateKey()
+		if err != nil {
+			s.Log.Warn("the recorded key of a live session could not be read; it is re-pinned with a fresh one and its previous grants are revoked", "runtime_id", rec.RuntimeID, "error", err)
+			key = nil
+		}
+		sess, err := newSession(rec.PID, rec.StartTicks, rec.RuntimeID, rec.SessionID, key, peer)
 		if err != nil {
 			peer.Close()
 			s.Log.Error("key generation", "runtime_id", rec.RuntimeID, "error", err)
+			continue
+		}
+		if key != nil {
+			sess.setEnrolled(rec.EnrollmentID)
+			s.Registry.Add(sess)
+			s.Log.Info("session re-pinned after a restart with the key it had; it keeps its enrollment", "runtime_id", rec.RuntimeID, "enrollment_id", rec.EnrollmentID)
+			s.adopt(ctx, sess)
 			continue
 		}
 		sess.setLapsed(rec.EnrollmentID)
