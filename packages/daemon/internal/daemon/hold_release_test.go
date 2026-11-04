@@ -794,7 +794,7 @@ func TestAHeldRootKeepsItsPlaceOnTheRuntimeUntilItsOwnReleaseAdmitsIt(t *testing
 	w := &workflowRuntime{
 		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},
 		dispatchProject: "CAPTURE", bootID: "test-boot", log: log,
-		holdPollInterval: 20 * time.Millisecond, consumers: consumers,
+		holdPollInterval: 20 * time.Millisecond, nats: newNATSHolder(nil, consumers, nil),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
