@@ -6,11 +6,15 @@
 # every change), every job `changes` selected succeeded, and every job it did not select
 # succeeded or was skipped.
 #
-# A selected job must succeed: skipped, cancelled or absent fails. GitHub's "Re-run failed jobs"
-# can leave one skipped while its selector now succeeds: when `changes` fails, every job its
-# filters gate is skipped, and a failed-only re-run makes `changes` succeed while the jobs it
-# selects stay skipped. A verdict that accepted a skip from a job `changes` selected would pass
-# with nothing tested.
+# A selected job must succeed: skipped, cancelled or absent fails. A skip there means the job's
+# `if:` did not admit the run although `changes` chose it — the two disagree, and whoever meets
+# the failure has one of them to fix — and a verdict that accepted it would pass with nothing
+# tested. A re-run of only the failed jobs does not leave one: `gh run rerun <id> --failed` was
+# measured twice on pull request #2734, and each re-run kept 30 of the run's 31 jobs, ran only
+# the failed job again, and ci-ok passed both times. A merge_group run of ci.yaml is never
+# re-run at all: every job of a re-run attempt of a merge-group run skips, deliberately, because
+# a group is tested once, and a pull request the queue removed is tested again when it is added
+# again.
 #
 # Its inputs, from ci-ok-report.sh:
 #   NEEDS              `changes`' result and outputs, as `toJSON(needs.changes)` gives them, and
@@ -77,7 +81,7 @@ include "ci-ok";
         if $result == "absent" then
           ["error", "\($job) is absent from NEEDS, but SELECTED_BY maps it to needs.changes.outputs.\($map[$job]); ci-ok-report.sh gives every SELECTED_BY job a result, so this is its defect"]
         elif $s.selected and $result != "success" then
-          ["error", "\($job) ended \($result), but changes selected it (\($s.why)); a selected job must succeed, and a skip here is what a failed-only re-run leaves"]
+          ["error", "\($job) ended \($result), but changes selected it (\($s.why)); a selected job must succeed, and a skip here means the job's if: did not admit the run although changes chose it, a disagreement between the two the author must fix"]
         elif ($s.selected | not) and $result != "success" and $result != "skipped" then
           ["error", "\($job) ended \($result); a job changes did not select must succeed or be skipped"]
         else empty end

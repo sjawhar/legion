@@ -22,7 +22,20 @@
 #     listed but also read, since `type=local,src=…` is a local tree.
 #   * GATES are an ALLOWLIST: unknown means refused, never ungated. A gate resolves to
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, to event terms, or to
-#     terms that cannot narrow by path, or it is refused. GitHub compares case-insensitively,
+#     terms that cannot narrow by path, or it is refused. The `changes` output such a test names
+#     is read WHOLE, never searched for a `steps.<id>.outputs.<name>` inside it: a reference a
+#     term this check has not read decides reaches the job narrower than its filter, and
+#     crediting the job with the filter's whole coverage would assert a build the gate does not
+#     start. Two shapes are read (output_filter): the PLAIN one, where the reference is a `||`
+#     disjunct of its own — `${{ steps.filter.outputs.x }}`, and ci.yaml's `${{ github.event_name
+#     == 'workflow_dispatch' && 'true' || steps.filter.outputs.x }}`, whose earlier disjunct can
+#     only hand the job the string 'true' — and the NARROWED one, where the reference is the last
+#     `&&` conjunct of its disjunct, `${{ <term> && steps.filter.outputs.x || 'false' }}`,
+#     ci.yaml's `full-ci` outputs. A narrowed output runs the job on fewer changes than its
+#     filter selects, so it is admitted only for a job whose every `docker/build-push-action`
+#     step publishes nothing (step_publishes): there a change the filter selects publishes no
+#     image either way, so no pin can name the commit it skipped. Every other shape is refused.
+#     GitHub compares case-insensitively,
 #     so this check does too. A filter is read under its step's `predicate-quantifier`: under
 #     `some` (the default) a file matches when any pattern does, and a `!` pattern, which
 #     there matches every file outside it, is refused; under `some-with-excludes` a file
@@ -672,6 +685,36 @@ BUILD_ACTION_INPUTS = {
     "tags",  # names on the result
     "target",  # which stage to stop at; narrows what is read, never widens
 }
+# The `outputs` exporters that write the result somewhere other than a registry: BuildKit's
+# exporters are image, registry, local, tar, oci, docker and cacheonly, and the first two are
+# the ones that publish.
+LOCAL_EXPORTERS = {"cacheonly", "docker", "local", "oci", "tar"}
+
+
+def step_publishes(options: dict) -> bool:
+    """True unless a `docker/build-push-action` step provably publishes nothing, read from the
+    two of its inputs that say where the result goes: `push`, false or unset, and `outputs`,
+    whose every exporter must write somewhere other than a registry. Anything this check cannot
+    read — an expression in `push`, an exporter it does not name — counts as publishing, the
+    safe side: a narrowed gate (output_filter) is admitted only on a job whose builds publish
+    nothing, so reading one wrongly would hide a published image behind a gate narrower than
+    its filter."""
+    if str(options.get("push", "false")).strip().lower() != "false":
+        return True
+    for exporter in str(options.get("outputs", "")).splitlines():
+        fields = {}
+        for field in exporter.split(","):
+            name, _, value = field.strip().partition("=")
+            if name:
+                fields[name] = value.strip()
+        if not fields:
+            continue
+        if fields.get("type", "") not in LOCAL_EXPORTERS:
+            return True
+        if fields.get("push", "false").lower() != "false":
+            return True
+    return False
+
 # A context this check can resolve to a repository path: no expression, no URL, no named
 # context.
 PLAIN_CONTEXT = re.compile(r"[\w.][\w./-]*\Z")
@@ -873,15 +916,20 @@ def gate_outputs(
 
 
 def gating_filters(
-    workflow: Path, describe: str, holder: dict, modes: dict[str, str | None] | None = None
+    workflow: Path,
+    describe: str,
+    holder: dict,
+    publishes: bool,
+    modes: dict[str, str | None] | None = None,
 ) -> tuple[list[tuple[str, PathsFilter]], set[str]]:
     """The dorny/paths-filter filters an `if:` is gated on, and the trigger events it admits.
     The holder is a job that builds an image, a job that calls a workflow which does, a job
-    either of those needs, or the build step itself, in `workflow`; `modes` are the CALL_MODE
-    inputs its `if:` may test, none for a step. A gate this check cannot evaluate is reported,
-    never ignored, since ignoring it would treat a gated build as one that runs on every
-    change. So is a draft term under a trigger that does not build the head once the draft is
-    marked ready (the comment above NEUTRAL)."""
+    either of those needs, or the build step itself, in `workflow`; `publishes` says whether the
+    build this gate decides is published, which is what forbids a narrowed output (output_filter)
+    here; `modes` are the CALL_MODE inputs its `if:` may test, none for a step. A gate this check
+    cannot evaluate is reported, never ignored, since ignoring it would treat a gated build as
+    one that runs on every change. So is a draft term under a trigger that does not build the
+    head once the draft is marked ready (the comment above NEUTRAL)."""
     document = documents[workflow]
     condition = str(holder.get("if", ""))
     try:
@@ -915,6 +963,19 @@ def gating_filters(
                 f"::error::{describe} builds or calls an image and is gated on "
                 f"needs.{needed}.outputs.{output}, which is not a dorny/paths-filter filter "
                 f"this check can read; make that output a paths-filter filter, or drop the gate"
+            )
+            continue
+        narrowing = reference[2]
+        if narrowing and publishes:
+            problems.append(
+                f"::error::{describe} builds or calls an image its job publishes, and is gated "
+                f"on needs.{needed}.outputs.{output}, which hands it "
+                f"steps.{reference[0]}.outputs.{reference[1]} only while "
+                f"`{' '.join(narrowing.split())}` holds, so a change that filter selects "
+                f"publishes no image and no pin can name that commit; drop the narrowing term "
+                f"from that output, which leaves the filter deciding the job, or keep the "
+                f"narrowed output for a job whose every docker/build-push-action step publishes "
+                f"nothing (no push:, and outputs: exporters that write no registry)"
             )
             continue
         name = reference[1]
@@ -973,12 +1034,57 @@ def filter_label(needed: str, name: str) -> str:
     return f"jobs.{needed} filter {name}"
 
 
-def output_filter(document: dict, needed: str, output: str) -> tuple[str, str] | None:
-    """(step id, filter name) that `needs.<needed>.outputs.<output>` reads, or None when the
-    output is not a step output."""
+def output_filter(document: dict, needed: str, output: str) -> tuple[str, str, str] | None:
+    """(step id, filter name, narrowing term) for the paths-filter output
+    `needs.<needed>.outputs.<output>` hands the job, or None when the whole expression is in
+    neither shape this check reads.
+
+    The expression is read WHOLE, never searched: a `steps.<id>.outputs.<name>` inside a term
+    this check has not read can reach the job narrower than its filter. GitHub's `&&` binds
+    tighter than `||`, so an expression is a `||` of disjuncts, each a `&&` of conjuncts, and
+    exactly one disjunct may hold the reference. Two shapes are read:
+
+      * PLAIN, the reference being the whole disjunct: `${{ steps.filter.outputs.x }}`, and
+        `${{ <term> && 'true' || steps.filter.outputs.x }}`, the shape ci.yaml's
+        workflow_dispatch term writes. An earlier disjunct may only widen, which `widening`
+        holds it to: `||` yields the first truthy operand, so one whose own last conjunct is
+        the literal `'true'` either falls through to the reference or hands the job 'true',
+        and the filter's match reaches the job's `if:` unnarrowed either way. The term is "".
+      * NARROWED, the reference being the LAST conjunct of its disjunct:
+        `${{ <term> && steps.filter.outputs.x || 'false' }}`, ci.yaml's `full-ci` shape, whose
+        <term> is every conjunct beside it. The job then runs on fewer changes than its filter
+        selects, so gating_filters admits it only for a build that publishes nothing. A
+        disjunct after the reference may only be the literal `'false'`, the fallback that
+        shape writes.
+
+    Anything else is refused by returning None, which gating_filters reports as an output it
+    cannot read: the reference in two disjuncts, a conjunct beside it that is not last, a
+    widening disjunct this check cannot prove yields 'true', any other fallback."""
     upstream = (document.get("jobs") or {}).get(needed) or {}
-    reference = STEP_OUTPUT.search(str((upstream.get("outputs") or {}).get(output, "")))
-    return (reference.group(1), reference.group(2)) if reference else None
+    expression = str((upstream.get("outputs") or {}).get(output, "")).strip()
+    if not (expression.startswith("${{") and expression.endswith("}}")):
+        return None
+    disjuncts = [unwrap(part) for part in split_top(unwrap(expression), "||")]
+    holders = [index for index, part in enumerate(disjuncts) if STEP_OUTPUT.search(part)]
+    if len(holders) != 1:
+        return None
+    index = holders[0]
+    if not all(widening(part) for part in disjuncts[:index]):
+        return None
+    if any(part != "'false'" for part in disjuncts[index + 1 :]):
+        return None
+    conjuncts = split_top(disjuncts[index], "&&")
+    reference = STEP_OUTPUT.fullmatch(unwrap(conjuncts[-1]))
+    if not reference or any(STEP_OUTPUT.search(part) for part in conjuncts[:-1]):
+        return None
+    return reference.group(1), reference.group(2), " && ".join(conjuncts[:-1])
+
+
+def widening(disjunct: str) -> bool:
+    """True when a `||` disjunct before the reference can only widen the output: its value,
+    when truthy, is the string 'true', which the job's `if:` tests for. `<term> && 'true'`
+    (ci.yaml's workflow_dispatch term) and a bare `'true'` are the two."""
+    return unwrap(split_top(disjunct, "&&")[-1]) == "'true'"
 
 
 def paths_filter_steps(job: dict) -> list[dict]:
@@ -1054,15 +1160,18 @@ def deciding_jobs(document: dict, job_name: str) -> list[str]:
     return order
 
 
-def inherited_gates(workflow: Path, job_name: str) -> list[tuple[str, list[tuple[str, PathsFilter]], set[str]]]:
+def inherited_gates(
+    workflow: Path, job_name: str, publishes: bool
+) -> list[tuple[str, list[tuple[str, PathsFilter]], set[str]]]:
     """(label, filters, admitted events) for every gate that decides whether `job_name` runs:
-    the `if:` of each of its deciding_jobs, in `workflow`."""
+    the `if:` of each of its deciding_jobs, in `workflow`. `publishes` says whether the build
+    those gates decide is published, which gating_filters holds a narrowed output to."""
     document = documents[workflow]
     modes = call_inputs(document)
     gates = []
     for name in deciding_jobs(document, job_name):
         job = (document.get("jobs") or {}).get(name) or {}
-        found, admitted = gating_filters(workflow, f"jobs.{name}", job, modes)
+        found, admitted = gating_filters(workflow, f"jobs.{name}", job, publishes, modes)
         gates.append((f"jobs.{name}.if", found, admitted))
     return gates
 
@@ -1093,7 +1202,7 @@ def apply_gates(triggers: list, gates: list, workflow: Path) -> list:
     return triggers
 
 
-def triggers_for(workflow: Path) -> list[tuple[str, str, list, Path, tuple]]:
+def triggers_for(workflow: Path, publishes: bool) -> list[tuple[str, str, list, Path, tuple]]:
     """(label, event, filters that must all cover an input, the workflow whose trigger it is,
     the paths-filter filters that select it) for every trigger that runs `workflow`. A called
     workflow's `github.event_name` is its caller's event, so a caller's trigger carries the
@@ -1106,7 +1215,7 @@ def triggers_for(workflow: Path) -> list[tuple[str, str, list, Path, tuple]]:
     for caller, caller_document, job_name in calling_jobs(workflow):
         # The calling job is gated by its own `if:` and by every job it transitively needs,
         # exactly as a building job is.
-        gates = inherited_gates(caller, job_name)
+        gates = inherited_gates(caller, job_name, publishes)
         base = [
             (f"{caller} {label}", event, [caller_filter], caller, ())
             for event, label, caller_filter in event_filters(caller, caller_document)
@@ -1169,7 +1278,16 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
             return
         context = posixpath.normpath(raw)
         dockerfile = str(options.get("file", posixpath.join(context, "Dockerfile")))
-        builds.append((workflow, job_name, gate_step, context, posixpath.normpath(dockerfile)))
+        builds.append(
+            (
+                workflow,
+                job_name,
+                gate_step,
+                context,
+                posixpath.normpath(dockerfile),
+                step_publishes(options),
+            )
+        )
         return
     if uses:
         if action in NON_BUILDING_ACTIONS:
@@ -1330,8 +1448,16 @@ if not builds:
 # is, the paths-filter filters that select it, and every file the builds it starts read: the
 # reverse check below reads them.
 PULL_REQUEST_EVENTS = ("pull_request", "pull_request_target")
+# One gate decides every build of its job, so the allowance for a narrowed output is the job's:
+# it holds only while EVERY docker/build-push-action step of the job publishes nothing.
+publishing_jobs = {
+    (workflow, job_name)
+    for workflow, job_name, _, _, _, published in builds
+    if published
+}
 started: dict[str, tuple[list, Path, tuple, set[str]]] = {}
-for workflow, job_name, step, context, dockerfile in builds:
+for workflow, job_name, step, context, dockerfile, _ in builds:
+    publishes = (workflow, job_name) in publishing_jobs
     if not Path(dockerfile).is_file():
         problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing; add the "
         f"Dockerfile, or correct the step's file:")
@@ -1368,13 +1494,13 @@ for workflow, job_name, step, context, dockerfile in builds:
     # the trigger let through, and the image is then not built for that change either. The
     # gates are the build step's own `if:`, its job's, and every job that job transitively
     # needs. A gate's event terms drop the triggers whose event it does not admit.
-    gates = inherited_gates(workflow, job_name)
+    gates = inherited_gates(workflow, job_name, publishes)
     if str(step.get("if", "")):
         where = step.get("name") or "an unnamed step"
         describe = f"jobs.{job_name} step '{where}'"
-        found, admitted = gating_filters(workflow, describe, step)
+        found, admitted = gating_filters(workflow, describe, step, publishes)
         gates.append((f"{describe} if", found, admitted))
-    triggers = apply_gates(triggers_for(workflow), gates, workflow)
+    triggers = apply_gates(triggers_for(workflow, publishes), gates, workflow)
     read = {path for _, files in inputs for path in files}
     for label, event, filters, origin, selectors in triggers:
         if event in PULL_REQUEST_EVENTS:

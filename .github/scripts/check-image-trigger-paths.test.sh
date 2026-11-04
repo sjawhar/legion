@@ -638,6 +638,63 @@ run_check "$root"
 check "a gate missing one input fails, though the trigger covers it" "$(is "$status" 1)"
 check "names that input" "$(contains "$out" 'does not cover .dockerignore')"
 
+echo "case: a narrowed output is read as narrowed, and admitted only where nothing is published"
+# ci.yaml's `full-ci` shape: the filter reaches the job only while the term beside it holds, so
+# the job runs on fewer changes than the filter selects. Read as the plain shape — a search for
+# `steps.<id>.outputs.<name>` anywhere in the expression — it would credit the job with the
+# filter's whole coverage while the real gate is narrower. A job whose builds publish nothing has
+# no pin that could miss a commit, so there the narrowing is admitted; a job that publishes one
+# would leave a change the filter selects with no image built for it.
+#
+# narrow_output <root> <term>: rewrites the changes job's output into that shape, behind the
+# workflow_dispatch term, which can only hand the job 'true' and so only widens.
+narrow_output() {
+  local root=$1 term=$2
+  python3 - "$root/.github/workflows/image.yaml" "$term" <<'PY'
+import sys
+path, term = sys.argv[1], sys.argv[2]
+text = open(path).read()
+plain = "      gated: ${{ steps.filter.outputs.gated }}\n"
+assert text.count(plain) == 1, "the fixture's output is not the plain shape"
+narrowed = (
+    "      gated: ${{ github.event_name == 'workflow_dispatch' && 'true' || "
+    + term
+    + " && steps.filter.outputs.gated || 'false' }}\n"
+)
+open(path, "w").write(text.replace(plain, narrowed))
+PY
+}
+
+# publishing_build <root>: the build pushes its result, which is what forbids a narrowed gate.
+publishing_build() {
+  sed -i 's|^          file: docker/Dockerfile$|&\n          push: true|' \
+    "$1/.github/workflows/image.yaml"
+}
+
+every_input="              - 'package.json'
+              - 'packages/app/**'
+              - 'docker/**'
+              - '.dockerignore'
+              - '.github/workflows/image.yaml'"
+full_ci="(github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci'))"
+
+root=$(fixture narrowed-gate-loads)
+gate_build_job "$root" "$every_input"
+narrow_output "$root" "$full_ci"
+run_check "$root"
+check "a narrowed output passes where every build of the job publishes nothing" "$(is "$status" 0)"
+check "and its filter still decides the build" "$(contains "$out" 'jobs.docker.if (jobs.changes filter gated)')"
+
+root=$(fixture narrowed-gate-publishes)
+gate_build_job "$root" "$every_input"
+narrow_output "$root" "$full_ci"
+publishing_build "$root"
+run_check "$root"
+check "a narrowed output fails where the job's build publishes" "$(is "$status" 1)"
+check "names the job and the narrowing term" \
+  "$(contains "$out" "^::error::jobs.docker builds or calls an image its job publishes, and is gated on needs.changes.outputs.gated, which hands it steps.filter.outputs.gated only while \`$(printf '%s' "$full_ci" | sed 's|[.*]|\\&|g')\` holds")"
+check "says what the author must do" "$(contains "$out" 'drop the narrowing term from that output, which leaves the filter deciding the job, or keep the narrowed output for a job whose every docker/build-push-action step publishes nothing')"
+
 echo "case: a gate reaches the build however it is written"
 # gate_probe <root> <docker job header> [extra job yaml]: a changes job exposing img (covers
 # every input) and narrow (covers docker/** only), with the build job's header supplied.

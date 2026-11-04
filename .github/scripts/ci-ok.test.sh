@@ -50,11 +50,13 @@ run_ci_ok() {
   set -e
 }
 
-echo "case: a failed-only re-run left a selected job skipped"
+echo "case: a job changes selected ended skipped"
 run_ci_ok "$(needs success "$selects" success typecheck=skipped envoy-client=skipped worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names the job, its result and why" \
   "$(contains "$out" "^::error::typecheck ended skipped, but changes selected it (needs.changes.outputs.typecheck is true)")"
+check "says what the skip means" \
+  "$(contains "$out" "a selected job must succeed, and a skip here means the job's if: did not admit the run although changes chose it, a disagreement between the two the author must fix\$")"
 check "prints its selection" "$(contains "$out" '^typecheck: skipped (selected: needs.changes.outputs.typecheck is true)$')"
 
 echo "case: every selected job succeeded and the unselected ones were skipped"
