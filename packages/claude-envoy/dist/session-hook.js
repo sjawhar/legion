@@ -14437,13 +14437,13 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, a typed block's serves and needs under it, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Optional project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
       version: z.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
-      blocks: z.boolean().describe("List the live document's blocks, with each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file.").optional(),
+      blocks: z.boolean().describe("List the live document's blocks, with a typed block's serves and needs and each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file.").optional(),
       ref: z.string().describe("Optional dispatch:// document reference; a picture in a conversation on the Agents page is dispatch://agent/<session id>/artifact/<slug>@vN.").optional()
     }),
     validation: documentOwnerValidation(true)
@@ -14451,14 +14451,59 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it, until " + "a later version's text is exactly the approved version's again, as when an accidental " + "edit is undone exactly, and no decision block in it was decided since: that version " + "carries the approval and the document reads approved at it, so nothing is requested for " + "it. When the document does not read approved, request approval again once that revision " + "is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; a carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it, until " + "a later version's text is exactly the approved version's again, as when an accidental " + "edit is undone exactly, and no decision block in it was decided since: that version " + "carries the approval and the document reads approved at it, so nothing is requested for " + "it. When the document does not read approved, request approval again once that revision " + "is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; a carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + "Refused 409 PLAN_APPROVED_BY_REVIEW on an issue's plan, which its plan review approves " + "(dispatch plan-approve), never a person. " + "On an issue's spec the answer ends with a `Coverage of <name>:` line naming each requirement " + "the spec marks that no check serves, in any document of the issue or of its descendants, or saying " + "the spec marks no requirements; a spec every requirement of which has a check gets no such line. It never " + "names a missing plan task, and a gap refuses nothing. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`)
+      summary: z.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`),
+      include_verification: z.boolean().describe("Ask for the issue's Verification document in the same request, beside this one: one Inbox card names both at their current versions, and the answer records the human's review on each. 409 NO_VERIFICATION_DOCUMENT when the issue has no verification.md. Without it the request names this document alone and records nothing on the Verification document.").optional()
     }),
     validation: documentOwnerValidation(true)
+  },
+  {
+    name: "dispatch_plan_approve",
+    example: { issue: "DSP-1", version: 2 },
+    description: "Record the plan review's approval of an issue's plan at the version it reviewed. A plan is " + "approved by that review, never by a person: dispatch request-approval on a plan is refused " + "409 PLAN_APPROVED_BY_REVIEW, so no plan approval ever reaches a human's Inbox. The approval " + "is pinned to the version named, so a later plan version makes it stale and the review runs " + "again. Refused 409 NOT_PLAN_DOCUMENT on any other document, the issue's spec included, and " + "400 INVALID_REVIEW for a version the plan does not have. " + ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      artifact: z.string().describe("Plan document artifact id, slug, or filename; the issue's plan.md by default.").optional(),
+      version: z.number({ int: true, min: 1 }).describe("The plan version the review read and approved.")
+    })
+  },
+  {
+    name: "dispatch_result",
+    example: {
+      issue: "DSP-1",
+      check: "k1",
+      role: "implementer",
+      verdict: "pass",
+      commit: "1111111111111111111111111111111111111111"
+    },
+    description: "Record one result of one check of an issue's Verification document, and print the " + "pull-request body line it implies. The check is named by its block id, or, when two " + "Verification documents in reach share that id, by its canonical reference " + "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " + "id no Verification document of the issue or of an issue above it holds is 400 " + "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " + "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " + "a child's run of a parent's check appears under that check. A closed issue takes a " + "result only for a check whose when is after_merge or default_branch \u2014 the production " + "check after the merge \u2014 and refuses every other one with 409 ISSUE_CLOSED, as it refuses " + "every other write. Write the printed line into the pull-request body unchanged: it is " + "the one grammar every writer uses, and it carries no link to Dispatch. " + ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      check: z.string().describe("The check block's id, or its canonical reference dispatch://KEY/artifact/verification-md#b-<id> when the id is not unique among the issue's Verification document and those of the issues above it."),
+      role: z.string({ max: 32 }).describe("Who ran it: implementer, tester, reviewer. At most 32 characters of a-z and -, printed in the pull-request line."),
+      verdict: z.enum(["pass", "fail"]).describe("Whether the check passed."),
+      commit: z.string().describe("The 40-character lowercase hex commit the check ran at."),
+      surface: z.string().describe("Where a person reaches the change.").optional(),
+      run: z.string().describe("The command that proved it.").optional(),
+      observed: z.string().describe("What the command printed.").optional(),
+      negative_control: z.string().describe("The deliberately broken input and the refusal seen.").optional(),
+      failed: z.number({ int: true, min: 0 }).describe("Cases the run failed; 0 by default.").optional(),
+      skipped: z.number({ int: true, min: 0 }).describe("Cases the run skipped; 0 by default.").optional(),
+      excluded: z.number({ int: true, min: 0 }).describe("Cases the run excluded; 0 by default.").optional(),
+      screenshots: z.array(z.string()).describe("dispatch:// references to image documents of this issue or of the check's issue.").optional()
+    })
+  },
+  {
+    name: "dispatch_results",
+    example: { issue: "DSP-1" },
+    description: "Print each check of an issue's Verification document with its latest result and whether " + "that result is current. A result is current when it ran at the commit the work stands at " + "\u2014 the head of an open pull request of the check's issue, the final head of a merged one, " + "or, for an after_merge or default_branch check, a commit on the repository's default " + "branch \u2014 and the check's words have not changed since; older otherwise, and unknown when " + "Dispatch cannot read the repository. A push that moves the pull request's head makes a " + "result older with no write of anyone's: record it again at the new head. " + ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE)
+    })
   },
   {
     name: "dispatch_artifact",
@@ -14482,7 +14527,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14931,6 +14976,7 @@ var EnvelopeSchema = object({
   dedupe_key: string2().min(1),
   issued_at: number2().int(),
   expires_at: number2().int().optional(),
+  kept_at: number2().int().optional(),
   payload_summary: string2().min(1),
   payload: string2().optional(),
   payload_ref: string2().optional(),
@@ -16279,6 +16325,15 @@ class DispatchClient {
     const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
     return { ...answer.payload, recorded: answer.status === 201 };
   }
+  async planApprove(artifactID, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "plan-reviews"], input);
+  }
+  async recordResult(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "results"], input);
+  }
+  async issueResults(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "results"]);
+  }
   async editAsk(id, input) {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
   }
@@ -16361,6 +16416,15 @@ class DispatchClient {
   }
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+  async issueArtifactBlocks(issue, slug) {
+    return this.#json("GET", ["api", "v1", "issues", issue, "artifacts", slug, "blocks"]);
+  }
+  async projectArtifactBlocks(project, slug) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug, "blocks"]);
+  }
+  async issueCoverage(key) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(key), "coverage"]);
   }
   async commentBlocks(id) {
     return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
@@ -18022,6 +18086,12 @@ function stringArg(args, name) {
     throw new Error(`${name} is required`);
   return value;
 }
+function numberArg(args, name) {
+  const value = args[name];
+  if (typeof value !== "number")
+    throw new Error(`${name} is required`);
+  return value;
+}
 function optionalString(args, name) {
   const value = args[name];
   return typeof value === "string" ? value : undefined;
@@ -18033,6 +18103,13 @@ function optionalBoolean(args, name) {
 function optionalNumber(args, name) {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
+}
+function defined(name, value) {
+  return value === undefined ? {} : { [name]: value };
+}
+function optionalStringArray(args, name) {
+  const value = args[name];
+  return Array.isArray(value) ? value : undefined;
 }
 function optionalPriority(args, name) {
   const value = args[name];
@@ -18957,6 +19034,24 @@ function progressText(progress, sep) {
   }
   return parts.join(sep);
 }
+function formatCheckResults(results) {
+  if (results.verification_artifact_id === "") {
+    return `${results.issue} has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved.`;
+  }
+  if (results.checks.length === 0) {
+    return `${results.issue}'s Verification document holds no check blocks.`;
+  }
+  const lines = results.checks.map((check) => {
+    const head = `- ${check.block_id} (${check.when}): `;
+    const latest = check.results[0];
+    if (latest === undefined) {
+      return `${head}no result yet. ${check.text}`;
+    }
+    return `${head}${latest.verdict} at ${latest.commit_sha.slice(0, 12)} by ${latest.role}, ${latest.currency ?? "unknown"}. ${check.text}`;
+  });
+  return [`Checks of ${results.issue}:`, ...lines].join(`
+`);
+}
 function repositoryLine(issue) {
   if (issue.resolved_repo === undefined) {
     return "Repository: unknown (this Dispatch server predates repository fields; upgrade it)";
@@ -18982,7 +19077,7 @@ function refuseUnsavedRepository(verb, issue, repo) {
   const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
   throw new Error(`Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
-function issueSummary(issue, events, references, graph, linkBase, titles) {
+function issueSummary(issue, events, references, graph, linkBase, coverage, titles) {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -19011,6 +19106,7 @@ function issueSummary(issue, events, references, graph, linkBase, titles) {
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
+    ...typeof coverage === "string" ? [`Coverage: ${coverage}`] : coverage.gaps.map((gap) => `Coverage: ${gap}`),
     "External links:",
     ...issue.external_links.length === 0 ? ["- none"] : issue.external_links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`),
     "Documents:",
@@ -19062,6 +19158,13 @@ async function issueReferencesOrUnavailable(client, key) {
     return unavailableReason(error);
   }
 }
+async function issueCoverageOrReason(client, key) {
+  try {
+    return await client.issueCoverage(key);
+  } catch (error) {
+    return unavailableReason(error);
+  }
+}
 async function graphSections(client, ref) {
   const [incoming, outgoing] = await Promise.all([
     graphReferences(client, { to: ref }),
@@ -19090,12 +19193,14 @@ function nodeLine(node) {
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
-function blockLines(node, ref, noun = "Block") {
+function blockLines(node, ref, typed, noun = "Block") {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head = ref.item === undefined ? [
     `Block: ${blockID}`,
+    ...typed === undefined ? [] : [`Type: ${typed.type}`],
     `Document: ${node.document ?? ref.document}`,
+    ...(typed?.attributes ?? []).map((attribute) => `${attribute.name}: ${attribute.value === "" ? "(empty)" : attribute.value}`),
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
   ] : [
@@ -19113,6 +19218,16 @@ function blockLines(node, ref, noun = "Block") {
     `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
+}
+async function typedBlockOf(client, ref) {
+  if (ref.item !== undefined || ref.block === undefined)
+    return;
+  try {
+    const blocks = ref.owner.kind === "project" ? await client.projectArtifactBlocks(ref.owner.project, ref.id) : await client.issueArtifactBlocks(ref.owner.issue, ref.id);
+    return blocks.find((block) => block.id === ref.block);
+  } catch {
+    return;
+  }
 }
 function askPartNoun(ask, node, blockID) {
   if (ask.answer?.id === blockID)
@@ -19483,7 +19598,7 @@ async function listDocumentBlocks(client, artifact) {
   const { bytes, blocks } = live;
   const decoder = new TextDecoder;
   const lines = [
-    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
+    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words, then a typed block's serves and needs. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
   ];
   const holders = [];
   for (const block of blocks) {
@@ -19495,6 +19610,11 @@ async function listDocumentBlocks(client, artifact) {
     const opening = points.length > BLOCK_OPENING_CHARS ? `${points.slice(0, BLOCK_OPENING_CHARS).join("")}\u2026` : flat;
     const { comments, asks } = block.references;
     lines.push(`${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`);
+    for (const attribute of block.attributes ?? []) {
+      if (attribute.kind === "block[]" && attribute.value !== "") {
+        lines.push(`${indent}  ${attribute.name}: ${attribute.value}`);
+      }
+    }
     if (block.type === "table") {
       if (block.table === undefined) {
         lines.push(`${indent}  This Dispatch does not report table rows yet, so no row or column index is listed.`);
@@ -20492,13 +20612,25 @@ Document token: ${listed.token}`,
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       await refuseOpenDecisionBlocks(client, input.tool, resolved);
+      const includeVerification = optionalBoolean(args, "include_verification") === true;
       const result = await client.requestApproval(resolved.artifact.id, {
         actor,
-        summary: stringArg(args, "summary")
+        summary: stringArg(args, "summary"),
+        ...includeVerification ? { include_verification: true } : {}
       });
+      const gaps = result.coverage ?? [];
+      const coverageLines = result.coverage_unread ? [
+        `Coverage of ${resolved.artifact.name}: unread. Dispatch could not read what the spec's requirements lack, so no line here says there is no gap; the request is recorded either way. Read the coverage again with dispatch read --issue, and mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`
+      ] : gaps.length === 0 ? [] : [
+        `Coverage of ${resolved.artifact.name}: ${gaps.map((gap) => `${gap}.`).join(" ")} Mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`
+      ];
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+          text: [
+            `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+            ...coverageLines
+          ].join(`
+`),
           details: {
             ...resolved.owner.kind === "project" ? documentResultDetails(resolved.artifact) : { issue: resolved.issue?.key },
             artifact: resolved.artifact.id,
@@ -20509,8 +20641,70 @@ Document token: ${listed.token}`,
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
       const outcome = result.recorded ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).` : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+        text: [
+          `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+          ...coverageLines
+        ].join(`
+`),
         details: { ...details, artifact: resolved.artifact.id, version: result.version }
+      };
+    }
+    case "dispatch_plan_approve": {
+      const planOwner = documentOwner();
+      const named = optionalString(args, "artifact");
+      const byRole = named === undefined && planOwner.kind === "issue" ? (await client.getIssue(planOwner.issue)).plan_artifact_id ?? "" : "";
+      const resolved = await resolveDocument(planOwner, named ?? (byRole || "plan.md"));
+      const version = numberArg(args, "version");
+      const review = await client.planApprove(resolved.artifact.id, { actor, version });
+      return {
+        text: `The plan review approved ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${review.version}; no human is asked to approve a plan. A later plan version makes this approval stale: run the review again and record it the same way.`,
+        details: {
+          issue: resolved.issue?.key,
+          artifact: resolved.artifact.id,
+          version: review.version
+        }
+      };
+    }
+    case "dispatch_result": {
+      const issue = stringArg(args, "issue");
+      const optional = {
+        ...defined("surface", optionalString(args, "surface")),
+        ...defined("run", optionalString(args, "run")),
+        ...defined("observed", optionalString(args, "observed")),
+        ...defined("negative_control", optionalString(args, "negative_control")),
+        ...defined("failed", optionalNumber(args, "failed")),
+        ...defined("skipped", optionalNumber(args, "skipped")),
+        ...defined("excluded", optionalNumber(args, "excluded")),
+        ...defined("screenshots", optionalStringArray(args, "screenshots"))
+      };
+      const recorded = await client.recordResult(issue, {
+        actor,
+        check: stringArg(args, "check"),
+        role: stringArg(args, "role"),
+        verdict: stringArg(args, "verdict"),
+        commit: stringArg(args, "commit"),
+        ...optional
+      });
+      return {
+        text: `Recorded ${recorded.result.verdict} for check ${recorded.result.check_block_id} of ${recorded.result.check_issue_key} at ${recorded.result.commit_sha.slice(0, 12)}, as ${recorded.result.role}.
+
+Pull request body line:
+${recorded.line}`,
+        details: {
+          issue,
+          result: recorded.result.id,
+          check: recorded.result.check_block_id,
+          verdict: recorded.result.verdict,
+          line: recorded.line
+        }
+      };
+    }
+    case "dispatch_results": {
+      const issue = stringArg(args, "issue");
+      const results = await client.issueResults(issue);
+      return {
+        text: formatCheckResults(results),
+        details: { issue, checks: results.checks.length }
       };
     }
     case "dispatch_artifact": {
@@ -20714,7 +20908,7 @@ ${handoff.body}`,
         const askOfPart = ref.item?.kind === "ask" ? client.getAsk(ref.item.id).catch(() => {
           return;
         }) : undefined;
-        const [incoming, outgoing, partOf] = await Promise.all([
+        const [incoming, outgoing, partOf, typed] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
               throw new Error(`No block ${ref.block} in ${holder}.`);
@@ -20722,13 +20916,14 @@ ${handoff.body}`,
             throw error;
           }),
           graphReferences(client, { from: blockRef }),
-          askOfPart
+          askOfPart,
+          typedBlockOf(client, ref)
         ]);
         const blockID = incoming.node.block_id ?? ref.block ?? "";
         const noun = ref.item?.kind !== "ask" ? undefined : partOf === undefined ? "Part" : askPartNoun(partOf.ask, incoming.node, blockID);
         return {
           text: [
-            ...blockLines(incoming.node, ref, noun),
+            ...blockLines(incoming.node, ref, typed, noun),
             ...graphSectionLines(incoming, outgoing)
           ].join(`
 `),
@@ -20800,17 +20995,18 @@ ${handoff.body}`,
       const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph, titles, pictures] = await Promise.all([
+      const [references, graph, titles, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
         liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
           ...read.events.flatMap(eventTexts)
-        ])
+        ]),
+        issueCoverageOrReason(client, read.issue.key)
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, titles),
         details: { issue: read.issue.key },
         ...showImages(pictures),
         ...repositoryFieldsWarnings(read.issue)

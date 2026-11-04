@@ -2,11 +2,14 @@ package docs
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -19,7 +22,9 @@ import (
 
 // forkWriteClient is the client id both forks of a comparison are built with, as a write's fork
 // is built with its transaction's (liveWrite.clientID): the two forks author the same items, so
-// the update each makes for the same write is comparable byte for byte.
+// the update each makes for the same write is comparable byte for byte. No corpus document is
+// written by it, so neither fork draws a client id of its own, which each would draw at random
+// and apart from the other (compareForks).
 const forkWriteClient crdt.ClientID = 991
 
 // forkWriteKinds are the writes each comparison makes on both forks: a word typed into the
@@ -142,10 +147,27 @@ func compareForkReads(t *testing.T, at corpusRoom) int {
 }
 
 // compareForks fails the test where two forks of the same state differ in what they encode to,
-// which is what a write stores and publishes, or in the state vector a reader of either asks
-// them for (forkHeld, captureLiveTextAndAuthors).
+// which is what a write stores and publishes, in the state vector a reader of either asks them
+// for (captureLiveTextAndAuthors), or in the client id each ended up with.
+//
+// A fork draws a client id of its own where the state it takes already holds structs of the one
+// it was built with: the clone draws it outright (crdt.Doc.Clone), and the decode's apply of
+// that state, a non-local transaction advancing the client's own clock, draws it at commit
+// (reearth/ygo#340). The two draws are independent random ids, so the comparison is run with a
+// client the corpus holds nothing of and neither fork may draw: the forks then author the same
+// items and their updates compare byte for byte. This fails where one fork drew and the other
+// did not, and where both drew, which would leave the writes below comparing two authors.
 func compareForks(t *testing.T, got, want *crdt.Doc, stage string) {
 	t.Helper()
+	gotDrew, wantDrew := got.ClientID() != forkWriteClient, want.ClientID() != forkWriteClient
+	switch {
+	case gotDrew != wantDrew:
+		t.Fatalf("%s: the cloned fork authors as %d and the decoded fork as %d, want both to keep client %d or both to draw a new one",
+			stage, got.ClientID(), want.ClientID(), forkWriteClient)
+	case gotDrew:
+		t.Fatalf("%s: both forks drew a client id of their own (%d and %d), so each write below is made by a different author; the comparison needs a client the room's state holds nothing of",
+			stage, got.ClientID(), want.ClientID())
+	}
 	gotState, wantState := crdt.EncodeStateAsUpdateV1(got, nil), crdt.EncodeStateAsUpdateV1(want, nil)
 	if !bytes.Equal(gotState, wantState) {
 		t.Fatalf("%s: the cloned fork encodes to %d bytes, want the decoded fork's %d", stage, len(gotState), len(wantState))
@@ -224,6 +246,80 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 	}
 	if after := crdt.EncodeStateAsUpdateV1(fork, nil); !bytes.Equal(after, forkWritten) {
 		t.Fatalf("the room's commit left the fork encoding to %d bytes, want the %d it held", len(after), len(forkWritten))
+	}
+}
+
+// A write authors every item under the client id of the fork it was handed, which is not always
+// the one the fork was asked for: a fork draws an id of its own where the state it takes already
+// holds structs of that client - the clone outright (crdt.Doc.Clone), and a replay of the
+// write's own updates at the commit that advances the client's clock from outside a local
+// transaction (reearth/ygo#340). Both paths leave write.clientID the id its fork holds, so the
+// lost-write check finds the write's own text by it (recordInsertedText).
+func TestEveryForkLeavesTheWriteAuthoringUnderItsForksClientID(t *testing.T) {
+	server := websocket.NewServer()
+	server.RoomIdleTimeout = time.Hour
+	service := &Service{srv: newRoomServer(server)}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			t.Errorf("shut the server down: %v", err)
+		}
+	})
+	// The room the rebuilt fork looks up by name (rebuildFork), so the rebuild clones the same
+	// replica the warm fork did.
+	if err := server.Apply(context.Background(), "room", func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		transact(typeParagraph(doc, "The paragraph a fork writes into."))
+	}); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	live := service.srv.GetDoc("room")
+	if live == nil {
+		t.Fatal("the server holds no room to fork")
+	}
+	log := live.OpenUpdateLog()
+	defer log.Close()
+	replica := service.keepReplica(live, log, nil)
+	// A commit of its own gives the replica the room's state to follow: the fork of a replica
+	// holding none is a decode of the room's own copy and not a clone.
+	typeIntoLastParagraph(t, live, "first ")
+	replica.observe("room")
+	if replica.doc == nil {
+		t.Fatal("the replica holds no state after the room's commit, so the fork below is no clone of it")
+	}
+
+	// The room's own client, whose structs the state the clone copies already holds, so the
+	// clone must draw an id of its own rather than continue that client's clock.
+	write := &liveWrite{artifactID: "room", clientID: live.ClientID(), state: newRoomState()}
+	fork, err := service.warmFork(write, live)
+	if err != nil {
+		t.Fatalf("fork the room: %v", err)
+	}
+	if fork.ClientID() == live.ClientID() {
+		t.Fatalf("the cloned fork kept client %d, which the state it copied already holds structs of", live.ClientID())
+	}
+	if write.clientID != fork.ClientID() {
+		t.Fatalf("after warmFork the write authors as %d, want its fork's %d", write.clientID, fork.ClientID())
+	}
+
+	// The write appends an update and its operation abandons the fork (applyLive); the next
+	// operation builds the fork again on the read point the room still stands at and replays
+	// that update into it, which is what advances the clone's own clock from outside.
+	cloned := write.clientID
+	typed := prepareTypedWord(t, fork)
+	if typed == nil {
+		t.Fatal("the fork holds no paragraph to write into")
+	}
+	write.updates = append(write.updates, typed(t, fork))
+	rebuilt, err := service.rebuildFork(context.Background(), write)
+	if err != nil {
+		t.Fatalf("rebuild the write's fork: %v", err)
+	}
+	if rebuilt.ClientID() == cloned {
+		t.Fatalf("the rebuilt fork kept client %d, whose clock its replay of the write's own update advanced", cloned)
+	}
+	if write.clientID != rebuilt.ClientID() {
+		t.Fatalf("after rebuildFork the write authors as %d, want its fork's %d", write.clientID, rebuilt.ClientID())
 	}
 }
 

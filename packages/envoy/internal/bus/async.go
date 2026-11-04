@@ -61,6 +61,14 @@ type Sender interface {
 	// exactly once: nil once the stream acknowledged item, or why it did not. A topic the stream
 	// does not capture answers ErrNotCaptured.
 	PublishAsync(item contracts.Envelope) <-chan error
+	// PublishStoredAsync sends item to the stream on subject, which can differ from item.Topic,
+	// under msgID as its Nats-Msg-Id when that is not empty, and returns a channel that receives
+	// the outcome exactly once: nil once the stream acknowledged item, or why it did not. It is
+	// the asynchronous form of Client.PublishStoredAs, for a sender that stores an envelope away
+	// from its own topic: Dispatch's outbox keeps a role route no live holder can take on the
+	// role's kept lane with it (KeptRoleSubject, KeptMsgID). A subject the stream does not
+	// capture answers ErrNotCaptured.
+	PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error
 	// Request sends item over core NATS to subject, which can differ from item.Topic, with a reply
 	// inbox, and returns a channel that receives the outcome exactly once: nil once its receiver
 	// answered it, or why it did not.
@@ -142,7 +150,15 @@ type window struct {
 }
 
 func (w *window) PublishAsync(item contracts.Envelope) <-chan error {
-	return outcomeOf(w.send(item))
+	msgID := ""
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+		msgID = ForwardMsgID(item.DedupeKey, item.Topic)
+	}
+	return outcomeOf(w.send(item.Topic, item, msgID))
+}
+
+func (w *window) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
+	return outcomeOf(w.send(subject, item, msgID))
 }
 
 // outcomeOf is the channel a send's outcome comes in: err at once when the send failed before
@@ -157,16 +173,18 @@ func outcomeOf(answer func() error, err error) <-chan error {
 	return outcome
 }
 
-// send writes item to the window's connection and returns what waits for the stream's answer.
-func (w *window) send(item contracts.Envelope) (func() error, error) {
+// send writes item to the window's connection on subject, under msgID as its Nats-Msg-Id when
+// that is not empty, and returns what waits for the stream's answer. The envelope is encoded as
+// it is, so a copy stored away from its own topic keeps that topic (PublishStoredAsync).
+func (w *window) send(subject string, item contracts.Envelope, msgID string) (func() error, error) {
 	if err := w.expired(); err != nil {
 		return nil, err
 	}
-	if err := checkSubject(item.Topic); err != nil {
+	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
-	if !StreamCaptures(item.Topic) {
-		return nil, fmt.Errorf("bus: %w: %q", ErrNotCaptured, item.Topic)
+	if !StreamCaptures(subject) {
+		return nil, fmt.Errorf("bus: %w: %q", ErrNotCaptured, subject)
 	}
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -175,7 +193,7 @@ func (w *window) send(item contracts.Envelope) (func() error, error) {
 	if err := w.pinToSend(); err != nil {
 		return nil, err
 	}
-	return w.sendJetStream(item, data)
+	return w.sendJetStream(subject, msgID, data)
 }
 
 // pin pins the window to the client's connection at its first send, waiting up to wait for the
@@ -235,43 +253,43 @@ func (w *window) current() bool {
 	return w.conn.IsConnected() && w.conn.Stats().Reconnects == w.reconnects
 }
 
-// sendJetStream publishes data, item's encoding, to the stream and returns what waits for its
-// acknowledgement. It notes the time it put the message on the wire, which is what its
-// acknowledgement reads a denial of this send alone by (acknowledged). A failure is ErrUnavailable
-// once the window's connection is no longer current or nats.go reports the disconnect, and
-// ErrNotAcknowledged when the acknowledgement ran out of time or the server answered with no
-// responders on a connection that stayed current. An acknowledgement of a duplicate with no
-// sequence (ErrNotStored) has the envelope sent once more without its MsgId, as publishJetStream
-// does, while the window's connection is still current and its deadline has not passed: the answer
-// is that send's, under its own send time, and a failure of it still wraps ErrNotStored. The
-// resend goes out after the window's later sends, so the stream stores it after them, and the
-// stream does not deduplicate a copy sent without its MsgId: it stores that copy as a message of
-// its own.
-func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() error, error) {
+// sendJetStream publishes data, an envelope's encoding, to the stream on subject, under msgID as
+// its Nats-Msg-Id when that is not empty, and returns what waits for its acknowledgement. It
+// notes the time it put the message on the wire, which is what its acknowledgement reads a denial
+// of this send alone by (acknowledged). A failure is ErrUnavailable once the window's connection
+// is no longer current or nats.go reports the disconnect, and ErrNotAcknowledged when the
+// acknowledgement ran out of time or the server answered with no responders on a connection that
+// stayed current. An acknowledgement of a duplicate with no sequence (ErrNotStored) has the
+// envelope sent once more without its MsgId, as publishJetStream does, while the window's
+// connection is still current and its deadline has not passed: the answer is that send's, under
+// its own send time, and a failure of it still wraps ErrNotStored. The resend goes out after the
+// window's later sends, so the stream stores it after them, and the stream does not deduplicate a
+// copy sent without its MsgId: it stores that copy as a message of its own.
+func (w *window) sendJetStream(subject, msgID string, data []byte) (func() error, error) {
 	var options []nats.PubOpt
-	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
-		options = append(options, nats.MsgId(ForwardMsgID(item.DedupeKey, item.Topic)))
+	if msgID != "" {
+		options = append(options, nats.MsgId(msgID))
 	}
 	sentAt := time.Now()
-	future, err := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data}, options...)
+	future, err := w.js.PublishMsgAsync(&nats.Msg{Subject: subject, Data: data}, options...)
 	if err != nil {
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
-		err := w.acknowledged(future, item.Topic, sentAt)
+		err := w.acknowledged(future, subject, sentAt)
 		if !errors.Is(err, ErrNotStored) {
 			return err
 		}
 		if expired := w.expired(); expired != nil {
-			return fmt.Errorf("%w, and the window's deadline passed before the publish to %q was sent without its id: %w", err, item.Topic, expired)
+			return fmt.Errorf("%w, and the window's deadline passed before the publish to %q was sent without its id: %w", err, subject, expired)
 		}
 		if !w.current() {
-			return fmt.Errorf("bus: %w: %w, and the window's connection was lost or reconnected before the publish to %q was sent without its id", ErrUnavailable, err, item.Topic)
+			return fmt.Errorf("bus: %w: %w, and the window's connection was lost or reconnected before the publish to %q was sent without its id", ErrUnavailable, err, subject)
 		}
 		resentAt := time.Now()
-		future, sendErr := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data})
+		future, sendErr := w.js.PublishMsgAsync(&nats.Msg{Subject: subject, Data: data})
 		if sendErr == nil {
-			sendErr = w.acknowledged(future, item.Topic, resentAt)
+			sendErr = w.acknowledged(future, subject, resentAt)
 		} else {
 			sendErr = w.unsent(sendErr, len(data))
 		}
