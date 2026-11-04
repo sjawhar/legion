@@ -115,11 +115,12 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 
 	// The check is resolved before the transaction opens. Resolving it folds the live
 	// Verification document, which for a document no room holds is a cold read bounded by a
-	// minute (docs/read_cache.go), and no issue row lock is held across a read that long: four
-	// writers parked on one issue's row lock already cost a read of an unrelated issue the whole
-	// seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is settled
-	// here — the check's words and its `when` are the document's, not the issue's — and what it
-	// does protect, the block's indexed version and digest, is read again under it below.
+	// minute (docs/read_cache.go), and no issue's owner lock is held across a read that long:
+	// four writers parked on one issue's lock already cost a read of an unrelated issue the
+	// whole seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is
+	// settled here — the check's words and its `when` are the document's, not the issue's — and
+	// what it does protect, the block's indexed version and digest, is read again under it
+	// below.
 	check, err := s.resolveCheck(r.Context(), pool, issueKey, input.Check)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -461,10 +462,10 @@ func unknownCheck(value string) error {
 // attributes included, so a check reworded from before_merge to after_merge carries a digest of
 // its own. A digest the resolve already read is therefore the same words under the same `when`,
 // and the live document is not read a second time for them. That read is the slow one to hold
-// two issue row locks across: a document version landing between the resolve and the lock is
-// exactly what leaves the read cache cold (docs/read_cache.go), so the one case the second read
-// would answer differently is the one it would answer slowest in. Only a digest that moved pays
-// for it.
+// the two issues' owner locks across (lockIssueOwners): a document version landing between the
+// resolve and the lock is exactly what leaves the read cache cold (docs/read_cache.go), so the
+// one case the second read would answer differently is the one it would answer slowest in. Only
+// a digest that moved pays for it.
 func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *resolvedCheck, named string) error {
 	resolved := check.SHA256
 	err := q.QueryRow(ctx, `

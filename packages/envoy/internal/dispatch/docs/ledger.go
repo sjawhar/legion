@@ -92,7 +92,7 @@ type Ledger struct {
 	batch  *store.WriteBatch
 	// artifacts is the address of each artifacts row this transaction creates and has not
 	// written yet, by artifact id (RegisterPendingArtifact).
-	artifacts map[string]DocumentAddress
+	artifacts map[string]refs.DocumentAddress
 	// rooms holds, per document whose stored history this transaction has queued a write to, the
 	// state its queued writes leave it in (pendingRoom).
 	rooms map[string]*pendingRoom
@@ -489,31 +489,15 @@ func pendingAnchorsOf(ctx context.Context, artifactID string) []*PendingAnchor {
 	return ledger.anchors[artifactID]
 }
 
-// DocumentAddress is where a document sits: the reference key its blocks' node ids are built
-// from, the issue holding it, and the parent of an issue this transaction creates too. It is
-// what a read of the document's address answers before and after the write phase has run
-// (addressOfDocument).
-type DocumentAddress struct {
-	// RefKey is the document's reference key, its owner's key and its slug (migration 0071).
-	RefKey string
-	// IssueKey is the issue the document belongs to, "" for a project's or a session's document.
-	IssueKey string
-	// PendingParent is the parent of IssueKey when this transaction creates that issue's row
-	// too, "" when it does not or when the issue is a root. The ancestors walk starts there
-	// while the issues row is only queued: no read of this transaction can see that row, so the
-	// walk from the issue itself (refs.IssueAncestors) would answer nothing.
-	PendingParent string
-}
-
 // RegisterPendingArtifact records address as the address of artifactID, an artifacts row this
 // transaction creates and has not written yet: its insert is queued with the transaction's other
 // writes, or runs later in its write phase, while the document's own work names the artifact's id
 // from the start, so a read of the document's address here takes it from the ledger rather than
-// from the row no read of this transaction can see (addressOfDocument). The address is the one the
-// row is written with, so it answers the same before and after the write phase has run.
-func (l *Ledger) RegisterPendingArtifact(artifactID string, address DocumentAddress) {
+// from the row (addressOfDocument). The caller records the address the queued insert writes
+// (refs.DocumentAddress).
+func (l *Ledger) RegisterPendingArtifact(artifactID string, address refs.DocumentAddress) {
 	if l.artifacts == nil {
-		l.artifacts = make(map[string]DocumentAddress)
+		l.artifacts = make(map[string]refs.DocumentAddress)
 	}
 	l.artifacts[artifactID] = address
 }
@@ -553,10 +537,10 @@ func (l *Ledger) QueueAskParts(
 // pendingArtifact is the address registered for artifactID on ctx's ledger
 // (RegisterPendingArtifact), false when none is and the artifacts row is the only place to read
 // it.
-func pendingArtifact(ctx context.Context, artifactID string) (DocumentAddress, bool) {
+func pendingArtifact(ctx context.Context, artifactID string) (refs.DocumentAddress, bool) {
 	ledger := ledgerFrom(ctx)
 	if ledger == nil {
-		return DocumentAddress{}, false
+		return refs.DocumentAddress{}, false
 	}
 	address, pending := ledger.artifacts[artifactID]
 	return address, pending

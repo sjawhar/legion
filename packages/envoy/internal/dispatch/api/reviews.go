@@ -351,8 +351,12 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 // Commit has run the write phase (docs.QueueReview). Each is a person's review
 // (docs.ReviewKindPerson): a plan review writes its own, on one document.
 //
-// A second document's row is read here, in the read phase: nothing this transaction queues
-// writes artifacts, so the stored row is the one a read after the write phase would return.
+// A second document's row is read here, in the read phase. This transaction does write artifacts:
+// an event on a document no issue holds is owned by that document (docs.documentAskEvent), and the
+// append moves the row's last_seq (events/broker.go). What makes the read safe is that no write
+// this transaction queues changes a column artifactMetadata returns - artifactColumns, the row's
+// id, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, role, created_by
+// and created_at - so the stored row is the one a read after the write phase would return.
 func (s *server) queueApprovalReviews(
 	ctx context.Context,
 	tx pgx.Tx,

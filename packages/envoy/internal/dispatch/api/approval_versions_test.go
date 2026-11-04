@@ -995,4 +995,10 @@ func (acceptingPublisher) Request(string, contracts.Envelope, bus.RequestOptions
 	return accepted
 }
 
+func (acceptingPublisher) PublishStoredAsync(string, contracts.Envelope, string) <-chan error {
+	accepted := make(chan error, 1)
+	accepted <- nil
+	return accepted
+}
+
 func (acceptingPublisher) Probe(time.Duration) error { return nil }

@@ -1,5 +1,14 @@
 # Changelog
 
+## [main@6f23228e01f0] - 2026-11-04
+
+### Added
+
+- `publish` takes `keep` and reports `kept` and `keptReason` from the listener's 202, so a role
+  message the listener kept for the role's next holder reads as the success it is. A delivery
+  carrying `kept_at` renders the time the listener kept it, and the `envoy_publish` tool's
+  description states the three answers a role publish has.
+
 ## [main@7ae56d094176] - 2026-11-04
 
 ### Added

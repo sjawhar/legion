@@ -263,43 +263,72 @@ func TestAWriteRefusesABlockPointerOutsideItsIssueOrDocument(t *testing.T) {
 // An issue created in one request seeds its spec inside the transaction that creates the issue,
 // so neither the spec's artifacts row nor the issue's own row is readable while the seed runs:
 // the pointer the spec introduces is held to the address the ledger carries - the spec's key,
-// the issue, and the parent the create already holds - and a plan task serving a requirement of
-// the parent's spec is created, its edge in the block index afterwards. The refusal that does
-// not turn on the issue still stands: the same seeded shape pointing at a block no document
-// holds is refused. The shipped types carry this test, a plan task's `serves` pointing at
-// requirements, so it swaps no schema.
+// the issue, the parent the create already holds, and the issues above that parent, walked from
+// it (refs.IssueAncestors) since no read of the transaction can see the issue's own row. A plan
+// task serving a requirement of the parent's spec is created, and so is one serving a
+// requirement of the grandparent's, each edge in the block index afterwards. The refusals that
+// do not turn on the issue still stand: the same seeded shape pointing at a block no document
+// holds is refused, as is one pointing at a requirement of an issue outside the new issue's own
+// chain, which the walk above the parent must not reach. The shipped types carry this test, a
+// plan task's `serves` pointing at requirements, so it swaps no schema.
 func TestASeededSpecPointsIntoItsParentsSpec(t *testing.T) {
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
-	parent := createSpecIssue(t, handler, "CORE", ":::requirement{#r1}\nA requirement.\n:::\n")
+	requirement := ":::requirement{#r1}\nA requirement.\n:::\n"
+	root := createSpecIssue(t, handler, "CORE", requirement)
+	middle := createChildIssue(t, handler, "CORE", root.Key, "Nothing of its own.\n")
+	outside := requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+		"project": "CORE", "title": "Telemetry retention windows", "spec": requirement,
+	}))
 	// Each create needs a title of its own: two near-identical titles in a row are refused
 	// 409 POSSIBLE_DUPLICATE before the markdown is read at all, which would hide the pointer.
-	seedChild := func(title, serves string) *httptest.ResponseRecorder {
+	seed := func(title, parent, serves string) *httptest.ResponseRecorder {
 		return createIssueRequest(t, handler, map[string]any{
-			"project": "CORE", "title": title, "parent": parent.Key,
+			"project": "CORE", "title": title, "parent": parent,
 			"spec": ":::plan_task{#t1 serves=\"" + serves + "\"}\nServe it.\n:::\n",
 		})
 	}
+	// requireSeededServes asserts the create was accepted and the block index holds the seeded
+	// task's serves edge at target, the node id of the requirement the spec named.
+	requireSeededServes := func(t *testing.T, created *httptest.ResponseRecorder, target string) {
+		t.Helper()
+		if created.Code != http.StatusCreated {
+			t.Fatalf("a seeded spec pointing at %s: status=%d body=%s, want 201", target, created.Code, created.Body.String())
+		}
+		issue := decodeBody[model.Issue](t, created)
+		rows := readBlockRefs(t, database, issue.PrimaryArtifactID)
+		for _, row := range rows {
+			if row.BlockID == "t1" && row.Kind == "serves" && row.ToID == target {
+				return
+			}
+		}
+		t.Fatalf("block_refs of the seeded spec = %#v, want t1's serves edge at %s", rows, target)
+	}
+	rootR1 := "dispatch://" + root.Key + "/spec#b-r1"
 
-	r1 := "dispatch://" + parent.Key + "/spec#b-r1"
-	created := seedChild("A seeded child spec pointing into its parent", r1)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("a seeded spec pointing at the parent's requirement: status=%d body=%s, want 201", created.Code, created.Body.String())
-	}
-	child := decodeBody[model.Issue](t, created)
-	var served bool
-	rows := readBlockRefs(t, database, child.PrimaryArtifactID)
-	for _, row := range rows {
-		served = served || (row.BlockID == "t1" && row.Kind == "serves" && row.ToID == parent.Key+"/spec#r1")
-	}
-	if !served {
-		t.Fatalf("block_refs of the seeded spec = %#v, want t1's serves edge at %s/spec#r1", rows, parent.Key)
-	}
+	t.Run("a requirement of its parent's spec", func(t *testing.T) {
+		requireSeededServes(t, seed("A seeded child spec pointing into its parent", root.Key, rootR1), root.Key+"/spec#r1")
+	})
 
-	nowhere := "dispatch://" + parent.Key + "/spec#b-nope"
-	expectRefusal(t, "a seeded spec pointing at a block no document holds",
-		seedChild("Zeta omega lambda sigma phantom", nowhere),
-		http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, nowhere, "no document holds")
+	// The grandchild's parent is the pending one, so the root is reached only by the walk above
+	// it: this is the case that fails when that walk is dropped.
+	t.Run("a requirement of its grandparent's spec", func(t *testing.T) {
+		requireSeededServes(t, seed("Grandchild plan serving the oldest requirement", middle.Key, rootR1), root.Key+"/spec#r1")
+	})
+
+	t.Run("a block no document holds", func(t *testing.T) {
+		nowhere := "dispatch://" + root.Key + "/spec#b-nope"
+		expectRefusal(t, "a seeded spec pointing at a block no document holds",
+			seed("Zeta omega lambda sigma phantom", root.Key, nowhere),
+			http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, nowhere, "no document holds")
+	})
+
+	t.Run("a requirement of an issue outside its own chain", func(t *testing.T) {
+		outsideR1 := "dispatch://" + outside.Key + "/spec#b-r1"
+		expectRefusal(t, "a seeded spec pointing into an issue above neither it nor its parent",
+			seed("Rainfall gauge calibration backlog", middle.Key, outsideR1),
+			http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, outsideR1, outside.Key, "or of an issue above it")
+	})
 }
 
 // A browser's write is never refused: a settled browser tree whose pointer names a block no
@@ -316,7 +345,25 @@ func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) 
 	missing := "dispatch://" + issue.Key + "/spec#b-nowhere"
 
 	writeBrowserDocument(t, documents, checks.ID, claimMarkdown("c1", missing))
-	settledVersion(t, handler, documents, checks.ID, 2)
+	// Settled on this goroutine, not through SettleNow's timer, which the browser's update can
+	// outrun: the room arms the settlement that update owes, at the hour-long settle window, as it
+	// drains the update, which can come after the text is live. That arming replaces SettleNow's
+	// timer before it fires or moves the generation under its settlement, which then writes
+	// nothing. SettleIssueDocuments runs the owed settlement itself, and again when a write
+	// supersedes it. The upload's live write already owes it, so the call cannot find none owed.
+	var owed bool
+	if err := database.Pool.QueryRow(context.Background(), `select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, checks.ID).Scan(&owed); err != nil {
+		t.Fatalf("read checks.md's pending settlement: %v", err)
+	}
+	if !owed {
+		t.Fatal("checks.md owes no settlement, want the upload's still owed")
+	}
+	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+		t.Fatalf("settle the issue's documents: %v", err)
+	}
+	if version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+checks.ID+"/versions/2", nil, "alice"); version.Code != http.StatusOK {
+		t.Fatalf("checks.md version 2 once settled: status=%d body=%s, want 200", version.Code, version.Body.String())
+	}
 
 	stored := readBlockRefs(t, database, checks.ID)
 	if len(stored) != 1 || stored[0].BlockID != "c1" || stored[0].Kind != "serves" || stored[0].ToID != issue.Key+"/spec#nowhere" {
