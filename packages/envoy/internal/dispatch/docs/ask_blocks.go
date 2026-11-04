@@ -140,10 +140,21 @@ func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
 	return changed
 }
 
-// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive).
-func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) error {
-	_, err := rewriteLive(doc, origin, r.repairLive)
-	return err
+// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive)
+// and reports whether any of them changed the tree they were written into. That is not the same
+// as the document moving: a repair whose whole change is taking off an attribute the room holds
+// as a null leaves the document as it was, since pmdoc.Update reads a null attribute and an
+// absent one as one attribute set, so ygo commits no update and the write returns no suppression
+// slot (applySuppressed). The browser editor writes every server-owned attribute its schema
+// declares, and the ones it has no value for as nulls, so that is the shape of every ask block it
+// pastes.
+func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, error) {
+	repaired := false
+	_, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+		repaired = r.repairLive(live)
+		return repaired
+	})
+	return repaired, err
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing
@@ -901,7 +912,14 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, copied string, with
 			answered = answered || pmdoc.IsAnswerAttribute(name)
 			continue
 		}
-		if exists {
+		// A block holding the attribute as a null holds no attribute: pmdoc reads a null
+		// attribute and an absent one as one attribute set (attrsEqual), so taking the null off
+		// writes nothing into the document. The browser editor's schema declares every
+		// server-owned attribute and it writes the ones it has no value for as nulls, so every
+		// ask block it pastes carries them; read as a repair, they are planned and written at
+		// every pass of every settlement, which never changes the document and never ends
+		// (INFRA-592).
+		if exists && got != nil {
 			delete(node.Attrs, name)
 			changed = true
 		}

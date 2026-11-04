@@ -36,6 +36,20 @@ const (
 	settleOn
 )
 
+// String names the step a log line reports (settleRoomWithin).
+func (s settleStep) String() string {
+	switch s {
+	case settleDone:
+		return "done"
+	case settleAgain:
+		return "again"
+	case settleMoved:
+		return "moved"
+	default:
+		return "on"
+	}
+}
+
 // maxSettleRereads is how many times one settlement reads its document again after a pass found it
 // moved under its read (settleMoved). A document a browser keeps moving faster than it renders is
 // left owed after that: each of its updates arms a settlement of its own, and the resumption arms
@@ -284,8 +298,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			moves++
 		}
 		if moves > maxSettleRereads || passes == maxSettlePasses {
+			// The step the last pass ended on and how many passes read the document again say
+			// which of the two bounds was reached, and where: a run of passes that each found
+			// the document moved reads differently from one that kept committing a part.
 			slog.Info("dispatch: document settlement left owed after reading a moving document again; its next update or the resumption settles it",
-				"room", room, "passes", passes)
+				"room", room, "passes", passes, "rereads", moves, "last", step)
 			return settleOutcome{}
 		}
 	}
@@ -639,11 +656,17 @@ func (p *settlementPass) committed() {
 func (p *settlementPass) applyStamp(ctx context.Context) (settleStep, settleOutcome) {
 	s, room, state := p.service, p.room, p.state
 	// The stamp is written into the room as it stands, read inside the stamp's own transaction.
+	// What says the stamp wrote is the ids it minted, not the update the room took for them: a
+	// mutation that changed the tree it found and left the document as it was commits no ygo
+	// update, and so returns no slot (applySuppressed, writeLive).
 	var renamed []stampedAsk
+	stamped := false
 	if p.stamping {
 		slot, update, err := s.applySuppressed(ctx, room, p.doc, func(doc *crdt.Doc, origin any) error {
+			var minted int
 			var stampErr error
-			_, _, renamed, stampErr = stampBlockIDs(doc, origin)
+			_, minted, renamed, stampErr = stampBlockIDs(doc, origin)
+			stamped = minted > 0
 			return stampErr
 		})
 		p.keep(slot, update)
@@ -684,9 +707,11 @@ func (p *settlementPass) applyStamp(ctx context.Context) (settleStep, settleOutc
 		s.unlockState(room, state)
 		return settleDone, settleOutcome{}
 	}
-	if p.stamping {
-		// The stamp found nothing to write: another writer stamped the ids first, and the next pass
-		// reads the document as that writer left it.
+	// A stamp that minted no id found another writer had stamped them first, and the next pass
+	// reads the document as that writer left it. One that minted ids the room took no update for
+	// left the document as it was, so there is nothing to store or broadcast for it, and the pass
+	// goes on and reconciles the tree it read.
+	if p.stamping && !stamped {
 		s.unlockState(room, state)
 		return settleMoved, settleOutcome{}
 	}
@@ -795,44 +820,57 @@ func (p *settlementPass) commitRepairs(ctx context.Context) (settleStep, settleO
 	s, room, state := p.service, p.room, p.state
 	// The repairs are made on the document as it stands (writeLive): the tree they were
 	// reconciled on was read before settlement's database work.
-	slot, update, err := s.applySuppressed(ctx, room, p.doc, p.reconciliation.writeLive)
+	repaired := false
+	slot, update, err := s.applySuppressed(ctx, room, p.doc, func(doc *crdt.Doc, origin any) error {
+		var writeErr error
+		repaired, writeErr = p.reconciliation.writeLive(doc, origin)
+		return writeErr
+	})
 	p.keep(slot, update)
 	if err != nil {
 		return settleDone, p.abandon(fmt.Errorf("write reconciled typed blocks: %w", err))
 	}
-	// Repairs that found nothing to write found the document moved under them: a browser
-	// removed or changed the block a repair was for. The rollback leaves the document as the
-	// browser left it, and the next pass reads it again. A pass whose repairs were all dropped
-	// writes no repairs at all and never reaches here (planRepairs): nothing moved under it.
-	if len(p.slots) == 0 {
+	// Repairs that found nothing to change in the tree they were written into found the document
+	// moved under them: a browser removed or changed the block a repair was for. The rollback
+	// leaves the document as the browser left it, and the next pass reads it again. A pass whose
+	// repairs were all dropped writes no repairs at all and never reaches here (planRepairs):
+	// nothing moved under it. What says they wrote is their own answer, not the update the room
+	// took for them: repairs that changed the tree and left the document as it was commit no ygo
+	// update (writeLive), and the rows and events they reconciled are committed here all the same.
+	if !repaired {
 		return settleMoved, settleOutcome{}
 	}
 	p.published = make([]model.Event, 0, len(p.reconciliation.events)+1)
-	// The room holds the repairs, so what is left to store them runs apart from the settlement's
-	// deadline, under a bound of its own (finishInRoom): a deadline falling between the write and
-	// the commit would fail the room over updates the room already holds.
+	// The room holds whatever the repairs left in it, so what is left to store them runs apart
+	// from the settlement's deadline, under a bound of its own (finishInRoom): a deadline falling
+	// between the write and the commit would fail the room over updates the room already holds.
 	ctx, cancel := finishInRoom(ctx)
 	defer cancel()
-	merged, err := mergeUpdates(p.updates)
-	if err != nil {
-		return settleDone, p.abandon(err)
-	}
-	if err := s.srv.BroadcastUpdate(ctx, room, merged); err != nil {
-		return settleDone, p.abandon(fmt.Errorf("broadcast document closure update: %w", err))
+	if slot != nil {
+		merged, err := mergeUpdates(p.updates)
+		if err != nil {
+			return settleDone, p.abandon(err)
+		}
+		if err := s.srv.BroadcastUpdate(ctx, room, merged); err != nil {
+			return settleDone, p.abandon(fmt.Errorf("broadcast document closure update: %w", err))
+		}
 	}
 	// What this pass stores, it stores from here on, after the reconciliation: the room's updates
 	// through the point it read the room at, in the room's commit order (Ledger.flushThrough),
 	// then the repair at its own place among them, with the class the room measured for it
 	// (storeRepair). The instance takes the versions they are stored at just before the commit,
-	// under the advisory lock this transaction holds until then (commitSettlement).
+	// under the advisory lock this transaction holds until then (commitSettlement). Repairs the
+	// room took no update for have nothing to broadcast and nothing to store.
 	if err := p.ledger.flushThrough(ctx, p.tx, room, p.taken.point); err != nil {
 		return settleDone, p.abandon(fmt.Errorf("store the room's updates through the settlement's read: %w", err))
 	}
-	if err := p.ledger.storeRepair(ctx, p.tx, room, p.cursor, update); err != nil {
-		return settleDone, p.abandon(fmt.Errorf("store reconciled typed blocks: %w", err))
-	}
-	if s.afterSettleRepairAppend != nil {
-		s.afterSettleRepairAppend(room)
+	if slot != nil {
+		if err := p.ledger.storeRepair(ctx, p.tx, room, p.cursor, update); err != nil {
+			return settleDone, p.abandon(fmt.Errorf("store reconciled typed blocks: %w", err))
+		}
+		if s.afterSettleRepairAppend != nil {
+			s.afterSettleRepairAppend(room)
+		}
 	}
 	contentChanged, err := contentChangedSinceVersion(ctx, p.tx, room, p.latest.docUpdateVersion)
 	if err != nil {
