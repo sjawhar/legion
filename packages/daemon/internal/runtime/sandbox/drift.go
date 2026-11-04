@@ -370,10 +370,11 @@ func (r *Runtime) launchDrift(s *sandbox, kind podKind) []string {
 // from (podShapeDrift — the image, the kind's reservation, the operator's volumes and mounts, and
 // the disk), the launch keys that template records the pod's own launch read
 // (launchSettingsDrift — `instructions`, `provider_keys`, `daemon_url` and the rest, each a
-// settings change of class `launch`), and the three facets of the pod itself whose worker can be
+// settings change of class `launch`), and the four facets of the pod itself whose worker can be
 // asked to push first — the operator's volume and mount holding its role's overlays, the secrets
-// broker's enrollment, and the session store (driftedInPod). The two facets whose worker cannot
-// be reached at all stay a launch's business and are never a round's (movedInPod).
+// broker's enrollment, the session store, and the GitHub owners its gh volume projects a
+// directory for (driftedInPod). The two facets whose worker cannot be reached at all stay a
+// launch's business and are never a round's (movedInPod).
 //
 // It answers nothing for a claim with no process — such a claim records no pod, so no pod of it
 // is gone — and nothing for a pod no round covers (roundCovers), today the project controller's:

@@ -42,7 +42,7 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	t.Helper()
 	cfg := testConfig(t)
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
-		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
+		Namespace: "legion", Image: "ghcr.io/cybermonklabs/legion-worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "gp2", IssueVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
 		Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
 	}}
@@ -202,7 +202,7 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 	var probed runtime.Runtime
 	o.probe = func(_ context.Context, built runtime.Runtime) (bootprobe.ImageReport, error) {
 		probed = built
-		return bootprobe.ImageReport{}, errors.New("worker image ghcr.io/sjawhar/legion-worker@sha256:aaaa refused: the plugin declares contract 3")
+		return bootprobe.ImageReport{}, errors.New("worker image ghcr.io/cybermonklabs/legion-worker@sha256:aaaa refused: the plugin declares contract 3")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -519,7 +519,7 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 func TestKubernetesSetupReachesTheSandboxRuntime(t *testing.T) {
 	cfg := config.Config{Project: "TEST", Projects: map[string]config.Project{"TEST": {}}}
 	k := config.Kubernetes{
-		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
+		Namespace: "legion", Image: "ghcr.io/cybermonklabs/legion-worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "gp2", IssueVolume: "20Gi", Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
 	}
 	want := []string{"/bin/sh", "-c", "omp plugin install agent-skills"}
@@ -595,7 +595,7 @@ github_apps:
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
     session_store: postgres
     session_dsn_secret: SESSION_DSN

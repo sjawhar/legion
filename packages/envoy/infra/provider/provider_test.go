@@ -71,7 +71,7 @@ func servedSchema(t *testing.T) schema {
 
 func TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath(t *testing.T) {
 	s := servedSchema(t)
-	require.Equal(t, "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}", s.PluginDownloadURL)
+	require.Equal(t, "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}", s.PluginDownloadURL)
 	require.Equal(t, "github.com/sjawhar/envoy/infra/sdk/go/envoyinfra", s.Language.Go.ImportBasePath)
 }
 

@@ -521,12 +521,13 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
-// bundle (gitHubCredential, a directory for each of owners), with the workflow's mapping as the
-// repositories its repository caches follow (mapped), and registers its launcher acceptor on the
-// stream listener. A daemon with no GitHub Apps hands it neither tokens nor a mapping, and
-// sandbox.New's own refusal names what is missing. Boot has already run the cluster check
-// (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
-// per-claim pods, or issue pods on one tree volume — remains.
+// bundle (gitHubCredential, a directory for each of owners) and the owner set those directories
+// are built from (appauth.GitHubOwners), which the runtime reads a running pod's gh projection
+// against, with the workflow's mapping as the repositories its repository caches follow (mapped),
+// and registers its launcher acceptor on the stream listener. A daemon with no GitHub Apps hands
+// it neither tokens nor a mapping, and sandbox.New's own refusal names what is missing. Boot has
+// already run the cluster check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of
+// a layout before this one — per-claim pods, or issue pods on one tree volume — remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
@@ -534,6 +535,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		if apps != nil {
 			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
+			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {

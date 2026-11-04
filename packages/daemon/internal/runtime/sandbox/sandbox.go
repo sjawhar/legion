@@ -106,6 +106,7 @@ type Runtime struct {
 	adoptTimeout                   time.Duration
 	tokens                         ProvisionTokens
 	gitHubCredential               runtime.GitHubCredential
+	gitHubOwners                   func() []string
 	store                          Store
 	conns                          runtime.Conns
 	launchers                      *launchers
@@ -225,9 +226,10 @@ func configure(opts Options) (*Runtime, error) {
 
 // checkSupervision refuses opts that lack what only supervision reads — launching, relaunching,
 // adopting and sweeping a claim's pod, and making, refreshing and sweeping the repository caches:
-// the provisioning token source, the roles' gh-files function, the store, the connection
-// directory, a worker stream address a pod can dial, the repository caches' configuration and the
-// mapping they follow. A runtime that runs the image probe alone (newProber) reads none of them.
+// the provisioning token source, the roles' gh-files function and the owners it serves them for,
+// the store, the connection directory, a worker stream address a pod can dial, the repository
+// caches' configuration and the mapping they follow. A runtime that runs the image probe alone
+// (newProber) reads none of them.
 func checkSupervision(opts Options) error {
 	refuse := func(format string, args ...any) error { return fmt.Errorf("sandbox runtime: "+format, args...) }
 	switch {
@@ -235,6 +237,8 @@ func checkSupervision(opts Options) error {
 		return refuse("no provisioning token source")
 	case opts.GitHubCredential == nil:
 		return refuse("no github credential function for the roles' gh files")
+	case opts.GitHubOwners == nil:
+		return refuse("no github owners function for the pods' gh directories")
 	case opts.Store == nil:
 		return refuse("no store")
 	case opts.Conns == nil:
@@ -359,7 +363,8 @@ func configureProber(opts Options) (*Runtime, error) {
 			issuePod{}:      launchSettingsFor(opts.LaunchSettings, issuePod{}),
 			controllerPod{}: launchSettingsFor(opts.LaunchSettings, controllerPod{}),
 		},
-		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
+		store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},

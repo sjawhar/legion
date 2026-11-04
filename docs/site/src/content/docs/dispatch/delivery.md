@@ -179,7 +179,7 @@ with no `events_start` since it was sent is one Dispatch could not start, which 
 after each subscription while its database does not answer: subscribe it again after a backoff
 from 1 s, doubling up to 30 s, as after an events `error`, and refresh what the page holds once, at
 the next `events_start`, unless that start says its replay is complete. An agent refusal is
-terminal for that view (`HUMAN_ONLY`, `SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
+terminal for that view (`OAUTH_SCOPE_REQUIRED`, `SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
 
 A client that reconnects subscribes a delivery view again with `"resume": {"seq", "revs"}`, the
 last change it applied and the revisions it holds, and is sent a delta of what changed since; a

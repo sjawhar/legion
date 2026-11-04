@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
 
 import {
+  actorActText,
   actorAttribution,
   actorLabel,
   actorName,
   sessionLabel,
   shortSessionId,
 } from "./actor-label";
+import type { ActorAct } from "./dispatch-api";
 
 const titles = new Map([["abcdef1234567890", "Planner"]]);
 
@@ -132,4 +134,26 @@ test("an actor's attribution is what its label adds after its name", () => {
   expect(actorAttribution({ id: "architecture-importer", kind: "system" })).toBe("");
   const owned = { id: "abcdef1234567890", kind: "session" as const, owner: "bob" };
   expect(actorLabel(owned, titles)).toBe(`${actorName(owned, titles)}${actorAttribution(owned)}`);
+});
+
+test("a person who acted themselves is the person alone", () => {
+  expect(actorActText("ana@example.com", undefined)).toBe("ana@example.com");
+  // An act that names no agent - neither the session a broker token proved nor the personal
+  // token - has no agent to show beside the person.
+  expect(actorActText("ana@example.com", { scopes: ["person"] })).toBe("ana@example.com");
+});
+
+test("an act made through a session names the session, and one through a token names the token", () => {
+  const throughSession: ActorAct = {
+    session: "0123456789abcdef",
+    token_id: "token-1",
+    token_name: "architect",
+    scopes: ["person", "approve"],
+  };
+  expect(actorActText("ana@example.com", throughSession)).toBe(
+    "ana@example.com, acting through session 0123456789abcdef"
+  );
+  expect(actorActText("ana@example.com", { token_id: "token-1", token_name: "architect" })).toBe(
+    "ana@example.com, acting through token architect"
+  );
 });
