@@ -47,6 +47,8 @@ const (
 	KindGitHubApp = "github-app"
 	// KindGoogleLogin exchanges the stored authorized-user refresh token for an access token.
 	KindGoogleLogin = "google-login"
+	// KindAzureLogin releases the broker's projected token with the stored Entra identity ids.
+	KindAzureLogin = "azure-login"
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
 	// TagDefaultGrant, set to DefaultGrantSession, keeps a request that names no lifetime for this
@@ -91,7 +93,7 @@ const (
 )
 
 // Kinds is every value a secret's kind tag may name. The broker holds a minter for each.
-var Kinds = []string{KindGitHubApp, KindGoogleLogin}
+var Kinds = []string{KindGitHubApp, KindGoogleLogin, KindAzureLogin}
 
 // ValidKind reports whether kind is one of Kinds.
 func ValidKind(kind string) bool {

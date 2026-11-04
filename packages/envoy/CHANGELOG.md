@@ -1,5 +1,69 @@
 # Changelog
 
+## [29.4.1] - 2026-11-04
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.1. Browser edits travel as smaller,
+  Yjs-shaped updates (an update carries only its own deletions, and a transaction that changes
+  nothing and keeps nothing for later sends and stores nothing); a joining editor gets the
+  document once instead of twice; a browser that stops reading is closed once 128 MiB is queued
+  for it instead of holding memory without bound; a room is no longer closed while a write, a
+  read or a browser's join is inside it, so closing an issue, evicting a room or shutting down
+  waits for them and then closes it; and a browser's edit that reaches the server ahead of the
+  edit it builds on is stored at once, even when the update then fails, so a restart before
+  that earlier edit arrives no longer loses it. The stored-order check judges each parked row
+  independently: a later update that carries its newly parked content again is accepted, a
+  resolved row whose parked content is not carried again is a mismatch even while unrelated
+  edits still wait, and an unresolved row counts as awaiting. Replay keeps the part that
+  integrated immediately and compares actual parked content.
+  Every write fork reads its client ID after decoding its history, so inserted text still gets
+  the lost-write check when that decode changes the ID.
+
+## [29.4.0] - 2026-11-04
+
+### Added
+
+- The listener keeps a role message it cannot deliver and gives it to the role's next holder.
+  A publish to a role with no live holder, or one whose claim has lapsed, is answered 202 with
+  `kept: true` and `kept_reason` (`unclaimed` or `holder_lapsed`) in place of 404, and the message
+  is stored on `notifications.envoy.kept.role.<role>`, a private stream subject the listener alone
+  reads. The next session to claim that role is handed each kept copy once, in the order the
+  copies were kept, each carrying `kept_at`. A copy kept more than an hour before the claim is
+  dropped and counted on the new `envoy_role_kept_expired_total`. A sender that keeps a queue of
+  its own publishes with `keep: false` in the publish body and gets the 404 unchanged; a message
+  published straight onto the lane is always kept, since no such publisher opts out. A handover walks a role's lane again for the role's current holder until
+  the lane is empty, and a lane whose handover a restart ended is picked up by a sweep that runs
+  every five minutes and at each listener's start, so no copy waits for a claim a live holder will
+  not make. `notifications.role.>` is still not a stream subject, and no NATS grant changed.
+
+  RELEASE ORDER: deploy the `legion` binary that sends `keep: false` before this listener. A
+  `legion` binary of the release before it sends no `keep` field, so the new listener keeps its
+  notice and answers 202, which that binary reads as neither success nor "no holder": its outbox
+  row keeps retrying while Envoy also hands the message to the role's next holder, and the role
+  gets it twice. In the other order there is no such window.
+
+### Fixed
+
+- Two sessions claiming one role at the same moment are both answered 200. A claim's write named
+  the revision its read had seen, so the loser of the race was refused with JetStream's wrong last
+  sequence and `POST /v1/roles/set` answered 500 — an answer that route never documented, since a
+  claim is last-claim-wins. A hard claim with no `if_claim_revision` now writes unconditionally, so
+  the last write holds the role. A hard claim with `if_claim_revision`, and a soft claim, keep their
+  conditional write, answered 409 when another claim landed first.
+- A Dispatch event routed to a role no live holder can take now reaches the role's next holder.
+  Dispatch's outbox used to count such a route reached with nothing sent, so the event was lost
+  to whoever claimed the role afterwards. It now keeps the event on that role's kept lane, the
+  one the listener keeps its own undeliverable role messages on, so the session that claims the
+  role next is handed it. The copy is written under the same id either writer would give it
+  (`bus.KeptMsgID`, the dedupe key and the role), so the stream holds one copy of a message
+  however many retries and however many writers keep it. A keep the stream did not acknowledge
+  leaves the event pending for the outbox's own retry. A claim the listener's restart grace
+  retained is not kept for: that holder keeps its claim and writes no new one, so the event stays
+  pending as before.
+- `scripts/e2e-local.sh` no longer dies at startup when its first read of a process log runs before
+  the backgrounded redirect created the file.
+
 ## [29.3.0] - 2026-11-04
 
 ### Changed
