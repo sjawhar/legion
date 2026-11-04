@@ -77,9 +77,8 @@ func readMemory(value *yaml.Node, key string) (Memory, error) {
 		}
 	}
 	if files := fields["config_files"]; files != nil {
-		// A `memory` block's `config_files` and `role_config_files` are read the same way
-		// (readOverlayFiles); the overlays are a project's, and a memory-group role's Oh My Pi
-		// is what loads them.
+		// Read the way the top-level `role_config_files` lists are (readOverlayFiles); the
+		// overlays are the project's, and a memory-group role's Oh My Pi loads them.
 		if memory.ConfigFiles, err = readOverlayFiles(files, key+".config_files", "a memory-group role's Oh My Pi", "the project"); err != nil {
 			return Memory{}, err
 		}
