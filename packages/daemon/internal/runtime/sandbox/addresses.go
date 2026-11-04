@@ -327,7 +327,7 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 // carry is drift, not a moved address (driftedInPod, podShapeDrift): its worker can be asked to
 // push its work first, and an update round asks it before the pod is replaced.
 //
-// A pod no round covers holds every facet here, those three included. No round is ever opened
+// A pod no round covers holds every facet here, those four included. No round is ever opened
 // over such a pod — PodDrift answers nothing for it — so a facet that was neither a moved address
 // nor a round's would leave its role in the pod it was created in for ever, with nothing saying
 // so: today that is the project controller's pod, which has nobody in it to task and no issue disk
@@ -353,13 +353,14 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // replacement is an update round's business rather than a launch's: the operator's volume and
 // mount holding every named role's overlays and the project's memory overlays in role's container
 // (movedRoleOverlays), the secrets broker's enrollment its next generation is started against
-// (movedEnrollment), and the whole session store it was created under (movedSessionStore). Each
-// is fixed for the pod's life, so the pod must be replaced for the role to run as one launched
-// now — but each leaves the workers already in the pod running and able to reach this daemon, so
-// each is a reason to open a round (PodDrift) and ask them to push, where replacing the pod under
-// them would end every turn in it and take the issue's disk with it. The two facets whose worker
+// (movedEnrollment), the whole session store it was created under (movedSessionStore), and the
+// GitHub owners its gh volume projects a directory for (movedGhOwners). Each is fixed for the
+// pod's life, so the pod must be replaced for the role to run as one launched now — but each
+// leaves the workers already in the pod running and able to reach this daemon, so each is a
+// reason to open a round (PodDrift) and ask them to push, where replacing the pod under them
+// would end every turn in it and take the issue's disk with it. The two facets whose worker
 // cannot be reached at all are movedInPod's and are never a round's — and for a pod no round
-// covers (roundCovers), the project controller's today, so are these three: no round is opened
+// covers (roundCovers), the project controller's today, so are these four: no round is opened
 // over such a pod, so movedInPod holds every facet there and its launch replaces it, as it always
 // did.
 func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
@@ -373,7 +374,60 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	if store, ok := r.movedSessionStore(pod); ok {
 		moved = append(moved, store)
 	}
+	if owners, ok := r.movedGhOwners(pod.Spec, role); ok {
+		moved = append(moved, owners)
+	}
 	return moved
+}
+
+// movedGhOwners is the GitHub owners the daemon serves now (r.gitHubOwners, appauth.GitHubOwners)
+// that role's gh volume of the pod spec projects no directory for; ok is whether it lacks any.
+// That volume is one Secret projection whose items are fixed when the pod is created (volumes),
+// one pair of keys per owner of the launch, while the role Secret those keys come from gains an
+// owner's pair the moment the daemon serves it (refreshGitHubCredentials). So a Secret that holds
+// a new owner's files reaches no pod made before it: the pod's /var/run/legion/gh has no
+// directory of that owner's name, every `gh` call of its roles against that owner's repositories
+// runs unauthenticated, and only a new pod projects it.
+//
+// The two pods without a Secret projection are not the same. One with no gh volume at all is no
+// pod of this runtime's making and stays unmoved: this runtime does not know what it holds. One
+// whose gh volume is an EmptyDir was launched with no owners at all (volumes: a Secret projection
+// with no items would project every key of the Secret, the launcher token among them), so it
+// holds the empty owner set — a controller whose project had no owner yet reads every owner the
+// daemon serves now as lacking, and the first owner its project gains remakes it. The comparison
+// runs one way only: an owner the pod holds that the daemon no longer serves costs the pod a
+// stale directory and nothing more, and must never be worth remaking a pod and deleting its disk
+// for.
+func (r *Runtime) movedGhOwners(pod corev1.PodSpec, role claim.Role) (movedAddress, bool) {
+	name := roleVolume(ghVolume, role)
+	at := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == name })
+	if at < 0 {
+		return movedAddress{}, false
+	}
+	var held []string
+	if secret := pod.Volumes[at].Secret; secret != nil {
+		for _, item := range secret.Items {
+			if owner, ok := GitHubHostsOwner(item.Key); ok {
+				held = append(held, owner)
+			}
+		}
+	}
+	served := r.gitHubOwners()
+	lacking := slices.ContainsFunc(served, func(owner string) bool { return !slices.Contains(held, owner) })
+	if !lacking {
+		return movedAddress{}, false
+	}
+	slices.Sort(held)
+	return movedAddress{where: name, held: ghOwnersName(held), handed: ghOwnersName(slices.Sorted(slices.Values(served)))}, true
+}
+
+// ghOwnersName names the gh directories a set of owners is projected as, each owner's name in
+// order; "(unset)" for none, and no credential in any of it.
+func ghOwnersName(owners []string) string {
+	if len(owners) == 0 {
+		return "(unset)"
+	}
+	return strings.Join(owners, " ")
 }
 
 // movedRoleOverlays is the first overlay of any role role_config_files names

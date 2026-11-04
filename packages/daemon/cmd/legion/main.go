@@ -54,7 +54,7 @@ var revision string
 // release build's boot wakes — a check whose merge the build carries. A Go constant is never
 // empty, so a non-release build's empty revision is what makes its boot compare nothing, as does
 // a deployment whose configured repository is another (the smoke rig's).
-const builtFromRepository = "sjawhar/legion"
+const builtFromRepository = "cybermonklabs/legion"
 
 // release is the legion-v* version a release binary was built for, linked in by the release
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.

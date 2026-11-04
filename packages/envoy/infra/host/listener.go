@@ -33,7 +33,7 @@ const (
 type ListenerArgs struct {
 	MachineID     string                  `pulumi:"machineId"`
 	NatsUrls      pulumi.StringArrayInput `pulumi:"natsUrls"`               // may come from another stack's output
-	Image         string                  `pulumi:"image"`                  // e.g. ghcr.io/sjawhar/legion/envoy:<tag>
+	Image         string                  `pulumi:"image"`                  // e.g. ghcr.io/cybermonklabs/legion/envoy:<tag>
 	ContainerName *string                 `pulumi:"containerName,optional"` // default "envoy-listener"
 	Port          *int                    `pulumi:"port,optional"`          // default core.DefaultListenerPort, 9020
 	Seed          pulumi.StringInput      `pulumi:"seed,optional" provider:"secret"`

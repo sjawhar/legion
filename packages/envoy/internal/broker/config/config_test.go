@@ -88,6 +88,41 @@ func TestLoadRequiresMachineLoginURL(t *testing.T) {
 	}
 }
 
+func TestLoadKeepsTheAzureProjectedTokenPathForEachRelease(t *testing.T) {
+	for _, row := range []struct{ configured, want string }{
+		{"", "/var/run/secrets/azure/tokens/azure-identity-token"},
+		{"/not-mounted-at-boot/azure-token", "/not-mounted-at-boot/azure-token"},
+	} {
+		e := validEnv()
+		e["BROKER_AZURE_TOKEN_FILE"] = row.configured
+		cfg, err := Load(env(e))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.AzureTokenFile != row.want {
+			t.Errorf("AzureTokenFile = %q, want %q", cfg.AzureTokenFile, row.want)
+		}
+	}
+}
+
+func TestLoadLimitsAzureLoginToOneNamedSecret(t *testing.T) {
+	for _, name := range []string{"", "AZURE_LOGIN"} {
+		e := validEnv()
+		e["BROKER_AZURE_LOGIN_SECRET"] = name
+		cfg, err := Load(env(e))
+		if err != nil || cfg.AzureLoginSecret != name {
+			t.Fatalf("Load AzureLoginSecret = %q, %v, want %q", cfg.AzureLoginSecret, err, name)
+		}
+	}
+	for _, name := range []string{"azure-login", "AZURE__LOGIN", " AZURE_LOGIN", "AZURE_LOGIN OTHER_LOGIN"} {
+		e := validEnv()
+		e["BROKER_AZURE_LOGIN_SECRET"] = name
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_AZURE_LOGIN_SECRET") {
+			t.Fatalf("Load an invalid Azure login secret name = %v, want refusal naming the setting", err)
+		}
+	}
+}
+
 // TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
 // that carries a credential and is refused names the variable and the value as
 // redact.NotPrinted, never the user name, password or query; a clean refused value is named as
@@ -911,7 +946,7 @@ func TestLoadRefusesTheDatabasePassword(t *testing.T) {
 			if !strings.HasPrefix(refusal, tc.opens) {
 				t.Errorf("refusal %q does not open %q", refusal, tc.opens)
 			}
-			for _, why := range []string{"by IAM token", "https://sjawhar.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token", "goes in the URL itself"} {
+			for _, why := range []string{"by IAM token", "https://cybermonklabs.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token", "goes in the URL itself"} {
 				if !strings.Contains(refusal, why) {
 					t.Errorf("refusal %q does not say %q", refusal, why)
 				}

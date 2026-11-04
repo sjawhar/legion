@@ -53,7 +53,7 @@ Plan the probe into the review round, not into the tester's E2E:
    `Accepted: not a defect — acceptance-2 probe; …` — and nothing after it.
 3. **The other App's phase runs the mechanism against it** at the point the process already
    requires (the implementer, after its next push) and pastes the output into the PR body. On
-   #1003 that was `resolved https://github.com/sjawhar/legion/pull/1003#discussion_r3998955772`
+   #1003 that was `resolved https://github.com/cybermonklabs/legion/pull/1003#discussion_r3998955772`
    next to `left open …#discussion_r3998955769 — newest reply by legion-reviewer is not an
    acceptance` for the still-open blocking thread — positive and negative control in one run.
 4. **The reviewer verifies the newest submitted comments on GitHub, not in the body.** Approval

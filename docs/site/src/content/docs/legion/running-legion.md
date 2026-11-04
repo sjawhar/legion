@@ -20,7 +20,7 @@ your cluster, from one published worker image.
 | [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents, and the project's repositories mapped to it in Dispatch's Settings → Repositories → Projects, one of them the project's default ([below](#the-projects-repositories)). |
 | The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
 | Three GitHub Apps | An **implement** App (the implementer's and merger's identity), a **review** App (every other role's) and an **Envoy** App (the webhook that feeds Envoy, and Dispatch's GitHub reads), each installed on the owner of every repository Legion works, with its private key ([below](#the-github-apps)). |
-| The worker image | `ghcr.io/sjawhar/legion-worker`, pinned by digest. |
+| The worker image | `ghcr.io/cybermonklabs/legion-worker`, pinned by digest. |
 | A model route | An Oh My Pi provider file and settings overlay, and the credential they read ([below](#the-model-route)). |
 
 ## The project's repositories
@@ -236,7 +236,7 @@ Dispatch read them, delete the files, then install every App from
   storage at 10Gi for a pod's main containers and 10Gi for each init container, and clamps a
   container's limit to its request, so a GKE deployment sets
   `issue: {ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi}`. See
-  [Issue sizing](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
+  [Issue sizing](https://github.com/cybermonklabs/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
   for the sources. The image probe pod, which every
   boot runs before anything is served, carries a fixed reservation of its own:
   250m and 1Gi over 5Gi of disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi
@@ -289,17 +289,17 @@ Dispatch read them, delete the files, then install every App from
 
 ## The worker image
 
-Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
+Every agent runs from `ghcr.io/cybermonklabs/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
 Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl) and the client tools a
 role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
 prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto
 its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
-`legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
+`legion.yaml` accepts the image only by digest (`ghcr.io/cybermonklabs/legion-worker@sha256:…`). A digest
 is published in the summary of each run that builds the worker image and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
-`docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` prints its digest. Worker-image
+`docker buildx imagetools inspect ghcr.io/cybermonklabs/legion-worker:<tag>` prints its digest. Worker-image
 tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>` for a
 release. The package also currently holds `sha256-<image digest hex>` OCI referrer indexes from
 earlier proof runs; they hold attestations, not worker images, so inspecting one does not print a
@@ -622,7 +622,7 @@ Legion's two Oh My Pi plugins at `/opt/legion/pi-envoy` and `/opt/legion/pi-legi
 take all three from the image you pinned:
 
 ```sh
-image=ghcr.io/sjawhar/legion-worker@sha256:<digest>
+image=ghcr.io/cybermonklabs/legion-worker@sha256:<digest>
 id=$(docker create --platform linux/amd64 "$image")
 docker cp "$id:/opt/legion/bin/legion" ./legion
 docker cp "$id:/opt/legion/pi-envoy" ./pi-envoy
@@ -745,7 +745,7 @@ Closing the terminal leaves the project without one, and the daemon logs
    that store's key — for a deployment today `session_store: postgres` and `session_dsn_secret`,
    with the providers Secret holding that key — before the daemon boots: the loader refuses the
    file otherwise ([legion.yaml](#legionyaml)). Before rolling that change, follow
-   [Copying file sessions before turning it on](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#copying-file-sessions-before-turning-it-on).
+   [Copying file sessions before turning it on](https://github.com/cybermonklabs/legion/blob/main/docs/kubernetes.md#copying-file-sessions-before-turning-it-on).
    A later reaping of an older Sandbox-owned volume reads the retiring Sandbox's pod template.
    The providers volume's `OMP_SESSION_SQL_DSN` item under `postgres`, or the launcher's three
    Cloud SQL session flags under `cloudsql-iam`, proves that the Sandbox used the session database

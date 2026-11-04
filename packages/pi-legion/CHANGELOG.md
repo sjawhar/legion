@@ -3,6 +3,22 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.3.0] - 2026-11-04
+
+### Changed
+
+- The package `repository.url`, which is the repository link on its npm page, names `cybermonklabs/legion`.
+
+## [18.2.0] - 2026-11-04
+
+### Changed
+
+- A phase worker's stall reminder to an architect role nobody holds asks Envoy to keep nothing
+  (`keep: false`), so the listener answers it `404` and the next reminder of the worker's own
+  endless run tries again. The reminder is a notice whose latest copy is the one that matters, and
+  the worker already retries it, so a copy Envoy kept would be delivered stale, or dropped an hour
+  later with nobody told.
+
 ## [18.1.0] - 2026-11-04
 
 ### Changed
