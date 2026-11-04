@@ -915,9 +915,15 @@ it shows an item, or an answer or comment a person changed, that the session's l
 not (`SessionAnswersRead.words`, from `sessionAnswersWords` over the items the list shows, so an item the cap left out was not seen: each item's kind, id, author, times,
 options chosen and words, so an issue title, an ask's question or a cached list's header does not
 count); on the requests after that it stays right after that message, found by role, timestamp
-and a tool result's call id, with its current text, so the request ends with its own last message
-and the model does not read a list with nothing new in it as a new turn and answer it on every
-turn. A list that only lost items, or the failure line, keeps its place. A session with no list
+and a tool result's call id, with the bytes it was placed with, so the request ends with its own
+last message and the model does not read a list with nothing new in it as a new turn and answer it
+on every turn. A list that only lost items, or whose text names a different read of the same
+items (`As read at …; this read failed: …`), keeps its place and those same bytes, since a changed
+byte inside the conversation costs a prompt-cache miss for every byte behind it; a read that gives
+no text at all leaves the placed list where it is rather than taking it out. So a placed list can
+name a read older than the request carrying it, and can hold an item that has since aged out of
+the window, until a read shows a new one and the whole list is re-rendered after the last message.
+A session with no list
 placed yet in this process, or whose list's message is no longer in the request (a compaction
 summarized it, the branch moved), gets it after the last message again. Each session's place and
 last list live in a process-wide `WeakMap` by `sessionManager` and then session id, since Oh My Pi
