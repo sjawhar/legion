@@ -9,6 +9,8 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes none (`skill://legion-worker`).
 
+Before choosing a design, writing options or requesting approval: `skill://following-best-practices`.
+
 ## The outline
 
 Find the issue's project with `dispatch projects` or `dispatch search`, never the environment. The spec's `##` parts, in order:
@@ -32,7 +34,7 @@ For each spec, ask, comment and message:
 - Write in `skill://asd-ste100`'s strict mode.
 - Write about the current design, never the person or how people reached it, and never quote people or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
-- In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
+- In a spec, cite code by file and symbol, never a line number, which goes stale.
 - A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
@@ -48,7 +50,7 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches and delete what it contradicts. Never narrate an edit or what used to be here: versions and comments hold the history. Reply in a comment's thread.
+1. After a person's answer, comment or edit, rewrite what it touches and delete what it contradicts. Never narrate an edit: versions and comments hold the history. Reply in a comment's thread.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent: it lists gaps, conflicts, uncheckable requirements, unclear text and missing or needless questions. Fix or record each.
 3. Before each approval request, `wait` for a read-only fact check: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.

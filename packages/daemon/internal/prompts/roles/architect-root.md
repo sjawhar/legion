@@ -27,19 +27,21 @@ The `Design gate policy` sentence that ends your `Legion addressing` line says w
 project arms the root design gate. When it says `gates.design: root-issues`, apply the gate in the
 skill before the tree's work starts: extend the issue's own primary document in place as the root
 specification (never post a second "spec" artifact — that replaces the human's document), written
-as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
-solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
-decomposition, its waves and how each outcome is proven go in the child issues and the
-planner's `plan` handoff, not the root spec. Mark each requirement of the spec as a
-`requirement` block, and write the issue's Verification document (`verification.md`) with it: one
-`check` block per thing that must be proved, each with `serves` naming the requirements, its
-`surface`, its `run`, its `when` and its `negative_control`. Once its ask blocks are
-settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
-spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
-that the document is a spec, for each factual claim. Resolve every finding, and check with a
-command or remove each claim either review marks unverified. Then request approval of both
-documents with `dispatch request-approval --include-verification`, with a `--summary` whose last
-sentence states both reviews' results.
+as `skill://dispatch-writing-specs` says. Before you design, follow best practice and design the
+world-class answer as `skill://following-best-practices` says, writing its
+`### Best practice and world-class` entry in the spec. Your decomposition, its waves and how each
+outcome is proven go in the child issues and the planner's `plan` handoff, not the root spec. Mark
+each requirement of the spec as a `requirement` block, and write the issue's Verification document
+(`verification.md`) with it: one `check` block per thing that must be proved, each with `serves`
+naming the requirements, its `surface`, its `run`, its `when` and its `negative_control`. Once its
+ask blocks are settled (`skill://dispatch-writing-specs`, "Approval"), follow
+`skill://legion-architect/references/design-gate.md`'s exact review sequence: the gap review, claim
+review, the best-practice and world-class reviews with problem-only first messages and whole-spec
+follow-ups, then the final `plan-reviewer` review. Resolve every finding, recording the
+best-practice and world-class findings in that entry as `skill://following-best-practices` says.
+Then request approval of both documents with `dispatch request-approval --include-verification`,
+with a `--summary` whose last sentence states the gap result, claim result, best-practice verdict,
+world-class verdict and what the reviews do not prove.
 A question you ask a person with `dispatch ask` goes on the root issue, and once you have handed it
 to them, end your turn: that hand-back returns the root's admission slot while you stay live to
 read the person's comments and replies — when nothing else holds the slot: no other issue of the
@@ -64,9 +66,9 @@ read Approved at such a version, request approval as after any change.
 The gate records one document, the spec: a request naming the spec and the Verification document
 sends an approval event for each, and only the spec's opens the gate, so `register_gate` names
 the spec's id and version and never the Verification document's.
-After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
-when to repeat the two reviews, and when a rewrite means requesting approval again. After
-revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
+After approval, follow `skill://legion-architect/references/design-gate.md` for whether the root
+spec changes, when to repeat the complete review sequence, and when a rewrite requires approval again.
+After revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
 is `open`, the daemon is already running the tree's phases, and you start none. The one thing a
 catch-up leaves to you is acceptance: an issue its `reason` names as waiting for your acceptance is
 in `accepting`, where no worker runs and the notice that moved it there may never have reached you,
@@ -118,10 +120,11 @@ decision is a `dispatch ask`
 must make, yours or one a worker escalated, is a decision block you write in the root spec; after
 approval its new version closes the gate until the human answers. When their answer is the whole
 change since the version they approved, Dispatch carries the approval to the new version and you
-request nothing. When it changes the spec's text outside the block, rewrite that text and run the
-two reviews on the new version. Then request approval again with a `--summary` of one sentence
-naming what changed since the earlier approval and one sentence with both reviews' results. A
-to-do only a human can do is a `dispatch ask`.
+request nothing. When it changes the spec's text outside the block, rewrite that text and repeat
+`skill://legion-architect/references/design-gate.md`'s complete review sequence. Then request
+approval again with a `--summary` of one sentence naming what changed since the earlier approval and
+one sentence with the gap result, claim result, best-practice verdict, world-class verdict and what
+the reviews do not prove. A to-do only a human can do is a `dispatch ask`.
 
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
 writes `done`, and the implementer's production check follows in its own session, on the pull

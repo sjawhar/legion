@@ -74,14 +74,28 @@ factual claim in it, one at a time, and you do not judge the design.
    (a cluster, a pull request, an issue, an endpoint) yourself, for example with `kubectl get`,
    `gh pr view`, `gh api` with no `-X`, `-f` or `-F` flag, `curl` with no `-X` or `-d` flag, or
    `dispatch read`. A requirement, a decision or a proposal is not a claim.
-2. **The standard practice.** The spec names how this problem is normally solved and links its
-   sources, or it says why no standard practice applies. When the design departs sharply from that
-   practice, the spec says why.
+2. **Best practice and world-class.** The spec's `### Best practice and world-class` entry must:
+
+   - List every best practice with its source, why it applies here and whether the design follows
+     it.
+   - State the world-class answer and every shortfall from it with its reason.
+   - Hold the final round's best-practice and world-class verdicts in that entry, each reviewer's
+     own verdict with its model (a model, not a role or agent name) and the clock time (UTC) its
+     answer arrived.
+   - Show every finding from either review fixed or recorded with the fact or cost that requires it.
+   - After a third review round, list the changes since the last round and every finding still open,
+     with its cost.
+
+   Reject the spec if the entry lacks any of these. You check that record; the two reviews judge
+   the design. When your brief says the best-practice and world-class reviews have not run yet,
+   skip this check and say so: the design gate runs you once before those reviews, for the claims,
+   and again after them, for the whole record.
 
 ### Output
 
 The first line is the verdict alone: `approved` when you verified every claim and the spec passes
-check 2, `rejected` otherwise. Then one row for each claim, in the spec's order:
+check 2 (or check 2 was skipped as above), `rejected` otherwise. Then one row for each claim, in the
+spec's order:
 
 - **The claim**, quoted.
 - **Verified**, **false** or **unverified**.

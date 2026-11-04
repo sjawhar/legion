@@ -36,7 +36,8 @@ plugin() {
   @sjawhar/pi-envoy)
     entry=envoy
     skills=(
-      asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy outside-message plain-words
+      asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy following-best-practices
+      outside-message plain-words
     )
     ;;
   @sjawhar/pi-legion)
