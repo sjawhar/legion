@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  A pod that logs in with its own projected ServiceAccount token enrols only the pod that login
+  came from; any other pod UID is `403 POD_SELF_ENROLL_ONLY`, the narrowing a `vm` enrollment
+  already makes. A login from a token bound to no pod enrols none of its account's pods. A
+  launcher's login, such as the Legion daemon's, is untouched: its subject is never the subject
+  of a pod token it presents, because `BROKER_SERVICE_LOGINS` may not name an account
+  `BROKER_SERVICES` binds for a service's pods.
+custom:
+  Issue: pr2777
