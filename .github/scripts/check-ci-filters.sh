@@ -58,6 +58,33 @@
 #      row it is in: a filter and a declared read that name the same path which does not exist are
 #      consistent with each other and select nothing, so every rule above passes while a change to
 #      the files they mean starts no job. A `!` pattern is exempt, since it names what to leave out.
+#  10. an `if:` of ci.yaml, a job's or a step's, that tests `github.event_name == 'push'` or
+#      `github.event_name != 'push'`, or that compares `github.ref` with a single-quoted
+#      `'refs/heads/...'` literal with `==` or `!=` (either operand first), naming the job, the
+#      step and the expression: this workflow has no `push:` trigger, so such a condition gates
+#      its job or step on what no run of it ever is, and the dead code reads as live - the cache
+#      restores carried `github.ref != 'refs/heads/main'` long after a run on main was possible.
+#      A cache that must be filled on a push to main belongs in .github/workflows/ci-caches.yaml;
+#      a job that must run at main's tip is reached by the workflow_dispatch the bypass check
+#      (.github/workflows/main-bypass-check.yaml) sends. It refuses those two comparisons and
+#      nothing else: `github.ref_name`, and `github.ref` outside such a comparison, are left
+#      alone, since a merge_group run's github.ref really is a branch ref
+#      (refs/heads/gh-readonly-queue/...) and a startsWith on it is live. As everywhere here, the
+#      same test written as a function call is the review's to catch, not this check's.
+#  11. a cache family .github/workflows/ci-caches.yaml saves whose `key:` or `path:` is not
+#      exactly that of the matching actions/cache/restore of ci.yaml (the keys compared as text,
+#      trailing whitespace aside, the paths as ordered lists of stripped lines), or that ci.yaml
+#      restores nowhere, and an actions/cache/restore of ci-caches.yaml that is not
+#      `lookup-only: true` or that carries restore-keys. ci-caches.yaml fills the entries ci.yaml
+#      restores, and a key or a path that drifts apart makes every restore miss silently: nothing
+#      fails, every job just rebuilds from nothing what the fill already built. A save is matched
+#      to a restore by family, the key's text up to its first `${{`, which is the Go version the
+#      entry is keyed on. A family ci.yaml restores that ci-caches.yaml does not save is no
+#      failure: go-docs is saved by docs-pages.yaml, from the build job that workflow shares with
+#      ci.yaml's docs job. Each restore of ci-caches.yaml is a lookup, which must download
+#      nothing: the workflow asks only whether that exact key is already there, no step of it
+#      reads a restored entry, and a prefix hit would answer for an older key and skip the build
+#      that fills this one, leaving it empty.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,

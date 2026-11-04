@@ -25,6 +25,8 @@ import yaml
 from workflow_paths import PathsFilter, events, glob_regex, unread_filter_patterns
 
 WORKFLOW = ".github/workflows/ci.yaml"
+# The workflow that fills, on a push to main, the Go cache families WORKFLOW's jobs restore.
+CACHE_WORKFLOW = ".github/workflows/ci-caches.yaml"
 REPO = Path.cwd().resolve()
 SHOWN = 20  # uncovered files printed per gate
 
@@ -905,6 +907,116 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
+# ---------------------------------------------------------------- the conditions ci.yaml cannot hold
+# ci.yaml runs on a pull request, a merge group and a workflow_dispatch, and on no push, so an if:
+# testing for a push event, or comparing github.ref with a branch ref, holds its job or step back
+# on every run there is. Either way round, as a GitHub expression may be written; its strings are
+# single-quoted, a double-quoted one being no expression at all. github.ref_name, and github.ref
+# in anything but such a comparison - startsWith against refs/heads/gh-readonly-queue/, the branch
+# a merge_group run does carry, among them - are left alone.
+def comparison(left: str, right: str) -> str:
+    """The regex of a GitHub expression comparing `left` with `right`, either operand first."""
+    return rf"{left}\s*[=!]=\s*{right}|{right}\s*[=!]=\s*{left}"
+
+
+PUSH_CONDITION = re.compile("|".join((comparison(r"github\.event_name", "'push'"),
+                                      comparison(r"github\.ref", r"'refs/heads/[^']*'"))))
+# Where the work such a condition used to gate lives now.
+PUSH_INSTEAD = (f"a cache that must be filled on a push to main belongs in {CACHE_WORKFLOW}, and a job that must "
+                f"run at main's tip is started by the workflow_dispatch "
+                f".github/workflows/main-bypass-check.yaml sends")
+
+
+def check_push_conditions(document: dict, problems: list) -> None:
+    """A job or a step of ci.yaml gated on a push event, or on github.ref being a branch ref, is
+    dead: the workflow has no push trigger, and on its three events github.ref is a pull request's
+    merge ref or the merge queue's own branch, never the ref such a condition names. Dead code
+    that reads as live is worse than none - the cache restores carried
+    `github.ref != 'refs/heads/main'` conditions that could no longer be true - so a later pull
+    request may not bring one back. Read off the if: text, one comparison at a time: a committer
+    who writes the same test as a function call is the review's to catch."""
+    for job_id, job in (document.get("jobs") or {}).items():
+        job = job or {}
+        refs = [(None, str(job.get("if", "")))] + [(s, str((s or {}).get("if", ""))) for s in job.get("steps") or []]
+        for step, condition in refs:
+            for found in dict.fromkeys(m.group(0) for m in PUSH_CONDITION.finditer(condition)):
+                where = f"job {job_id}" + (f' step "{step_label(step)}"' if step else "")
+                problems.append(f"::error file={WORKFLOW}::{where} has `if: {squash(condition)}`, which tests "
+                                f"`{found}`: {WORKFLOW} runs on a pull request, a merge group and a "
+                                f"workflow_dispatch, never on a push to main, so nothing that condition gates ever "
+                                f"runs; {PUSH_INSTEAD}")
+
+
+# ---------------------------------------------------------------- the cache round trip
+def cache_family(key: str) -> str:
+    """The family a cache key names: its text up to the first expression - the Go version the
+    entry is keyed on - without the separator that joins the two."""
+    return key.split("${{")[0].strip().rstrip("-")
+
+
+def path_lines(value) -> list:
+    """A cache step's path:, as the ordered list of directories it names."""
+    return [line.strip() for line in str(value).splitlines() if line.strip()]
+
+
+def cache_steps(document: dict, action: str) -> list:
+    """Every actions/cache/<action> step of a workflow, as (its job, its family, its with:)."""
+    return [(job_id, cache_family(str((step.get("with") or {}).get("key", ""))), step.get("with") or {})
+            for job_id, job in (document.get("jobs") or {}).items()
+            for step in ((job or {}).get("steps") or [])
+            if str((step or {}).get("uses", "")).split("@")[0] == f"actions/cache/{action}"]
+
+
+def check_cache_round_trip(document: dict, problems: list) -> None:
+    """ci-caches.yaml fills on a push to main the entries ci.yaml's jobs restore, so each family's
+    save must carry exactly the key and the paths its restores name: a key or a path that drifts
+    apart makes every restore miss, and nothing fails - each job just rebuilds from nothing what
+    the fill already built. A family is the key's text up to its first expression, and it is what
+    pairs a save with the restores to hold it to; the keys are compared as text and the paths as
+    the ordered lists of lines they name. A family ci.yaml restores that this workflow does not
+    save is no fault: docs-pages.yaml saves go-docs. The other way round is one, a family nothing
+    restores being a fill nobody reads. Each restore here is a lookup, which must be
+    `lookup-only: true` with no restore-keys: the question it asks is whether that exact key is
+    already there, the entry it would download is read by nothing in this workflow, and a prefix
+    hit would answer for an older key and skip the build that fills this one. A ci-caches.yaml
+    that is not in the repository saves nothing, and so has nothing to hold."""
+    if not (REPO / CACHE_WORKFLOW).is_file():
+        return
+    caches = yaml.safe_load((REPO / CACHE_WORKFLOW).read_text()) or {}
+    restores = defaultdict(list)
+    for job_id, family, given in cache_steps(document, "restore"):
+        restores[family].append((job_id, given))
+    for job_id, family, given in cache_steps(caches, "save"):
+        key, paths = str(given.get("key", "")).rstrip(), path_lines(given.get("path", ""))
+        if family not in restores:
+            problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves cache family {family}, which no "
+                            f"actions/cache/restore of {WORKFLOW} reads; this workflow exists to fill what "
+                            f"{WORKFLOW} restores, so a family nothing restores is a fill nobody reads: restore it "
+                            f"there, or drop the save")
+            continue
+        for restore_job, restored in restores[family]:
+            if key != str(restored.get("key", "")).rstrip():
+                problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves family {family} under key "
+                                f"`{key}`, but job {restore_job} of {WORKFLOW} restores it under "
+                                f"`{str(restored.get('key', '')).rstrip()}`: a restore whose key is not the save's "
+                                f"misses every time, and nothing fails - the job rebuilds from nothing instead")
+            if paths != path_lines(restored.get("path", "")):
+                problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves family {family} from "
+                                f"{', '.join(paths) or '(no path)'}, but job {restore_job} of {WORKFLOW} restores "
+                                f"it into {', '.join(path_lines(restored.get('path', ''))) or '(no path)'}: the "
+                                f"entry then holds other directories than the job reads, and the job rebuilds what "
+                                f"the fill already built")
+    for job_id, family, given in cache_steps(caches, "restore"):
+        if str(given.get("lookup-only", "")).strip().lower() != "true":
+            problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id}'s actions/cache/restore of family "
+                            f"{family} is not `lookup-only: true`: it asks only whether that exact key is already "
+                            f"there, and the entry a restore downloads is read by no step of this workflow")
+        if given.get("restore-keys") is not None:
+            problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id}'s actions/cache/restore of family "
+                            f"{family} has restore-keys: a prefix hit would answer for an older key, and the build "
+                            f"that fills this one would be skipped, leaving the key empty")
+
+
 def declared_reads(data) -> list:
     """Every read pattern ci_job_reads.py declares, each with where it is: a gate's reads, or a
     RULES row's (a row's Runs declare go commands, not patterns)."""
@@ -944,6 +1056,8 @@ def main() -> int:
     files = repo_files()
     unreduced = check_table(document, data, filters, set(files), problems)
     check_ci_ok(document, problems)
+    check_push_conditions(document, problems)
+    check_cache_round_trip(document, problems)
     expander = Expander(files)
     check_dead_patterns(data, filters, expander, problems)
     session = Session()

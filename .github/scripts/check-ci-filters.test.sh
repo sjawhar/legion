@@ -8,7 +8,9 @@
 # CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
 # each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
 # report step and no job may be named for a required check, and a PUSH_WORKFLOWS workflow's
-# on.push.paths must equal its filter.
+# on.push.paths must equal its filter, no `if:` of ci.yaml may test for a push event or compare
+# github.ref with a branch ref, and ci-caches.yaml's save of a cache family must carry the key and
+# the paths ci.yaml's restore of that family names, its own restores being lookups.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -791,5 +793,119 @@ GO
     "$(contains "$out" "job app step \"Test the app\" runs \`go test ./cmd/app ./lib\`, which this check does not reduce (step \"Test the app\".s env sets $name)")"
   check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
 done
+
+echo "case: a step of ci.yaml gated on a push, an event the workflow does not run on"
+root=$(fixture push-gated-step)
+replace "$root/.github/workflows/ci.yaml" "      - name: Test the app" \
+  $'      - name: Test the app\n        if: github.event_name == \'push\''
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job, the step and the expression" \
+  "$(contains "$out" "job app step \"Test the app\" has \`if: github.event_name == 'push'\`, which tests \`github.event_name == 'push'\`")"
+check "says where such work belongs instead" \
+  "$(contains "$out" 'belongs in .github/workflows/ci-caches.yaml')"
+
+echo "case: a job of ci.yaml gated on main's ref"
+root=$(fixture push-gated-job)
+replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
+  "    if: needs.changes.outputs.app == 'true' && github.ref != 'refs/heads/main'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the comparison" \
+  "$(contains "$out" "job app has \`if: needs.changes.outputs.app == 'true' && github.ref != 'refs/heads/main'\`, which tests \`github.ref != 'refs/heads/main'\`")"
+
+echo "case: github.ref_name, and github.ref outside such a comparison, are no push gate"
+root=$(fixture push-gate-free)
+replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
+  "    if: needs.changes.outputs.app == 'true' && github.ref_name != 'main' && !startsWith(github.ref, 'refs/heads/gh-readonly-queue/')"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+# cache_workflow <root>: the shape .github/workflows/ci-caches.yaml and ci.yaml have here - a fill
+# job that looks the family's key up, builds only on a miss and saves the entry, and a restore of
+# that same key and those same paths in the job that reads it.
+cache_workflow() {
+  cat > "$1/.github/workflows/ci-caches.yaml" <<'YAML'
+name: CI caches
+on:
+  push:
+    branches: [main]
+jobs:
+  fill:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: go-app
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-app-${{ runner.os }}
+          lookup-only: true
+      - if: steps.go-app.outputs.cache-hit != 'true'
+        run: go test -count=1 ./cmd/app ./lib
+        working-directory: mod
+      - if: steps.go-app.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-app-${{ runner.os }}
+YAML
+  replace "$1/.github/workflows/ci.yaml" "      - name: Test the app" \
+    $'      - id: go-cache\n        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: |\n            ~/go/pkg/mod\n            ~/.cache/go-build\n          key: go-app-${{ runner.os }}\n          restore-keys: ${{ format(\'go-app-{0}-\', runner.os) }}\n      - name: Test the app'
+}
+
+echo "case: a family ci-caches.yaml saves under the key and paths ci.yaml restores"
+root=$(fixture cache-round-trip)
+cache_workflow "$root"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: a restore key that drifted from the key ci-caches.yaml saves"
+root=$(fixture cache-key-drift)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci.yaml" 'key: go-app-${{ runner.os }}' 'key: go-app-${{ runner.os }}-v2'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the family and both keys" \
+  "$(contains "$out" 'job fill saves family go-app under key .*, but job app of .github/workflows/ci.yaml restores it under .*-v2')"
+
+echo "case: a restore path the save of that family does not name"
+root=$(fixture cache-path-drift)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci.yaml" $'            ~/.cache/go-build\n' $'            ~/.cache/go-build\n            ~/.cache/legion\n'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names both path lists" \
+  "$(contains "$out" 'job fill saves family go-app from ~/go/pkg/mod, ~/.cache/go-build, but job app of .github/workflows/ci.yaml restores it into ~/go/pkg/mod, ~/.cache/go-build, ~/.cache/legion')"
+
+echo "case: a family ci-caches.yaml fills that ci.yaml restores nowhere"
+root=$(fixture cache-unrestored)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci.yaml" 'key: go-app-${{ runner.os }}' 'key: go-other-${{ runner.os }}'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the family nothing restores" \
+  "$(contains "$out" 'job fill saves cache family go-app, which no actions/cache/restore of .github/workflows/ci.yaml reads')"
+
+echo "case: a lookup of ci-caches.yaml that downloads the entry"
+root=$(fixture cache-lookup-only)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci-caches.yaml" "          lookup-only: true"$'\n' ""
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the family" \
+  "$(contains "$out" "job fill's actions/cache/restore of family go-app is not \`lookup-only: true\`")"
+
+echo "case: a lookup of ci-caches.yaml with restore-keys"
+root=$(fixture cache-lookup-prefix)
+cache_workflow "$root"
+replace "$root/.github/workflows/ci-caches.yaml" "          lookup-only: true" $'          lookup-only: true\n          restore-keys: go-app-'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the family" \
+  "$(contains "$out" "job fill's actions/cache/restore of family go-app has restore-keys")"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
