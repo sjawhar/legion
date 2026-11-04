@@ -1,4 +1,5 @@
 import { ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS } from "@legion/contracts";
+import type { Locator } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
 import { agentRow, setLiveSessions, setSessionLastSeen, setSessionState } from "./agents";
@@ -61,10 +62,27 @@ async function seedClaim(title: string): Promise<{ issueKey: string; token: stri
  *  holds the record and says the session is unresponsive, with the heartbeat it was last seen
  *  at. Returns that heartbeat. */
 async function stall(msAgo: number): Promise<number> {
-  const lastSeen = Date.now() - msAgo;
+  // A millisecond ending in zero, every run: the server spells the moment as Go does, which
+  // drops that trailing zero (`…:32.15Z` for 150 ms), and the page's `datetime` is that
+  // spelling. Rounding here exercises the difference on every run rather than one in ten,
+  // so expectInstant's comparison of moments is what the assertions below rest on.
+  const lastSeen = Math.floor((Date.now() - msAgo) / 10) * 10;
   await setSessionLastSeen(holder.session_id, lastSeen);
   await setSessionState(holder.session_id, "unresponsive");
   return lastSeen;
+}
+
+// expectInstant reads a <time> element's `datetime` and compares the moment it names with want,
+// rather than its spelling: the server writes the moment as Go formats it, which drops a trailing
+// zero from the milliseconds (`…:32.15Z` for 150 ms), while `Date.toISOString` always writes
+// three digits. Comparing the strings failed about one run in ten on that difference alone.
+async function expectInstant(locator: Locator, want: number, what: string) {
+  await expect(locator).toBeVisible();
+  await expect
+    .poll(async () => Date.parse((await locator.getAttribute("datetime")) ?? ""), {
+      message: `${what} names the moment ${new Date(want).toISOString()}`,
+    })
+    .toBe(want);
 }
 
 test("an unresponsive holder keeps its claim: the issue page says unresponsive since its last heartbeat and names when it becomes takeable, and a second agent is refused", async ({
@@ -105,14 +123,17 @@ test("an unresponsive holder keeps its claim: the issue page says unresponsive s
     await expect(chip).toHaveAttribute("title", /missed its heartbeats without ending/);
     // R5's wording: the state, and the heartbeat the silence is dated from.
     await expect(stalled).toContainText("unresponsive since");
-    await expect(
-      stalled.getByTestId("issue-claim-unresponsive-since").locator("time")
-    ).toHaveAttribute("datetime", new Date(lastSeen).toISOString());
+    await expectInstant(
+      stalled.getByTestId("issue-claim-unresponsive-since").locator("time"),
+      lastSeen,
+      "the issue page's unresponsive-since time"
+    );
     // The moment named is the holder's last heartbeat plus the shared grace, which is the sum
     // the server's own refusal below is written from.
-    await expect(stalled.getByTestId("issue-claim-takeable").locator("time")).toHaveAttribute(
-      "datetime",
-      new Date(lastSeen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS).toISOString()
+    await expectInstant(
+      stalled.getByTestId("issue-claim-takeable").locator("time"),
+      lastSeen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
+      "the issue page's takeable-at time"
     );
     // The holder is drawn as unresponsive wherever it is named, never as not running.
     await expect(chip.locator(`[data-agent-name="${holder.session_id}"]`)).toHaveAttribute(
@@ -206,9 +227,10 @@ test("the Agents page lists an unresponsive claim holder as unresponsive since i
     const note = row.getByTestId("agent-unresponsive");
     await expect(note).toBeVisible();
     await expect(note).toContainText("Unresponsive");
-    await expect(note.locator("time")).toHaveAttribute(
-      "datetime",
-      new Date(lastSeen).toISOString()
+    await expectInstant(
+      note.locator("time"),
+      lastSeen,
+      "the agents page's unresponsive-since time"
     );
     await expect(note).toHaveAttribute("title", /It has not ended/);
     // The name's own mark reads the row's state, not the list's membership.
