@@ -1,9 +1,11 @@
 package workflow
 
 import (
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -66,4 +68,74 @@ func recordedStatus(t *testing.T, pool *pgxpool.Pool, key string) string {
 		t.Fatalf("read the status of %s: %v", key, err)
 	}
 	return status
+}
+
+// A root waiting for a slot can stand in a workflow phase of its own: a re-admission leaves the
+// phase a hand-over carried (admit's readmit), and the root waits in the line as `todo` until a
+// slot reaches it. Only a `todo` root is in that line (record.line), so a status correction of its
+// phase would take it out and no slot would ever reach it: the boot leaves such a root, and every
+// issue of a tree that holds no slot or lingers, exactly as it stands.
+func TestTheBootCorrectsNoStatusOfATreeThatHoldsNoSlot(t *testing.T) {
+	pool := migratedPool(t)
+	seedBootTree(t, pool)
+	// The waiting root: handed over in implementing, carrying the phase of its old tree, recorded
+	// todo, which is what Dispatch shows and what keeps it in the line.
+	seedIssue(t, pool, record.Issue{Key: "LEGION-300", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-300", Project: "LEGION", Title: "a root waiting for a slot with a carried phase",
+		Phase: phase.Implementing, Generation: 2, Status: "todo", DispatchStatus: "todo", Rank: "Y", HandedOver: true})
+	// A child of that waiting root waits with it, and is corrected by no boot either.
+	seedIssue(t, pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-300", Project: "LEGION", Title: "a child of the waiting root", Parent: new("LEGION-300"),
+		Phase: phase.Planning, Generation: 2, Status: "todo", DispatchStatus: "todo", Rank: "Z"})
+	// A lingering root's tree runs nothing: its statuses are its close's to write.
+	until := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-310", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-310", Project: "LEGION", Title: "a lingering root", Phase: phase.Testing, Generation: 1,
+		Status: "todo", DispatchStatus: "todo", Rank: "ZA", HandedOver: true, LingerUntil: &until})
+	// The child of the live tree is corrected all the same, so the skip is the tree's and not a
+	// correction switched off.
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-208", Project: "LEGION", Title: "a child the old daemon started", Parent: new("LEGION-208"),
+		Phase: phase.Planning, Generation: 4, Status: "todo", DispatchStatus: "todo", Rank: "V"})
+
+	applyMirrored(t, pool, testEngine(config.DesignGateRootIssues, nil), "boot", intake.DaemonBooted{})
+
+	for _, key := range []string{"LEGION-300", "LEGION-301", "LEGION-310"} {
+		if got := statusWrites(t, pool, key); len(got) != 0 {
+			t.Errorf("the boot queued %+v for %s, want nothing: its tree holds no slot", got, key)
+		}
+		if got := recordedStatus(t, pool, key); got != "todo" {
+			t.Errorf("the record of %s = %q, want the todo it stood at: a write would take a waiting root out of the line", key, got)
+		}
+	}
+	if waiting := waitingNow(t, pool); !slices.Contains(waiting, "LEGION-300") {
+		t.Fatalf("the waiting line after the boot = %v, want the carried root LEGION-300 still in it", waiting)
+	}
+	want := []record.StatusWrite{record.OrdinaryStatusWrite("in_progress", "todo", "")}
+	if got := statusWrites(t, pool, "LEGION-209"); len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("the status writes the boot queued for the live tree's planning child = %+v, want %+v", got, want)
+	}
+}
+
+// waitingNow is the keys of the roots in the waiting line as the project stands (record.Waiting),
+// the line a slot is taken from.
+func waitingNow(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	var keys []string
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		store := record.NewStore()
+		issues, err := store.Issues(t.Context(), tx)
+		if err != nil {
+			return err
+		}
+		slots, err := store.Slots(t.Context(), tx)
+		if err != nil {
+			return err
+		}
+		for _, issue := range record.Waiting(issues, slots) {
+			keys = append(keys, issue.Key)
+		}
+		return nil
+	})
+	return keys
 }
