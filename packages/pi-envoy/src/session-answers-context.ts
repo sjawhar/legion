@@ -231,44 +231,26 @@ function withoutReadLine(text: string): string {
     : text;
 }
 
-/** The first line `renderSessionAnswerItem` writes for an item: its time, its author and what the
- *  person did, joined by ` · `. A line of a person's own text that looks like one only splits
- *  their item in two, which reads as something new; it never joins two items into one. */
-const ITEM_HEAD = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z · /;
-
-/** The line `leftOutLine` writes last when the character cap dropped older items. */
-const LEFT_OUT =
-  /^\d[\d,]* older items? left out to stay under [\d,]+ characters(: run `dispatch answers` to read every one in full)?\.$/;
-
-/** The items a rendered list shows, one string each: the text without the marker and the line
- *  naming the read, cut at each item's own first line, and without the line counting what the
- *  character cap left out, which the read note's own length can move. Two lists that show the
- *  same items give the same strings, whatever read produced them. */
-function shownItems(text: string): string[] {
-  const items: string[] = [];
-  for (const line of withoutReadLine(text).split("\n")) {
-    if (ITEM_HEAD.test(line)) items.push(line);
-    else if (items.length > 0) items[items.length - 1] += `\n${line}`;
-  }
-  const last = items.at(-1);
-  if (last !== undefined) {
-    const paragraphs = last.split("\n\n");
-    const trailing = paragraphs.at(-1)?.trim();
-    if (paragraphs.length > 1 && trailing !== undefined && LEFT_OUT.test(trailing)) {
-      items[items.length - 1] = paragraphs.slice(0, -1).join("\n\n");
-    }
-  }
-  return items.map((item) => item.trimEnd());
-}
-
-/** Whether `next` shows something `shown` did not: an item, or an answer or comment a person
- *  changed. Without both reads' words (a list an older copy of this extension placed), the items
- *  the two texts show are compared instead, so neither the line naming the read nor an item this
- *  read's character cap left out counts as something new. */
+/**
+ * Whether `next` shows something `shown` did not: an item, or an answer or comment a person
+ * changed. The two reads' words (`sessionAnswersWords`, one string per item the list shows)
+ * answer that exactly.
+ *
+ * A list an older copy of this extension placed has no words, and then only its rendered text is
+ * left to compare. The comparison there is deliberately crude: the texts are the same only when
+ * they differ in nothing but the line naming the read, and every other difference counts as
+ * something new, so the list is re-rendered after the last message. Reading that text more
+ * closely — by paragraph, or cut into items, each without the line counting what the character
+ * cap left out — was tried twice and defeated twice by an item whose own words read like the
+ * renderer's: a person's answer quoting another item's first lines, or ending in a sentence of
+ * the cap line's shape, was taken for something already shown, and what they wrote reached no
+ * request at all. A list re-rendered because only this read's note changed costs a prompt-cache
+ * miss, on a path that lasts only until every copy of this extension carries this change; a
+ * swallowed answer costs a person's words. So this path pays the miss.
+ */
 function showsNew(shown: CarriedAnswers, next: CarriedAnswers): boolean {
   if (shown.words === undefined || next.words === undefined) {
-    const before = new Set(shownItems(shown.text));
-    return shownItems(next.text).some((item) => !before.has(item));
+    return withoutReadLine(shown.text) !== withoutReadLine(next.text);
   }
   const before = new Set(shown.words);
   return next.words.some((word) => !before.has(word));

@@ -461,29 +461,41 @@ test("a request an older copy already gave the list gets no second one and no re
   expect(calls()).toBe(0);
 });
 
-// A list an older copy placed carries no item fingerprints, so the two texts' items are compared.
-// The line naming the read takes characters from the reader's cap, so a cached read can show one
-// item fewer than the fresh read before it. That is not a new item: moving the list for it would
-// change the request at the list's place on every other turn.
-test("an older copy's list that the read note's own length shortened keeps its place and bytes", async () => {
+// A list an older copy placed carries no item fingerprints, so only its text is left to compare,
+// and every difference but the line naming the read counts as something new. Here the read note's
+// own length pushed an item past the reader's character cap, so the list is re-rendered after the
+// last message: a prompt-cache miss, and never a person's words held back. Reading that text more
+// closely to spare the miss swallowed an item twice (see `showsNew`).
+test("an older copy's list the cap shortened is re-rendered, not kept", async () => {
   const session = {};
   const fresh = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
   const capped = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n1 older item left out to stay under 8,000 characters: run \`dispatch answers\` to read every one in full.`;
   const freshList = { role: "user", content: [{ type: "text", text: fresh }], timestamp: 0 };
-  // No read of this copy's own: the older copy's list is what gets placed and kept.
+  const cappedList = { role: "user", content: [{ type: "text", text: capped }], timestamp: 0 };
+  // No read of this copy's own: the older copy's list is what gets placed.
   const { read, calls } = reading(LIST);
   await withSessionAnswers([skill, ask, freshList], requestOf(read, noBranch, session));
   const turn = [skill, ask, readCall, readResult];
-  const cappedList = { role: "user", content: [{ type: "text", text: capped }], timestamp: 0 };
   expect(
     await withSessionAnswers([...turn, cappedList], requestOf(read, noBranch, session))
-  ).toEqual([skill, ask, freshList, readCall, readResult]);
+  ).toEqual([...turn, cappedList]);
+  // Only the read note differs from the list just placed, so that one keeps its place and bytes.
+  const sameItems = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: capped.replace("2026-10-27T11:00:00.000Z;", "2026-10-27T11:05:00.000Z;"),
+      },
+    ],
+    timestamp: 0,
+  };
   expect(
     await withSessionAnswers(
-      [...turn, grepCall, grepResult, freshList],
+      [...turn, grepCall, grepResult, sameItems],
       requestOf(read, noBranch, session)
     )
-  ).toEqual([skill, ask, freshList, readCall, readResult, grepCall, grepResult]);
+  ).toEqual([...turn, cappedList, grepCall, grepResult]);
   expect(calls()).toBe(0);
 });
 
