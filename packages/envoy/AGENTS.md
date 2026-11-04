@@ -40,6 +40,22 @@ Each item below names a task and where its code is, then notes on it.
 
   ENVOY_WEBHOOKS parsing, startup validation
 
+- **Repository renames**: `internal/ghrename/`
+
+  `ENVOY_GITHUB_REPOSITORY_RENAMES`, read in `internal/webhook/config.go` only where `ENVOY_WEBHOOKS` names `github`:
+  a comma-separated list of `<former owner>/<name>=<current owner>/<name>`, the pair this repository's own move to GitHub Enterprise needs being `sjawhar/legion=cybermonklabs/legion`.
+  The listener publishes every GitHub envelope of the current repository a second time under the former name (`ghrename.Publishing`).
+  That keeps a session that subscribed before the rename hearing about the repository.
+  The copy differs from the envelope it copies in its topic and in nothing else: the same `event_id`, the same `dedupe_key`, the same payload.
+  A client drops the copy by `event_id`, so a session subscribed under both names sees one event.
+  The mapping is one-way, a current name published under its former name and never the reverse, because this rewrite creates subjects:
+  under a two-way mapping, a repository created later at the freed name would publish into the live topics of the repository that moved away from it.
+  A value `ghrename.Parse` cannot read refuses the listener's start, naming the variable.
+  This list and the Legion daemon's `repository_renames` in `legion.yaml` (`packages/daemon/internal/ghrepo/renames.go`) are two lists an operator keeps in step:
+  they are separate Go modules, and the listener's pod mounts no `legion.yaml`.
+  The daemon's list is read-side only and two-way, while this one is publish-side and one-way.
+  A pair can be removed once no live session names the former repository in a topic, which Envoy's session list answers in one read (`GET /v1/sessions`).
+
 - **Listener behavior**: `cmd/listener/main.go`
 
   subscribe/match/deliver flow
