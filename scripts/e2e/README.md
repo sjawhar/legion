@@ -182,6 +182,16 @@ Each item below names a script, then what it proves.
   a delivered mention of the claimant leaves its topic out, a failed one reaches it, and a failed mention of an ask's follower still reaches the follower.
   Run against a base binary (`DISPATCH_BIN`), it is the change's negative control
 
+- `verification-results.sh`
+
+  a recorded check result says whether it still speaks for the work as it stands, and the head it is measured against moves with the pull-request events Dispatch takes off the bus, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names, a NATS of the run's own and the e2e harness's fake GitHub:
+  a result is read back under its check;
+  a push that moves the pull request's head, published as the normalized `pull_request` envelope, makes the earlier result read older with no write of Dispatch's, while a result at the new head reads current;
+  a closed issue takes a result for an `after_merge` check and still refuses a document write 409 `ISSUE_CLOSED`;
+  a `default_branch` result reads current at a commit the compare calls `behind` and not at one it calls `diverged`;
+  and a result whose issue resolves to a repository the installation lookup does not find is marked neither current nor older.
+  Run against a base binary (`DISPATCH_BIN`), it is the change's negative control
+
 - `child-adoption.sh`
 
   a labelled root still queued in admission, which a person then makes a child of a live tree, joins that tree and runs there, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own:
@@ -247,7 +257,7 @@ Each item below names a script, then what it proves.
 ## On a GitHub-hosted runner
 
 [`.github/workflows/e2e.yaml`](../../.github/workflows/e2e.yaml) runs one proof per job on `ubuntu-24.04`, against a Postgres service.
-Five scripts run there: `child-adoption.sh`, `dispatch-claimant-delivery.sh`, `merged-root-waits.sh`, `no-required-checks.sh` and `stage1-skeleton.sh`, which the `test` job of `ci.yaml` also runs.
+Six scripts run there: `child-adoption.sh`, `dispatch-claimant-delivery.sh`, `merged-root-waits.sh`, `no-required-checks.sh`, `verification-results.sh` and `stage1-skeleton.sh`, which the `test` job of `ci.yaml` also runs.
 None of them needs a secret, and none there may:
 Sami answered that no API key goes into this repository, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512).
 Every other script needs a devbox, a throwaway kind cluster, a real cluster or a model key, and the workflow refuses it by name with what its own header says it needs.
@@ -274,7 +284,7 @@ gh run download <run id>    # every evidence directory the run uploaded
 
 Each job writes its evidence to one directory and uploads it as `e2e-<script>-<run id>-<run attempt>`, on a pass and on a failure.
 The job sets the evidence variable of the script it runs (`CHILD_ADOPTION_EVIDENCE_DIR`, `MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`), so that script writes its transcript and its logs there.
-It also keeps the run's own output as `output.log` in the same directory, which is what `stage1-skeleton.sh` and `dispatch-claimant-delivery.sh` leave a reader:
+It also keeps the run's own output as `output.log` in the same directory, which is what `stage1-skeleton.sh`, `dispatch-claimant-delivery.sh` and `verification-results.sh` leave a reader:
 they take no evidence variable and keep a work directory of their own, whose path that output names.
 
 ## TestRealGitHubCredentialSurface
@@ -3800,6 +3810,95 @@ DATABASE_URL=… DISPATCH_BIN="$TMPDIR/envoy-dispatch-base" bash scripts/e2e/dis
 #   other seven, exit 1
 ```
 
+## verification-results.sh
+
+```sh
+DATABASE_URL=postgres://<user>@127.0.0.1:<port>/<database>?sslmode=disable \
+  [DISPATCH_BIN=<envoy-dispatch>] bash scripts/e2e/verification-results.sh     # → "verification results e2e: PASS in <n>s", exit 0
+```
+
+Runs on any Linux host with `go`, `bun`, `curl`, `psql` and `openssl` — no Docker.
+It proves `currencyReader` (`packages/envoy/internal/dispatch/api/results.go`) and `recordPullRequestHead` (`packages/envoy/internal/dispatch/delivery/pull_request_heads.go`) on the wire:
+the real `envoy-dispatch` records each result and judges whether it still speaks for the work as it stands, and the head a `before_merge` result is measured against moves only because a pull-request event reached the bus.
+
+Each item below names an input and its default, then what it means.
+
+- `DATABASE_URL` — required
+
+  a scratch PostgreSQL database with `pgvector` available, on `127.0.0.1`, `localhost` or `::1` (any other host, or a host given as a parameter, is refused).
+  The run drops and recreates its `public` schema before the server migrates it, and leaves what it wrote there for inspection
+
+- `DISPATCH_BIN` — unset
+
+  a prebuilt `envoy-dispatch` to run; unset, the script builds `./cmd/dispatch` from this checkout's `packages/envoy`
+
+- `VERIFICATION_RESULTS_E2E_DISPATCH_PORT` — `19061`
+
+  the server's port; refused when something already answers on it
+
+- `VERIFICATION_RESULTS_E2E_ENVOY_PORT` — `19063`
+
+  the fake Envoy listener's port; refused the same way
+
+- `VERIFICATION_RESULTS_E2E_GITHUB_PORT` — `19065`
+
+  the fake GitHub's port; refused the same way, and the three must differ
+
+The script drops every inherited `DISPATCH_*`, `ENVOY_*`, `NATS_*` and `FAKE_*` variable (and `PGHOSTADDR`) before it starts anything, so a Legion pane's real listener, Dispatch and NATS credentials reach none of it.
+It starts a NATS of its own (`internal/testnats/cmd/natsd`, JetStream on, on a port the kernel picks), the harness's fake Envoy listener (`packages/dispatch/e2e/fake-envoy.ts`), the harness's fake GitHub (`packages/dispatch/e2e/fake-github.ts`, which the server reads as `DISPATCH_GITHUB_API_BASE`), and the server with NATS on, dev sign-in, an insecure cookie, an agent token minted for the run and a throwaway RSA App key, in an environment holding nothing else.
+The App key is what makes the delivery intake run at all, and every GitHub call it makes goes to the fake.
+
+The driver, `verification-results.ts`, acts as one session with the agent token (each write naming the session as `actor`) and as the person `alice` through `GET /auth/_dev/signin`.
+Its setup seeds the fake GitHub with two repositories — `acme/verification-live`, whose default branch `main` holds one of the run's commits, and `acme/verification-hidden`, which the installation lookup answers 404 for — maps each as a project's default repository, and writes the one `delivery_settings` row the intake needs before it binds its durable.
+`commit_pulls` is empty on purpose:
+the record route's read-through asks GitHub which pull requests name a result's commit, so with no answer there the only thing that can teach Dispatch a head is the envelope a case publishes.
+Each case after the first seeds the issue it drives, with a spec that marks one requirement and a Verification document holding that case's checks.
+
+Each item below names a case and how it is driven, then what must hold for it to pass.
+
+- `the-results-route-is-served` — a result naming a check a plain issue does not have
+
+  `400 UNKNOWN_CHECK`, which is the run's first result write.
+  A binary that serves no such route answers `404`, and the run stops there, since every later case records a result too
+
+- `a2-record-and-read` — one result recorded against a `before_merge` check, then read back through `GET /api/v1/issues/{key}/results`
+
+  exactly one result under that check, at the commit it was recorded at, with the verdict and the `observed` it carried, and the pull-request body line Dispatch printed for it
+
+- `a4-a-push-moves-the-head` — the pull request's `opened` envelope on `notifications.github.acme.verification-live.pr.7`, a result at that head, then its `synchronize` envelope at a later head, and a result at the new one
+
+  the first result `current` once the envelope has landed, then `older` after the push with no write of Dispatch's — the reads alone — and the result at the new head `current`
+
+- `a5-a-closed-issue-takes-the-after-merge-result` — the issue closed, then a result for its `after_merge` check, a result for its `before_merge` check, and a document write
+
+  the after-merge result recorded, and `409 ISSUE_CLOSED` for both the before-merge result and the document write
+
+- `a10-a-default-branch-result-follows-the-branch` — one `default_branch` check with a result at a commit the fake's compare calls `behind` and another at a commit it calls `diverged`
+
+  `current` for the first and not `current` for the second
+
+- `an-unreadable-repository-leaves-the-result-unmarked` — a `default_branch` result on an issue whose project maps to `acme/verification-hidden`
+
+  `unknown`:
+  Dispatch can reach no installation token for that repository, so it marks the result neither current nor older
+
+Every case prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>: <why>`; a summary follows, and any FAIL exits 1.
+The work directory, under `TMPDIR`, holds the binaries and the logs of natsd, the two fakes and the server:
+removed when the run passes, kept (without the binaries) and printed when it fails.
+Every process the run started is stopped on any exit.
+
+**Negative control.**
+Built from the pull request's base commit, `cd99d1b266d7`, which serves no `POST /api/v1/issues/{key}/results`, the same run fails at `the-results-route-is-served` and stops there:
+
+```sh
+mkdir -p "$TMPDIR/base-src"
+git --git-dir=<the checkout's git directory> archive <base commit> packages/envoy | tar -x -C "$TMPDIR/base-src"
+go -C "$TMPDIR/base-src/packages/envoy" build -o "$TMPDIR/envoy-dispatch-base" ./cmd/dispatch
+DATABASE_URL=… DISPATCH_BIN="$TMPDIR/envoy-dispatch-base" bash scripts/e2e/verification-results.sh
+# → FAIL the-results-route-is-served: the record route answers 404 NOT_FOUND, no other case run,
+#   exit 1
+```
+
 ## child-adoption.sh
 
 ```sh
@@ -4414,7 +4513,7 @@ the caller does, with its work directory, which holds both (the profile holds `p
 
 ### The natives download
 
-OMP's native module (`pi_natives.linux-x64-modern.node` or `…-baseline.node`, the one the CPU selects, 111 MiB at the pin;
+OMP's native module (`pi_natives.linux-x64-modern.node` or `…-baseline.node`, the one the CPU selects, 116 MiB at the pin;
 builds before 18.11.0 wrote every variant they embed, about twice that) lives in `$HOME/.omp/natives/<omp version>/` — `$XDG_DATA_HOME/omp/natives/` when `$XDG_DATA_HOME/omp` exists
 — and every profile under that `HOME` shares it (`getNativesDir`, `@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own.
 OMP writes it on its first run under a `HOME` that has not run this OMP version, and in this script that run is `omp plugin install`.

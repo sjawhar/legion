@@ -652,10 +652,13 @@ func describedArgs(jj, dir string) []string {
 // described (its pushed commit) is kept as it is, and the incoming role starts on a fresh one of
 // its own (`jj new`): otherwise its work would land in the previous role's commit, authored by the
 // previous role's App. One read decides which of the two changes the working copy needs, and only
-// that one runs. A failure is reported the way the shipped runner does (commandFailure,
-// packages/workspace/src/workspace.ts): the daemon decides what a failed adoption means. A shim
-// without LEGION_WORKSPACE was not started by a runtime, and refuses (runWorkingCopyAdoption,
-// worker-shim.ts); a PATH without jj refuses naming jj and the PATH searched.
+// that one runs. Both commands run in the workspace itself, never in the shim's own directory: jj
+// reads the repository of the directory it runs in, whatever -R names, and migrates that
+// repository's legacy configuration (workspace.RunCommand). A failure is reported the way the
+// shipped runner does (commandFailure, packages/workspace/src/workspace.ts): the daemon decides
+// what a failed adoption means. A shim without LEGION_WORKSPACE was not started by a runtime, and
+// refuses (runWorkingCopyAdoption, worker-shim.ts); a PATH without jj refuses naming jj and the
+// PATH searched.
 func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	dir := envValue(s.cfg.Env, "LEGION_WORKSPACE")
 	if dir == "" {

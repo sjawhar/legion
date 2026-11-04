@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
@@ -23,7 +24,7 @@ func TestABundleOverTheReleasesBoundIsRefusedWithItsSize(t *testing.T) {
 	daemon := listen(t, path)
 	child := newOMP(t)
 	cfg := config(t, path, child)
-	cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+	cfg.Env = append(fixtureenv.Isolated(t.TempDir()), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 		"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "JJ_USER=tester", "JJ_EMAIL=tester@example.test")
 	run(t, cfg, newClock())
 	p := daemon.accept(t)
@@ -80,7 +81,7 @@ func TestABundleOfNoWorkspaceIsRefusedByName(t *testing.T) {
 	daemon := listen(t, path)
 	child := newOMP(t)
 	cfg := config(t, path, child)
-	cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker, "FAKE_OMP_LOG="+child.log)
+	cfg.Env = append(fixtureenv.Isolated(t.TempDir()), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker, "FAKE_OMP_LOG="+child.log)
 	run(t, cfg, newClock())
 	p := daemon.accept(t)
 	p.open(t)

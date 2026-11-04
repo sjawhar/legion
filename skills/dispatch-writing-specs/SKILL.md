@@ -1,13 +1,13 @@
 ---
 name: dispatch-writing-specs
-description: "Use in a session with Dispatch before you write or change a spec, and before an ask, comment or message a person reads. It replaces superpowers' brainstorming there."
+description: "Use in a session with Dispatch before you write or change a spec, ask, comment or message a person reads. It replaces superpowers' brainstorming there."
 ---
 
 # Writing specs
 
 ## The aim
 
-Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
+Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes none (`skill://legion-worker`).
 
 ## The outline
 
@@ -18,12 +18,12 @@ Part | Content
 `Summary` | The change in the reader's own terms, at most 100 words
 `Problem` | What goes wrong, for whom, with counts
 `Goals and non-goals` | What is in and out of scope
-`Requirements` | `**R1.**` on, each naming its source (`From:`)
+`Requirements` | a `:::requirement` block each, `**R1.**` on, its source (`From:`)
+`Verification` | the issue's `verification.md`, a `:::check` block each: `serves`, `surface`, `run`, `when`, `negative_control`
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
-`Acceptance` | `**A1.**` on, each naming the requirements it tests
 
-Another agent can build and check the work from the spec alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
+`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
 
 ## Rules for the text
 
@@ -33,7 +33,7 @@ For each spec, ask, comment and message:
 - Write about the current design, never the person or how people reached it, and never quote people or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence that cites a gate passing (test, review, check, proof) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
+- A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name or term a new reader may not know, and what each issue you name does for them.
@@ -68,9 +68,9 @@ At your next edit, rewrite a spec outside the outline whole in one version, movi
 
 ## Approval
 
-- Request approval once: each ask block answered or waived, each claim checked, this version unapproved. Unbuilt acceptance checks never delay it.
-- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment. An exact undo can restore approval.
+- Request approval of the spec and `verification.md` (`--include-verification`): each ask block answered or waived, each claim checked, this version unapproved. An unrun check never delays it.
+- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment. An exact undo can restore approval.
 
 ## The plan
 
-Write the plan with `writing-plans` as the issue's `plan.md`, not a repository file.
+Write the plan with `writing-plans` as the issue's `plan.md`, not a repository file. Each task is a `:::plan_task` block with `serves` and `needs`.

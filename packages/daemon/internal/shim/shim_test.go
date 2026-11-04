@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -39,7 +40,16 @@ func TestMain(m *testing.M) {
 	if os.Getenv(fakeOMPEnv) == "1" {
 		os.Exit(fakeOMP())
 	}
+	// The tests run real git and jj, in the shim's adoption and push check (fixtureenv.Guard).
+	if err := fixtureenv.Guard(); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
+}
+
+func TestTheTestProcessIsGuarded(t *testing.T) {
+	fixtureenv.RequireGuarded(t)
 }
 
 // fakeOMP answers a prompt with OMP's own sequence — the ack, then the turn — records every line
@@ -915,15 +925,6 @@ esac
 	return record
 }
 
-// environWithout is os.Environ() less the named variables: the shim under test must not inherit
-// one from whatever environment the tests happen to run in.
-func environWithout(names ...string) []string {
-	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		name, _, _ := strings.Cut(kv, "=")
-		return slices.Contains(names, name)
-	})
-}
-
 // `adopt-working-copy` is answered by the shim itself: the one shared adoption command, run by
 // the jj on the shim's PATH on the workspace LEGION_WORKSPACE names — never the directory the
 // shim happens to run in — under the identity the daemon named and within its budget, and OMP
@@ -981,7 +982,7 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			// The workspace is a directory of its own: not the test process's working
 			// directory, which is the shim's.
 			workspace := t.TempDir()
-			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+			cfg.Env = append(fixtureenv.Isolated(t.TempDir()), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 				"FAKE_OMP_LOG="+child.log, "FAKE_JJ_RECORD="+record, "FAKE_JJ_MODE="+tc.mode)
 			if !tc.noWorkspace {
 				cfg.Env = append(cfg.Env, "LEGION_WORKSPACE="+workspace)
@@ -1036,8 +1037,23 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 // checks every workspace on the disk its LEGION_WORKSPACE is on, pushes what the remote lacks to a
 // rescue branch, and answers one entry per workspace; OMP never sees the frame. A shim with no
 // LEGION_WORKSPACE has no disk to check and refuses.
+//
+// The test process's own environment names a decoy disk in LEGION_WORKSPACE, as a Legion issue
+// pod's does its live workspace: neither case may check it or push from it, so the disk's
+// environment (fixtureenv.Isolated) carries none of the process's LEGION_ variables.
 func TestRescueUnpushedChecksTheDiskAndAnswersTheDaemon(t *testing.T) {
+	decoy := rescuetest.New(t, "DECOY-7")
+	decoy.Write(decoy.Workspace, "decoy.txt", "work on the pod's own disk\n")
+	decoy.JJ("commit", "-m", "work on the pod's own disk")
+	decoyBranches := decoy.RemoteBranches()
+	t.Setenv("LEGION_WORKSPACE", decoy.Workspace)
+	t.Setenv("LEGION_ISSUE", "DECOY-7")
 	d := rescuetest.New(t, "WIDGETS-42")
+	for _, entry := range d.Env {
+		if strings.HasPrefix(entry, "LEGION_") {
+			t.Fatalf("the disk's environment holds %s, want none of the process's LEGION_ variables", entry)
+		}
+	}
 	d.Write(d.Workspace, "feature.txt", "work jj alone holds\n")
 	d.JJ("commit", "-m", "work jj alone holds")
 	commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
@@ -1083,6 +1099,9 @@ func TestRescueUnpushedChecksTheDiskAndAnswersTheDaemon(t *testing.T) {
 			if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
 				t.Fatalf("OMP read %v; rescue-unpushed is the shim's own", got)
 			}
+			if got := decoy.RemoteBranches(); !reflect.DeepEqual(got, decoyBranches) {
+				t.Fatalf("the decoy's remote holds %v after the check, want %v: the check reached the process's LEGION_WORKSPACE", got, decoyBranches)
+			}
 		})
 	}
 }
@@ -1120,7 +1139,7 @@ func TestAdoptWorkingCopyRunsTheJJOnPATHWithNoLEGIONJJPATH(t *testing.T) {
 			child := newOMP(t)
 			cfg := config(t, path, child)
 			workspace := t.TempDir()
-			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+			cfg.Env = append(fixtureenv.Isolated(t.TempDir()), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 				"FAKE_OMP_LOG="+child.log, "FAKE_JJ_RECORD="+record, "LEGION_WORKSPACE="+workspace)
 			run(t, cfg, newClock())
 			p := daemon.accept(t)
@@ -1178,12 +1197,9 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 		{name: "an undescribed working copy", ran: "log\nmetaedit\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// The devbox's own jj configuration (its user, its trailers) must not reach the test.
-			jjConfig := filepath.Join(t.TempDir(), "jj.toml")
-			if err := os.WriteFile(jjConfig, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("JJ_CONFIG", jjConfig)
+			// The test process's environment (a devbox's jj configuration, a pod's workspace and
+			// credential) must not reach the test.
+			home := t.TempDir()
 			workspace := t.TempDir()
 			jjAs := func(user string, args ...string) string {
 				t.Helper()
@@ -1192,7 +1208,7 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				// workspace it reads, since jj searches upward from the directory it runs in for
 				// the closest .jj, and the test process stands in a real workspace in a pod.
 				command.Dir = workspace
-				command.Env = append(os.Environ(), "JJ_USER="+user, "JJ_EMAIL="+user+"@example.test")
+				command.Env = append(fixtureenv.Isolated(home), "JJ_USER="+user, "JJ_EMAIL="+user+"@example.test")
 				output, err := command.CombinedOutput()
 				if err != nil {
 					t.Fatalf("jj %v: %v\n%s", args, err, output)
@@ -1203,7 +1219,7 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
 			initialize.Dir = workspace
-			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
+			initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
 			if output, err := initialize.CombinedOutput(); err != nil {
 				t.Fatalf("jj git init: %v\n%s", err, output)
 			}
@@ -1228,7 +1244,7 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 			daemon := listen(t, path)
 			child := newOMP(t)
 			cfg := config(t, path, child)
-			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+			cfg.Env = append(fixtureenv.Isolated(home), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace)
 			run(t, cfg, newClock())
 			p := daemon.accept(t)
@@ -1256,6 +1272,104 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 	}
 }
 
+// jj reads the repository of the directory it runs in as well as the one -R names, and migrates
+// that repository's legacy configuration (.jj/repo/config.toml) into the config home, writing a
+// config-id in its place. The shim's own directory is a repository of its own (in a pod, the
+// role's workspace; on a devbox, a checkout), so the adoption runs in the workspace it adopts and
+// leaves the repository the shim runs in as it was.
+func TestAdoptWorkingCopyLeavesTheRepositoryTheShimRunsInUntouched(t *testing.T) {
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		t.Fatalf("jj is required: %v", err)
+	}
+	home := t.TempDir()
+	initialize := func(dir string) {
+		t.Helper()
+		command := exec.Command(jj, "git", "init", "--colocate", dir)
+		command.Dir = dir
+		command.Env = fixtureenv.Isolated(home)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("jj git init %s: %v\n%s", dir, err, output)
+		}
+	}
+	decoy, workspace := t.TempDir(), t.TempDir()
+	initialize(decoy)
+	initialize(workspace)
+	// The decoy keeps its configuration as a jj before the per-repository config home did, the
+	// layout jj migrates on the first command that loads the repository.
+	if err := os.Remove(filepath.Join(decoy, ".jj", "repo", "config-id")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, ".jj", "repo", "config.toml"), []byte("[ui]\ncolor = \"never\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := treeOf(t, decoy)
+	t.Chdir(decoy)
+
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t)
+	cfg := config(t, path, child)
+	cfg.Env = append(fixtureenv.Isolated(home), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+		"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace)
+	run(t, cfg, newClock())
+	p := daemon.accept(t)
+	p.open(t)
+	p.send(t, shimwire.AdoptWorkingCopy{ID: "adopt", JJUser: "tester", JJEmail: "tester@example.test", TimeoutMs: 10000})
+	if got, ok := p.next(t).(shimwire.AdoptWorkingCopyResult); !ok || !got.OK {
+		t.Fatalf("the shim answered %#v, want a successful adoption", got)
+	}
+	after := treeOf(t, decoy)
+	var changed []string
+	for rel, was := range before {
+		if now, ok := after[rel]; !ok {
+			changed = append(changed, "removed "+rel)
+		} else if now != was {
+			changed = append(changed, "changed "+rel)
+		}
+	}
+	for rel := range after {
+		if _, ok := before[rel]; !ok {
+			changed = append(changed, "added "+rel)
+		}
+	}
+	if len(changed) > 0 {
+		slices.Sort(changed)
+		t.Fatalf("the adoption wrote the repository the shim runs in: %s", strings.Join(changed, ", "))
+	}
+}
+
+// treeOf is every path under root with its content: a file's bytes, a symlink's target, or "dir".
+func treeOf(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			tree[rel] = "-> " + target
+			return err
+		case info.IsDir():
+			tree[rel] = "dir"
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		tree[rel] = string(body)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree
+}
+
 // A git lock an interrupted git or jj left in a running pod's workspace fails the adoption on
 // every write of what it locks, and nothing under a running pod removes it: another role's live git
 // may hold it. The failure names the lock and how long ago it was last written, says not to remove
@@ -1267,11 +1381,6 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jj is required: %v", err)
 	}
-	jjConfig := filepath.Join(t.TempDir(), "jj.toml")
-	if err := os.WriteFile(jjConfig, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("JJ_CONFIG", jjConfig)
 	for _, tc := range []struct {
 		name string
 		// script is the PATH's jj, given the real jj and the lock.
@@ -1283,12 +1392,13 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
 			workspace := t.TempDir()
 			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
 			initialize.Dir = workspace
-			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
+			initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
 			if output, err := initialize.CombinedOutput(); err != nil {
 				t.Fatalf("jj git init: %v\n%s", err, output)
 			}
@@ -1314,7 +1424,7 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 			daemon := listen(t, path)
 			child := newOMP(t)
 			cfg := config(t, path, child)
-			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+			cfg.Env = append(fixtureenv.Isolated(home), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace)
 			run(t, cfg, newClock())
 			p := daemon.accept(t)

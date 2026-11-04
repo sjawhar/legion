@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
@@ -31,6 +32,12 @@ const testMainEnv = "LEGION_CMD_TEST_MAIN"
 func TestMain(m *testing.M) {
 	if os.Getenv(testMainEnv) == "1" {
 		main()
+	}
+	// The tests run real git and jj, in-process and as children (fixtureenv.Guard). LEGION_GH_PATH
+	// is kept: it names the real gh a capture test runs, a binary and no credential.
+	if err := fixtureenv.Guard("LEGION_GH_PATH"); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
 	}
 	// Every test below starts isolated from the operator's own jj configuration — in particular
 	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
@@ -52,6 +59,12 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(configDir)
 	os.Exit(code)
+}
+
+// TestMain ran fixtureenv.Guard: no test here inherits a workspace, remote or credential of the
+// process that runs the tests.
+func TestTheTestProcessIsGuarded(t *testing.T) {
+	fixtureenv.RequireGuarded(t)
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or

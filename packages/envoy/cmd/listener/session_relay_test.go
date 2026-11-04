@@ -383,6 +383,110 @@ func TestSessionConsumerHeldFrameDoesNotDelayLaterReceiptsAndSurvivesARestart(t 
 	}
 }
 
+// A registration's new epoch that the relay loop hears only after a run that restarted after the
+// registration took its mark restarts nothing: that run read the session's topics and consumer
+// after the plugin subscribed, so every frame it sent went to the connection the registration
+// names. A run the registration's own entry write starts is such a run, and the loop hears the
+// registration after that run restarted whenever it takes the write's change alone (on CI
+// TestSessionConsumerAcksAFrameOnlyOnDone failed so: the second restart sent the message again and
+// forgot the frame its done answered). A second restart would send the session every message it
+// has not acked again and drop its answers to the frames it holds. A registration with a new epoch
+// after the run's restart still restarts it at the ack floor.
+func TestSessionConsumerNewEpochHeardAfterTheRunRestartedRestartsNothing(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_epoch_heard_late"
+	agent := contracts.AgentSubject(sessionID)
+	standIn := startSessionStandIn(t, rig.url, sessionID, func(relayedFrame) []string { return []string{relayReplyReceived} })
+	// A mark taken before the session's relay starts, as a registration takes its own before its
+	// entry write starts the relay.
+	heard := rig.deps.consumers.mark()
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	held, heldSeq := rig.storeEvent(t, agent)
+	requireFrames(t, standIn.collect(t, 1, 5*time.Second), held)
+
+	// The run has restarted and sent a frame; the loop hears the registration only now.
+	rig.relays.registered(sessionID, true, heard)
+	standIn.none(t, time.Second)
+
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-2"))
+	again := standIn.collect(t, 1, 5*time.Second)[0]
+	requireFrames(t, []relayedFrame{again}, held)
+	standIn.reply(again, relayReplyDone)
+	awaitAcked(t, rig.consumers, sessionID, heldSeq)
+	standIn.none(t, time.Second)
+}
+
+// A relay restart sets the consumer's filter to the session's stored topics as they stand under
+// the session's consumer lock, not as it read them before it took the lock: a registration that
+// stored a topic and wrote its filter while the restart waited keeps that topic, and a message on
+// it reaches the session.
+func TestSessionConsumerRestartWritesTheTopicsStoredWhenItHoldsTheLock(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_restart_stale"
+	const followed = "notifications.dispatch.issue.RESTARTSTALE.>"
+	agent := contracts.AgentSubject(sessionID)
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	before, beforeSeq := rig.storeEvent(t, agent)
+	requireFrames(t, standIn.collect(t, 1, 5*time.Second), before)
+	awaitAcked(t, rig.consumers, sessionID, beforeSeq)
+
+	unlock := rig.deps.consumers.locks.lock(sessionID)
+	// A new epoch registered after the run's restart replaces the run, whose restart waits for
+	// the lock.
+	rig.relays.registered(sessionID, true, rig.deps.consumers.mark())
+	awaitLockUsers(t, &rig.deps.consumers.locks, sessionID, 2)
+	followWhileLocked(t, rig.sessionConsumerRig, sessionID, followed)
+	unlock()
+	// The restart has written its filter.
+	awaitLockUsers(t, &rig.deps.consumers.locks, sessionID, 0)
+
+	item, _ := rig.storeEvent(t, "notifications.dispatch.issue.RESTARTSTALE.comment")
+	requireFrames(t, standIn.collect(t, 1, 5*time.Second), item)
+	requireFilters(t, rig.sessionConsumerRig, sessionID, followed)
+}
+
+// A registration the loop hears while a run returns on its own is never lost: a wake sent before the
+// run's exit is taken by the exit, which asks the loop for a run in its place, and one sent after it
+// is refused, so the loop starts that run itself (sessionRelays.apply). A run that decided to return
+// (its entry lapsed while it waited to retry) before the registration renewed the entry would
+// otherwise end with the registration's wake unread, and nothing would relay the session until its
+// next registration.
+func TestRelayRunExitTakesOrRefusesEveryWake(t *testing.T) {
+	wokenFirst := &relayRun{resume: make(chan struct{}, 1)}
+	if !wokenFirst.wake() {
+		t.Fatal("a run that is not returning refused a wake")
+	}
+	if !wokenFirst.exit() {
+		t.Fatal("the run's exit missed the wake sent before it")
+	}
+
+	exitedFirst := &relayRun{resume: make(chan struct{}, 1)}
+	if exitedFirst.exit() {
+		t.Fatal("the run's exit found a wake nobody sent")
+	}
+	if exitedFirst.wake() {
+		t.Fatal("a returning run took a wake, which nothing would act on")
+	}
+}
+
+// A run waiting to retry after a failed call or pull restarts at once when the session registers,
+// a registration heard while the failed call ran included, rather than waiting its backoff out.
+func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
+	run := &relayRun{resume: make(chan struct{}, 1)}
+	run.wake()
+	goesOn := make(chan bool, 1)
+	go func() { goesOn <- run.waitRetry(context.Background(), time.Hour) }()
+	select {
+	case ok := <-goesOn:
+		if !ok {
+			t.Fatal("the retry wait reported the run stopped")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry wait did not end on the wake sent before it")
+	}
+}
+
 // A session that stops answering is taken for unreachable: within the receipt wait of the oldest
 // frame it has not answered the relay sends nothing more, and it logs that once. It resumes on its
 // own, with no registration: after its pause backoff it restarts at the ack floor and sends the
