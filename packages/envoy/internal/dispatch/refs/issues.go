@@ -110,11 +110,6 @@ var IssueRepoLateral = `
 			) as too_deep
 	) repo on true`
 
-// IssueRepoColumns are the repository columns an issue read scans, in api's repoScan order: the
-// issue's own repository, the one IssueRepoLateral resolves, and whether the walk ran out of
-// links.
-const IssueRepoColumns = `i.repo, repo.resolved, repo.too_deep`
-
 // IssueRepository is the repository the issue key resolves to, read through q: its own, the
 // nearest one above it on `child_of`, or its project's default mapping; nil when none resolves,
 // and nil for an issue no row has and for the empty key. It is IssueRepoLateral for one issue,
