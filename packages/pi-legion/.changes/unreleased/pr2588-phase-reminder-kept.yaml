@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  A phase worker's stall reminder to an architect role nobody holds asks Envoy to keep nothing
+  (`keep: false`), so the listener answers it `404` and the next reminder of the worker's own
+  endless run tries again. The reminder is a notice whose latest copy is the one that matters, and
+  the worker already retries it, so a copy Envoy kept would be delivered stale, or dropped an hour
+  later with nobody told.

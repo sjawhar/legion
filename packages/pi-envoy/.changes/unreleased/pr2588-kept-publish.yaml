@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  `envoy_publish` to a role nobody holds now reports that Envoy kept the message for the session
+  that claims the role next, instead of failing.

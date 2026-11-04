@@ -21,6 +21,12 @@ export const EnvelopeSchema = z.object({
   dedupe_key: z.string().min(1),
   issued_at: z.number().int(),
   expires_at: z.number().int().optional(),
+  /**
+   * The Unix-millisecond time the listener kept this copy because it could not deliver it,
+   * present only on a copy the listener forwards from the kept lane, so the holder it reaches can
+   * judge how old the message is.
+   */
+  kept_at: z.number().int().optional(),
   payload_summary: z.string().min(1),
   payload: z.string().optional(),
   payload_ref: z.string().optional(),
