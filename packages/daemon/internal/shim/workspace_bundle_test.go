@@ -102,12 +102,6 @@ func bundledWorkspace(t *testing.T) string {
 		}
 	}
 	root := t.TempDir()
-	// The host's own jj configuration (its user, its trailers) must not reach the fixture.
-	config := filepath.Join(root, "jj.toml")
-	if err := os.WriteFile(config, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("JJ_CONFIG", config)
 	workspace := filepath.Join(root, "ws")
 	if err := os.Mkdir(workspace, 0o755); err != nil {
 		t.Fatal(err)
@@ -142,14 +136,17 @@ func jjGit(t *testing.T, dir string, args ...string) string {
 // environment the rest of this package's fixtures use (fixtureenv.Isolated, as shim_test.go's
 // jjAs does), so no command of a test reads the git or jj configuration, the credentials or the
 // LEGION_ variables of whoever runs the tests — in a pod, of the role whose live workspace this
-// binary stands in. The home is a directory of the fixture's own, so each fixture's
-// configuration is its own, and the tester identity is appended after Isolated's, which is what
-// makes the commits this package asserts on.
+// binary stands in. Isolated's own JJ_CONFIG names a file that does not exist, which is what
+// keeps the host's jj configuration out; the fixture writes none of its own.
+//
+// The home is a sibling of the workspace, never a directory inside it: this package's fixtures
+// bundle the workspace's unpushed work and assert on what the bundle holds, and a home under it
+// would put jj's and git's own files into the very change under test.
 func workspaceCommand(t *testing.T, dir string, args []string) string {
 	t.Helper()
 	command := exec.Command(args[0], args[1:]...)
 	command.Dir = dir
-	command.Env = append(fixtureenv.Isolated(filepath.Join(dir, ".fixture-home")),
+	command.Env = append(fixtureenv.Isolated(filepath.Join(filepath.Dir(dir), "fixture-home")),
 		"JJ_USER=tester", "JJ_EMAIL=tester@example.test",
 		"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.test",
 		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test")
