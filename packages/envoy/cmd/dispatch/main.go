@@ -938,23 +938,17 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, err
 		}
 	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_ROSTER_UNCACHED")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
+	for _, setting := range []struct {
+		name   string
+		target *bool
+	}{
+		{"DISPATCH_TEST_ROSTER_UNCACHED", &boot.ListenerRosterUncached},
+		{"DISPATCH_TEST_EMBEDDER_OFF", &boot.EmbedderOff},
+		{"DISPATCH_TEST_RECONCILE_AT_START", &boot.ReconcileAtStart},
+	} {
+		if err := testHookBool(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
+			return bootConfig{}, err
 		}
-		boot.ListenerRosterUncached = raw == "1"
-	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EMBEDDER_OFF")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EMBEDDER_OFF")
-		}
-		boot.EmbedderOff = raw == "1"
-	}
-	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_RECONCILE_AT_START")); raw != "" {
-		if !boot.TestHooksEnabled {
-			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START")
-		}
-		boot.ReconcileAtStart = raw == "1"
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
@@ -1606,6 +1600,22 @@ func testHookDuration(env settingValues, name string, testHooksEnabled bool, tar
 		return fmt.Errorf("%s=%q (expected a positive Go duration)", name, raw)
 	}
 	*target = value
+	return nil
+}
+
+// testHookBool reads the test-only yes/no setting name into target, leaving target as it is when
+// the setting is unset. Such a setting is refused without DISPATCH_TEST_HOOKS=1; set, only "1"
+// turns the hook on, so a value meant as a yes in another spelling leaves it off rather than
+// quietly changing the server a test reads.
+func testHookBool(env settingValues, name string, testHooksEnabled bool, target *bool) error {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return nil
+	}
+	if !testHooksEnabled {
+		return fmt.Errorf("DISPATCH_TEST_HOOKS=1 required with %s", name)
+	}
+	*target = raw == "1"
 	return nil
 }
 

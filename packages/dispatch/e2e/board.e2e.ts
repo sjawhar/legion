@@ -4,6 +4,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, getIssue, listIssues, patchIssue, putIssueState } from "./api";
 import { pickFilterOption } from "./filters";
+import { nextFrames } from "./frames";
 import { resetDatabase } from "./seed";
 import { centerOf, pressFinger, touchDrag, touchHold } from "./touch";
 import { asUser } from "./users";
@@ -71,19 +72,6 @@ async function clicksDelivered(page: Page): Promise<void> {
       probe.remove();
     }
   });
-}
-
-/** Lets the keypress just dispatched finish: the handler it ran and the render React queued for
- *  it are both done within two animation frames. */
-async function framesPassed(page: Page): Promise<void> {
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => resolve());
-        });
-      })
-  );
 }
 
 /** Drags with the mouse from the middle of `source` to `target` (a card or a column). */
@@ -291,7 +279,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
     await page.locator("body").focus();
     await page.keyboard.press("v");
-    await framesPassed(page);
+    await nextFrames(page);
     expect(await viewPreference()).toBe("list");
     await expect(page.getByRole("button", { name: "Board" })).toHaveCount(0);
     await page.getByRole("tab", { name: "Issues" }).click();
@@ -389,11 +377,11 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     patches.length = 0;
     await alphaCard.focus();
     await page.keyboard.press("Space");
-    await framesPassed(page);
+    await nextFrames(page);
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Space");
-    await framesPassed(page);
+    await nextFrames(page);
     await expect(page.locator("article.opacity-50")).toHaveCount(0);
     // Again a real move is the witness: its PATCH is the first either Space could precede.
     await alphaCard.focus();

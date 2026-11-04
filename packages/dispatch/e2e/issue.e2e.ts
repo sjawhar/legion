@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
@@ -18,6 +18,7 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
+import { nextFrames } from "./frames";
 import { clearIssueCreator, resetDatabase } from "./seed";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
@@ -25,19 +26,6 @@ import { asUser } from "./users";
 test.beforeEach(async () => {
   await resetDatabase();
 });
-
-/** Lets a viewport change land: the browser's relayout and the render React queued for it are
- *  both done within two animation frames. */
-async function relayout(page: Page): Promise<void> {
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => resolve());
-        });
-      })
-  );
-}
 
 test("database reset clears fake Envoy subscribers before the next issue", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -928,7 +916,7 @@ test("issue header gives the title the row's free space beside a short details l
     // controls; the title must still take the rest of the row rather than split it with the line.
     for (const width of [1024, 1200, 1279]) {
       await page.setViewportSize({ height: 800, width });
-      await relayout(page);
+      await nextFrames(page);
       const measured = await measureTitle();
       expect(
         measured.width,
@@ -973,7 +961,7 @@ test("issue header gives the title the row's free space beside a short details l
       await expect(githubLink).toHaveCount(withLink ? 1 : 0);
       for (const width of [1265, 1279]) {
         await page.setViewportSize({ height: 800, width });
-        await relayout(page);
+        await nextFrames(page);
         const measured = await measureTitle();
         const label = `${width}px ${withLink ? "with" : "without"} the GitHub link`;
         expect(

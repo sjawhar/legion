@@ -1,5 +1,5 @@
 import { resetFakeEnvoy, setLiveSessions } from "./agents";
-import { baseUrl, baseUrlOf, devSignInPath, e2eAgentToken, sessionCookieFrom } from "./api";
+import { baseUrl, baseUrlOf, devSignInPath, listAgents, sessionCookieFrom } from "./api";
 import { asLane, harnessPorts, laneCount } from "./harness-ports";
 import {
   type DispatchProcess,
@@ -37,22 +37,6 @@ export default async function preflight(): Promise<void> {
   if (harnessProcessCount === 2 && harnessSignIn === "dev") await requireOneCookieKey();
 }
 
-/** The lane's Agents rows, as `listAgents` reads its own lane's (e2e/api.ts). */
-async function agentsOf(url: string, target: DispatchProcess | undefined): Promise<string[]> {
-  const response = await fetch(new URL("/api/v1/agents", url), {
-    headers: {
-      Authorization: `Bearer ${e2eAgentToken}`,
-      "Content-Type": "application/json",
-      ...(target === undefined ? {} : pinnedTo(target)),
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`GET /api/v1/agents failed: ${response.status} ${await response.text()}`);
-  }
-  const agents = (await response.json()) as { session_id: string }[];
-  return agents.map((agent) => agent.session_id);
-}
-
 /** Puts a session in the lane's fake Envoy, asks the lane's server for it, and empties the fake
  *  again, whatever the answer was. */
 async function checkLane(lane: number, lanes: number): Promise<void> {
@@ -68,13 +52,15 @@ async function checkLane(lane: number, lanes: number): Promise<void> {
     for (const target of targets) {
       const pinned = target === undefined ? "" : ` pinned to Dispatch ${target.toUpperCase()}`;
       const refusal = `The Dispatch e2e harness cannot start: ${url}${named}${pinned}`;
-      const agents = await agentsOf(url, target).catch((error: unknown) => {
-        throw new Error(
-          `${refusal} did not list its agents, so this run cannot tell whether it reads ${fake}: ` +
-            (error instanceof Error ? error.message : String(error))
-        );
-      });
-      if (!agents.includes(sentinel.session_id)) {
+      const agents = await listAgents({ as: "agent", baseUrl: url, process: target }).catch(
+        (error: unknown) => {
+          throw new Error(
+            `${refusal} did not list its agents, so this run cannot tell whether it reads ${fake}: ` +
+              (error instanceof Error ? error.message : String(error))
+          );
+        }
+      );
+      if (!agents.some((agent) => agent.session_id === sentinel.session_id)) {
         throw new Error(
           `${refusal} does not list the session this run put in ${fake}, so it reads another ` +
             "Envoy listener. Give the server and this run one FAKE_ENVOY_PORT; the acceptance " +

@@ -85,6 +85,9 @@ const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
+  /** The Dispatch server the call goes to; this module's `baseUrl`, the lane of the process that
+   *  imported it, when absent. Only e2e/preflight.ts names another: it checks every lane. */
+  baseUrl?: string;
   /** The `Idempotency-Key` header the write carries, naming one intent: a repeat under it is
    *  answered what the first was answered. None when absent, which Dispatch handles unkeyed. */
   idempotencyKey?: string;
@@ -291,7 +294,7 @@ async function request<T>(
   }
   if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
-  const response = await fetch(new URL(path, baseUrl), {
+  const response = await fetch(new URL(path, options.baseUrl ?? baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),
     headers,
     method,

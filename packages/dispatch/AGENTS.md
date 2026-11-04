@@ -1507,6 +1507,47 @@ waits for; the one class of row the shorter delay changes is a row that proves
 a settlement did not happen inside a window, whose window must now be shorter
 than 250 ms. A caller that set the variable itself keeps its own value.
 
+`run-server.sh` sets four more test-only settings under that same
+`DISPATCH_TEST_HOOKS=1`, and every server it starts gets them, the one behind
+`bun run dispatch:local` included. Each is read as `${VAR:-default}`, so a
+caller that set the variable itself keeps its own value; the value named at the
+end of each paragraph below is the server's own behaviour back.
+
+`DISPATCH_TEST_MARK_WAIT=250ms` is how long a Send that names a provisional
+comment, ask or suggestion mark waits for the room to receive that mark before
+the server answers that the document does not hold it (`VerifyMark`,
+`internal/dispatch/docs/marks.go`), in place of the document service's own 1 s.
+The whole wait is paid by every Send whose mark really is gone, so locally such
+a Send is refused a quarter second after it was made rather than a second
+after. `DISPATCH_TEST_MARK_WAIT=1s` is the service's own wait.
+
+`DISPATCH_TEST_UNRECORDED_MARK_TTL=4s` is how long a comment, ask or suggestion
+mark that no row records survives before a sweep removes it, counted from the
+first settlement that saw it (`sweepUnrecordedMarks`, same file), in place of
+the service's own minute. Locally the highlight a composer somebody abandoned
+left behind therefore goes four seconds after that settlement rather than a
+minute after; a mark whose author still has a browser on the room is kept
+whatever its age, as it is on any server.
+`DISPATCH_TEST_UNRECORDED_MARK_TTL=1m` is the service's own TTL.
+
+`DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=500ms` is how long, from its first try,
+a sender keeps trying a session whose listener is being replaced before the
+send settles failed (`listenerTakeoverWindow`,
+`internal/dispatch/api/envoy_resolve.go`), in place of the server's own 12 s.
+Locally a message to a session that has really gone fails in half a second
+rather than twelve, and a message made while a listener really is handing over
+can settle failed where a deployment would have waited and delivered it.
+`DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=12s` is the server's own window.
+
+`DISPATCH_TEST_EMBEDDER_OFF=1` builds no embedder, whatever `DISPATCH_EMBEDDER`
+and the AWS variables the file-store block exports name: the embedding queue's
+`Run` returns at once, no text and no query is embedded, and search answers
+keyword-only and says so. Locally that is a search that never ranks by meaning,
+and a server that makes no call to Bedrock - which it would otherwise make for
+every indexed text and every query, on the file store's static keys, and be
+refused 403. `DISPATCH_TEST_EMBEDDER_OFF=0` builds the embedder again, for a
+run that means to prove that path.
+
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
 post-update text selection; Yjs document transport and local editing remain active.
