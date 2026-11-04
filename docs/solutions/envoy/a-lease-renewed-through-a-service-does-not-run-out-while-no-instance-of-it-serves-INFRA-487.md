@@ -59,3 +59,11 @@ related_issues:
 - `TestABrokerOutageLongerThanALease` (`cmd/broker/outage_test.go`), real broker and
   `agent-secrets` binaries, 58 s outage against a 45 s lease: the pod's fetch is served about
   100 ms after the restart, and it fails on the base commit with `proof invalid: not live`.
+- 2026-11-03 (INFRA-454): the boot refusal above is superseded. `2*BROKER_LEASE_SECONDS <=
+  9*BROKER_SWEEP_SECONDS` counted the gap and not the retries a renewer takes after it.
+  `config.Load` now walks each renewer's own retry schedule
+  (`packages/envoy/internal/broker/leasetime`) and refuses a lease that cannot outlive the gap
+  plus those retries, counting each renewal the outage refuses as failing at whatever instant
+  costs the renewer most, up to the 30-second client timeout, and naming the shortest lease
+  that survives both renewers at that sweep: 91 s at a 1 s or a 5 s sweep, 105 s at 10, 225 s
+  at 30 and 360 s at 60.

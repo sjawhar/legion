@@ -10,9 +10,11 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours. Role messages and team topics travel over core NATS and are not
-  kept for a later subscriber, but the listener's forward of a role message to its current holder
-  is kept on that holder's inbox. Envoy also keeps its own state in JetStream key-value buckets:
+  session's inbox for 72 hours. Role messages and team topics travel over core NATS. A team topic
+  is not kept for a later subscriber. The listener's forward of a role message to its current
+  holder is kept on that holder's inbox, and a role message no live holder can take is kept for
+  the session that claims the role next. Envoy also keeps its own state in JetStream key-value
+  buckets:
   which session is subscribed to what (`envoy_interests`), which sessions are live
   (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check results
   (`envoy_ci_state`). The stream and every bucket are kept in at least as many copies as the
@@ -153,24 +155,30 @@ published still gets it when it reconnects
 | Topic | What it is |
 | --- | --- |
 | `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, comments on an issue with no route and no session claim whose spec it wrote, and claim changes arrive here. |
-| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. |
+| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it, and the listener hands each message to the current holder and answers once the holder confirmed it. With no live holder it keeps the message for the session that claims the role next, and answers that it kept it. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. The stream keeps no such topic, so it is the one family a session still takes live, on its own NATS connection, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. The stream keeps no such topic, so it is the one family a session still takes live, on its own NATS connection, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for a later holder. A publish through the API waits for the holder to
-confirm the message and answers `200` naming the holder. If no live session holds the role, it is
-refused with `404`; if the holder does not take the message's delivery mode, with `403`; and if the
-holder has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
-`delivery_failed`. A role message published straight onto NATS, not through the API, is forwarded
-once, and if the holder does not take it the listener publishes an exception naming the reason:
+A publish to a role through the API waits for the holder to confirm the message and answers `200`
+naming the holder. If no live session holds the role, or its holder's claim has lapsed, the
+listener keeps the message and answers `202` with `kept: true` and `kept_reason`, `unclaimed` or
+`holder_lapsed`. The next session that claims the role is handed each kept message once, in the
+order the messages were kept. A message kept more than an hour before is dropped instead. A
+sender that keeps a queue of its own sends `keep: false`. An unheld or lapsed role is then
+refused with `404`, as it is when the keep itself fails. A holder that does not take the
+message's delivery mode is refused with `403`. A holder that has not confirmed the message within
+four seconds is `504` with the reason, `receipt_timeout` or `delivery_failed`, and that message
+is not kept, because its forward is already stored on the holder's inbox. A role message
+published straight onto NATS, not through the API, is kept the same way when no live holder can
+take it. A keep that fails there leaves the listener publishing an exception naming the reason:
 `no_holder`, `delivery_failed`, or `receipt_timeout`. Either way the forward to the live holder is
 stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
 holder that restarts or loses its connection gets the forward once when it is back.
@@ -178,14 +186,17 @@ holder that restarts or loses its connection gets the forward once when it is ba
 ## Messages a session missed
 
 Every message a session gets comes from a durable consumer the listener keeps for it on the
-stream: one per Oh My Pi session (`@sjawhar/pi-envoy`), per Claude Code session (`claude-envoy`)
-and per session on a serving port, filtered on the session's inbox and on each topic it follows
+stream: one per Oh My Pi session (`@sjawhar/pi-envoy`) and per Claude Code session
+(`claude-envoy`), filtered on the session's inbox and on each topic it follows
 that the stream keeps. The listener that owns the session sends it those messages in the order
 they were published, on `notifications.envoy.deliver.<session_id>`, a subject the stream does not
 keep, and marks each one delivered only when the session answers that it has it. No session takes
 its messages from a NATS subscription of its own, so a message published while the session was not
 running, was restarting or had lost its connection, or while its listener restarted, reaches the
 session once when it is back, up to 72 hours later.
+A session registers no port of its own, and the listener opens no connection to a session: a
+registration naming a port above 0 is refused `400` naming the `port` field, and the answer's
+`port` is always 0.
 
 - **What comes this way:** the session's inbox, `notifications.agent.<session_id>` (direct
   messages, Dispatch deliveries, and the forwards of role messages to a role it holds), and the
@@ -198,8 +209,7 @@ session once when it is back, up to 72 hours later.
   session file. A Claude Code session under Legion's bridge answers once Claude Code took the
   message as a user message. A Claude Code session in channel mode answers once Claude Code
   accepted the channel notification, the last signal Claude Code gives there, so a notification it
-  drops after that (a channel it did not load) is not sent again. A session on a serving port gets each message by the listener's push, marked delivered on the port's
-  `204` and pushed again until then.
+  drops after that (a channel it did not load) is not sent again.
 - **Nothing runs late:** a BTW delivered before, or published before the session's connection
   began, starts no side turn: an Oh My Pi session shows it as one inert notice, and a Claude Code
   session passes it over.
@@ -365,8 +375,6 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_API_TOKEN` | The bearer token `/v1` callers must send. |
 | `ENVOY_OIDC_ISSUER`, `ENVOY_OIDC_AUDIENCE` | Also accept Kubernetes service-account tokens from that issuer for that audience. Set both or neither. |
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
-| `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
 | `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (on a doubling backoff, until GitHub records the delivery or 72 hours after its first failed attempt); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
@@ -452,9 +460,9 @@ install it, what each component deploys and which settings it sets.
 | Answer | Meaning |
 | --- | --- |
 | `200` `starting` | The listener is still binding its durable consumer. |
-| `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
+| `200` `healthy` | Everything answers. The body includes the consumer's lag. |
 | `200` `degraded` | A passing key-value failure the listener is retrying, or a role claim view that answers no read: its watcher's first scan has not delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has. Both repair themselves, so the answer stays `200`. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, and its body keeps the `healthy` body's fields. Also `KV watch rebuild unavailable` when the listener has not rebuilt its key-value watches for a minute after a NATS reconnect: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out the one listener still serving those caches and replace it with one that rebuilds into the same failure with empty caches. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. `role lane subscription inactive` when the role lane's own connection is down or holds no valid subscription, since no role message is forwarded then. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. `role lane subscription inactive` when the role lane's own connection is down or holds no valid subscription, since no role message is forwarded then. |
 
 After a NATS reconnect the listener rebuilds the key-value watches its caches read through. A
 rebuild that fails is tried again within seconds, so one that fails and then succeeds inside that
