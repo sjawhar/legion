@@ -7,6 +7,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import {
   answerTextReadsWithTheSeededText,
+  artifact,
   createQueryClient,
   renderProofDocument,
 } from "../../__tests__/proof-document";
@@ -96,7 +97,10 @@ function seededQueryClient(): QueryClient {
   const queryClient = createQueryClient();
   queryClient.setQueryData(["issue-summary", "CORE-1"], summary);
   queryClient.setQueryData(["issue-summary", "CORE-2"], referenced);
-  queryClient.setQueryData(["artifact", "artifact-1", "asks"], [ask]);
+  // The document, read for the owner that serves its asks, and that owner's ask list: an
+  // issue's document answers its asks on the issue's route alone (`useDocumentAsks`).
+  queryClient.setQueryData(["artifact", "artifact-1"], artifact);
+  queryClient.setQueryData(["asks", "CORE-1"], [ask]);
   queryClient.setQueryData(["ask", "ask-1"], askRead);
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   return queryClient;

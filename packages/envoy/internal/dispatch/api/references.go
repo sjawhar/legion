@@ -23,25 +23,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// replaceReferences is refs.ReplaceCounted bound to this server's URL, which is all an API
-// write path needs to say the same thing about what it moved as every other producer.
-func (s *server) replaceReferences(
-	ctx context.Context,
-	tx pgx.Tx,
-	fromKind, fromID, body string,
-) (model.ReferenceChanges, error) {
-	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
-}
-
-// replaceEditedReferences is refs.ReplaceCountedEdit bound to this server's URL: an edit of an
-// ask's question from previous to body. A comment's edit goes through refs.ReplaceCountedItemEdit,
-// which indexes its blocks as well.
-func (s *server) replaceEditedReferences(
-	ctx context.Context,
-	tx pgx.Tx,
-	fromKind, fromID, previous, body string,
-) (model.ReferenceChanges, error) {
-	return refs.ReplaceCountedEdit(ctx, tx, fromKind, fromID, previous, body, s.deps.ServerURL)
+// askReader is the one reader a write of an ask reads its texts through (refs.NewReader), bound
+// to this server's URL: an ask's question (refs.ReplaceCountedWith, refs.ReplaceCountedEditWith)
+// and its parts (refs.IndexAskPartsCountedWith) are texts of one write, so the database answers
+// once per kind for the write rather than once for each of them.
+func (s *server) askReader(ctx context.Context, tx pgx.Tx, askID string) *refs.Reader {
+	return refs.NewReader(ctx, tx, "ask", askID, s.deps.ServerURL)
 }
 
 // indexAskParts is refs.IndexAskPartsCounted bound to this server's URL: the parts of the ask
@@ -189,12 +176,15 @@ func (s *server) wholeReference(w http.ResponseWriter, r *http.Request, ref text
 	if !ok || !text.IsIDPrefix(written) {
 		return ref, true
 	}
+	// wholeID answers "" for every refusal it has written and for a prefix nothing carries,
+	// which this route leaves as written.
 	whole, ok := s.wholeID(w, r, kind, scope, written, viewer, notFoundNone)
-	switch {
-	case !ok || whole == "":
-	case block:
+	if whole == "" {
+		return ref, ok
+	}
+	if block {
 		ref.Block = whole
-	default:
+	} else {
 		ref.ID = whole
 	}
 	return ref, ok

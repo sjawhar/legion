@@ -6,6 +6,7 @@ import {
   type QueryObserverResult,
   type QueryStatus,
   queryOptions,
+  type UseQueryResult,
   useQuery,
 } from "@tanstack/react-query";
 
@@ -170,28 +171,42 @@ const documentQuery = (artifactId: string) =>
   });
 
 /** The asks the question map of a text's document is built from, read on the route that serves
- *  that document's owner: an issue's asks for a document an issue owns, since
- *  `/artifacts/{id}/asks` refuses one (`ARTIFACT_LINKED`), and the document's own asks for a
- *  project's. A document source carries no issue key, so the owner comes from the document
- *  itself; both answers are the one document's asks, so they are read under its own key and a
- *  second text of the same document reads nothing. Only a text that writes a `#id` asks for it. */
-export const documentAsksQuery = (source: TextSource | undefined) =>
-  queryOptions<Ask[]>({
-    queryKey:
-      source?.kind === "document"
-        ? ["artifact", source.artifactId, "asks"]
-        : ["asks", source?.kind === "issue" ? source.key : undefined],
-    queryFn: async ({ client }) => {
-      if (source?.kind !== "document") {
-        return api.listIssueAsks(source?.kind === "issue" ? source.key : "", "all");
-      }
-      const document = await client.ensureQueryData(documentQuery(source.artifactId));
-      const issue = document.issue_key;
-      return issue === null || issue === ""
-        ? api.listArtifactAsks(source.artifactId, "all")
-        : api.listIssueAsks(issue, "all");
-    },
+ *  that document's owner and under the key that owner's other readers already use: an issue's
+ *  asks under `["asks", <key>]`, since `/artifacts/{id}/asks` refuses a document an issue owns
+ *  (`ARTIFACT_LINKED`), and a project document's own asks under `["artifact", <id>, "asks"]`,
+ *  which is what `useAnsweredAsks` and `ProofDocument` read and what an ask event invalidates.
+ *  A document source carries no issue key, so the owner comes from the document itself, read
+ *  under the key every other surface of that document already shares. `enabled` is the caller's
+ *  own need: only a text that writes a `#id` asks for any of this. */
+export function useDocumentAsks(
+  source: TextSource | undefined,
+  enabled: boolean
+): readonly Ask[] | undefined {
+  const artifactId = source?.kind === "document" ? source.artifactId : undefined;
+  const document = useQuery({
+    ...documentQuery(artifactId ?? ""),
+    enabled: enabled && artifactId !== undefined,
   });
+  const issueKey =
+    source?.kind === "issue"
+      ? source.key
+      : document.data === undefined || document.data.issue_key === null
+        ? undefined
+        : document.data.issue_key;
+  // The owner is known once the issue key is in hand, or once the document it must come from
+  // says the document has none; until then there is no key to read under.
+  const owned = issueKey !== undefined && issueKey !== "";
+  const ownerless = source?.kind === "document" && document.data !== undefined && !owned;
+  const asks = useQuery<Ask[]>({
+    queryKey: ownerless ? ["artifact", artifactId, "asks"] : ["asks", owned ? issueKey : undefined],
+    queryFn: () =>
+      ownerless && artifactId !== undefined
+        ? api.listArtifactAsks(artifactId, "all")
+        : api.listIssueAsks(issueKey ?? "", "all"),
+    enabled: enabled && (owned || ownerless),
+  });
+  return asks.data;
+}
 
 /** The question map of `source`: each question block id its document declares to the reference
  *  of the ask settled for it, as the server's `refs.QuestionMap` writes it. The scope of an
@@ -382,6 +397,15 @@ export function resolvedPrefixItems(
   return id === "" ? {} : { [id]: reference };
 }
 
+/** `useWholeRouteRead`'s answer: the route with its short ids replaced, the reference its graph
+ *  read was keyed by (undefined for a route that writes every id whole, which reads nothing),
+ *  and that read, for a caller that also shows what an ambiguous prefix matched. */
+export interface WholeRouteRead {
+  readonly prefix: string | undefined;
+  readonly resolution: UseQueryResult<GraphReferences>;
+  readonly route: DispatchReferenceRoute | undefined;
+}
+
 /**
  * `route` with every id it writes short replaced by the whole id it names, which one graph read
  * of the reference as written answers (`GET /api/v1/references?to=…`, which the server resolves
@@ -389,24 +413,30 @@ export function resolvedPrefixItems(
  * page or a node gave - is answered as it stands and reads nothing extra. One whose short id
  * names nothing yet, or nothing at all, is `undefined`, so the record behind it is read under
  * its whole id or not at all and nothing is ever cached under a prefix.
+ *
+ * The read itself is returned beside it, for the surfaces that show an ambiguous prefix's
+ * matches (`ArtifactDocument`, `useItemLanding`); a caller that wants the route alone reads
+ * `.route`.
  */
-function useWholeRoute(
-  route: DispatchReferenceRoute | undefined
-): DispatchReferenceRoute | undefined {
+export function useWholeRouteRead(route: DispatchReferenceRoute | undefined): WholeRouteRead {
   const origin = window.location.origin;
   const prefix = route === undefined ? undefined : prefixReference(route);
   const resolution = useQuery({ ...referencesQuery(prefix), enabled: prefix !== undefined });
-  if (route === undefined || prefix === undefined) {
-    return route;
-  }
-  return routeWithWholeIds(route, resolvedPrefixItems(resolution.data), origin);
+  return {
+    prefix,
+    resolution,
+    route:
+      route === undefined || prefix === undefined
+        ? route
+        : routeWithWholeIds(route, resolvedPrefixItems(resolution.data), origin),
+  };
 }
 
 export function useReferenceData(
   given: DispatchReferenceRoute | undefined,
   options: ReferenceReadOptions
 ): ReferenceData {
-  const route = useWholeRoute(given);
+  const route = useWholeRouteRead(given).route;
   const blockReference = blockReferenceOf(route);
   // A block of a comment or message is read from its graph node alone, which carries its text:
   // no issue, document, ask, comment or message read behind it.

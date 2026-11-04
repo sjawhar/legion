@@ -1079,17 +1079,11 @@ func (s *server) wholeID(
 // after every four digits, which Postgres reads as a whole uuid and every handler behind this
 // reads as the row it names (project_scope.go, INFRA-264). Such a value matches nothing because
 // it can start no id, not because no item carries it, so it is left as written and the route
-// reads it as it always did; refs.ResolvePrefix answers both as no match, and this tells the two
-// apart by the same rule its uuidRange uses.
+// reads it as it always did; refs.ResolvePrefix answers both as no match, and refs.CanStartUUID
+// is the rule its uuidRange tells the two apart by.
 func itemNotFound(notFound, prefix string) string {
-	const uuidText = "00000000-0000-0000-0000-000000000000"
-	if len(prefix) > len(uuidText) {
+	if !refs.CanStartUUID(prefix) {
 		return notFoundNone
-	}
-	for index := range len(prefix) {
-		if (prefix[index] == '-') != (uuidText[index] == '-') {
-			return notFoundNone
-		}
 	}
 	return notFound
 }

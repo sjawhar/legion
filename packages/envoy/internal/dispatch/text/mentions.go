@@ -171,20 +171,18 @@ func bareCandidates(body string, spans [][]int) (candidates []bareMention, keys 
 // leaves out - it names nothing, or two items or more - stays exactly as the text writes it, as
 // does one whose whole id would carry the reference past the bounds the index keys (inBound).
 func resolvePrefixes(located []Located, r Resolver) error {
-	type target struct {
-		at    int
-		block bool
-	}
 	var prefixes []Prefix
-	var targets []target
+	// The reference each prefix was read from, in step with prefixes: whether it is the item's
+	// id or its block's is the prefix's own Block.
+	var at []int
 	for index, item := range located {
 		if IsIDPrefix(item.Block) {
 			prefixes = append(prefixes, Prefix{Ref: item.Ref, Block: true})
-			targets = append(targets, target{at: index, block: true})
+			at = append(at, index)
 		}
 		if (isItemKind(item.Kind) || item.Kind == "block" && isItemKind(item.Item)) && IsIDPrefix(item.ID) {
 			prefixes = append(prefixes, Prefix{Ref: item.Ref})
-			targets = append(targets, target{at: index})
+			at = append(at, index)
 		}
 	}
 	if len(prefixes) == 0 {
@@ -195,17 +193,17 @@ func resolvePrefixes(located []Located, r Resolver) error {
 		return err
 	}
 	for index, whole := range resolved {
-		if index < 0 || index >= len(targets) || whole == "" {
+		if index < 0 || index >= len(at) || whole == "" {
 			continue
 		}
-		ref := located[targets[index].at].Ref
-		if targets[index].block {
+		ref := located[at[index]].Ref
+		if prefixes[index].Block {
 			ref.Block = whole
 		} else {
 			ref.ID = whole
 		}
 		if inBound(ref) {
-			located[targets[index].at].Ref = ref
+			located[at[index]].Ref = ref
 		}
 	}
 	return nil
@@ -270,23 +268,26 @@ func isHexByte(c byte) bool {
 // a prefix of. A declared id wins over a short one, and a short one two question blocks or more
 // carry names nothing.
 func questionRef(questions map[string]Ref, id string) (Ref, bool) {
-	trimmed := strings.TrimRight(id, "_-")
-	if trimmed == id || trimmed == "" {
-		trimmed = ""
+	// The other spelling to try: the id without the trailing `_` and `-` an emphasis or a
+	// sentence leaves on it, and "" where there is none to try (its twin on the web is
+	// text-references.ts's `shortened`).
+	shortened := strings.TrimRight(id, "_-")
+	if shortened == id {
+		shortened = ""
 	}
 	if ref, ok := questions[id]; ok {
 		return ref, true
 	}
-	if trimmed != "" {
-		if ref, ok := questions[trimmed]; ok {
+	if shortened != "" {
+		if ref, ok := questions[shortened]; ok {
 			return ref, true
 		}
 	}
 	if ref, ok := questionPrefix(questions, id); ok {
 		return ref, true
 	}
-	if trimmed != "" {
-		return questionPrefix(questions, trimmed)
+	if shortened != "" {
+		return questionPrefix(questions, shortened)
 	}
 	return Ref{}, false
 }

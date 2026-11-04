@@ -160,10 +160,10 @@ export function DocumentReferences({
   // One line per word, so each is read as the whole mention it was: the reader starts a bare key
   // or `#id` at a line's start and ends it at its end, exactly as it did in the document.
   const text = useMemo(() => words.join("\n"), [words]);
-  const { facts } = useTextReferences(text, source);
+  const { facts, reading } = useTextReferences(text, source);
   const resolved = useMemo(() => {
     const found: ResolvedReference[] = [];
-    for (const reference of readTextReferences(text, facts).references) {
+    for (const reference of reading.references) {
       if (reference.reference === undefined || reference.route === undefined) {
         continue;
       }
@@ -175,7 +175,7 @@ export function DocumentReferences({
       });
     }
     return found;
-  }, [facts, text]);
+  }, [facts, reading]);
 
   const targets = useMemo(() => {
     const drawn = new Map<string, ReferenceTarget | null>();

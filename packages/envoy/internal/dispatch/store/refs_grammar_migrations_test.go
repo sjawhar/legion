@@ -240,10 +240,13 @@ func TestTheRefsGrammarTriggersOweWhatAnyBuildWrites(t *testing.T) {
 	}
 	assertOwedSources(t, store, ask, scope)
 
-	// The drain's read goes through the queue's own index.
-	const read = `select kind, id, enqueued_at from refs_grammar_owed order by enqueued_at limit 200`
-	if plan := explainWithoutSeqScan(t, store, read); !strings.Contains(plan, "refs_grammar_owed_enqueued") {
-		t.Errorf("the owed read's plan does not read refs_grammar_owed_enqueued:\n%s", plan)
+	// The drain's read, exactly as refs.OwedSources runs it, goes through the queue's own index
+	// and in the order the index holds: no sort, so the limit cuts the backlog before it is read
+	// rather than after, which matters where the seed gives every row one enqueued_at.
+	const read = `select o.kind, o.id::text, o.enqueued_at from refs_grammar_owed o order by o.enqueued_at, o.kind, o.id limit 200`
+	plan := explainWithoutSeqScan(t, store, read)
+	if !strings.Contains(plan, "refs_grammar_owed_enqueued") || strings.Contains(plan, "Sort") {
+		t.Errorf("the owed read's plan does not read refs_grammar_owed_enqueued in order:\n%s", plan)
 	}
 	if len(owed) != 5 {
 		t.Fatalf("the fixture owed %v, want one row per source and one scope", owed)

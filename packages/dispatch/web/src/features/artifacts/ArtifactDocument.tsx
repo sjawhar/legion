@@ -10,9 +10,8 @@ import { type DocumentToolbar, ProofDocument } from "../doc/ProofDocument";
 import { ItemMatchList } from "../issue/ItemMatchList";
 import { ambiguousItems } from "../issue/useItemLanding";
 import type { MarginOwner } from "../margin/useMarginItems";
-import { referencesQuery, resolvedPrefixItems } from "../refs/reference-target";
+import { useWholeRouteRead } from "../refs/reference-target";
 import type { DispatchReferenceRoute } from "../refs/routes";
-import { prefixReference, routeWithWholeIds } from "../refs/text-references";
 
 /** The item a document address names, as `?comment=` or `?ask=` writes it. Its id may be written
  *  short, which only the reference it stands for can resolve. */
@@ -60,19 +59,14 @@ interface SelectedItemLanding {
  * the page is unambiguous.
  */
 function useSelectedItem(owner: MarginOwner, item: SelectedItem | undefined): SelectedItemLanding {
-  const origin = window.location.origin;
   const { hash, pathname, search } = useLocation();
   const route = item === undefined ? undefined : itemReference(owner, item);
-  // Only an id written short is resolved; `prefixReference` gives none for a whole one.
-  const reference = route === undefined ? undefined : prefixReference(route);
-  const resolution = useQuery({ ...referencesQuery(reference), enabled: reference !== undefined });
-  const answered =
-    route === undefined || reference === undefined
-      ? route
-      : routeWithWholeIds(route, resolvedPrefixItems(resolution.data), origin);
+  // Only an id written short is resolved; the hook reads nothing for a route that writes every
+  // id whole.
+  const { prefix, resolution, route: answered } = useWholeRouteRead(route);
   const whole =
     item === undefined || answered === undefined ? undefined : itemId(answered, item.kind);
-  const candidates = reference === undefined ? undefined : ambiguousItems(resolution.error);
+  const candidates = prefix === undefined ? undefined : ambiguousItems(resolution.error);
   if (item === undefined || whole === undefined || whole === item.id) {
     return { candidates, id: whole, rewrite: undefined };
   }

@@ -1,13 +1,13 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import type { GraphReferences } from "../../api/types";
 import type { ReferenceLinking } from "./RefLink";
 import {
-  documentAsksQuery,
   issueSummaryQuery,
   questionMap,
   referencesQuery,
+  resolvedPrefixItems,
+  useDocumentAsks,
 } from "./reference-target";
 import { readTextReferences, type TextReading, type TextSource } from "./text-references";
 
@@ -16,17 +16,12 @@ import { readTextReferences, type TextReading, type TextSource } from "./text-re
 const NO_KEYS: readonly string[] = [];
 const NO_MAP: Readonly<Record<string, string>> = {};
 
-/** The id a prefix's graph read resolved, with the reference it is stored under: a block by its
- *  block id, every other item by its own. A read that answered nothing resolves nothing, and the
- *  reference stays as the text wrote it. */
-function resolvedItem(answer: GraphReferences | undefined): [string, string] | undefined {
-  const node = answer?.node;
-  const reference = node?.ref;
-  if (node === undefined || reference === undefined) {
-    return undefined;
-  }
-  const id = node.block_id ?? node.id;
-  return id === "" ? undefined : [id, reference];
+/** Everything a rendered body needs to link what it cites, and the reading it was found in:
+ *  the one reader's pass over the body once every fact it waits on is in (`TextReading`), so a
+ *  caller that needs the references themselves - the cards under a body, the editor's
+ *  decorations - reads them rather than parsing the same text again. */
+export interface TextReferences extends ReferenceLinking {
+  readonly reading: TextReading;
 }
 
 /**
@@ -46,7 +41,7 @@ function resolvedItem(answer: GraphReferences | undefined): [string, string] | u
  * A body that writes no key, no `#id` and no prefix - almost every body - starts no query at all
  * and is read once.
  */
-export function useTextReferences(markdown: string, source?: TextSource): ReferenceLinking {
+export function useTextReferences(markdown: string, source?: TextSource): TextReferences {
   const origin = window.location.origin;
   // The first reading: it resolves every `dispatch://` reference and dashboard address on its
   // own, and says which keys, question and prefixes the rest waits on.
@@ -61,14 +56,9 @@ export function useTextReferences(markdown: string, source?: TextSource): Refere
   const exist = keys.filter((_, index) => summaries[index]?.isSuccess === true).join(" ");
   const issues = useMemo(() => (exist === "" ? NO_KEYS : exist.split(" ")), [exist]);
 
-  const asks = useQuery({
-    ...documentAsksQuery(source),
-    enabled: questions && source !== undefined,
-  });
+  const asks = useDocumentAsks(source, questions && source !== undefined);
   const declared =
-    questions && source !== undefined && asks.data !== undefined
-      ? questionMap(asks.data, source)
-      : undefined;
+    questions && source !== undefined && asks !== undefined ? questionMap(asks, source) : undefined;
   const declaredBy = declared === undefined ? "" : JSON.stringify(declared);
   const askedQuestions = useMemo(
     () => (declaredBy === "" ? NO_MAP : (JSON.parse(declaredBy) as Record<string, string>)),
@@ -79,12 +69,7 @@ export function useTextReferences(markdown: string, source?: TextSource): Refere
     queries: prefixes.map((reference) => ({ ...referencesQuery(reference), retry: false })),
   });
   const resolved = JSON.stringify(
-    Object.fromEntries(
-      resolutions.flatMap((answer) => {
-        const item = resolvedItem(answer.data);
-        return item === undefined ? [] : [item];
-      })
-    )
+    Object.assign({}, ...resolutions.map((answer) => resolvedPrefixItems(answer.data)))
   );
   const items = useMemo(
     () => (resolved === "{}" ? NO_MAP : (JSON.parse(resolved) as Record<string, string>)),
@@ -109,6 +94,6 @@ export function useTextReferences(markdown: string, source?: TextSource): Refere
         cited.add(reference.reference);
       }
     }
-    return { cited, facts };
+    return { cited, facts, reading };
   }, [facts, reading]);
 }

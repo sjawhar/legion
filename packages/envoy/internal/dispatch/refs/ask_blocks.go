@@ -168,15 +168,15 @@ func askPartPairs(parts []itemblocks.Block, ids []string, r *resolver) []blockPa
 //
 // It returns the targets of the part mentions it moved, which the caller's event counts.
 func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) ([]Target, error) {
-	return indexAskPartsWith(ctx, tx, ask, newResolver(ctx, tx, string(ItemAsk), ask.ID, serverURL), at)
+	return IndexAskPartsWith(ctx, tx, NewReader(ctx, tx, string(ItemAsk), ask.ID, serverURL), ask, at)
 }
 
-// indexAskPartsWith is IndexAskParts through a resolver the caller holds already, which a write
-// that reads the ask's own text through it passes on (ReindexOwedItem), so one write asks the
-// database once per kind for the question and its parts together.
-func indexAskPartsWith(ctx context.Context, tx pgx.Tx, ask model.Ask, r *resolver, at time.Time) ([]Target, error) {
+// IndexAskPartsWith is IndexAskParts through a reader the caller holds already, which a write
+// that reads the ask's own question through it passes on (ReplaceCountedWith, ReindexOwedItem),
+// so one write asks the database once per kind for the question and its parts together.
+func IndexAskPartsWith(ctx context.Context, tx pgx.Tx, r *Reader, ask model.Ask, at time.Time) ([]Target, error) {
 	parts := AskParts(ask)
-	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), r, at)
+	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), r.resolve, at)
 }
 
 // IndexAskPartsCounted is IndexAskParts for a writer that appends an event: it indexes the ask's
@@ -195,7 +195,21 @@ func IndexAskPartsCounted(
 	at time.Time,
 	beside model.ReferenceChanges,
 ) (model.ReferenceChanges, error) {
-	moved, err := IndexAskParts(ctx, tx, ask, serverURL, at)
+	return IndexAskPartsCountedWith(ctx, tx, NewReader(ctx, tx, string(ItemAsk), ask.ID, serverURL), ask, at, beside)
+}
+
+// IndexAskPartsCountedWith is IndexAskPartsCounted through a reader the caller holds already,
+// the one it reconciled the ask's question through (ReplaceCountedWith, ReplaceCountedEditWith):
+// every live write of an ask reads both texts through one reader.
+func IndexAskPartsCountedWith(
+	ctx context.Context,
+	tx pgx.Tx,
+	r *Reader,
+	ask model.Ask,
+	at time.Time,
+	beside model.ReferenceChanges,
+) (model.ReferenceChanges, error) {
+	moved, err := IndexAskPartsWith(ctx, tx, r, ask, at)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}

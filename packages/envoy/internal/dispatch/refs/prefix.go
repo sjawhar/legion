@@ -168,24 +168,20 @@ func itemPrefixCandidates(ctx context.Context, q Queryer, kind string, scope Sco
 	if kind == "comment" {
 		table, column = "comments", "body"
 	}
-	var args []any
-	param := func(value any) string {
-		args = append(args, value)
-		return "$" + strconv.Itoa(len(args))
-	}
+	var args queryArgs
 	query := `select item.id::text, item.issue_key, coalesce(issue.project_key, doc.project_key, ''), coalesce(doc.slug, ''), item.` + column + `
 		from ` + table + ` item
 		left join issues issue on issue.key = item.issue_key
 		left join artifacts doc on doc.id = item.artifact_id
-		where item.id >= ` + param(lower) + `::uuid and item.id <= ` + param(upper) + `::uuid`
+		where item.id >= ` + args.param(lower) + `::uuid and item.id <= ` + args.param(upper) + `::uuid`
 	switch {
 	case scope.IssueKey != "":
-		query += ` and item.issue_key = ` + param(scope.IssueKey)
+		query += ` and item.issue_key = ` + args.param(scope.IssueKey)
 	case scope.Document != "":
-		query += ` and item.artifact_id = (select id from artifacts where ref_key = ` + param(scope.Document) + `)`
+		query += ` and item.artifact_id = (select id from artifacts where ref_key = ` + args.param(scope.Document) + `)`
 	}
 	query += ` order by item.id limit ` + prefixLimit
-	rows, err := q.Query(ctx, query, args...)
+	rows, err := q.Query(ctx, query, args.values...)
 	if err != nil {
 		return nil, fmt.Errorf("read the %ss %q names: %w", kind, prefix, err)
 	}
@@ -216,16 +212,12 @@ func messagePrefixCandidates(ctx context.Context, q Queryer, scope Scope, prefix
 	if !ok || scope.Version != 0 || scope.Document != "" {
 		return nil, nil
 	}
-	var args []any
-	param := func(value any) string {
-		args = append(args, value)
-		return "$" + strconv.Itoa(len(args))
-	}
+	var args queryArgs
 	candidates := `select m.id, m.issue_key, m.body
 			from messages m
-			where m.id >= ` + param(lower) + `::uuid and m.id <= ` + param(upper) + `::uuid`
+			where m.id >= ` + args.param(lower) + `::uuid and m.id <= ` + args.param(upper) + `::uuid`
 	if scope.IssueKey != "" {
-		candidates += ` and m.issue_key = ` + param(scope.IssueKey)
+		candidates += ` and m.issue_key = ` + args.param(scope.IssueKey)
 	}
 	candidates += ` order by m.id limit ` + prefixLimit
 	threads, inConversation := "", "false"
@@ -245,17 +237,17 @@ func messagePrefixCandidates(ctx context.Context, q Queryer, scope Scope, prefix
 			union all
 			select t.candidate, m.id from thread t join messages m on m.in_reply_to = t.node
 		)`
-		inConversation = `coalesce((select r.target from root r where r.candidate = c.id) = ` + param("session:"+viewer.Session) + `, false)
+		inConversation = `coalesce((select r.target from root r where r.candidate = c.id) = ` + args.param("session:"+viewer.Session) + `, false)
 		       or exists (
 		         select 1 from thread t join messages m on m.id = t.node
-		         where t.candidate = c.id and m.author->>'kind' = 'session' and m.author->>'id' = ` + param(viewer.Session) + `
+		         where t.candidate = c.id and m.author->>'kind' = 'session' and m.author->>'id' = ` + args.param(viewer.Session) + `
 		       )`
 	}
 	rows, err := q.Query(ctx, `with recursive candidates as (`+candidates+`)`+threads+`
 		select c.id::text, c.issue_key, coalesce(i.project_key, ''), c.body, `+inConversation+`
 		from candidates c
 		left join issues i on i.key = c.issue_key
-		order by c.id`, args...)
+		order by c.id`, args.values...)
 	if err != nil {
 		return nil, fmt.Errorf("read the messages %q names: %w", prefix, err)
 	}
@@ -302,19 +294,15 @@ func artifactPrefixCandidates(ctx context.Context, q Queryer, scope Scope, prefi
 	if !ok || scope.Version != 0 || scope.Document != "" {
 		return nil, nil
 	}
-	var args []any
-	param := func(value any) string {
-		args = append(args, value)
-		return "$" + strconv.Itoa(len(args))
-	}
+	var args queryArgs
 	query := `select ` + documentColumns("a") + `, a.name
 		from artifacts a
-		where a.id >= ` + param(lower) + `::uuid and a.id <= ` + param(upper) + `::uuid`
+		where a.id >= ` + args.param(lower) + `::uuid and a.id <= ` + args.param(upper) + `::uuid`
 	if scope.IssueKey != "" {
-		query += ` and a.issue_key = ` + param(scope.IssueKey)
+		query += ` and a.issue_key = ` + args.param(scope.IssueKey)
 	}
 	query += ` order by a.id limit ` + prefixLimit
-	rows, err := q.Query(ctx, query, args...)
+	rows, err := q.Query(ctx, query, args.values...)
 	if err != nil {
 		return nil, fmt.Errorf("read the documents %q names: %w", prefix, err)
 	}
@@ -395,6 +383,18 @@ func blockPrefixCandidates(ctx context.Context, q Queryer, scope Scope, prefix s
 	return found, rows.Err()
 }
 
+// queryArgs are the arguments of a query this file builds by concatenation: param appends one
+// and answers the placeholder that reads it, so the text and the arguments of a query whose
+// shape depends on its scope cannot drift apart.
+type queryArgs struct {
+	values []any
+}
+
+func (a *queryArgs) param(value any) string {
+	a.values = append(a.values, value)
+	return "$" + strconv.Itoa(len(a.values))
+}
+
 // uuidRange is the range of uuids prefix names: the prefix, lowercased, with its remaining hex
 // digits filled with `0` and with `f` and its remaining hyphens where a uuid writes them, so a
 // comparison against it is one range on a uuid primary key. ok is false when prefix can start no
@@ -428,6 +428,15 @@ func uuidRange(prefix string) (lower, upper string, ok bool) {
 		low[at], high[at] = digit, digit
 	}
 	return string(low), string(high), true
+}
+
+// CanStartUUID reports whether prefix can start a uuid's text form, which is uuidRange's own ok:
+// a caller that has to tell a prefix no item carries from one no item can carry - the 404 an id
+// route answers for a value that is no prefix of any id (api.itemNotFound) - asks the rule the
+// range itself is built by rather than keeping a second copy of it.
+func CanStartUUID(prefix string) bool {
+	_, _, ok := uuidRange(prefix)
+	return ok
 }
 
 func isHexDigit(c byte) bool {

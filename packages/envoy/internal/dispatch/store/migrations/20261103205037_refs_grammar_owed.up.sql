@@ -26,7 +26,12 @@ create table refs_grammar_owed (
   enqueued_at timestamptz not null default now(),
   primary key (kind, id)
 );
-create index refs_grammar_owed_enqueued on refs_grammar_owed (enqueued_at);
+-- The index the drain reads through, on the whole order it reads in (refs.OwedSources, `order by
+-- enqueued_at, kind, id limit $1`): the seed below gives every row of the corpus one enqueued_at,
+-- so an index on that column alone would leave each tick sorting the entire backlog before its
+-- limit could cut it. On all three columns the read stops after its limit, and takes every column
+-- it selects from the index.
+create index refs_grammar_owed_enqueued on refs_grammar_owed (enqueued_at, kind, id);
 
 -- The trigger function of the comments, asks and messages triggers: the row's kind is the
 -- trigger's argument, and a write that lands on a row already owed moves its enqueued_at, so a

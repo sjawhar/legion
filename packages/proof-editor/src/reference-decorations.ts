@@ -142,7 +142,7 @@ function blockCandidates(
     text += mask === undefined ? childText : mask.repeat(childText.length);
   });
 
-  const found: Array<{ start: number; end: number; key: string }> = [];
+  const found: ReferenceCandidate[] = [];
   let reached = 0;
   for (const candidate of references.scan(text)) {
     if (

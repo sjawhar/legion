@@ -319,12 +319,15 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
-			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			// The question and the parts through one reader: the ask's parts hold its question,
+			// so the database answers once per kind for the write (refs.NewReader).
+			reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL)
+			changes, err := refs.ReplaceCountedWith(ctx, tx, reader, ask.Question)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			// The new ask's parts, beside its own references: both named by the ask.opened.
-			changes, err = refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, ask.CreatedAt, changes)
+			changes, err = refs.IndexAskPartsCountedWith(ctx, tx, reader, ask, ask.CreatedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
 			}
@@ -399,13 +402,15 @@ func (s *Service) reconcileAskBlocks(
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
-			changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, s.serverURL)
+			reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL)
+			changes, err := refs.ReplaceCountedEditWith(ctx, tx, reader, previous.Question, ask.Question)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
-			// The block's wording is now the row's: its parts are that wording too, and the
-			// ask.edited names what they moved beside the ask's own references.
-			changes, err = refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, editedAt, changes)
+			// The block's wording is now the row's: its parts are that wording too, read through
+			// the one reader, and the ask.edited names what they moved beside the ask's own
+			// references.
+			changes, err = refs.IndexAskPartsCountedWith(ctx, tx, reader, ask, editedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
 			}

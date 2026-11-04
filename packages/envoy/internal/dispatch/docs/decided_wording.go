@@ -234,7 +234,10 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 	}
 	at := time.Now().UTC()
 	for _, wording := range restored {
-		if _, err := refs.ReplaceCounted(ctx, tx, "ask", wording.ask, wording.wording.Question, s.serverURL); err != nil {
+		// The question and the parts of the restored ask through one reader, which holds what
+		// the database answered for the first of them.
+		reader := refs.NewReader(ctx, tx, "ask", wording.ask, s.serverURL)
+		if _, err := refs.ReplaceCountedWith(ctx, tx, reader, wording.wording.Question); err != nil {
 			return nil, fmt.Errorf("index the restored question of ask %s: %w", wording.ask, err)
 		}
 		ask := model.Ask{
@@ -243,7 +246,7 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 			Options:  wording.wording.Options,
 			Answer:   wording.answer,
 		}
-		if _, err := refs.IndexAskParts(ctx, tx, ask, s.serverURL, at); err != nil {
+		if _, err := refs.IndexAskPartsWith(ctx, tx, reader, ask, at); err != nil {
 			return nil, fmt.Errorf("index the parts of the restored ask %s: %w", wording.ask, err)
 		}
 	}

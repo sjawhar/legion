@@ -78,6 +78,27 @@ func newResolver(ctx context.Context, q Queryer, fromKind, fromID, serverURL str
 	return &resolver{ctx: ctx, q: q, kind: fromKind, id: fromID, serverURL: serverURL}
 }
 
+// Reader is the database one write reads every text of its source through: an ask's question
+// and each of its parts, a comment's body, a document's version. It is the resolver above held
+// by a caller that reads two texts of one source - a write that reconciles the ask's own
+// references from its question (ReplaceCountedWith) and then indexes its parts
+// (IndexAskPartsWith) - so the database answers once per kind for that write however many texts
+// it holds, and what it answered is the one transaction's view.
+type Reader struct{ resolve *resolver }
+
+// NewReader is the Reader of one write of the text of the source fromKind/fromID, over q, the
+// pool or transaction that write runs in, with serverURL the server its mentions are read with.
+// A write that holds one text alone needs none: ReplaceCounted, ReplaceCountedEdit and
+// IndexAskParts each build their own.
+func NewReader(ctx context.Context, q Queryer, fromKind, fromID, serverURL string) *Reader {
+	return &Reader{resolve: newResolver(ctx, q, fromKind, fromID, serverURL)}
+}
+
+// mentions is text.Mentions of body read through r.
+func (r *Reader) mentions(body string) []text.Located {
+	return r.resolve.mentions(body)
+}
+
 // mentions is text.Mentions of body resolved through r.
 func (r *resolver) mentions(body string) []text.Located {
 	located, err := text.Mentions(body, r.serverURL, r)
@@ -103,7 +124,7 @@ func (r *resolver) Issues(keys []string) (map[string]bool, error) {
 		}
 	}
 	if len(unknown) > 0 {
-		found, err := r.readIssues(unknown)
+		found, err := resolveIssueTargets(r.ctx, r.q, unknown)
 		if err != nil {
 			r.failed("read the issues a text writes bare", err)
 			return nil, nil
@@ -121,23 +142,6 @@ func (r *resolver) Issues(keys []string) (map[string]bool, error) {
 		answer[key] = r.issues[key]
 	}
 	return answer, nil
-}
-
-func (r *resolver) readIssues(keys []string) (map[string]struct{}, error) {
-	rows, err := r.q.Query(r.ctx, `select key from issues where key = any($1)`, keys)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	found := make(map[string]struct{}, len(keys))
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
-		}
-		found[key] = struct{}{}
-	}
-	return found, rows.Err()
 }
 
 // Questions is the question map of the document the source's text belongs to (ScopeOf, then

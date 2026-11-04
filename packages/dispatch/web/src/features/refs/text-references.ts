@@ -487,25 +487,18 @@ export function readTextReferences(text: string, facts: TextReferenceFacts = {})
     if (route === undefined) {
       continue;
     }
+    // An address writing every id whole is the route it parsed to; one writing any short is
+    // that route with the ids `facts` resolved put in, and is asked about either way.
     const written = prefixReference(route);
-    if (written === undefined) {
-      references.push({
-        end: span.start + span.value.length,
-        form: "address",
-        reference: buildDispatchReference(route),
-        route,
-        start: span.start,
-        text: span.value,
-        unresolved: false,
-      });
-      continue;
+    let resolved = { route, unresolved: false };
+    if (written !== undefined) {
+      if (!seenPrefixes.has(written)) {
+        seenPrefixes.add(written);
+        prefixes.push(written);
+      }
+      kinds ??= itemKinds(facts.items ?? {}, origin);
+      resolved = resolvePrefixIds(route, kinds);
     }
-    if (!seenPrefixes.has(written)) {
-      seenPrefixes.add(written);
-      prefixes.push(written);
-    }
-    kinds ??= itemKinds(facts.items ?? {}, origin);
-    const resolved = resolvePrefixIds(route, kinds);
     references.push({
       end: span.start + span.value.length,
       form: "address",

@@ -14,12 +14,7 @@ import { MarkdownPreview } from "./MarkdownPreview";
 import { referenceSpans, trimReference } from "./reference-spans";
 import { useReferencePath, useReferenceTarget } from "./reference-target";
 import { buildDispatchReference, type DispatchReferenceRoute } from "./routes";
-import {
-  readTextReferences,
-  type TextReference,
-  type TextReferenceFacts,
-  type TextSource,
-} from "./text-references";
+import { readTextReferences, type TextReference, type TextSource } from "./text-references";
 import { useTextReferences } from "./useTextReferences";
 
 interface UnfurlProps {
@@ -128,14 +123,15 @@ const whitespaceOnly = /^\s*$/;
 const trailingRun = /\S*/y;
 
 /**
- * Every reference-shaped word of `body`, in the order it holds them: what the one reader finds
- * (`readTextReferences` - a `dispatch://` reference, a dashboard address, an issue key written
- * bare, a `#id`) and the GitHub issue and pull-request URLs it leaves alone, which Dispatch
- * knows nothing of. A word spans only what its reference spans: the sentence punctuation and
- * emphasis the reader trims off a reference stays outside it.
+ * Every reference-shaped word of `body`, in the order it holds them: the references one reading
+ * of that body found (`readTextReferences` - a `dispatch://` reference, a dashboard address, an
+ * issue key written bare, a `#id`) and the GitHub issue and pull-request URLs it leaves alone,
+ * which Dispatch knows nothing of. The reading is the caller's, so a body is read once however
+ * many times its words are walked. A word spans only what its reference spans: the sentence
+ * punctuation and emphasis the reader trims off a reference stays outside it.
  */
-function referenceWords(body: string, facts: TextReferenceFacts): ReferenceWord[] {
-  const words: ReferenceWord[] = readTextReferences(body, facts).references.map((reference) => ({
+function referenceWords(body: string, references: readonly TextReference[]): ReferenceWord[] {
+  const words: ReferenceWord[] = references.map((reference) => ({
     end: reference.end,
     reference,
     start: reference.start,
@@ -204,14 +200,17 @@ function referencesOnly(body: string, words: readonly ReferenceWord[]): boolean 
 
 /**
  * The cards `body` shows, or `undefined` for a body that shows none: it is nothing but
- * references (`referencesOnly`) and every one of them names something, read through the facts
- * the queries answered. A key whose issue does not exist, a `#id` no question of the body's
- * document declares, and an id prefix nothing resolved are each a word that names nothing, and
- * one of them is the whole body showing no card - until it resolves, and for good where it never
- * does.
+ * references (`referencesOnly`) and every one of them names something, which is `references`,
+ * the reading made once the queries answered. A key whose issue does not exist, a `#id` no
+ * question of the body's document declares, and an id prefix nothing resolved are each a word
+ * that names nothing, and one of them is the whole body showing no card - until it resolves,
+ * and for good where it never does.
  */
-function referenceCards(body: string, facts: TextReferenceFacts): ReferenceCards | undefined {
-  const words = referenceWords(body, facts);
+function referenceCards(
+  body: string,
+  references: readonly TextReference[]
+): ReferenceCards | undefined {
+  const words = referenceWords(body, references);
   if (!referencesOnly(body, words)) {
     return undefined;
   }
@@ -262,13 +261,16 @@ function referenceCards(body: string, facts: TextReferenceFacts): ReferenceCards
 export function Unfurl({ body, source }: UnfurlProps): ReactNode {
   const origin = window.location.origin;
   const shaped = useMemo(
-    () => referencesOnly(body, referenceWords(body, { origin })),
+    () =>
+      referencesOnly(body, referenceWords(body, readTextReferences(body, { origin }).references)),
     [body, origin]
   );
-  const { facts } = useTextReferences(shaped ? body : "", source);
+  // The hook's own reading of the same body, made with everything its queries answered: the
+  // cards are read from it rather than from a second pass over the text.
+  const { reading } = useTextReferences(shaped ? body : "", source);
   const cards = useMemo(
-    () => (shaped ? referenceCards(body, facts) : undefined),
-    [body, facts, shaped]
+    () => (shaped ? referenceCards(body, reading.references) : undefined),
+    [body, reading, shaped]
   );
 
   if (cards === undefined) {

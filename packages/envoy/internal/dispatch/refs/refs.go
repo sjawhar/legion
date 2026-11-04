@@ -50,8 +50,21 @@ func ReplaceCounted(
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	found := text.Refs(Mentions(ctx, tx, fromKind, fromID, body, serverURL))
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
+	return ReplaceCountedWith(ctx, tx, NewReader(ctx, tx, fromKind, fromID, serverURL), body)
+}
+
+// ReplaceCountedWith is ReplaceCounted for the source r was built for, read through r: a write
+// that holds another text of the same source - an ask's parts beside its question
+// (IndexAskPartsWith) - reads both through the one reader, so the database answers once per kind
+// for the write rather than once per text.
+func ReplaceCountedWith(
+	ctx context.Context,
+	tx pgx.Tx,
+	r *Reader,
+	body string,
+) (model.ReferenceChanges, error) {
+	found := text.Refs(r.mentions(body))
+	changed, err := replaceRefs(ctx, tx, r.resolve.kind, r.resolve.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -66,8 +79,19 @@ func ReplaceCountedEdit(
 	tx pgx.Tx,
 	fromKind, fromID, previous, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	found := text.Refs(Mentions(ctx, tx, fromKind, fromID, body, serverURL))
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
+	return ReplaceCountedEditWith(ctx, tx, NewReader(ctx, tx, fromKind, fromID, serverURL), previous, body)
+}
+
+// ReplaceCountedEditWith is ReplaceCountedEdit for the source r was built for, read through r,
+// as ReplaceCountedWith is ReplaceCounted.
+func ReplaceCountedEditWith(
+	ctx context.Context,
+	tx pgx.Tx,
+	r *Reader,
+	previous, body string,
+) (model.ReferenceChanges, error) {
+	found := text.Refs(r.mentions(body))
+	changed, err := replaceRefs(ctx, tx, r.resolve.kind, r.resolve.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}

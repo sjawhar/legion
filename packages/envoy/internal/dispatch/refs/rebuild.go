@@ -283,7 +283,7 @@ func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL strin
 		}
 		return nil
 	}
-	resolve := newResolver(ctx, tx, kind, id, serverURL)
+	resolve := NewReader(ctx, tx, kind, id, serverURL)
 	located := resolve.mentions(body)
 	switch itemKind := ItemKind(kind); itemKind {
 	case ItemComment, ItemMessage:
@@ -298,7 +298,7 @@ func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL strin
 			return err
 		}
 		if found {
-			if _, err := indexAskPartsWith(ctx, tx, ask, resolve, writtenAt); err != nil {
+			if _, err := IndexAskPartsWith(ctx, tx, resolve, ask, writtenAt); err != nil {
 				return fmt.Errorf("index the parts of ask %s: %w", id, err)
 			}
 		}
@@ -321,10 +321,18 @@ type OwedSource struct {
 }
 
 // OwedSources lists at most limit sources owed an index with the whole grammar, oldest first
-// (refs_grammar_owed_enqueued), and locks nothing.
+// (refs_grammar_owed_enqueued, which carries all three order columns and every column read), and
+// locks nothing.
+//
+// The order columns are written qualified: unqualified, `id` would name the selected `id::text`
+// rather than the table's uuid, and the index could not serve the order, leaving every tick
+// sorting the whole tie group the seed enqueues under one enqueued_at. The two orders are the
+// same - a uuid's canonical text is its bytes in lowercase hex, hyphens at fixed positions - so
+// the rows come back as they always did.
 func OwedSources(ctx context.Context, q Queryer, limit int) ([]OwedSource, error) {
 	rows, err := q.Query(ctx, `
-		select kind, id::text, enqueued_at from refs_grammar_owed order by enqueued_at, kind, id limit $1
+		select o.kind, o.id::text, o.enqueued_at from refs_grammar_owed o
+		order by o.enqueued_at, o.kind, o.id limit $1
 	`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list the sources owed an index with the whole grammar: %w", err)

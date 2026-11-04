@@ -88,8 +88,10 @@ function spyAsks(document: Artifact, asks: Ask[]) {
   return spies;
 }
 
-function withQueries(children: ReactNode): ReactNode {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function withQueries(
+  children: ReactNode,
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+): ReactNode {
   return (
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>{children}</MemoryRouter>
@@ -167,6 +169,29 @@ test("two texts of one document read its asks once", async () => {
     );
     expect(spies.listIssueAsks).toHaveBeenCalledTimes(1);
     expect(spies.getArtifact).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an issue's asks are cached under the issue, leaving the document's own asks key to its readers", async () => {
+  const document = documentOf("doc-1", "CORE-1", "notes");
+  spyAsks(document, [questionAsk("ask-2", "CORE-1", "doc-1")]);
+  const source: TextSource = { artifactId: "doc-1", kind: "document" };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // What `["artifact", id, "asks"]` means to every other reader of it (`useAnsweredAsks`,
+  // `ProofDocument`, the refresh an ask event pushes): the asks of that document alone.
+  queryClient.setQueryData(["artifact", "doc-1", "asks"], []);
+  const view = render(
+    withQueries(<MarkdownBody markdown="See #q2 for the rollout." source={source} />, queryClient)
+  );
+
+  try {
+    await waitFor(() => expect(linked(view.container)).toEqual(["dispatch://CORE-1/ask/ask-2"]));
+    // The issue's whole ask list is the issue's, under the key its readers and its
+    // invalidations already mean.
+    expect(queryClient.getQueryData<Ask[]>(["asks", "CORE-1"])).toHaveLength(1);
+    expect(queryClient.getQueryData<Ask[]>(["artifact", "doc-1", "asks"])).toEqual([]);
   } finally {
     view.unmount();
   }

@@ -388,8 +388,12 @@ func askDirective(rest string) (questionBlock, bool) {
 				escaped = attrs[offset] == '\\' && !escaped
 				offset++
 			}
-			if parsed, err := uuid.Parse(attrs[valueStart:offset]); err == nil && name == "copied_from" {
-				block.copiedFrom = parsed.String()
+			// Only the one attribute carries an id: every other value on the line - the state,
+			// the asker, the question's own wording - is left unparsed.
+			if name == "copied_from" {
+				if parsed, err := uuid.Parse(attrs[valueStart:offset]); err == nil {
+					block.copiedFrom = parsed.String()
+				}
 			}
 			offset++
 		default:
