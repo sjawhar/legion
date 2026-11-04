@@ -3,7 +3,9 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,8 +20,10 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
@@ -57,6 +61,23 @@ func (heldRoles) TTL() time.Duration { return 5 * time.Minute }
 func withHeldRoles(deps Deps) Deps {
 	deps.RoleClaims, deps.Sessions = heldRoles{}, heldRoles{}
 	return deps
+}
+
+// errRoleBucketUnreachable is what unreadableRoleClaims answers every read of a claim with.
+var errRoleBucketUnreachable = errors.New("the role bucket is unreachable")
+
+// unreadableRoleClaims is a role-claim store whose every read of a claim fails, the shape of a
+// role bucket the outbox cannot reach: the resolution answers a read error, and the role
+// destination it resolves stays pending with nothing sent (roles.ResolveHolder, forwardOf). The
+// release is never reached, a resolution that read no claim releasing none.
+type unreadableRoleClaims struct{}
+
+func (unreadableRoleClaims) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
+	return envoystore.RoleClaim{}, errRoleBucketUnreachable
+}
+
+func (unreadableRoleClaims) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
+	return envoystore.ExpiredRoleClaimMissing, nil
 }
 
 // roleRig is a real NATS server whose stream captures agent subjects, the outbox's client on it,
@@ -767,4 +788,101 @@ func TestAFallbackPassForwardsARoleCopyToItsOwnMentionedHolderUnderTheMentionsKe
 		t.Fatalf("the copy forwarded to the session its own mention names carries %q, want no role forward's prefix",
 			forwards[0].DedupeKey)
 	}
+}
+
+// heldPendingCopy holds what one pass that reached no holder left of the copy held for
+// destination: the row unsettled and unpublished with its one attempt and its back-off, one
+// logged failure naming why the holder was not reached, and that destination counted under its
+// holder alone. before and after bracket the pass, as every reading of a row's back-off brackets
+// the pass that wrote it.
+func heldPendingCopy(t *testing.T, rig *roleRig, registry *metrics.Registry, logged *lockedBuffer,
+	commentID, destination, why string, before, after time.Time,
+) {
+	t.Helper()
+	held := readHeldCopy(t, rig.database, commentID, destination)
+	if held.attempts != 1 || held.settled || held.published || held.due == nil {
+		t.Fatalf("the held copy is attempts=%d settled=%v published=%v next_attempt_at=%v, "+
+			"want one attempt, unsettled and unpublished", held.attempts, held.settled, held.published, held.due)
+	}
+	if held.due.Before(before.Add(retry.Delay(1))) || held.due.After(after.Add(retry.Delay(1))) {
+		t.Fatalf("the held copy is due at %v, want retry.Delay(1) = %v from the pass", *held.due, retry.Delay(1))
+	}
+	var failures []string
+	for line := range strings.SplitSeq(logged.String(), "\n") {
+		if strings.Contains(line, "dispatch outbox: publish fallback copy") {
+			failures = append(failures, line)
+		}
+	}
+	if len(failures) != 1 || !strings.Contains(failures[0], why) {
+		t.Fatalf("the pass logged %q, want the one held copy's failure naming %q", failures, why)
+	}
+	body := failureReasons(t, registry)
+	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="holder"} 1`) {
+		t.Fatalf("/metrics body = %q, want the copy its resolution held pending counted under its holder", body)
+	}
+	if strings.Contains(body, `reason="failed"`) {
+		t.Fatalf("/metrics body = %q counts a copy that sent nothing as a publish failure", body)
+	}
+}
+
+// A copy held back for a role route whose holder the pass cannot reach is left for a later pass:
+// nothing is sent, the row counts its attempt and backs off unsettled, and the destination is
+// counted under its holder rather than as a publish failure, the bus having neither refused nor
+// dropped anything (fallbackSend.send, Deps.countPublishFailure). These are the pass's two
+// pending ends of a role destination - a resolution that could not be read, and a holder still
+// registered that has not heartbeated within session.ClaimStaleAfter - which a batch's own role
+// route reaches in TestARoleRouteToAStaleHolderStaysPending and
+// TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder. Neither may send anything: no
+// resolution vouched for the holder a forward would reach, and the copy's own role topic is one
+// the stream does not capture, which would refuse it and back the row off for ever.
+func TestAFallbackCopyWhoseRoleHolderIsNotReachedStaysPendingUnderItsHolder(t *testing.T) {
+	const role = "reviewer"
+	roleTopic := contracts.RoleTopicPrefix + role
+
+	t.Run("the holder has not heartbeated", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		var logged lockedBuffer
+		logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+		rig := newRoleRig(t)
+		const holder = "ses_stale_fallback"
+		rig.claimStale(t, role, holder)
+		rig.silent(t, roleTopic)
+		rig.silent(t, contracts.AgentTopicPrefix+">")
+		deps, registry := rig.countingDeps(t)
+		commentID := seedHeldRoleFallbackCopy(ctx, t, deps, role)
+
+		before := time.Now()
+		publishFallbackCopies(ctx, deps, unfenced{})
+		after := time.Now()
+
+		heldPendingCopy(t, rig, registry, &logged, commentID, roleTopic, "has not heartbeated", before, after)
+		if claimed, err := rig.registry.RoleHolder(role); err != nil || claimed != holder {
+			t.Fatalf("the claim after the pass names %q (%v), want the stale holder's kept", claimed, err)
+		}
+	})
+
+	t.Run("the role's claim could not be read", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		var logged lockedBuffer
+		logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+		rig := newRoleRig(t)
+		const holder = "ses_unread_claim"
+		rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+		rig.silent(t, roleTopic)
+		rig.silent(t, contracts.AgentTopicPrefix+">")
+		deps, registry := rig.countingDeps(t)
+		// The row is seeded through readers that read, the scan that holds the copy back
+		// resolving the roles of the destinations it sends; the pass alone is given the bucket
+		// it cannot read. The claim is a live holder's, so what holds the copy back is the read
+		// and not what the bucket says.
+		commentID := seedHeldRoleFallbackCopy(ctx, t, deps, role)
+		unreadable := deps
+		unreadable.RoleClaims = unreadableRoleClaims{}
+
+		before := time.Now()
+		publishFallbackCopies(ctx, unreadable, unfenced{})
+		after := time.Now()
+
+		heldPendingCopy(t, rig, registry, &logged, commentID, roleTopic, "resolve the role's holder", before, after)
+	})
 }

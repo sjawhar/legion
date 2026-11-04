@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -680,5 +682,91 @@ func TestAFallbackPassWhoseClaimFailedBacksTheHolderOff(t *testing.T) {
 	}
 	if wait, ok := outbox.nextRetry(context.Background(), failed); !ok || wait != retry.BaseDelay {
 		t.Fatalf("the holder's next pass is armed to %s (armed=%v), want retry.BaseDelay = %s", wait, ok, retry.BaseDelay)
+	}
+}
+
+// failEveryFallbackClaim makes every update of comment_fallback_copies in database raise, which
+// fails the fallback pass's claim and nothing else: the claim is that one update ... returning
+// (claimFallbackCopies), while every read of the table still answers, Outbox.nextRetry's among
+// them.
+func failEveryFallbackClaim(t *testing.T, database *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `
+		create function fail_the_fallback_claim() returns trigger language plpgsql as $$
+		begin
+			raise exception 'this test fails every claim of a fallback copy';
+		end
+		$$
+	`); err != nil {
+		t.Fatalf("write the function behind the failing claim: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		create trigger fail_the_fallback_claim before update on comment_fallback_copies
+		for each row execute function fail_the_fallback_claim()
+	`); err != nil {
+		t.Fatalf("make every fallback claim fail: %v", err)
+	}
+}
+
+// failedClaims is how many fallback claims the log says failed: the pass logs one Error line for
+// each of them (publishFallbackCopies).
+func failedClaims(logged *lockedBuffer) int {
+	var count int
+	for line := range strings.SplitSeq(logged.String(), "\n") {
+		if strings.Contains(line, "dispatch outbox: claim fallback copies") {
+			count++
+		}
+	}
+	return count
+}
+
+// The holder passes again retry.BaseDelay after a pass whose claim failed, rather than waiting
+// for a wake that never comes. A row the claim never reached keeps the next_attempt_at it had -
+// none at all, for a row a batch has just held back - so no retry timer is armed to it
+// (Outbox.nextRetry), and nothing in this test inserts an event or changes a connection: a serve
+// that read the failed claim as an idle pass would leave the held copy unpublished until some
+// unrelated event woke it. The pass writes one Error line for every claim that fails, so a
+// second such line is the second pass and one line alone is a holder that armed nothing.
+//
+// The claim fails on a trigger of this test's own database rather than on a table nothing can
+// read at all, because nextRetry reads comment_fallback_copies too: a read of it that fails arms
+// the timer by itself, its error path answering retry.BaseDelay, whatever serve made of the
+// pass's failure.
+func TestAFallbackPassWhoseClaimFailedHasTheHolderPassAgain(t *testing.T) {
+	var logged lockedBuffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+	ctx, cancel := context.WithCancel(store.WithTransactionTracking(context.Background()))
+	defer cancel()
+	database := storetest.Open(t)
+	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: events.NewBroker()}
+	seedFallbackBacklog(t, database, deps.Broker, 1)
+	failEveryFallbackClaim(t, database)
+
+	outbox := New(deps)
+	hold, _ := outbox.tryHold(ctx)
+	if hold == nil {
+		t.Fatal("the outbox did not take the free publisher hold")
+	}
+	t.Cleanup(func() { _ = hold.Release(context.Background()) })
+	served := make(chan holdEnd, 1)
+	started := time.Now()
+	go func() { served <- outbox.serve(ctx, hold) }()
+
+	waitFor(t, 30*time.Second, "a second pass of the claim that keeps failing", func() bool {
+		return failedClaims(&logged) >= 2
+	})
+	if waited := time.Since(started); waited < retry.BaseDelay {
+		t.Fatalf("the holder passed again %s after it started, want it to wait retry.BaseDelay = %s rather than spin",
+			waited, retry.BaseDelay)
+	}
+	cancel()
+	select {
+	case end := <-served:
+		if end != stopping {
+			t.Fatalf("serve ended %q, want it to stop with its context", end)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return once its context ended")
 	}
 }
