@@ -127,10 +127,14 @@
 #                                 host, once per judge, and its container gets only the token
 #                                 (cmd_judge_omp)
 #   LEGION_E2E_MODEL_GATEWAY_URL  gateway: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
-#   LEGION_E2E_ANTHROPIC_KEY_FILE key-file: a 0600 file holding a plaintext Anthropic key
-#                                 (scripts/e2e/lib/install-key-file-model-route.sh); the key command
-#                                 that reads it lives in the label's profile directory, and removing
-#                                 that directory removes it
+#   LEGION_E2E_ANTHROPIC_KEY_FILE key-file: a 0600 file holding the plaintext key the endpoint
+#                                 takes (scripts/e2e/lib/install-key-file-model-route.sh); the key
+#                                 command that reads it lives in the label's profile directory,
+#                                 and removing that directory removes it
+#   LEGION_E2E_MODEL_BASE_URL     key-file: an Anthropic-compatible gateway in place of Anthropic
+#                                 itself, whose key the file above holds, so a batch reaches a
+#                                 gateway on the documented route rather than a hand-written
+#                                 provider block
 #   LEGION_E2E_MODEL_PROVIDER_FILE, LEGION_E2E_MODEL_PROVIDER
 #                                 provider: an operator's own models.yml and the name of the
 #                                 anthropic-messages provider block in it to route through
@@ -328,8 +332,14 @@ install_model_route() {
       echo "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
       return 1
     fi
+    local base=()
+    # An Anthropic-compatible gateway, whose key the file holds, in place of Anthropic itself:
+    # the installer's own --base-url, which this route did not pass, so a batch on a gateway had
+    # to be written as a provider block by hand (scripts/e2e/claude-backend-tmux.sh takes the
+    # same variable for the same reason).
+    [ -z "${LEGION_E2E_MODEL_BASE_URL:-}" ] || base=(--base-url "$LEGION_E2E_MODEL_BASE_URL")
     bash "$co/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$dir/home" --dest "$dir/key" \
-      --key-dir "$dir/model-key" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" || {
+      --key-dir "$dir/model-key" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" "${base[@]}" || {
       rm -rf "$dir/model-key"
       return 1
     }
