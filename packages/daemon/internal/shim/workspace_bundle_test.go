@@ -138,11 +138,19 @@ func jjGit(t *testing.T, dir string, args ...string) string {
 	return workspaceCommand(t, dir, append([]string{"git"}, args...))
 }
 
+// workspaceCommand runs one jj or git of a fixture's workspace under the same isolated
+// environment the rest of this package's fixtures use (fixtureenv.Isolated, as shim_test.go's
+// jjAs does), so no command of a test reads the git or jj configuration, the credentials or the
+// LEGION_ variables of whoever runs the tests — in a pod, of the role whose live workspace this
+// binary stands in. The home is a directory of the fixture's own, so each fixture's
+// configuration is its own, and the tester identity is appended after Isolated's, which is what
+// makes the commits this package asserts on.
 func workspaceCommand(t *testing.T, dir string, args []string) string {
 	t.Helper()
 	command := exec.Command(args[0], args[1:]...)
 	command.Dir = dir
-	command.Env = append(os.Environ(), "JJ_USER=tester", "JJ_EMAIL=tester@example.test",
+	command.Env = append(fixtureenv.Isolated(filepath.Join(dir, ".fixture-home")),
+		"JJ_USER=tester", "JJ_EMAIL=tester@example.test",
 		"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.test",
 		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test")
 	output, err := command.CombinedOutput()

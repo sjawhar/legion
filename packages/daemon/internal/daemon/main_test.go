@@ -18,11 +18,13 @@ import (
 // launcher re-enters as TestIdleRigRoleProcess (idle_rig_pod_test.go) with the environment a role
 // of an issue pod is given: LEGION_IDLE_RIG_URL names the rig to serve, and LEGION_SANDBOX,
 // LEGION_ISSUE, LEGION_ROLE and LEGION_DAEMON_URL say which role of which issue it is. Guard takes
-// every LEGION_* variable out, so guarding that child would leave it naming no rig at all: it
+// every LEGION_* variable out, so guarding that run would leave the child naming no rig at all: it
 // would return from its test, print PASS and exit 0, and the daemon would read every one of its
-// roles as a process that died at once. So the branch where this binary runs as a helper child
-// comes first, which is the contract Guard's own doc states — "that child keeps the variables its
-// test hands it" — and the child runs no git or jj of its own.
+// roles as a process that died at once. So the child's run is told apart by that variable and
+// skips the guard, keeping what its launcher handed it, which is what Guard's own doc asks for a
+// helper child ("that child keeps the variables its test hands it"); it runs no git or jj of its
+// own, and goes on into m.Run as any other run of this binary does, where the one test it names
+// serves the rig.
 func TestMain(m *testing.M) {
 	if os.Getenv(idleRigURLVariable) == "" {
 		if err := fixtureenv.Guard("LEGION_KEPT_PROPERTY_SEED"); err != nil {

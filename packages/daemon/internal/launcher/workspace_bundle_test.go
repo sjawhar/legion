@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
@@ -340,23 +341,22 @@ func newBundleFixture(t *testing.T) *bundleFixture {
 		}
 	}
 	root := t.TempDir()
-	// The host's own jj and git configuration (its user, its trailers, its filters) must not
-	// reach the fixture.
-	config := filepath.Join(root, "jj.toml")
-	if err := os.WriteFile(config, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// Neither the workspace, the configuration, the remote nor the credential of the process that
+	// runs the tests reaches the fixture's git and jj: its environment is fixtureenv.Isolated of
+	// a home of this test's own, which holds none of the host's jj and git configuration — its
+	// user, its trailers, its filters — and the identity below is the fixture's own
+	// (docs/testing.md).
+	home := filepath.Join(root, "home")
 	f := &bundleFixture{
 		t: t, root: root, remote: filepath.Join(root, "remote"), clone: filepath.Join(root, "clone"), ws: filepath.Join(root, "ws"),
 		commits: map[string]string{},
-		env: append(os.Environ(),
-			"JJ_CONFIG="+config, "JJ_USER=tester", "JJ_EMAIL=tester@example.test",
+		env: append(fixtureenv.Isolated(home),
+			"JJ_USER=tester", "JJ_EMAIL=tester@example.test",
 			"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.test",
-			"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test",
-			"GIT_CONFIG_GLOBAL="+filepath.Join(root, "gitconfig"), "GIT_CONFIG_SYSTEM="+filepath.Join(root, "gitconfig")),
+			"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test"),
 	}
 	seed := filepath.Join(root, "seed")
-	for _, dir := range []string{f.remote, seed} {
+	for _, dir := range []string{f.remote, seed, home} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
