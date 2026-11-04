@@ -636,7 +636,7 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		VMServicesByAccount: cfg.VMServicesByAccount,
 		VMProjects:          cfg.VMProjects,
 		VMInstancePatterns:  cfg.VMInstancePatterns,
-		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
+		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -697,14 +697,13 @@ func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 	return oidc.NewKeys(discovery, issuer)
 }
 
-// kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets
-// and the Google login minter for google-login ones. Its arguments are the production minters in
-// newRequestMachine; a test passes ones aimed at its own endpoints, so wiring a kind to the wrong
-// minter fails it.
-func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) map[string]requests.Minter {
+// kindMinters is the broker's minter for each kind. Its arguments are the production minters in
+// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin, azureLogin secrets.AzureLogin) map[string]requests.Minter {
 	return map[string]requests.Minter{
 		policy.KindGitHubApp:   githubApp.Mint,
 		policy.KindGoogleLogin: googleLogin.Mint,
+		policy.KindAzureLogin:  azureLogin.Mint,
 	}
 }
 

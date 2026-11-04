@@ -1,7 +1,7 @@
 // packages/envoy/internal/broker/config/config.go
 // Package config reads the broker's BROKER_* environment. A missing required variable, an
-// unreadable or empty _FILE, a value out of range or of the wrong form, or a removed variable
-// refuses to start naming the variable.
+// unreadable or empty startup credential file, a value out of range or of the wrong form, or a
+// removed variable refuses to start naming the variable.
 //
 // Each Config field's doc comment opens with the variables it reads and a colon; the broker's
 // generated configuration reference (cmd/broker-refgen) is built from those comments
@@ -126,6 +126,21 @@ type Config struct {
 	// with automatic replication takes a global key). A secret under the prefix encrypted with any
 	// other key, the provider's default one included, is refused.
 	SecretsKMSKey string
+	// BROKER_AZURE_TOKEN_FILE: the path of the broker pod's projected ServiceAccount token for
+	// azure-login releases, default /var/run/secrets/azure/tokens/azure-identity-token. Read only
+	// on release, not at boot, and read anew each time so the rotated token is used. The token's
+	// exp claim supplies the released expires_at; an unreadable, malformed or expired token
+	// refuses that release. Mount the projection read-only in the broker container alone, with
+	// audience api://AzureADTokenExchange and a one-hour lifetime. Only one Entra identity may
+	// trust this ServiceAccount subject: a released token can sign in to any identity that does.
+	AzureTokenFile string
+	// BROKER_AZURE_LOGIN_SECRET: the one agent-secret name allowed to release the broker's Azure
+	// projected token, for example AZURE_LOGIN. Empty (the default) disables azure-login
+	// releases. Must be an uppercase agent-secret name, not its store id or slug. That secret
+	// must be human tier in the policy snapshot checked for each release, with a person's
+	// approval recorded for that name in its grant. Another secret with kind=azure-login,
+	// the named secret retagged to agent tier, or an automatic grant releases no token.
+	AzureLoginSecret string
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
@@ -716,11 +731,18 @@ func Load(getenv func(string) string) (Config, error) {
 		MachineLoginURL:    getenv("BROKER_MACHINE_LOGIN_URL"),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
+		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
+		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
 		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
+	}
+	if cfg.AzureLoginSecret != "" {
+		if _, err := policy.NameToSlug(cfg.AzureLoginSecret); err != nil {
+			return Config{}, fmt.Errorf("BROKER_AZURE_LOGIN_SECRET: %w", err)
+		}
 	}
 	if cfg.SecretsStore != secrets.StoreAWS && cfg.SecretsStore != secrets.StoreGCP {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_STORE must be %s or %s, got %q", secrets.StoreAWS, secrets.StoreGCP, cfg.SecretsStore)
