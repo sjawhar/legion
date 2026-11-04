@@ -61,10 +61,12 @@ type subscribeDelivery struct {
 
 // subscribeResume is a session's resume point: the stream's identity (bus.StreamIDMetadataKey) and
 // a sequence below which the plugin holds nothing unwritten, so a consumer created from it starts at
-// Seq+1 when StreamID is still the stream's.
+// Seq+1 when StreamID is still the stream's. A Seq of 0 is a position too: the plugin holds nothing
+// of the stream, and its consumer starts at sequence 1. Seq is nil when the body carries no seq,
+// which names no position, so the consumer starts at the stream's end.
 type subscribeResume struct {
-	StreamID string `json:"stream_id"`
-	Seq      uint64 `json:"seq"`
+	StreamID string  `json:"stream_id"`
+	Seq      *uint64 `json:"seq"`
 }
 
 // sessionEntryFromSubscribe is the session entry a registration writes: the body's fields, the

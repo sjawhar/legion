@@ -20,7 +20,8 @@ import (
 // another shape (CONCURRENTLY, batches), which is what the refusal forces. One constant, no
 // per-migration override; raising it is a reviewed edit when a real table crosses it. The one
 // exemption is by statement kind, not by migration: a migration made only of statements that
-// change the catalog and read no row (catalogOnlyStatements, as Postgres's own parser reads them)
+// change the catalog or the transaction's own settings and read no row (catalogOnlyStatements,
+// as Postgres's own parser reads them)
 // holds its lock for a time that does not grow with the table, so the limit does not apply to it;
 // its table's size is still read and reported, and its lock holders still refuse it. Census does
 // not count the rows of a table above the limit: the refusal is already decided, or the migration
@@ -979,7 +980,7 @@ func (r *Report) Write(w io.Writer) {
 				fmt.Fprintf(w, "census: %s touches %s: %s; locks held by other sessions: %s\n", name, touches, humanBytes(table.Bytes), holders)
 			case table.Bytes > r.TableLimit && entry.TableSizeExemption != "":
 				size, limit := sizesAbove(table.Bytes, r.TableLimit)
-				fmt.Fprintf(w, "census: %s touches %s: %s, above the %s limit, from which the migration is exempt because its statements are only %s, which change the catalog and read no row, so its rows were not counted; locks held by other sessions: %s\n",
+				fmt.Fprintf(w, "census: %s touches %s: %s, above the %s limit, from which the migration is exempt because its statements are only %s, which change the catalog or the transaction's own settings and read no row, so its rows were not counted; locks held by other sessions: %s\n",
 					name, touches, size, limit, entry.TableSizeExemption, holders)
 			case table.Bytes > r.TableLimit:
 				size, limit := sizesAbove(table.Bytes, r.TableLimit)
