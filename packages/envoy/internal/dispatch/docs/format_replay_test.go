@@ -68,6 +68,7 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	browserFragment := browser.GetXmlFragment(fragmentName)
 	var browserText *crdt.YXmlText
 	cleanups := 0
+	localCleanups := 0
 	browserCommit := func(change func(*crdt.Transaction)) {
 		t.Helper()
 		before := browser.StateVector()
@@ -83,6 +84,12 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 				}
 			})
 			defer unsubscribe()
+			unsubscribeTransactions := doc.OnAfterTransaction(func(txn *crdt.Transaction) {
+				if txn.Local {
+					localCleanups++
+				}
+			})
+			defer unsubscribeTransactions()
 			if err := crdt.ApplyUpdateV1(doc, update, origin); err != nil {
 				t.Errorf("apply the browser's update: %v", err)
 			}
@@ -103,6 +110,9 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	if cleanups != 0 {
 		t.Fatalf("the room made %d cleanup commit(s) after the browser's local cleanup, want none", cleanups)
 	}
+	if localCleanups == 0 {
+		t.Fatal("the initial room ran no local format cleanup transaction after the browser's updates")
+	}
 
 	want := roomMarkdown(t, service, artifactID)
 	if got, err := service.Text(ctx, artifactID); err != nil || got != want {
@@ -122,6 +132,7 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	// apply returned (bootstrapLoadedState). The browser has already cleaned these local deletes,
 	// so the room still makes no cleanup commit.
 	cleanups = 0
+	localCleanups = 0
 	browserCommit(func(txn *crdt.Transaction) {
 		paragraph := crdt.NewYXmlElement("paragraph")
 		browserFragment.InsertElement(txn, browserFragment.Len(), paragraph)
@@ -133,6 +144,9 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	})
 	if cleanups != 0 {
 		t.Fatalf("the reloaded room made %d cleanup commit(s) after the browser's local cleanup, want none", cleanups)
+	}
+	if localCleanups == 0 {
+		t.Fatal("the reloaded room ran no local format cleanup transaction; its load left cleanup disabled")
 	}
 }
 

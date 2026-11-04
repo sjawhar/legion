@@ -2589,10 +2589,10 @@ func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
 // room as failed. Tests, including those in package api, call it to force a room to reload. It
 // checks nothing about the room: the service's own closes of a room behind the durable head go
 // through closeRoomBehindHead and reloadRoomBehindHead, which reserve the room first
-// (reserveRoomCloseLocked) and close the instance they checked (closeRoomInstance). A room a
-// caller is inside is closed once that caller has left, or left open, with ctx's error, when ctx
-// ends first; a caller whose ctx has already ended closes nothing. A caller inside its own Apply
-// on the room must not call it, since it would wait for itself.
+// (reserveRoomCloseLocked) and close the instance they checked (closeRoomInstance). ctx bounds
+// retries while a caller is inside the room; it cannot interrupt ygo's close once one starts,
+// including its wait for a room to finish loading. A caller whose ctx has already ended closes
+// nothing. A caller inside its own Apply on the room must not call it, since it would wait for itself.
 func (s *Service) Evict(ctx context.Context, artifactID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -2651,9 +2651,10 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 	return state
 }
 
-// evictRoom closes room and then settles what becomes of its record. A failed room's record has to
-// go, since it carries the failure (handOverFailedRoomLocked); any other is kept while anything
-// holds it and forgotten when nothing does, as any record whose room has gone is (unlockState).
+// evictRoom closes room and then settles what becomes of its record. Once the close succeeds, a
+// failed room's record has to go, since it carries the failure (handOverFailedRoomLocked); any other
+// is kept while anything holds it and forgotten when nothing does (unlockState). A close error
+// leaves the record in place, including a failure whose own eviction still has to close the room.
 //
 // ygo takes the closed room out of its map before CloseRoom returns, so a browser that opens the
 // document while the close runs registers on this record (authorize registers it before its room
@@ -2662,15 +2663,18 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 // person's keystrokes were credited to nobody, the document forgot its issue was closed, and the
 // settlement the new load armed was left to a timer that found its record gone (INFRA-352).
 //
-// A room a caller is inside is closed once that caller has left (roomServer.closeRoom), bounded by
-// ctx.
+// ctx bounds retries while a caller is inside the room, but cannot interrupt a ygo close once
+// started (roomServer.closeRoom).
 func (s *Service) evictRoom(ctx context.Context, room string, state *roomState) error {
 	return s.forgetEvicted(room, state, s.srv.closeRoom(ctx, room, true))
 }
 
-// forgetEvicted is an eviction's end once its close has returned err: it settles state, the
-// closed room's record, and reports a close that failed, a room that had already gone being none.
+// forgetEvicted settles state only after a successful close or confirmation that the room has
+// already gone. A failed close keeps the room's record and reports the error.
 func (s *Service) forgetEvicted(room string, state *roomState, err error) error {
+	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+		return fmt.Errorf("evict live document: %w", err)
+	}
 	// Close first, then settle the state: the close's flush-before-evict consults the state's
 	// persistence-suppression slot, so a state removed before the close would let a failed
 	// settlement's discarded identity update reach the store. A settlement armed on this
@@ -2688,9 +2692,6 @@ func (s *Service) forgetEvicted(room string, state *roomState, err error) error 
 			}
 		}
 		state.mu.Unlock()
-	}
-	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
-		return fmt.Errorf("evict live document: %w", err)
 	}
 	return nil
 }

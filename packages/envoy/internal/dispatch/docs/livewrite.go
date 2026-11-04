@@ -508,6 +508,7 @@ func (s *Service) warmFork(write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) 
 	if err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}
+	write.clientID = fork.ClientID()
 	// The instance once, rather than its hold and its cursor looked up one after the other: the
 	// two are halves of one *roomInstance, and a room evicted between the lookups would leave the
 	// write a hold from the gone instance beside a nil cursor, a split the gate is not written
@@ -557,6 +558,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 		s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
+	write.clientID = fork.ClientID()
 	// The zero point: no cursor, so no gate. The gate is about a room (refuseRoomBehindHead), and
 	// this write holds none. Its update is a Yjs update, which commutes with whatever its room
 	// takes before the publish, and the room that loads after its publish reads the store, which

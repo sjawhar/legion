@@ -60,8 +60,9 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.closeRoom(context.Background(), room, force)
 }
 
-// closeRoom is CloseRoom bounded by ctx: a room still in use when ctx ends is left open, and a
-// caller whose ctx has ended closes nothing; both answer ctx's error.
+// closeRoom checks ctx before attempting a close and while retrying a room still in use. Once
+// ygo's CloseRoom starts, ctx cannot interrupt it: loading, peer teardown and persistence drain
+// can keep it blocked, and the room can close after ctx ends.
 func (r *roomServer) closeRoom(ctx context.Context, room string, force bool) error {
 	return r.closeWhenFree(ctx, room, func() error { return r.Server.CloseRoom(room, force) })
 }
@@ -76,11 +77,11 @@ const (
 )
 
 // closeWhenFree runs try, a close of room, holding room's gate exclusively, until try answers
-// anything but websocket.ErrRoomInUse or ctx ends. A cancelled caller closes nothing, even when
-// the room is free by the time it reaches the gate. It lets go of the gate between tries, so the
-// callers it waits for are not held behind it: a close of the service's own made from inside an
-// Apply on the room (closeInstance) waits for that gate, and a repair refuses to start while a
-// close holds it.
+// anything but websocket.ErrRoomInUse or ctx ends between attempts. It checks ctx after taking
+// the gate, but cannot cancel the gate lock or try itself. It lets go of the gate between tries,
+// so the callers it waits for are not held behind it: a close of the service's own made from
+// inside an Apply on the room (closeInstance) waits for that gate, and a repair refuses to start
+// while a close holds it.
 func (r *roomServer) closeWhenFree(ctx context.Context, room string, try func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err

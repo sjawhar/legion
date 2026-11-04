@@ -361,11 +361,50 @@ func (sh *renderShadow) observedWithoutUpdate(room *shadowRoom, log *crdt.Update
 	for _, candidate := range room.updates {
 		if candidate.parkedOnly && candidate.observed == 0 {
 			candidate.observed++
+			if state := sh.service.lockExistingState(sh.artifactID); state != nil {
+				for _, class := range state.updateClasses {
+					if bytes.Equal(class.update, candidate.update) {
+						candidate.classes++
+						candidate.class = class.contentChanged
+					}
+				}
+				sh.service.unlockState(sh.artifactID, state)
+			}
 			observed = true
 		}
 	}
 	if observed {
 		sh.alignLocked(room, log, replica)
+	}
+}
+
+func TestTheRenderShadowReadsClassesForAParkedOnlyCommit(t *testing.T) {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("pending")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	before := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " later", nil) })
+	roomDoc := newDocumentCopy()
+	log := roomDoc.OpenUpdateLog()
+	if err := crdt.ApplyUpdateV1(roomDoc, crdt.EncodeStateAsUpdateV1(writer, before), nil); err != nil {
+		t.Fatal(err)
+	}
+	if roomDoc.PendingStats().Items == 0 {
+		t.Fatal("the fixture did not park an update")
+	}
+	service := &Service{srv: newRoomServer(ygws.NewServer())}
+	state := newRoomState()
+	state.unsettled = true
+	state.updateClasses = append(state.updateClasses, &queuedClass{documentUpdateClass: documentUpdateClass{update: emptyUpdateV1}})
+	service.rooms.Store("r", state)
+	shadow := &renderShadow{service: service, artifactID: "r"}
+	room := &shadowRoom{}
+	shadow.observedWithoutUpdate(room, log, &renderedReplica{})
+	if len(room.updates) != 1 || !room.updates[0].parkedOnly {
+		t.Fatalf("shadow updates = %+v, want one parked-only commit", room.updates)
+	}
+	if got := room.updates[0].classes; got != 1 {
+		t.Fatalf("shadow observed %d classes, want the deliberately queued class", got)
 	}
 }
 

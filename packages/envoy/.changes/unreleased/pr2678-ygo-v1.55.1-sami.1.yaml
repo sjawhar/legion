@@ -7,11 +7,13 @@ body: |-
     for it instead of holding memory without bound; a room is no longer closed while a write, a
     read or a browser's join is inside it, so closing an issue, evicting a room or shutting down
     waits for them and then closes it; and a browser's edit that reaches the server ahead of the
-    edit it builds on is stored at once, so a restart before that earlier edit arrives no longer
-    loses it. The stored-order check accepts a stored parked edit that a later update carries
-    again, and counts an edit still waiting for its predecessor as awaiting instead of a
-    mismatch. A rebuilt write fork reads its client ID again after replay, so a later edit
-    still gets the lost-write check when a replay changes that ID.
+    edit it builds on is stored at once, even when the update then fails, so a restart before
+    that earlier edit arrives no longer loses it. The stored-order check judges each parked row
+    independently: a later update that carries it again is accepted, a resolved row not carried
+    again is a mismatch even while unrelated edits still wait, and an unresolved row counts as
+    awaiting. Only a row whose omission changes replay is reported, including parked content.
+    Every write fork reads its client ID after decoding its history, so inserted text still gets
+    the lost-write check when that decode changes the ID.
 time: 2026-11-02T14:00:00.000000000Z
 custom:
     Issue: pr2678

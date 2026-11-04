@@ -1768,6 +1768,13 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 	pair := newProcessPair(t)
 	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	const goneAsk = "ask-block-the-document-does-not-hold"
+	state := pair.taskA.lockState(pair.artifactID)
+	if state.askAuthors == nil {
+		state.askAuthors = make(map[string]model.Actor)
+	}
+	state.askAuthors[goneAsk] = alice
+	pair.taskA.unlockState(pair.artifactID, state)
 	var cold bool
 	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
 		if _, err := pair.taskA.ReplaceText(ctx, pair.artifactID, "First.\n", alice); err != nil {
@@ -1793,6 +1800,12 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
 	if strings.Contains(fresh, "Second.") {
 		t.Fatalf("the room after the publishes = %q, want the text edit's deletion of \"Second.\"", fresh)
+	}
+	state = pair.taskA.lockState(pair.artifactID)
+	_, remembered := state.askAuthors[goneAsk]
+	pair.taskA.unlockState(pair.artifactID, state)
+	if remembered {
+		t.Error("the ask-block observer retained an author for a block absent from the edited room")
 	}
 	if kept != fresh {
 		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)

@@ -154,6 +154,12 @@ func TestARoomWhosePeersUpdatesReachItsPersistenceOutOfOrderSettlesBoth(t *testi
 // pending. The replica applies Update then Parked, so a replica rebuilt from the log alone holds
 // everything the live room holds.
 func TestARoomsParkedOnlyCommitIsStoredAndReplaysFromItsLog(t *testing.T) {
+	t.Run("valid", func(t *testing.T) { parkedOnlyCommitSurvivesReload(t, false) })
+	t.Run("truncated_delete_set", func(t *testing.T) { parkedOnlyCommitSurvivesReload(t, true) })
+}
+
+func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
+	t.Helper()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -176,6 +182,9 @@ func TestARoomsParkedOnlyCommitIsStoredAndReplaysFromItsLog(t *testing.T) {
 	atBase := writer.StateVector()
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " later", nil) })
 	parked := crdt.EncodeStateAsUpdateV1(writer, atBase)
+	if truncated {
+		parked = append(append([]byte(nil), parked[:len(parked)-1]...), 1, 42)
+	}
 
 	var updates atomic.Int64
 	room.OnUpdate(func([]byte, any) { updates.Add(1) })

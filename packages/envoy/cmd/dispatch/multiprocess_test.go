@@ -2292,7 +2292,7 @@ func TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther(t *testing.T) {
 	pair.a.createProject(t, project, "Documents")
 	_, artifactID := pair.a.createIssueIn(t, project, "Open here, written there", "before")
 
-	editor := pair.a.openEditor(t, artifactID, "before\n")
+	editor := openSyncedEditor(t, pair, artifactID, "before\n")
 	wrote := time.Now()
 	pair.b.call(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits",
 		`{"ops":[{"op":"replace","find":"before","with":"after"}]}`, http.StatusOK)
@@ -2344,6 +2344,18 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	return head
 }
 
+// openSyncedEditor checks that a tab's no-op sync leaves the durable head unchanged, so only
+// the subsequent write can leave its room behind the store.
+func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
+	t.Helper()
+	before := storedHead(t, pair, artifactID)
+	editor := pair.a.openEditor(t, artifactID, want)
+	if head := storedHead(t, pair, artifactID); head != before {
+		t.Fatalf("the durable head moved from %d to %d during a tab's no-op sync", before, head)
+	}
+	return editor
+}
+
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
 // client is told to. A write whose own room is failed or reloading is answered
 // 503 DOC_SERVICE_UNAVAILABLE, and the contract is that the caller repeats the same call
@@ -2393,7 +2405,7 @@ const staleRoomEvictInterval = 2 * time.Second
 // way once.
 func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string) (*docstest.Peer, time.Time) {
 	t.Helper()
-	editor := pair.a.openEditor(t, artifactID, "before\n")
+	editor := openSyncedEditor(t, pair, artifactID, "before\n")
 	writeThroughRetrying503s(t, pair.b, artifactID, "before", "middle")
 	var evicted time.Time
 	select {
@@ -2430,7 +2442,7 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	// removal of the room, where the dial is refused: a real browser's reconnect has the same
 	// window, and the row then fails at its open, naming the refusal, rather than passing on
 	// something it did not measure.
-	reconnected := pair.a.openEditor(t, artifactID, "middle\n")
+	reconnected := openSyncedEditor(t, pair, artifactID, "middle\n")
 	// The eviction's own line is written after the room has closed, so it is waited for rather
 	// than read the moment the socket went.
 	pair.a.waitForLog(t, 10*time.Second,

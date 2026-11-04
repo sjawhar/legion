@@ -722,12 +722,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 // loop, which holds no lock of the service's, so it can wait for the document's lock the store
 // takes; an OnUpdate observer cannot, since it runs on the goroutine that committed, which can be
 // a settlement holding that lock.
+// An unbounded apply can fail after parking bytes, so its error does not skip the durable append.
 func (s *Service) onPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
-	if err := apply(); err != nil {
-		return err
-	}
+	err := apply()
 	s.storeParked(info.Room)
-	return nil
+	return err
 }
 
 // observeRoomUpdates drains replica's log and arms the settlement the drained updates owe. It runs

@@ -139,8 +139,8 @@ require (
 // request. Thirteen wait in open upstream pull requests: pre-integration refusals change nothing,
 // and a partly applied update relays the bytes the room integrated and parked (#340, which
 // replaces #334, #341, #344, #345, #352, #356 and #357); when a non-local transaction advances a
-// document's own client clock, the document takes a new client ID at commit, so rebuildFork
-// reads that ID again (#340, breaking);
+// document's own client clock, the document takes a new client ID at commit, so every write fork
+// reads that ID after decoding its history (#340, breaking);
 // peer memory is bounded and dead peers close - a per-peer write queue byte budget
 // (Server.PeerWriteQueueBytes, which the document service sets), a failed write or a server close
 // ends the peer and drops its unread input, a joining peer gets the room's state once, and a room
