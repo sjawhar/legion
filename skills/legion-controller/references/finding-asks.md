@@ -40,15 +40,17 @@ The work goes to whoever already owns that code. You file an issue only when nob
    repository your addressing line lists. Otherwise open an ask for it, as `findings.md` says.
 2. Search first (`skill://dispatch-first`). When an open issue tracks it, comment the evidence
    there, reply `Filed dispatch://<that KEY>` under the evidence, and file nothing.
-3. Find the running tree whose code it is: a root in `admission.active` whose repository and
-   component match, read from `read_state` and `dispatch read`. When one matches, hand it over.
+3. Find the running tree whose code it is: a root in `admission.trees`, the live trees, whose
+   repository and component match, read from `read_state` and `dispatch read`. Read it there
+   rather than in `admission.active`, which holds the issues at work: a tree runs whether or not
+   any issue of it holds a slot. When one matches, hand it over.
    `envoy_publish` the defect, its evidence reference and the fix to that tree's architect topic,
    `notifications.role.<issues.<KEY>.architect.locator.claim>`. The architect decides whether it
    is a child of the tree or part of an open issue's work. Reply `Handed dispatch://<that KEY>`
    under the evidence only when the publish names a holder. When the root has no locator, or the
    publish answers no holder, reply nothing: no architect reads a comment on its root, so the
    evidence stays unhandled, and catch-up step 4 lists it again at your next start. Publish it
-   again at your next wake. Once the root leaves `admission.active`, no running tree owns the
+   again at your next wake. Once the root leaves `admission.trees`, no running tree owns the
    code, and step 4 files it. File nothing while a tree owns it: a second issue splits the work.
 4. No running tree owns that code: file it on the repository where the fix belongs, in the
    project that repository maps to:

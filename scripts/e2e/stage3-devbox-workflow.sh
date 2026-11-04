@@ -349,12 +349,21 @@ stop_dispatch() {
 issue_worker_pane() {
   daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.locator.tmux.pane'
 }
-# The state projection intentionally omits the internal tree key; the record itself is the
-# observable source for this admission invariant.
-child_is_slotless() {
+# A slot is one issue with work, not one tree (dispatch://INFRA-980), so a child takes a slot of
+# its own once its first phase starts. This child cannot start yet: its tree's design gate has
+# never opened, so it stands at admitted, holds no slot and is in no line, while the cap's two
+# slots stay with the two roots whose architects write their specs. admission.trees names its
+# tree, never the child, and the state's own `tree` field puts the child in that tree; the
+# daemon's record is read too, as the durable source of the same fact.
+child_waits_in_its_tree_without_a_slot() {
   local child=$1 root_issue_key=$2 tree
-  daemon_state | jq -e --arg child "$child" \
-    '(.admission.active | length) == 2 and .issues[$child].key == $child and .issues[$child].phase == "admitted" and .issues[$child].slot == null' >/dev/null || return 1
+  daemon_state | jq -e --arg child "$child" --arg root "$root_issue_key" \
+    '(.admission.active | length) == 2 and ((.admission.active | index($child)) == null)
+       and ((.admission.waiting | index($child)) == null)
+       and ((.admission.trees | index($root)) != null)
+       and ((.admission.trees | index($child)) == null)
+       and .issues[$child].key == $child and .issues[$child].phase == "admitted"
+       and .issues[$child].slot == null and .issues[$child].tree == $root' >/dev/null || return 1
   tree=$(docker exec "$pg_container" psql -U legion -d legion -tAc "select tree from issues where key = '$child'")
   [ "$tree" = "$root_issue_key" ]
 }
@@ -808,13 +817,14 @@ until_true 180 "two roots admitted and two waiting in Dispatch rank order" sh -c
 child_issue=$(new_issue "Dependent admission leaf" "$root_issue")
 set_status "$child_issue" todo
 timeout_hook=admission_diagnostics
-until_true 120 "the child to join its first tree without taking a slot" child_is_slotless "$child_issue" "$root_issue"
+until_true 120 "the child to join its first tree and wait there with no slot of its own" child_waits_in_its_tree_without_a_slot "$child_issue" "$root_issue"
 timeout_hook=
 state_file admission
-note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); child $child_issue remains slotless under $root_issue"
-# The slotless check is everything this child was filed for, so the proof human takes it out of
-# the workflow at once: a child still in the workflow would keep the first root's close waiting
-# after its merge, and the first root is accepted below, in retro-handoff.
+note "issues holding a slot: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); live trees: $(jq -c .admission.trees "$evidence/admission.json"); child $child_issue stands in $root_issue's tree with no slot of its own"
+# This child was filed for the slot check alone, so the proof human takes it out of the workflow
+# at once: an open child under the first root would hold that root's own first phase
+# (children-first), refuse its sign-off while the child is in the workflow, and keep its close
+# waiting after its merge. The first root is accepted below, in retro-handoff.
 set_status "$child_issue" backlog
 until_true 300 "$child_issue to leave the workflow" issue_phase "$child_issue" "done"
 note "the proof human parked $child_issue (backlog): it takes no further turns and holds no issue above it"
@@ -839,7 +849,7 @@ primary_issue() {
   # the root left at registration went to a waiting root (no-change, restart), and the approved root
   # takes one back only once one of those registers its own gate in turn: the bound is twice
   # architect_registers_gate's 900 s for that registration. admission_cap stays 2: admission order
-  # and the slotless child above are proved against it, and every root of the run gives its slot
+  # and the child that stands in its tree with no slot of its own are proved against it, and every root of the run gives its slot
   # back at its registration, so the slot always comes back within that bound.
   drive_gate "$root_issue" "Stage 3 proof gate operation" 1800
   artifact_id=$gate_artifact

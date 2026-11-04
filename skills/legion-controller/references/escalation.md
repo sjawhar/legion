@@ -9,8 +9,10 @@ it as a decision block and opens its own finding asks. Send a design decision ba
 architect with `envoy_publish` to its role, because it is not yours to make.
 
 For capacity, the only lever is order. You cannot change `admission.cap`: it is the operator's
-`legion.yaml` setting, and `set_status` is your only admission move. Read `admission.active` and
-`admission.waiting`, tell the architect its root's place in the line with `envoy_publish`, and
+`legion.yaml` setting, and `set_status` is your only admission move. The cap counts issues at
+work, a root or a child, not trees, so a tree's own children compete for it with every other
+tree's. Read `admission.active`, `admission.waiting` and `admission.trees`, tell the architect
+where its tree's issues stand in the line with `envoy_publish`, and
 open a finding ask when the deployment needs a larger cap.
 
 For a conflict between trees, read both roots in `read_state` and Dispatch, publish what you read

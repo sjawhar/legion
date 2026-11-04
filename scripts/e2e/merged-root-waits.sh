@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# The live proof that the daemon keeps a tree's order at the close: a root is accepted while a child
-# beneath it is still in the workflow, and its merged close waits for the rest of its tree instead
-# of lingering it mid-turn. The whole daemon is booted by the function `legion start`
-# calls, over a real PostgreSQL and a real nats-server, and driven only through the GitHub and
-# Dispatch envelopes of the ENVOY_NOTIFICATIONS stream and its own HTTP routes; every step is read
-# back from GET /legion/v1/state and from what the daemon posted to the Dispatch and Envoy
-# stand-ins (packages/daemon/internal/daemon/merged_root_waits_live_test.go, which this script
-# builds with `-tags e2e`). Each check prints `== <name>`, what it observed and `ok <name>`; the
-# first that fails ends the run non-zero, naming it.
+# The live proof that the daemon keeps a tree's order at the close: a parent is accepted only once
+# nothing beneath it is in the workflow, so the child is taken out of the workflow with park_child
+# before the root's sign-off is accepted — one sent while the child was still in the workflow is
+# refused SIGNOFF_CHILD_IN_WORKFLOW, naming the child — and a root whose own pull request has
+# merged while an issue of its tree is still in the workflow waits in `awaiting_merge`, its
+# workers live and no admission slot held, instead of lingering the tree mid-turn: its close comes
+# when the last of them is done or parked. That merged root's wait is driven from a state the
+# driver seeds, the shape a deploy of this release meets, since the sign-off refusal above leaves
+# a tree that starts after it no route to the wait. The whole daemon is booted by the function
+# `legion start` calls, over a real PostgreSQL and a real nats-server, and driven only through the
+# GitHub and Dispatch envelopes of the ENVOY_NOTIFICATIONS stream and its own HTTP routes; every
+# step is read back from GET /legion/v1/state and from what the daemon posted to the Dispatch and
+# Envoy stand-ins (packages/daemon/internal/daemon/merged_root_waits_live_test.go, which this
+# script builds with `-tags e2e`). Each check prints `== <name>`, what it observed and `ok
+# <name>`; the first that fails ends the run non-zero, naming it.
 #
 # Run it from a checkout on a Linux host with go and awk, as
 #   LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \

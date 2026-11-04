@@ -119,8 +119,9 @@ reviewing until you finish.
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
   tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines and the reviewer's
-  approval of the head by SHA; the daemon lets no child hold it; a parent's waits for its last
-  round, `skill://legion-architect`, section 4) and accepts with the
+  approval of the head by SHA; the daemon refuses the sign-off while an issue beneath it is still
+  in the workflow, `SIGNOFF_CHILD_IN_WORKFLOW`, so a parent is accepted after its children, on
+  the head of its last round, `skill://legion-architect`, section 4) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The architect also reads the reviewer's own

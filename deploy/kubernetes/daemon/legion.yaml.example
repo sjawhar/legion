@@ -25,7 +25,7 @@ state_dir: ./state                     # the daemon's local state
 bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
-admission_cap: 4                       # trees running at once
+admission_cap: 4                       # issues running at once, roots and children alike
 controller: operator                   # who runs the controller: operator (legion controller start,
                                        # the default) or daemon (a pod this daemon launches and keeps;
                                        # under runtime: tmux, a pane in a window of its own)

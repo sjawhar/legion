@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  The worker's MCP server declares daemon API contract 47, whose state lists the issues that hold
+  an admission slot rather than the roots, names the live trees under `admission.trees`, and gives
+  each issue the root of its tree.

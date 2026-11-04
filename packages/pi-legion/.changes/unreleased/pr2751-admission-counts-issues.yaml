@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+  The `legion` tool's `sign_off` description says that the daemon refuses an acceptance while an
+  issue beneath the issue is still in the workflow (`SIGNOFF_CHILD_IN_WORKFLOW`, naming each one),
+  and names the remedy: take each one to done, or out of the workflow with `park_child`, and sign
+  off again.
+  The plugin declares daemon API contract 47, whose state lists the issues that hold an admission
+  slot rather than the roots, names the live trees under `admission.trees`, and gives each issue
+  the root of its tree.

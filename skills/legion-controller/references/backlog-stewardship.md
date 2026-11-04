@@ -18,9 +18,11 @@ Run this pass on the first turn of every UTC day and after every ruling from a p
 1. Read the weekly-planning issue and select its newest `plan-week-*` artifact by its latest
    `artifact.version` event. Read that artifact before changing any issue.
 2. For every plan line whose issue key carries this project's prefix (`daemon.project` in
-   `read_state`), make the project's board order match the line order exactly, because Legion
-   admits waiting roots by board rank alone. Set the priority the plan line states, and leave the
-   priority where it states none; priority changes no admission order. When one plan line lists
+   `read_state`), make the project's board order match the line order exactly, because board rank
+   is the order Legion admits by: an issue whose first phase can start takes the rank of its
+   tree's root, and an issue whose work came back goes ahead of all of them. Set the priority the
+   plan line states, and leave the priority where it states none; priority changes no admission
+   order. When one plan line lists
    several issues, keep them in that order. Take the order from the plan alone, never from a
    title or a route. Reorder with
    `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`.
@@ -81,8 +83,8 @@ For work that a ruling of a person's, recorded in the plan with its link (the ru
 above), says moves to Legion when its session stops, preserve its existing labels, add `legion`,
 then set it `todo` with the `legion` tool's `set_status`. A plan row you wrote with no such ruling
 behind it moves nothing. The label comes first: it is what
-lets the daemon admit the root. Do not apply that recovery to an issue already in an active Legion
-tree; its architect and daemon own its lifecycle. Update the weekly-plan owner row after the move.
+lets the daemon admit the root. Do not apply that recovery to an issue already in a live Legion
+tree (a root in `admission.trees`, or an issue whose `tree` is one); its architect and daemon own its lifecycle. Update the weekly-plan owner row after the move.
 
 ## A root the plan defers
 

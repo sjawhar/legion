@@ -33,8 +33,11 @@ questions, approve the spec, and review the pull request. Everything happens in
    its status to **`todo`**, or approve its spec: your approval queues it the same way.
 
 When a slot is free the daemon admits the issue and the status changes to `in_progress`; when
-every slot is taken, the issue waits in `todo` and takes the next free slot in the board's order. A
-label an agent session set on an issue in `triage` goes to the controller instead: the controller
+every slot is taken, the issue waits in `todo` and takes the next free slot in the board's order.
+A slot is one issue with work, a root or a child, so a tree of four working issues holds four of
+them, and an issue that only waits — for its merge, on a blocker, on its own children or on you —
+holds none while its agents stay live.
+A label an agent session set on an issue in `triage` goes to the controller instead: the controller
 decides whether to admit it, park it, or leave it for you.
 
 The controller never takes an issue on its own, whatever slots are free: Legion works what a person
@@ -46,7 +49,9 @@ or depends on the code. Otherwise the controller gives it to the tree that owns 
 needs a decision, the agent asks you in a Dispatch ask whether to file one, rather than filing it.
 Answer with `File it for Legion` and the controller files it labelled `legion`.
 
-Do not label child issues: a child runs under its tree once the root is admitted.
+Do not label child issues: a child runs under its tree once the root is admitted. The children do
+the work first: an issue starts no phase of its own while Dispatch shows an open child under it,
+so a parent's own pull request is built and merged after its children's.
 
 ## Ask Legion in Slack
 
@@ -137,8 +142,8 @@ The merge closes the issue: it moves to `done` the moment GitHub reports the pul
 A root with work still running beneath it is the exception: its merge is recorded and the issue
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
-it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
-not hold that acceptance, since the root's close waits for it. After the close the
+it, with a comment on the issue summarizing the evidence; the daemon refuses that acceptance while
+an issue beneath it is still being worked, so a parent is accepted after its children. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
 on the pull request's `Production:` line; a closed issue takes no further write, so look there.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
@@ -147,7 +152,7 @@ resumes.
 ## Stop, park or rerun
 
 - **To stop Legion working an issue**, move it to `backlog` (or `icebox`) from the Dispatch
-  dashboard. A person's move takes the tree out at once and its slot goes to the next issue; its
+  dashboard. A person's move takes the tree out at once and the slots its issues held go to the next issues in line; its
   agents stop, each once the turn it is in ends, however long that takes, so a turn already under
   way finishes what it was doing. To keep Legion off it for good, also take the `legion` label off;
   taking the label off alone does not stop a tree that has started.
@@ -168,7 +173,7 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `triage` | whoever files the issue | New. A person's `legion` label is queued by the daemon: the issue moves to `todo` itself. A label a session set goes to the controller, which decides whether to admit it now, park it, or leave it to you. |
 | `icebox` | a person or the controller | Parked for the long term. Legion does not run it. |
 | `backlog` | a person or the controller | Should not run now: it waits on a decision or a deploy. Legion does not run it. |
-| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree. |
+| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree, and waits in the same line for a slot of its own. |
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
