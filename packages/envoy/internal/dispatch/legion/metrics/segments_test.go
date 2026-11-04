@@ -47,7 +47,11 @@ var holdSegment = map[Segment]func(root, child *Issue){
 			observeString(legion.FieldPullRequestState, hour(2), "closed")
 	},
 	SegmentWaitingOnChildren: func(_, child *Issue) {
-		child.observeString(legion.FieldPhase, hour(1), "implementing").
+		// The child's own work time starts at its first worker event: a phase it is in before
+		// that one makes no root wait (the spec's "When a child makes its root wait on
+		// children"), so the child here starts working where its implementing phase opens.
+		child.worked("implementer", hour(1)).
+			observeString(legion.FieldPhase, hour(1), "implementing").
 			observeString(legion.FieldPhase, hour(2), "done")
 	},
 	SegmentIdle: func(_, _ *Issue) {},
@@ -197,5 +201,31 @@ func TestAnAskTurnEndsAtTheWaitTheDaemonRecordedAsAnswered(t *testing.T) {
 	bar := barOf(t, Compute(fixture(hour(-24), hour(24), root), ScopeAll, hour(24)), "implementer")
 	if bar.Segments.WaitingOnPerson != 1 || bar.Segments.Idle != 2 {
 		t.Fatalf("the bar is %+v, want the one hour to the answer and the rest idle", bar.Segments)
+	}
+}
+
+// TestAChildMakesItsRootWaitOnlyThroughItsOwnWorkTime: "A child counts as in a phase only during
+// its own work time, as work time to merge defines it: not while it is parked, back in the
+// queue, or before its first worker event" (the spec's "Rule details — When a child makes its
+// root wait on children"). The child below reads as `implementing` for eleven of its root's
+// twelve hours, and seven of them are its own work time: two run before its first worker event,
+// two in `backlog`, and one back in the queue. The root's five other hours are idle.
+func TestAChildMakesItsRootWaitOnlyThroughItsOwnWorkTime(t *testing.T) {
+	root := newIssue("INFRA-1").worked("planner", hour(0)).closedAt(hour(12)).
+		observeString(legion.FieldPhase, hour(0), "planning").
+		observeString(legion.FieldPhase, hour(12), "done")
+	child := newIssue("INFRA-2").under("INFRA-1").
+		worked("implementer", hour(2)).
+		statusAt(hour(4), "backlog").
+		statusAt(hour(6), "in_progress").
+		closedAt(hour(12)).
+		observeString(legion.FieldPhase, hour(0), "implementing").
+		observeString(legion.FieldPhase, hour(8), "admitted").
+		observeString(legion.FieldPhase, hour(9), "implementing").
+		observeString(legion.FieldPhase, hour(12), "done")
+	bar := barOf(t, Compute(fixture(hour(-24), hour(24), root, child), ScopeRoots, hour(24)), "planner")
+	if bar.Hours != 12 || bar.Segments.WaitingOnChildren != 7 || bar.Segments.Idle != 5 {
+		t.Fatalf("the root's planner bar = %g hours, %+v, want seven waiting on the child's own work time and five idle",
+			bar.Hours, bar.Segments)
 	}
 }

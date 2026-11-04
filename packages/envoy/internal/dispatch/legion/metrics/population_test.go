@@ -174,3 +174,66 @@ func TestADaemonsTreeFieldNamesTheRootWhereAReadCarriedOne(t *testing.T) {
 		t.Fatalf("INFRA-9's children = %v, want the issue whose tree it is", children)
 	}
 }
+
+// TestOnlyAnAskOpenedByASessionOfTheIssuesOwnTreeMakesItWaitOnAPerson: "An ask counts for an
+// issue when it is opened on that issue by any Legion session of the issue's tree, that is, a
+// session titled `Legion <role> · <KEY>` where KEY is any issue of the same tree, walked as for
+// splitting and follow-ups. An ask opened by a session outside the tree does not count" (the
+// spec's "Rule details — Whose ask counts as waiting on a person"). Two asks more stand on a
+// person's turn over the child's last hours: one a session of a grandchild of its own root
+// opened, which is an hour of waiting on a person, and one a session of another root's tree
+// opened, which is on no segment at all.
+func TestOnlyAnAskOpenedByASessionOfTheIssuesOwnTreeMakesItWaitOnAPerson(t *testing.T) {
+	database := corpus(t)
+	ctx := t.Context()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed (%s): %v", sql, err)
+		}
+	}
+	// A grandchild of the root, under the child the asks are opened on: its own tree root is
+	// the child's, two parents up.
+	exec(`insert into issues (key, project_key, number, title, status, rank, parent_key, created_by, created_at)
+		values ('INFRA-5', 'INFRA', 5, 'A grandchild', 'in_progress', 'p', 'INFRA-2', '{"kind":"user","id":"alice"}'::jsonb, $1)`, after(1))
+	// Another root, with Legion work of its own, so its sessions are a tree of their own.
+	exec(`insert into issues (key, project_key, number, title, status, rank, created_by, created_at)
+		values ('INFRA-9', 'INFRA', 9, 'Another root', 'in_progress', 'q', '{"kind":"user","id":"alice"}'::jsonb, $1)`, after(0))
+	session := func(title string) string {
+		return fmt.Sprintf(`{"kind":"session","id":"s-%s","origin":{"session_title":%q}}`, title, title)
+	}
+	event := func(issue string, seq int, kind, actor, payload string, at time.Time) {
+		t.Helper()
+		exec(`insert into events (issue_key, seq, type, actor, payload, notify, created_at)
+			values ($1, $2, $3, $4::jsonb, $5::jsonb, false, $6)`, issue, seq, kind, actor, payload, at)
+	}
+	event("INFRA-9", 1, "comment.created", session("Legion architect · INFRA-9"), `{}`, after(0))
+	// The grandchild's implementer asks on the child: a session of the child's own tree.
+	event("INFRA-2", 8, "ask.opened", session("Legion implementer · INFRA-5"), `{"id":"ask-2"}`, after(7))
+	event("INFRA-2", 9, "ask.answered", `{"kind":"user","id":"alice"}`, `{"id":"ask-2"}`, after(8))
+	// The other root's implementer asks on the child: a Legion session outside its tree.
+	event("INFRA-2", 10, "ask.opened", session("Legion implementer · INFRA-9"), `{"id":"ask-3"}`, after(8))
+	event("INFRA-2", 11, "ask.answered", `{"kind":"user","id":"alice"}`, `{"id":"ask-3"}`, after(9))
+
+	population, err := Read(ctx, database.Pool, nil, "INFRA", after(-2), after(24))
+	if err != nil {
+		t.Fatalf("read the population: %v", err)
+	}
+	if root := population.TreeRoot("INFRA-5"); root != "INFRA-1" {
+		t.Fatalf("the grandchild's tree root = %q, want INFRA-1 two parents up", root)
+	}
+	if root := population.TreeRoot("INFRA-9"); root != "INFRA-9" {
+		t.Fatalf("the other root's tree root = %q, want itself", root)
+	}
+	child := population.Issues["INFRA-2"]
+	if len(child.AskTurns) != 2 || !child.AskTurns[1].From.Equal(after(7)) || !child.AskTurns[1].To.Equal(after(8)) {
+		t.Fatalf("the child's ask turns = %+v, want its own implementer's hour and the grandchild's, and not the other tree's",
+			child.AskTurns)
+	}
+	// The child's seven bar hours: the unparked hour of its turn, the two hours of the asks its
+	// own tree opened, and four idle. The hour of the ask the other tree opened is idle too.
+	bar := barOf(t, Compute(population, ScopeAll, after(24)), "implementer")
+	if bar.Hours != 7 || bar.Segments.WaitingOnPerson != 2 || bar.Segments.InATurn != 1 || bar.Segments.Idle != 4 {
+		t.Fatalf("the implementer bar = %g hours, %+v, want seven hours with two waiting on a person", bar.Hours, bar.Segments)
+	}
+}

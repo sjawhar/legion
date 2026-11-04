@@ -98,9 +98,9 @@ type Issue struct {
 	// FieldPhase, FieldSlot, ClaimFieldPrefix+role and the rest), oldest first within a field.
 	Observed map[string][]Mark
 
-	// AskTurns are the spans in which an ask a Legion session opened on this issue stood on a
-	// person's turn, from its opening or hand-back to its answer or resolution, and to the
-	// issue's end where neither came.
+	// AskTurns are the spans in which an ask a Legion session of this issue's tree opened on
+	// this issue stood on a person's turn, from its opening or hand-back to its answer or
+	// resolution, and to the issue's end where neither came (keepTreeAsks).
 	AskTurns []Span
 
 	// MergedAt is the merge time of the pull request Dispatch holds for the issue, where it holds
@@ -137,6 +137,11 @@ type Population struct {
 
 	// Filed is every issue a Legion session created in the window, in creation order.
 	Filed []Filed
+
+	// askTurns is every ask turn the read gathered, before the tree rule picked the ones that
+	// count for the issue they were opened on. The rule reads each issue's tree, which the
+	// observations of the same read name, so it runs once every read has landed (keepTreeAsks).
+	askTurns []askTurn
 }
 
 // Read is every database and GitHub read one metrics answer makes: the project's issues, the
@@ -186,6 +191,7 @@ func Read(ctx context.Context, pool *store.Pool, github *githubapp.Client, proje
 		return nil, err
 	}
 	population.linkTrees()
+	population.keepTreeAsks()
 	return population, nil
 }
 
@@ -405,9 +411,19 @@ func (p *Population) readStatusMarks(ctx context.Context, pool *store.Pool, keys
 	return nil
 }
 
+// askTurn is one span an ask stood on a person's turn: the issue it was opened on, the issue the
+// opening session's title named, and the span itself. The second is what the tree rule reads
+// (keepTreeAsks); it is empty for a controller, whose title names a project and no issue.
+type askTurn struct {
+	issue string
+	by    string
+	span  Span
+}
+
 // readAskTurns reads the ask events of the issues and turns each ask into the spans it stood on a
 // person's turn: from an opening or a hand-back by a Legion session to the answer or resolution
-// that took it back, and to the issue's end where neither came.
+// that took it back, and to the issue's end where neither came. Which of them count for the
+// issue is keepTreeAsks's rule, which runs once every read has landed.
 func (p *Population) readAskTurns(ctx context.Context, pool *store.Pool, keys []string) error {
 	rows, err := pool.Query(ctx, `
 		select issue_key, created_at, type, coalesce(payload->>'id', ''), coalesce(actor->>'id', ''),
@@ -446,10 +462,7 @@ func (p *Population) readAskTurns(ctx context.Context, pool *store.Pool, keys []
 	if err != nil {
 		return err
 	}
-	open := map[string]struct {
-		issue string
-		at    time.Time
-	}{}
+	open := map[string]askTurn{}
 	for _, event := range events {
 		switch event.kind {
 		case "ask.opened", "ask.handed_back":
@@ -459,35 +472,62 @@ func (p *Population) readAskTurns(ctx context.Context, pool *store.Pool, keys []
 			if event.actorKind != "session" {
 				continue
 			}
-			if _, isLegion := ParseSessionTitle(titles[event.session]); !isLegion {
+			title, isLegion := ParseSessionTitle(titles[event.session])
+			if !isLegion {
 				continue
 			}
-			open[event.ask] = struct {
-				issue string
-				at    time.Time
-			}{issue: event.issue, at: event.at}
+			open[event.ask] = askTurn{issue: event.issue, by: title.Issue, span: Span{From: event.at}}
 		case "ask.answered", "ask.resolved":
 			turn, waiting := open[event.ask]
 			if !waiting {
 				continue
 			}
 			delete(open, event.ask)
-			if issue := p.Issues[turn.issue]; issue != nil {
-				issue.AskTurns = append(issue.AskTurns, Span{From: turn.at, To: event.at})
-			}
+			turn.span.To = event.at
+			p.askTurns = append(p.askTurns, turn)
 		}
 	}
 	for _, turn := range open {
-		if issue := p.Issues[turn.issue]; issue != nil {
-			issue.AskTurns = append(issue.AskTurns, Span{From: turn.at, To: p.issueEnd(issue)})
+		issue := p.Issues[turn.issue]
+		if issue == nil {
+			continue
 		}
+		turn.span.To = p.issueEnd(issue)
+		p.askTurns = append(p.askTurns, turn)
 	}
-	for _, key := range keys {
+	return nil
+}
+
+// keepTreeAsks gives each issue the ask turns that count for it: "An ask counts for an issue when
+// it is opened on that issue by any Legion session of the issue's tree, that is, a session titled
+// `Legion <role> · <KEY>` where KEY is any issue of the same tree, walked as for splitting and
+// follow-ups. An ask opened by a session outside the tree does not count" (the spec's "Rule
+// details — Whose ask counts as waiting on a person"). The walk is TreeRoot, the one splitting
+// and follow-ups walks with, so one reading of a tree serves both rules; a controller's session
+// names a project and no issue, so it is of no tree and its asks count for nothing.
+func (p *Population) keepTreeAsks() {
+	roots := map[string]string{}
+	rootOf := func(key string) string {
+		if root, held := roots[key]; held {
+			return root
+		}
+		root := p.TreeRoot(key)
+		roots[key] = root
+		return root
+	}
+	for _, turn := range p.askTurns {
+		issue := p.Issues[turn.issue]
+		if issue == nil || turn.by == "" || rootOf(turn.issue) != rootOf(turn.by) {
+			continue
+		}
+		issue.AskTurns = append(issue.AskTurns, turn.span)
+	}
+	p.askTurns = nil
+	for _, key := range p.Keys {
 		if issue := p.Issues[key]; issue != nil {
 			slices.SortFunc(issue.AskTurns, func(a, b Span) int { return a.From.Compare(b.From) })
 		}
 	}
-	return nil
 }
 
 func (p *Population) readHandoffs(ctx context.Context, pool *store.Pool, keys []string) error {

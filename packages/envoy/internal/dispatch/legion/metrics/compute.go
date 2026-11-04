@@ -308,12 +308,13 @@ func (c *computation) viewOf(issue *Issue) *issueView {
 		root = issue
 	}
 	view := &issueView{
-		population: c.population,
-		issue:      issue,
-		root:       root,
-		timeline:   c.phasesOf(issue),
-		childPhase: map[string][]PhaseSpan{},
-		end:        c.population.issueEnd(issue),
+		population:  c.population,
+		issue:       issue,
+		root:        root,
+		timeline:    c.phasesOf(issue),
+		childPhase:  map[string][]PhaseSpan{},
+		childWorked: map[string][]Span{},
+		end:         c.population.issueEnd(issue),
 	}
 	for _, key := range root.Children {
 		child := c.population.Issues[key]
@@ -321,7 +322,13 @@ func (c *computation) viewOf(issue *Issue) *issueView {
 			continue
 		}
 		view.children = append(view.children, child)
+		if root.Key != issue.Key {
+			// Only a root's view reads its children's timelines: the waiting-on-children rule
+			// answers nothing for a child, and a child's view takes its tree's asks alone.
+			continue
+		}
 		view.childPhase[child.Key] = c.phasesOf(child)
+		view.childWorked[child.Key] = c.barSpansOf(child)
 	}
 	c.views[issue.Key] = view
 	return view
@@ -380,21 +387,27 @@ func (c *computation) workedOf(issue *Issue) workTimeRow {
 // computeWorkTime is the work time itself: the issue's life, less the time it sat parked and the
 // time it sat back in the queue. The spans that are left are the answer's second half, because
 // they are what the issue's bars of phase time are shared out over.
+//
+// Every issue the metric reports a row for has closed (finishedInWindow), and the row's ClosedAt
+// is that close. A child still open has a work time too, which its root's waiting-on-children
+// rule reads: its life runs to the window's end, as every other span of a live issue does
+// (issueEnd).
 func (c *computation) computeWorkTime(issue *Issue) workTimeRow {
 	start, ok := firstWorkerEvent(issue)
 	if !ok {
 		return workTimeRow{}
 	}
+	end := c.population.issueEnd(issue)
 	// A life of no length leaves no span to park, to queue or to put on a bar, which the span
 	// algebra below answers on its own.
-	life := []Span{{From: start, To: *issue.ClosedAt}}
+	life := []Span{{From: start, To: end}}
 	parked := intersect(c.population.parkedSpans(issue), life)
 	queued := intersect(c.population.queuedSpans(issue), life)
 	worked := subtract(subtract(life, parked), queued)
 	return workTimeRow{
 		row: WorkTimeIssue{
 			Key: issue.Key, Title: issue.Title, Priority: issue.Priority, Root: c.isRoot(issue),
-			StartedAt: start, ClosedAt: *issue.ClosedAt, MergedAt: issue.MergedAt,
+			StartedAt: start, ClosedAt: end, MergedAt: issue.MergedAt,
 			Hours:       hours(totalOf(worked)),
 			ParkedHours: hours(totalOf(parked)),
 			QueuedHours: hours(totalOf(queued)),

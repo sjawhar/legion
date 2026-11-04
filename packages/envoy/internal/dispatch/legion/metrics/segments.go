@@ -86,7 +86,10 @@ type issueView struct {
 	children   []*Issue
 	timeline   []PhaseSpan
 	childPhase map[string][]PhaseSpan
-	end        time.Time
+	// childWorked is each child's own work time, the very spans that child's bars are shared
+	// out over, which is all of its timeline the waiting-on-children rule reads.
+	childWorked map[string][]Span
+	end         time.Time
 
 	claimed []([]Span)
 }
@@ -183,14 +186,19 @@ func ciWaitSpans(view *issueView) []Span {
 }
 
 // waitingOnChildrenSpans is segment 4: "the issue is a root with a child in a phase from planning
-// to awaiting merge".
+// to awaiting merge", each child counted "only during its own work time, as work time to merge
+// defines it: not while it is parked, back in the queue, or before its first worker event" (the
+// spec's "Rule details — When a child makes its root wait on children"). The work time is the
+// child's own bar spans, so a root waits on children through exactly the hours its children's
+// bars hold and this package keeps one definition of an issue's work time.
 func waitingOnChildrenSpans(view *issueView) []Span {
 	if view.root.Key != view.issue.Key {
 		return nil
 	}
 	var spans []Span
 	for _, child := range view.children {
-		spans = append(spans, phaseSpansOf(view.childPhase[child.Key], childWorkingPhases...)...)
+		inPhase := phaseSpansOf(view.childPhase[child.Key], childWorkingPhases...)
+		spans = append(spans, intersect(inPhase, view.childWorked[child.Key])...)
 	}
 	return spans
 }
