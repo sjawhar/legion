@@ -1568,8 +1568,10 @@ export const dispatchToolSpecs = [
       "the same question. Use it to check a draft before filing it. It searches by meaning and by " +
       "the text's rarest words, and says how it searched; when meaning search cannot run it " +
       "searches by keywords only and says why. When it could not search at all it says why and " +
-      "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " +
-      "as a check on that issue's own write does; keywords_only skips meaning search.",
+      "names the dispatch search to run instead. exclude_issue leaves each named issue's own " +
+      "items out, as a check on that issue's own write does, and takes up to 50 issues, so a " +
+      "draft under a parent can leave out that parent and its children; keywords_only skips " +
+      "meaning search.",
     arguments: (z) => ({
       project: z.string().describe("Project key to search within, such as CORE."),
       title: z
@@ -1580,9 +1582,9 @@ export const dispatchToolSpecs = [
         .string()
         .describe("Optional text to check, such as a draft spec or a question.")
         .optional(),
-      exclude_issue: z
-        .string()
-        .describe("Optional issue key in the project whose own items are left out.")
+      exclude_issues: z
+        .array(z.string())
+        .describe("Optional issue keys in the project whose own items are left out; at most 50.")
         .optional(),
       keywords_only: z
         .boolean()

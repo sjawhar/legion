@@ -3791,12 +3791,13 @@ export async function executeDispatchTool(
         const candidates = duplicateCandidates(error);
         return {
           text: [
-            `Not created: "${title}" looks like a duplicate.`,
+            `Not created: "${title}" is a near copy of an open issue.`,
             ...candidates.map((candidate) => {
               const href = new URL(candidate.href, linkBase).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
             }),
-            "Reference the existing issue, or run dispatch issue again with --force after reading it.",
+            "Read each issue above. If one is the same work, fold this into it by the duplicate rule of skill://dispatch-first.",
+            "If none is, run dispatch issue again with --force, and write in the new issue's spec why it is not each issue named here.",
           ].join("\n"),
           details: { duplicates: candidates },
         };
@@ -4049,12 +4050,14 @@ export async function executeDispatchTool(
       const project = stringArg(args, "project");
       const title = optionalString(args, "title");
       const text = optionalString(args, "text");
-      const excludeIssue = optionalString(args, "exclude_issue");
+      const excludeIssues = Array.isArray(args.exclude_issues)
+        ? (args.exclude_issues as string[])
+        : undefined;
       const keywordsOnly = optionalBoolean(args, "keywords_only");
       const suggestions = await client.related(project, {
         ...(title === undefined ? {} : { title }),
         ...(text === undefined ? {} : { text }),
-        ...(excludeIssue === undefined ? {} : { exclude_issue: excludeIssue }),
+        ...(excludeIssues === undefined ? {} : { exclude_issues: excludeIssues }),
         ...(keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }),
       });
       return {

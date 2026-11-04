@@ -24,8 +24,8 @@ export interface RelatedCheckContext {
  * The related-item check's lines. They hold exactly one of three forms, so a check
  * that never ran cannot read as one that found nothing: the items it found and how it searched,
  * that it searched and found nothing, or that no check was made, why, and the `dispatch search` to
- * run instead. A past decision, with where its ask stands, and the titles a forced create went
- * past follow the form.
+ * run instead. A past decision, with where its ask stands, the likely duplicate an unforced
+ * create was nudged about, and the near copies a forced create went past follow the form.
  *
  * A server predating the forms sends less, and each of its shapes maps to one form: no result at
  * all, `missing`, items with no `outcome`, and nothing at all with no `outcome`.
@@ -59,9 +59,18 @@ export function relatedCheckLines(
       // stands prints here, as under any ask item.
       lines.push(...askLines(decision.ask));
     }
+    const likely = suggestions.likely_duplicate;
+    if (likely !== undefined && likely !== null) {
+      lines.push(
+        `Likely duplicate: ${likely.key} [${likely.status}] ${likely.title} → ${absoluteHref(likely.href, context.configUrl)}`
+      );
+      lines.push(
+        "Read it. If it is the same work, fold this issue into it by the duplicate rule of skill://dispatch-first."
+      );
+    }
     for (const match of suggestions.title_matches ?? []) {
       lines.push(
-        `Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} → ${absoluteHref(match.href, context.configUrl)}`
+        `Near copy you forced past: ${match.key} [${match.status}] ${match.title} → ${absoluteHref(match.href, context.configUrl)}`
       );
     }
   } catch (error) {

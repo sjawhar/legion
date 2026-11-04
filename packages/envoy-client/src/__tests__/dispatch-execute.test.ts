@@ -3254,9 +3254,10 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text: [
-        'Not created: "Global search across issues and documents" looks like a duplicate.',
+        'Not created: "Global search across issues and documents" is a near copy of an open issue.',
         "LEGION-12 [triage] Global search across issues and documents → http://dispatch.test/issues/LEGION-12",
-        "Reference the existing issue, or run dispatch issue again with --force after reading it.",
+        "Read each issue above. If one is the same work, fold this into it by the duplicate rule of skill://dispatch-first.",
+        "If none is, run dispatch issue again with --force, and write in the new issue's spec why it is not each issue named here.",
       ].join("\n"),
       details: { duplicates: candidates },
     });

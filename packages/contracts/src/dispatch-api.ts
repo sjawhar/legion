@@ -2071,9 +2071,11 @@ export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
  * field is absent there. From that release on, `outcome` is always set, `search` is set unless the
  * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
  * `search_query` is two or three of the words the keyword search used, spelled as the text spells
- * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
- * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
- * `model.Suggestions`.
+ * them, for a reader to run `dispatch search` with. `title_matches` is the issues the near-copy
+ * refusal named when the create was forced past it. `likely_duplicate` is the closest open issue
+ * of an unforced create whose near-copy score reached the nudge bar but not the refusal's: a
+ * field of its own, because every released client prints each `title_matches` entry as something
+ * the filer forced past. Mirrors `model.Suggestions`.
  */
 export interface Suggestions {
   readonly outcome?: RelatedCheckOutcome;
@@ -2084,6 +2086,7 @@ export interface Suggestions {
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
   readonly title_matches?: DuplicateCandidate[];
+  readonly likely_duplicate?: DuplicateCandidate;
 }
 
 /** One new decision block's related-item check in a document edit's advice
@@ -2097,14 +2100,17 @@ export interface DecisionBlockCheck {
 /**
  * The body of `POST /api/v1/projects/{key}/related` (and the query of its `GET` form, which caps
  * title and text together at `SEARCH_QUERY_MAX`): the related-item check over a title and a text
- * without writing anything. `exclude_issue` leaves that issue's own items out of the results, as a
- * check on that issue's own write does; `keywords_only` skips meaning search. A blank title and
- * text answer `not_made`. The answer is `Suggestions`.
+ * without writing anything. `exclude_issue` leaves that issue's own items out of the results and
+ * out of the word statistics, as a check on that issue's own write does; `exclude_issues` leaves
+ * each of its issues out of the results alone, at most 50 of them, so a caller can leave out a
+ * whole subtree without changing how rare the text's words are. `keywords_only` skips meaning
+ * search. A blank title and text answer `not_made`. The answer is `Suggestions`.
  */
 export interface RelatedCheckInput {
   readonly title?: string;
   readonly text?: string;
   readonly exclude_issue?: string;
+  readonly exclude_issues?: readonly string[];
   readonly keywords_only?: boolean;
 }
 
@@ -3574,6 +3580,10 @@ export const IssueEventPayloadSchema = z.object({
   changed: z.array(z.string()).optional(),
   ancestors: z.array(z.string()).optional(),
   thread_logins: z.array(z.string()).optional(),
+  /** On an `issue.created` whose create went past the near-copy refusal with `force`: `past`
+   *  names the issues that refusal named, and is the empty list when the check did not answer.
+   *  A forced create the refusal would not have stopped carries no `forced` at all. */
+  forced: z.object({ past: z.array(z.string()) }).optional(),
 });
 
 export const ArtifactCreatedEventPayloadSchema = z.object({

@@ -910,7 +910,7 @@ describe("the related-item check", () => {
       [
         createdLine,
         "No related-item check was made: the search behind it failed. Search before you rely on this being new: dispatch search --project DSP --query 'Created issue'",
-        "Title overlaps you forced past: DSP-3 [todo] Created issue → http://dispatch.test/issues/DSP-3",
+        "Near copy you forced past: DSP-3 [todo] Created issue → http://dispatch.test/issues/DSP-3",
       ].join("\n")
     );
   });
@@ -1203,7 +1203,7 @@ describe("dispatch_related", () => {
         project: "DSP",
         title: "Retry failed webhook deliveries",
         text: "Back off exponentially.",
-        exclude_issue: "DSP-9",
+        exclude_issues: ["DSP-9"],
         keywords_only: true,
       },
       answer
@@ -1216,7 +1216,7 @@ describe("dispatch_related", () => {
         body: {
           title: "Retry failed webhook deliveries",
           text: "Back off exponentially.",
-          exclude_issue: "DSP-9",
+          exclude_issues: ["DSP-9"],
           keywords_only: true,
         },
       },
