@@ -1462,8 +1462,10 @@ func insertCommentWithWindow(t *testing.T, q querier, issueKey, body string) {
 }
 
 // Once Run has embedded what was pending at boot and its coverage pass has run, nothing
-// changes, so Run makes no statement at all: no scan timer, no due time, no coverage pass. The
-// window is longer than the 5-second period the scan ticker ran at before.
+// changes, so Run makes no statement between one identity recheck and the next: no scan timer,
+// no due time, no further pass. The window is longer than the 5-second period the scan ticker
+// ran at before, and far shorter than identityRecheckInterval, which this test leaves at its
+// ten minutes.
 func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "IDLE", "IDLE-1", "Enqueued by its trigger")

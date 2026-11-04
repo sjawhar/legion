@@ -132,10 +132,11 @@ pass with none calls the embedder zero times), an `embedCanary` embed the pass s
 failed or throttled canary leaves those rows in place and logs one WARN with the identity, the
 error and the counts left. After the boot pass only those identity steps run again
 (`runCoverage`): at once when the queue's first embed proves an embedder the pass's canary could
-not, and every `identityRecheckInterval` (10 minutes, jittered) while a run still finds another
-identity's rows, so a vector an old-configuration process commits during a roll is dropped; once a
-run finds none, the loop holds no timer. `coverageKinds` there is the one list of what meaning
-search covers - the issue the pass builds (`issueCoverage`) and the windows the indexers own
+not, and every `identityRecheckInterval` (10 minutes, jittered) for as long as the process runs,
+so a vector an old-configuration process commits during a roll is dropped whenever it lands; a
+run that finds none says nothing about the next ten minutes, and costs one `exists` query.
+`coverageKinds` there is the one list of what meaning
+search covers - the issue the pass builds (`issueKind`) and the windows the indexers own
 (`windowCoverageKinds`) - read by the pass and by `GET /api/v1/search/coverage`
 (`embedqueue.Coverage`); the issue's text is its trigger's (0073, and since 0140 its title and its
 spec, the latest version of its primary document, which a second trigger on `artifact_versions`

@@ -18,44 +18,43 @@ import (
 // would wait behind for longer than one small statement takes.
 const coverageStatementRows = 500
 
-// identityRecheckInterval is how long, plus up to a tenth again, Run's coverage loop waits after a
-// run that found rows of another identity before it runs the identity steps again (runCoverage),
-// and after a failed run before it tries that run again. While a rolling deploy that changes the
-// identity still has an old-configuration process embedding, that process commits vectors the new
-// identity must drop; ten minutes was the whole pass's period before, and nothing faster is owed
-// to a vector search already filters out by identity. A var, not a const, so a test can shrink it
-// rather than wait out ten minutes.
+// identityRecheckInterval is how long, plus up to a tenth again, Run's coverage loop waits
+// between runs of the identity steps (runCoverage), and after a failed run before it tries that
+// run again. While a rolling deploy that changes the identity still has an old-configuration
+// process embedding, that process commits vectors the new identity must drop; ten minutes was
+// the whole pass's period before, and nothing faster is owed to a vector search already filters
+// out by identity. A var, not a const, so a test can shrink it rather than wait out ten minutes.
 var identityRecheckInterval = 10 * time.Minute
 
-// coverageSource is one kind of row meaning search ranks whose rows this pass builds from a
-// source table: its FROM clause (from), and the expressions for its id, its text and when it
-// was written. id and text are the kind's write-time trigger's own (0073, as 0140 replaced
-// it), byte for byte, so a row the coverage pass writes is the row the trigger would have
-// written, and a row the trigger wrote is never seen as stale; from is the items search ranks
-// (api/search.go's meaning candidate CTEs), which the trigger can exceed.
-//
-// The issue is the only such kind (issueCoverage). The window kinds
-// (windowCoverageKinds) have no source table at all: their rows are the indexers' own, so no
-// statement of this pass builds one.
-type coverageSource struct {
-	kind, from, id, text, writtenAt string
-}
+// issueKind is the one kind of row meaning search ranks that no indexer owns, and so the one
+// kind this pass builds: insertMissingIssues and repairStaleIssues, the two statements that
+// build a kind, are the issue's alone and take it as $1::text. A window kind
+// (windowCoverageKinds) has no statement of that sort at all.
+const issueKind = "issue"
 
-// issueCoverage is the one kind whose rows this pass builds and repairs, which since the move
-// to windows is the issue alone: 0073's trigger, as 0140 replaced it, and 0140's trigger on a
-// new version of the issue's primary document enqueue new.key and
-// issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
+// issueRows is every issue as (id, text, hash, written_at), the shape every statement of this
+// pass and the report read an item in; windowRows gives a window kind's rows that same shape.
 //
-// An item whose text has nothing to embed (nothingToEmbed: the empty string, or only white
-// space) is not covered: it matches nothing by meaning, so items leaves it out and the queue
-// settles its row with no vector.
-var issueCoverage = coverageSource{
-	kind:      "issue",
-	from:      "issues i",
-	id:        "i.key",
-	text:      "issue_embedding_text(i.title, issue_embedding_spec(i.key))",
-	writtenAt: "i.created_at",
-}
+// id and text are the issue's write-time triggers' own expressions, byte for byte: 0073's on
+// issues, as 0140 replaced it, and 0140's on a new version of an issue's primary document, which
+// enqueue new.key and issue_embedding_text(new.title, issue_embedding_spec(new.key)). So a row
+// this pass writes is the row a trigger would have written, and a row a trigger wrote is never
+// seen as stale. hash is embeddings_enqueue's own content_hash expression (0072, 0118) over that
+// text, so an item's hash equals the content_hash its trigger would store. What it selects from
+// is the items search ranks (api/search.go's meaning candidate CTEs), which the trigger can
+// exceed.
+//
+// Issues whose text has nothing to embed are kept in: repairStaleIssues needs them, so a row
+// whose issue's text became empty with the trigger off takes that text and the queue settles it,
+// dropping the vector of the text the item no longer holds.
+const issueRows = `select s.id, s.text, encode(sha256(convert_to(s.text, 'UTF8')), 'hex') as hash, s.written_at
+	from (select i.key as id, issue_embedding_text(i.title, issue_embedding_spec(i.key)) as text, i.created_at as written_at from issues i) s`
+
+// issueItems is the issues worth a vector: those whose text has something to embed (not
+// nothingToEmbed, which is the empty string or white space alone). An item with nothing to embed
+// is not covered, since it matches nothing by meaning, so insertMissingIssues gives it no row
+// and the queue settles the row it already holds with no vector.
+var issueItems = searchableItems(issueRows)
 
 // windowCoverageKinds is every kind whose rows the indexers own: one row per window of a
 // document's, a comment's, a message's blocks or of an ask's parts (INFRA-370). Migration
@@ -64,27 +63,12 @@ var issueCoverage = coverageSource{
 // own transaction, or by the block-index tick for an owner written before this build. No
 // statement of this pass may invent one: the pass has no way to window an owner, and a row it
 // inserted for a window that no longer exists would be embedded for ever at a text no reader
-// can reach. So a window kind declares no source table, takes the identity steps alone
-// (coverPass), and is counted in the report from its own rows (windowRows).
+// can reach. So no statement here builds a window row (insertMissingIssues and repairStaleIssues
+// are the issue's alone), a window kind takes the settling and the identity steps alone
+// (coverPass), and it is counted in the report from its own rows (windowRows).
 var windowCoverageKinds = []string{"document_block", "comment_block", "message_block", "ask_part"}
 
-// items renders the kind's searchable items, those whose text has something to embed (not
-// nothingToEmbed), as a query of (id, text, hash, written_at). hash is embeddings_enqueue's own
-// content_hash expression (0072, 0118) over the trigger's text, so an item's hash equals the
-// content_hash its trigger would store.
-func (s coverageSource) items() string {
-	return searchableItems(s.allItems())
-}
-
-// allItems is items with the ones whose text has nothing to embed kept in: repairStale needs
-// them, so a row whose item's text became empty with the trigger off takes that text and the
-// queue settles it, dropping the vector of the text the item no longer holds.
-func (s coverageSource) allItems() string {
-	return fmt.Sprintf(`select s.id, s.text, encode(sha256(convert_to(s.text, 'UTF8')), 'hex') as hash, s.written_at
-		from (select %s as id, %s as text, %s as written_at from %s) s`, s.id, s.text, s.writtenAt, s.from)
-}
-
-// windowRows is a window kind's items, in the shape allItems gives a built kind's: its own
+// windowRows is a window kind's items, in the shape issueRows gives the issue's: its own
 // rows, since a window exists only while the indexer that wrote it says so, and its text and
 // hash are the ones that indexer wrote. Reading them from embeddings itself is what makes the
 // report count the windows of the database rather than items the pass has no way to window.
@@ -94,26 +78,25 @@ func windowRows(kind string) string {
 		from embeddings e where e.kind = '%s') s`, kind)
 }
 
-// searchableItems holds a kind's items (allItems, windowRows) to those whose text has something
+// searchableItems holds a kind's items (issueRows, windowRows) to those whose text has something
 // to embed.
 func searchableItems(items string) string {
 	return items + " where not " + nothingToEmbed("s.text")
 }
 
-// insertMissing adds a pending row for up to $2 items of the kind that have none, exactly as the
-// trigger's embeddings_enqueue would insert it. ON CONFLICT DO NOTHING, never DO UPDATE: a row a
-// trigger inserts between this statement's read and its insert holds text at least as fresh as
-// what this statement read, and DO UPDATE would revert it to the older text.
-func (s coverageSource) insertMissing() string {
-	return fmt.Sprintf(`
-		insert into embeddings (kind, id, text_snapshot, content_hash)
-		select $1::text, item.id, item.text, item.hash from (%s) item
-		where not exists (select 1 from embeddings e where e.kind = $1::text and e.id = item.id)
-		limit $2
-		on conflict (kind, id) do nothing`, s.items())
-}
+// insertMissingIssues adds a pending row for up to $2 issues ($1::text is issueKind) that have
+// none, exactly as the trigger's embeddings_enqueue would insert it. ON CONFLICT DO NOTHING,
+// never DO UPDATE: a row a trigger inserts between this statement's read and its insert holds
+// text at least as fresh as what this statement read, and DO UPDATE would revert it to the older
+// text.
+var insertMissingIssues = `
+	insert into embeddings (kind, id, text_snapshot, content_hash)
+	select $1::text, item.id, item.text, item.hash from (` + issueItems + `) item
+	where not exists (select 1 from embeddings e where e.kind = $1::text and e.id = item.id)
+	limit $2
+	on conflict (kind, id) do nothing`
 
-// repairStale points up to $2 of the kind's rows whose content_hash is not the hash of the item's
+// repairStaleIssues points up to $2 issue rows whose content_hash is not the hash of the issue's
 // current text (text changed with the trigger off, as a restore or replication does) at that
 // text, starting the row's wait and attempts again as embeddings_enqueue does on a text change;
 // a text with nothing to embed is repaired too, and scanPending then settles the row.
@@ -123,22 +106,20 @@ func (s coverageSource) insertMissing() string {
 // so a trigger write committing after the read makes the update skip that row, keeping the
 // trigger's text, hash, claim and counters. The CTE takes no row lock (FOR UPDATE would re-read
 // the newest version into seen and defeat the check).
-func (s coverageSource) repairStale() string {
-	return fmt.Sprintf(`
-		with stale as (
-			select e.kind, e.id, e.content_hash as seen, item.text, item.hash
-			from (%s) item
-			join embeddings e on e.kind = $1::text and e.id = item.id
-			where e.content_hash <> item.hash
-			limit $2
-		)
-		update embeddings e
-		set text_snapshot = stale.text, content_hash = stale.hash, attempt_count = 0,
-		    confirmed_failures = 0, dead = false, dead_model = null, next_attempt_at = now(),
-		    pending_since = now()
-		from stale
-		where e.kind = stale.kind and e.id = stale.id and e.content_hash = stale.seen`, s.allItems())
-}
+var repairStaleIssues = `
+	with stale as (
+		select e.kind, e.id, e.content_hash as seen, item.text, item.hash
+		from (` + issueRows + `) item
+		join embeddings e on e.kind = $1::text and e.id = item.id
+		where e.content_hash <> item.hash
+		limit $2
+	)
+	update embeddings e
+	set text_snapshot = stale.text, content_hash = stale.hash, attempt_count = 0,
+	    confirmed_failures = 0, dead = false, dead_model = null, next_attempt_at = now(),
+	    pending_since = now()
+	from stale
+	where e.kind = stale.kind and e.id = stale.id and e.content_hash = stale.seen`
 
 // dropForeignVectors takes up to $3 of the kind's rows holding a vector another identity made
 // ($2 is the configured one) out of the HNSW index's rows: search compares a stored vector only
@@ -222,10 +203,10 @@ const foreignRowsLeft = `
 	       count(*) filter (where dead and dead_model is distinct from $2)
 	from embeddings where kind = any($1)`
 
-// coverageKinds is every kind meaning search covers, the one this pass builds (issueCoverage)
+// coverageKinds is every kind meaning search covers, the one this pass builds (issueKind)
 // and the window kinds the indexers own (windowCoverageKinds), and the argument foreignRows and
 // foreignRowsLeft take.
-var coverageKinds = append([]string{issueCoverage.kind}, windowCoverageKinds...)
+var coverageKinds = append([]string{issueKind}, windowCoverageKinds...)
 
 // coverStep is one statement of the coverage pass, run until it changes nothing.
 type coverStep struct {
@@ -260,8 +241,7 @@ func (step coverStep) run(ctx context.Context, deps Deps, kind string) error {
 // when an Embed this process's queue made has already succeeded (Deps.proven), and otherwise
 // embeds embedCanary (proveEmbedder): a success is proof; a failure, a throttle included, skips
 // them until a later run (runCoverage), logged once at WARN with the identity, the canary's
-// error, and how many vectors and dead rows stay in place. run or skipped is true exactly when
-// such rows exist.
+// error, and how many vectors and dead rows stay in place.
 func decideIdentitySteps(ctx context.Context, deps Deps, identity string) (run, skipped bool, err error) {
 	var foreign bool
 	if err := deps.Store.Pool.QueryRow(ctx, foreignRows, coverageKinds, identity).Scan(&foreign); err != nil {
@@ -291,10 +271,8 @@ func decideIdentitySteps(ctx context.Context, deps Deps, identity string) (run, 
 
 // identityRun is what one run of the identity steps (runIdentitySteps) found and did.
 type identityRun struct {
-	// foreign is whether any row of another identity existed when the run looked (foreignRows),
-	// whether or not it then acted on them.
-	foreign bool
-	// skipped is whether it left them in place because the embedder has not answered yet.
+	// skipped is whether the run left rows of another identity in place because the embedder
+	// has not answered yet.
 	skipped             bool
 	dropped, readmitted int64
 }
@@ -308,7 +286,7 @@ func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identity
 	if err != nil {
 		return identityRun{}, err
 	}
-	result := identityRun{foreign: run || skipped, skipped: skipped}
+	result := identityRun{skipped: skipped}
 	if !run {
 		return result, nil
 	}
@@ -326,7 +304,7 @@ func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identity
 }
 
 // Cover is the coverage pass: for every covered kind (coverageKinds) it settles each dead row
-// whose text has nothing to embed and, for the kind it builds (issueCoverage), adds a row for
+// whose text has nothing to embed and, for the kind it builds (issueKind), adds a row for
 // each item that has none and repairs each row whose text is stale; then, once the configured
 // embedder has answered (decideIdentitySteps), it drops each vector another identity made and
 // re-admits each other row dead under another identity; and it logs one line with what it
@@ -353,7 +331,7 @@ func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 	identity := deps.Embedder.Identity()
 	var added, repaired, settled int64
 	// Every covered kind settles its dead rows with nothing to embed; only the kind this pass
-	// builds (issueCoverage) takes the other two steps, since no statement here may invent a
+	// builds (issueKind) takes the other two steps, since no statement here may invent a
 	// window.
 	for _, kind := range coverageKinds {
 		step := coverStep{&settled, settleDeadNothingToEmbed, []any{kind, identity, coverageStatementRows}}
@@ -362,10 +340,10 @@ func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 		}
 	}
 	for _, step := range []coverStep{
-		{&added, issueCoverage.insertMissing(), []any{issueCoverage.kind, coverageStatementRows}},
-		{&repaired, issueCoverage.repairStale(), []any{issueCoverage.kind, coverageStatementRows}},
+		{&added, insertMissingIssues, []any{issueKind, coverageStatementRows}},
+		{&repaired, repairStaleIssues, []any{issueKind, coverageStatementRows}},
 	} {
-		if err := step.run(ctx, deps, issueCoverage.kind); err != nil {
+		if err := step.run(ctx, deps, issueKind); err != nil {
 			return identityRun{}, err
 		}
 	}
@@ -404,16 +382,33 @@ func recheckIdentity(ctx context.Context, deps Deps) (identityRun, error) {
 	return steps, err
 }
 
-// runCoverage runs Cover once at start, and after it only what a later moment can change. Writes
-// reach the queue through their triggers in their own transactions, so the rest of the pass - what
-// no trigger saw - has nothing new to find until the next boot. The identity steps do: while a run
-// finds rows of another identity, a rolling deploy that changed the identity may still have an
-// old-configuration process committing its vectors, so the loop runs the identity steps again
-// every identityRecheckInterval (jittered) until a run finds none, and then holds no timer and
-// makes no statement. A run that skipped them because the embedder had not answered runs them
-// again as soon as it does (Deps.proven: the queue's first successful embed), not ten minutes
-// later. A failed run is logged and tried again after identityRecheckInterval: every step is
-// idempotent, so nothing is lost by waiting.
+// runCoverage runs Cover once at start, and the identity steps alone every
+// identityRecheckInterval (jittered) after it, for as long as the process runs. Writes reach the
+// queue through their triggers in their own transactions, so the rest of the pass - what no
+// trigger saw - has nothing new to find until the next boot.
+//
+// The identity steps do have something new to find at any moment: a process of the configuration
+// before a rolling deploy keeps embedding until it stops, and every vector it commits is one
+// this identity must drop. Nothing else would drop it. The scan loop selects only rows whose
+// embedded_hash is distinct from content_hash, which such a row's is not, and search compares a
+// stored vector only with a query vector of its own identity, so that item would be matched by
+// nothing until some later boot's pass. A run that finds no such row is evidence about the
+// moment it looked and about no later one, which is why the loop keeps looking rather than
+// stopping at the first clean run.
+//
+// What that costs, while there is nothing to do, is one statement per interval: foreignRows, the
+// two exists over the covered kinds, which stops at the first row of another identity and
+// otherwise reads their rows once. A run that finds one pays two statements per kind on top,
+// each repeated until it changes nothing, and only while such rows remain. One read of the
+// queue's rows every ten minutes is the right price for what it buys: without it a vector
+// another identity commits after this process's boot pass is matched by no search and reached
+// by no scan for as long as this process lives.
+//
+// A run that skipped the steps because the embedder had not answered runs them again as soon as
+// it does (Deps.proven: the queue's first successful embed), not ten minutes later. A failed run
+// is logged and tried again after identityRecheckInterval, a failed boot pass as the whole pass
+// since it may have failed before its later steps: every step is idempotent, so nothing is lost
+// by waiting. The context ending returns at once.
 func runCoverage(ctx context.Context, deps Deps) {
 	pass := coverPass
 	for {
@@ -424,8 +419,6 @@ func runCoverage(ctx context.Context, deps Deps) {
 			return
 		case err != nil:
 			slog.Error("dispatch embedqueue: coverage pass failed; it runs again later", "error", err, "retryIn", identityRecheckInterval)
-		case !steps.foreign:
-			return
 		default:
 			pass = recheckIdentity
 			if steps.skipped {
@@ -445,17 +438,16 @@ func runCoverage(ctx context.Context, deps Deps) {
 }
 
 // coverageQuery counts, per covered kind, its items left-joined to their embeddings rows, in
-// one statement so every count reads one snapshot: the built kind's items are its source table's
-// (coverageSource.items), a window kind's its own rows (windowRows). $1 is the configured
-// identity, the empty string when there is none, and then no item is current. greatest ignores
-// a null, so an item with no row ages from when it was written; the oldest age is null when
-// nothing of the kind lacks.
+// one statement so every count reads one snapshot: the issue's items are issueItems, a window
+// kind's its own rows (windowRows). $1 is the configured identity, the empty string when there
+// is none, and then no item is current. greatest ignores a null, so an item with no row ages
+// from when it was written; the oldest age is null when nothing of the kind lacks.
 var coverageQuery = func() string {
 	arm := func(kind, items string) string {
 		return fmt.Sprintf("select '%s'::text as kind, item.id, item.hash, item.written_at from (%s) item", kind, items)
 	}
 	arms := make([]string, 0, 1+len(windowCoverageKinds))
-	arms = append(arms, arm(issueCoverage.kind, issueCoverage.items()))
+	arms = append(arms, arm(issueKind, issueItems))
 	for _, kind := range windowCoverageKinds {
 		arms = append(arms, arm(kind, searchableItems(windowRows(kind))))
 	}

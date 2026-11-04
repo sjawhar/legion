@@ -703,7 +703,7 @@ func waitOutDebt(ctx context.Context, wait time.Duration, renewal *claimRenewal,
 // Foundry's deployment answers HTTP 500 to an empty input, which bisection would confirm as the
 // row's own failure and dead-letter). The queue settles its row with no model call
 // (scanPending, settleDeadNothingToEmbed), and the coverage pass and report leave the item out
-// (coverageSource.items).
+// (searchableItems).
 func nothingToEmbed(expr string) string {
 	return "(" + expr + " !~ '[^[:space:]]')"
 }

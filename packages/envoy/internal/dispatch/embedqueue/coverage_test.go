@@ -989,46 +989,26 @@ func TestTheIdentityRecheckDropsAVectorTheOldConfigurationCommitsAfterTheBootPas
 	})
 }
 
-// runCoverage holds no timer once a run finds no row of another identity: with none at boot it
-// returns after the boot pass, and with some it returns after the first recheck that finds none
-// left, having dropped and re-admitted them.
-func TestTheCoverageLoopStopsOnceNoForeignRowRemains(t *testing.T) {
-	for name, tc := range map[string]struct {
-		seed    func(t *testing.T, database *store.Store)
-		recheck time.Duration
-	}{
-		// An hour's interval: a loop that armed a recheck would not return within the test.
-		"none at boot": {
-			seed: func(t *testing.T, database *store.Store) {
-				seedIssue(t, database, "NONE", "NONE-1", "Embedded here")
-				drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
-			},
-			recheck: time.Hour,
-		},
-		"some at boot": {
-			seed:    func(t *testing.T, database *store.Store) { seedForeignRows(t, database, "SOME") },
-			recheck: 200 * time.Millisecond,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			database := storetest.Open(t)
-			tc.seed(t, database)
-			shortenIdentityRecheck(t, tc.recheck)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			runCoverage(ctx, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity), proven: newProof()})
-			if ctx.Err() != nil {
-				t.Fatal("the coverage loop still waited after 10s, want it returned once no foreign row remained")
-			}
-			var foreign bool
-			if err := database.Pool.QueryRow(context.Background(), foreignRows, coverageKinds, configuredIdentity).Scan(&foreign); err != nil {
-				t.Fatalf("look for foreign rows: %v", err)
-			}
-			if foreign {
-				t.Error("foreign rows remain after the loop returned")
-			}
-		})
-	}
+// A vector another identity commits is dropped whenever it lands, not only while an earlier pass
+// had already found rows of that identity: here the boot pass finds none, and the vector lands
+// after it. Nothing but the identity steps would take it back - the scan selects only rows whose
+// embedded_hash is distinct from content_hash, which this row's is not, and search compares a
+// stored vector only with a query vector of its own identity - so without them the issue would
+// be matched by no meaning search for the life of the process.
+func TestTheIdentityRecheckDropsAVectorCommittedAfterAPassThatFoundNone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "CLEAN", "CLEAN-1", "Embedded here at boot")
+	shortenIdentityRecheck(t, time.Second)
+	runQueue(t, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity)})
+	// The boot drain embeds the issue here, so the boot pass's look for rows of another identity
+	// finds none: the database holds one row and this process made its vector.
+	eventually(t, 15*time.Second, "the boot pass and the boot drain", func() bool {
+		return modelOf(t, database, "CLEAN-1") == configuredIdentity
+	})
+	commitForeignVector(t, database, "CLEAN-1")
+	eventually(t, 20*time.Second, "CLEAN-1's foreign vector dropped and embedded again here", func() bool {
+		return modelOf(t, database, "CLEAN-1") == configuredIdentity
+	})
 }
 
 // A boot pass that skipped the identity steps because the embedder had not answered its canary
