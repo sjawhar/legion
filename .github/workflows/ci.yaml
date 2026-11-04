@@ -33,20 +33,20 @@ name: CI
 # (`cache: false` on every step). The jobs that cache Go restore one of six families with
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
-# build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch-browser-multiprocess and envoy-go-race-docs), go-envoy-test (envoy-go alone: it builds
-# the test binary of every package of the envoy module, a set no other job builds), go-envoy-infra
-# (envoy-infra-go) and go-notices (lint's notices step). Every family but go-docs is filled by
-# .github/workflows/ci-caches.yaml, which builds those sets on a push to main and saves them;
-# go-docs stays with docs-pages.yaml, which saves it on that same push. Each family keeps one
-# entry, keyed on the Go version its job's setup-go installed, so it is refreshed only when Go is
-# bumped. A go.sum change downloads only the changed modules, and Go's build cache is
-# content-addressed, so a stale entry costs a run only what changed; a key on the go.sum files
-# left a whole entry, up to a gigabyte, per change for seven days. The fallback by prefix, when
-# the exact key misses, now applies on every run, a dispatched one on main included: it was held
-# off main so that the entry a run saved after a Go bump held nothing the older Go built, and no
-# run here saves any more. setup-bun reads and writes its cache only on main
-# (.github/actions/setup-bun), which of this workflow's events is the dispatched run alone.
+# build the same listener and natsd, listener-server-change and envoy-go-checks, which build the
+# listener, and dispatch-browser-multiprocess and envoy-go-race-docs), go-envoy-test (envoy-go
+# alone: it builds the test binary of every package of the envoy module, a set no other job
+# builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Every family but
+# go-docs is filled by .github/workflows/ci-caches.yaml, which builds those sets on a push to
+# main and saves them; go-docs stays with docs-pages.yaml, which saves it on that same push. Each
+# family keeps one entry, keyed on the Go version its job's setup-go installed, so it is
+# refreshed only when Go is bumped. A go.sum change downloads only the changed modules, and Go's
+# build cache is content-addressed, so a stale entry costs a run only what changed; a key on the
+# go.sum files left a whole entry, up to a gigabyte, per change for seven days. The fallback by
+# prefix, when the exact key misses, now applies on every run, a dispatched one on main
+# included: it was held off main so that the entry a run saved after a Go bump held nothing the
+# older Go built, and no run here saves any more. setup-bun reads and writes its cache only on
+# main (.github/actions/setup-bun), which of this workflow's events is the dispatched run alone.
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -115,9 +115,11 @@ env:
       "pi-envoy": "pi_envoy",
       "pi-legion": "pi_legion",
       "dispatch": "dispatch",
+      "dispatch-ui": "dispatch_ui",
       "dispatch-browser-multiprocess": "dispatch_browser_multiprocess",
       "claude-envoy": "claude_envoy",
       "envoy-go": "envoy_go",
+      "envoy-go-checks": "envoy_go_checks",
       "envoy-infra-go": "envoy_infra_go",
       "envoy-go-race": "envoy_go_race",
       "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
@@ -166,10 +168,17 @@ jobs:
       # trigger, which would start a run that joins the concurrency group above and cancels the
       # pull request's run in progress.
       dispatch: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.dispatch || 'false' }}
+      # The dashboard's and the proof editor's fast checks, split out of `dispatch` so they come
+      # back on every push: no `full-ci` term, only the dispatched one above.
+      dispatch_ui: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.dispatch_ui }}
       dispatch_browser_multiprocess: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.dispatch_browser_multiprocess }}
       claude_envoy: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.claude_envoy }}
       # A slow suite, gated as the comment above `dispatch` says.
       envoy_go: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go || 'false' }}
+      # envoy-go's fast half (the format and generated-code checks, the shell-script tests and
+      # the build of the envoy commands), split out so it comes back on every push: no `full-ci`
+      # term, only the dispatched one above.
+      envoy_go_checks: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_go_checks }}
       envoy_infra_go: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.envoy_infra_go }}
       # Six slow suites, gated as the comment above `dispatch` says.
       envoy_go_race: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.envoy_go_race || 'false' }}
@@ -810,14 +819,9 @@ jobs:
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
               - *bun_install
-              - *biome
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/src/**'
-              # web/src/features/delivery/lib/applyDelta.test.ts:2-4 and
-              # web/src/features/doc/decision-blocks.test.ts:10.
-              - 'packages/contracts/fixtures/live/**'
-              - 'packages/contracts/fixtures/decision-blocks/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
               - 'packages/envoy-client/bin/dispatch.ts'
@@ -830,8 +834,6 @@ jobs:
               # action, and the S3 step reads the same declaration for its docker run.
               - 'packages/envoy/internal/tests3/seaweedfs.go'
               - '.github/actions/pull-test-images/**'
-              # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
-              - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
               # The real secrets broker e2e/broker-approval.e2e.ts approves a request on, the dev
@@ -864,6 +866,29 @@ jobs:
               - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/ratelimit/*'
+            # The dashboard's and the proof editor's fast checks (dispatch-ui), split out of the
+            # dispatch filter above: what their lint, typecheck, unit tests and the dashboard's
+            # build and asset checks read. No Go and no Dispatch server: the job runs neither.
+            dispatch_ui:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *biome
+              - 'packages/dispatch/**'
+              - 'packages/proof-editor/**'
+              # packages/dispatch/web/vite.config.ts:94-103 aliases @legion/contracts, and tsc and
+              # bun read it through the workspace's "bun" export condition.
+              - 'packages/contracts/src/**'
+              # web/src/features/delivery/lib/applyDelta.test.ts:2-4,
+              # e2e/__tests__/delivery-live-probe.test.ts:8-12 and
+              # web/src/features/doc/decision-blocks.test.ts:10.
+              - 'packages/contracts/fixtures/live/**'
+              - 'packages/contracts/fixtures/decision-blocks/**'
+              # The block schema web/src/__tests__/setup.ts:7 and features/refs/markdown-engine.test.ts:3 read.
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/blocks.json'
+              # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
+              - 'packages/envoy/scripts/fixtures/shell-quote.json'
+              # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
+              - 'scripts/third-party-notices.ts'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
             # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
@@ -874,20 +899,14 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
-              # gofmt -l . walks every .go file under packages/envoy, and its tests walk it too
-              # (internal/dispatch/api/lock_level_test.go:120-133).
+              # Its unit step tests every package of the envoy module, and
+              # internal/dispatch/api/lock_level_test.go:120-133 walks every .go file under it.
               - 'packages/envoy/**'
-              # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
-              # and sources, renders pmdoc's generated block schema from
-              # schemas/block-schema.schema.json, and checks the daemon's generated copy too
-              # (its outputs list, the files the generator owns).
-              - 'packages/contracts/scripts/gen-go.ts'
-              - 'packages/contracts/schemas/**'
-              - 'packages/contracts/src/**'
-              - 'packages/daemon/internal/dispatch/generated.go'
-              # The pmdoc fixture check and pmdoc's tests run pmdoc/gen, which imports the editor
-              # (internal/dispatch/pmdoc/update_test.go:236-239).
+              # pmdoc's tests run pmdoc/gen, which imports the editor
+              # (internal/dispatch/pmdoc/update_test.go:236-239), whose src/block-pointers.ts
+              # imports @legion/contracts.
               - 'packages/proof-editor/**'
+              - 'packages/contracts/src/**'
               # Fixtures its Go tests read: cmd/listener/api_test.go:191,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
               # internal/dispatch/api/delivery_live_diff_test.go:982,1011,
@@ -902,6 +921,26 @@ jobs:
               # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
               - 'docs/kubernetes.md'
               - '.github/actions/pull-test-images/**'
+            # envoy-go's fast half (envoy-go-checks): the format, generated-contract and pmdoc
+            # checks, the seven shell-script tests, and the build and pack of the envoy commands.
+            # gofmt -l . walks every .go file under packages/envoy, those tests and the scripts
+            # they drive live there, and `go build ./cmd/dispatch ./cmd/listener` compiles
+            # packages of that module alone.
+            envoy_go_checks:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *go_workspace
+              - 'packages/envoy/**'
+              # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
+              # and sources, renders pmdoc's generated block schema from
+              # schemas/block-schema.schema.json, and checks the daemon's generated copy too
+              # (its outputs list, the files the generator owns).
+              - 'packages/contracts/scripts/gen-go.ts'
+              - 'packages/contracts/schemas/**'
+              - 'packages/contracts/src/**'
+              - 'packages/daemon/internal/dispatch/generated.go'
+              # The pmdoc fixture check runs pmdoc/gen, which imports the editor.
+              - 'packages/proof-editor/**'
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
@@ -2261,6 +2300,65 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
+  # The dashboard's and the proof editor's lint, typecheck, unit tests, build and asset checks,
+  # split out of the `dispatch` job below: that job's browser suite is one of the nine slow
+  # suites, which run in the merge queue and on a pull request labelled `full-ci`, while these
+  # checks must come back on every push. No Postgres service, no Go and no contracts build: tsc
+  # and bun read @legion/contracts through the workspace's "bun" export condition and the
+  # dashboard's Vite build aliases its sources, so only the browser suite needs contracts' dist/.
+  dispatch-ui:
+    needs: changes
+    if: needs.changes.outputs.dispatch_ui == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Lint proof editor
+        run: bun run lint
+        working-directory: packages/proof-editor
+      - name: Typecheck proof editor
+        run: bun run typecheck
+        working-directory: packages/proof-editor
+      - name: Test proof editor
+        run: bun run test
+        working-directory: packages/proof-editor
+      - name: Lint dispatch dashboard
+        run: bun run lint
+        working-directory: packages/dispatch
+      - name: Typecheck dispatch dashboard
+        run: bun run typecheck
+        working-directory: packages/dispatch
+      - name: Test dispatch dashboard
+        run: bun run test
+        working-directory: packages/dispatch
+      # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
+      # cannot be determined; the listing shows the build shipped it.
+      - name: Build dispatch dashboard
+        run: |
+          bun run build:web
+          ls -l web/dist/THIRD_PARTY_NOTICES.txt
+        working-directory: packages/dispatch
+      - name: Check dispatch dashboard CSS classes
+        run: bun run check:classes
+        working-directory: packages/dispatch
+      # The server refuses to boot on a build holding an asset over 8 MiB (it publishes every
+      # asset to its database at boot), which would stall a roll; refuse the build here instead.
+      - name: Check dispatch dashboard asset sizes
+        run: bun run check:asset-sizes
+        working-directory: packages/dispatch
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The browser suite, one of the nine slow suites: the dashboard's lint, typecheck, unit tests,
+  # build and asset checks are dispatch-ui's above.
   dispatch:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true'
@@ -2297,39 +2395,6 @@ jobs:
         # TS source directly through the workspace's "bun" export condition).
         run: bun run build
         working-directory: packages/contracts
-      - name: Lint proof editor
-        run: bun run lint
-        working-directory: packages/proof-editor
-      - name: Typecheck proof editor
-        run: bun run typecheck
-        working-directory: packages/proof-editor
-      - name: Test proof editor
-        run: bun run test
-        working-directory: packages/proof-editor
-      - name: Lint dispatch dashboard
-        run: bun run lint
-        working-directory: packages/dispatch
-      - name: Typecheck dispatch dashboard
-        run: bun run typecheck
-        working-directory: packages/dispatch
-      - name: Test dispatch dashboard
-        run: bun run test
-        working-directory: packages/dispatch
-      # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
-      # cannot be determined; the listing shows the build shipped it.
-      - name: Build dispatch dashboard
-        run: |
-          bun run build:web
-          ls -l web/dist/THIRD_PARTY_NOTICES.txt
-        working-directory: packages/dispatch
-      - name: Check dispatch dashboard CSS classes
-        run: bun run check:classes
-        working-directory: packages/dispatch
-      # The server refuses to boot on a build holding an asset over 8 MiB (it publishes every
-      # asset to its database at boot), which would stall a roll; refuse the build here instead.
-      - name: Check dispatch dashboard asset sizes
-        run: bun run check:asset-sizes
-        working-directory: packages/dispatch
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose
         # index intermittently fails `apt-get update` with a hash-sum mismatch and
@@ -2364,14 +2429,12 @@ jobs:
           curl -sf -X PUT -o /dev/null http://127.0.0.1:18333/dispatch-e2e-files
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
-        # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
-        # Calling the wrapper directly reuses the "Build dispatch dashboard" step's dist above and
-        # drops this job to one Vite build. Safe because that build and this one are now the same
-        # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
-        # unconsumed consumer, the `window.__dispatchDocument` inspection probe). e2e/run.ts starts
-        # the harness on ports the OS chooses and runs Playwright with them; the config starts no
-        # server.
-        run: bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
+        # `bun run e2e` builds the SPA and then runs the harness, the one Vite build this job
+        # makes now that the dashboard's own build step is dispatch-ui's. The build cannot be
+        # skipped here: the server serves the dashboard from web/dist (e2e/run-server.sh:103).
+        # The wrapper it runs, e2e/run.ts, starts the harness on ports the OS chooses and runs
+        # Playwright with them; the config starts no server.
+        run: bun run e2e
         working-directory: packages/dispatch
         # The file store the step above started. Set here, not written to $GITHUB_ENV, which every
         # later step would inherit, and which check-ci-filters.sh treats as reaching the job's go
@@ -2527,6 +2590,113 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
+  # envoy-go's fast half: the Go format check, the two generated-code checks, the seven
+  # shell-script tests and the build and pack of the envoy commands. The slow half below (the
+  # module's unit tests, the container-backed NATS matrix and the integration suite) is one of
+  # the nine slow suites, which run in the merge queue and on a pull request labelled `full-ci`,
+  # while these checks must come back on every push. No Postgres service: nothing here opens a
+  # database. It restores go-envoy rather than go-envoy-test, which is the slow half's family
+  # alone (the test binary of every package of the envoy module).
+  envoy-go-checks:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_checks == 'true'
+    runs-on: ubuntu-24.04
+    # The builds below download the envoy module's dependencies and compile ./cmd/listener for
+    # each release architecture, so the job restores go-envoy, the family whose entry holds that
+    # same listener build (.github/workflows/ci-caches.yaml fills it on a push to main). Without
+    # it the pack step would recompile the set per architecture from nothing on every push, which
+    # is the runner time this change exists to cut.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ format('go-envoy-{0}-', runner.os) }}
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
+            echo "$unformatted"
+            exit 1
+          fi
+        working-directory: packages/envoy
+      - name: Check Go contracts are generated from the shared schema
+        run: bun run check:go
+        working-directory: packages/contracts
+      - name: Check pmdoc fixtures are up to date
+        run: bun run check
+        working-directory: packages/envoy/internal/dispatch/pmdoc/gen
+      - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
+        run: bash scripts/dev-broker.test.sh
+        working-directory: packages/envoy
+      - name: Reuse test for dev-postgres.sh (a fake docker; refuses a dispatch-pg off the pinned image)
+        run: bash scripts/dev-postgres.test.sh
+        working-directory: packages/envoy
+      - name: Verdict test for listener-deploy-probe.sh (two fake listener tasks on 127.0.0.1 and 127.0.0.2)
+        run: bash scripts/listener-deploy-probe.test.sh
+        working-directory: packages/envoy
+      - name: One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)
+        run: bash loadtest/run-step.test.sh
+        working-directory: packages/envoy
+      - name: Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)
+        run: bash loadtest/common.test.sh
+        working-directory: packages/envoy
+      - name: Test loadtest/cluster/cluster.sh (fakes kubectl, gh and curl; no cluster) and compare nats.yaml with a fresh render
+        run: bash loadtest/cluster/cluster.test.sh
+        working-directory: packages/envoy
+      # The test runs its URL cases under en_US.UTF-8, where bash's [[ =~ ]] ranges reach past ASCII,
+      # to hold the deployer's URL grammar to ASCII; it refuses to run without that locale.
+      - name: Rollback and credential test for deploy/scripts/autodeploy.sh (fakes docker/jj/curl and a libpq client; no real Compose or Postgres)
+        run: |
+          sudo locale-gen en_US.UTF-8
+          bash deploy/scripts/autodeploy_test.sh
+        working-directory: packages/envoy
+      - name: Build envoy services
+        run: go build ./cmd/dispatch ./cmd/listener
+        working-directory: packages/envoy
+      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included.
+      - name: Pack envoy binaries
+        run: |
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
+            out="../../out/pr-artifacts/envoy-$arch"
+            mkdir -p "$out"
+            GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
+            GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+            tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
+            tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
+          done
+        working-directory: packages/envoy
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: legion-envoy-binaries-pr
+          path: |
+            out/pr-artifacts/legion-envoy-amd64.tar.gz
+            out/pr-artifacts/legion-envoy-arm64.tar.gz
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The slow half: the unit tests of every package of the envoy module, the container-backed NATS
+  # matrix and the integration suite, all against this job's Postgres. Its format, generated-code,
+  # shell-script, build and pack steps are envoy-go-checks' above.
   envoy-go:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
@@ -2535,7 +2705,7 @@ jobs:
     # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
     # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
     # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
-    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    # default 10 is 46, and the integration step's 5 is 41.
     timeout-minutes: 60
     services:
       postgres:
@@ -2577,21 +2747,6 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ format('go-envoy-test-{0}-', runner.os) }}
-      - name: Check Go formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
-            echo "$unformatted"
-            exit 1
-          fi
-        working-directory: packages/envoy
-      - name: Check Go contracts are generated from the shared schema
-        run: bun run check:go
-        working-directory: packages/contracts
-      - name: Check pmdoc fixtures are up to date
-        run: bun run check
-        working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       # The server's version and the pgvector version it offers, read from the service itself, so
       # the run shows which Postgres the tests below ran on.
       - name: Postgres service version
@@ -2626,55 +2781,9 @@ jobs:
       - name: Test the container-backed NATS matrix (natslive)
         run: go test -count=1 -tags natslive ./internal/testnats/
         working-directory: packages/envoy
-      - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
-        run: bash scripts/dev-broker.test.sh
-        working-directory: packages/envoy
-      - name: Reuse test for dev-postgres.sh (a fake docker; refuses a dispatch-pg off the pinned image)
-        run: bash scripts/dev-postgres.test.sh
-        working-directory: packages/envoy
-      - name: Verdict test for listener-deploy-probe.sh (two fake listener tasks on 127.0.0.1 and 127.0.0.2)
-        run: bash scripts/listener-deploy-probe.test.sh
-        working-directory: packages/envoy
-      - name: One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)
-        run: bash loadtest/run-step.test.sh
-        working-directory: packages/envoy
-      - name: Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)
-        run: bash loadtest/common.test.sh
-        working-directory: packages/envoy
-      - name: Test loadtest/cluster/cluster.sh (fakes kubectl, gh and curl; no cluster) and compare nats.yaml with a fresh render
-        run: bash loadtest/cluster/cluster.test.sh
-        working-directory: packages/envoy
-      # The test runs its URL cases under en_US.UTF-8, where bash's [[ =~ ]] ranges reach past ASCII,
-      # to hold the deployer's URL grammar to ASCII; it refuses to run without that locale.
-      - name: Rollback and credential test for deploy/scripts/autodeploy.sh (fakes docker/jj/curl and a libpq client; no real Compose or Postgres)
-        run: |
-          sudo locale-gen en_US.UTF-8
-          bash deploy/scripts/autodeploy_test.sh
-        working-directory: packages/envoy
       - name: Integration test envoy (a real NATS server, in the test process)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
-      - name: Build envoy services
-        run: go build ./cmd/dispatch ./cmd/listener
-        working-directory: packages/envoy
-      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included.
-      - name: Pack envoy binaries
-        run: |
-          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
-            out="../../out/pr-artifacts/envoy-$arch"
-            mkdir -p "$out"
-            GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
-            GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
-            tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
-            tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
-          done
-        working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: legion-envoy-binaries-pr
-          path: |
-            out/pr-artifacts/legion-envoy-amd64.tar.gz
-            out/pr-artifacts/legion-envoy-arm64.tar.gz
       - name: Report ci-ok when this is the run's last job
         if: always()
         uses: ./.github/actions/ci-ok-report

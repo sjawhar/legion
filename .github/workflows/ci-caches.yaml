@@ -14,17 +14,18 @@ name: CI caches
 #
 # Five families, each one a restore step of ci.yaml names, keyed on the Go version the family's
 # own module installs: go-notices (lint's notices step), go-daemon (typecheck, test and
-# pi-legion), go-envoy (dispatch-browser-multiprocess, envoy-go-race-docs, listener-server-change,
-# envoy-e2e-local and envoy-session-stall), go-envoy-test (envoy-go) and go-envoy-infra
-# (envoy-infra-go). One job per Go setup, since the key carries the version that module's go.mod
-# names: the daemon's go.mod for go-daemon and for go-notices, which lint installs the daemon's Go
-# for; the envoy module's for go-envoy and go-envoy-test; the infra module's for go-envoy-infra.
-# Each family is first looked up (`lookup-only`, and no `restore-keys`: the question is whether
-# that exact key exists, and the answer downloads nothing), and only a miss runs the build the
-# ci.yaml job runs and saves what it left in the module cache and the build cache. A family whose
-# key is already there builds nothing, so a run that finds every key costs a checkout and a
-# setup-go. Where a job fills two families it fills the smaller one first, so the entry that
-# carries the other's objects too is the one that was large already.
+# pi-legion), go-envoy (dispatch-browser-multiprocess, envoy-go-checks, envoy-go-race-docs,
+# listener-server-change, envoy-e2e-local and envoy-session-stall), go-envoy-test (envoy-go) and
+# go-envoy-infra (envoy-infra-go). One job per Go setup, since the key carries the version that
+# module's go.mod names: the daemon's go.mod for go-daemon and for go-notices, which lint
+# installs the daemon's Go for; the envoy module's for go-envoy and go-envoy-test; the infra
+# module's for go-envoy-infra. Each family is first looked up (`lookup-only`, and no
+# `restore-keys`: the question is whether that exact key exists, and the answer downloads
+# nothing), and only a miss runs the build the ci.yaml job runs and saves what it left in the
+# module cache and the build cache. A family whose key is already there builds nothing, so a run
+# that finds every key costs a checkout and a setup-go. Where a job fills two families it fills
+# the smaller one first, so the entry that carries the other's objects too is the one that was
+# large already.
 #
 # go-docs is not here: docs-pages.yaml saves it on this same push, from the build job it shares
 # with ci.yaml's docs job. The Bun cache is not here either: .github/actions/setup-bun reads and

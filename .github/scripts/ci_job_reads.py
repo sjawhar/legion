@@ -333,8 +333,8 @@ def go_notices_runs():
     return out
 
 
-# The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
-# simple form, pinned whole.
+# The steps of envoy-go, envoy-go-checks, envoy-smoke and listener-server-change whose go
+# commands are not in the simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 go test -count=1 -timeout 20m ./internal/dispatch/api
@@ -591,21 +591,31 @@ GATES = [
                    f"starts in {at('dispatch', 'Browser-test dispatch dashboard')} for e2e/broker-approval.e2e.ts (a one-process run on the "
                    "fake broker, e2e/harness-real-broker.ts)", ENVOY, BROKER_PKGS, mode="build"),
     ], reads=reads(
-        ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
-        ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:104-123"),
+        ("packages/dispatch/**", f"{at('dispatch', 'Browser-test dispatch dashboard')}: `bun run e2e` builds the SPA and runs Playwright in packages/dispatch"),
+        ("packages/proof-editor/**", "packages/dispatch/web/vite.config.ts:104-123 (the build:web of `bun run e2e`)"),
         (CONTRACTS_SRC, f"{at('dispatch', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:94-103 aliases"),
-        (f"{FIX}/live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
-        (f"{FIX}/decision-blocks/**", "packages/dispatch/web/src/features/doc/decision-blocks.test.ts:10, features/inbox/AskCard.test.tsx:411"),
         ("packages/envoy-client/bin/dispatch.ts", "packages/dispatch/e2e/cli-body-cap.e2e.ts:17 runs it through e2e/dispatch-cli.ts:8"),
         (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:17 runs"),
-        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3, e2e/engine-reading.ts:10"),
-        (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:154-155"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-reading.ts:10"),
         (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Pull the file store image')} names it to the action, and "
          f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image"),
         (".github/actions/pull-test-images/**", at("dispatch", "Pull the file store image")),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
-    ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),
+    ) + setup_go("dispatch", f"{ENVOY}/go.mod") + bun_job("dispatch") + CI_SELF),
+
+    # The dashboard's and the proof editor's fast checks, split out of the dispatch job above
+    # (ci.yaml's comment on dispatch-ui says why). No go command runs here.
+    gate("dispatch_ui", "dispatch-ui", reads=reads(
+        ("packages/dispatch/**", f"{at('dispatch-ui', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes and check:asset-sizes in packages/dispatch"),
+        ("packages/proof-editor/**", f"{at('dispatch-ui', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:104-123"),
+        (CONTRACTS_SRC, 'packages/dispatch/web/vite.config.ts:94-103 aliases; tsc and bun read @legion/contracts through its "bun" export condition (src/)'),
+        (f"{FIX}/live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
+        (f"{FIX}/decision-blocks/**", "packages/dispatch/web/src/features/doc/decision-blocks.test.ts:10, features/inbox/AskCard.test.tsx:411"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3"),
+        (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:154-155"),
+        ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
+    ) + biome(at("dispatch-ui", "Lint dispatch dashboard")) + bun_job("dispatch-ui") + CI_SELF),
 
     # Its "Build the Dispatch server" step names an output (-o), which the simple form does not
     # reduce, so the step is pinned whole.
@@ -635,8 +645,6 @@ GATES = [
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
         step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
                  ["./internal/testnats/"], tags="natslive"),
-        step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
-                 mode="build"),
     ], exact=[
         # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
         # on the service's one checkpointer beside the other package binaries), then ./... but it
@@ -645,29 +653,39 @@ GATES = [
             (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
+    ], reads=reads(
+        (".github/actions/pull-test-images/**", at("envoy-go", "Pull test container images")),
+    ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
+
+    # envoy-go's fast half: its format and generated-code checks, the seven shell-script tests
+    # and the build and pack of the envoy commands (ci.yaml's comment on envoy-go-checks says why
+    # they are split out). Its gofmt step reads the whole module, so no closure stands for it.
+    gate("envoy_go_checks", "envoy-go-checks", runs=[
+        step_run("envoy-go-checks", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY,
+                 ["./cmd/dispatch", "./cmd/listener"], mode="build"),
+    ], exact=[
         # One linux build of the listener per architecture the loop reads from the target list.
-        pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [
+        pinned_step("envoy-go-checks", PACK_STEP, ENVOY, PACK_SCRIPT, [
             (ENVOY, ["./cmd/listener"], f"GOOS=linux GOARCH={arch} go build ./cmd/listener",
              {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
             for arch in targets(GO_TARGETS, "envoy")
         ]),
     ], reads=reads(
-        (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
-        ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
+        (f"{ENVOY}/**", f"{at('envoy-go-checks', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
+        ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go-checks', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
         ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts's envelopeFile and blockSchemaFile read schemas/"),
         (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts's imports of ../src/*"),
         (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts's outputs list: --check compares it"),
-        (f"{ENVOY}/internal/dispatch/pmdoc/gen/**", f"{at('envoy-go', 'Check pmdoc fixtures are up to date')} (gen.ts --check)"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/gen/**", f"{at('envoy-go-checks', 'Check pmdoc fixtures are up to date')} (gen.ts --check)"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/gen.ts:4-5 imports @legion/proof-editor (exports -> src/lib.ts, src/lib-headless.ts)"),
-        (".github/actions/pull-test-images/**", at("envoy-go", "Pull test container images")),
-        (f"{ENVOY}/loadtest/run-step.test.sh", at("envoy-go", LOADTEST_RUN_STEP)),
+        (f"{ENVOY}/loadtest/run-step.test.sh", at("envoy-go-checks", LOADTEST_RUN_STEP)),
         (f"{ENVOY}/loadtest/run-step.sh", "packages/envoy/loadtest/run-step.test.sh runs it"),
         (f"{ENVOY}/loadtest/run-series.sh", "packages/envoy/loadtest/run-step.test.sh runs it"),
-        (f"{ENVOY}/loadtest/common.test.sh", at("envoy-go", LOADTEST_LOCK)),
+        (f"{ENVOY}/loadtest/common.test.sh", at("envoy-go-checks", LOADTEST_LOCK)),
         (f"{ENVOY}/loadtest/common.sh", "packages/envoy/loadtest/common.test.sh sources it; run-step.sh and run-series.sh source it"),
-        (NOTICES, f"{at('envoy-go', 'Pack envoy binaries')} runs it"),
-        (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
-    ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
+        (NOTICES, f"{at('envoy-go-checks', 'Pack envoy binaries')} runs it"),
+        (GO_TARGETS, f"{at('envoy-go-checks', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
+    ) + setup_go("envoy-go-checks", f"{ENVOY}/go.mod") + bun_job("envoy-go-checks") + CI_SELF),
 
 
     gate("envoy_infra_go", "envoy-infra-go", runs=[
