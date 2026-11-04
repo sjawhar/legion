@@ -412,6 +412,7 @@ jobs:
               - 'packages/envoy/internal/config/*'
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/dedupe/*'
+              - 'packages/envoy/internal/ghrename/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logging/*'

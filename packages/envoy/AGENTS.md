@@ -51,6 +51,9 @@ Each item below names a task and where its code is, then notes on it.
   The mapping is one-way, a current name published under its former name and never the reverse, because this rewrite creates subjects:
   under a two-way mapping, a repository created later at the freed name would publish into the live topics of the repository that moved away from it.
   A value `ghrename.Parse` cannot read refuses the listener's start, naming the variable.
+  The former name is written into the subject exactly as the value spells it, while the current name is matched without case, so it must carry the spelling GitHub used for that repository:
+  a NATS subject is compared with case, a subscriber holds the subject GitHub's own spelling produced, and a former name in a case GitHub never used addresses every copy to a subject nothing subscribes to.
+  The listener's start-up line names the subject prefix each pair's copies go out on, so that mistake is visible in the log rather than silent.
   This list and the Legion daemon's `repository_renames` in `legion.yaml` (`packages/daemon/internal/ghrepo/renames.go`) are two lists an operator keeps in step:
   they are separate Go modules, and the listener's pod mounts no `legion.yaml`.
   The daemon's list is read-side only and two-way, while this one is publish-side and one-way.

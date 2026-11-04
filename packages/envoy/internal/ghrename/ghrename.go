@@ -169,14 +169,24 @@ func (r Renames) IsZero() bool { return len(r.pairs) == 0 }
 // the renames answer.
 func (r Renames) Pairs() []Rename { return slices.Clone(r.pairs) }
 
-// String spells the configured pairs, in configured order, as ENVOY_GITHUB_REPOSITORY_RENAMES
-// spells them: `<former>=<current>`, joined by `, `. The value's grammar is written here, in the
-// package that parses it, so a caller that prints the renames cannot spell them another way. The
-// zero Renames is the empty string.
+// String spells, for each configured pair in configured order, the pair as
+// ENVOY_GITHUB_REPOSITORY_RENAMES spells it and the subject prefix that pair's copies are
+// published under: `<former>=<current> copies to <prefix>`, joined by `, `. The value's grammar
+// is written here, in the package that parses it, so a caller that prints the renames cannot
+// spell them another way. The zero Renames is the empty string.
+//
+// The prefix is spelled out because the former name is written into the subject exactly as the
+// value spells it, while the current name is matched without case. A NATS subject is compared
+// with case, and a subscriber holds the subject GitHub's own spelling of the repository
+// produced, so a former name written in a case GitHub never used addresses every copy to a
+// subject nothing subscribes to. The listener logs this line at start, so that operator reads
+// the subject in the log's first lines rather than meeting the silence later.
 func (r Renames) String() string {
 	spelled := make([]string, 0, len(r.pairs))
 	for _, pair := range r.pairs {
-		spelled = append(spelled, pair.Former+"="+pair.Current)
+		// Parse accepted the pair, so both of its sides are an `<owner>/<name>` and this holds.
+		prefix, _ := repositoryPrefix(pair.Former)
+		spelled = append(spelled, pair.Former+"="+pair.Current+" copies to "+prefix)
 	}
 	return strings.Join(spelled, ", ")
 }

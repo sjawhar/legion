@@ -265,8 +265,10 @@ func TestZeroRenames(t *testing.T) {
 	}
 }
 
-// TestRenamesString covers the one spelling of the configured pairs: the value's own, so a caller
-// that logs the renames an operator configured prints what the operator wrote.
+// TestRenamesString covers the line the listener logs at start: each pair as the value spelled
+// it, and the subject prefix that pair's copies go out under. The prefix is what tells an
+// operator who wrote the former name in a case GitHub never used that the copies address a
+// subject nothing subscribes to, since a NATS subject is compared with case.
 func TestRenamesString(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -274,11 +276,26 @@ func TestRenamesString(t *testing.T) {
 		want  string
 	}{
 		{name: "no pair", value: "", want: ""},
-		{name: "one pair", value: "sjawhar/legion=cybermonklabs/legion", want: "sjawhar/legion=cybermonklabs/legion"},
+		{
+			name:  "one pair",
+			value: "sjawhar/legion=cybermonklabs/legion",
+			want:  "sjawhar/legion=cybermonklabs/legion copies to notifications.github.sjawhar.legion",
+		},
 		{
 			name:  "two pairs, in configured order and as the value spelled them",
 			value: " acme/old = acme/new , sjawhar/legion=cybermonklabs/legion ",
-			want:  "acme/old=acme/new, sjawhar/legion=cybermonklabs/legion",
+			want: "acme/old=acme/new copies to notifications.github.acme.old, " +
+				"sjawhar/legion=cybermonklabs/legion copies to notifications.github.sjawhar.legion",
+		},
+		{
+			name:  "a former name holding a dot, as a subject writes it",
+			value: "acme/old.site=acme/new",
+			want:  "acme/old.site=acme/new copies to notifications.github.acme.old_site",
+		},
+		{
+			name:  "a former name spelled with capitals keeps them, since a subject is compared with case",
+			value: "SJawhar/Legion=cybermonklabs/legion",
+			want:  "SJawhar/Legion=cybermonklabs/legion copies to notifications.github.SJawhar.Legion",
 		},
 	}
 

@@ -749,6 +749,10 @@ func main() {
 	// The renames a deployment configures belong beside the other settings lines: an operator who
 	// reads from the top sees from them alone whether ENVOY_GITHUB_REPOSITORY_RENAMES took, and a
 	// value that configures none logs nothing, as every other repository's publishing is unchanged.
+	// The line names the subject prefix each pair's copies go out on, not the pair alone, because
+	// the former name is written into the subject as the value spells it while a NATS subject is
+	// compared with case: an operator who spelled it in a case GitHub never used reads here the
+	// subject nothing subscribes to, rather than meeting the silence later (Renames.String).
 	if github := webhookCfg.GitHub; github != nil && !github.RepositoryRenames.IsZero() {
 		logger.Info("github repository renames: every envelope of the current repository is published a second time under the former name",
 			slog.String("renames", github.RepositoryRenames.String()))
