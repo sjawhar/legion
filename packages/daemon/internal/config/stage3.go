@@ -101,13 +101,17 @@ func matchesPathPattern(patterns []PathPattern, paths []string) bool {
 	return false
 }
 
-// GitHubApp is one App's configuration. Load resolves the configured private-key source into
+// GitHubApp is one App's configuration. Load resolves a configured private-key source into
 // PrivateKey; LoadForValidation preserves command and secret sources without executing them.
+// TokenCommand is the fourth source, for a deployment whose App keys only a secrets broker holds:
+// the daemon holds no key and runs the command for every lease it needs (appauth's token mode), so
+// neither loader runs it.
 type GitHubApp struct {
 	AppID             string
 	PrivateKey        string
 	PrivateKeyCommand string
 	PrivateKeySecret  string
+	TokenCommand      string
 	Installations     map[string]string
 }
 
@@ -386,7 +390,7 @@ func readGitHubApp(value *yaml.Node, key string) (GitHubApp, error) {
 	if value.Kind != yaml.MappingNode {
 		return GitHubApp{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "app_id", "private_key", "private_key_command", "private_key_secret", "installations")
+	fields, err := members(value, key, "app_id", "private_key", "private_key_command", "private_key_secret", "token_command", "installations")
 	if err != nil {
 		return GitHubApp{}, err
 	}
@@ -397,6 +401,7 @@ func readGitHubApp(value *yaml.Node, key string) (GitHubApp, error) {
 	}{
 		{"app_id", &app.AppID}, {"private_key", &app.PrivateKey},
 		{"private_key_command", &app.PrivateKeyCommand}, {"private_key_secret", &app.PrivateKeySecret},
+		{"token_command", &app.TokenCommand},
 	} {
 		if *field.target, err = stringOf(fields[field.name], key+"."+field.name); err != nil {
 			return GitHubApp{}, err
@@ -414,19 +419,25 @@ func readGitHubApp(value *yaml.Node, key string) (GitHubApp, error) {
 		return GitHubApp{}, fmt.Errorf("%s is missing required fields: app_id", key)
 	}
 	sources := 0
-	for _, source := range []string{app.PrivateKey, app.PrivateKeyCommand, app.PrivateKeySecret} {
+	for _, source := range []string{app.PrivateKey, app.PrivateKeyCommand, app.PrivateKeySecret, app.TokenCommand} {
 		if source != "" {
 			sources++
 		}
 	}
 	if sources != 1 {
-		return GitHubApp{}, fmt.Errorf("%s requires exactly one of private_key, private_key_command, or private_key_secret", key)
+		return GitHubApp{}, fmt.Errorf("%s requires exactly one of %s", key, appSources)
+	}
+	if app.TokenCommand != "" && len(app.Installations) > 0 {
+		return GitHubApp{}, fmt.Errorf("%s.installations cannot be set with token_command: the command's release names each installation", key)
 	}
 	if app.Installations == nil {
 		app.Installations = map[string]string{}
 	}
 	return app, nil
 }
+
+// appSources names the four sources of an App's credential, of which an App configures exactly one.
+const appSources = "private_key, private_key_command, private_key_secret, or token_command"
 
 func readInstallations(value *yaml.Node, key string) (map[string]string, error) {
 	if value.Tag == "!!null" || value.Kind != yaml.MappingNode {
@@ -464,6 +475,7 @@ func readPositiveInteger(value *yaml.Node, key string, max int) (*int, error) {
 // ResolveGitHubApps obtains App private keys only after Config has accepted every local setting.
 // private_key_command runs with the daemon environment; private_key_secret deliberately drops only
 // SECRETSD_SESSION_TOKEN_FILE so a key grant remains attached to the daemon's launcher terminal.
+// An App on token_command has no key to resolve: the token manager runs its command per lease.
 func ResolveGitHubApps(apps GitHubApps) (GitHubApps, error) {
 	implement, err := resolveGitHubApp(apps.Implement, "github_apps.implement")
 	if err != nil {
@@ -478,7 +490,7 @@ func ResolveGitHubApps(apps GitHubApps) (GitHubApps, error) {
 
 func resolveGitHubApp(app GitHubApp, field string) (GitHubApp, error) {
 	switch {
-	case app.PrivateKey != "":
+	case app.PrivateKey != "", app.TokenCommand != "":
 		return app, nil
 	case app.PrivateKeyCommand != "":
 		key, err := executePrivateKeyCommand(app.PrivateKeyCommand, field+".private_key_command")
@@ -495,7 +507,7 @@ func resolveGitHubApp(app GitHubApp, field string) (GitHubApp, error) {
 		app.PrivateKey = key
 		return app, nil
 	default:
-		return GitHubApp{}, fmt.Errorf("%s requires exactly one of private_key, private_key_command, or private_key_secret", field)
+		return GitHubApp{}, fmt.Errorf("%s requires exactly one of %s", field, appSources)
 	}
 }
 

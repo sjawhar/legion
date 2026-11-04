@@ -49,7 +49,7 @@ for (const name of [
 const wrong = pinned === "1.0.0" ? "1.0.1" : "1.0.0";
 stub("bun", `case "$1" in --version) echo ${wrong};; esac\nexit 0`);
 stub("curl", "printf 200");
-stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name=a2V5"; exec "$@"');
+stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"');
 // hostTool gives the real NAME binary to put on the run's PATH. Bun.which takes the first match on
 // this process's PATH, which on a machine with a version manager is a shim: a wrapper that resolves
 // the tool it stands for out of the caller's environment — the manager's configuration under HOME,
@@ -144,7 +144,6 @@ test("a bun other than the pinned release is refused in prerequisites, naming th
       TMPDIR: scratch,
       LEGION_E2E_MODEL_ROUTE: "key-file",
       LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
-      LEGION_E2E_APP_KEY_RUNNER: "agent-secrets",
     },
     stdout: "pipe",
     stderr: "pipe",

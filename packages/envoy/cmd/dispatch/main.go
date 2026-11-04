@@ -543,6 +543,7 @@ func main() {
 			Listen:          database.Pool.Listener,
 			RoleClaims:      holders,
 			Sessions:        holders,
+			KeptLanes:       natsClient,
 			PublishFailures: outboxPublishFailures,
 		})
 		outboxStopped = make(chan struct{})

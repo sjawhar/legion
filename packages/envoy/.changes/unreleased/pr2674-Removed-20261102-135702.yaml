@@ -1,5 +1,0 @@
-kind: Removed
-body: 'The listener no longer posts a message to a session''s HTTP serve port, and has no live topics lane. `ENVOY_HOST_BRIDGE` and `ENVOY_SUBSCRIBE_ALL_TOPICS` are read by nothing: a listener started with either set logs one warning naming it and starts, and an operator should remove both from the deployment. `envoy-infra`''s `hostBridge` and `subscribeAllTopics` inputs go with them, as do the two settings in the compose files.'
-time: 2026-11-02T13:57:02.337419271Z
-custom:
-    Issue: pr2674
