@@ -101,6 +101,14 @@ Both readings come from the readers themselves, through the pmdoc differential's
 every other stored text to the read-only engine in `DisplayLatest`, which is the pairing the
 differential's own cross-reader gates use. Trees are compared with their block ids ignored.
 
+Classing is the long half of a run - hours over a hundred thousand texts on two cores, where
+reading them takes one - so it is done once. Every text classed is appended to `verdicts.jsonl`
+in the work directory, each run reads only the texts no run has classed, and the readings of each
+such batch stay in a `batch-<time>/` directory of their own. A pass over a corpus that grew by a
+quarter therefore costs a quarter of the classing. Delete `verdicts.jsonl` to class them all
+again, which is what a change to either reader, or to the classes, calls for; the batch
+directories hold the readings and can be deleted whenever the disk is wanted back.
+
 Each text falls in one class, defined in the script's opening comment: **the two agree**, **format
 differs** (one visible text, two trees), **the browser lost text** (the browser's visible text is
 Go's with characters deleted), **Go loses text** (the other way round, which must never happen),
@@ -117,6 +125,12 @@ and 0 on none. It reads the corpus and nothing else, so it needs a pass to have 
 `__fixtures__/display-read-census.json`: ten texts written for the purpose, eight of them with the
 trees this repository's own two readers made of them, and the two pairs no text produced written
 by hand, plus the stored texts and files the guard is tested on.
+
+The fixture is generated, not written by hand: `/legion/scratch/tmp/drc-probe/fixture.ts` on the
+pod that ran the census holds the texts and calls `classifyCorpus` and `classifyBatch`, then
+writes the JSON; `bun fixture.ts` followed by `bunx biome check --write scripts/dispatch` gives
+back the committed file byte for byte. It stays scratch and out of the tree; its whole input is
+the fixture's own `markdown` and `why` fields, so it can be written again from them.
 
 ## Comment delivery
 

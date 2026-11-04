@@ -868,27 +868,35 @@ async function run(
     closeSync(handle);
   }
 }
+/** Where one stored text stands, without its markdown: all the join needs, and small enough that
+ * a hundred thousand of them fit in memory where the texts themselves do not. */
+interface TextPlace {
+  readonly id: string;
+  readonly group: Group;
+}
 
-/**
- * Writes the corpus as the readers take it: one `{id, md}` a line, in one order all three follow.
- * It gives back the id and group of each line and nothing else, so the readings can be joined
- * back to their texts without a pass holding every stored text in memory.
- */
-function writeReaderCorpus(path: string, corpus: string): { id: string; group: Group }[] {
-  const index: { id: string; group: Group }[] = [];
+/** Every text of a corpus, in order, by id and group alone. */
+function textPlaces(corpus: string): TextPlace[] {
+  const places: TextPlace[] = [];
+  for (const stored of storedTexts(corpus)) places.push({ id: stored.id, group: stored.group });
+  return places;
+}
+
+/** Writes the texts `wanted` names as the readers take them: one `{id, md}` a line, in the
+ * corpus's own order, which all three readers' outputs then follow line for line. */
+function writeReaderCorpus(path: string, corpus: string, wanted: ReadonlySet<string>): void {
   const handle = openSync(path, "w");
   try {
     for (const stored of storedTexts(corpus)) {
+      if (!wanted.has(stored.id)) continue;
       const line = `${JSON.stringify({ id: stored.id, md: stored.markdown })}\n`;
       const written = writeSync(handle, line);
       // On a full disk writeSync writes what fits and returns the short count instead of throwing.
       if (written !== Buffer.byteLength(line)) throw new Error(`short write to ${path}`);
-      index.push({ id: stored.id, group: stored.group });
     }
   } finally {
     closeSync(handle);
   }
-  return index;
 }
 
 /** One line of an engine's output: the reading of the `md` field, `{pm}` or `{err}`, under the
@@ -914,46 +922,22 @@ function engineReading(reading: EngineLine["md"]): PmNode | { error: string } {
 }
 
 /**
- * Runs both engines and Go's display read over the corpus and classes every text they read. The
- * three outputs are read in step with the corpus, one line each at a time, so a pass over tens of
- * thousands of documents holds one pair of trees rather than all of them. `visit` is given each
- * text's two readings as they are classed.
+ * Classes each text of `places` from the three readings one batch directory holds, read in step
+ * with it, one line each at a time, so a batch of tens of thousands of documents holds one pair
+ * of trees rather than all of them. `visit` is given each text's two readings as they are
+ * classed. It runs no reader itself: `classifyCorpus` runs them, and a batch already read can be
+ * classed again from its files alone.
  */
-export async function classifyCorpus(
-  corpus: string,
-  work: string,
-  visit?: (stored: { id: string; group: Group }, reading: TextReading) => void
-): Promise<ClassedText[]> {
-  const readerCorpus = join(work, "reader-corpus.jsonl");
-  const editing = join(work, "engine.jsonl");
-  const readOnly = join(work, "engine-readonly.jsonl");
-  const dump = join(work, "go-dump.jsonl");
-  const index = writeReaderCorpus(readerCorpus, corpus);
-  console.error(`readers: ${index.length} texts in ${readerCorpus}`);
-  await run(["bun", ENGINE_READER, readerCorpus, editing, "md"], REPO, join(work, "engine.log"));
-  console.error("readers: the editing engine is done");
-  await run(
-    ["bun", ENGINE_READER, "--read-only", readerCorpus, readOnly, "md"],
-    REPO,
-    join(work, "engine-readonly.log")
-  );
-  console.error("readers: the read-only engine is done");
-  // The display read is only reachable from inside its own module, so it is run through the
-  // differential's dump test, which writes ReadForDisplay's two readings with the block ids
-  // dropped. It is one package, never ./... : packages/daemon holds a test that pushes this pod's
-  // workspace.
-  await run(
-    ["go", "test", GO_PACKAGE, "-run", "^TestDifferentialDump$", "-count=1", "-timeout", "0"],
-    GO_MODULE,
-    join(work, "go.log"),
-    { PMDOC_DIFF_CORPUS: readerCorpus, PMDOC_DIFF_ENGINE: editing, PMDOC_DIFF_OUT: dump }
-  );
-  console.error("readers: the display read is done");
-  const editingLines = jsonLines<EngineLine>(editing);
-  const readOnlyLines = jsonLines<EngineLine>(readOnly);
-  const dumpLines = jsonLines<DumpLine>(dump);
+export function classifyBatch(
+  places: readonly TextPlace[],
+  batch: string,
+  visit?: (stored: TextPlace, reading: TextReading) => void
+): ClassedText[] {
+  const editingLines = jsonLines<EngineLine>(join(batch, "engine.jsonl"));
+  const readOnlyLines = jsonLines<EngineLine>(join(batch, "engine-readonly.jsonl"));
+  const dumpLines = jsonLines<DumpLine>(join(batch, "go-dump.jsonl"));
   const classed: ClassedText[] = [];
-  for (const stored of index) {
+  for (const stored of places) {
     const edit = editingLines.next().value;
     const shown = readOnlyLines.next().value;
     const go = dumpLines.next().value;
@@ -972,6 +956,80 @@ export async function classifyCorpus(
     classed.push({ ...stored, class: classify(reading) });
   }
   return classed;
+}
+
+/** The class each text was put in by a pass before this one. Classing is the long half of a run -
+ * hours over a hundred thousand texts on two cores - and a corpus read again has only grown, so a
+ * text already decided is not decided twice. Delete the file to decide them all again, which is
+ * what a change to either reader, or to the classes, calls for. */
+function readVerdicts(path: string): Map<string, TextClass> {
+  const verdicts = new Map<string, TextClass>();
+  try {
+    for (const verdict of jsonLines<ClassedText>(path)) verdicts.set(verdict.id, verdict.class);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return verdicts;
+}
+
+/**
+ * Classes every text of the corpus, running both engines and Go's display read over the texts no
+ * pass has classed yet. Each such batch gets a directory of its own under `work`, so the readings
+ * of the texts already classed stay where they are and can be read again.
+ */
+export async function classifyCorpus(corpus: string, work: string): Promise<ClassedText[]> {
+  const verdictsPath = join(work, "verdicts.jsonl");
+  const verdicts = readVerdicts(verdictsPath);
+  const places = textPlaces(corpus);
+  const pending = places.filter((place) => !verdicts.has(place.id));
+  console.error(
+    `readers: ${places.length} texts, ${verdicts.size} already classed, ${pending.length} to read`
+  );
+  if (pending.length > 0) {
+    const batch = join(work, `batch-${new Date().toISOString().replace(/[:.]/gu, "-")}`);
+    mkdirSync(batch, { recursive: true });
+    const readerCorpus = join(batch, "reader-corpus.jsonl");
+    const editing = join(batch, "engine.jsonl");
+    writeReaderCorpus(readerCorpus, corpus, new Set(pending.map((place) => place.id)));
+    await run(["bun", ENGINE_READER, readerCorpus, editing, "md"], REPO, join(batch, "engine.log"));
+    console.error("readers: the editing engine is done");
+    await run(
+      [
+        "bun",
+        ENGINE_READER,
+        "--read-only",
+        readerCorpus,
+        join(batch, "engine-readonly.jsonl"),
+        "md",
+      ],
+      REPO,
+      join(batch, "engine-readonly.log")
+    );
+    console.error("readers: the read-only engine is done");
+    // The display read is only reachable from inside its own module, so it is run through the
+    // differential's dump test, which writes ReadForDisplay's two readings with the block ids
+    // dropped. It is one package, never ./... : packages/daemon holds a test that pushes this
+    // pod's workspace.
+    await run(
+      ["go", "test", GO_PACKAGE, "-run", "^TestDifferentialDump$", "-count=1", "-timeout", "0"],
+      GO_MODULE,
+      join(batch, "go.log"),
+      {
+        PMDOC_DIFF_CORPUS: readerCorpus,
+        PMDOC_DIFF_ENGINE: editing,
+        PMDOC_DIFF_OUT: join(batch, "go-dump.jsonl"),
+      }
+    );
+    console.error("readers: the display read is done");
+    const read = classifyBatch(pending, batch);
+    appendFileSync(verdictsPath, read.map((one) => `${JSON.stringify(one)}\n`).join(""));
+    for (const one of read) verdicts.set(one.id, one.class);
+  }
+  return places.map((place) => ({
+    ...place,
+    // Every text is either in the verdicts already or in the batch just classed.
+    class: verdicts.get(place.id) as TextClass,
+  }));
 }
 
 // --- the report ---------------------------------------------------------------------------------
