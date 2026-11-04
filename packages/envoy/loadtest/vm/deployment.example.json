@@ -1,0 +1,87 @@
+{
+  "project": "theorem-agent-infra",
+  "zone": "us-west1-a",
+  "ssh_command": "ssh",
+  "pprof_url": "http://10.138.0.21:6060",
+  "pprof_tunnel_command": "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes",
+  "embed_tokens_per_minute": 1000000,
+  "token_url": "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+  "sqladmin": "https://sqladmin.googleapis.com",
+  "compute": "https://compute.googleapis.com",
+  "vms": {
+    "app": {"ssh": "lt@10.138.0.21", "host": "10.138.0.21", "instance": "lt-app"},
+    "generator": {"ssh": "lt@10.138.0.22", "host": "10.138.0.22", "instance": "lt-gen"}
+  },
+  "cloudsql": {
+    "instance": "lt-db",
+    "connection_name": "theorem-agent-infra:us-west1:lt-db",
+    "host": "10.139.0.3",
+    "port": 5432,
+    "user": "dispatch",
+    "password": "...",
+    "database": "dispatch",
+    "template": "dispatch_seed",
+    "sslmode": "require",
+    "vcpus": 16,
+    "expect": {
+      "databaseVersion": "POSTGRES_18",
+      "settings.edition": "ENTERPRISE",
+      "settings.tier": "db-custom-16-61440",
+      "settings.availabilityType": "REGIONAL"
+    }
+  },
+  "images": {
+    "dispatch": "europe-docker.pkg.dev/example-project/example-repository/dispatch@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "listener": "europe-docker.pkg.dev/example-project/example-repository/envoy-listener@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "proxy": "gcr.io/cloud-sql-connectors/cloud-sql-proxy@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "nats": "mirror.gcr.io/library/nats@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "ports": {
+    "dispatch": 8766,
+    "pprof": 6060,
+    "pprof_tunnel": 16060,
+    "proxy": 5432,
+    "listener": 9020,
+    "hub_listener": 9030,
+    "nats": 4222,
+    "nats_monitor": 8222,
+    "stub_embed": 8443,
+    "load_listeners": [9021, 9022, 9023, 9024]
+  },
+  "secrets": {
+    "dispatch_token": "...",
+    "listener_token": "...",
+    "embed_key": "..."
+  },
+  "paths": {
+    "remote_root": "/var/lib/dispatch-loadtest",
+    "stateful_dir": "dispatch-loadtest",
+    "nats_store": "/var/lib/dispatch-loadtest/nats",
+    "cert": "/var/lib/dispatch-loadtest/stub-embed.pem",
+    "remote_loadgen": "/var/lib/dispatch-loadtest/loadgen",
+    "remote_work": "/var/lib/dispatch-loadtest/work",
+    "loadgen": "/tmp/dispatch-loadtest/bin/loadgen",
+    "cgroup": "/sys/fs/cgroup/system.slice/docker-%s.scope"
+  },
+  "production_addresses": ["10.139.0.2:5432", "10.138.0.10:4222"],
+  "load": {
+    "baseline": {
+      "events": 4,
+      "requests": 60,
+      "sessions": 400,
+      "event_mix": "production-2026-10-26",
+      "route_mix": ""
+    },
+    "loop": {
+      "writes": 3.5,
+      "reads": 38.5,
+      "unit_starts": 1.75,
+      "event_mix": "spec-loop-2026-11-03",
+      "route_mix": "routes-spec-loop-2026-11-03.txt"
+    },
+    "unit_life": "5m",
+    "driver_topics": 614,
+    "receipt_deadline": "1s",
+    "session_delivery": "consumer"
+  }
+}

@@ -2787,25 +2787,18 @@ the VM that stopped, and ends the step with status 3, which `series` reports and
 
 Nothing of the deployment is named in the script. Every machine, address, port, image, credential
 and production address comes from the JSON file `--config` names, because the deployment's own
-shape has changed once under this issue and will change again. It is one object:
+shape has changed once under this issue and will change again. It is one object, and
+`packages/envoy/loadtest/vm/deployment.example.json` is one: every key the script reads, each
+optional one at its own default, with placeholder machines, addresses and credentials
+throughout. Copy it and edit it:
 
-```json
-{"project": "theorem-agent-infra", "zone": "us-west1-a",
- "vms": {"app":       {"ssh": "lt@10.138.0.21", "host": "10.138.0.21", "instance": "lt-app"},
-         "generator": {"ssh": "lt@10.138.0.22", "host": "10.138.0.22", "instance": "lt-gen"}},
- "cloudsql": {"instance": "lt-db", "connection_name": "p:us-west1:lt-db", "host": "10.139.0.3",
-              "port": 5432, "user": "dispatch", "password": "...", "database": "dispatch",
-              "template": "dispatch_seed", "sslmode": "require", "vcpus": 16,
-              "expect": {"databaseVersion": "POSTGRES_18", "settings.edition": "ENTERPRISE"}},
- "images": {"dispatch": "...@sha256:...", "listener": "...@sha256:...",
-            "proxy": "...@sha256:...", "nats": "...@sha256:..."},
- "ports": {"dispatch": 8766, "pprof": 6060, "pprof_tunnel": 16060, "proxy": 5432,
-           "listener": 9020, "hub_listener": 9030, "nats": 4222, "nats_monitor": 8222,
-           "stub_embed": 8443, "load_listeners": [9021, 9022, 9023, 9024]},
- "secrets": {"dispatch_token": "...", "listener_token": "...", "embed_key": "..."},
- "paths": {"remote_root": "/var/lib/dispatch-loadtest", "stateful_dir": "dispatch-loadtest"},
- "production_addresses": ["10.139.0.2:5432", "10.138.0.10:4222"]}
+```bash
+cp packages/envoy/loadtest/vm/deployment.example.json my-deployment.json
 ```
+
+The example is the only copy of the shape: `vm/vm.test.sh` reads the keys out of `vm.sh`'s own
+`cfg` filters and fails when the example carries a key the script never reads, or lacks one the
+script does. What the example cannot carry is why each key is there, which is below.
 
 - `cloudsql.expect` is read as it is written: each key is a path into the Cloud SQL Admin API's
   answer and each value what that path must read, so a change of production's instance is a change
@@ -2836,8 +2829,10 @@ shape has changed once under this issue and will change again. It is one object:
   `pprof_tunnel_command` `"ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes"`, `paths.loadgen`
   `"$LOADTEST_ROOT/bin/loadgen"`, `paths.remote_loadgen`, `paths.remote_work`,
   `paths.nats_store`, `paths.cert`, `paths.cgroup`
-  `"/sys/fs/cgroup/system.slice/docker-%s.scope"`, and `token_url`, `sqladmin` and `compute`, the
-  Google endpoints, for a test server.
+  `"/sys/fs/cgroup/system.slice/docker-%s.scope"`, `pprof_url` (the profiling endpoint the
+  sampler is given when no step tunnel stands in for it, `http://<app host>:<ports.pprof>`),
+  `embed_tokens_per_minute` `1000000`, production's own quota, and `token_url`, `sqladmin` and
+  `compute`, the Google endpoints, for a test server.
 
 ### The containers
 
