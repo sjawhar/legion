@@ -486,8 +486,8 @@ func TestACopyKeptForARoleClaimedUnderTheKeepReachesThatHolderBeforeTheIssuesNex
 			handed.EventID, handed.DedupeKey, keptKey)
 	}
 	// The handover's copy carries the time of the keep, as the drain's own forward of a copy
-	// carries the stream's store time of it: for a holder with a serving port the stream keeps
-	// whichever of the two reached its agent subject first, which is this one.
+	// carries the stream's store time of it: every holder is reached through the stream, which keeps
+	// whichever of the two reached its agent subject first, which is this one here.
 	if handed.KeptAt == nil || *handed.KeptAt < started.UnixMilli() || *handed.KeptAt > time.Now().UnixMilli() {
 		t.Fatalf("the holder was handed kept_at %v, want the time the outbox kept the copy, between %d and now",
 			handed.KeptAt, started.UnixMilli())

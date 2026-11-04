@@ -62,15 +62,8 @@ const roleKeepPublishWindow = 2 * time.Second
 // (handOverKeptRole, readKeptLaneHead), the one read of that lane a pass makes, which it hands
 // to the walk it starts (walkKeptRole).
 //
-// It is bus.KeptRoleClaimWindow, the window a walk's claim holds a lane for against the walks of
-// the other listeners of the deployment and against the handover Dispatch's outbox makes behind
-// a keep of its own, because a walk's life and its claim's hold are the same span seen from two
-// sides: a walk must not outlive its own claim, or a second walk would take the copy it claimed
-// over while it is still forwarding it, and a claim must not outlive the walk that wrote it, or
-// a lane would stay held longer than the work behind the claim. Being one duration, it is
-// written once, in the package both writers of a kept lane read it from, whose doc says what the
-// window buys and what it assumes of the two clocks it compares (bus.KeptRoleClaimWindow, whose
-// rule both judge a claim by is bus.KeptRoleCursor.ClaimOutstanding).
+// It is bus.KeptRoleClaimWindow, whose doc says why a walk's life and its claim's hold are one
+// duration and what the window assumes of the two clocks it compares.
 const roleKeepDrainWindow = bus.KeptRoleClaimWindow
 
 // roleKeepDrainRetryPause is how long a handover waits before its next walk when the one before it

@@ -735,8 +735,8 @@ keep_false_status="$(curl -sS -o "$keep_false_role_response_file" -w '%{http_cod
   "${listener_url}/v1/messages/publish" \
   -d "{\"topic\":\"notifications.role.${keep_false_role}\",\"message\":\"Unkept role delivery.\",\"keep\":false}")"
 # The body carries claim_revision as well since sjawhar/legion#2610's conditional role claim:
-# every role answer reports the revision a lookup would, 0 for a role with no claim record at
-# all. The assertion stays an exact object, so a field that appears or goes is seen here.
+# every 404 role answer reports the revision a lookup would, 0 for a role with no claim record
+# at all. The assertion stays an exact object, so a field that appears or goes is seen here.
 if [[ "$keep_false_status" != 404 ]] || ! jq -e --arg role "$keep_false_role" \
   '. == {error: ("no holder for role " + $role), reason: "unclaimed", claim_revision: 0}' \
   "$keep_false_role_response_file" >/dev/null; then
