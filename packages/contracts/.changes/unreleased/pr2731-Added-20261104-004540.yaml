@@ -1,0 +1,5 @@
+kind: Added
+body: The Legion daemon's state carries `daemon.commit`, the commit the running binary was built from, `requiresChecks` on each pull request, whether its base branch requires a check at all, and a `settingSources` block beside `settings`, saying for every settable `legion.yaml` path whether the file or the settings route decides its value, who asked and when — provenance a withheld credential carries too. Dispatch's live views gained a fourth kind, `legion`, which names the project whose board it shows and carries a `LegionBoardResponse` in its snapshot and deltas, beside the Legion board, metrics and setting shapes themselves.
+time: 2026-11-04T00:45:40.581722476Z
+custom:
+    Issue: pr2731

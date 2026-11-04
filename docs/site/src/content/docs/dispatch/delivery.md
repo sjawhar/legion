@@ -1,15 +1,17 @@
 ---
 title: Delivery
-description: The Delivery page's timeline and measures, the Pipeline page's step timings, what each figure counts, the targets, and the routes an agent reads.
+description: The Delivery page's timeline and measures, its Pipeline section's step timings, what each figure counts, the targets, and the routes an agent reads.
 sidebar:
   order: 7
 ---
 
 The **Delivery** page shows how work reaches production. A timeline of every merge, deploy and
 failed run sits under a panel of delivery measures. Both read the facts Dispatch stores from
-GitHub, and both follow the same window and filters. The **Pipeline** page beside it shows how
-long each step of CI and the deploy takes, day by day. Until the deploy repository and its
-workflows are set in **Settings → Delivery timeline**, the Delivery page shows that form instead.
+GitHub, and both follow the same window and filters. A **Pipeline** section of the same page
+shows how long each step of CI and the deploy takes, day by day, and a **Legion** section above
+them shows where Legion's time goes, from an issue to its merge. Until the deploy repository and
+its workflows are set in **Settings → Delivery timeline**, the Delivery page shows that form
+instead.
 
 ![The Delivery page's measures panel: six target cards over a strip of headline numbers](/legion/media/dispatch/delivery-measures.png)
 
@@ -29,7 +31,7 @@ brush window** puts the measures back.
 
 ## Live updates
 
-An open Delivery or Pipeline page keeps itself current over one connection to Dispatch. A merge
+An open Delivery page keeps all of itself current over one connection to Dispatch. A merge
 or a deploy appears within seconds, without a reload. Nothing reads again on a timer: Dispatch
 sends the page an update only when something it shows has changed, and each update carries only
 what changed, such as the pull requests and runs that moved, the counts beside the filters and
@@ -37,7 +39,7 @@ the measures' new numbers. A preset window keeps its end at the present, so a pu
 leaves the page at the moment it ages out of the window. A deploy shows once its production job
 finishes, without waiting for the rest of its run.
 
-Each page's freshness row says **Live** while the connection is open, with how long ago the last
+Each section's freshness row says **Live** while the connection is open, with how long ago the last
 change arrived. A source Dispatch reports as stale, or a failed reconcile, still shows
 in red with its age and error. While the connection is lost the row reads **Reconnecting** in red,
 with how long it has been lost; the page reconnects by itself and is sent only what changed while
@@ -221,15 +223,16 @@ route.
 
 ## Pipeline
 
-The **Pipeline** page (`/pipeline`, **Pipeline** in the sidebar under **Delivery**) shows how
-long each step between a pull request and production takes, and how often it succeeds, over the
-last seven UTC days. Today is the last day, drawn faded because it is not over. The page follows
-neither the Delivery page's window nor its filters. It updates itself live, as the Delivery page
-does, and a deploy card moves as soon as the deploy job it times finishes. A pull request's CI run
-reaches the **PR CI** card and its two tables only when the five-minute reconcile records it,
-since Envoy relays no event for a workflow run of a pull request.
+The **Pipeline** section of the Delivery page (**Pipeline** in the sidebar under **Delivery**,
+which opens the page at it; the old `/pipeline` address redirects to `/delivery#pipeline`) shows
+how long each step between a pull request and production takes, and how often it succeeds, a UTC
+day at a time. Today is the last day of a preset window, drawn faded because it is not over. The
+section follows the page's window, and none of its filters. It updates itself live, as the
+timeline does, and a deploy card moves as soon as the deploy job it times finishes. A pull
+request's CI run reaches the **PR CI** card and its two tables only when the five-minute
+reconcile records it, since Envoy relays no event for a workflow run of a pull request.
 
-![The Pipeline page: six timing cards over the slowest-jobs and failing-jobs tables](/legion/media/dispatch/pipeline.png)
+![The Delivery page's Pipeline section: six timing cards over the slowest-jobs and failing-jobs tables](/legion/media/dispatch/pipeline.png)
 
 Each run counts on the day it started, and each job on its run's day. Only a result that ended in
 success or failure is timed; a timed-out result is a failure. A cancelled run or job is counted
@@ -262,6 +265,9 @@ of its latest failure. A cancelled run's jobs are not counted, and neither is th
 named in **Settings → Delivery timeline**, which only reports the other jobs' result and fails
 whenever any of them does, nor a notification or guard step.
 
-For agents, `GET /api/v1/delivery/pipeline` answers the same numbers. Its optional `at`
-(RFC 3339) names the day the seven days end on and the moment the failing jobs look back from;
-left out, it is now. Any signed-in person or agent token reads it.
+For agents, `GET /api/v1/delivery/pipeline` answers the same numbers. Its optional `from` and
+`to` (RFC 3339) are the window, as the page's control sends it, bounded at the same 84 days as
+the other delivery routes, and its optional `at` is the seven UTC days ending on its own day and
+the moment the failing jobs look back from; the route refuses `at` beside `from` or `to`, and
+with none of the three the window is the seven days ending now. Any signed-in person or agent
+token reads it.

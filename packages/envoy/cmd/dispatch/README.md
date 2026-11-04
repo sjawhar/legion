@@ -2194,6 +2194,36 @@ Each item below names a path with its method and identity, then its purpose.
   A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`.
   `AGENTS.md` gives the rules and the `settings.repo_project.updated` events.
 
+- `/api/v1/settings/legion` (GET; cookie, trusted header, or bearer)
+
+  Every project's Legion setting, by project key: the daemon Dispatch reads that project's `GET /legion/v1/state` from once a minute, with the actor that first set it and when it was last written.
+  `[]` when no project names one.
+
+- `/api/v1/settings/legion/{project}` (PUT, DELETE; cookie, trusted header, or bearer)
+
+  Name the Legion daemon a project's state is read from, `{state_url}`, or stop reading that project's daemon, what the sampler already recorded staying.
+  A `state_url` that is not an absolute http(s) URL with a host and no path is `400 LEGION_SETTING_INPUT`, and a DELETE for a project that names no daemon `404 NOT_FOUND`.
+  The setting points Dispatch at a host, so it belongs to the deployment rather than to the project it names, and a project-scoped credential is refused it as it is a repository mapping.
+  `AGENTS.md` gives the rest, including why neither write emits an event.
+
+- `/api/v1/legion/{project}/settings` (PUT; cookie, trusted header, or bearer)
+
+  Relay an operator's `legion.yaml` change `{changes: {<dotted path>: <value>}}` to that project's Legion daemon, with the caller's login as the change's author, and answer the daemon's status and its per-key result unchanged: applied `at-once`, `rebuilt` or `next-launch`, or refused with the reason.
+  The bearer is Dispatch's own projected Kubernetes service-account token, minted for the daemon's audience, which `DISPATCH_LEGION_DAEMON_TOKEN_FILE` names and the relay reads at call time, so a rotation needs no restart; unset, it sends no bearer and whatever the daemon answers is what the caller sees.
+  `404 LEGION_NOT_CONFIGURED` when the project names no daemon, `503 LEGION_DAEMON_UNAVAILABLE` when it could not be reached.
+
+- `/api/v1/legion/metrics?project=&from=&to=&scope=` (GET; cookie, trusted header, or bearer)
+
+  The Delivery page's Legion section for one project, the first naming a daemon when `project` is left out, over `[from, to)` (default the last 7 days) and `scope=all|roots|children`.
+  Over the issues that closed in the window with Legion phase work: the work time to merge less parked and queued time, the phase hours of each of the seven worker bars split into waiting on a person, in a turn, CI wait, waiting on children and idle, the review rounds, send-back share and post-review hours, and the issues Legion sessions filed per week by class against the issues finished per week.
+  `400 INVALID_QUERY` for a malformed window or scope, `404 NOT_FOUND` for a project that does not exist.
+
+- `/api/v1/legion/board?project=` (GET; cookie, trusted header, or bearer)
+
+  The Legion view on the Issues page for one project, the first naming a daemon when `project` is left out, from what the sampler recorded of that project's daemon.
+  Ten columns (`queue`, `design`, `planning`, `implementing`, `testing`, `reviewing`, `accepting`, `merging`, `awaiting_person`, `held`), each card naming its issue's key, title, priority, phase and when that phase began, the slot it holds, the roles in a turn now, its pull request's CI verdict, the issues a blocker link holds it on, what it waits on from a person, its tree root and the children of its tree that have not started; and a header with the slots in use, the slot cap, the queue's length and the last read of the daemon with its failure.
+  `404 LEGION_NOT_CONFIGURED` when the project names no daemon.
+
 - `/api/v1/github/app-installation/{owner}/{repo}` (GET; cookie, trusted header, or bearer)
 
   Whether Dispatch's GitHub App, which GitHub sends the repository's webhook events through, is installed on the repository:

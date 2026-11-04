@@ -169,10 +169,16 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Delivery measures**: `internal/dispatch/delivery/measures/`
 
-  pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype;
-  `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now;
+  pure DORA computation (`measures.go`) and the Delivery page's Pipeline section's timings (`pipeline.go`), each ported formula by formula from the delivery prototype;
+  `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, over the seven days ending on `?at=` (default now) or the days `?from=` and `?to=` cover;
   `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step;
   a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`)
+
+- **Where Legion's time goes**: `internal/dispatch/legion/`, `api/settings_legion.go`, `api/legion_board.go`, `api/legion_metrics.go`
+
+  A per-project setting names the Legion daemon whose `GET /legion/v1/state` Dispatch reads (`store.go`, `GET /api/v1/settings/legion` and `PUT`/`DELETE /api/v1/settings/legion/{project}`), and `PUT /api/v1/legion/{project}/settings` relays an operator's `legion.yaml` change back to it, as the ServiceAccount token `DISPATCH_LEGION_DAEMON_TOKEN_FILE` names (`client.go`; `docs/kubernetes.md`, "The settings route").
+  `sampler.go` reads each configured daemon's state every minute, one replica at a time under the `legion-state` lease, and records what moved (`state.go`, migration `20261103170923_legion_state`);
+  `metrics/` computes from those records what `GET /api/v1/legion/metrics` serves the Delivery page's Legion section, and `api/legion_board.go` what `GET /api/v1/legion/board` serves the Issues page's Legion view
 
 - **`issue.deployed`: a merged pull request reached production**: `internal/dispatch/delivery/deployed.go`
 
@@ -2872,7 +2878,7 @@ A deployment with no broker configured has no such kind at all, and a `DPoP` pre
 A credential that names one project writes that project and nothing else, and every write is decided in one place.
 Each mutating row of the route table declares what its write belongs to (`api/routes_table.go`'s `writeClasses`, stamped onto `apiRoute.Scope`;
 a `GET` row declares nothing, and a mutating row that declares nothing fails `TestEveryMutatingRouteIsClassed` and panics `Register` rather than being served unjudged).
-The four classes are *a project's* (the issue-key rows, the project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the message rows that carry an issue), *a project the body names* (the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled), *the calling session's* (an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows) and *the deployment's* (the project create, the repository-to-project map, the delivery settings and session groups, the broadcast, and the credential and machine-login decisions).
+The four classes are *a project's* (the issue-key rows, the project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the message rows that carry an issue), *a project the body names* (the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled), *the calling session's* (an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows) and *the deployment's* (the project create, the repository-to-project map, the delivery settings and session groups, the Legion setting and the change it relays to a project's daemon, the broadcast, and the credential and machine-login decisions).
 `Register` wraps every mutating route in `api.withinProjectScope` and `api.withinSessionScope` (`api/project_scope.go`), which run after the caller is resolved and before the handler, outside the keyed-write layer and the upload's spool, so a refused write claims no idempotency key and costs no body.
 
 The project check resolves the project the addressed object belongs to

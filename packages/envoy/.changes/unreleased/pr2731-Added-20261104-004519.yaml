@@ -1,0 +1,5 @@
+kind: Added
+body: Dispatch records where Legion's time goes. A per-project setting names the Legion daemon whose state Dispatch reads (`GET /api/v1/settings/legion`, and `PUT` and `DELETE /api/v1/settings/legion/{project}`, each a deployment-scoped write), and one replica reads every configured daemon's `GET /legion/v1/state` each minute under a lease and records what changed. `PUT /api/v1/legion/{project}/settings` relays an operator's `legion.yaml` change to that project's daemon, as Dispatch's own projected ServiceAccount token (`DISPATCH_LEGION_DAEMON_TOKEN_FILE`), and answers the daemon's per-key result unchanged. `GET /api/v1/legion/metrics` serves the Delivery page's Legion section — the work time to merge, each worker's phase hours, the review rounds and what Legion filed against what it finished — and `GET /api/v1/legion/board` the Legion view on the Issues page.
+time: 2026-11-04T00:45:19.598815852Z
+custom:
+    Issue: pr2731

@@ -2377,6 +2377,33 @@ the check before the pane seed is written also has each daemon consume a Dispatc
 `legion-pane` is never granted the daemon's subjects above.
 Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`, and each refused subject logs the error line above (a refused consumer or subscription never delivers).
 
+### The settings route
+
+A running daemon applies a `legion.yaml` change without being restarted, and `docs/deployment.md` ("What a change of each `legion.yaml` key needs") gives every key's class: applied at the next decision, the holder built again for it, the next launch of a pod or a pane, or refused by name.
+`settings_route` is who may ask for one through `PUT /legion/v1/operator/settings` besides the bearer `operator_token_file` names:
+
+```yaml
+settings_route:
+  oidc_issuer: https://<the cluster's own OIDC issuer>   # as its projected tokens' iss claim writes it
+  audience: legion-daemon                                # the audience the caller's token was projected for
+  service_accounts:
+    - system:serviceaccount:<namespace>:<name>           # every ServiceAccount admitted, as a token's sub writes it
+```
+
+The three are one admission rule and are configured together (`packages/daemon/internal/config/settings_route.go`):
+an absent or null block admits nobody and leaves the route to the operator bearer alone, and a block carrying one of the three is refused naming the key it lacks (`settings_route.audience is required: the issuer, the audience and the ServiceAccounts are one admission rule, and a daemon that read only part of it would admit a caller the deployment did not name`), since an issuer with no ServiceAccounts would admit every account of the cluster and ServiceAccounts with no issuer a token nobody checked.
+An `oidc_issuer` that is not an absolute URL with a host, and a `service_accounts` entry that is not `system:serviceaccount:<namespace>:<name>`, are refused naming the key and the value.
+The daemon checks a presented token's signature against that issuer's discovery document, as the secrets broker checks its own tokens (`packages/envoy/oidc`), and reads the document at the first token it verifies, so neither the boot nor a rebuild of the verifier costs a network read.
+A change of any of the three is a `rebuild` of the `api-server` holder: the verifier is built again under the requests the daemon is serving, and the API's socket is never rebound.
+A call whose bearer is neither the operator token nor a token of an admitted ServiceAccount is `403 Invalid operator token or ServiceAccount token`, which never says which of the two failed;
+the daemon's log says, naming the reason or the subject it would not take.
+
+Dispatch is the caller this exists for, and it holds no copy of the daemon's operator token.
+The Dispatch component projects a ServiceAccount token of its own into the app pod for the audience its `legionDaemonAudience` input names (`legion-daemon` when a stack sets none), in a projected volume of its own with `expirationSeconds: 3600`, written to `daemon-token` and mounted read-only at `/var/run/secrets/legion`;
+`DISPATCH_LEGION_DAEMON_TOKEN_FILE` names `/var/run/secrets/legion/daemon-token`, which Dispatch reads at call time, so the kubelet's rewrite of that file in place needs no restart and no token is stored (`packages/envoy/infra/README.md`).
+So `settings_route.audience` is that same string, and `settings_route.service_accounts` names the ServiceAccount the Dispatch app's pod runs as.
+The relay is Dispatch's `PUT /api/v1/legion/{project}/settings`, which sends that token as its bearer and answers the daemon's own per-key result — applied `at-once`, `rebuilt` or `next-launch`, or refused with the reason — unchanged (`packages/envoy/cmd/dispatch/AGENTS.md`).
+
 ### The deployment's capability report
 
 `packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:

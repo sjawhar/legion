@@ -243,16 +243,18 @@ const dispatch: ShotSet<DispatchWorkspace> = {
     },
     {
       id: "pipeline",
-      alt: "The Pipeline page: six timing cards over the slowest-jobs and failing-jobs tables.",
-      // The e2e seed's pinned day (e2e/delivery-seed.ts PIPELINE_AT), so the fixture's runs are
-      // the seven days shown.
-      route: "/pipeline?at=2026-10-02T12%3A00%3A00Z",
+      alt: "The Delivery page's Pipeline section: six timing cards over the slowest-jobs and failing-jobs tables.",
+      // The Delivery page opened at its Pipeline section over the seven days the e2e seed pins
+      // (e2e/delivery-seed.ts PIPELINE_SECTION_URL, the same window its own specs use), since
+      // INFRA-1077 folded the Pipeline page in and `/pipeline` now redirects, dropping the query.
+      route: "/delivery?from=2026-09-26T00%3A00%3A00Z&to=2026-10-03T00%3A00%3A00Z#pipeline",
       viewport: "desktop",
       theme: "light",
       ready: async (page) => {
         await expect(page.locator('[data-metric="staging_e2e"]')).toContainText("55m");
         await expect(page.locator('[data-failing-job="build / unit"]')).toBeVisible();
       },
+      element: (page) => page.locator("section#pipeline"),
     },
   ],
 };

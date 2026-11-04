@@ -73,7 +73,7 @@ interface Draft {
   excluded_repos: string;
 }
 
-/** The three optional job names the Pipeline page follows, in the order the form lists them. */
+/** The three optional job names the Pipeline section follows, in the order the form lists them. */
 const PIPELINE_JOB_FIELDS = [
   {
     key: "staging_e2e_job_name",
@@ -102,7 +102,7 @@ interface DeliverySettingsFormProps {
 /**
  * The delivery timeline's configuration record as a form: the deploy repository, its deploy and
  * pull-request-check workflow paths, the deploy workflow's production jobs (one per line) and
- * optional apply step, the three optional job names the Pipeline page follows (the staging
+ * optional apply step, the three optional job names the Pipeline section follows (the staging
  * end-to-end gate, the staging deploy and the PR-checks roll-up), and the population's authors and
  * excluded repositories. The two population lists take one entry per line (a comma or a space also
  * separates entries); production job names split on newlines alone because they can contain spaces.
@@ -273,8 +273,8 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
             </label>
           ))}
           <p className={`text-xs ${textMutedOnCanvas}`} id={`${id}-pipeline-jobs-hint`}>
-            Leave empty if the pipeline has no such step; the Pipeline page omits that card. With no
-            roll-up job the failing-jobs table leaves nothing out.
+            Leave empty if the pipeline has no such step; the Delivery page's Pipeline section omits
+            that card. With no roll-up job the failing-jobs table leaves nothing out.
           </p>
           <label className={settingsFieldLabel} htmlFor={`${id}-pr-checks-workflow`}>
             PR checks workflow

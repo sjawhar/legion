@@ -4073,9 +4073,11 @@ export interface DeliveryLeadTimeTiming {
 }
 
 /**
- * `GET /api/v1/delivery/pipeline?at` or `?from&to`: the Pipeline page over the UTC days its window
- * covers, computed on request from stored facts and followed by none of the timeline's facets.
- * `at` (default now) is the seven days ending on its own, the form the Pipeline page sends;
+ * `GET /api/v1/delivery/pipeline?at` or `?from&to`: the Delivery page's Pipeline section over the
+ * UTC days its window covers, computed on request from stored facts and followed by none of the
+ * timeline's facets.
+ * `at` (default now) is the seven days ending on its own, which no surface sends any more: the
+ * section follows the page's window, so an `at` comes from an agent reading the route itself;
  * `from` and `to` are read as every other delivery route reads them, bounded by the same 84 days,
  * and show the days that window covers. The two forms are exclusive: naming `at` beside either is
  * `400 INVALID_QUERY`. `pr_checks` is the PR-checks workflow's pull_request runs: their whole run
@@ -4208,8 +4210,8 @@ export type DeliveryLiveWindow =
  *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. A
  *  pipeline view names a window, or an `at`, which is the seven days ending on that day, or
  *  neither, which is the seven days ending at the present; naming both is refused, as the GET
- *  route refuses `at` beside `from`/`to`, and it names no query, since the Pipeline page follows
- *  none of the timeline's facets. A legion view names the project whose board it shows and
+ *  route refuses `at` beside `from`/`to`, and it names no query, since the Pipeline section
+ *  follows none of the timeline's facets. A legion view names the project whose board it shows and
  *  nothing else: the board has no window, and `project` is all `GET /api/v1/legion/board` reads.
  *  Its snapshot and deltas carry a `LegionBoardResponse`. */
 export type DeliveryLiveView =
