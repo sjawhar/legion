@@ -778,6 +778,13 @@ func (p *memoryServer) tryOpenBrowser(artifactID string) (*browser, error) {
 	// as @hocuspocus/provider does on every connection: without the ask the socket waits out
 	// ygo's handshake deadline and the room closes it.
 	if err := opened.write(documentFrame(artifactID, frameSync, ygsync.EncodeSyncStep1(crdt.New()))); err != nil {
+		// A socket the room budget refused can be closed before the ask goes out: the read loop
+		// has then read the room's close and answered it, so the write fails with the client's
+		// own close (ErrCloseSent), and what the room said is what the read loop ended with.
+		if errors.Is(err, gws.ErrCloseSent) {
+			<-opened.ended
+			err = opened.end
+		}
 		opened.leave()
 		return nil, err
 	}
