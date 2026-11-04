@@ -382,8 +382,11 @@ type Service struct {
 	roomSlots     roomSlots
 	residentRooms atomic.Int64
 	connections   atomic.Int64
-	// residentBytes is the encoded bytes the resident rooms took, each room's load and every
-	// update it committed since (roomState.residentBytes), for the room figures.
+	// residentBytes is the encoded bytes the loads ygo holds took, each load's own history and
+	// every update the room it left behind has committed since (residentLoad), for the room
+	// figures. Each load's bytes are counted against that load's token and taken back at that
+	// load's unload, so a room that loaded again before an earlier room of the same name reported
+	// its unload keeps its own (roomUnloaded).
 	residentBytes atomic.Int64
 	// appendFigures counts what the rooms' browser append transactions did (room_appends.go), for
 	// the room figures, as evictorQueries counts the stale-room evictor's reads of a document's
@@ -826,8 +829,9 @@ func (s *Service) ProcessID() string {
 //     batches stored how many updates, by bucket ("1", "2", "3-4", ... "129-256");
 //   - Pools, the room-appends and rooms pools' connection figures;
 //   - ReadCache, the cold reads' cache's weight, entries and budget; Preloads, the cold sockets'
-//     states waiting for their room's load; ResidentBytes, the encoded bytes the resident rooms
-//     took (each load and every update since);
+//     states waiting for their room's load; ResidentBytes, the encoded bytes the loads ygo holds
+//     took (each load's history and every update it committed since, taken back at that load's
+//     own unload);
 //   - HeadTracker, whether the head tracker trusts itself and how many documents it holds;
 //     EvictorQueries, the stale-room evictor's reads of a document's head; SettlementWakeups,
 //     the wakes of the waits for a room's appends.

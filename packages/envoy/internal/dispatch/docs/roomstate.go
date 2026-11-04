@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -126,14 +127,9 @@ type roomState struct {
 	// from the moment it records its read of the issue here until the socket ends. A cold room's
 	// load takes that read instead of reading the issue again (admittedIssueRead), and a close of
 	// the issue while the socket loads its document reaches the socket through it.
-	admitting int
-	// residentBytes is the encoded bytes the room resident on this record took: the history its
-	// load decoded and each update it committed since (queueUpdateClass). The service's
-	// residentBytes counts them too, until the room unloads or the record goes
-	// (dropResidentBytesLocked).
-	residentBytes int64
-	failed        error
-	failedDone    chan struct{}
+	admitting  int
+	failed     error
+	failedDone chan struct{}
 	// reloading marks a state whose room a close is about to retire because the room stands behind
 	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
 	// (openLiveWrite), until the close has returned, whether or not it closed the room it checked
@@ -158,7 +154,9 @@ type roomState struct {
 // while a live write was open, the peers connected as the room took it, outside F and with no
 // credit sequence of its own: the credit its append takes if the room's shadow measures it a
 // change after all (storedClasses). recorded is when a durable class was recorded, which the batch
-// its own call takes lingers from (roomAppendLinger).
+// its own call takes lingers from (roomAppendLinger). resident is the token of the load whose
+// room instance committed the update, which the update's bytes count against (queueUpdateClass),
+// nil for a class no room instance made.
 type documentUpdateClass struct {
 	update         []byte
 	seq            uint64
@@ -167,6 +165,7 @@ type documentUpdateClass struct {
 	credit         *UpdateCredit
 	roomCredit     *UpdateCredit
 	cursor         *roomCursor
+	resident       *residentLoad
 	recorded       time.Time
 }
 
@@ -252,17 +251,22 @@ func (s *Service) releaseIfUnused(room string) {
 
 // releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so it no longer counts among
 // the resident rooms, nor holds a place under the room cap unless a socket still holds a
-// reservation on it (roomUnloaded, which takes back what its load counted in onLoadDocument), the
-// bytes it took no longer count as resident, and its state goes too unless something still holds
-// it, whose end releases it instead. ygo calls it
-// exactly once for each room whose load succeeded, whichever way the room goes: the idle sweep,
-// the last peer leaving, CloseRoom.
+// reservation on it, the bytes its load took no longer count as resident (roomUnloaded, which
+// takes back what that load counted in onLoadDocument), and its state goes too unless something
+// still holds it, whose end releases it instead. ygo calls it exactly once for each room whose
+// load succeeded, and only for a room that has left its map, whichever way the room goes: the
+// idle sweep, the last peer leaving, CloseRoom.
+//
+// Which load is ending is read off the loads counted under this name: the oldest whose document
+// is not the one ygo holds for the name now. The room this unload names has left ygo's map, so
+// that document is not it; a room of the same name loaded since is a younger load, whose own
+// unload is still to come, and so is one still loading, which ygo reports as absent (GetDoc is
+// nil while a room loads) and whose entry oldest-first passes over anyway. The live document is
+// read before roomSlots.mu is taken, so no lock of ygo's is ever held under that one.
 func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
-	s.roomUnloaded(room)
-	if state := s.lockExistingState(room); state != nil {
-		s.dropResidentBytesLocked(state)
-		s.unlockState(room, state)
-	}
+	live := s.srv.GetDoc(room)
+	s.roomUnloaded(room, s.takeEndedLoad(room, live))
+	s.releaseIfUnused(room)
 }
 
 // releaseIfUnusedLocked forgets state, room's, once ygo holds no room for it - none loaded or
@@ -283,17 +287,8 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 // (lookUpState). Its one caller, releaseIfUnusedLocked, forgets only a state nothing holds
 // (unusedLocked), so no in-flight credit is on it. Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
-	s.dropResidentBytesLocked(state)
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
-}
-
-// dropResidentBytesLocked takes the bytes state's room took out of the service's resident bytes,
-// once that room has gone or the record goes. A record outlives its room only while something
-// holds it, and a room loaded on it again counts its own load. Its caller holds state.mu.
-func (s *Service) dropResidentBytesLocked(state *roomState) {
-	s.residentBytes.Add(-state.residentBytes)
-	state.residentBytes = 0
 }
 
 // handOverFailedRoomLocked takes state, room's, out of the service once the eviction of the room
@@ -318,8 +313,6 @@ func (s *Service) dropResidentBytesLocked(state *roomState) {
 // the connection id the service gave it. Its caller holds state.mu.
 func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.released = true
-	// The failed room is closed, so the bytes it took are no longer resident.
-	s.dropResidentBytesLocked(state)
 	// A wait for the room's appends on this record looks the room up again, and waits on the
 	// record that counts the room's updates from now on, if any does.
 	state.idle.wake()
@@ -386,7 +379,9 @@ func (s *Service) unusedLocked(state *roomState) bool {
 //
 // A queue that reaches a batch's cap ends the linger of the room's browser append, whose batch
 // has nothing more to wait for. Every update the room commits is recorded here once, so this is
-// also where the bytes it took count as resident (residentBytes).
+// also where the bytes it took count as resident, against the token of the load whose instance
+// committed it (residentLoad, countResidentBytes), so that load's own unload takes them back. A
+// class carrying no token - one a test built by hand - counts no bytes.
 func (s *Service) queueUpdateClass(room string, update []byte, class documentUpdateClass, stored bool) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
@@ -404,8 +399,7 @@ func (s *Service) queueUpdateClass(room string, update []byte, class documentUpd
 		state.recordRepairLocked(class)
 	}
 	state.queuedBytes += len(class.update)
-	state.residentBytes += int64(len(class.update))
-	s.residentBytes.Add(int64(len(class.update)))
+	s.countResidentBytes(class.resident, int64(len(class.update)))
 	if len(state.updateClasses) >= roomAppendBatchUpdates || state.queuedBytes >= roomAppendBatchBytes {
 		state.appendLinger.wake()
 	}
@@ -773,10 +767,50 @@ type roomSlots struct {
 
 // roomSlot is what holds one room's place: resident, the loads of it ygo holds (one, save while a
 // closed instance's unload and its successor's load overlap), and sockets, the document sockets
-// holding a reservation on it. The room keeps its place while either is above zero.
+// holding a reservation on it. The room keeps its place while either is above zero. loads is one
+// token for each load the count holds, oldest first, which is the order the unloads of the name
+// end them in (takeEndedLoad).
 type roomSlot struct {
 	resident int
 	sockets  int
+	loads    []*residentLoad
+}
+
+// residentLoad is one room load's share of the service's resident bytes (Service.residentBytes):
+// the history that load decoded (onLoadDocument) and every update the room instance it left
+// behind committed (queueUpdateClass). The bytes are kept per load rather than on the room's
+// record because ygo's OnUnloadDocument names the room alone and comes only after the room has
+// left its map, so a room of the same name can load again first, onto that very record or onto
+// one created after it was forgotten: either way a record's total is the wrong thing to take
+// back, and the figure would read short for the whole of the newer room's life.
+//
+// doc is the document the load made, which tells one load of a name from the next
+// (takeEndedLoad). It is weak so that a token no unload has reached yet holds no document
+// resident. bytes and ended are guarded by roomSlots.mu: ended marks a token whose unload has
+// taken its bytes back, so each load's bytes leave the count exactly once and a load that is over
+// counts nothing more (countResidentBytes).
+type residentLoad struct {
+	doc   weak.Pointer[crdt.Doc]
+	bytes int64
+	ended bool
+}
+
+// countResidentBytes counts n, the bytes a load took, against load, that load's token, and among
+// the service's resident bytes, which the load's own unload takes them back out of
+// (roomUnloaded). A load that has ended counts nothing more, so no bytes are left in the figure
+// with no unload to come for them, and neither does a class carrying no token at all
+// (queueUpdateClass).
+func (s *Service) countResidentBytes(load *residentLoad, n int64) {
+	if load == nil {
+		return
+	}
+	s.roomSlots.mu.Lock()
+	defer s.roomSlots.mu.Unlock()
+	if load.ended {
+		return
+	}
+	load.bytes += n
+	s.residentBytes.Add(n)
 }
 
 // setLocked records slot as room's, and forgets the room once nothing holds its place. Its caller
@@ -823,15 +857,20 @@ func (s *Service) releaseRoom(room string) {
 // roomLoaded counts a load of room among the resident rooms (residentRooms) and among the room
 // cap's places, where it takes the place a socket reserved for the room, if one did, rather than
 // a second one, and holds room's head-tracker entry (headTracker.hold) for the room's evictor
-// decisions (staleRoomEvictor.roomHolds).
-func (s *Service) roomLoaded(room string) {
+// decisions (staleRoomEvictor.roomHolds). It answers with the load's own token, doc being the
+// document ygo made for it: what the load takes counts against that token (countResidentBytes),
+// and the load's unload hands it back (roomUnloaded).
+func (s *Service) roomLoaded(room string, doc *crdt.Doc) *residentLoad {
 	s.heads.hold(room)
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
+	load := &residentLoad{doc: weak.Make(doc)}
 	slot := s.roomSlots.rooms[room]
 	slot.resident++
+	slot.loads = append(slot.loads, load)
 	s.roomSlots.setLocked(room, slot)
 	s.residentRooms.Add(1)
+	return load
 }
 
 // roomLoadedHere is whether a room of this name is loaded on this process, or has left ygo's map
@@ -842,22 +881,57 @@ func (s *Service) roomLoaded(room string) {
 // unload arrives, onto a record created after the earlier room's record was forgotten
 // (releaseIfUnusedLocked). A flag on the record would be cleared by that late unload while the
 // newer room is loaded; each unload here takes back only its own load's count. A socket's
-// admission asks it (offerPreload) under the room's state record, after the load counts itself
-// and before it sweeps (onLoadDocument).
+// admission asks it (offerPreload) under the room's state record, and a load counts itself here
+// before it sweeps the preloads stored under the room's name (onLoadDocument), so an offer that
+// sweep did not reach was stored by an admission whose own ask comes after this count and finds
+// the room loaded.
 func (s *Service) roomLoadedHere(room string) bool {
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	return s.roomSlots.rooms[room].resident > 0
 }
 
-// roomUnloaded takes back what roomLoaded counted for a load of room, and its hold on room's
-// head-tracker entry. The room keeps its place while a socket still holds a reservation on it.
-func (s *Service) roomUnloaded(room string) {
+// takeEndedLoad takes room's oldest load whose document is not live, the one ygo holds for the
+// name now, out of the loads the name counts, and answers with it: the token of the load an
+// unload of this name is reporting (releaseUnloadedRoom). It answers nil when every load of the
+// name is the live one's, which leaves that unload nothing to take back. Taking the token out
+// here, under the one hold of roomSlots.mu that chooses it, is what keeps two unloads of a name
+// racing each other from choosing the same load.
+func (s *Service) takeEndedLoad(room string, live *crdt.Doc) *residentLoad {
+	s.roomSlots.mu.Lock()
+	defer s.roomSlots.mu.Unlock()
+	slot := s.roomSlots.rooms[room]
+	for at, load := range slot.loads {
+		if live != nil && load.doc.Value() == live {
+			continue
+		}
+		slot.loads = slices.Delete(slot.loads, at, at+1)
+		s.roomSlots.setLocked(room, slot)
+		return load
+	}
+	return nil
+}
+
+// roomUnloaded takes back what roomLoaded counted for one load of room - its place among the
+// resident rooms and under the room cap, its hold on room's head-tracker entry, and the bytes
+// counted against load, the token that load was given - and is the only place a load's bytes
+// leave the service's count. The room keeps its place while a socket still holds a reservation
+// on it. A nil token takes no bytes back: nothing counted any for that load.
+func (s *Service) roomUnloaded(room string, load *residentLoad) {
 	s.heads.release(room)
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	slot := s.roomSlots.rooms[room]
 	slot.resident--
+	if load != nil {
+		if at := slices.Index(slot.loads, load); at >= 0 {
+			slot.loads = slices.Delete(slot.loads, at, at+1)
+		}
+		if !load.ended {
+			load.ended = true
+			s.residentBytes.Add(-load.bytes)
+		}
+	}
 	s.roomSlots.setLocked(room, slot)
 	s.residentRooms.Add(-1)
 }

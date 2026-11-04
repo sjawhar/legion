@@ -58,6 +58,33 @@ func admitSocket(t *testing.T, serverURL, id, what string) *gws.Conn {
 	return connection
 }
 
+// openedSocket is what a dial off the test's own goroutine answers with (dialSocketAsync): the
+// socket it opened, or why it was refused, with the response's status before it.
+type openedSocket struct {
+	connection *gws.Conn
+	err        error
+}
+
+// dialSocketAsync dials id's document socket as alice's browser does, on a goroutine of its own,
+// and answers on the channel it returns. A test dials this way when the open it is about to make
+// holds inside the service - in an admission's rendering, in a room's load - where a dial on the
+// test's own goroutine would wait for the very hold that goroutine has to release.
+func dialSocketAsync(serverURL, id string) <-chan openedSocket {
+	opened := make(chan openedSocket, 1)
+	go func() {
+		connection, response, err := gws.DefaultDialer.Dial(socketURL(serverURL, id), http.Header{"X-Dispatch-User": []string{"alice"}})
+		if err != nil {
+			status := "no response"
+			if response != nil {
+				status = response.Status
+			}
+			err = fmt.Errorf("%s: %w", status, err)
+		}
+		opened <- openedSocket{connection, err}
+	}()
+	return opened
+}
+
 // refuseSocket opens id's document socket and requires the service to refuse it with
 // ServiceUnavailable before any upgrade, as a cap refuses one.
 func refuseSocket(t *testing.T, serverURL, id, what string) {
@@ -174,22 +201,7 @@ func TestAPreloadOvertakenByTheRoomsLoadIsReleasedWhileItsSocketStaysOpen(t *tes
 		<-release
 	}
 
-	type opened struct {
-		connection *gws.Conn
-		err        error
-	}
-	cold := make(chan opened, 1)
-	go func() {
-		connection, response, err := gws.DefaultDialer.Dial(socketURL(server.URL, artifactID), http.Header{"X-Dispatch-User": []string{"alice"}})
-		if err != nil {
-			status := "no response"
-			if response != nil {
-				status = response.Status
-			}
-			err = fmt.Errorf("%s: %w", status, err)
-		}
-		cold <- opened{connection, err}
-	}()
+	cold := dialSocketAsync(server.URL, artifactID)
 	select {
 	case <-rendered:
 	case <-time.After(roomWait(t)):
@@ -523,18 +535,7 @@ func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoad
 		close(rendered)
 		<-release
 	}
-	type opened struct {
-		connection *gws.Conn
-		err        error
-	}
-	cold := make(chan opened, 1)
-	go func() {
-		connection, response, err := gws.DefaultDialer.Dial(socketURL(server.URL, artifactID), http.Header{"X-Dispatch-User": []string{"alice"}})
-		if err != nil && response != nil {
-			err = fmt.Errorf("%s: %w", response.Status, err)
-		}
-		cold <- opened{connection, err}
-	}()
+	cold := dialSocketAsync(server.URL, artifactID)
 	select {
 	case <-rendered:
 	case <-time.After(roomWait(t)):
@@ -571,19 +572,109 @@ func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoad
 	}
 }
 
+// The resident bytes the room figures report (RoomFigures, dispatch_rooms.resident_bytes) are the
+// bytes the loads ygo holds took, and each load's own unload takes its own back. A room that
+// loaded again before an earlier room of the same name reported its unload keeps the bytes it
+// counted: that late unload is the older load's end, and ygo's OnUnloadDocument names the room
+// alone, so bytes kept by the room's name, or on its record, would be taken back by it - leaving
+// the figure short by the whole of the resident room's history, for as long as that room lives.
+func TestAnEarlierRoomsLateUnloadLeavesTheResidentRoomsBytesResident(t *testing.T) {
+	database := storetest.Open(t)
+	service, server := newTestServiceInstance(t, database)
+	artifactID := createDocuments(t, database, 1)[0]
+	admitSocket(t, server.URL, artifactID, "the socket that loads the first room").Close()
+	// The service holds this room alone, so the figure is the first room's load.
+	first := service.residentBytes.Load()
+	if first <= 0 {
+		t.Fatalf("the first room's load counted %d resident bytes, want the history it decoded; nothing here is tested", first)
+	}
+
+	// The first room's unload waits here, where ygo has already taken the room out of its map.
+	// Every unload of this room reports itself once it has run, this one included.
+	unloading := make(chan struct{})
+	unloadGo := make(chan struct{})
+	unloaded := make(chan struct{}, 2)
+	var unloadOnce, unloadGoOnce sync.Once
+	letUnload := func() { unloadGoOnce.Do(func() { close(unloadGo) }) }
+	t.Cleanup(letUnload)
+	unload := service.srv.OnUnloadDocument
+	service.srv.OnUnloadDocument = func(ctx context.Context, room string) {
+		if room != artifactID {
+			unload(ctx, room)
+			return
+		}
+		unloadOnce.Do(func() { close(unloading); <-unloadGo })
+		unload(ctx, room)
+		unloaded <- struct{}{}
+	}
+	awaitUnload := func(what string) {
+		t.Helper()
+		select {
+		case <-unloaded:
+		case <-time.After(roomWait(t)):
+			t.Fatalf("%s never reported its unload", what)
+		}
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- service.srv.CloseRoom(artifactID, true) }()
+	select {
+	case <-unloading:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the first room never reached its unload, so nothing here is tested")
+	}
+
+	// The room loads afresh while the first room's unload is held, so the service counts both
+	// loads, and a write the second room takes counts against it alone. The two loads then hold
+	// different counts, so an unload that took back the wrong load's bytes would show.
+	second := admitSocket(t, server.URL, artifactID, "the socket that loads the second room")
+	if _, err := joinedReplaceText(service, artifactID, "A write the second room takes, longer than the seed.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write to the second room: %v", err)
+	}
+	resident := service.residentBytes.Load() - first
+	if resident <= first {
+		t.Fatalf("the second room counted %d resident bytes against the first room's %d, want more; nothing here is tested", resident, first)
+	}
+
+	letUnload()
+	if err := <-closed; err != nil {
+		t.Fatalf("close the first room: %v", err)
+	}
+	awaitUnload("the first room")
+	// What is left is the second room's load and its write.
+	if got := service.residentBytes.Load(); got != resident {
+		t.Errorf("the resident bytes after the first room's late unload = %d, want the %d the second room counted with its write: that unload takes back the bytes of the load that ended", got, resident)
+	}
+
+	// The second room's own unload takes back what that load counted, and nothing is left.
+	_ = second.Close()
+	if err := service.srv.CloseRoom(artifactID, true); err != nil {
+		t.Fatalf("close the second room: %v", err)
+	}
+	awaitUnload("the second room")
+	if got := service.residentBytes.Load(); got != 0 {
+		t.Errorf("the resident bytes once every room of the document has unloaded = %d, want 0", got)
+	}
+}
+
 // A cold socket that offers its read while the room's load is running - after the load has looked
 // for a preload (LoadDoc's takePreload) and before it records the room as loaded here
 // (onLoadDocument) - offers to a load that will never read it. The load takes that offer out as it
 // records itself, so the socket keeps neither the history nor its hold on the document's
 // head-tracker entry while it stays open. The load is held inside its own read of the store
-// (holdFirstLoadStore), which LoadDoc makes once takePreload has found nothing.
+// (insideFirstLoadStore), which LoadDoc makes once takePreload has found nothing.
 func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocuments(t, database, 1)[0]
-	store := &holdFirstLoadStore{VersionedStore: NewPgVersioned(database), room: artifactID, reading: make(chan struct{}), release: make(chan struct{})}
+	reading, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
-	letLoad := func() { releaseOnce.Do(func() { close(store.release) }) }
+	letLoad := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(letLoad)
+	// The load holds inside its own read of the store, once that read has returned and before
+	// Load hands it back, which is where LoadDoc makes it: after takePreload has found nothing.
+	store := &insideFirstLoadStore{VersionedStore: NewPgVersioned(database), room: artifactID, during: func() {
+		close(reading)
+		<-release
+	}}
 	store.armed.Store(true)
 	service := New(Deps{
 		Store:       database,
@@ -611,30 +702,19 @@ func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	loaded := make(chan error, 1)
 	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
 	select {
-	case <-store.reading:
+	case <-reading:
 	case <-time.After(roomWait(t)):
 		t.Fatal("the room's load never read the store, so nothing here is tested")
 	}
 
-	type opened struct {
-		connection *gws.Conn
-		err        error
-	}
-	cold := make(chan opened, 1)
-	go func() {
-		connection, response, err := gws.DefaultDialer.Dial(socketURL(server.URL, artifactID), http.Header{"X-Dispatch-User": []string{"alice"}})
-		if err != nil && response != nil {
-			err = fmt.Errorf("%s: %w", response.Status, err)
-		}
-		cold <- opened{connection, err}
-	}()
+	cold := dialSocketAsync(server.URL, artifactID)
 	select {
 	case <-offered:
 	case <-time.After(roomWait(t)):
 		t.Fatal("the cold socket never offered its read while the room loaded, so nothing here is tested")
 	}
 	if _, stored := service.preloads.Load(artifactID); !stored {
-		t.Log("the cold socket's offer was not stored while the room loaded; the checks below still hold for it")
+		t.Fatal("the cold socket's offer was not stored while the room loaded, so nothing here is tested")
 	}
 
 	letLoad()
@@ -656,24 +736,4 @@ func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	if got := headHolds(service, artifactID); got != 1 {
 		t.Errorf("the head tracker holds the document %d times while the cold socket is open, want the 1 the resident room holds", got)
 	}
-}
-
-// holdFirstLoadStore holds the first store read of room after it is armed, once that read has
-// returned and before Load hands it back: reading closes when it gets there, and release lets it
-// go. Every other read goes straight through.
-type holdFirstLoadStore struct {
-	VersionedStore
-	room    string
-	armed   atomic.Bool
-	reading chan struct{}
-	release chan struct{}
-}
-
-func (s *holdFirstLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
-	result, err := s.VersionedStore.Load(ctx, room)
-	if room == s.room && s.armed.CompareAndSwap(true, false) {
-		close(s.reading)
-		<-s.release
-	}
-	return result, err
 }

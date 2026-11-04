@@ -28,6 +28,10 @@ type roomInstance struct {
 	// start, which also folds in the versions took recorded while the load ran - those are durable,
 	// but not in the loaded document. Set once, when the load starts the instance (roomLoad.start).
 	loadedHead int64
+	// resident is the token of the load this instance stands for, which the bytes of every update
+	// the instance commits count against (classifyDrained, queueUpdateClass), so that load's own
+	// unload takes them back (residentLoad). Set once, where the instance is kept (keepInstance).
+	resident *residentLoad
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -201,11 +205,13 @@ func (s *Service) tookResidentVersion(room string, version persistence.Version) 
 // advance of the instance's cursor: the instance holds every durable update through the head that
 // load read, and every version this process appended while it ran (roomLoad). The load's record
 // goes with the document from here, as the listing does: until then took still reaches this
-// instance through it, which is what ygo's loading window needs it for. A notice the load heard
-// that the instance does not stand at goes to the stale-room evictor's decision for the room
-// (start), which waits for ygo to publish the room before it decides
+// instance through it, which is what ygo's loading window needs it for. counted is the token of
+// the load the instance stands for, which its updates' bytes count against (classifyDrained); it
+// is set before the instance is listed, so every reader of a listed instance reads it too. A
+// notice the load heard that the instance does not stand at goes to the stale-room evictor's
+// decision for the room (start), which waits for ygo to publish the room before it decides
 // (staleRoomEvictor.awaitResidence).
-func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
+func (s *Service) keepInstance(room string, live *crdt.Doc, counted *residentLoad) *roomInstance {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
 		// A room ygo loaded without reading the store through this service's persistence stands
@@ -214,6 +220,7 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	}
 	load := value.(*roomLoad)
 	instance, recheck := load.start()
+	instance.resident = counted
 	listResident(&s.instances, live, instance)
 	runtime.AddCleanup(live, func(load *roomLoad) { s.roomLoads.CompareAndDelete(room, load) }, load)
 	if recheck != nil {

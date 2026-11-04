@@ -77,20 +77,24 @@ func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
 	}
 }
 
-// roomDuringColdReadStore runs opened once, inside the first store read of room after it is armed
-// and before that read returns: a browser's room load takes no lock a write holds, so it can land
-// there, while a cold write reads the store.
-type roomDuringColdReadStore struct {
+// insideFirstLoadStore runs during once, inside the first store read of room that succeeds after
+// the store is armed and before that read hands its result back. That window is where a test puts
+// what has to happen while a load of this document is running: a browser's room load, which takes
+// no lock a cold write holds, lands there while the write reads the store
+// (TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits), and a hold there keeps the room's own
+// load inside its read (TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad). Every other
+// read goes straight through.
+type insideFirstLoadStore struct {
 	VersionedStore
 	room   string
 	armed  atomic.Bool
-	opened func()
+	during func()
 }
 
-func (s *roomDuringColdReadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+func (s *insideFirstLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	result, err := s.VersionedStore.Load(ctx, room)
 	if err == nil && room == s.room && s.armed.CompareAndSwap(true, false) {
-		s.opened()
+		s.during()
 	}
 	return result, err
 }
@@ -109,7 +113,7 @@ func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			database := storetest.Open(t)
 			artifactID := createDocument(t, database, "# First")
-			store := &roomDuringColdReadStore{VersionedStore: NewPgVersioned(database), room: artifactID}
+			store := &insideFirstLoadStore{VersionedStore: NewPgVersioned(database), room: artifactID}
 			service := New(Deps{
 				Store:       database,
 				Persistence: store,
@@ -137,7 +141,7 @@ func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
 				}
 			}
 			if during {
-				store.opened = browserOpens
+				store.during = browserOpens
 				store.armed.Store(true)
 			} else {
 				opened := false

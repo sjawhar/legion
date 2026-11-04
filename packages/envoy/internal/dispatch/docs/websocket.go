@@ -427,12 +427,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The room counts among the resident rooms, and holds its place under the room cap
 	// (reserveRoom), from here until ygo's OnUnloadDocument (releaseUnloadedRoom), unless this
 	// load fails: ygo then drops the room with no OnUnloadDocument, so the load takes its own count
-	// back.
-	s.roomLoaded(room)
+	// back. The token the count answers with is this load's own: the bytes counted against it are
+	// taken back at the unload of this load, and of no other load of the name (residentLoad).
+	counted := s.roomLoaded(room, doc)
 	resident := false
 	defer func() {
 		if !resident {
-			s.roomUnloaded(room)
+			s.roomUnloaded(room, counted)
 		}
 	}()
 	// Decoded before anything reads or observes the document (bootstrapLoadedState).
@@ -511,14 +512,16 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	default:
 		askBlocks = askBlockIDs(rendered.tree)
 	}
+	// The history this load decoded counts as resident against this load's own token, so its
+	// unload takes those bytes back wherever the room's record has gone by then
+	// (countResidentBytes).
+	s.countResidentBytes(counted, int64(size))
 	// The room this load publishes holds the state it takes from here until ygo retires it
 	// (releaseIfUnusedLocked). The issue's state is the newest the record holds, this load's read
-	// or a close recorded after it began; the history the load decoded counts as resident.
+	// or a close recorded after it began.
 	state := s.lockState(room)
 	state.recordIssueLocked(issue)
 	open := !state.closed
-	state.residentBytes += int64(size)
-	s.residentBytes.Add(int64(size))
 	// The room has counted itself loaded here since roomLoaded, above, and stays counted until its
 	// unload (roomLoadedHere), so a socket's admission offers it no preload from then on
 	// (offerPreload). An offer that checked before that count and has stored its preload is under
@@ -572,7 +575,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// on from the first update (renderedReplica.verdict).
 	replica := s.keepReplica(doc, doc.OpenUpdateLog(), rendered.rendering)
 	replica.recordVerdict(renderErr)
-	instance := s.keepInstance(room, doc)
+	instance := s.keepInstance(room, doc, counted)
 	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (bool, bool) {
 		return s.classifyDrained(room, instance, logged, seq, contentChanged, asks)
 	}
@@ -616,9 +619,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 //
 // The cursor is the instance's, taken here rather than looked up when the update reaches the
 // store: a room evicted and reloaded in between is a different instance, which did not take this
-// update and must not be recorded as holding the version it is stored at.
+// update and must not be recorded as holding the version it is stored at. The instance's resident
+// token is taken with it, so the update's bytes count against the load that committed it
+// (queueUpdateClass).
 func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (settles, changed bool) {
-	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor}
+	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor, resident: instance.resident}
 	if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 		// A repair's writer appends its update in its own transaction, under the document's
 		// advisory lock it holds while the room takes the update, so the class is queued stored:
