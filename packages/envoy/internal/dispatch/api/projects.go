@@ -10,23 +10,31 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
-		return
-	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select p.key, p.name, (
-			select count(*)
+// projectListQuery counts every project's open asks in one grouped read, in place of a subquery
+// per project row. An ask belongs to the project of its issue, else of its document, as the
+// inbox reads it; a project with no open ask has no row of that count, which the coalesce reads
+// as the 0 the subquery answered. It is named here rather than written inside the handler so
+// the plan test explains the statement the route runs.
+const projectListQuery = `
+		select p.key, p.name, coalesce(open_asks.total, 0), p.created_at
+		from projects p
+		left join (
+			select coalesce(i.project_key, ar.project_key) as project_key, count(*) as total
 			from asks a
 			left join issues i on i.key = a.issue_key
 			left join artifacts ar on ar.id = a.artifact_id
 			where a.state = 'open'
-			  and coalesce(i.project_key, ar.project_key) = p.key
 			  and (i.key is null or i.closed_at is null)
-		), p.created_at
-		from projects p
+			group by coalesce(i.project_key, ar.project_key)
+		) open_asks on open_asks.project_key = p.key
 		order by p.key
-	`)
+	`
+
+func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), projectListQuery)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

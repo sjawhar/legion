@@ -23320,7 +23320,7 @@ function createEnvoyClient(config) {
       session_id: input.sessionID,
       subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
       ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
+    }, { timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false })))
   };
 }
 function waitForRetry() {
