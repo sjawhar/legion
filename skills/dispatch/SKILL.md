@@ -8,12 +8,12 @@ description: "Use before your first dispatch command in a session: a message, co
 Dispatch is a record for the people who decide, never a log of your work.
 
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
-- Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
+- Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
 - Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
 
 ## Asks and ask blocks
 
-- A design question a document records is an ask block (a decision block) at the end of its section, at each phase:
+- A design question a document records is an ask block (a decision block) at the end of its section:
 
 ```md
 :::ask{urgency="med"}
@@ -42,9 +42,9 @@ The question and the recommendation, as `skill://dispatch-writing-specs` writes 
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree, even when its claim reads `· not running`. An outside claim can take the tree out of the workflow. A status write is set back or stands.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. Never write or route the status of an issue with the `legion` label or under one, and claim one only as a role of its tree, even when its claim reads `· not running`: an outside claim can take the tree out of the workflow. A status write is set back or stands.
 
-A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
+A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no quiet event.
 
 ## Close what you opened
 
@@ -80,7 +80,7 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
+A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole.
 
 ## Setup and the HTTP API
 

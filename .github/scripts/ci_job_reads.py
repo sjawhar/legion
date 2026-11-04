@@ -223,6 +223,11 @@ RULES = {
         Read(g, "internal/daemon/promptreferences_omp_test.go:132,207-228 bun pm pack of packages/pi-envoy and pi-legion runs their prepack")
         for g in PACK_READS] + reads(("packages/envoy-client/scripts/build-dispatch-cli.sh", "scripts/pi-plugin-prepack.sh:92, run by the pack in promptreferences_omp_test.go:228")),
     f"{DAEMON}/internal/daemon/supervision_test.go": reads((f"{DAEMON}/internal/stream/*", "internal/daemon/supervision_test.go:1220 Glob ../stream/*.go")),
+    # The daemon's own reader of Dispatch's block grammar is held to the server's splitter over
+    # the parser's corpus: it reads each document of that corpus by relative path, and the table
+    # of the server's reading of them that packages/envoy/internal/dispatch/itemblocks writes.
+    f"{DAEMON}/internal/dispatch/corpus_test.go": reads(
+        (f"{ENVOY}/internal/dispatch/pmdoc/testdata/corpus/*", "internal/dispatch/corpus_test.go:12,44,54 ../../../envoy/internal/dispatch/pmdoc/testdata/corpus")),
     f"{DAEMON}/internal/intake/redelivered_test.go": [
         run(ENVOY, ["./cmd/listener", "./cmd/dispatch"], "internal/intake/redelivered_test.go:255 go build -C ../../../envoy ./cmd/listener ./cmd/dispatch", mode="build")],
     f"{DAEMON}/internal/intake/intake_test.go": reads((f"{FIX}/github-envelopes/*", "internal/intake/intake_test.go:782,855")),
@@ -279,6 +284,13 @@ RULES = {
     f"{ENVOY}/internal/dispatch/docs/approval_carry_test.go": reads((f"{FIX}/decision-blocks/*", "internal/dispatch/docs/approval_carry_test.go:26")),
     f"{ENVOY}/internal/dispatch/docs/history_fold_test.go": reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/testdata/fixtures.json", "internal/dispatch/docs/history_fold_test.go:478")),
+    # The splitter's reading of the parser's corpus, written to a fixture under packages/daemon
+    # with -update and compared with the committed one without it: the daemon module cannot
+    # import this package, so its own reader of the block grammar is held to that table
+    # (packages/daemon/internal/dispatch/corpus_test.go reads it).
+    f"{ENVOY}/internal/dispatch/itemblocks/daemon_fixture_test.go": reads(
+        (f"{DAEMON}/internal/dispatch/testdata/*", "internal/dispatch/itemblocks/daemon_fixture_test.go:19 ../../../../daemon/internal/dispatch/testdata"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/testdata/corpus/*", "internal/dispatch/itemblocks/daemon_fixture_test.go:23 ../pmdoc/testdata/corpus")),
     f"{ENVOY}/internal/dispatch/pmdoc/update_test.go": [
         Read(g, "internal/dispatch/pmdoc/update_test.go:236-238 bun run gen/<script> (imports @legion/proof-editor)") for g in PMDOC_GEN],
     f"{ENVOY}/internal/dispatch/pmdoc/render_readback_test.go": [
@@ -362,6 +374,20 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
 
 
+# The four packages the test job's race step runs, and which its plain step therefore leaves out.
+# One list: both step texts below are built from it, and check-ci-filters.sh fails when either step
+# in ci.yaml differs from the text built here, so the two steps cannot name different sets.
+DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/record", "internal/sessionproxy", "internal/launcher"]
+DAEMON_RACE_STEP = "Test the concurrent packages under the race detector"
+DAEMON_RACE_PKGS = [f"./{p}/" for p in DAEMON_RACE_PACKAGES]
+DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(DAEMON_RACE_PKGS)
+DAEMON_PLAIN_STEP = "Test the Go daemon"
+DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
+DAEMON_PLAIN_SCRIPT = f"""\
+set -o pipefail
+go list ./... | grep -Ev '{DAEMON_PLAIN_PATTERN}' | xargs go test -count=1 -timeout 15m"""
+
+
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
 BUILD_BINARIES = "docs/site/scripts/build-binaries.sh"
 DISPATCH_SERVER_BUILD = "flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch"
@@ -392,14 +418,19 @@ GATES = [
     ], reads=CI_SELF + setup_go("typecheck", f"{DAEMON}/go.mod")),
 
     gate("test", "test", runs=[
-        step_run("test", "Test the Go daemon", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
-        step_run("test", "Test the concurrent packages under the race detector",
-                 "go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
-                 DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"], race=True),
+        step_run("test", DAEMON_RACE_STEP, DAEMON_RACE_TEXT, DAEMON, DAEMON_RACE_PKGS, race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
+    ], exact=[
+        # check-ci-filters.sh reduces only a one-line go test, so the step's whole script is
+        # pinned, as the envoy-go unit step's is. A Run cannot name "./... but the four", so the
+        # entry declares the superset ./..., as the envoy-go unit step's does; the race step's Run
+        # above is what claims the four.
+        pinned_step("test", DAEMON_PLAIN_STEP, DAEMON, DAEMON_PLAIN_SCRIPT, [
+            (DAEMON, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
     ], reads=CLAUDE_ENVOY_BUILD + reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
@@ -486,8 +517,9 @@ GATES = [
         ("skills/dispatch-writing-specs/SKILL.md", "packages/contracts/src/dispatch-tools.test.ts:1056 existsSync(skills/dispatch-writing-specs/SKILL.md)"),
         (f"{ENVOY}/internal/dispatch/text/testdata/dispatch-href-references.json", "packages/contracts/src/dispatch-href.test.ts:49-53"),
         (f"{ENVOY}/internal/dispatch/text/testdata/dispatch-text-references.json", "packages/contracts/src/dispatch-text-references.test.ts:10-14"),
-        (f"{ENVOY}/internal/contracts/generated.go", "packages/contracts/scripts/gen-go.test.ts:6,42,47 and gen-go.ts:577,599 (--check compares the committed file)"),
-        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,42,47 and gen-go.ts:581"),
+        (f"{ENVOY}/internal/contracts/generated.go", "packages/contracts/scripts/gen-go.test.ts:6,55-59 and gen-go.ts's outputs list (--check compares the committed file)"),
+        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,55-59 and gen-go.ts's outputs list"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema_generated.go", "packages/contracts/scripts/gen-go.test.ts:8-11,55-59 and gen-go.ts's outputs list (the block schema's shape, generated from schemas/block-schema.schema.json)"),
     ) + biome(at("contracts", "Lint contracts")) + bun_job("contracts") + CI_SELF),
 
     gate("conflicts_script", "conflicts-script", reads=reads(
@@ -634,9 +666,9 @@ GATES = [
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
         ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
-        ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts:65 reads schemas/envelope.schema.json"),
-        (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts:4-27 imports ../src/*"),
-        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts:581,599 --check compares it"),
+        ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts's envelopeFile and blockSchemaFile read schemas/"),
+        (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts's imports of ../src/*"),
+        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts's outputs list: --check compares it"),
         (f"{ENVOY}/internal/dispatch/pmdoc/gen/**", f"{at('envoy-go', 'Check pmdoc fixtures are up to date')} (gen.ts --check)"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/gen.ts:4-5 imports @legion/proof-editor (exports -> src/lib.ts, src/lib-headless.ts)"),
         (".github/actions/pull-test-images/**", at("envoy-go", "Pull test container images")),

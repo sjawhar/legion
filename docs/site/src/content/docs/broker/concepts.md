@@ -102,10 +102,29 @@ the gap gives the gap back to every such lease that was not revoked, at most
 (`packages/envoy/internal/broker/enroll/serving.go`, `ServingClock`). The session's renewer then
 renews as before. A revoked enrollment stays ended, and so does one whose lease ran out while a
 broker was serving. A renewal with another pod's or service account's token is still refused
-`POD_IDENTITY_MISMATCH`. A live session renews with at least two thirds of its lease left, so the
-broker refuses to start unless `BROKER_LEASE_SECONDS` is more than four and a half times
-`BROKER_SWEEP_SECONDS`: a lease that runs out inside a gap of three sweeps, which still counts as
-serving, would otherwise be ended. This covers only an outage of the broker itself:
+`POD_IDENTITY_MISMATCH`. A gap of three sweeps is given back to nobody, so a lease has to
+outlive one and then the retries its renewer takes to renew once a broker serves again. The
+broker refuses to start on a `BROKER_LEASE_SECONDS` too short for its `BROKER_SWEEP_SECONDS`,
+and names the shortest lease that is long enough: 91 seconds at a sweep of 1 or 5 seconds, 105
+at a sweep of 10, 225 at 30 and 360 at 60.
+It walks both renewers' own retry schedules
+(`packages/envoy/internal/broker/leasetime`), counting each renewal the outage refuses as
+failing at whatever instant costs the renewer most: anywhere from at once, when the connection
+is refused, to the 30-second client timeout, when nothing behind a front door ever answers,
+with a proxy that gives up or a terminating pod that resets ending one between the two.
+Each renewer waits from the instant its failure comes back, so that instant is what decides
+where its next renewal falls.
+Which renewer sets the floor changes with the sweep: `agent-secrets renew`'s floor grows steadily
+with the sweep, while `agent-secrets-helper`, which waits at least 30 seconds after any failed
+renewal, stays at 91 seconds up to a 10-second sweep, where an outage can refuse only its first
+renewal, and rises faster after that. So `agent-secrets renew` is the stricter of the two only
+at sweeps of 7 to 10 seconds, and the helper at every other.
+The default lease
+of 900 seconds passes at every sweep the broker takes.
+A deployment whose `BROKER_LEASE_SECONDS` is below its sweep's floor has to raise it before it
+rolls a broker carrying this refusal, since each new pod exits at boot instead of serving.
+This covers only an outage of the broker
+itself:
 
 - A broker that runs but that sessions cannot reach (ingress, DNS, a NetworkPolicy, a stale
   `AGENT_SECRETS_URL`) still counts as serving, so a lease that runs out then ends as before.
@@ -213,7 +232,12 @@ marked with tags or annotations:
   name gets no token. A `github-app` secret without the tag, or with one that names no account, is
   refused `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
-  secret must use `--ttl` no longer than the tag.
+  secret must ask for a lifetime no longer than the tag; a request with no `--ttl` asks for the
+  12-hour default.
+- **`default-grant`** is optional. Its one value is `session`: a request with no `--ttl` whose
+  secrets all carry it gets a grant that lasts until its session ends instead of 12 hours. Any other
+  value is refused `default-grant-malformed`. Set it with `agent-secrets secret create|retag
+  --default-grant session`.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
   `kind-secret`, and this broker never reads it. It makes the brokers before kinds, from
   legion-envoy-v13.19.0 on, refuse a kind secret rather than serve its stored key.
@@ -371,8 +395,8 @@ reason of at most 400 characters. The broker evaluates every name
   release mints a token of that same kind from that same frozen source, never the stored value. To
   end a grant, revoke it. A kind secret the broker stops serving, such as one whose
   `github-owners` is removed or malformed, stops releasing until the secret is served again.
-- A secret with `max-grant` needs `--ttl` no longer than that duration. A request with no `--ttl`,
-  or a longer one, is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
+- A secret with `max-grant` needs a lifetime no longer than that duration. A request whose `--ttl`
+  (or, with none, the 12-hour default, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a release that finds
   a live grant lasting longer ends it for good (`GRANT_NOT_LIVE`), and a pending request that asked
   for longer is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again
@@ -391,9 +415,12 @@ reason of at most 400 characters. The broker evaluates every name
   ([what an owner change does](#approvals)).
 
 A granted request yields a **grant**: the session's right to read those values until the grant
-ends. A grant lasts until its session ends, unless the request asks for a shorter lifetime
-(`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), which it then
-lasts counted from the moment it is granted. A secret with `max-grant` requires that shorter
+ends. A grant lasts the lifetime its request asks for
+(`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), counted from
+the moment it is granted. A request that names no lifetime gets 12 hours, or, when every secret it
+names carries the tag `default-grant=session`, a grant that lasts until its session ends. A grant
+also always ends with its session. Any other value of `default-grant` is refused
+(`default-grant-malformed`). A secret with `max-grant` requires that shorter
 lifetime and bounds it. The approver sees the lifetime the request asked for before deciding it.
 While a grant lives, a new request from the same session for exactly the same names and the same
 lifetime gets the same grant back, without asking anyone again, as long as the current policy still

@@ -95,6 +95,7 @@ class FakeDispatch {
     created_at: string;
     body: string;
   }[] = [];
+  results: Record<string, unknown>[] = [];
   /** A seeded spec's ask blocks no settlement has indexed yet, by issue. Dispatch settles a
    * seeded document a moment after the issue is created; here the issue's second read of its asks
    * is the first to find them. */
@@ -321,6 +322,44 @@ class FakeDispatch {
         (id) => {
           const record = this.handoffs.find((h) => h.id === id);
           return record === undefined ? json({ code: "HANDOFF_NOT_FOUND" }, 404) : json(record);
+        },
+      ],
+      [
+        /^POST \/api\/v1\/issues\/([^/]+)\/artifacts$/,
+        (issue) => {
+          const name = String(body?.name ?? "");
+          const artifact: FakeArtifact = {
+            id: this.id("art"),
+            issue_key: issue,
+            name,
+            slug: name.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-"),
+            kind: "doc",
+            primary: false,
+            markdown: String(body?.content ?? ""),
+            versions: [],
+          };
+          this.artifacts.push(artifact);
+          return json(strip(artifact), 201);
+        },
+      ],
+      [
+        /^POST \/api\/v1\/issues\/([^/]+)\/results$/,
+        (issue) => {
+          const result = {
+            id: this.id("result"),
+            issue_key: issue,
+            check: body?.check,
+            role: body?.role,
+            verdict: body?.verdict,
+            commit_sha: body?.commit,
+            actor: actor(),
+            created_at: new Date().toISOString(),
+          };
+          this.results.push(result);
+          return json(
+            { result, line: `- Check ${body?.check} (before_merge): ${body?.verdict}` },
+            201
+          );
         },
       ],
     ];
@@ -990,22 +1029,27 @@ describe("tester-proof", () => {
   test("files the run's own greet() issue, forced past the duplicate check", async () => {
     const file = path.join(freshDir("seed"), "fixture.json");
     await seed.testerProofIssue(file);
-    const [post] = dispatch.calls.filter((call) => call.method === "POST");
-    expect(`${post?.who} ${post?.path}`).toBe("agent /api/v1/issues");
-    expect(post?.body).toMatchObject({ project: "LWEVAL", force: true });
-    expect(String(post?.body?.spec)).toContain("## Acceptance");
+    const posts = dispatch.calls.filter((call) => call.method === "POST");
+    expect(`${posts[0]?.who} ${posts[0]?.path}`).toBe("agent /api/v1/issues");
+    expect(posts[0]?.body).toMatchObject({ project: "LWEVAL", force: true });
+    expect(String(posts[0]?.body?.spec)).toContain(":::requirement{#r1}");
+    expect(String(posts[0]?.body?.spec)).not.toContain("## Acceptance");
+    expect(`${posts[1]?.who} ${posts[1]?.path}`).toBe("agent /api/v1/issues/LWEVAL-2/artifacts");
+    expect(String(posts[1]?.body?.content)).toContain(':::check{#k1 surface="cli"');
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ issue: "LWEVAL-2" });
   });
 
   // Catches: an implement record under the run's session (which the daemon would take as the
-  // tester's own), a body re-encoded on the way, or a fixture that forgets the record's version.
-  test("records the implement handoff under the implementer's session and keeps its version", async () => {
+  // tester's own), a body re-encoded on the way, a fixture that forgets the record's version, or a
+  // seed that leaves the tester no implementer result to judge.
+  test("records the implement handoff and the implementer's result, under its own session", async () => {
     const dir = freshDir("seed");
     const file = path.join(dir, "fixture.json");
     await seed.testerProofIssue(file);
-    const body = { schemaVersion: 1, phase: "implement", issue: "LWEVAL-2", proof: [] };
+    const body = { schemaVersion: 1, phase: "implement", issue: "LWEVAL-2" };
     writeFileSync(path.join(dir, "implement.json"), JSON.stringify(body));
-    await seed.implementHandoff(file, path.join(dir, "implement.json"));
+    const commit = "1111111111111111111111111111111111111111";
+    await seed.implementHandoff(file, path.join(dir, "implement.json"), commit);
     expect(dispatch.handoffs).toEqual([
       expect.objectContaining({
         issue_key: "LWEVAL-2",
@@ -1013,6 +1057,16 @@ describe("tester-proof", () => {
         version: 1,
         author: seed.IMPLEMENTER,
         body: JSON.stringify(body),
+      }),
+    ]);
+    expect(dispatch.results).toEqual([
+      expect.objectContaining({
+        issue_key: "LWEVAL-2",
+        check: "k1",
+        role: "implementer",
+        verdict: "pass",
+        commit_sha: commit,
+        actor: seed.IMPLEMENTER,
       }),
     ]);
     expect(seed.IMPLEMENTER.id).not.toBe(runSession.id);
@@ -1028,10 +1082,11 @@ describe("tester-proof", () => {
     const file = path.join(dir, "fixture.json");
     await seed.testerProofIssue(file);
     writeFileSync(path.join(dir, "implement.json"), "[1]");
-    await expect(seed.implementHandoff(file, path.join(dir, "implement.json"))).rejects.toThrow(
-      "holds no JSON object"
-    );
+    await expect(
+      seed.implementHandoff(file, path.join(dir, "implement.json"), "1".repeat(40))
+    ).rejects.toThrow("holds no JSON object");
     expect(dispatch.handoffs).toEqual([]);
+    expect(dispatch.results).toEqual([]);
   });
 
   // Catches: a capture that keeps only the metadata Dispatch lists, or loses the newest-first order
@@ -1041,7 +1096,7 @@ describe("tester-proof", () => {
     const file = path.join(dir, "fixture.json");
     await seed.testerProofIssue(file);
     writeFileSync(path.join(dir, "implement.json"), JSON.stringify({ phase: "implement" }));
-    await seed.implementHandoff(file, path.join(dir, "implement.json"));
+    await seed.implementHandoff(file, path.join(dir, "implement.json"), "2".repeat(40));
     dispatch.handoffs.push({
       id: "h-test",
       issue_key: "LWEVAL-2",

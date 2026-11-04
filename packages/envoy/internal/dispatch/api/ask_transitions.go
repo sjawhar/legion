@@ -241,9 +241,10 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
 	})
-	// An approval ask's answer is a review of the document it names, pinned to the version its
-	// question named: the latest settled one, which every version write moves the request to, and
-	// the one the human reviewed (revision).
+	// An approval ask's answer is a review of every document it names, each pinned to the version
+	// its question named: that document's latest settled one, which every version write moves the
+	// request to, and the one the human reviewed (revision). A request naming a spec and its
+	// issue's Verification document writes one review on each.
 	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {
 		if ask.Kind != "approval" {
 			return nil, nil
@@ -256,11 +257,11 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		_, event, err := docs.WriteReview(ctx, tx, s.deps.Events, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID))
+		_, events, err := s.writeApprovalReviews(ctx, tx, artifact, ask.Approval.Documents, state, actor, reason, new(ask.ID))
 		if err != nil {
 			return nil, err
 		}
-		return []model.Event{event}, nil
+		return events, nil
 	}
 	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, transition)
 	if err != nil {

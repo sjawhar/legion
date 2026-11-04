@@ -1,5 +1,0 @@
-kind: Changed
-body: The skill-scenario rig starts its Envoy listener without `ENVOY_HOST_BRIDGE`, which the listener no longer reads.
-time: 2026-11-02T13:57:35.498695497Z
-custom:
-    Issue: pr2674

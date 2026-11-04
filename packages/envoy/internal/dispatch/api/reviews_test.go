@@ -255,7 +255,7 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	// summary; each "é" is one UTF-16 unit and two bytes, and the padding around a summary is
 	// not part of it.
 	room := contracts.DispatchEventBodyMax -
-		docs.AskWordingUnits(docs.ApprovalQuestion("spec.md", maxApprovalVersion, ""), approvalAskOptions) - 1
+		docs.AskWordingUnits(docs.ApprovalQuestion(approvalOf("spec.md", maxApprovalVersion), ""), approvalAskOptions) - 1
 	over := strings.Repeat("é", room+1)
 	overCap := "summary is 1 characters over the " + strconv.Itoa(room) + "-character limit (" + strconv.Itoa(room+1) + "/" + strconv.Itoa(room) + ")"
 	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), overCap) {
@@ -279,7 +279,7 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	// reading: it is refused, and the card keeps its question and its revision.
 	other := "A different summary."
 	reworded := request(issue.PrimaryArtifactID, &other)
-	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary would rewrite the card they are reading") {
+	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary or another document would rewrite the card they are reading") {
 		t.Fatalf("a different summary while the request waits on the human: status=%d body=%s", reworded.Code, reworded.Body.String())
 	}
 	if shown := readAskDetail(t, handler, opened.ID); shown.Question != opened.Question || shown.EditedAt != nil || shown.WaitingOn != "human" {
@@ -309,6 +309,11 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	}
 }
 
+// approvalOf is the one-document list an approval request names, for the question tests.
+func approvalOf(name string, version int) []model.AskApprovalDocument {
+	return []model.AskApprovalDocument{{ArtifactID: "artifact-1", Name: name, Version: version, RequestedVersion: version}}
+}
+
 // A version move rebuilds an approval request's question at the document's new version without
 // asking again, so the summary is budgeted against the longest version a request can reach: the
 // longest summary the route accepts keeps the ask's question and options within the ask bound
@@ -319,22 +324,22 @@ func TestTheLongestAcceptedSummaryFitsTheBoundAtEveryVersion(t *testing.T) {
 			// The longest summary approvalQuestion accepts, by binary search over its verdict:
 			// it accepts every length up to that one and refuses every length past it.
 			refused := sort.Search(contracts.DispatchEventBodyMax+2, func(length int) bool {
-				_, err := approvalQuestion(name, requested, strings.Repeat("é", length))
+				_, err := approvalQuestion(approvalOf(name, requested), strings.Repeat("é", length))
 				return err != nil
 			})
 			limit := refused - 1
 			summary := strings.Repeat("é", limit)
-			if _, err := approvalQuestion(name, requested, summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
+			if _, err := approvalQuestion(approvalOf(name, requested), summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
 				t.Fatalf("%s at version %d: one past the %d-unit limit = %v, want CAP_EXCEEDED", name, requested, limit, err)
 			}
 			// A move to the first version of each digit count, then to the longest of all.
 			for boundary := 9; boundary < maxApprovalVersion; boundary = boundary*10 + 9 {
-				moved := docs.ApprovalQuestion(name, boundary+1, summary)
+				moved := docs.ApprovalQuestion(approvalOf(name, boundary+1), summary)
 				if units := docs.AskWordingUnits(moved, approvalAskOptions); units > contracts.DispatchEventBodyMax {
 					t.Fatalf("%s requested at version %d, moved to %d: question and options are %d units, past the %d bound", name, requested, boundary+1, units, contracts.DispatchEventBodyMax)
 				}
 			}
-			longest := docs.ApprovalQuestion(name, maxApprovalVersion, summary)
+			longest := docs.ApprovalQuestion(approvalOf(name, maxApprovalVersion), summary)
 			if units := docs.AskWordingUnits(longest, approvalAskOptions); units != contracts.DispatchEventBodyMax {
 				t.Fatalf("%s requested at version %d, moved to the longest version: question and options are %d units, want exactly the %d bound", name, requested, units, contracts.DispatchEventBodyMax)
 			}
@@ -586,7 +591,7 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 	// The production writer, so no time or sequence is fabricated.
 	reason := "And name who runs the restore."
 	second, event, err := docs.WriteReview(ctx, delayed, deps.Events, artifact, first.Version, "changes_requested",
-		model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
+		docs.ReviewKindPerson, model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
 	if err != nil {
 		t.Fatalf("write the delayed review: %v", err)
 	}

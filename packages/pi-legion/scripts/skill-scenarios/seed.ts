@@ -8,11 +8,12 @@
 //                                          the world of every scenario but brainstorm
 //   seed.ts tester-proof <file>            one run's own issue, the greet() issue the tester's world
 //                                          implements; writes {issue} to <file>
-//   seed.ts implement-handoff <file> <body file>
+//   seed.ts implement-handoff <file> <body file> <commit>
 //                                          records <body file>, one JSON object, as the implement
 //                                          handoff of the issue <file> names, under the session
-//                                          IMPLEMENTER (never the run's); writes {issue, implement:
-//                                          {id, version}} to <file>
+//                                          IMPLEMENTER (never the run's), records its passing
+//                                          result on check k1 at <commit>, and writes {issue,
+//                                          implement: {id, version}} to <file>
 //   seed.ts capture-handoffs <file> <run dir>
 //                                          every handoff record of the issue <file> names, newest
 //                                          first as Dispatch lists them, each with the body it
@@ -570,9 +571,13 @@ async function seedProject(): Promise<void> {
   console.log("seeded LWEVAL");
 }
 
-/** `tester-proof <file>`: the run's own greet() issue, whose spec lists the acceptance criteria
- * rig.sh's worker_fixture meets. Each run's implement and test records go on its own issue alone,
- * and `force` passes Dispatch's duplicate check should the issue be filed again. */
+/** `tester-proof <file>`: the run's own greet() issue, whose spec marks what rig.sh's
+ * worker_fixture meets as `requirement` blocks, and whose Verification document holds the one
+ * `check` block the implementer's result and the tester's own run are recorded against. The check
+ * names no `serves`, since a pointer must name a block of a document this seed has not read back;
+ * the pointer rules are the Dispatch suites' to prove, not this fixture's. Each run's records go
+ * on its own issue alone, and `force` passes Dispatch's duplicate check should the issue be filed
+ * again. */
 export async function testerProofIssue(file: string): Promise<void> {
   const issue = await createIssue(
     {
@@ -584,11 +589,33 @@ export async function testerProofIssue(file: string): Promise<void> {
         "",
         "`greet(name)` returns `Hello, <name>!`, and `bun greet.ts <name>` prints it.",
         "",
-        "## Acceptance",
+        "## Requirements",
         "",
-        "1. `bun greet.ts Ada` prints `Hello, Ada!` and exits 0.",
-        "2. `bun greet.ts` with no name, or a blank one, exits 2 and prints `usage: greet.ts <name>` to stderr.",
-        "3. Surrounding whitespace in the name is trimmed.",
+        ":::requirement{#r1}",
+        "**R1.** `bun greet.ts Ada` prints `Hello, Ada!` and exits 0. From: the issue.",
+        ":::",
+        "",
+        ":::requirement{#r2}",
+        "**R2.** `bun greet.ts` with no name, or a blank one, exits 2 and prints `usage: greet.ts <name>` to stderr. From: the issue.",
+        ":::",
+        "",
+        ":::requirement{#r3}",
+        "**R3.** Surrounding whitespace in the name is trimmed. From: the issue.",
+        ":::",
+      ].join("\n"),
+    },
+    { as: "agent" }
+  );
+  await createIssueArtifact(
+    issue.key,
+    {
+      name: "verification.md",
+      content: [
+        "# Verification",
+        "",
+        ':::check{#k1 surface="cli" run="bun greet.ts Ada" when="before_merge" negative_control="bun greet.ts with no name exits 2 and prints the usage line to stderr."}',
+        "`bun greet.ts <name>` prints the greeting, trims the name, and exits 2 with a usage line when no name is given.",
+        ":::",
       ].join("\n"),
     },
     { as: "agent" }
@@ -598,15 +625,31 @@ export async function testerProofIssue(file: string): Promise<void> {
   console.log(`seeded ${issue.key}`);
 }
 
-/** `implement-handoff <file> <body file>`: the implementer's handoff on the run's issue, as
- * `dispatch handoff-write` records it under the implementer's session. A body that is no JSON
- * object is the fixture's fault, refused before anything is written. */
-export async function implementHandoff(file: string, bodyFile: string): Promise<void> {
+/** `implement-handoff <file> <body file> <commit>`: the implementer's handoff on the run's issue,
+ * as `dispatch handoff-write` records it under the implementer's session, and its passing result
+ * against the issue's check `k1` at `<commit>`, as `dispatch result` records it. A body that is no
+ * JSON object is the fixture's fault, refused before anything is written. */
+export async function implementHandoff(
+  file: string,
+  bodyFile: string,
+  commit: string
+): Promise<void> {
   const { issue } = TesterFixture.parse(JSON.parse(readFileSync(file, "utf8")));
   const body: unknown = JSON.parse(readFileSync(bodyFile, "utf8"));
   if (typeof body !== "object" || body === null || Array.isArray(body))
     throw new Error(`${bodyFile} holds no JSON object, which a handoff body is`);
   const recorded = await createHandoff(issue, "implement", body, IMPLEMENTER);
+  await agentPost(`/api/v1/issues/${encodeURIComponent(issue)}/results`, {
+    check: "k1",
+    role: "implementer",
+    verdict: "pass",
+    commit,
+    surface: "cli",
+    run: "bun greet.ts Ada",
+    observed: "prints Hello, Ada! and exits 0",
+    negative_control: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+    actor: IMPLEMENTER,
+  });
   const fixture: z.infer<typeof TesterFixture> = {
     issue,
     implement: { id: recorded.id, version: recorded.version },
@@ -623,6 +666,21 @@ async function agentGet<T>(route: string): Promise<T> {
   if (!response.ok)
     throw new Error(`GET ${route} failed: ${response.status} ${await response.text()}`);
   return (await response.json()) as T;
+}
+
+/** `POST route` as the agent bearer, with `input` as its JSON body; a refusal names the route and
+ * Dispatch's answer. */
+async function agentPost(route: string, input: unknown): Promise<void> {
+  const response = await fetch(new URL(route, baseUrl), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${e2eAgentToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok)
+    throw new Error(`POST ${route} failed: ${response.status} ${await response.text()}`);
 }
 
 /** `capture-handoffs <file> <run dir>`: every handoff record of the run's issue, the seeded
@@ -837,7 +895,7 @@ async function captureBrainstorm(runDir: string): Promise<void> {
 }
 
 const USAGE =
-  "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | spec-writing <file> <source dir> | spec-rewrite <file> <source dir> | state <file> <turn> <run dir> | answer <file> <answers file> | approve <file> | capture-spec <file> <run dir> | askgate <file> | capture-askgate <file> <run dir> | tester-proof <file> | implement-handoff <file> <body file> | capture-handoffs <file> <run dir>";
+  "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | spec-writing <file> <source dir> | spec-rewrite <file> <source dir> | state <file> <turn> <run dir> | answer <file> <answers file> | approve <file> | capture-spec <file> <run dir> | askgate <file> | capture-askgate <file> <run dir> | tester-proof <file> | implement-handoff <file> <body file> <commit> | capture-handoffs <file> <run dir>";
 
 /** Runs the mode `argv` names; false when argv names no mode, with its arguments. The first six
  * modes take extra arguments and ignore them, as they always did; each new mode takes exactly its
@@ -870,8 +928,14 @@ async function main(argv: string[]): Promise<boolean> {
     await captureAskgate(file, second);
   else if (command === "tester-proof" && file !== undefined && n === 2)
     await testerProofIssue(file);
-  else if (command === "implement-handoff" && file !== undefined && second !== undefined && n === 3)
-    await implementHandoff(file, second);
+  else if (
+    command === "implement-handoff" &&
+    file !== undefined &&
+    second !== undefined &&
+    third !== undefined &&
+    n === 4
+  )
+    await implementHandoff(file, second, third);
   else if (command === "capture-handoffs" && file !== undefined && second !== undefined && n === 3)
     await captureHandoffs(file, second);
   else return false;
