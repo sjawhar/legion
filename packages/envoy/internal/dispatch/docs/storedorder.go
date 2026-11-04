@@ -475,10 +475,17 @@ func judgeParkedRows(ctx context.Context, tx pgx.Tx, artifactID string, resolved
 }
 
 func compareParkedPrefix(ctx context.Context, tx pgx.Tx, artifactID string, prefix *crdt.Doc, omitted *parkedRow) (bool, error) {
-	options := documentCopyOptions(maxUpdateItems)
-	full, without := prefix.Clone(options...), prefix.Clone(options...)
+	full, without := newDocumentCopy(), newDocumentCopy()
 	defer full.Destroy()
 	defer without.Destroy()
+	// Decode a snapshot rather than copying ygo's pending-queue internals: a queue with
+	// emptied slots must rebuild its coverage from content, not retain those slots in a clone.
+	snapshot := crdt.EncodeStateAsUpdateV1(prefix, nil)
+	for _, doc := range []*crdt.Doc{full, without} {
+		if err := decodeStoredState(doc, snapshot); err != nil {
+			return false, fmt.Errorf("copy the stored prefix: %w", err)
+		}
+	}
 	applies := true
 	err := replayStoredRange(ctx, tx, artifactID, omitted.mismatch.Update-1, omitted.through, func(version int64, update []byte) error {
 		var unsubscribe func()

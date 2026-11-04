@@ -371,9 +371,10 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return newCappedDocumentCopy(maxUpdateItems, options...)
 }
 
-// newCappedDocumentCopy builds a fresh document for replay at the instance's pending-queue cap.
-// documentCopyOptions also configures clones of an existing replay prefix, so each copy decodes
-// what that instance decodes and refuses what it would refuse. See maxUpdateItems for the caps.
+// newCappedDocumentCopy builds a fresh document for replay at the instance's pending-queue cap:
+// a copy of its room decodes what that instance decodes and refuses what it would refuse. The
+// cap follows the instance (newRoomServer, loadTree, replica); other callers use newDocumentCopy.
+// See maxUpdateItems for the production and protocol caps.
 //
 // Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
 // remote apply that changes formatted text with a commit of its own: every update a copy applies
@@ -383,11 +384,7 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // cleaned up would hold a state the room never held - and a compaction that folded such a copy
 // would store it. A write's fork commits its own writes locally, which never clean up.
 func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(documentCopyOptions(maxPending, options...)...)
-}
-
-func documentCopyOptions(maxPending int, options ...crdt.DocOption) []crdt.DocOption {
-	return append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))...)
 }
 
 // emptyUpdateV1 is the V1 encoding of no structs and no delete ranges. ygo logs it beside Parked
