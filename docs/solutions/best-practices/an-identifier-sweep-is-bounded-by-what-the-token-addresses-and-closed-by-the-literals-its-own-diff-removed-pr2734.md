@@ -92,8 +92,10 @@ cybermonklabs/legion#2734 moved this repository's own address from the `sjawhar`
   `cluster.sh:274`'s `LEGION_REPO` makes; and
   `packages/daemon/internal/runtime/sandbox/probe_test.go:184`, whose own comment calls
   `testManifest` "testImage's manifest URL" while the constant held the old path. **None of the
-  three matches the acceptance grep**, whose four shapes were `ghcr.io/sjawhar`,
-  `--repo sjawhar/legion`, `github.com/sjawhar/legion/(releases|.github)` and `sjawhar.github.io`.
+  three matches the acceptance grep**, whose four shapes were, each under the old owner's name,
+  the `ghcr.io` image path, the `--repo` argument, the `releases` and `.github` URLs under
+  `github.com`, and the `github.io` site. A document that quotes such a pattern verbatim makes
+  itself a hit: name the shapes instead, or the next run of the criterion fails on its own retro.
 - The diff-literal extraction found 119 distinct removed tokens from the non-test half. Grepped
   across every test and fixture file, it reached the two remaining expectations and nothing else;
   the tester's independent extraction of 140 tokens left fourteen shapes, each in an allowed class.

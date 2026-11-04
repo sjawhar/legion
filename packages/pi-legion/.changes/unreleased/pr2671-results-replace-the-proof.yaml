@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  A Legion phase records what it saw as a result against a check of the issue's Verification document, with `dispatch result`, in place of the six-field proof a handoff carried and the two `E2E` lines of the pull-request body, which is now one line per check.
+  The reviewer approves only when every before-merge check has a passing result that is current at the head it reviews, and the architect's acceptance names each check with its result.
+  The planner writes its plan's tasks as `plan_task` blocks, runs the plan review without a round limit, sends a repeated finding to the architect, and records the plan's approval with `dispatch plan-approve`.
+  Retro commits nothing: its findings are a comment on the issue.

@@ -5,6 +5,14 @@ import { dirname, join, relative, resolve } from "node:path";
 
 const output = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
 const daemonOutput = resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go");
+const blockSchemaOutput = resolve(
+  import.meta.dir,
+  "../../envoy/internal/dispatch/pmdoc/schema_generated.go"
+);
+const blockSchemaTypes = resolve(import.meta.dir, "../src/block-schema.generated.ts");
+// Every file the generator writes, so a copy of the whole set is checked and only the hand-edit
+// below is stale.
+const generated = [output, daemonOutput, blockSchemaOutput, blockSchemaTypes];
 const questionSchema = resolve(import.meta.dir, "../schemas/dispatch-question.schema.json");
 const generator = resolve(import.meta.dir, "gen-go.ts");
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -39,12 +47,12 @@ describe("gen-go", () => {
   // Each file the generator writes is checked, so a hand-edit of any of them fails CI naming the
   // file it found stale rather than passing because a sibling file still matches. The hand-edit
   // lands on a copy under GEN_GO_CHECK_ROOT, never on the tracked file this workspace shares.
-  for (const stale of [output, daemonOutput]) {
+  for (const stale of generated) {
     test(`a hand-edit of ${relative(repoRoot, stale)} makes --check fail, naming it`, async () => {
       const root = mkdtempSync(join(tmpdir(), "gen-go-check-"));
       const staleCopy = resolve(root, relative(repoRoot, stale));
       try {
-        for (const source of [output, daemonOutput]) {
+        for (const source of generated) {
           const copy = resolve(root, relative(repoRoot, source));
           mkdirSync(dirname(copy), { recursive: true });
           await Bun.write(copy, await Bun.file(source).text());

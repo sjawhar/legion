@@ -49,6 +49,11 @@ const (
 	KindGoogleLogin = "google-login"
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
+	// TagDefaultGrant, set to DefaultGrantSession, keeps a request that names no lifetime for this
+	// secret lasting until its session ends, rather than the broker's DefaultGrantLifetime.
+	TagDefaultGrant = "default-grant"
+	// DefaultGrantSession is the one value TagDefaultGrant takes.
+	DefaultGrantSession = "session"
 	// TagGitHubOwners lists the GitHub accounts a github-app secret mints installation tokens for
 	// (ParseGitHubOwners). A github-app secret without it is refused, since a public App can be
 	// installed by any account, and an installation on an account it does not list gets no token.
@@ -297,7 +302,10 @@ type Secret struct {
 	// GitHubOwners is a github-app secret's github-owners tag as ParseGitHubOwners answers it, and
 	// "" for every other secret. A string, not a slice, for the same reason as MaxGrant.
 	GitHubOwners string
-	ownership    ownerKind
+	// SessionDefault is true when the secret's default-grant tag is "session": a request naming
+	// no lifetime gets a grant that lasts until its session ends instead of DefaultGrantLifetime.
+	SessionDefault bool
+	ownership      ownerKind
 }
 
 // Kind is the kind the secret is served as, read back from its Source (KindSource), or "" for a
@@ -356,8 +364,12 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" {
+		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault {
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
+			continue
+		}
+		if s.secret.SessionDefault {
+			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
 			continue
 		}
 		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)

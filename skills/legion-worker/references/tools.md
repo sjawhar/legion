@@ -473,7 +473,7 @@ figure came from
 ## The tests your pod cannot run
 
 Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
-A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
+A tmux pane runs on its host, and none of this holds there. Their evidence is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
 the known ones, not every one: a failure they do not name is yours to explain. Several of them
 reach any work a pod runs, a test or a tool of your own, not a test suite alone. One habit holds

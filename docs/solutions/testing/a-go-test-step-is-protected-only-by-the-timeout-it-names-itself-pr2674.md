@@ -1,5 +1,5 @@
 ---
-title: "A go test step is protected only by the -timeout it names itself: CI's test job gives packages/daemon 20 minutes in one step and go test's 600 s default in the next"
+title: "A go test step is protected only by the -timeout it names itself: CI's test job names one on each of its two Go steps, 15 minutes for the plain step and 30 for the race step"
 category: testing
 tags:
   - ci
@@ -12,6 +12,7 @@ status: active
 module: packages/daemon
 related_issues:
   - "sjawhar/legion#2674"
+  - "INFRA-1052"
 ---
 
 # A go test step is protected only by the -timeout it names itself
@@ -20,19 +21,21 @@ Extends docs/solutions/testing/the-pod-only-skip-list-is-re-derived-against-a-ma
 
 That document says to give `internal/daemon` `-timeout 25m` and measures it at 459–853 s, but it
 is about a local run in a pod.
-On CI the same package runs **twice** in one job, and only the first run carries a deadline.
+On CI `internal/daemon` runs once per `test` job, in the race step, and that step carries
+`-timeout 30m`.
 
 ## The rule
 
 A `go test` step is protected only by the `-timeout` it names itself.
 The step above it in the same job protects nothing, however generous its own flag.
-In `.github/workflows/ci.yaml`'s `test` job, `packages/daemon` gets `-timeout 20m` at
-"Test the Go daemon" (`:1769`) and `go test`'s bare 600 s default at
-"Test the concurrent packages under the race detector" (`:1779`), where the race detector makes the
-same packages slower, not faster.
+In `.github/workflows/ci.yaml`'s `test` job both Go steps now name an explicit `-timeout`.
+"Test the Go daemon" runs every package of the module except the four concurrent ones under
+`-timeout 15m`, and "Test the concurrent packages under the race detector" runs
+`./internal/daemon/`, `./internal/record/`, `./internal/sessionproxy/` and `./internal/launcher/`
+under `-timeout 30m`, where the race detector makes those packages slower, not faster.
 
-So a red `test` job whose panic reads `test timed out after 10m0s` and names a `packages/daemon`
-package is the **race** step, not the one with the flag: a 20-minute deadline panics at `20m0s`.
+So a red `test` job whose panic names a `packages/daemon` package tells you which step it came from
+by the deadline it prints: a 15-minute deadline panics at `15m0s`, a 30-minute one at `30m0s`.
 Read the job's step list before you read its log, because the log's `running tests:` line names only
 the test that happened to be executing, as INFRA-391 says:
 
@@ -48,8 +51,11 @@ The fix is a `-timeout` on that step and belongs to whoever owns the workflow, n
 touches no file under `packages/daemon/`.
 
 Whoever adds the flag raises the job's limit with it, or sizes the flag to fit.
-The job is `timeout-minutes: 45` (`ci.yaml:1560`), so 5 minutes of setup plus 20 plus 25 would let
-the runner cancel the job before Go prints the goroutine dump a hang needs — the budget rule in
+The job's limit must stay above the sum of the largest setup time and, for each `go test` step, its
+largest measured green duration plus its own `-timeout`.
+The `test` job's `timeout-minutes` is 80 for a measured worst case of about 76, so a flag raised
+without the limit can let the runner cancel the job before Go prints the goroutine dump a hang
+needs — the budget rule in
 docs/solutions/testing/a-race-lane-names-the-packages-that-hold-the-shared-state-and-its-job-limit-outlasts-every-steps-test-timeout-INFRA-141.md.
 
 ## Evidence

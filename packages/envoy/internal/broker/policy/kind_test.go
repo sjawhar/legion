@@ -371,3 +371,23 @@ func TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultGrantTag: default-grant=session is served as SessionDefault; any other value is
+// refused default-grant-malformed.
+func TestDefaultGrantTag(t *testing.T) {
+	logged := policytest.CaptureLog(t)
+	good := kindSecret("GOOD_KEY", policy.KindGoogleLogin, "v")
+	good.Tags[policy.TagDefaultGrant] = policy.DefaultGrantSession
+	bad := kindSecret("BAD_KEY", policy.KindGoogleLogin, "v")
+	bad.Tags[policy.TagDefaultGrant] = "forever"
+	set, err := policytest.Loader(secrets.NewLocal(good, bad)).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.Secrets["GOOD_KEY"].SessionDefault {
+		t.Fatal("GOOD_KEY not SessionDefault")
+	}
+	if _, ok := set.Secrets["BAD_KEY"]; ok || !strings.Contains(logged.String(), policy.ReasonDefaultGrantMalformed) {
+		t.Fatalf("BAD_KEY served or not logged: %s", logged.String())
+	}
+}

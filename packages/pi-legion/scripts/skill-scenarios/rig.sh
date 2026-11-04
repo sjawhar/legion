@@ -1299,7 +1299,9 @@ cmd_judge() {
 # run's index in its batch, and the commits are dated <index> seconds after <start>, the batch's
 # start, so no two runs of a batch share a PR number or a head (two runs can meet in a scratch file
 # in the shared /tmp), and each batch's heads carry its own start time.
-# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run that
+# The CLI must meet every requirement the seeded spec marks, and the issue's Verification document
+# holds the check that the implementer's seeded result and the tester's own run are against.
+# testerProof fails a run that
 # pushes a change to legion/<key>, and it cannot tell a tester that pinned a real defect with a red
 # test, which roles/core/tester.md asks for, from one that went off-task. A defect left in the
 # fixture turns correct testing into a fail.
@@ -1356,13 +1358,12 @@ EOF
   : >"$R/pushes.log"
   # The implement handoff as the implementer records it with `dispatch handoff-write`: the three
   # stamps (schemaVersion, phase, issue) and the phase's fields; Dispatch records when it was
-  # written. The PR's head is the implementer's code commit, since no handoff commit sits above it.
-  jq -n --arg key "$worker_key" --arg head "$C1" '
+  # written. What the implementer ran is no part of it: seed.ts implement-handoff records that as a
+  # result against the issue's check k1. The PR's head is the implementer's code commit, since no
+  # handoff commit sits above it.
+  jq -n --arg key "$worker_key" '
     {schemaVersion:1, phase:"implement", issue:$key,
-     filesChanged:["greet.ts","greet.test.ts"],
-     proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
-       surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
-       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$R/implement.json"
+     filesChanged:["greet.ts","greet.test.ts"]}' >"$R/implement.json"
   # Isolated from the operator's own jj configuration (fsmonitor.backend = "watchman" on a devbox
   # that runs it): a bare JJ_CONFIG naming only fsmonitor.backend = "none" and this fixture's own
   # identity, so jj falls back to its built-in defaults and `jj new`'s working-copy snapshot never
@@ -1379,12 +1380,8 @@ Adds \`greet(name)\` and \`bun greet.ts <name>\`.
 
 **Threads:** 0 resolved, 0 unresolved.
 
-**E2E (implementer):** the CLI — ran \`bun greet.ts Ada\`, observed \`Hello, Ada!\` exit 0, at head $C1.
-Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name>\` on stderr.
-
-**E2E (tester):** pending.
-
-**Production:** pending the merge.
+**Checks:**
+- Check k1 (before_merge): pass at ${C1:0:12}, recorded by implementer. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given.
 
 **Fast-follow:** none.
 
@@ -1420,7 +1417,7 @@ run_tester_proof() {
   seed_ts tester-proof "$R/fixture.json"
   worker_key=$(jq -r .issue "$R/fixture.json")
   worker_fixture "$index" "$start" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
-  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json"
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json" "$(jq -r .head "$R/world.json")"
   version=$(jq -r .implement.version "$R/fixture.json")
   read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
   # The architect's assignment, with the Handoff line the daemon's task names the predecessor's

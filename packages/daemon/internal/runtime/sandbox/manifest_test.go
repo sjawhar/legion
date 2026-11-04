@@ -24,6 +24,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -552,11 +553,7 @@ func TestEveryRolesGitAsksItsOwnHelperForGitHubOutsideAnyClone(t *testing.T) {
 				fill := exec.Command("git", "credential", "fill")
 				fill.Dir = outside
 				fill.Stdin = strings.NewReader("url=" + tc.url + "\n\n")
-				for _, entry := range os.Environ() {
-					if !strings.HasPrefix(entry, "GIT_") && !strings.HasPrefix(entry, "PATH=") {
-						fill.Env = append(fill.Env, entry)
-					}
-				}
+				fill.Env = fixtureenv.Isolated(t.TempDir())
 				fill.Env = append(fill.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 					"GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+dir, "GIT_TERMINAL_PROMPT=0")
 				fill.Env = append(fill.Env, gitEnv...)
