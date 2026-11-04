@@ -1044,11 +1044,33 @@
             "Authorization": "Bearer secret"
           },
           "body": null
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/artifacts/01234567-0000-4000-8000-00000000000b/plan-reviews",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "test-machine",
+                "session_title": "Record the command surface"
+              }
+            },
+            "version": 2
+          }
         }
       ],
-      "outcome": "error",
+      "outcome": "result",
       "text": [
-        "document \"plan.md\" not found by slug; this issue's documents: spec-md (spec.md)"
+        "The plan review approved plan.md (document id 01234567-0000-4000-8000-00000000000b) at version 2; no human is asked to approve a plan. A later plan version makes this approval stale: run the review again and record it the same way."
       ]
     },
     {
@@ -1279,11 +1301,12 @@
         "Route: none",
         "Repository: owner/repo (own)",
         "Progress: none",
-        "Coverage: unavailable: unexpected request: GET /api/v1/issues/DSP-1/coverage",
+        "Coverage: the spec marks no requirements",
         "External links:",
         "- none",
         "Documents:",
         "- spec-md (spec.md, doc)",
+        "- plan-md (plan.md, doc)",
         "Open asks:",
         "- none",
         "References:",
@@ -1521,20 +1544,14 @@
             "role": "implementer",
             "verdict": "pass"
           }
-        },
-        {
-          "method": "GET",
-          "path": "/healthz",
-          "headers": {
-            "Accept": "application/json",
-            "Authorization": "Bearer secret"
-          },
-          "body": null
         }
       ],
-      "outcome": "error",
+      "outcome": "result",
       "text": [
-        "unexpected request: POST /api/v1/issues/DSP-1/results"
+        "Recorded pass for check k1 of DSP-1 at 111111111111, as implementer.",
+        "",
+        "Pull request body line:",
+        "- Check k1 (before_merge): pass at 111111111111, recorded by implementer. The workspace opens natively."
       ]
     },
     {
@@ -1554,9 +1571,10 @@
           "body": null
         }
       ],
-      "outcome": "error",
+      "outcome": "result",
       "text": [
-        "unexpected request: GET /api/v1/issues/DSP-1/results"
+        "Checks of DSP-1:",
+        "- k1 (before_merge): pass at 111111111111 by implementer, current. The workspace opens natively."
       ]
     },
     {

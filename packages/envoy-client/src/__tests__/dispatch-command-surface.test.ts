@@ -59,7 +59,12 @@ const ISSUE = "DSP-1";
 const UUID = "01234567-0000-4000-8000-000000000001";
 const OTHER_UUID = "01234567-0000-4000-8000-000000000002";
 const ARTIFACT_ID = "01234567-0000-4000-8000-00000000000a";
+const PLAN_ARTIFACT_ID = "01234567-0000-4000-8000-00000000000b";
 const AT = "2026-01-02T03:04:05Z";
+// The commit a recorded check result stands at, and the digest of the check's words: a result
+// prints the first twelve characters of the one, and the other reaches no printed line.
+const COMMIT = "1111111111111111111111111111111111111111";
+const CHECK_SHA256 = "2222222222222222222222222222222222222222222222222222222222222222";
 
 const config = { url: "http://dispatch.test", token: "secret" };
 
@@ -116,11 +121,12 @@ function issueBody(key = ISSUE) {
     updated_at: AT,
     closed_at: null,
     primary_artifact_id: ARTIFACT_ID,
+    plan_artifact_id: PLAN_ARTIFACT_ID,
     last_seq: 0,
     route_status: null,
     route_holder: null,
     progress: { tasks: null, children: null },
-    artifacts: [artifactBody("spec.md")],
+    artifacts: [artifactBody("spec.md"), planArtifactBody()],
     open_asks: [],
     children: [],
     referenced_by_count: 0,
@@ -214,6 +220,108 @@ function artifactBody(name = "design.md", kind = "doc") {
     created_by: actor,
     created_at: AT,
     versions: [versionBody()],
+  };
+}
+
+/** The issue's plan document: the one `dispatch plan-approve` resolves, by the `plan_artifact_id`
+ *  the issue detail names it under. It carries the version that command's example approves. */
+function planArtifactBody() {
+  return {
+    ...artifactBody("plan.md"),
+    id: PLAN_ARTIFACT_ID,
+    versions: [versionBody(), { ...versionBody(), number: 2 }],
+  };
+}
+
+/** `POST /api/v1/artifacts/{id}/plan-reviews`: the plan review's approval, which carries no ask,
+ *  since no plan approval ever reaches a human's Inbox. */
+function planReviewBody() {
+  return {
+    id: UUID,
+    artifact_id: PLAN_ARTIFACT_ID,
+    version: 2,
+    state: "approved",
+    actor,
+    reason: null,
+    ask_id: null,
+    kind: "plan_review",
+    created_at: AT,
+  };
+}
+
+/** One result of one check, as `CheckResult` carries it. `currency` is computed when results are
+ *  read, so the record route's own answer leaves it out. */
+function checkResultBody(currency?: string) {
+  return {
+    id: UUID,
+    issue_key: ISSUE,
+    check_issue_key: ISSUE,
+    check_artifact_id: ARTIFACT_ID,
+    check_block_id: "k1",
+    check_version: 1,
+    check_sha256: CHECK_SHA256,
+    role: "implementer",
+    surface: "",
+    run: "",
+    observed: "",
+    commit_sha: COMMIT,
+    negative_control: "",
+    failed: 0,
+    skipped: 0,
+    excluded: 0,
+    verdict: "pass",
+    screenshots: [],
+    session: SESSION,
+    actor,
+    created_at: AT,
+    event_seq: 1,
+    ...(currency === undefined ? {} : { currency }),
+  };
+}
+
+/** `GET /api/v1/issues/{key}/results`: the issue's one check with the result recorded against it.
+ *  The line each check prints carries no age, so the row is a filled one. */
+function issueResultsBody() {
+  return {
+    issue: ISSUE,
+    verification_artifact_id: ARTIFACT_ID,
+    checks: [
+      {
+        block_id: "k1",
+        ref: `dispatch://${ISSUE}/artifact/verification-md#b-k1`,
+        issue_key: ISSUE,
+        artifact_id: ARTIFACT_ID,
+        text: "The workspace opens natively.",
+        when: "before_merge",
+        surface: "",
+        run: "",
+        negative_control: "",
+        version: 1,
+        sha256: CHECK_SHA256,
+        results: [checkResultBody("current")],
+      },
+    ],
+  };
+}
+
+/** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line Dispatch
+ *  writes for it (`checkResultLine`), so every writer writes one grammar. */
+function checkResultRecordedBody() {
+  return {
+    result: checkResultBody(),
+    line: `- Check k1 (before_merge): pass at ${COMMIT.slice(0, 12)}, recorded by implementer. The workspace opens natively.`,
+  };
+}
+
+/** `GET /api/v1/issues/{key}/coverage`: a spec that marks no requirements, which Dispatch answers
+ *  with no requirement rows and the one gap line that says so. */
+function coverageBody() {
+  return {
+    issue: ISSUE,
+    spec_artifact_id: ARTIFACT_ID,
+    has_plan: true,
+    requirements: [],
+    gaps: ["the spec marks no requirements"],
   };
 }
 
@@ -317,6 +425,9 @@ function answerFor(method: string, pathname: string): Response {
     }
     if (rest === "artifacts") return response([artifactBody("spec.md")]);
     if (rest === "references") return response({ members: [], truncated: false });
+    if (rest === "results" && method === "POST") return response(checkResultRecordedBody(), 201);
+    if (rest === "results") return response(issueResultsBody());
+    if (rest === "coverage") return response(coverageBody());
     if (rest === "handoffs") return response([]);
     if (segments[4] === "handoffs" && method === "POST") return response(handoffBody(), 201);
     if (segments[4] === "handoffs") return response(handoffBody());
@@ -326,6 +437,7 @@ function answerFor(method: string, pathname: string): Response {
     if (rest === "text") return response({ markdown: "# Spec\n", version: 1 });
     if (rest === "blocks") return response([]);
     if (rest === "edits") return response({ applied: 1, version: versionBody(), changed: true });
+    if (rest === "plan-reviews") return response(planReviewBody(), 201);
     if (rest === "suggestions") {
       return response({ ...commentBody(), artifact_id: ARTIFACT_ID }, 201);
     }
