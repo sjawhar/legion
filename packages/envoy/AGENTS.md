@@ -2087,12 +2087,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is;
   not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits;
   a closed issue refuses it, `409 ISSUE_CLOSED`).
-  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoTerms`:
+  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `refs.IssueRepoTerms`, the server's one repository-resolution rule (`internal/dispatch/refs/issues.go`, spliced by `api`'s issue reads with `refs.IssueRepoJoin` and `refs.IssueRepoColumns`):
   one walk climbs the parent chains of every issue the read answers for at once — its `subjects` term, which is a listing's page, a listing's whole match or the one issue a read names — and each issue takes the nearest issue on its chain (itself first) whose own `repo` is set, else its project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`, read for every project of the read in one join), else null.
-  A chain stops at the first issue that names a repository or at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 rows per issue;
+  A chain stops at the first issue that names a repository or at `refs.IssueDepthCap` (32) links, the most any issue sits below its root (`api`'s `parentDepthCap` is that same number), so it costs at most 33 rows per issue;
   a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default, and a paged listing walks its own page alone, so such a chain fails the page it is on and no other.
-  `refs.IssueRepoLateral` is that same rule written as a lateral walk of one issue's chain, for a read that resolves a single key outside the issue reads;
-  `refs.IssueRepository` is that read, which the results route and the pull-request head attribution make, so neither can name a repository the issue page does not show.
+  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, for the results route and the pull-request head attribution, so neither can name a repository the issue page does not show.
 
 - An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
   its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running).

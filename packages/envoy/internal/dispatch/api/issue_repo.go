@@ -47,53 +47,10 @@ func checkIssueRepoMapped(ctx context.Context, tx pgx.Tx, repo, project string) 
 	return err
 }
 
-// issueRepoTerms resolve the repository of every issue of `subjects`, the one-column term of
-// issue keys each statement that splices these defines before them (issueComponentsTerms reads
-// the same one): the nearest issue on its parent chain (itself first) whose own `repo` is set,
-// else the project's default mapping, else null. One walk climbs every subject's chain together
-// and one join reads the defaults of every project at once, so a listing pays one set of joins
-// rather than a walk and a default lookup per row. A chain stops climbing at the first issue
-// that names a repository or at parentDepthCap links up, which writes never let a chain pass
-// (refuseParentTooDeep): at most parentDepthCap+1 rows per subject, at most one of them naming
-// a repository, which is why `max` over a chain is the nearest repository and needs no order.
-// A walk that reaches the cap with links still above it sets `too_deep`, and repoScan.resolve
-// refuses it rather than answer with the default. Such a chain is a loop, or one a direct
-// database write made, or one an earlier release's API built: migration 0113 refuses to apply
-// while one exists, but an earlier release left serving after it, against the rollout rule
-// (cmd/dispatch/README.md), can build one again. A paged listing resolves only the issues of
-// its page, so such a chain fails the page it is on and no other (api/issue_queries.go,
-// issueSummaryQuery).
-var issueRepoTerms = `repo_chain as (
-		select s.key as start, i.parent_key, i.repo, 0 as depth
-		from subjects s join issues i on i.key = s.key
-		union all
-		select c.start, p.parent_key, p.repo, c.depth + 1
-		from repo_chain c join issues p on p.key = c.parent_key
-		where c.repo is null and c.depth < ` + parentDepthCapSQL + `
-	), repo as (
-		select c.start as key,
-		       max(c.repo) as owned,
-		       bool_or(c.depth = ` + parentDepthCapSQL + ` and c.repo is null and c.parent_key is not null) as too_deep
-		from repo_chain c
-		group by c.start
-	)`
-
-// issueRepoJoin attaches issueRepoTerms' answer to the issue aliased `i` in the enclosing query,
-// with the default mapping of every project those issues belong to, read once. One row per
-// issue: a key that is no issue has no chain and no row, which the columns below read as the
-// default alone.
-const issueRepoJoin = `left join repo on repo.key = i.key
-	left join repo_projects repo_default on repo_default.project = i.project_key and repo_default.is_default`
-
-// issueRepoColumns are the repository columns every issue read scans, in repoScan's order: the
-// issue's own, the nearest one its chain names else its project's default, and whether the walk
-// ran out of depth.
-const issueRepoColumns = `i.repo, coalesce(repo.owned, repo_default.repo), coalesce(repo.too_deep, false)`
-
-// repoScan receives issueRepoColumns for one issue. These columns answer the same
-// repository-resolution rule refs.IssueRepoLateral runs for a single key, the one
-// refs.IssueRepository reads for the currency mark and the pull-request head attribution, so an
-// issue read and those two can never name different repositories for the same issue.
+// repoScan receives refs.IssueRepoColumns for one issue, the repository-resolution rule the
+// server keeps in one place: refs.IssueRepository reads the same terms for a single key, for
+// the currency mark and the pull-request head attribution, so an issue read and those two
+// cannot name different repositories for the same issue.
 type repoScan struct {
 	own, resolved *string
 	tooDeep       bool

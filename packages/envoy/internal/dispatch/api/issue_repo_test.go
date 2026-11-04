@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -250,8 +251,8 @@ func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
 	started := time.Now()
 	rows, err := tx.Query(ctx, `
 		with recursive subjects as (select i.key from issues i where i.project_key = 'DEEP'),
-		`+issueRepoTerms+`
-		select i.key, `+issueRepoColumns+` from issues i `+issueRepoJoin+` where i.project_key = 'DEEP'`)
+		`+refs.IssueRepoTerms+`
+		select i.key, `+refs.IssueRepoColumns+` from issues i `+refs.IssueRepoJoin+` where i.project_key = 'DEEP'`)
 	if err != nil {
 		t.Fatalf("walk %d issues: %v", length, err)
 	}

@@ -82,7 +82,7 @@ func issueSummaryQuery(pinned, paged bool) string {
 	}
 	return query + `, subjects as (
 		select key from ` + rows + `
-	), ` + issueComponentsTerms + `, ` + issueRepoTerms + `
+	), ` + issueComponentsTerms + `, ` + refs.IssueRepoTerms + `
 	select ` + columns + `
 	from ` + rows + ` join issues i on i.key = ` + rows + `.key
 	` + issueSummaryJoins + `
@@ -135,7 +135,7 @@ const issueSummaryColumns = `i.key, i.title, i.status, i.priority, i.rank, i.lab
 	       case when i.closed_at is null then coalesce(open_asks.total, 0) else 0 end,
 	       ` + issueProgressColumns + `,
 	       ` + issueComponentsColumns + `,
-	       ` + issueRepoColumns
+	       ` + refs.IssueRepoColumns
 
 // issueSummaryJoins resolve the six values a listing row carries beside the issue's own columns,
 // each for every issue of `subjects` at once rather than for one row at a time. The open-ask
@@ -166,7 +166,7 @@ var issueSummaryJoins = `left join (
 		group by c.parent_key
 	) progress on progress.parent_key = i.key
 	` + issueComponentsJoin + `
-	` + issueRepoJoin
+	` + refs.IssueRepoJoin
 
 const (
 	maxIssueLabels  = 20
@@ -569,7 +569,7 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 var issueWithProgressQuery = `
 		with recursive subjects as (select $1::text as key),
 		` + issueComponentsTerms + `,
-		` + issueRepoTerms + `
+		` + refs.IssueRepoTerms + `
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
 		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
 		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
@@ -579,11 +579,11 @@ var issueWithProgressQuery = `
 		       i.last_seq, ` + issueClaimColumns + `,
 		       ` + issueProgressColumns + `,
 		       ` + issueComponentsColumns + `,
-		       ` + issueRepoColumns + `
+		       ` + refs.IssueRepoColumns + `
 		from issues i
 		` + issueProgressLateral + `
 		` + issueComponentsJoin + `
-		` + issueRepoJoin + `
+		` + refs.IssueRepoJoin + `
 		where i.key = $1
 	`
 

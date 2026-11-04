@@ -150,7 +150,7 @@ func writeIssueComponents(ctx context.Context, tx pgx.Tx, key, project string, i
 // two subqueries per row; `comp` holds a row for each issue an ancestor chose for, and
 // issueComponentsJoin leaves the columns null for an issue none chose for, as the per-row lateral
 // this replaced did. The walk climbs with `union all` bounded by parentDepthCap, like
-// issueRepoTerms, so it terminates even if a raced reparent ever commits a cycle: a row carries
+// refs.IssueRepoTerms, so it terminates even if a raced reparent ever commits a cycle: a row carries
 // its depth, so no two rows of one chain are equal and `union`'s distinct step would remove
 // nothing.
 var issueComponentsTerms = `comp_chain as (
