@@ -18,10 +18,7 @@ const asksAnchorArtifactIDVersion = 148
 func TestMigration0148BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion-1)); err != nil {
-		t.Fatalf("migrate through %d: %v", asksAnchorArtifactIDVersion-1, err)
-	}
+	store := openMigratedThrough(t, asksAnchorArtifactIDVersion-1)
 	var documentA, documentB string
 	if err := store.Pool.QueryRow(ctx, `
 		with project as (

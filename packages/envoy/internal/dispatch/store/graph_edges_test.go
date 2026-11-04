@@ -19,10 +19,7 @@ type graphEdgeRow struct {
 func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	var ids struct {
 		Spec, ProjectDoc, BlockAsk, AnchoredAsk, ProjectAsk, PlainAsk, AnchoredComment, ProjectComment, Reply, AskReply, Message, MessageReply string
 	}
@@ -131,10 +128,7 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 func TestGraphEdgesCarryBlockMentionsAndPartOf(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	if _, err := store.Pool.Exec(ctx, `
 		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),
 		issue as (insert into issues (key, project_key, number, title, created_by, rank) select 'CORE-1', key, 1, 'One', '{"kind":"user","id":"alice"}', 'A' from p returning key),
@@ -188,10 +182,7 @@ func TestGraphEdgesCarryBlockMentionsAndPartOf(t *testing.T) {
 func TestItemBlockArmsAreGraphEdges(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	var comment, reply, message, messageReply, ask, askReply string
 	if err := store.Pool.QueryRow(ctx, `
 		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),
@@ -285,10 +276,7 @@ func sortGraphEdges(edges []graphEdgeRow) {
 func TestBlockRefListedFindsItsTargetByTheNodeIDIndex(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	var body string
 	if err := store.Pool.QueryRow(ctx, `select prosrc from pg_proc where proname = 'block_ref_listed'`).Scan(&body); err != nil {
 		t.Fatalf("read block_ref_listed: %v", err)
@@ -345,8 +333,7 @@ func explainWithoutSeqScan(t *testing.T, store *Store, query string, setup ...st
 func TestMigrate0032RefusesNonUUIDAnchorArtifactIDs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 31)
+	store := openMigratedThrough(t, 31)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank) values ('CORE-1', 'CORE', 1, 'Issue', '{"kind":"user","id":"alice"}', 'A');

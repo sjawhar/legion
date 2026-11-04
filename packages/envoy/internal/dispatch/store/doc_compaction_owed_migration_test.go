@@ -18,8 +18,7 @@ const beforeDocCompactionOwed = 157
 func TestTheCompactionOwedMigrationNamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeDocCompactionOwed)
+	store := openMigratedThrough(t, beforeDocCompactionOwed)
 	documents := map[string]int{"none": 0, "one": 1, "two": 2, "three": 3}
 	ids := map[string]string{}
 	if _, err := store.Pool.Exec(ctx, `

@@ -45,7 +45,11 @@ func newListenerProbe() *listenerProbe {
 }
 
 // listener is a Listener that dials with dial and reports to the probe, at its defaults
-// otherwise.
+// otherwise but for the backoff: a test here that loses a connection is about what the listener
+// does next, not about how long it waits first, and the default's first wait is a second plus up
+// to half of it again, which each such test slept through. What that wait is for every caller
+// that sets none is RedialBackoff's own test, and the test of a listener returning while it
+// backs off sets a wait of its own.
 func (p *listenerProbe) listener(dial func(context.Context) (*pgx.Conn, error)) *Listener {
 	return &Listener{
 		Dial:     p.dialing(dial),
@@ -57,6 +61,7 @@ func (p *listenerProbe) listener(dial func(context.Context) (*pgx.Conn, error)) 
 			}
 		},
 		OnNotify: p.notify,
+		Backoff:  func(int) time.Duration { return 20 * time.Millisecond },
 	}
 }
 
@@ -306,12 +311,12 @@ func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)
-	listener.ListenIdle, listener.PingTimeout = 200*time.Millisecond, time.Second
+	listener.ListenIdle, listener.PingTimeout = 50*time.Millisecond, time.Second
 	runListener(t, probe, listener)
 	probe.waitConnected(t, 5*time.Second, "first connection")
 	pid := probe.lastConn(t).PgConn().PID()
 
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(350 * time.Millisecond)
 	if dials := probe.dials.Load(); dials != 1 {
 		t.Fatalf("dials after seven idle periods = %d, want 1", dials)
 	}
@@ -339,7 +344,7 @@ func TestTheListenerReplacesAHalfOpenConnection(t *testing.T) {
 	proxy := newBlindingProxy(t, databaseAddress(database))
 	probe := newListenerProbe()
 	listener := probe.listener(proxiedDial(database, proxy))
-	listener.ListenIdle, listener.PingTimeout = time.Second, time.Second
+	listener.ListenIdle, listener.PingTimeout = 200*time.Millisecond, 500*time.Millisecond
 	runListener(t, probe, listener)
 	probe.waitConnected(t, 5*time.Second, "first connection")
 	notifyChannel(t, database, "delivery_changes", "")
@@ -685,7 +690,7 @@ func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)
-	listener.ListenIdle, listener.PingTimeout = 200*time.Millisecond, time.Second
+	listener.ListenIdle, listener.PingTimeout = 50*time.Millisecond, time.Second
 	// Far sooner than the idle period, so a listener that honoured it would end every wait on it
 	// and the backend's last statement below would be the LISTEN, not the ping.
 	listener.NextWake = func() time.Duration { return time.Millisecond }
@@ -693,7 +698,7 @@ func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
 	probe.waitConnected(t, 5*time.Second, "first connection")
 	pid := probe.lastConn(t).PgConn().PID()
 
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(350 * time.Millisecond)
 	if dials := probe.dials.Load(); dials != 1 {
 		t.Fatalf("dials over seven idle periods = %d, want 1", dials)
 	}
@@ -722,7 +727,7 @@ func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)
 	listener.OnNotify = nil
-	listener.ListenIdle, listener.PingTimeout = 200*time.Millisecond, time.Second
+	listener.ListenIdle, listener.PingTimeout = 50*time.Millisecond, time.Second
 	runListener(t, probe, listener)
 	probe.waitConnected(t, 5*time.Second, "first connection")
 	pid := probe.lastConn(t).PgConn().PID()
@@ -730,7 +735,7 @@ func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.
 	notifyChannel(t, database, "dispatch_events", "dropped")
 	// Long enough for the notification to arrive and for the wait after it to end on the idle
 	// period and be pinged.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	if dials := probe.dials.Load(); dials != 1 {
 		t.Fatalf("dials after a notification the listener has nowhere to report = %d, want 1: the notification cost it the connection", dials)
 	}

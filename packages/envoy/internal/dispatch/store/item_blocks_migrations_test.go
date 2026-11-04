@@ -69,10 +69,7 @@ func assertItemOwed(t *testing.T, store *Store, what, kind, id string) itemBlock
 func TestAnOlderBuildsWriteLeavesTheItemOwed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedBlockIndexIssue(t, store)
 
 	comment := insertReturningID(t, store, `
@@ -167,8 +164,7 @@ func TestAnOlderBuildsWriteLeavesTheItemOwed(t *testing.T) {
 func TestTheItemBlockMigrationsOweEveryStoredItem(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeItemBlocks)
+	store := openMigratedThrough(t, beforeItemBlocks)
 	seedBlockIndexIssue(t, store)
 	insertComment := func(body string) string {
 		return insertReturningID(t, store, `

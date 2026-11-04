@@ -19,10 +19,7 @@ const artifactReviewsEventSeqVersion = 120
 func TestMigrationAddsTheReviewsEventSequence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.migrate(ctx, migrationsThrough(t, artifactReviewsEventSeqVersion-1)); err != nil {
-		t.Fatalf("migrate through %d: %v", artifactReviewsEventSeqVersion-1, err)
-	}
+	store := openMigratedThrough(t, artifactReviewsEventSeqVersion-1)
 	var artifactID string
 	for _, seed := range []string{
 		`insert into projects (key, name) values ('TEST', 'Test')`,

@@ -14,8 +14,7 @@ import (
 func TestUserAgentReadBackfillMarksEveryExistingDirectConversationRead(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 50)
+	store := openMigratedThrough(t, 50)
 
 	if _, err := store.Pool.Exec(ctx, `
 		insert into messages (id, author, body, target, in_reply_to) values

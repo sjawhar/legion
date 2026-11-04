@@ -36,10 +36,7 @@ func seedSearchDocument(t *testing.T, ctx context.Context, store *Store) string 
 // search_text each takes under a second (0.85 s for 1 MiB of `a_`).
 func TestSearchIndexesAPathologicalBodyInBoundedTime(t *testing.T) {
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	artifactID := seedSearchDocument(t, ctx, store)
 	for number, shape := range []string{"a_", "1_", "a-b_", "1.2_", "a_1_"} {
 		body := strings.Repeat(shape, (1<<20)/len(shape))
@@ -79,26 +76,10 @@ func TestSearchIndexesAPathologicalBodyInBoundedTime(t *testing.T) {
 func TestSearchTextKeepsEveryLexeme(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
+	var names, bodies []string
 	same := func(name, body string) {
-		t.Helper()
-		var equal bool
-		var lost, gained []string
-		if err := store.Pool.QueryRow(ctx, `
-			with raw as (select to_tsvector('english', $1) as v), broken as (select to_tsvector('english', search_text($1)) as v)
-			select raw.v = broken.v,
-			       array(select unnest(tsvector_to_array(raw.v)) except select unnest(tsvector_to_array(broken.v))),
-			       array(select unnest(tsvector_to_array(broken.v)) except select unnest(tsvector_to_array(raw.v)))
-			  from raw, broken
-		`, body).Scan(&equal, &lost, &gained); err != nil {
-			t.Fatalf("%s: compare vectors: %v", name, err)
-		}
-		if !equal {
-			t.Errorf("%s: search_text changed the lexemes: lost %q, gained %q", name, lost, gained)
-		}
+		names, bodies = append(names, name), append(bodies, body)
 	}
 	moduleRoot := filepath.Join("..", "..", "..")
 	files := 0
@@ -130,4 +111,31 @@ func TestSearchTextKeepsEveryLexeme(t *testing.T) {
 	same("x_ run", strings.Repeat("x_", 5000))
 	same("empty", "")
 	same("snake runs", strings.Repeat("alpha_beta_gamma_delta_epsilon_zeta_eta_theta_iota_kappa_lambda_mu_nu_xi_omicron_pi_rho_sigma_tau ", 50))
+
+	// Every body in one statement, which answers only the ones whose lexemes differ: the two
+	// vectors are the work, and a round trip for each of two hundred bodies was most of the rest
+	// (dispatch://INFRA-1075).
+	rows, err := store.Pool.Query(ctx, `
+		select name,
+		       array(select unnest(tsvector_to_array(raw)) except select unnest(tsvector_to_array(broken))),
+		       array(select unnest(tsvector_to_array(broken)) except select unnest(tsvector_to_array(raw)))
+		  from unnest($1::text[], $2::text[]) as corpus(name, body),
+		       lateral (select to_tsvector('english', corpus.body) as raw,
+		                       to_tsvector('english', search_text(corpus.body)) as broken) vectors
+		 where raw <> broken`, names, bodies)
+	if err != nil {
+		t.Fatalf("compare vectors: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var lost, gained []string
+		if err := rows.Scan(&name, &lost, &gained); err != nil {
+			t.Fatalf("compare vectors: %v", err)
+		}
+		t.Errorf("%s: search_text changed the lexemes: lost %q, gained %q", name, lost, gained)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("compare vectors: %v", err)
+	}
 }

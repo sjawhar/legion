@@ -66,10 +66,7 @@ func assertAskOwed(t *testing.T, store *Store, what, id string) askBlockState {
 func TestAnOlderBuildsWriteLeavesTheAskBlocksOwed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedBlockIndexIssue(t, store)
 
 	ask := insertReturningID(t, store, `
@@ -162,8 +159,7 @@ func TestAnOlderBuildsWriteLeavesTheAskBlocksOwed(t *testing.T) {
 func TestTheAskBlockMigrationsOweEveryStoredAsk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeAskBlocks)
+	store := openMigratedThrough(t, beforeAskBlocks)
 	seedBlockIndexIssue(t, store)
 	insertAsk := func(question string) string {
 		return insertReturningID(t, store, `

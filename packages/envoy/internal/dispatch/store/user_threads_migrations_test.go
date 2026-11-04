@@ -49,8 +49,7 @@ func insertReturningID(t *testing.T, store *Store, query string, args ...any) st
 func TestUserThreadsSeedStartsReadAndTriggersKeepEachRow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeUserThreads)
+	store := openMigratedThrough(t, beforeUserThreads)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -174,8 +173,7 @@ func TestUserThreadsSeedStartsReadAndTriggersKeepEachRow(t *testing.T) {
 func TestUserThreadsSeedMergesWithRowsTheTriggerWrote(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeUserThreads+1)
+	store := openMigratedThrough(t, beforeUserThreads+1)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -208,8 +206,7 @@ func TestUserThreadsSeedMergesWithRowsTheTriggerWrote(t *testing.T) {
 func TestUserThreadsCatchUpCountsAReplyTheSeedRaced(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeUserThreads)
+	store := openMigratedThrough(t, beforeUserThreads)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -264,8 +261,7 @@ func TestUserThreadsCatchUpCountsAReplyTheSeedRaced(t *testing.T) {
 func TestUserThreadsCountAnAnswerAsAWrite(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeUserThreads)
+	store := openMigratedThrough(t, beforeUserThreads)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -315,8 +311,7 @@ func TestUserThreadsCountAnAnswerAsAWrite(t *testing.T) {
 func TestUserThreadsSeedStopsTheMessageWalkWhereTheTriggerDoes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeUserThreads)
+	store := openMigratedThrough(t, beforeUserThreads)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)

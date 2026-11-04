@@ -18,10 +18,7 @@ import (
 func TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedSearchDocument(t, ctx, store)
 	text := searchtest.DistinctWords(100_000, "\n")
 
@@ -76,10 +73,7 @@ func TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening(t *testin
 func TestATextCutToFitIsIndexedByWholeWords(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	var fragments []string
 	var opening bool
 	if err := store.Pool.QueryRow(ctx, `
@@ -105,10 +99,7 @@ func TestATextCutToFitIsIndexedByWholeWords(t *testing.T) {
 func TestSearchVectorRunsInAQueryPostgresWouldRunInParallel(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedSearchDocument(t, ctx, store)
 	tx, err := store.Pool.Begin(ctx)
 	if err != nil {

@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 // Processes that boot at once against an empty database all migrate it. The version table is
@@ -114,11 +112,11 @@ func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.
 // it, and applies nothing. Unbounded, it waits for as long as the holder lives, and every read and
 // write of the table queues behind its request for that long.
 func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
-	lockTimeout := pgmigrate.LockTimeout
-	// Every attempt waits out the lock timeout, with the runner's pause between attempts.
-	gaveUp := pgmigrate.LockTimeoutAttempts*lockTimeout + (pgmigrate.LockTimeoutAttempts-1)*pgmigrate.LockTimeoutRetryPause
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
+	lockTimeout := store.Locking.Timeout
+	// Every attempt waits out the lock timeout, with the runner's pause between attempts.
+	gaveUp := time.Duration(store.Locking.Attempts)*lockTimeout + time.Duration(store.Locking.Attempts-1)*store.Locking.RetryPause
 	if _, err := store.Pool.Exec(ctx, "create table guard_held (id integer)"); err != nil {
 		t.Fatalf("create the held table: %v", err)
 	}
@@ -141,9 +139,10 @@ func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 		"migrations/0001_widen_held.up.sql": {Data: []byte("alter table guard_held add column wider integer")},
 	}
 
-	// The test's own bound on the wait, well past the runner's: a runner that does not bound its
-	// lock waits shows up here as a wait this long.
-	bound := gaveUp + 3*lockTimeout
+	// The test's own bound on the wait, well past the runner's: fifteen seconds past the
+	// give-up, whatever the runner's timeout, since a runner that does not bound its lock waits
+	// waits for a holder that lives as long as the test does.
+	bound := gaveUp + 15*time.Second
 	bounded, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	started := time.Now()
@@ -156,7 +155,7 @@ func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 		t.Fatalf("migrate applied a migration whose lock another transaction held, after %s", waited.Round(time.Millisecond))
 	}
 	if waited < gaveUp || waited > gaveUp+10*time.Second {
-		t.Errorf("migrate gave up after %s, want about %s: %d attempts of the %s lock timeout", waited.Round(time.Millisecond), gaveUp, pgmigrate.LockTimeoutAttempts, lockTimeout)
+		t.Errorf("migrate gave up after %s, want about %s: %d attempts of the %s lock timeout", waited.Round(time.Millisecond), gaveUp, store.Locking.Attempts, lockTimeout)
 	}
 	t.Logf("migrate gave up after %s: %v", waited.Round(time.Millisecond), err)
 	holderPID := strconv.FormatUint(uint64(holder.PgConn().PID()), 10)

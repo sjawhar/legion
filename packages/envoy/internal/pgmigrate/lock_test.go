@@ -3,6 +3,7 @@ package pgmigrate
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 // What the watch reports after a sequence of readings. One empty reading of a wait that named its
@@ -43,5 +44,30 @@ func TestObserveNamesOnlyAHolderTheLatestReadingsSupport(t *testing.T) {
 				t.Errorf("after %d readings the watch reports %+v, want %+v", len(tc.readings), w.wait, tc.want)
 			}
 		})
+	}
+}
+
+// A runner that configures no Locking applies production's: five seconds, three attempts, two
+// seconds apart, with the watch reading every 200 ms. Every test of the bound, the retry and the
+// give-up now runs under a Locking of its own (internal/dispatch/store's testLocking), so this is
+// the one place that holds the zero value to the constants a deployment gets.
+func TestAZeroLockingIsProductionsDiscipline(t *testing.T) {
+	zero := Locking{}.resolve()
+	if zero != DefaultLocking {
+		t.Errorf("a zero Locking resolves to %+v, want %+v", zero, DefaultLocking)
+	}
+	if zero.Timeout != 5*time.Second || zero.Attempts != 3 || zero.RetryPause != 2*time.Second {
+		t.Errorf("production's discipline is %+v, want a five-second timeout, three attempts and two-second pauses", zero)
+	}
+	if got := (Locking{}).setting(); got != "5000ms" {
+		t.Errorf("lock_timeout is set to %q, want 5000ms", got)
+	}
+	if got := (Locking{}).watchInterval(); got != 200*time.Millisecond {
+		t.Errorf("the watch reads every %s, want the 200ms it has always read at", got)
+	}
+	// A runner on a short timeout still reads many times inside it, which is what names the
+	// holder of the lock it gave up on.
+	if got := (Locking{Timeout: 500 * time.Millisecond}).watchInterval(); got != 20*time.Millisecond {
+		t.Errorf("a 500ms timeout reads every %s, want 20ms", got)
 	}
 }

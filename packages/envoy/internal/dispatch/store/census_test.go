@@ -18,6 +18,12 @@ import (
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
 )
 
+// censusTestLockTimeout is how long a census these tests take waits for a touched table's lock,
+// in place of pgmigrate.LockTimeout. The refusal it proves is the same at any bound, and the two
+// tests of it waited five seconds each for a holder that never lets go (dispatch://INFRA-1075).
+// The refusals name the bound, so each test reads it from here rather than spelling it out.
+const censusTestLockTimeout = 300 * time.Millisecond
+
 var censusBase = fstest.MapFS{
 	"migrations/0001_things.up.sql": {Data: []byte("create table things (id integer, kind text)")},
 }
@@ -599,8 +605,7 @@ func TestCensusRefusesATouchedTableAboveTheLimit(t *testing.T) {
 // prints artifact_versions above that limit with why the migration is exempt.
 func TestCensusExemptsAMigrationOfOnlyCatalogStatementsFromTheTableLimit(t *testing.T) {
 	t.Parallel()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 121)
+	store := openMigratedThrough(t, 121)
 	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, 122), pgmigrate.CensusOptions{TableLimit: 1})
 	if err != nil {
 		t.Fatalf("census: %v", err)
@@ -1161,15 +1166,15 @@ func TestCensusRefusesATouchedTableItCannotReadWithinTheLockTimeout(t *testing.T
 	store, url := migratedToOne(t)
 	pid := holdLock(t, store, "things", "access exclusive")
 	started := time.Now()
-	report, err := census(ctx, url, withCheck("select 0"), pgmigrate.CensusOptions{})
+	report, err := census(ctx, url, withCheck("select 0"), pgmigrate.CensusOptions{LockTimeout: censusTestLockTimeout})
 	if err != nil {
 		t.Fatalf("census: %v (after %s)", err, time.Since(started).Round(time.Millisecond))
 	}
-	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read things within 5s (SQLSTATE 55P03)") || !strings.Contains(got[0], "pid "+strconv.FormatUint(uint64(pid), 10)) {
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read things within "+censusTestLockTimeout.String()+" (SQLSTATE 55P03)") || !strings.Contains(got[0], "pid "+strconv.FormatUint(uint64(pid), 10)) {
 		t.Errorf("refusals = %v, want one naming the table, 55P03 and pid %d", got, pid)
 	}
 	out := reportText(report)
-	if !strings.Contains(out, "touches things: not read, its lock was not granted within 5s") || !strings.Contains(out, "census: transactions open longer than 1m0s, or of an age the census cannot see: none") {
+	if !strings.Contains(out, "touches things: not read, its lock was not granted within "+censusTestLockTimeout.String()) || !strings.Contains(out, "census: transactions open longer than 1m0s, or of an age the census cannot see: none") {
 		t.Errorf("report:\n%s", out)
 	}
 }
@@ -1184,8 +1189,7 @@ func TestCensusRefusesATouchedTableItCannotReadWithinTheLockTimeout(t *testing.T
 func TestCensusChecksTheTablesAForeignKeyReachesFromARowTheMigrationWrites(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 55)
+	store := openMigratedThrough(t, 55)
 	for _, statement := range []string{
 		`insert into projects (key, name) values ('CORE', 'Core')`,
 		`insert into issues (key, project_key, number, title, created_by, rank) values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U')`,
@@ -1233,11 +1237,11 @@ func TestCensusChecksTheTablesAForeignKeyReachesFromARowTheMigrationWrites(t *te
 	}
 
 	exclusive := "pid " + strconv.FormatUint(uint64(holdLock(t, store, "ask_followers", "access exclusive")), 10)
-	report, err = census(ctx, url, set, pgmigrate.CensusOptions{})
+	report, err = census(ctx, url, set, pgmigrate.CensusOptions{LockTimeout: censusTestLockTimeout})
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read ask_followers within 5s (SQLSTATE 55P03)") || !strings.Contains(got[0], exclusive) {
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read ask_followers within "+censusTestLockTimeout.String()+" (SQLSTATE 55P03)") || !strings.Contains(got[0], exclusive) {
 		t.Errorf("refusals = %v, want one naming ask_followers, 55P03 and %s", got, exclusive)
 	}
 }
@@ -1246,10 +1250,7 @@ func TestCensusChecksTheTablesAForeignKeyReachesFromARowTheMigrationWrites(t *te
 func TestCensusOnAMigratedDatabaseHasNothingPending(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	report, err := Census(ctx, store.Pool.Config().ConnString())
 	if err != nil {
 		t.Fatalf("census: %v", err)

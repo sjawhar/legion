@@ -59,7 +59,7 @@ func TestMigrateTriesALockTimeoutAgainAndAppliesOnceTheWriterCommits(t *testing.
 	go func() { migrated <- store.migrate(ctx, withOwedTrigger()) }()
 	waitForQueuedLock(t, store, "things", "ShareRowExclusiveLock")
 	// Past the first attempt's lock_timeout and into the pause, then let the writer go.
-	time.Sleep(pgmigrate.LockTimeout + pgmigrate.LockTimeoutRetryPause/2)
+	time.Sleep(store.Locking.Timeout + store.Locking.RetryPause/2)
 	if err := held.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestMigrateTriesALockTimeoutAgainAndAppliesOnceTheWriterCommits(t *testing.
 }
 
 // A migration whose lock wait outlasts its lock_timeout on every attempt fails the runner after
-// pgmigrate.LockTimeoutAttempts attempts, applies nothing, and its error names the writer it was
+// the runner's attempts, applies nothing, and its error names the writer it was
 // queued behind with the writer's diagnosis. Each attempt is logged.
 func TestMigrateFailsNamingTheWriterOnceEveryAttemptTimesOut(t *testing.T) {
 	ctx := context.Background()
@@ -112,8 +112,8 @@ func TestMigrateFailsNamingTheWriterOnceEveryAttemptTimesOut(t *testing.T) {
 		t.Errorf("schema version = %d, want 1: the migration must not apply", got)
 	}
 	out := logs.String()
-	if n := strings.Count(out, "migration=0002_things_owed.up.sql"); n != pgmigrate.LockTimeoutAttempts {
-		t.Errorf("logged %d timed-out attempts, want %d:\n%s", n, pgmigrate.LockTimeoutAttempts, out)
+	if n := strings.Count(out, "migration=0002_things_owed.up.sql"); n != store.Locking.Attempts {
+		t.Errorf("logged %d timed-out attempts, want %d:\n%s", n, store.Locking.Attempts, out)
 	}
 	if !strings.Contains(out, "on its last attempt; the runner fails") {
 		t.Errorf("logs lack the last attempt:\n%s", out)

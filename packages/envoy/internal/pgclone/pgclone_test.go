@@ -10,9 +10,11 @@ package pgclone
 // dropped instead, and a fresh database is nobody's leftovers. Every one of the schema changes
 // below has shipped past a fingerprint that did not look for it.
 //
-// No test here calls t.Parallel: most of them change a database's schema, and all of them read
-// the pool's own count of the databases it refused to reuse, which names no database and so
-// reads true only while one test runs at a time.
+// No top-level test here calls t.Parallel: each reads back the database it was handed by name,
+// which the free list only answers while nothing else is taking from it. The schema cases do run
+// together, as subtests of one test: what each of them observes is its own database's fate
+// (release), not a count, and seven create database and seven drop database in a row are seven
+// waits on the one checkpointer every package on the server queues behind (dispatch://INFRA-1075).
 //
 // The tests are in package pgclone rather than pgclone_test because what they observe - the free
 // list, the refusal count - is the pool's decision about a database, which it exports no reading
@@ -161,6 +163,9 @@ func TestADatabaseWhoseSchemaATestChangedIsDropped(t *testing.T) {
 		}},
 	} {
 		t.Run(change.name, func(t *testing.T) {
+			// Each case reads its own database's fate by name, so the cases wait on the
+			// server's one checkpointer together rather than one after another.
+			t.Parallel()
 			ctx := context.Background()
 			name := testPool.Take(t, true)
 			conn := connect(t, name)
@@ -324,26 +329,28 @@ const (
 const releaseWait = 60 * time.Second
 
 // release hands name back the way a harness's cleanup does and answers what the pool decided.
-// Every release ends in one of the three: the database goes on the free list, or it is counted
-// as one the pool would not reuse, or as one whose reset failed. The counts name no database, so
-// this reads them as a difference, which holds because no test of this file runs beside another.
+// Every release ends in one of the three: the database goes on the free list, or the pool will
+// not reuse it and drops it, or its reset failed and it is dropped for that. The first two are
+// read by name - the free list holds it, or the server no longer does - so releases running
+// beside each other are each read for themselves; only the third, which no test here expects,
+// is read from the pool's count, and its log line says a reset failed rather than naming this
+// database's.
 func release(t *testing.T, name string, close func()) outcome {
 	t.Helper()
-	wereRefused, wereFailed := refusals()
+	_, wereFailed := refusals()
 	testPool.Release(name, close)
 	for deadline := time.Now().Add(releaseWait); ; time.Sleep(time.Millisecond) {
 		if onFreeList(name) {
 			return reused
 		}
-		nowRefused, nowFailed := refusals()
-		if nowFailed > wereFailed {
-			testPool.resetMu.Lock()
-			first := testPool.resetFirst
-			testPool.resetMu.Unlock()
-			t.Logf("the reset of %s failed: %s", name, first)
-			return resetFailed
-		}
-		if nowRefused > wereRefused {
+		if dropped(t, name) {
+			if _, nowFailed := refusals(); nowFailed > wereFailed {
+				testPool.resetMu.Lock()
+				first := testPool.resetFirst
+				testPool.resetMu.Unlock()
+				t.Logf("a reset failed while %s was released: %s", name, first)
+				return resetFailed
+			}
 			return refused
 		}
 		if time.Now().After(deadline) {
@@ -366,17 +373,23 @@ func onFreeList(name string) bool {
 	return slices.Contains(testPool.free, name)
 }
 
+// dropped reports whether the server no longer holds name, which is where a database the pool
+// would not reuse ends: the reset's decision carries no name, and this does.
+func dropped(t *testing.T, name string) bool {
+	t.Helper()
+	var left int
+	if err := testPool.Admin().QueryRow(context.Background(), "select count(*) from pg_database where datname = $1", name).Scan(&left); err != nil {
+		t.Fatalf("read whether %s is still on the server: %v", name, err)
+	}
+	return left == 0
+}
+
 // waitDropped waits for the drop Drop started in the background. It reads the server rather than
 // the pool's wait group, which only Main may wait on.
 func waitDropped(t *testing.T, name string) {
 	t.Helper()
-	ctx := context.Background()
 	for deadline := time.Now().Add(releaseWait); ; time.Sleep(time.Millisecond) {
-		var left int
-		if err := testPool.Admin().QueryRow(ctx, "select count(*) from pg_database where datname = $1", name).Scan(&left); err != nil {
-			t.Fatalf("read whether %s is still on the server: %v", name, err)
-		}
-		if left == 0 {
+		if dropped(t, name) {
 			return
 		}
 		if time.Now().After(deadline) {

@@ -136,17 +136,6 @@ func storePlainRefreshToken(t *testing.T, database *Store, email, token string) 
 	}
 }
 
-// migratedEmptyStore is a database of the test's own at the current schema, so a sweep of people
-// meets only the rows the test writes.
-func migratedEmptyStore(t *testing.T) *Store {
-	t.Helper()
-	database := openEmptyTestStore(t)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return database
-}
-
 // retireLines counts the lines logging a refresh token the pool did not revoke.
 func retireLines(logs *bytes.Buffer) int {
 	return strings.Count(logs.String(), "the sign-in pool did not revoke a refresh token stored in plain text")
@@ -277,7 +266,7 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 // It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	pool, flow := revokingPool(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	storePlainRefreshToken(t, database, "plain-1@d.example", "plain-token-1")
@@ -329,7 +318,7 @@ func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
 // It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestRetirePlainRefreshTokensLeavesATokenThePoolDidNotRevoke(t *testing.T) {
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	pool, flow := revokingPool(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	email := "plain@d.example"
@@ -445,7 +434,7 @@ func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	_, flow := revokingPool(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	email := "raced@d.example"
@@ -480,7 +469,7 @@ func sessionGeneration(t *testing.T, sessions *PgSessionStore, login string) (in
 // It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t *testing.T) {
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
@@ -575,7 +564,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
@@ -614,7 +603,7 @@ func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 // before it began. The first is held mid-transaction, its row written and not committed.
 func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
@@ -667,7 +656,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
 func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	const email = "a.person@example.com"
 	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1"); err != nil {
@@ -713,7 +702,7 @@ func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 func TestPgPeopleStoreEndSubjectEndsOnlyTheAccountItNames(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	database := migratedEmptyStore(t)
+	database := openTestStore(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"

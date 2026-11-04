@@ -15,10 +15,7 @@ const asksApprovalDocumentsVersion = 20261102110100
 // reader finds the list and the rebuilt check admits the row.
 func TestMigrationGivesApprovalAsksTheirDocumentList(t *testing.T) {
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.migrate(ctx, migrationsThrough(t, asksApprovalDocumentsVersion-1)); err != nil {
-		t.Fatalf("migrate through the migration before the document list: %v", err)
-	}
+	store := openMigratedThrough(t, asksApprovalDocumentsVersion-1)
 	const artifactID = "11111111-1111-4111-8111-111111111111"
 	for _, seed := range []string{
 		`insert into projects (key, name) values ('TEST', 'Test')`,

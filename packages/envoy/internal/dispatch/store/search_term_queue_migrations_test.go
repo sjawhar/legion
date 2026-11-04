@@ -25,8 +25,7 @@ const (
 // needs no gigabyte, over a database at 20261101182515, where the item tables are already above
 // that.
 func TestCensusExemptsTheSearchTermQueueTriggersFromTheTableLimit(t *testing.T) {
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, searchTermTotalsColumns)
+	store := openMigratedThrough(t, searchTermTotalsColumns)
 	report, err := census(context.Background(), store.Pool.Config().ConnString(),
 		migrationsThrough(t, searchTermQueueTriggers), pgmigrate.CensusOptions{TableLimit: 1})
 	if err != nil {

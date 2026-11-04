@@ -20,6 +20,12 @@ import (
 // Store is the shared Dispatch database handle.
 type Store struct {
 	Pool *Pool
+	// Locking is the discipline Migrate applies each migration under: how long it waits for a
+	// lock, how many attempts it makes of one whose wait outlasts that, and how long it holds
+	// nothing between them. The zero value is production's (pgmigrate.DefaultLocking); the tests
+	// of the runner itself set their own short, so that proving the bound, the retry and the
+	// give-up costs a fraction of a second rather than three five-second waits.
+	Locking pgmigrate.Locking
 }
 
 // Every file in migrations, so pgmigrate.Load judges each one; pgmigratetest.CheckEmbedsEveryFile
@@ -139,7 +145,7 @@ func declaresPoolSize(databaseURL string) (bool, error) {
 // Migrate applies the embedded migrations in version order, each committed with its version
 // record in one transaction. It refuses a set pgmigrate.Load refuses before it touches the
 // database, so a set it cannot apply as written applies nothing, and it bounds every lock wait a
-// migration makes by pgmigrate.LockTimeout.
+// migration makes by s.Locking's timeout, pgmigrate.LockTimeout unless a caller set its own.
 func (s *Store) Migrate(ctx context.Context) error {
 	return s.migrate(ctx, migrationFiles)
 }
@@ -222,11 +228,11 @@ func (s *Store) createVersionTable(ctx context.Context, widen bool) error {
 }
 
 // applyMigration applies one migration in a transaction of its own, trying it again while its lock
-// wait outlasts its lock_timeout, up to pgmigrate.LockTimeoutAttempts times, holding nothing between
-// attempts (pgmigrate.RetryLockTimeouts). A migration that times out on every attempt fails the
-// runner, and boot with it.
+// wait outlasts its lock_timeout, up to s.Locking's attempts, holding nothing between
+// attempts (pgmigrate.Locking.RetryLockTimeouts). A migration that times out on every attempt
+// fails the runner, and boot with it.
 func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
-	return pgmigrate.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
+	return s.Locking.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
 		return s.applyMigrationOnce(ctx, migration)
 	})
 }
@@ -254,7 +260,7 @@ func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migr
 	if applied {
 		return tx.Commit(ctx)
 	}
-	if err := pgmigrate.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
+	if err := s.Locking.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1::bigint)", migration.Version); err != nil {

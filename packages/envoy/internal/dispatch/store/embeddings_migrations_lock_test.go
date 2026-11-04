@@ -21,8 +21,7 @@ import (
 // takes the table-level lock its statement needs.
 func TestEmbeddingsMigrationsLockOneTableAtATime(t *testing.T) {
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 72)
+	store := openMigratedThrough(t, 72)
 	holder, err := store.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin holder: %v", err)

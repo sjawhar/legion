@@ -67,10 +67,7 @@ func seedNodeFactsDocuments(t *testing.T, store *Store) (spec, doc string) {
 func TestTheWrittenVersionTriggerRecordsWhatAnyBuildInserts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	spec, doc := seedNodeFactsDocuments(t, store)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into artifact_versions (artifact_id, number, markdown) values
@@ -142,8 +139,7 @@ func TestTheWrittenVersionTriggerRecordsWhatAnyBuildInserts(t *testing.T) {
 func TestTheWrittenVersionBackfillFillsOlderRows(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeNodeFacts)
+	store := openMigratedThrough(t, beforeNodeFacts)
 	_, doc := seedNodeFactsDocuments(t, store)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into artifact_versions (artifact_id, number, markdown, created_at) values
@@ -210,8 +206,7 @@ func TestTheWrittenVersionBackfillFillsOlderRows(t *testing.T) {
 func TestComponentFactsSeedEveryComponentUnrecorded(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeNodeFacts)
+	store := openMigratedThrough(t, beforeNodeFacts)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core'), ('OPS', 'Operations');
 		insert into architecture_sources (project_key, repo, branch, installation_id, created_by)

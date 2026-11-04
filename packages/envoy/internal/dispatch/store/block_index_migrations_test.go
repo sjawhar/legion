@@ -97,10 +97,7 @@ func seedBlockIndexIssue(t *testing.T, store *Store) {
 func TestTheBlockIndexTriggersOweWhatAnyBuildWrites(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedBlockIndexIssue(t, store)
 	doc := insertReturningID(t, store, `
 		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
@@ -227,8 +224,7 @@ func TestTheBlockIndexTriggersOweWhatAnyBuildWrites(t *testing.T) {
 func TestTheBlockGrammarSeedOwesOlderText(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, beforeBlockGraph)
+	store := openMigratedThrough(t, beforeBlockGraph)
 	seedBlockIndexIssue(t, store)
 	doc := insertReturningID(t, store, `
 		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
