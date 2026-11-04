@@ -360,6 +360,16 @@ SCHEMA_SCRIPT = (
 # cmd/listener package compiles under the serverchange tag, whichever test the run selects.
 SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+# The document service's race step runs under .github/scripts/race_memory.py, which fails it with
+# a log when the race binary's memory passes RACE_MEM_LIMIT_KB (ci.yaml's comment on the step says
+# why), so its line is a shell assignment and a script, not a go command the simple form reduces.
+RACE_DOCS_STEP = "Race-test the document service"
+RACE_DOCS_SCRIPT = ("RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py "
+                    "go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/")
+# The same package under Go's cleanup detector. GODEBUG is a GO* name, which is outside
+# ENV_ALLOWED wherever it is set, so this step too is pinned whole rather than reduced.
+FINALIZERS_STEP = "Test the document service under the cleanup detector"
+FINALIZERS_SCRIPT = "GODEBUG=checkfinalizers=1 go test -count=1 -timeout 40m ./internal/dispatch/docs/"
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -705,11 +715,22 @@ GATES = [
                  ENVOY, ["./internal/dispatch/api/"], race=True),
     ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
-        step_run("envoy-go-race-docs", "Race-test the document service",
-                 "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
-                 ["./internal/dispatch/docs/"], race=True),
-    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[
+        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, ENVOY, RACE_DOCS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -race -count=1 -timeout 60m ./internal/dispatch/docs/", {"race": True}),
+        ]),
+    ], reads=reads(
+        (".github/scripts/race_memory.py", f"{at('envoy-go-race-docs', RACE_DOCS_STEP)} runs the package under it"),
+    ) + setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+
+    # A second gate on envoy_go_race_docs: this job runs the same package, so it reads that
+    # closure and no other, and check-ci-filters.sh keys a claim by (job, step), so the two gates
+    # claim different steps and do not collide.
+    gate("envoy_go_race_docs", "envoy-go-docs-finalizers", exact=[
+        pinned_step("envoy-go-docs-finalizers", FINALIZERS_STEP, ENVOY, FINALIZERS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -count=1 -timeout 40m ./internal/dispatch/docs/", {}),
+        ]),
+    ], reads=setup_go("envoy-go-docs-finalizers", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", runs=[
         step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",

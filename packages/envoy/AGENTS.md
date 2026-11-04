@@ -2842,7 +2842,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 - Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the Envoy jobs this module's tagged and race suites run in among them:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-pmdoc` (`envoy_go_race_pmdoc`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-pmdoc` (`envoy_go_race_pmdoc`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` and `envoy-go-docs-finalizers`, which share `envoy_go_race_docs`, and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
