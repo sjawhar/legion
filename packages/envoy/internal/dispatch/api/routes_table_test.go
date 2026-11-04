@@ -319,6 +319,9 @@ func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
 		"GET /api/v1/me/answers",
 		"GET /api/v1/me/replies",
 		"PUT /api/v1/me/threads/{id}/read",
+		// The Inbox's Mark all read is no older row either: it writes the person's own read
+		// marks, so it is theirs as the two rows above it are.
+		"POST /api/v1/me/inbox/read",
 		"GET /api/v1/agents/{session_id}/messages",
 		"POST /api/v1/agents/{session_id}/messages",
 		"POST /api/v1/broadcasts",
