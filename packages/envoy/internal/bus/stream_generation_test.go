@@ -2,6 +2,7 @@ package bus
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestAnOwningClientLeavesAStreamANewerGenerationStampedUntouched(t *testing.
 		Duplicates: time.Minute,
 		Storage:    nats.FileStorage,
 		Replicas:   3,
-		Metadata:   map[string]string{generationKey: "2"},
+		Metadata:   map[string]string{generationKey: strconv.Itoa(streamConfigGeneration + 1)},
 	}
 	if _, err := js.AddStream(&newer); err != nil {
 		t.Fatalf("the newer build creates the stream: %v", err)
@@ -69,8 +70,8 @@ func TestAnOwningClientLeavesAStreamANewerGenerationStampedUntouched(t *testing.
 				t.Fatalf("stream MaxAge=%s Duplicates=%s Subjects=%v Replicas=%d, want the newer build's MaxAge=%s Duplicates=%s Subjects=%v Replicas=%d",
 					got.MaxAge, got.Duplicates, got.Subjects, got.Replicas, newer.MaxAge, newer.Duplicates, newer.Subjects, newer.Replicas)
 			}
-			if got.Metadata[generationKey] != "2" {
-				t.Fatalf("stream generation = %q, want the newer build's 2", got.Metadata[generationKey])
+			if want := strconv.Itoa(streamConfigGeneration + 1); got.Metadata[generationKey] != want {
+				t.Fatalf("stream generation = %q, want the newer build's %s", got.Metadata[generationKey], want)
 			}
 		})
 	}
@@ -91,8 +92,8 @@ func TestAnOwningClientStampsItsGenerationOnAnUnstampedStream(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	if got := deployedStream(t, js).Config.Metadata[generationKey]; got != "1" {
-		t.Fatalf("stream generation = %q, want 1", got)
+	if got, want := deployedStream(t, js).Config.Metadata[generationKey], strconv.Itoa(streamConfigGeneration); got != want {
+		t.Fatalf("stream generation = %q, want %s", got, want)
 	}
 }
 
@@ -128,8 +129,8 @@ func TestAStreamDeletedWhileTheClientRunsIsRecreatedOnItsReconnect(t *testing.T)
 	for {
 		info, err := checkerJS.StreamInfo(Stream)
 		if err == nil {
-			if !slices.Equal(info.Config.Subjects, streamSubjects) {
-				t.Fatalf("recreated stream subjects = %v, want %v", info.Config.Subjects, streamSubjects)
+			if !slices.Equal(info.Config.Subjects, streamCarriedSubjects) {
+				t.Fatalf("recreated stream subjects = %v, want %v", info.Config.Subjects, streamCarriedSubjects)
 			}
 			return
 		}
@@ -161,7 +162,7 @@ func TestATopicOnlyTheDeployedStreamCapturesIsPublishedThroughJetStream(t *testi
 			js := rawJetStream(t, uri)
 			newer := *streamCfg
 			newer.Replicas = 1
-			newer.Subjects = append(slices.Clone(streamSubjects), "notifications.x.>")
+			newer.Subjects = append(slices.Clone(streamCarriedSubjects), "notifications.x.>")
 			newer.Metadata = map[string]string{generationKey: "1"}
 			if _, err := js.AddStream(&newer); err != nil {
 				t.Fatalf("the newer build creates the stream: %v", err)
@@ -238,7 +239,7 @@ func TestAClientFollowsASubjectANewerBuildAddsWhileItRuns(t *testing.T) {
 			}
 
 			newer := current
-			newer.Subjects = append(slices.Clone(streamSubjects), "notifications.x.>")
+			newer.Subjects = append(slices.Clone(streamCarriedSubjects), "notifications.x.>")
 			newer.Metadata = map[string]string{generationKey: "2"}
 			if _, err := js.UpdateStream(&newer); err != nil {
 				t.Fatalf("the newer build adds its subject: %v", err)
@@ -291,7 +292,7 @@ func TestABackgroundClientReadsTheDeployedSubjectsAtItsFirstConnection(t *testin
 			js := rawJetStream(t, uri)
 			newer := *streamCfg
 			newer.Replicas = 1
-			newer.Subjects = append(slices.Clone(streamSubjects), "notifications.x.>")
+			newer.Subjects = append(slices.Clone(streamCarriedSubjects), "notifications.x.>")
 			newer.Metadata = map[string]string{generationKey: "2"}
 			if _, err := js.AddStream(&newer); err != nil {
 				t.Fatalf("the newer build creates the stream: %v", err)

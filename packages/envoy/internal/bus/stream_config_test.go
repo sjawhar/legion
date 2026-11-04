@@ -341,6 +341,7 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 		"notifications.ghostwispr.>",
 		"notifications.whatsapp.>",
 		"notifications.envoy.exceptions.notifications.agent.>",
+		"notifications.envoy.kept.>",
 	}
 	if !reflect.DeepEqual(streamCfg.Subjects, wantSubjects) {
 		t.Fatalf("stream subjects = %v, want %v", streamCfg.Subjects, wantSubjects)
@@ -372,6 +373,22 @@ var streamGenerations = map[int]struct {
 			"notifications.ghostwispr.>",
 			"notifications.whatsapp.>",
 			"notifications.envoy.exceptions.notifications.agent.>",
+		},
+	},
+	// Generation 2 adds the listener's kept lane (streamCarriedSubjects).
+	2: {
+		maxAge:     72 * time.Hour,
+		duplicates: 72 * time.Hour,
+		subjects: []string{
+			"notifications.agent.>",
+			"notifications.dispatch.>",
+			"notifications.github.>",
+			"notifications.slack.>",
+			"notifications.legion.>",
+			"notifications.ghostwispr.>",
+			"notifications.whatsapp.>",
+			"notifications.envoy.exceptions.notifications.agent.>",
+			"notifications.envoy.kept.>",
 		},
 	},
 }

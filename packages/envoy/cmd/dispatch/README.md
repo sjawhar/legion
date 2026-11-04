@@ -882,8 +882,10 @@ It drives each build's `dispatch` command against the other build's server, read
 
 Generations and holds protect from the release after the first one that carries them.
 The build before them compares stream and consumer settings with no generation, binds its delivery durable by lookup with no hold, and refuses a request member it does not declare.
-So the release that introduces them changes no request member, stream or consumer setting, or loop interval, and each protection binds from the release after it.
-The element rule binds from that release too, and this one does add document elements: the three typed blocks of version 3.
+So each protection binds from the release after the one that introduces it, and that release would ideally change no request member, stream or consumer setting, or loop interval.
+This one changes two such things that main merged beside it.
+The stream carries the kept-message lane `notifications.envoy.kept.>` (stream generation 2); the build before keeps a deployed subject that overlaps none of its own (`reconcileSubjects`), so it leaves that lane in place.
+And it adds document elements: the three typed blocks of version 3.
 The build before reads a document holding one as outside the schema rather than as newer content, so while it serves, a repair or a rebuild asked of it would rewrite that document without them.
 Until every process of that build is gone, leave such a document to a process of this build, which refuses both (`DOC_NEWER_CONTENT`).
 In that first overlap, a take-over (`delivery/held_durable.go`, `heldDurable.takeOver`) deletes a durable and creates it again at its ack floor, all under the durable's consumer lease, and tries a failed create again for up to 10 seconds while it holds its hold.
@@ -1767,7 +1769,9 @@ An argument `envoy-dispatch` does not know is refused with exit 2, never served,
 
 ## Stored-order check
 
-`envoy-dispatch stored-order [--artifact <uuid>]... [--since <RFC 3339 time>]` reads, and never writes, whether each document's stored history replays: folding its `doc_updates` rows in version order must give every row's `content_changed` (measured against the render the rows before it fold to, true when either side does not render) and every version's markdown at its `doc_update_version`, and no row may leave the fold holding parked structs.
+`envoy-dispatch stored-order [--artifact <uuid>]... [--since <RFC 3339 time>]` reads, and never writes, whether each document's stored history replays: folding its `doc_updates` rows in version order must give every row's `content_changed` (measured against the render the rows before it fold to, true when either side does not render) and every version's markdown at its `doc_update_version`, and no row may be stored ahead of one it depends on.
+A row after which the fold parks structs is that only when no later row carries what it parked again: the room stores a peer's edit that arrives ahead of the edit it builds on at once, so a restart keeps it, and the commit that integrates it once that edit arrives stores it again, so the check folds the history a second time without such rows and reports them as `pending` only when that fold differs.
+A row still parked when the history ends is counted as `awaiting`, not a mismatch: the store alone cannot tell an edit whose predecessor has not arrived from a dependency never stored, and a dependency the room held and the store lost also leaves every later version rendering text the fold lacks.
 It reads `DATABASE_URL` as the other subcommands do and runs no migration; with no `--artifact` it checks every document.
 Each document is read in one repeatable-read transaction, which stays open while the check renders the document at every checked update: tens of thousands of updates hold one snapshot for minutes, and an open snapshot on the primary holds back vacuum.
 On production, pass `--since` or point `DATABASE_URL` at a read replica.
@@ -1783,7 +1787,7 @@ A history a prune rewrote after the base (a checkpoint standing, a gap, a versio
 The check holds only for one renderer: run it from the same commit as the Dispatch whose history it reads.
 A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from this build's render of the same state.
 
-Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=… mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its base and `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
+Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=… mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its base, `awaiting="<reason>"` for one holding rows still parked, and `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
 It prints no document text.
 A document whose check compared no update and no version, one whose versions inside the window all sit below the base included, is `unchecked`, never clean.
 Exit 0 when every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`, unchecked document `--artifact` names, or a run that checked no document at all (an empty database included), 2 on a usage error.

@@ -139,9 +139,10 @@ export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise
  * A record's mtime is when its session was last seen holding the role: every heartbeat on which
  * the listener still names the session as holder touches the record (`refreshRoleRecord` in the
  * channel server), so this age reaches only a record whose session has not confirmed its role for
- * that long — in practice one that stopped running. Only one path removes a role file by hand — a
- * soft `setRole` that comes back unclaimed — so a session that holds its role to the end leaves
- * its file behind, and the handoff sweep cannot reach it: that one walks `sessions/<pid>/` and asks
+ * that long — in practice one that stopped running. Only one path removes a role file by hand —
+ * a soft `setRole` another live session holds off (`claimed: false`, the listener's 409), never
+ * any answer of the publish route — so a session that holds its role to the end leaves its file
+ * behind, and the handoff sweep cannot reach it: that one walks `sessions/<pid>/` and asks
  * the operating system about a pid, while a role file is keyed by session id and has no process
  * left to ask about.
  *

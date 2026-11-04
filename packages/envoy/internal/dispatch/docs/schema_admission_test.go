@@ -126,6 +126,19 @@ func readUntil(t *testing.T, connection *gws.Conn, kind uint64) *encoding.Decode
 	}
 }
 
+// sendSyncStep1 asks the room for its whole document, the sync step 1 a provider sends as its
+// socket opens.
+func sendSyncStep1(t *testing.T, connection *gws.Conn, artifactID string) {
+	t.Helper()
+	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarString(artifactID)
+		encoder.WriteVarUint(0) // Hocuspocus sync message.
+	})
+	if err := connection.WriteMessage(gws.BinaryMessage, append(frame, ygsync.EncodeSyncStep1(crdt.New())...)); err != nil {
+		t.Fatalf("ask the room for the document: %v", err)
+	}
+}
+
 // probeWritable sends a probe update and reports whether the room applied it.
 func probeWritable(t *testing.T, connection *gws.Conn, artifactID string) bool {
 	t.Helper()
@@ -422,6 +435,14 @@ func dialSlowPage(t *testing.T, serverURL, artifactID string, query url.Values) 
 		t.Fatalf("connect a slow page presenting %v: response=%#v err=%v", query, response, err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
+	// ygo sends a joining peer the room's state only in answer to that peer's own sync step 1
+	// (sjawhar/ygo v1.55.1-sami.1, provider/websocket/server.go, reearth/ygo#342), so a page that
+	// asks for nothing is owed nothing and the writes below would never fill its buffer. The
+	// token follows it, as a provider sends it once its socket opens, so the room's answer to it
+	// is queued behind the document: a frame after it says the server has moved on from writing
+	// the document (waitForTheDocumentOnTheWire).
+	sendSyncStep1(t, connection, artifactID)
+	sendToken(t, connection, artifactID, query.Get("schema_version"))
 	return connection
 }
 

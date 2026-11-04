@@ -38,6 +38,18 @@ Extends docs/solutions/legion/a-stacked-branch-whose-base-squash-merged-conflict
   `files(working copy != hop-1 tip) − files(main != base's final head)`; anything left is drift to
   put back from the hop-1 tip (`jj file show -r <hop-1> <path> > <path>`). `go build` catches an
   import, nothing catches a dead method or a duplicated name list.
+- State the audit as an equality of file **sets**, and check it: the pull request's diff against
+  the new base must list the same files as its diff against the old one. A fingerprint over the
+  diff's lines cannot answer this - it says "changed", which an ordinary round of work says too -
+  so at a merge that also carries fixes it carries no information at all. In sjawhar/legion#2588
+  the merge re-added 20 changelog fragments of its own base that main's fold had already consumed
+  into `CHANGELOG.md` and deleted; no conflict marker showed them, no lane went red, and the next
+  fold would have written those entries a second time. The count is what made it legible: 91 files
+  against main, 71 against the old base. A file that appears is content your branch is
+  re-introducing that the new base deliberately does not have, and a folded changelog fragment is
+  the commonest instance, because every stacked branch that carried its base unsquashed holds one.
+- Read a large merge by line sets per file, never by jj's merge diff, which against a conflicted
+  auto-merge mixes resolution content with conflict-marker content and reads as noise.
 - jj's rendering of a two-sided conflict picks per file which side is the `+++++++` snapshot and
   which is the `%%%%%%% diff from: <base>` / `\\\\\\\ to: <side>` pair. A script that resolves "to
   mine" must find its side by the commit id in those headers, never by position: half the files of
