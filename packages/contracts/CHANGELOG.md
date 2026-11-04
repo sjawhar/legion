@@ -1,5 +1,12 @@
 # Changelog
 
+## [main@6f23228e01f0] - 2026-11-04
+
+### Added
+
+- The envelope's optional `kept_at`: the time Envoy's listener kept an undeliverable role message,
+  carried on the copy it forwards to the role's next holder.
+
 ## [main@7ae56d094176] - 2026-11-04
 
 ### Added

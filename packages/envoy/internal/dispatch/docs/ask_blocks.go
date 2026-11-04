@@ -149,11 +149,10 @@ func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
 	return changed
 }
 
-// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive) and
-// reports whether any changed it.
-func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, error) {
-	_, repaired, err := rewriteLive(doc, origin, r.repairLive)
-	return repaired, err
+// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive).
+func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) error {
+	_, err := rewriteLive(doc, origin, r.repairLive)
+	return err
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing

@@ -428,6 +428,49 @@ func TestABatchNamesOnlyTheOperationsWhoseTextWentMissing(t *testing.T) {
 	}
 }
 
+// A transaction's fork is built again after one of its operations abandons it (rebuildFork), and
+// the transaction's own earlier writes are applied to the rebuilt fork. That apply is not local and
+// advances the fork's own client clock, and ygo then gives the document a new client ID at commit,
+// as Yjs's cleanupTransactions does. The lost-write check finds what a batch inserted by the
+// write's client ID (recordInsertedText), so an edit made after the rebuild must still be found
+// under the ID its fork now has: a browser that removes that edit's text before the version is
+// rendered has the edit refused, not reported applied.
+func TestAnEditAfterItsForkIsRebuiltIsRefusedWhenItsTextIsLost(t *testing.T) {
+	service, artifactID := lostEditService(t)
+	browser := model.Actor{Kind: "user", ID: "alice"}
+	service.addConnection(artifactID, service.nextConnection.Add(1), browser)
+	edit := startEditInFlight(t, service, artifactID, model.EditOp{
+		Op: "replace", Find: "Alpha paragraph.", With: "Alpha paragraph edited.",
+	})
+	// A mark whose author carries more text than a document's anchor marks may hold: the growth
+	// weigh refuses it once it has moved the fork, so the operation abandons the fork and leaves
+	// the transaction the update its first edit appended.
+	heavy := model.Actor{Kind: "session", ID: "s" + strings.Repeat("a", maxAnchorBytes)}
+	if _, err := service.MarkQuote(edit.ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c-heavy", By: heavy}, "Bravo", nil); !errors.Is(err, ErrDocumentTooLarge) {
+		t.Fatalf("the heavy mark answered %v, want the growth refusal that abandons the fork", err)
+	}
+	write := joinedLiveWrite(edit.ctx, artifactID)
+	if write == nil || write.fork != nil || len(write.updates) == 0 {
+		t.Fatal("the refused mark left the transaction a fork, or no update of its own, so nothing here is rebuilt")
+	}
+	if _, err := service.ApplyOps(edit.ctx, artifactID, []model.EditOp{{
+		Op: "replace", Find: "Bravo paragraph.", With: "Bravo paragraph edited.",
+	}}, lostEditAgent, nil); err != nil {
+		t.Fatalf("the edit after the rebuild: %v", err)
+	}
+	if write.fork == nil || write.fork.ClientID() != write.clientID {
+		t.Fatal("the write does not name the client ID its rebuilt fork authors items under")
+	}
+	// The browser removes, in the room, the paragraph the edit after the rebuild rewrote.
+	edit.browserWrites(t, withoutTopLevelBlock("Bravo paragraph."))
+
+	_, err := service.SnapshotVersion(edit.ctx, artifactID, lostEditAgent)
+	var lost *ErrEditLost
+	if !errors.As(err, &lost) {
+		t.Fatalf("snapshot = %v, want the edit made after the rebuild refused as lost", err)
+	}
+}
+
 // pmdoc.Update rewrites a block it passes over in place when an operation inserts or removes a
 // block above it, so a batch's own update re-inserts the text of paragraphs no operation names -
 // and a concurrent deletion takes that text exactly as it takes an operation's own. The batch

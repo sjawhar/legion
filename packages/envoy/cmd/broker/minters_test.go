@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
@@ -36,7 +39,7 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "google-access-token"})
 	}))
 	defer google.Close()
-	minters := kindMinters(secrets.GitHubApp{Base: github.URL, HTTP: github.Client()}, secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()})
+	minters := kindMinters(secrets.GitHubApp{Base: github.URL, HTTP: github.Client()}, secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()}, secrets.AzureLogin{})
 
 	app, err := json.Marshal(map[string]string{"app_id": "123456", "private_key": pemText})
 	if err != nil {
@@ -50,5 +53,31 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 	minted, err = minters[policy.KindGoogleLogin](context.Background(), secrets.MintRequest{Value: login})
 	if err != nil || minted != "google-access-token" {
 		t.Fatalf("google-login minter = %q, %v; want the Google endpoint's access token", minted, err)
+	}
+}
+
+func TestRequestMachineReleasesAzureLoginFromTheConfiguredFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "azure-token")
+	const token = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2lnbmF0dXJl"
+	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	machine := newRequestMachine(config.Config{AzureTokenFile: file, AzureLoginSecret: "AZURE_LOGIN"}, nil, nil, nil, nil)
+	for _, kind := range policy.Kinds {
+		if machine.Minters[kind] == nil {
+			t.Fatalf("request machine has no minter for %s", kind)
+		}
+	}
+	mint := machine.Minters["azure-login"]
+	if mint == nil {
+		t.Fatal("request machine has no Azure login minter")
+	}
+	got, err := mint(t.Context(), secrets.MintRequest{Name: "AZURE_LOGIN", HumanTier: true, Value: `{"tenant_id":"tenant","client_id":"client"}`})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	var value map[string]string
+	if json.Unmarshal([]byte(got), &value) != nil || len(value) != 4 || value["tenant_id"] != "tenant" || value["client_id"] != "client" || value["federated_token"] != token || value["expires_at"] != "2100-01-01T00:00:00Z" {
+		t.Fatal("request machine did not release the Azure login from its configured token file")
 	}
 }

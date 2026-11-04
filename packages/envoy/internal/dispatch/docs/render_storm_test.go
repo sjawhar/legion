@@ -87,6 +87,11 @@ func stormRound(t *testing.T, seed uint64, edits int) {
 	t.Helper()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
+	// The peers apply their updates to the room's document directly, never through a ygo
+	// connection or Server.Apply, so ygo's idle sweep counts the room idle from its load and would
+	// retire it after roomIdleTimeout - which a seed on a loaded machine outlasts. ygo's sweeper
+	// reads the timeout when the first room starts it, so it is set before any room loads.
+	service.srv.RoomIdleTimeout = time.Hour
 	sh := watchRenders(t, service, artifactID)
 	seedServiceText(t, service, artifactID, stormDocument())
 	sent := map[string]bool{}
@@ -284,9 +289,9 @@ func stormRound(t *testing.T, seed uint64, edits int) {
 	waitForLandedAppends(t, service, artifactID)
 	sh.check(t)
 	paths := m.since()
-	t.Logf("seed %d: edits %v, recovers %d; paths incremental %d, whole %d, untouched %d, reused %d, inRoom %d, marginOnly %d, catchUpFromLoad %d, catchUpRendered %d",
+	t.Logf("seed %d: edits %v, recovers %d; paths incremental %d, whole %d, untouched %d, reused %d, marginOnly %d, catchUpFromLoad %d, catchUpRendered %d",
 		seed, kinds, recovered, paths.observerIncremental, paths.observerRendered, paths.observerUntouched,
-		paths.observerReused, paths.observerInRoom, paths.observerMarginOnly, paths.catchUpFromLoad, paths.catchUpRendered)
+		paths.observerReused, paths.observerMarginOnly, paths.catchUpFromLoad, paths.catchUpRendered)
 	if paths.observerIncremental == 0 {
 		t.Errorf("seed %d spliced no update: the storm proved nothing about the incremental path", seed)
 	}

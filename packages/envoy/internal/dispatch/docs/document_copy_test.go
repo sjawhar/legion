@@ -219,8 +219,8 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 		if err := peer.Write(ygsync.EncodeUpdate(update)); err != nil {
 			t.Fatalf("send the browser's update: %v", err)
 		}
-		// The store holds the update once a version past head declares its items: the peer's
-		// answer to the room's sync step 1, an empty update, can move the head first.
+		// The store holds the update once a version past head declares its items; the peer's
+		// sync, which changes nothing in the room, stores nothing.
 		stored := func() bool {
 			versions, err := persist.ListVersions(ctx, artifactID)
 			if err != nil {

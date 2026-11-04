@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -537,7 +539,7 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 				defer close(closed)
 				closeErr = closer.close(service, artifactID)
 			}()
-			waitFor(t, 10*time.Second, "the room's close to wait for the repair's commit", closeWaitsForRepair)
+			awaitCloseWaitingForRepair(t, service, closed)
 
 			_, update := peerEdit(t, held, replaceRun("before", "before, edited"))
 			var writeErr error
@@ -651,12 +653,71 @@ func endRoomLockHolders(t *testing.T, service *Service) {
 // closeWaitsForRepair reports whether a close the service makes of a room is waiting for a repair
 // to finish committing into that room: the repair holds the room's close gate while it commits
 // (roomServer.holdOpen), and a close waits for that gate. Every gated close of the service is named
-// here, since any can be the one waiting: CloseRoom; closeInstance, which the close of a room
-// behind the head takes; and closeOwned, which a failed room's eviction takes.
+// here, since any can be the one waiting: closeWhenFree, which every close from outside the room
+// takes (CloseRoom, closeRoom and closeOwned, a failed room's eviction's); and closeInstance, which
+// the close of a room behind the head takes.
 func closeWaitsForRepair() bool {
-	return goroutinesIn("(*roomServer).CloseRoom", "sync.(*RWMutex).Lock")+
-		goroutinesIn("(*roomServer).closeInstance", "sync.(*RWMutex).Lock")+
-		goroutinesIn("(*roomServer).closeOwned", "sync.(*RWMutex).Lock") > 0
+	return goroutinesIn("(*roomServer).closeWhenFree", "sync.(*RWMutex).Lock")+
+		goroutinesIn("(*roomServer).closeInstance", "sync.(*RWMutex).Lock") > 0
+}
+
+// awaitCloseWaitingForRepair blocks until a close the service makes of the room waits for the
+// paused repair's commit (closeWaitsForRepair), failing at once if the close returns first, and
+// otherwise only after a ceiling no ordering of the close's own waits reaches - Shutdown's close
+// comes after its own settlement of the room has waited, up to its drain budget, for the document
+// lock the paused repair holds. On the ceiling it reports where the service's goroutines stand and
+// what the database's sessions wait on, so a close held up elsewhere names what held it.
+func awaitCloseWaitingForRepair(t *testing.T, service *Service, closed <-chan struct{}) {
+	t.Helper()
+	ceiling := time.After(ShutdownDrainBudget + 2*time.Minute)
+	for !closeWaitsForRepair() {
+		select {
+		case <-closed:
+			t.Fatal("the room's close returned without waiting for the repair's commit")
+		case <-ceiling:
+			describeCloseWait(t, service)
+			t.Fatal("the room's close never waited for the repair's commit")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// describeCloseWait logs the stack of every goroutine standing in the service's close, shutdown
+// and settlement paths, and every session of the test's database with what it waits on and the
+// advisory locks it holds.
+func describeCloseWait(t *testing.T, service *Service) {
+	t.Helper()
+	buffer := make([]byte, 1<<24)
+	for _, stack := range strings.Split(string(buffer[:runtime.Stack(buffer, true)]), "\n\n") {
+		for _, frame := range []string{"(*Service).Shutdown", "(*roomServer).close", "(*Service).settleRoom", "(*Service).waitForDurableAppends", "settlementPending", "(*PgVersioned)"} {
+			if strings.Contains(stack, frame) {
+				t.Logf("goroutine in %s:\n%s", frame, stack)
+				break
+			}
+		}
+	}
+	rows, err := service.store.Pool.Query(context.Background(), `
+		select a.pid, a.state, coalesce(a.wait_event_type, ''), coalesce(a.wait_event, ''),
+		       left(a.query, 160), coalesce(string_agg(l.objid::text, ',') filter (where l.granted), '')
+		from pg_stat_activity a
+		left join pg_locks l on l.pid = a.pid and l.locktype = 'advisory'
+		where a.datname = current_database() and a.pid <> pg_backend_pid()
+		group by a.pid, a.state, a.wait_event_type, a.wait_event, a.query
+	`)
+	if err != nil {
+		t.Logf("read the database's sessions: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid int
+		var state, waitType, waitEvent, query, held string
+		if err := rows.Scan(&pid, &state, &waitType, &waitEvent, &query, &held); err != nil {
+			t.Logf("scan a database session: %v", err)
+			return
+		}
+		t.Logf("session %d %s wait=%s/%s advisory_held=[%s] query=%q", pid, state, waitType, waitEvent, held, query)
+	}
 }
 
 // repairCommitPause holds a room's next repair commit in the room's update observers once armed,

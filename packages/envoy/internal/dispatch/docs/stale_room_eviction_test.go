@@ -1077,7 +1077,7 @@ func TestALiveWriteDuringAnEvictionLeavesNoGenerationForTheReload(t *testing.T) 
 	stale := evicted.roomGeneration
 	evicted.mu.Unlock()
 	service.finishLiveWrite(write)
-	if err := service.evictRoom(artifactID, evicted); err != nil {
+	if err := service.evictRoom(ctx, artifactID, evicted); err != nil {
 		t.Fatalf("close the room and forget its state: %v", err)
 	}
 

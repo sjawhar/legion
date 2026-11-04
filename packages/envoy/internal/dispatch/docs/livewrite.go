@@ -53,7 +53,8 @@ type liveWrite struct {
 	artifactID string
 	state      *roomState
 	// clientID authors every item the transaction writes, on fork: the document as the
-	// transaction's one read of it found it, with the transaction's updates applied (forkLive).
+	// transaction's one read of it found it, with the transaction's updates applied (forkLive). A
+	// rebuilt fork authors under a new one (rebuildFork), which replaces it.
 	clientID crdt.ClientID
 	fork     *crdt.Doc
 	// point is the room the transaction's read of the document found, at an exact commit position
@@ -197,30 +198,24 @@ type forkReadMark struct {
 // It also carries what lets the observer classify the update without rendering the room
 // (renderedReplica.changedBy): rendering, the operation's own rendering of the state the update
 // leaves, which the observer takes out once it has consumed the update (renderedReplica.consumed),
-// so no markdown outlives that; and inRoom, which says the room instance the update is published
-// into loaded it already (roomInstance.loadedHead). publishLiveUpdate sets inRoom on the
-// publishing goroutine before the update reaches the room, and the observer reads it only once the
-// room's log has handed the update over.
+// so no markdown outlives that.
 type liveWriteOrigin struct {
 	slot      *suppressSlot
 	rendering publishedRendering
-	inRoom    bool
 	// marginOnly says the update is a margin write (applyMargin) whose fork was warm-built from
 	// the very room document it is applied to, so it cannot change the document's XML fragment
 	// and the room's update observer keeps the rendering it has rather than rendering the
-	// replica again (renderedReplica.observe). The fork was room instance R's whole state, its
-	// delete set included, plus the transaction's earlier updates, which publishLiveWrite
-	// publishes into R before this one, in order, stopping at the first that fails. ygo encodes
-	// every update with the whole delete set of the document it was made on (sjawhar/ygo
-	// crdt/update.go, buildDeleteSet), so every delete the margin update carries is already in R
-	// but the marks map value it replaced, and every struct it adds is an item of the marks map.
-	// The replica is R as of the commit before this one (the update log's order), so neither the
-	// fragment nor its rendering can move. A margin write made on a cold fork is never tagged: its
-	// room stood behind the durable head, and the store it forked holds another process's deletes
-	// R lacks, which the update carries in. Nor is one published into a room replaced or reloaded
-	// since its fork, which can lack deletes the fork held (a browser update whose append failed).
-	// It is set inside the publish's Apply, against the document the update reaches, beside
-	// inRoom (publishLiveUpdate).
+	// replica again (renderedReplica.observe). The fork was room instance R's whole state plus
+	// the transaction's earlier updates, which publishLiveWrite publishes into R before this one,
+	// in order, stopping at the first that fails. ygo encodes a transaction's update with that
+	// transaction's own deletes alone (reearth/ygo#350), so the margin update deletes only the
+	// marks map value it replaced, and every struct it adds is an item of the marks map whose
+	// neighbours R holds. The replica is R as of the commit before this one (the update log's
+	// order), so neither the fragment nor its rendering can move. That proof needs the fork to
+	// have been R: a margin write made on a cold fork, forked from a store that holds what R
+	// lacks, or published into a room replaced or reloaded since its fork, is never tagged, and
+	// its publish is rendered as any other update is. It is set inside the publish's Apply,
+	// against the document the update reaches (publishLiveUpdate).
 	marginOnly bool
 	// shadow is the write's shadow on the publish of its last update, nil on the others
 	// (reachShadow).
@@ -424,6 +419,12 @@ func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc,
 			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
 		}
 	}
+	// Those updates are the write's own, so applying them - not a local transaction - advances the
+	// fork's own client clock, and ygo gives a document whose own clock a non-local transaction
+	// advanced a new client ID at commit, as Yjs's cleanupTransactions does. The transaction's
+	// later operations author their items under that ID, which the lost-write check finds them by
+	// (recordInsertedText); a batch already checked keeps the ID and clock it was recorded with.
+	write.clientID = fork.ClientID()
 	write.fork, write.forkMarkdown = fork, nil
 	return fork, nil
 }
@@ -506,6 +507,7 @@ func (s *Service) warmFork(write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) 
 	if err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}
+	write.clientID = fork.ClientID()
 	// The instance once, rather than its hold and its cursor looked up one after the other: the
 	// two are halves of one *roomInstance, and a room evicted between the lookups would leave the
 	// write a hold from the gone instance beside a nil cursor, a split the gate is not written
@@ -555,6 +557,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 		s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
+	write.clientID = fork.ClientID()
 	// The zero point: no cursor, so no gate. The gate is about a room (refuseRoomBehindHead), and
 	// this write holds none. Its update is a Yjs update, which commutes with whatever its room
 	// takes before the publish, and the room that loads after its publish reads the store, which
@@ -635,42 +638,6 @@ func (w *liveWrite) rendering(fork *crdt.Doc) (renderedTree, bool) {
 func (w *liveWrite) releaseFork() {
 	w.fork = nil
 	w.tree, w.markdown, w.offsets, w.anchorsTree, w.forkMarkdown = nil, "", nil, nil, nil
-}
-
-// forkHeld reports whether fork still carries exactly the content clocks and deletes describe.
-// A deletion advances no clock, so the delete set is half the answer.
-func forkHeld(clocks crdt.StateVector, deletes *crdt.IDSet, fork *crdt.Doc) bool {
-	now := fork.StateVector()
-	if len(clocks) != len(now) {
-		return false
-	}
-	for client, clock := range clocks {
-		if now[client] != clock {
-			return false
-		}
-	}
-	return sameDeletes(deletes, crdt.DeleteSetFromDoc(fork))
-}
-
-// sameDeletes reports whether two delete sets cover the same runs. Ranges are normalized, so
-// equal sets compare equal run for run.
-func sameDeletes(was, now *crdt.IDSet) bool {
-	wasClients, nowClients := was.Clients(), now.Clients()
-	if len(wasClients) != len(nowClients) {
-		return false
-	}
-	for _, client := range wasClients {
-		wasRanges, nowRanges := was.Ranges(client), now.Ranges(client)
-		if len(wasRanges) != len(nowRanges) {
-			return false
-		}
-		for index := range wasRanges {
-			if wasRanges[index] != nowRanges[index] {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // joinRead joins a read of artifactID to the calling transaction, as joinLiveWrite joins a write.
@@ -841,9 +808,8 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 // (readLive), since the room's peers write it while the check walks it, and the walk
 // (pmdoc.AuthoredTextRuns) takes no lock. The room's update observer has already brought its
 // replica up to date with this write, so the check reads the write's own blocks rather than a copy
-// of the whole document. It is deliberately taken without a Yjs transaction of its own: an empty
-// transaction still fires the room's update observers, so it would put an empty update through
-// ygo's persistence worker - a durable doc_updates row - on every edit.
+// of the whole document. It takes no Yjs transaction of its own, which would hold the room's
+// document lock, and so every browser's update to the room, for the whole walk.
 func (s *Service) recordPublishedLoss(write *liveWrite) {
 	if write.loss == nil {
 		write.lost, write.lostVerdict = nil, true
@@ -876,25 +842,23 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 //
 // The update is already durable, so the room's persistence must not append it again: the
 // suppression slot the publish queues is finished by the room's own update observer, with the
-// bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
-// room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
-// stranded persistence on this goroutine, which would otherwise wait on this slot for good.
+// bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns, so
+// the room's worker never waits on it for the rest of this Apply. No close retires the room's
+// worker under this Apply: ygo refuses a close while a caller is inside the room (roomServer).
 //
-// The origin carries rendering, the operation's own rendering of what the update leaves, and
-// inRoom, set where the update reaches the room instance and before it is applied: whether that
-// instance's load already held the update's version (roomInstance.loadedHead). The room's update
-// observer classifies the update by either when it can (renderedReplica.changedBy). marginRoom is
-// the room document a margin write's fork was warm-built from, or the zero pointer
-// (liveWrite.marginRooms): the update is tagged margin-only when the document it reaches is that
-// one (liveWriteOrigin.marginOnly). shadow, on the write's last update, is the shadow whose window
-// the update's drain closes.
+// The origin carries rendering, the operation's own rendering of what the update leaves, which the
+// room's update observer takes when it can (renderedReplica.changedBy). An update the room already
+// held is no commit: ygo calls no update observer for it, so there is nothing for the observer to
+// classify. marginRoom is the room document a margin write's fork was warm-built from, or the zero
+// pointer (liveWrite.marginRooms): the update is tagged margin-only when the document it reaches is
+// that one (liveWriteOrigin.marginOnly). shadow, on the write's last update, is the shadow whose
+// window the update's drain closes.
 func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc], shadow *roomShadow) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &liveWriteOrigin{slot: slot, rendering: rendering, shadow: shadow}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		instance := s.instanceOf(doc)
-		origin.inRoom = instance != nil && int64(version) <= instance.loadedHead
 		// Tagged against the document Apply hands here, not the one the room held when the
 		// publish began (liveWriteOrigin.marginOnly).
 		origin.marginOnly = marginRoom.Value() == doc
@@ -922,7 +886,8 @@ func (s *Service) publishLiveUpdate(room string, update []byte, version persiste
 		return fmt.Errorf("merge committed live document write: %w", err)
 	}
 	if err := s.srv.BroadcastUpdate(ctx, room, applied); err != nil {
-		// A room CloseRoom retired under this Apply has no peer left to tell.
+		// A room the publish's Apply left, and a close retired before this broadcast, has no peer
+		// left to tell.
 		if errors.Is(err, websocket.ErrRoomNotFound) {
 			return nil
 		}

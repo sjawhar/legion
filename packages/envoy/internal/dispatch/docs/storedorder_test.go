@@ -163,10 +163,12 @@ func onlyMismatch(t *testing.T, report StoredOrderReport, kind StoredOrderMismat
 
 // The checker reports each way a stored history fails to replay - a class its prefix does not
 // measure, a version at an update whose fold renders other text, an unrenderable prefix measured as
-// no change, an update stored before one it depends on - and refuses a history a prune rewrote; a
-// history that replays passes, a compacted base is folded as a state and not checked, rows
-// created before the since time are folded unchecked, and a version inside the window recording
-// an update a compaction folded into the base is counted and compared with nothing.
+// no change, an update stored ahead of one it depends on that no later row carries again - and
+// refuses a history a prune rewrote; a history that replays passes, a parked edit a later row
+// carries again passes, one whose predecessor is not stored is counted as awaiting, a compacted
+// base is folded as a state and not checked, rows created before the since time are folded
+// unchecked, and a version inside the window recording an update a compaction folded into the base
+// is counted and compared with nothing.
 func TestStoredOrderChecker(t *testing.T) {
 	t.Parallel()
 	const seed = "First.\n\nSecond.\n"
@@ -236,13 +238,38 @@ func TestStoredOrderChecker(t *testing.T) {
 		}
 	})
 
-	t.Run("a fold left pending", func(t *testing.T) {
+	t.Run("an update stored ahead of one it depends on", func(t *testing.T) {
 		history := newCraftedHistory(t, seed)
-		history.edit(replaceRun("Second.", "Second, edited."))
+		dependency := history.edit(replaceRun("Second.", "Second, edited."))
 		dependent := history.store(history.edit(replaceRun("edited", "edited again")), false)
+		history.store(dependency, true)
 		mismatch := onlyMismatch(t, history.check(time.Time{}), StoredOrderPending)
 		if mismatch.Update != dependent || mismatch.ParkedItems == 0 {
 			t.Fatalf("mismatch = %+v, want update %d leaving parked items", mismatch, dependent)
+		}
+	})
+
+	t.Run("a parked edit a later update carries again", func(t *testing.T) {
+		history := newCraftedHistory(t, seed)
+		before := history.doc.StateVector()
+		history.edit(replaceRun("Second.", "Second, edited."))
+		history.store(history.edit(replaceRun("edited", "edited again")), false)
+		// The commit that integrates a stored parked edit, once its predecessor arrives, carries
+		// the predecessor and the parked structs together.
+		history.version(history.markdown(), history.store(crdt.EncodeStateAsUpdateV1(history.doc, before), true))
+		report := history.check(time.Time{})
+		if !report.Clean() || report.UpdatesAwaitingPredecessor != 0 {
+			t.Fatalf("report = %+v, want a clean check with nothing awaiting", report)
+		}
+	})
+
+	t.Run("an update whose predecessor is not stored", func(t *testing.T) {
+		history := newCraftedHistory(t, seed)
+		history.edit(replaceRun("Second.", "Second, edited."))
+		history.store(history.edit(replaceRun("edited", "edited again")), false)
+		report := history.check(time.Time{})
+		if !report.Clean() || report.UpdatesAwaitingPredecessor != 1 {
+			t.Fatalf("report = %+v, want a clean check with one update awaiting its predecessor", report)
 		}
 	})
 
@@ -665,10 +692,9 @@ func TestStoredOrderRemeasuredClassMovesCreditAndSettlement(t *testing.T) {
 
 // soakTyping is typeIntoDocument's peer - a paragraph inserted at the start, a word typed into it,
 // the paragraph deleted, each its own update, a random time up to gap apart, kept within keepUp's
-// lead of the room - that sends nothing while paused is set. Each update ygo encodes carries the
-// document's whole delete set, so every stored row costs the check more than the one before it;
-// a soak pauses its peers while it checks, so the rows a round stores do not grow with the time its
-// checks take.
+// lead of the room - that sends nothing while paused is set. Every stored row costs the check
+// more than the one before it, so a soak pauses its peers while it checks, and the rows a round
+// stores do not grow with the time its checks take.
 func soakTyping(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration, paused *atomic.Bool) {
 	t.Helper()
 	peer := connectPeer(t, serverURL, artifactID, "alice")

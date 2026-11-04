@@ -16,6 +16,7 @@ import (
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -59,7 +60,7 @@ func renderReuseDocument() string {
 
 // renderPaths is a reading of the service's renderPathCounts.
 type renderPaths struct {
-	observerReused, observerInRoom, observerRendered   uint64
+	observerReused, observerRendered                   uint64
 	observerIncremental, observerUntouched             uint64
 	observerMarginOnly                                 uint64
 	beforeFromReplica, beforeFromWrite, beforeRendered uint64
@@ -70,7 +71,6 @@ func readRenderPaths(service *Service) renderPaths {
 	counts := &service.renderPaths
 	return renderPaths{
 		observerReused:      counts.observerReused.Load(),
-		observerInRoom:      counts.observerInRoom.Load(),
 		observerRendered:    counts.observerRendered.Load(),
 		observerIncremental: counts.observerIncremental.Load(),
 		observerUntouched:   counts.observerUntouched.Load(),
@@ -86,7 +86,6 @@ func readRenderPaths(service *Service) renderPaths {
 func (p renderPaths) minus(base renderPaths) renderPaths {
 	return renderPaths{
 		observerReused:      p.observerReused - base.observerReused,
-		observerInRoom:      p.observerInRoom - base.observerInRoom,
 		observerRendered:    p.observerRendered - base.observerRendered,
 		observerIncremental: p.observerIncremental - base.observerIncremental,
 		observerUntouched:   p.observerUntouched - base.observerUntouched,
@@ -102,7 +101,7 @@ func (p renderPaths) minus(base renderPaths) renderPaths {
 // observed is how many logged updates the update observer classified on any of its paths. A
 // replica's start is no such path: it classifies no update.
 func (p renderPaths) observed() int {
-	return int(p.observerReused + p.observerInRoom + p.observerRendered + p.observerIncremental + p.observerUntouched + p.observerMarginOnly)
+	return int(p.observerReused + p.observerRendered + p.observerIncremental + p.observerUntouched + p.observerMarginOnly)
 }
 
 // withoutCatchUps is p without the counts of the replica's starts (catchUpFromLoad,
@@ -163,6 +162,9 @@ type shadowUpdate struct {
 	// contentChanged.
 	classes int
 	class   bool
+	// parkedOnly says the commit only parked what waits for an edit the room lacks: ygo calls no
+	// update observer for it, and hands the room's persistence nothing of it.
+	parkedOnly bool
 }
 
 type shadowRead struct {
@@ -198,6 +200,13 @@ func watchRenders(t *testing.T, service *Service, artifactID string) *renderShad
 		sh.mu.Unlock()
 		doc.OnUpdate(func(update []byte, origin any) {
 			sh.observed(shadow, log, replica, update, origin)
+		})
+		// As the service's own after-transaction drain does, only for a transaction that changed
+		// no shared type while the log holds an update: a commit that only parked.
+		doc.OnAfterTransaction(func(txn *crdt.Transaction) {
+			if log.Pending() > 0 && len(txn.ChangedTypes()) == 0 {
+				sh.observedWithoutUpdate(shadow, log, replica)
+			}
 		})
 		return nil
 	}
@@ -283,14 +292,25 @@ func (room *shadowRoom) take(sh *renderShadow, log *crdt.UpdateLog) {
 		if err := crdt.ApplyUpdateV1(room.doc, logged.Update, nil); err != nil {
 			sh.failf("the shadow could not apply a logged update: %v", err)
 		}
+		// What the commit parked follows its update, as the replica applies it, so the shadow
+		// holds what the room holds (crdt.LoggedUpdate).
+		if len(logged.Parked) > 0 {
+			if err := crdt.ApplyUpdateV1(room.doc, logged.Parked, nil); err != nil {
+				sh.failf("the shadow could not apply a logged update's parked bytes: %v", err)
+			}
+		}
 		markdown, _, _ := shadowRender(room.doc)
 		changed := markdown == nil || room.markdown == nil || *markdown != *room.markdown
 		room.markdown = markdown
-		room.updates = append(room.updates, &shadowUpdate{update: logged.Update, origin: logged.Origin, changed: changed})
+		room.updates = append(room.updates, &shadowUpdate{
+			update: logged.Update, origin: logged.Origin, changed: changed,
+			parkedOnly: len(logged.Parked) > 0 && bytes.Equal(logged.Update, emptyUpdateV1),
+		})
 	}
 }
 
-// observed runs after the service's own update observer for each commit of room.
+// observed runs after the service's own update observer for each commit of room that changed the
+// document.
 func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica, update []byte, origin any) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -321,9 +341,77 @@ func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica 
 			sh.service.unlockState(sh.artifactID, state)
 		}
 	}
-	// The replica as this commit's observer left it, against the shadow at the same commit: under
-	// the replica's lock, holding every commit its log handed over, and with no commit landing
-	// while the shadow catches up (the replica's log is opened first, so a commit reaches it first).
+	sh.alignLocked(room, log, replica)
+}
+
+// observedWithoutUpdate runs after the service's own after-transaction drain for each transaction
+// of room that changed no shared type (onLoadDocument). A commit that only parked is logged but
+// has no update observer, so this is where it counts as observed - once, by the transaction that
+// made it, which is the one that logged it; a transaction that logged nothing compares nothing.
+func (sh *renderShadow) observedWithoutUpdate(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.closed {
+		log.Drain()
+		return
+	}
+	room.take(sh, log)
+	observed := false
+	for _, candidate := range room.updates {
+		if candidate.parkedOnly && candidate.observed == 0 {
+			candidate.observed++
+			if state := sh.service.lockExistingState(sh.artifactID); state != nil {
+				for _, class := range state.updateClasses {
+					if bytes.Equal(class.update, candidate.update) {
+						candidate.classes++
+						candidate.class = class.contentChanged
+					}
+				}
+				sh.service.unlockState(sh.artifactID, state)
+			}
+			observed = true
+		}
+	}
+	if observed {
+		sh.alignLocked(room, log, replica)
+	}
+}
+
+func TestTheRenderShadowReadsClassesForAParkedOnlyCommit(t *testing.T) {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("pending")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	before := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " later", nil) })
+	roomDoc := newDocumentCopy()
+	log := roomDoc.OpenUpdateLog()
+	if err := crdt.ApplyUpdateV1(roomDoc, crdt.EncodeStateAsUpdateV1(writer, before), nil); err != nil {
+		t.Fatal(err)
+	}
+	if roomDoc.PendingStats().Items == 0 {
+		t.Fatal("the fixture did not park an update")
+	}
+	service := &Service{srv: newRoomServer(ygws.NewServer())}
+	state := newRoomState()
+	state.unsettled = true
+	state.updateClasses = append(state.updateClasses, &queuedClass{documentUpdateClass: documentUpdateClass{update: emptyUpdateV1}})
+	service.rooms.Store("r", state)
+	shadow := &renderShadow{service: service, artifactID: "r"}
+	room := &shadowRoom{}
+	shadow.observedWithoutUpdate(room, log, &renderedReplica{})
+	if len(room.updates) != 1 || !room.updates[0].parkedOnly {
+		t.Fatalf("shadow updates = %+v, want one parked-only commit", room.updates)
+	}
+	if got := room.updates[0].classes; got != 1 {
+		t.Fatalf("shadow observed %d classes, want the deliberately queued class", got)
+	}
+}
+
+// alignLocked compares the replica as this commit's drain left it with the shadow at the same
+// commit: under the replica's lock, holding every commit its log handed over, and with no commit
+// landing while the shadow catches up (the replica's log is opened first, so a commit reaches it
+// first). The caller holds sh.mu.
+func (sh *renderShadow) alignLocked(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica) {
 	replica.mu.Lock()
 	defer replica.mu.Unlock()
 	if replica.doc == nil || replica.log.Pending() > 0 {
@@ -538,6 +626,14 @@ func (sh *renderShadow) check(t *testing.T) {
 			if _, repair := update.origin.(*identityClosureOrigin); repair {
 				continue
 			}
+			// A commit that only parked hands the room's persistence nothing, so no class is
+			// recorded for it (classifyDrained).
+			if update.parkedOnly {
+				if update.classes != 0 {
+					t.Errorf("room %d commit %d: %d classes recorded for a commit that only parked", roomIndex, index, update.classes)
+				}
+				continue
+			}
 			if update.classes != 1 {
 				t.Errorf("room %d commit %d: %d classes recorded", roomIndex, index, update.classes)
 			} else if update.class != update.changed {
@@ -558,7 +654,13 @@ func (sh *renderShadow) check(t *testing.T) {
 		t.Fatalf("copy the room: %v", err)
 	}
 	rendered, asks, _ := shadowRender(snapshot)
-	if !sameRendering(rendered, room.markdown) {
+	if room.doc == nil {
+		// A room that has committed nothing since its load logs no base, so its shadow holds no
+		// document to compare: a publish the loaded room already held is no commit.
+		if len(room.updates) != 0 {
+			t.Errorf("the room logged %d commits and no base", len(room.updates))
+		}
+	} else if !sameRendering(rendered, room.markdown) {
 		t.Errorf("the room renders %s and its shadow %s", describeRendering(rendered), describeRendering(room.markdown))
 	}
 	if room.doc != nil {
@@ -872,12 +974,11 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 }
 
 // E7. A room evicted and reloaded between the write's fork read and its publish has a replica of
-// its own, at another epoch, so the write's rendering is never taken there, though the write's
-// update, which deletes text, carries the old instance's whole delete set. Reloaded before the
+// its own, at another epoch, so the write's rendering is never taken there. Reloaded before the
 // write's append, the room measures the update, which changes one paragraph, so it is spliced in;
-// reloaded after its commit, the room's load already holds it - and with a browser's edit, which
-// appends a block and so is rendered whole, the new replica's foreign count is the fork read's, so
-// only the epoch tells the two apart.
+// reloaded after its commit, the room's load already holds it, so its publish is no commit and
+// nothing classifies it - and with a browser's edit, which appends a block and so is rendered
+// whole, the new replica's foreign count is the fork read's, so only the epoch tells the two apart.
 func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 	t.Parallel()
 	for _, afterCommit := range []bool{false, true} {
@@ -939,7 +1040,7 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 			ledger.publish()
 			sh.check(t)
 			if afterCommit {
-				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerInRoom: 1}, 0)
+				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 0)
 			} else {
 				m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 1}, 0)
 			}
@@ -1039,8 +1140,8 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 	}
 }
 
-// E10. A cold write's publish loads the room from the store, which holds the write, so every one
-// of its updates is already in the room and nothing renders it; each is no content change.
+// E10. A cold write's publish loads the room from the store, which holds the write, so its
+// publish changes nothing in the room: ygo commits nothing for it, and no observer classifies it.
 func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -1051,7 +1152,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 		{
 			name: "one operation",
 			ops:  []model.EditOp{{Op: "replace", Find: "Paragraph 18 opens", With: "Paragraph 18 now opens"}},
-			want: renderPaths{beforeRendered: 1, observerInRoom: 1},
+			want: renderPaths{beforeRendered: 1},
 		},
 		{
 			name: "two operations",
@@ -1059,7 +1160,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 				{Op: "replace", Find: "Paragraph 18 opens", With: "Paragraph 18 now opens"},
 				{Op: "replace", Find: "Paragraph 19 opens", With: "Paragraph 19 now opens"},
 			},
-			want: renderPaths{beforeRendered: 1, beforeFromWrite: 1, observerInRoom: 2},
+			want: renderPaths{beforeRendered: 1, beforeFromWrite: 1},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1135,7 +1236,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 		t.Fatalf("load the room: %v", err)
 	}
 	instance := service.instanceOf(service.srv.GetDoc(artifactID))
-	if instance == nil || instance.loadedHead >= int64(write.versions[0]) {
+	if instance == nil || instance.hold.snapshot().through >= int64(write.versions[0]) {
 		t.Fatalf("the room's load holds the write's version %d (loaded head %+v)", write.versions[0], instance)
 	}
 	ledger.publish()
@@ -1146,7 +1247,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 
 // E12. A document outside the schema: a warm repair's rendering is taken and counted a change; a
 // document pushed outside the schema after the fork read renders, and WARNs, as before; a cold
-// repair is already in the room it loads.
+// repair is already in the room it loads, so its publish commits nothing.
 func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 	t.Parallel()
 	const updatedOutside = "updated document outside Proof schema"
@@ -1209,7 +1310,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 		m := sh.measure()
 		write := sh.write(t, replaceWhole(service, artifactID))
 		sh.check(t)
-		m.expect(t, renderPaths{observerInRoom: 1}, 0)
+		m.expect(t, renderPaths{}, 0)
 		if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
 			t.Errorf("content_changed = %v, want [true]", stored)
 		}
@@ -1278,11 +1379,13 @@ func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 
 // E15. A peer sends the room the second of its two transactions first: its structs wait for the
 // first transaction's, which the room lacks, so the room parks them and the commit integrates
-// nothing. The replica takes what each commit parked beside what it integrated
-// (crdt.LoggedUpdate.Parked, renderedReplica), so it holds what the room holds parked while it
-// waits, and when the first transaction arrives both integrate what waited behind it: the room,
-// the replica and a render of the room all hold the text of both transactions, and the commit
-// that brought them is a content change.
+// nothing. ygo calls no update observer for that commit, but logs it with what it parked
+// (crdt.LoggedUpdate.Parked), and the room drains it right after the transaction
+// (onLoadDocument's after-transaction drain), so the replica holds what the room holds parked
+// while it waits, and the peer's update hook stores those parked bytes (onPeerUpdate). When the
+// first transaction arrives both integrate what waited behind it: the room, the replica and a
+// render of the room all hold the text of both transactions, and the commit that brought them is
+// a content change.
 func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T) {
 	t.Parallel()
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
@@ -1307,7 +1410,7 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 	second := crdt.EncodeStateAsUpdateV1(peer.doc, between)
 
 	m := sh.measure()
-	sendPeerUpdate(t, live, second)
+	sendPeerUpdate(t, service, artifactID, live, second)
 	logged := drainOneLoggedUpdate(t, parked, "the peer's second transaction")
 	if logged.Parked == nil {
 		t.Fatal("the room logged nothing parked for an update whose structs wait for an earlier one of the same peer")
@@ -1320,7 +1423,7 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 		t.Error("the room renders a paragraph of the peer's while the transaction that holds its place is missing")
 	}
 
-	sendPeerUpdate(t, live, first)
+	sendPeerUpdate(t, service, artifactID, live, first)
 	integrated := drainOneLoggedUpdate(t, parked, "the peer's first transaction")
 	if integrated.Parked != nil {
 		t.Error("the commit that fills the gap parked something of its own, so nothing here is tested")
@@ -1339,12 +1442,14 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 		t.Errorf("the replica renders %s and the room %d bytes", describeRendering(markdown), len(rendered))
 	}
 	// The commit that integrated what the room parked rendered two blocks more, so it changed the
-	// room's markdown; the commit that only parked changed nothing of it.
+	// room's markdown; the commit that only parked changed nothing of it. ygo hands the room's
+	// persistence no update for that commit, so what is stored of it is the bytes it parked, which
+	// the peer's update hook stored as no content change.
 	if changed := storedClassOf(t, service, artifactID, integrated.Update); !changed {
 		t.Error("the commit that integrated what the room parked was not recorded as a content change")
 	}
-	if changed := storedClassOf(t, service, artifactID, logged.Update); changed {
-		t.Error("the commit that only parked was recorded as a content change")
+	if changed := storedClassOf(t, service, artifactID, logged.Parked); changed {
+		t.Error("the bytes the commit that only parked kept were recorded as a content change")
 	}
 	m.expect(t, renderPaths{observerUntouched: 1, observerRendered: 1}, 0)
 }
@@ -1366,11 +1471,14 @@ func peerAppendsBlock(t *testing.T, peer *roomPeer, markdown string) {
 	}
 }
 
-// sendPeerUpdate applies one of the peer's updates to the room as its connection would, and
-// returns once the room's update observer has run for it.
-func sendPeerUpdate(t *testing.T, live *crdt.Doc, update []byte) {
+// sendPeerUpdate applies one of the peer's updates to the room as its connection does - through
+// the service's peer update hook (onPeerUpdate) - and returns once the room's update observer, or
+// its after-transaction drain for a commit that changed nothing, has run for it.
+func sendPeerUpdate(t *testing.T, service *Service, artifactID string, live *crdt.Doc, update []byte) {
 	t.Helper()
-	if err := crdt.ApplyUpdateV1(live, update, "peer"); err != nil {
+	if err := service.onPeerUpdate(ygws.PeerUpdateInfo{Room: artifactID, Doc: live, Update: update, Origin: "peer"}, func() error {
+		return crdt.ApplyUpdateV1(live, update, "peer")
+	}); err != nil {
 		t.Fatalf("apply the peer's update to the room: %v", err)
 	}
 }
