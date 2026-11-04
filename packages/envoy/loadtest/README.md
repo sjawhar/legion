@@ -2803,7 +2803,7 @@ shape has changed once under this issue and will change again. It is one object:
            "listener": 9020, "hub_listener": 9030, "nats": 4222, "nats_monitor": 8222,
            "stub_embed": 8443, "load_listeners": [9021, 9022, 9023, 9024]},
  "secrets": {"dispatch_token": "...", "listener_token": "...", "embed_key": "..."},
- "paths": {"remote_root": "/var/lib/dispatch-loadtest"},
+ "paths": {"remote_root": "/var/lib/dispatch-loadtest", "stateful_dir": "dispatch-loadtest"},
  "production_addresses": ["10.139.0.2:5432", "10.138.0.10:4222"]}
 ```
 
@@ -2822,6 +2822,16 @@ shape has changed once under this issue and will change again. It is one object:
   "routes-spec-loop-2026-11-03.txt"}, "unit_life": "5m", "driver_topics": 614,
   "receipt_deadline": "1s", "session_delivery": "consumer"}`. A step at factor 0 is the baseline
   alone and takes the baseline's mixes; every step above it takes the loop's.
+- `paths.stateful_dir` is the directory under `/mnt/stateful_partition` that `up` bind-mounts at
+  `remote_root`, on both machines, at every run. The machines run Container-Optimized OS, where
+  `/var` is mounted `noexec`, so a `loadgen` copied under `/var/lib/...` cannot be executed and
+  every step would fail at its first command. `up` makes that directory with `sudo`, mounts it
+  where it is not mounted already, remounts it `exec,nosuid,nodev`, gives it to the ssh user,
+  reads the mount table back, and refuses before it starts anything when the root is not mounted
+  or still reads `noexec`. The mount is the harness's and not the deployment's, so `check`'s
+  table has no row for it, as it has none for the profiling tunnel. Its default is
+  `remote_root`'s own last element, so a deployment that moves `remote_root` does not silently
+  share one backing directory with another.
 - The other optional keys and their defaults: `ssh_command` `"ssh"`, `ports.pprof_tunnel` `16060`,
   `pprof_tunnel_command` `"ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes"`, `paths.loadgen`
   `"$LOADTEST_ROOT/bin/loadgen"`, `paths.remote_loadgen`, `paths.remote_work`,

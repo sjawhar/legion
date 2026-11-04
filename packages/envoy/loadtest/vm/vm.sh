@@ -64,6 +64,16 @@
 # nothing worth keeping. The tunnel is closed when the step ends, however it ends. It is the
 # harness's own and not the deployment's: no row of check's table reads it.
 #
+# The two machines are Container-Optimized OS, where /var is mounted noexec, so the loadgen copy
+# under <remote_root> cannot be executed where a plain mkdir puts it and every step fails on its
+# first exec (dispatch://INFRA-49). Every up gives each machine's remote root a bind mount of
+# /mnt/stateful_partition/<paths.stateful_dir>, which is COS's own writable partition, remounts
+# it exec,nosuid,nodev and gives it to the ssh user; a root that already carries the mount is
+# remounted rather than mounted again. up then reads the mount table back and is refused by name,
+# before a single container is started, when the root is not mounted exec, because a generator VM
+# that cannot exec loadgen runs no step. Like the tunnel, the mount is the harness's own and not
+# the deployment's: no row of check's table reads it.
+#
 # Dispatch's identity is DISPATCH_IDENTITY=header:X-Dispatch-User with
 # DISPATCH_IDENTITY_HEADER_TRUSTED=1 and a shared agent token, as stack.sh's start_dispatch sets
 # them: the deployment has no front door, no Tailscale and no OAuth, and the report says so. Its
@@ -91,7 +101,7 @@
 #              "listener": 9020, "hub_listener": 9030, "nats": 4222, "nats_monitor": 8222,
 #              "stub_embed": 8443, "load_listeners": [9021, 9022, 9023, 9024]},
 #    "secrets": {"dispatch_token": "...", "listener_token": "...", "embed_key": "..."},
-#    "paths": {"remote_root": "/var/lib/dispatch-loadtest"},
+#    "paths": {"remote_root": "/var/lib/dispatch-loadtest", "stateful_dir": "dispatch-loadtest"},
 #    "production_addresses": ["10.139.0.2:5432", "10.138.0.10:4222"]}
 #
 # cloudsql.expect is read as it is written: each key is a path into the Cloud SQL Admin API's
@@ -103,9 +113,11 @@
 # "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes" (the command that opens it, run on the
 # generator VM; the forward and the application VM are appended to it), paths.loadgen
 # "$LOADTEST_ROOT/bin/loadgen", paths.remote_loadgen "<remote_root>/loadgen", paths.nats_store
-# "<remote_root>/nats", paths.cert "<remote_root>/stub-embed.pem", paths.cgroup
-# "/sys/fs/cgroup/system.slice/docker-%s.scope", token_url, sqladmin and compute (the Google
-# endpoints, for a test server), and the whole of load (below).
+# "<remote_root>/nats", paths.cert "<remote_root>/stub-embed.pem", paths.stateful_dir
+# "<remote_root's own last element>" (the directory under /mnt/stateful_partition that
+# remote_root is a bind mount of), paths.cgroup "/sys/fs/cgroup/system.slice/docker-%s.scope",
+# token_url, sqladmin and compute (the Google endpoints, for a test server), and the whole of
+# load (below).
 #
 # The load a step sends, from R5. The baseline is dispatch://INFRA-598's 1x, which every step
 # carries as it is; the loop's own rates are multiplied by the step's factor, so a step at factor
@@ -166,6 +178,13 @@ TUNNEL_POLL_SECONDS=2
 # answers nothing.
 PPROF_TUNNEL_PORT_DEFAULT=16060
 PPROF_TUNNEL_COMMAND_DEFAULT="ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes"
+# COS's own writable partition, which is where the remote root's backing directory is made: /var
+# is mounted noexec on these machines and this partition is not, so a bind mount of a directory
+# under it is what makes loadgen runnable under <remote_root> (dispatch://INFRA-49). The options
+# the remount gives that mount: exec because loadgen runs from there, nosuid and nodev because
+# nothing under it is a device or needs a set-user-id bit.
+STATEFUL_PARTITION=/mnt/stateful_partition
+REMOTE_ROOT_MOUNT_OPTIONS=exec,nosuid,nodev
 # The Google endpoints and the metadata server's token, each overridable in the deployment file
 # so a test server can stand in for them (cloudsqlcpu.go does the same).
 TOKEN_URL_DEFAULT=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
@@ -752,6 +771,71 @@ endpoints() {
   )
 }
 
+# ---- the remote root programs are executed from ---------------------------------------------------
+
+# stateful_dir: the directory under the stateful partition that remote_root is a bind mount of.
+# Its name is remote_root's own last element unless paths.stateful_dir gives another, so a
+# deployment that moves remote_root does not silently go on sharing one backing directory with
+# the deployment it moved away from.
+stateful_dir() {
+  local root
+  root=$(remote_root)
+  printf '%s/%s\n' "$STATEFUL_PARTITION" "$(cfg_valid name .paths.stateful_dir "${root##*/}")"
+}
+
+# mounted_options VM DIR: the options DIR is mounted with on VM, empty when nothing is mounted
+# there. It is the kernel's own record, read back out of mount's table rather than taken from
+# what a mount was asked for, and in that table an option is named only where it differs from
+# the default: exec is the absence of noexec.
+mounted_options() {
+  local vm=$1 dir=$2 opts
+  # shellcheck disable=SC2016 # expanded by the VM's sh
+  opts=$(on_vm "$vm" sh -c 'mount | while read -r src keyword at kind fs opts; do if [ "$keyword" = on ] && [ "$at" = "$1" ]; then printf "%s\n" "$opts"; fi; done; exit 0' sh "$dir") ||
+    die "up: reading the mount table of the $vm VM failed"
+  opts=${opts##*$'\n'}
+  opts=${opts#(}
+  printf '%s\n' "${opts%)}"
+}
+
+# remote_root_mount VM: remote_root on VM made a directory programs can be executed from,
+# whatever state an earlier run left the machine in. These are Container-Optimized OS machines,
+# where /var is mounted noexec, so loadgen copied under remote_root cannot be executed where a
+# plain mkdir puts it (dispatch://INFRA-49): the root is a bind mount of a directory under the
+# stateful partition, remounted exec. That directory and the root are made with sudo, because
+# neither partition is the ssh user's to write in, and the root is given to that user afterwards,
+# because no other command of this script uses sudo. A root that already carries a mount is
+# remounted and not mounted again, so a second up stacks no second mount on it. The mount is
+# then read back and the whole of up refused when it is not exec: a generator VM that cannot
+# exec loadgen runs no step, and up is a cheaper place to find that out than the first step.
+remote_root_mount() {
+  local vm=$1 root backing opts
+  root=$(remote_root)
+  backing=$(stateful_dir)
+  on_vm "$vm" sudo mkdir -p -- "$backing" ||
+    die "up: making $backing on the $vm VM failed: it is the directory $root is a bind mount of, and $root is noexec without it"
+  on_vm "$vm" sudo mkdir -p -- "$root" || die "up: making $root on the $vm VM failed"
+  if [ -z "$(mounted_options "$vm" "$root")" ]; then
+    on_vm "$vm" sudo mount --bind -- "$backing" "$root" ||
+      die "up: bind-mounting $backing at $root on the $vm VM failed"
+  else
+    note "$root already carries a mount on the $vm VM: up remounts it rather than stacking a second one on it"
+  fi
+  on_vm "$vm" sudo mount -o "remount,bind,$REMOTE_ROOT_MOUNT_OPTIONS" -- "$backing" "$root" ||
+    die "up: remounting $root $REMOTE_ROOT_MOUNT_OPTIONS on the $vm VM failed"
+  # shellcheck disable=SC2016 # expanded by the VM's sh
+  on_vm "$vm" sh -c 'sudo chown -- "$(id -un)" "$1"' sh "$root" ||
+    die "up: giving $root on the $vm VM to the ssh user failed: every later command of this script runs without sudo"
+  opts=$(mounted_options "$vm" "$root")
+  [ -n "$opts" ] ||
+    die "up: nothing is mounted at $root on the $vm VM after the bind mount of $backing: loadgen cannot be executed under $root there, so no step of this deployment would run"
+  case ",$opts," in
+    *,noexec,*)
+      die "up: $root on the $vm VM is mounted $opts, which is noexec: loadgen cannot be executed under $root there, so no step of this deployment would run"
+      ;;
+  esac
+  note "$root on the $vm VM is $backing, mounted $opts"
+}
+
 # ---- up -------------------------------------------------------------------------------------------
 
 cmd_up() {
@@ -761,8 +845,12 @@ cmd_up() {
   local role bin
   bin=$(loadgen_bin)
   [ -x "$bin" ] || die "up: no loadgen at $bin: build it (packages/envoy/loadtest/stack.sh setup) or name it with --loadgen"
-  on_vm app mkdir -p -- "$(remote_root)" "$(nats_store)" || die "making $(remote_root) on the application VM failed"
-  on_vm generator mkdir -p -- "$(remote_root)" "$(remote_work)" || die "making $(remote_root) on the generator VM failed"
+  # Each machine's remote root first, and executable: /var is noexec on these VMs, so the copy
+  # below runs from nowhere under $(remote_root) until that mount is there.
+  remote_root_mount app
+  remote_root_mount generator
+  on_vm app mkdir -p -- "$(nats_store)" || die "up: making $(nats_store) on the application VM failed"
+  on_vm generator mkdir -p -- "$(remote_work)" || die "up: making $(remote_work) on the generator VM failed"
   put_file generator "$bin" "$(remote_loadgen)"
   on_vm generator chmod 755 "$(remote_loadgen)" || die "chmod of $(remote_loadgen) on the generator VM failed"
   # The stub embedder first: Dispatch reads its certificate at startup (SSL_CERT_FILE), so a
@@ -872,9 +960,11 @@ cmd_check() {
   check_run_duration
   check_production_refused
   printf '| check | expected | found | ok |\n| --- | --- | --- | --- |\n%s' "$CHECK_ROWS"
-  # The table is the deployment's, so the tunnel is not in it: it is the harness's own, opened
-  # on the generator VM by each step and closed with it, and between steps there is nothing of
-  # it on either VM for check to read.
+  # The table is the deployment's, so neither the tunnel nor the remote root's mount is in it.
+  # The tunnel is the harness's own, opened on the generator VM by each step and closed with it,
+  # and between steps there is nothing of it on either VM for check to read. The mount is the
+  # harness's own too: up makes it on both VMs because /var is noexec there, and what check reads
+  # back is the deployment, not the harness's way around the machines it was given.
   note "check: the step's profiling tunnel is no row of this table. It is the harness's, not the deployment's: step opens it on the generator VM (port $(pprof_tunnel_port) to 127.0.0.1:$(port_of pprof) on the application VM), proves it, and closes it when the step ends."
   if ((CHECK_BAD > 0)); then
     note "check: $CHECK_BAD of the readings differ from the specification; the table above names each"

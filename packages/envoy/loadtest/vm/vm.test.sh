@@ -46,7 +46,12 @@
 # gives loadgen that tunnel as -pprof, takes its local port from the deployment file and 16060
 # when it names none, closes it when the step ends -- no process and no pid file left on the
 # generator VM -- and refuses the step by name, before any load and leaving no directory, when
-# the tunnel does not answer.
+# the tunnel does not answer; (n) up gives each VM's remote root a bind mount of a directory
+# under the stateful partition, made with sudo, remounted exec,nosuid,nodev and given to the ssh
+# user, all of it before the loadgen copy and any container, mounts nothing a second time over a
+# VM that already carries the mount, takes the backing directory's name from remote_root's own
+# last element unless the deployment file names another, and is refused by name, with no
+# container started, when that mount cannot be made or is not exec.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -384,6 +389,75 @@ trap 'exit 0' TERM INT
 while :; do "$REAL_SLEEP" 0.2; done
 EOF
 
+cat >"$bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+# The fake sudo: records the call and runs it here. This pod is not root and has no
+# /mnt/stateful_partition, so a path under the stateful partition is made under FAKE_DIR/stateful
+# instead; the log keeps the path vm.sh asked for, which is what the cases read.
+set -u
+printf 'sudo\t%s\t%s\n' "${FAKE_SSH_TARGET:-local}" "$*" >>"$FAKE_DIR/actions.log"
+args=()
+for a in "$@"; do
+  case $a in
+    /mnt/stateful_partition*) args+=("$FAKE_DIR/stateful${a#/mnt/stateful_partition}") ;;
+    *) args+=("$a") ;;
+  esac
+done
+exec "${args[@]}"
+EOF
+
+cat >"$bin/mount" <<'EOF'
+#!/usr/bin/env bash
+# The fake mount: a mount table of its own for each ssh target, under FAKE_DIR/mounts. With no
+# argument it prints that target's table in the form mount itself prints it, `SRC on DIR type
+# TYPE (OPTS)`; `--bind SRC DIR` adds a line and `-o remount,... SRC DIR` rewrites DIR's. A line
+# carries the options the mount was given, less remount, bind and exec, as the kernel's own
+# table does: exec is the absence of noexec. FAKE_DIR/mount-refuses makes every mounting call
+# fail, as a VM whose stateful partition cannot be bound does, and FAKE_DIR/mount-noexec makes
+# every mount noexec whatever it was asked for, which is a VM where the remount does not take.
+set -u
+printf 'mount\t%s\t%s\n' "${FAKE_SSH_TARGET:-local}" "$*" >>"$FAKE_DIR/actions.log"
+mkdir -p "$FAKE_DIR/mounts"
+table=$FAKE_DIR/mounts/${FAKE_SSH_TARGET:-local}
+[ -f "$table" ] || : >"$table"
+[ $# -gt 0 ] || { cat "$table"; exit 0; }
+[ ! -f "$FAKE_DIR/mount-refuses" ] || { echo 'fake mount: operation not permitted' >&2; exit 32; }
+opts="" args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) opts=$2; shift 2 ;;
+    --) shift ;;
+    -*) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+[ ${#args[@]} -eq 2 ] || { echo "fake mount: no source and target in '$*'" >&2; exit 2; }
+kept=rw
+for o in ${opts//,/ }; do
+  case $o in
+    rw | remount | bind | exec) ;;
+    *) kept="$kept,$o" ;;
+  esac
+done
+[ ! -f "$FAKE_DIR/mount-noexec" ] || kept="$kept,noexec"
+left=$(grep -vF -- " on ${args[1]} type " "$table" || true)
+{
+  [ -z "$left" ] || printf '%s\n' "$left"
+  printf '%s on %s type none (%s)\n' "${args[0]}" "${args[1]}" "$kept"
+} >"$table.new"
+mv -- "$table.new" "$table"
+exit 0
+EOF
+
+cat >"$bin/chown" <<'EOF'
+#!/usr/bin/env bash
+# The fake chown: records the call. This pod is not root and the directories a VM's file system
+# stands for are its own already, so what a case reads is that up asked, and for which user.
+set -u
+printf 'chown\t%s\t%s\n' "${FAKE_SSH_TARGET:-local}" "$*" >>"$FAKE_DIR/actions.log"
+exit 0
+EOF
+
 chmod +x "$bin"/*
 export PATH="$bin:$PATH"
 
@@ -461,6 +535,12 @@ run_dir() { printf '%s/%s\n' "$LOADTEST_VM_ROOT" "$(cat "$LOADTEST_VM_ROOT/curre
 # docker_run_line ROLE: the `docker run` call that started ROLE, the last one if it was started
 # more than once.
 docker_run_line() { grep -- " run --name $1 " "$fake/docker.log" | tail -n1; }
+
+# sudo_log TARGET: every command vm.sh ran with sudo on TARGET, one a line.
+sudo_log() { awk -F'\t' -v t="$1" '$1 == "sudo" && $2 == t { print $3 }' "$fake/actions.log"; }
+
+# line_at PATTERN: the first line of the action log that matches PATTERN, by number.
+line_at() { grep -n -- "$1" "$fake/actions.log" | head -n1 | cut -d: -f1; }
 
 # actions: the ordered actions of the deployment, one word per line, from every fake's log: a
 # container stopped or started, the database dropped or made, the JetStream store emptied and
@@ -896,5 +976,92 @@ grep -q 'pool acquire waiters p50 = 0' "$tmp/out" ||
   fail "a refused step left its directory, so it cannot run again under its own name"
 rm -f "$fake/tunnel-refuses"
 pass "a step whose profiling tunnel does not answer is refused by name, before any load, and leaves no directory behind"
+
+# ---- (n) the remote root is a directory loadgen can be executed from -----------------------------
+
+# The VMs are Container-Optimized OS, where /var is mounted noexec: without this mount up copies
+# loadgen where it cannot be run and every step fails on its first exec (dispatch://INFRA-49).
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed: see the output above"
+for target in lt@10.138.0.21 lt@10.138.0.22; do
+  sudo_log "$target" | grep -qxF -- "mkdir -p -- /mnt/stateful_partition/app" ||
+    fail "up did not make the backing directory under the stateful partition with sudo on $target: $(sudo_log "$target")"
+  sudo_log "$target" | grep -qxF -- "mount --bind -- /mnt/stateful_partition/app $remote/app" ||
+    fail "up did not bind-mount the backing directory at the remote root on $target: $(sudo_log "$target")"
+  sudo_log "$target" | grep -qxF -- "mount -o remount,bind,exec,nosuid,nodev -- /mnt/stateful_partition/app $remote/app" ||
+    fail "up did not remount the remote root exec,nosuid,nodev on $target: $(sudo_log "$target")"
+  sudo_log "$target" | grep -qxF -- "chown -- $(id -un) $remote/app" ||
+    fail "up did not give the remote root to the ssh user on $target: $(sudo_log "$target")"
+done
+[ -d "$fake/stateful/app" ] || fail "up made no backing directory under the stateful partition"
+pass "up makes the backing directory under the stateful partition with sudo, bind-mounts it at the remote root, remounts it exec,nosuid,nodev and gives it to the ssh user, on both VMs"
+
+mount_at=$(line_at 'chown -- ') copy_at=$(line_at "$remote/app/loadgen") start_at=$(line_at 'run --name ')
+[ -n "$mount_at" ] && [ -n "$copy_at" ] && [ -n "$start_at" ] && ((mount_at < copy_at)) && ((copy_at < start_at)) ||
+  fail "up did not mount both remote roots (through line ${mount_at:-none}) before the loadgen copy (${copy_at:-none}) and the first container (${start_at:-none})"
+pass "up mounts both remote roots before it copies loadgen onto the generator VM and before any container starts"
+
+# A second up over VMs that already carry the mount remounts it and stacks no second mount.
+: >"$fake/actions.log"
+run_vm up --config "$config"
+((RC == 0)) || fail "a second up over VMs that already carry the mount failed: see the output above"
+for target in lt@10.138.0.21 lt@10.138.0.22; do
+  sudo_log "$target" | grep -q -- '--bind --' &&
+    fail "a second up mounted the remote root again on $target, stacking a second mount on it"
+  sudo_log "$target" | grep -qxF -- "mount -o remount,bind,exec,nosuid,nodev -- /mnt/stateful_partition/app $remote/app" ||
+    fail "a second up did not remount the remote root on $target: $(sudo_log "$target")"
+done
+[ "$(actions | grep -c '^start ')" = 9 ] ||
+  fail "a second up started $(actions | grep -c '^start ') containers, not the 9 of the specification"
+pass "a second up over a VM that already carries the mount remounts it, mounts it no second time, and starts the deployment all the same"
+
+# A mount that cannot be made refuses up by name, before a container is started: a generator VM
+# that cannot exec loadgen runs no step at all.
+reset_fake
+: >"$fake/mount-refuses"
+run_vm up --config "$config"
+((RC != 0)) || fail "up ran over a VM whose remote root cannot be mounted"
+grep -q "up: bind-mounting /mnt/stateful_partition/app at $remote/app on the app VM failed" "$tmp/out" ||
+  fail "up's refusal does not name the mount it could not make"
+[ ! -s "$fake/docker.log" ] || fail "up started a container although the remote root could not be mounted"
+rm -f "$fake/mount-refuses"
+pass "up is refused by name, with no container started, when the remote root cannot be mounted"
+
+reset_fake
+: >"$fake/mount-noexec"
+run_vm up --config "$config"
+((RC != 0)) || fail "up ran over a VM whose remote root is mounted noexec"
+grep -q "up: $remote/app on the app VM is mounted .*noexec" "$tmp/out" ||
+  fail "up's refusal does not name the root it read back noexec"
+grep -q 'no step of this deployment would run' "$tmp/out" ||
+  fail "up's refusal does not say what a noexec remote root costs"
+[ ! -s "$fake/docker.log" ] || fail "up started a container although the remote root is noexec"
+rm -f "$fake/mount-noexec"
+pass "up is refused by name, with no container started, when the remote root is mounted but not exec"
+
+# The backing directory follows the remote root's own last element, so a deployment that moves
+# the root does not go on sharing the directory of the one it moved away from.
+reset_fake
+jq --arg r "$remote/elsewhere" '.paths.remote_root = $r' "$config" >"$tmp/moved.json"
+run_vm up --config "$tmp/moved.json"
+((RC == 0)) || fail "up failed on a deployment file whose remote root is elsewhere: see the output above"
+for target in lt@10.138.0.21 lt@10.138.0.22; do
+  sudo_log "$target" | grep -qxF -- "mkdir -p -- /mnt/stateful_partition/elsewhere" ||
+    fail "the backing directory does not follow the remote root's last element on $target: $(sudo_log "$target")"
+  sudo_log "$target" | grep -qxF -- "mount --bind -- /mnt/stateful_partition/elsewhere $remote/elsewhere" ||
+    fail "the moved remote root is not a bind mount of the directory its last element names on $target: $(sudo_log "$target")"
+done
+pass "the backing directory's name is the remote root's own last element"
+
+reset_fake
+jq --arg r "$remote/elsewhere" '.paths.remote_root = $r | .paths.stateful_dir = "loadtest-backing"' "$config" >"$tmp/named.json"
+run_vm up --config "$tmp/named.json"
+((RC == 0)) || fail "up failed on a deployment file that names its own stateful directory: see the output above"
+for target in lt@10.138.0.21 lt@10.138.0.22; do
+  sudo_log "$target" | grep -qxF -- "mount --bind -- /mnt/stateful_partition/loadtest-backing $remote/elsewhere" ||
+    fail "paths.stateful_dir is not the backing directory on $target: $(sudo_log "$target")"
+done
+pass "the deployment file names the backing directory under the stateful partition"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'
