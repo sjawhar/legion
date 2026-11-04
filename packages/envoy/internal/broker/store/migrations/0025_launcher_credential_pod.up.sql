@@ -1,0 +1,10 @@
+-- packages/envoy/internal/broker/store/migrations/0025_launcher_credential_pod.up.sql
+-- A service's token login proves which pod presented the token (the kubernetes.io pod uid claim of
+-- the projected ServiceAccount token, enroll.AccountClaims.PodUID), and until now the broker kept
+-- that only in the launcher_credential.token_login audit row. Record it on the credential too, so
+-- Create can hold a pod that logs in as its own account to enrolling its own pod alone
+-- (enroll.Service.Create, ErrPodSelfEnrollOnly). It is null for a token bound to no pod, such as one
+-- `kubectl create token` mints, and for every login a person approved, whose subject is null.
+-- Each login moves its account's one credential to the logging-in pod, so IssueTokenLogin's upsert
+-- writes this column on every login, not only the first.
+alter table launcher_credentials add column pod_uid text;

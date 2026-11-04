@@ -416,3 +416,35 @@ func TestAnyoneRevokesAServicesTokenLoginAndItLogsInAgain(t *testing.T) {
 		t.Fatalf("the new credential enrolls = %d %s, want 201", status, body)
 	}
 }
+
+// TestAPodsOwnLoginEnrolsOnlyItsOwnPodOverTheWire: a login whose token came from a pod enrols that
+// pod when the pod presents its own token, and any other pod of the same account is 403
+// POD_SELF_ENROLL_ONLY. A pod running as another account — every pod this login launches — enrols
+// as before.
+func TestAPodsOwnLoginEnrolsOnlyItsOwnPodOverTheWire(t *testing.T) {
+	ts := newTestServer(t)
+	key := newSigningKey(t)
+	ownPod := uuid.NewString()
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, ownPod, 20*time.Minute), ts.daemonRequest(t, key))
+	if status != http.StatusOK {
+		t.Fatalf("token login = %d %s, want 200", status, body)
+	}
+	credentialID := decode[wireTokenLogin](t, body).CredentialID
+
+	enrol := func(podUID string) (int, []byte) {
+		t.Helper()
+		return ts.launcher(t, key, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+			"kind": "pod", "runtime_id": podUID, "thumbprint": thumbprintOf(t, newSigningKey(t)),
+			"pod_token": ts.podToken(t, daemonAccount, podUID),
+		})
+	}
+	if status, body := enrol(uuid.NewString()); status != http.StatusForbidden || decode[wireError](t, body).Code != "POD_SELF_ENROLL_ONLY" {
+		t.Fatalf("enrol another pod of its own account = %d %s, want 403 POD_SELF_ENROLL_ONLY", status, body)
+	}
+	if status, body := enrol(ownPod); status != http.StatusCreated {
+		t.Fatalf("enrol its own pod = %d %s, want 201", status, body)
+	}
+	if status, body := ts.enrollPodWith(t, key, credentialID); status != http.StatusCreated {
+		t.Fatalf("enrol a pod of the account it launches = %d %s, want 201", status, body)
+	}
+}

@@ -54,6 +54,15 @@ var (
 	// login (RevokeCredential), or its lease, ends it.
 	ErrVMEndsByRevokingItsLogin = errors.New("a VM's enrollment ends when its machine login is revoked on Dispatch's machine-login page, or with its lease; no launcher credential ends it")
 	ErrPodTokenRequired         = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrPodSelfEnrollOnly refuses a pod enrollment whose launcher credential is the enrolling
+	// pod's own token login — its subject is the very ServiceAccount the presented pod token
+	// proves — and whose runtime id names another pod. Such a credential belongs to one pod, the
+	// pod whose token logged in (launcher_credentials.pod_uid), so it enrols that pod and nothing
+	// else, the narrowing kind vm makes with ErrVMIdentity. It never refuses a launcher's
+	// enrollment of the pods it launches, the Legion daemon's included: BROKER_SERVICE_LOGINS may
+	// not name an account BROKER_SERVICES binds for a service's pods (config.Load), so a
+	// launcher's subject is never the subject of a pod token it presents.
+	ErrPodSelfEnrollOnly = errors.New("a pod's own machine login enrols that pod alone")
 	// ErrVMIdentity is a VM identity token that does not prove this VM: one that does not verify
 	// (another issuer or audience, a bad signature, no verified email, no Compute Engine claims),
 	// another instance's or account's token, or a vm enrollment under a launcher credential that
@@ -80,6 +89,11 @@ type Credential struct {
 	// ServiceAccount, or a VM's runtime id (VMClaims.RuntimeID); nil for every login a person
 	// approved.
 	Subject *string
+	// PodUID is the pod whose token a Kubernetes ServiceAccount's login presented
+	// (AccountClaims.PodUID, launcher_credentials.pod_uid): the one pod that credential belongs
+	// to. "" for a token bound to no pod, such as one `kubectl create token` mints, for a VM's
+	// login, and for every login a person approved.
+	PodUID string
 }
 
 // LiveCredential is one of the machine logins a person may revoke, as their machine-login page
@@ -236,9 +250,11 @@ type TokenLogin struct {
 // the same id, so a login proving the key the credential already holds changes only its expiry and
 // every pod the account enrolled stays under it. A VM's subject is its own runtime id, so each VM of
 // a fleet holds a credential of its own and one VM's login never moves another's. Its host is
-// login's. Each login writes a launcher_credential.token_login audit row naming the subject, the
-// pod the token is bound to, the key, and both expiries. A key another live credential holds is a
-// unique violation (store.IsUniqueViolation), and nothing is written.
+// login's, and its pod the one whose token it presented, which moves with the credential: a pod of
+// the account that logs in next takes it over, and Create holds each to enrolling its own pod
+// (ErrPodSelfEnrollOnly). Each login writes a launcher_credential.token_login audit row naming the
+// subject, the pod the token is bound to, the key, and both expiries. A key another live
+// credential holds is a unique violation (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.UUID, error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -246,13 +262,13 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 	}
 	defer tx.Rollback(ctx)
 	var id uuid.UUID
-	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
-		values ($1, null, $2, $3, $4, $5, null, $6, $7)
+	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, pod_uid, expires_at)
+		values ($1, null, $2, $3, $4, $5, null, $6, nullif($7::text,''), $8)
 		on conflict (subject) where subject is not null and revoked_at is null
 		do update set service=excluded.service, host=excluded.host, key_thumbprint=excluded.key_thumbprint,
-			public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
+			public_jwk=excluded.public_jwk, pod_uid=excluded.pod_uid, expires_at=excluded.expires_at
 		returning id`,
-		uuid.New(), login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
+		uuid.New(), login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.PodUID, login.Expires).Scan(&id); err != nil {
 		return uuid.Nil, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
@@ -361,8 +377,8 @@ func (s *Service) VMService(vm VMClaims) (string, error) {
 // treated the same way (never silently swallowed into an empty Credential).
 func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
 	var cred Credential
-	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject from launcher_credentials where id=$1`, id).
-		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject, coalesce(pod_uid,'') from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject, &cred.PodUID); err != nil {
 		return Credential{}, err
 	}
 	return cred, nil
@@ -377,7 +393,9 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 // A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
-// not prove this pod is ErrPodIdentity. A vm enrollment is a Google VM enrolling itself: its runtime
+// not prove this pod is ErrPodIdentity. A pod presenting its own token under a login of its own
+// account — the self-enrolling pod of selfEnrolment — enrols the pod that login belongs to and no
+// other pod of that account (ErrPodSelfEnrollOnly). A vm enrollment is a Google VM enrolling itself: its runtime
 // id must be the one its VM identity token proves (VMClaims.RuntimeID), and its credential the one
 // that VM's own login holds (its subject is that runtime id), so one VM of a fleet never enrolls
 // another; a VM token past its expiry is ErrVMTokenExpired, and every other mismatch ErrVMIdentity.
@@ -404,6 +422,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		}
 		if claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
+		}
+		if selfEnrolment(cred, claims) && cred.PodUID != in.RuntimeID {
+			return Enrollment{}, fmt.Errorf("%w: this login is pod %s's, the enrollment names %q", ErrPodSelfEnrollOnly, cred.PodUID, in.RuntimeID)
 		}
 		in.Subject = &claims.Subject
 	}
@@ -833,6 +854,21 @@ func authorized(cred Credential, kind string, operator *string) bool {
 		return false
 	}
 	return true
+}
+
+// selfEnrolment reports whether cred is the enrolling pod's own machine login rather than a
+// launcher's: a token login (no operator, a subject) whose subject is the very ServiceAccount the
+// pod token it presents proves. Only a pod running as that account holds such a login, so Create
+// holds it to the one pod the login belongs to (Credential.PodUID, ErrPodSelfEnrollOnly), as kind
+// vm holds a VM's login to its own VM.
+//
+// A launcher is never one. The accounts a service's pods run as (BROKER_SERVICES) and the accounts
+// that log a service in (BROKER_SERVICE_LOGINS) are disjoint sets, which config.Load refuses to
+// let overlap, "since every such pod holds a token for it": so the Legion daemon's login, whose
+// subject is the daemon's own account, never matches the subject of a worker pod's token, and the
+// pods it launches enrol as before.
+func selfEnrolment(cred Credential, claims PodClaims) bool {
+	return cred.Operator == nil && cred.Subject != nil && *cred.Subject == claims.Subject
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request

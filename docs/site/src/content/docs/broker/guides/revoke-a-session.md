@@ -27,11 +27,16 @@ and stop it starting more, [revoke its machine login](#end-a-machines-login).
 
 Dispatch's **Settings** page lists your **Live grants**: every live grant of a session you operate,
 whether it was granted automatically or approved by someone, and every grant you approved on
-anyone's session. Each row names its enrollment, its secrets, how it was **Granted**
+anyone's session. It also lists, to everyone, every live grant that belongs to no person: one a
+pod or a VM got without asking, under a machine login that is a service's rather than a person's.
+Nobody operates such a session and nobody approved such a grant, so without this nobody would see
+what a pod had taken. Each row names its enrollment, its secrets, how it was **Granted**
 (**Automatically**, or **Approved by** an email), and when it was created and expires. Click
 **Revoke** to end one at once; the session's next read of it is refused `GRANT_NOT_LIVE`. The
 broker allows it when you are the grant's approver or its session's operator, and refuses anyone
-else `NOT_APPROVER`.
+else `NOT_APPROVER` — so a grant that belongs to no person is ended by
+[revoking the service's machine login](#end-a-machines-login), which ends every session it
+started, rather than one row at a time.
 
 ```console
 $ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
