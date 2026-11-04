@@ -1216,12 +1216,7 @@ func holdsNul(node *Node) bool {
 		return true
 	}
 	if attrsHoldNul(node.Attrs) {
-		if !IsTypedBlock(node.Type) {
-			return true
-		}
-		if id, _ := node.Attrs[BlockIDAttr].(string); strings.IndexByte(id, 0) >= 0 {
-			return true
-		}
+		return true
 	}
 	for _, mark := range node.Marks {
 		if attrsHoldNul(mark.Attrs) {
@@ -1244,16 +1239,14 @@ func attrsHoldNul(attrs Attrs) bool {
 // rendering would write as it is - in its text, in a string attribute a node or mark writes (a
 // link's href, an image's alt, a code block's language), or in a block's id - as U+FFFD
 // (nulAsReplacement). node may be asWritten's input, so the copy's attributes and marks are its
-// own before any is written. A typed block's other attributes are written quoted
-// (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back, so they keep
-// it; its id is written as TypedBlockIDAttribute writes it, with no such escape.
+// own before any is written. A typed block's attributes are its own case only in that they are
+// written quoted (renderTypedAttributes): that value holds its characters as they are, since the
+// browser editor's parser ends it at the next quote and decodes character references alone, so a
+// U+0000 there is written as U+FFFD like every other, which is what that parser's preprocessor
+// reads one as.
 func withNulsWritten(node *Node) *Node {
 	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: nulAsReplacement(node.Text), Marks: cloneMarks(node.Marks), Children: node.Children}
-	if !IsTypedBlock(out.Type) {
-		writeNulsInAttrs(out.Attrs)
-	} else if id, ok := out.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
-		out.Attrs[BlockIDAttr] = nulAsReplacement(id)
-	}
+	writeNulsInAttrs(out.Attrs)
 	for _, mark := range out.Marks {
 		writeNulsInAttrs(mark.Attrs)
 	}
