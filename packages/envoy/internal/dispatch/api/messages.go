@@ -770,6 +770,18 @@ func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Messag
 	return reads, nil
 }
 
+// listIssueRootMessagesQuery is every root message of one issue, oldest first. It is named
+// rather than written into its handler so that the plan test and the equality test read the
+// statement the route runs, not a copy of it: messages_issue_roots (20261101182433) is keyed on
+// exactly this predicate and this order, and a test that held a copy would keep passing after
+// an edit that took the statement off the index.
+var listIssueRootMessagesQuery = `
+		select ` + messageColumns + `
+		from messages
+		where issue_key = $1 and in_reply_to is null
+		order by created_at, id
+	`
+
 // listIssueMessages is every root message of one issue, oldest first, each with its deliveries
 // and every message replying to it: one row per thread, the list a dashboard shows one card
 // from. It is unpaged, as an issue's comments are - the threads on an issue are the whole
@@ -779,12 +791,7 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select `+messageColumns+`
-		from messages
-		where issue_key = $1 and in_reply_to is null
-		order by created_at, id
-	`, r.PathValue("key"))
+	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssueRootMessagesQuery, r.PathValue("key"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

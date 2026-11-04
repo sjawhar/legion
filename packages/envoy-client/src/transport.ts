@@ -413,6 +413,8 @@ export interface ReplayInput {
   readonly subjects: readonly ReplaySubjectInput[];
   /** The most messages across the whole answer; the listener defaults to 100 and caps it at 500. */
   readonly maxMessages?: number;
+  /** How long the call may take; `REPLAY_TIMEOUT_MS` when absent. */
+  readonly timeoutMs?: number;
 }
 
 /** The listener's answer to `POST /v1/replay`, in its wire shape. */
@@ -876,7 +878,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               ),
               ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
             },
-            { timeoutMs: REPLAY_TIMEOUT_MS, retry: false, actingSession: input.sessionID }
+            {
+              timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS,
+              retry: false,
+              actingSession: input.sessionID,
+            }
           )
         )
       ),
