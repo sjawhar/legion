@@ -556,7 +556,7 @@ To exercise an unmerged checkout the way the marketplace would install it, regis
 marketplace with a `command` source in copy mode whose command builds a copy of the plugin with
 `bun packages/claude-envoy/scripts/build.ts --out <dir>` (a new or empty directory outside the
 repository, without `node_modules`) and prints it, install `claude-envoy@<dev-marketplace>`, and
-run the smoke against that entry. Never `claude plugin marketplace add sjawhar/legion#<branch>`: the
+run the smoke against that entry. Never `claude plugin marketplace add cybermonklabs/legion#<branch>`: the
 marketplace name comes from the repository's `marketplace.json` and would replace the real
 `legion-plugins` registration.
 

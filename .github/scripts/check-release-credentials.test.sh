@@ -269,7 +269,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
+          tags: ghcr.io/cybermonklabs/legion/envoy:${{ github.sha }}
       - name: Check this job holds no credential (tripwire)
         run: .github/scripts/release-push.sh no-credential
   release_publish:

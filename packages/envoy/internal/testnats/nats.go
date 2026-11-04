@@ -39,16 +39,16 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-// Image is the NATS server image every Envoy test container runs: ghcr.io/sjawhar/legion/ci, the
+// Image is the NATS server image every Envoy test container runs: ghcr.io/cybermonklabs/legion/ci, the
 // copy of nats:2.15.1 (.github/ci-images.yaml), the version the listener requires and the
 // deployment runs. The envoy-go CI job reads this declaration and pulls the image before its first
 // test step, so no test reaches the registry mid-run; keep it a single-line string constant.
-const Image = "ghcr.io/sjawhar/legion/ci@sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a"
+const Image = "ghcr.io/cybermonklabs/legion/ci@sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a"
 
-// HubImage is the NATS server image the GCP hub runs: ghcr.io/sjawhar/legion/ci, the copy of
+// HubImage is the NATS server image the GCP hub runs: ghcr.io/cybermonklabs/legion/ci, the copy of
 // nats:2.15.1-alpine (.github/ci-images.yaml). The envoy-go and envoy-infra-go CI jobs read this
 // declaration and pull the image before their tests run; keep it a single-line string constant.
-const HubImage = "ghcr.io/sjawhar/legion/ci@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
+const HubImage = "ghcr.io/cybermonklabs/legion/ci@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
 
 // Images are the two NATS server images the real-server tests run on, Image and HubImage, each
 // with the short name its subtest takes: the two official variants of the version the deployment

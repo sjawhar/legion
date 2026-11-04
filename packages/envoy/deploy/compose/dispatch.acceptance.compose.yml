@@ -23,7 +23,7 @@ services:
       start_period: 5s
 
   dispatch-acceptance:
-    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
+    image: ghcr.io/cybermonklabs/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
     build:
       context: ../../../..
       dockerfile: packages/envoy/docker/Dockerfile

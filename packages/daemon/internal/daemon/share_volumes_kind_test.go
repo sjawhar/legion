@@ -93,7 +93,7 @@ func TestTheShareKindProofBuildsItsRuntimesFromItsConfigurations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := writeBurstableLiveConfig(t, filepath.Join(dir, tc.name), tc.project, "192.0.2.10",
-				"ghcr.io/sjawhar/legion-worker@sha256:"+strings.Repeat("a", 64), kubeconfig, "test", tc.pod)
+				"ghcr.io/cybermonklabs/legion-worker@sha256:"+strings.Repeat("a", 64), kubeconfig, "test", tc.pod)
 			cfg, err := config.LoadForValidation(path, nil)
 			if err != nil {
 				t.Fatalf("load %s: %v", path, err)

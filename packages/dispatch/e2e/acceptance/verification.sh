@@ -23,8 +23,8 @@
 # for the section) and DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
 # signs in: the local harness has it, a deployed server does not). Recording a review is a person's
 # write alone, so the two review sections sign that person in with a cookie jar; with
-# DEV_SIGNIN_LOGIN unset each prints one `SKIP: … POST /api/v1/artifacts/{id}/reviews is
-# human-only …` line and every other section runs.
+# DEV_SIGNIN_LOGIN unset each prints one `SKIP: … POST /api/v1/artifacts/{id}/reviews needs a
+# person's credential holding the approve scope …` line and every other section runs.
 #
 # It writes four issues in PROJECT — a root, a child of it, a sibling in another tree and one more
 # whose spec and Verification document are approved together — with a spec, a Verification document
@@ -665,7 +665,7 @@ grep -qF 'Approve spec.md (version 1) and verification.md (version 1)?' "$work/o
 pass review "one request's question names spec.md and verification.md at their versions"
 
 if [[ -z "$dev_login" ]]; then
-  skip review "a person's approval records a review on each document: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews is human-only, and only a server with dev sign-in mints that person's cookie"
+  skip review "a person's approval records a review on each document: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews needs a person's credential holding the approve scope, and only a server with dev sign-in mints that person's cookie"
   skip review "a request naming the spec alone records nothing on the Verification document: DEV_SIGNIN_LOGIN is unset"
 else
   curl -sS -o /dev/null -c "$work/jar" "$base/auth/_dev/signin?login=$(q "$dev_login")" \
