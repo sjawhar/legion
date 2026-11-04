@@ -102,11 +102,17 @@ nats_pid=""
 # the script's own for EXIT, and the conventional 128 plus the signal's number for INT and TERM, so
 # a run that was interrupted never reports success: inside a signal's trap, $? is the status of the
 # last command that finished, usually 0, not the signal's.
+#
+# It ends every job of this shell, not only the four recorded pids: each server is started with
+# `… &` and its pid recorded on the next command, and a trap runs between commands, so a signal
+# delivered in that gap leaves a child unrecorded. An unrecorded child holds the inherited lock
+# descriptor (below) for as long as it lives, which left out/e2e locked after a run stopped with
+# TERM. A pid that appears in both lists is killed once; the second kill -0 finds it gone.
 cleanup() {
   local rc=$1
   trap - EXIT INT TERM
   set +e
-  for pid in "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
+  for pid in $(jobs -p) "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
@@ -150,6 +156,15 @@ rm -f "$envelopes_file" "$session_frames_file" "$rendered_ts_file" \
 rm -rf "$nats_store_dir"
 : >"$envelopes_file"
 : >"$session_frames_file"
+# Every log file is created before the process that writes it, so a wait that reads one cannot
+# race the redirect that creates it: wait_for_listener's jq and wait_for_nats's grep would
+# otherwise read a file that is not there yet — jq exits non-zero on it, which under set -e ends
+# the whole run at "waiting for the listener address". The waits themselves are untouched: each
+# still fails the moment its own process is gone, and still fails on its own deadline.
+: >"$nats_log_file"
+: >"$listener_log_file"
+: >"$session_log_file"
+: >"$subscriber_log_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
 printf 'building listener and NATS server\n'

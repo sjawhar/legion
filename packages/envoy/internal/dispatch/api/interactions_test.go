@@ -24,6 +24,14 @@ import (
 
 func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store) {
 	t.Helper()
+	handler, database, _ := newInteractionDeps(t, makeDocs)
+	return handler, database
+}
+
+// newInteractionDeps is newInteractionHandler, answering also the Deps it registered, for a test
+// that must run one request on a connection of its own (oneConnectionHandler).
+func newInteractionDeps(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store, Deps) {
+	t.Helper()
 	database := storetest.Open(t)
 	var docsAPI docs.API
 	if makeDocs != nil {
@@ -42,7 +50,7 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 	}
 	mux := http.NewServeMux()
 	t.Cleanup(Register(mux, t.Context(), deps).Wait)
-	return mux, database
+	return mux, database, deps
 }
 
 // replaceDocumentText replaces a document's text as an upload of a new version does: holding the

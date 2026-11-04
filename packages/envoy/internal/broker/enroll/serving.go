@@ -47,10 +47,11 @@ const servingPrune = time.Hour
 
 // Run beats at once, then every Interval on its own ticker, until ctx ends. A beat that fails is
 // retried at the next tick; a run of failures is logged once, when it starts, so a database that
-// stays away for an hour fills no log, and once more when the clock beats again. timed_out says
-// whether the failure was the beat running out of its bound (its deadline, a lock it waited on
-// past lock_timeout, or a statement past statement_timeout) rather than an error the database
-// answered at once.
+// stays away for an hour fills no log, and once more when the clock beats again. process names
+// the clock the warning is about, so a reader of a log carrying several brokers can tell one
+// clock's run of failures from another's. timed_out says whether the failure was the beat running
+// out of its bound (its deadline, a lock it waited on past lock_timeout, or a statement past
+// statement_timeout) rather than an error the database answered at once.
 func (c *ServingClock) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
@@ -61,7 +62,7 @@ func (c *ServingClock) Run(ctx context.Context) {
 		case ctx.Err() != nil:
 		case err != nil && !failing:
 			slog.Warn("broker: the serving clock could not beat; it retries every interval and logs again once it beats",
-				"error", err, "timed_out", beatTimedOut(err))
+				"process", c.processID(), "error", err, "timed_out", beatTimedOut(err))
 			failing = true
 		case err == nil && failing:
 			slog.Info("broker: the serving clock beats again")

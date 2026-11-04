@@ -269,9 +269,16 @@ var jittered = duty.Jittered
 // process skip its own next sweep. leases is required, as it is of every leased loop (cmd/dispatch
 // exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
+	s.run(ctx, interval, leases, duty.Exclusive)
+}
+
+// run is Run with the lease gate handed in (duty.ExclusiveFunc), so the schedule above - the sweep
+// at start, and the jittered wait between one sweep and the next - can be tested on a fake clock
+// against a lease of the test's own, with no Postgres the bubble's clock would have to wait on.
+func (s *Sweeper) run(ctx context.Context, interval time.Duration, leases duty.Leases, exclusive duty.ExclusiveFunc) {
 	due := time.Now()
 	for {
-		duty.Exclusive(ctx, leases, duty.WebhookRedeliveryLease, due, interval, s.sweepAndReport)
+		exclusive(ctx, leases, duty.WebhookRedeliveryLease, due, interval, s.sweepAndReport)
 		timer := time.NewTimer(jittered(interval))
 		select {
 		case <-ctx.Done():

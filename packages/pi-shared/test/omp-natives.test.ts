@@ -129,7 +129,7 @@ test("a fill whose extraction writes no native caches nothing", async () => {
 });
 
 // With no embedded list, every file an extraction holds would be refused by name anyway, so
-// refusing first fails with a precise message and never runs the binary to extract about 111 MiB.
+// refusing first fails with a precise message and never runs the binary to extract about 116 MiB.
 test("a binary that lists no embedded natives is refused before it runs", async () => {
   const dir = await scratch();
   const runs = path.join(dir, "runs");
