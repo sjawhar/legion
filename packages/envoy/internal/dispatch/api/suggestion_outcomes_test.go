@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -736,7 +737,10 @@ func TestTheSuggestionSweepDoesNotWaitOnATransactionInAnotherDatabase(t *testing
 // were a later schema to insert an event without notifying.
 //
 // The server has to allow prepared transactions: with max_prepared_transactions at 0, the stock
-// Postgres image's setting, none can be prepared and the test has no subject.
+// Postgres image's setting, none can be prepared and the test has no subject. Every CI job that
+// runs this package raises it (.github/workflows/ci.yaml, envoy-go and envoy-go-race-api), so in
+// CI a zero is a failure rather than a skip: a skip there would be a pass proving nothing, in the
+// one place this test has to hold.
 func TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway(t *testing.T) {
 	// No t.Parallel: this test leaves a prepared transaction on the Postgres instance across the
 	// floor's statements, which holds the instance-wide safe horizon back for every test beside
@@ -749,7 +753,11 @@ func TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway(t *testin
 		t.Fatalf("read max_prepared_transactions: %v", err)
 	}
 	if allowed == 0 {
-		t.Skip("this Postgres server runs with max_prepared_transactions = 0 and can prepare no transaction")
+		const why = "this Postgres server runs with max_prepared_transactions = 0 and can prepare no transaction"
+		if os.Getenv("CI") != "" {
+			t.Fatalf("%s; the job must raise it", why)
+		}
+		t.Skip(why)
 	}
 	createSuggestionProject(t, handler, "OPREPARED")
 	target := createOutcomeIssue(t, handler, "OPREPARED", "Target issue")

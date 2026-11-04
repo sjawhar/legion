@@ -127,16 +127,72 @@ func TestTheIssueChildrenAnswerWhatMainsStatementDid(t *testing.T) {
 	}
 }
 
+// issueChildrenBacklog is how many issues the plan test writes beside the fixture's five: a
+// parent and a child of its own each. A plan is a judgement about data: over five issues the
+// whole table is one page, so reading it whole and hashing it is the planner's right answer and
+// the statement's own shape says nothing. The test read whichever plan the database it was
+// handed happened to make - a clone of the template, whose issues has never been analysed
+// (pg_class.reltuples = -1, where the planner assumes a table of ten pages), takes the index;
+// a database pgclone emptied and analysed for the next test (reltuples = 0, a table the planner
+// knows is empty) merges the whole of issues_parent_key into the walk - which is how it failed
+// in CI run 41897075339.
+//
+// A backlog of pairs is what the walk's own read turns on, not only its size: the planner costs
+// the recursive term over a work table it estimates at ten times the first term's rows, so it
+// is how many children an issue has on average that decides whether walking a key at a time
+// beats hashing the table. One child each is this schema's shape - a tree, not a fan - and
+// under it the keyed walk is the cheaper plan, whatever the statistics started as. The analyze
+// makes the choice the planner's own rather than an artefact of when it last looked.
+const issueChildrenBacklog = 1500
+
+// seedIssueChildrenBacklog writes that backlog: issueChildrenBacklog pairs, each a parent of
+// its own with one child, so the rows the children statement answers with are still the
+// fixture's alone. The child of each pair is what fills issues_parent_key - the index is
+// partial on there being a parent - and carries an external link, so the links the statement
+// reads are a keyed read of a table with rows in it rather than the whole of a table holding
+// two.
+func seedIssueChildrenBacklog(t *testing.T, database *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	for _, statement := range []struct {
+		what string
+		sql  string
+	}{
+		{"the backlog's parents", `
+			insert into issues (key, project_key, number, title, status, created_by, rank)
+			select 'CORE-R' || n, 'CORE', 100000 + n, 'Backlog parent ' || n, 'todo',
+			       '{"kind":"user","id":"alice"}', 'U'
+			from generate_series(1, $1) as n`},
+		{"the backlog's children", `
+			insert into issues (key, project_key, number, title, status, parent_key, created_by, rank)
+			select 'CORE-B' || n, 'CORE', 200000 + n, 'Backlog child ' || n,
+			       case when n % 5 = 0 then 'done' else 'todo' end,
+			       'CORE-R' || n, '{"kind":"user","id":"alice"}', 'U'
+			from generate_series(1, $1) as n`},
+		{"the backlog's external links", `
+			insert into issue_external_links (issue_key, url, kind)
+			select 'CORE-B' || n, 'https://github.com/owner/repo/pull/' || (100000 + n), 'github_pr'
+			from generate_series(1, $1) as n`},
+	} {
+		if _, err := database.Pool.Exec(ctx, statement.sql, issueChildrenBacklog); err != nil {
+			t.Fatalf("%s: %v", statement.what, err)
+		}
+	}
+	if _, err := database.Pool.Exec(ctx, `analyze issues, issue_external_links`); err != nil {
+		t.Fatalf("analyze the backlog: %v", err)
+	}
+}
+
 // Every read the children statement makes is keyed, each issue it reads is reached through
 // issues_parent_key, and no read of an issue goes by its own key. Joining the walk's keys back
-// to issues for their status and updated_at is that second read: on a database with issues in
-// it the planner has no estimate of a recursive CTE's size, so it hashes the whole table under
-// a node that carries no index condition rather than key one issues_pkey lookup per walked
-// key, and on a fixture this small it keys them and the whole-table read hides. Naming the
-// index holds the statement to one read of each issue either way.
+// to issues for their status and updated_at is that second read: the planner has no estimate of
+// a recursive CTE's size, so a statement that re-read each walked key would hash the whole table
+// under a node that carries no index condition. Naming the index holds the statement to one read
+// of each issue.
 func TestTheIssueChildrenReadEveryIssueThroughTheParentIndex(t *testing.T) {
 	fixture := newIssueChildrenFixture(t)
-	plan := planWithoutSeqScans(t, fixture.database, issueChildrenQuery, fixture.root)
+	seedIssueChildrenBacklog(t, fixture.database)
+	plan := planOf(t, fixture.database, issueChildrenQuery, fixture.root)
 	if unkeyed := explaintest.ScansWithoutIndexCond(t, plan); len(unkeyed) > 0 {
 		t.Errorf("the children statement reads %v, which no index serves:\n%s", unkeyed, plan)
 	}

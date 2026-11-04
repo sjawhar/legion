@@ -2649,10 +2649,17 @@ jobs:
       # store bounded at 16 connections (storetest's testPoolSize). Nothing about durability
       # changes: fsync, synchronous_commit and the data directory are untouched, which the spec
       # of dispatch://INFRA-1075 makes a non-goal and two learnings of this repository warn about.
-      - name: Raise the Postgres connection limit for the parallel tests
+      #
+      # max_prepared_transactions is raised with it, from the image's default of 0, because a
+      # server that can prepare no transaction makes the event log's floor test skip, and a skip
+      # is a pass that proves nothing: TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway
+      # prepares a transaction holding the lock an insert into events takes, which is the one
+      # writer pg_locks shows with no backend pid (dispatch://INFRA-1075).
+      - name: Raise the Postgres connection and prepared-transaction limits for the parallel tests
         run: |
           for id in "${{ job.services.postgres.id }}" "${{ job.services.horizon.id }}"; do
             docker exec "$id" psql -U postgres -c "alter system set max_connections = 500"
+            docker exec "$id" psql -U postgres -c "alter system set max_prepared_transactions = 20"
             docker restart "$id"
             # The wait is on the new limit, not on a ready socket: pg_isready can answer from a
             # server the restart has not taken down yet, and a green step that left the limit at
@@ -2663,7 +2670,9 @@ jobs:
               sleep 1
             done
             [ "$limit" = "500" ] || { echo "::error::a Postgres service still reports max_connections=$limit"; exit 1; }
-            echo "max_connections=$limit"
+            prepared=$(docker exec "$id" psql -U postgres -Atc "show max_prepared_transactions")
+            [ "$prepared" = "20" ] || { echo "::error::a Postgres service reports max_prepared_transactions=$prepared"; exit 1; }
+            echo "max_connections=$limit max_prepared_transactions=$prepared"
           done
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
@@ -3055,6 +3064,22 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # This package's TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway prepares
+      # a transaction holding the lock an insert into events takes, which is the one writer
+      # pg_locks shows with no backend pid. The image's max_prepared_transactions is 0, and the
+      # test refuses to skip in CI, so this job raises it as envoy-go does
+      # (dispatch://INFRA-1075).
+      - name: Let the Postgres service prepare transactions
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_prepared_transactions = 20"
+          docker restart "${{ job.services.postgres.id }}"
+          for _ in $(seq 60); do
+            prepared=$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_prepared_transactions" 2>/dev/null || true)
+            if [ "$prepared" = "20" ]; then break; fi
+            sleep 1
+          done
+          [ "$prepared" = "20" ] || { echo "::error::the Postgres service reports max_prepared_transactions=$prepared"; exit 1; }
+          echo "max_prepared_transactions=$prepared"
       - name: Race-test the Dispatch API
         run: go test -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy

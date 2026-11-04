@@ -10,6 +10,22 @@ import (
 	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
+// planOf is the plan Postgres builds for statement with nothing turned off: the plan the
+// server itself gets. A test that reads one seeds the rows that make the index it pins the
+// cheaper plan and analyses them (docs/testing.md, "A test that calls `t.Parallel()`" names the
+// kin of this: a claim that rests on what the database was handed rather than on what the test
+// wrote). Over a handful of rows a sequential scan is the planner's right answer, and which
+// one it picks there turns on whether the table has ever been analysed, which is the harness's
+// business and not the statement's.
+func planOf(t *testing.T, database *store.Store, statement string, arguments ...any) json.RawMessage {
+	t.Helper()
+	var raw []byte
+	if err := database.Pool.QueryRow(context.Background(), "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
+		t.Fatalf("explain the statement: %v", err)
+	}
+	return explaintest.OnePlan(t, raw)
+}
+
 // planWithoutSeqScans is the plan Postgres builds for statement with sequential scans off, in a
 // transaction of its own. A test fixture holds a handful of rows, which is read fastest whole
 // however the statement is written, so without that setting the planner answers a sequential

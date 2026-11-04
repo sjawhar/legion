@@ -93,6 +93,45 @@ func TestTheAgentsLastActivityAnswersWhatMainsStatementDid(t *testing.T) {
 	}
 }
 
+// agentActivityHistory is how many events the plan test writes beside the fixture's six, over
+// agentActivityHistorySessions sessions of their own. A plan is a judgement about data: over
+// the fixture's six rows a sequential scan of events and a sort is the cheapest way to answer
+// each session's newest event, and it is the planner's right answer there, so the test asked
+// the planner to be wrong and read whichever plan the database it was handed happened to make.
+// It read one answer on a clone of the template, whose events has never been analysed
+// (pg_class.reltuples = -1, where the planner assumes a table of ten pages), and another on a
+// database pgclone emptied and analysed for the next test (reltuples = 0, a table the planner
+// knows is empty), which is how it failed in CI run 41897075339 and fails under
+// `go test -count=12` here. With a history of this size the partial index is the cheaper plan
+// by what it skips, whatever the statistics started as, and the analyze below makes the choice
+// the planner's own rather than an artefact of when it last looked.
+const (
+	agentActivityHistory         = 4000
+	agentActivityHistorySessions = 200
+)
+
+// seedAgentActivityHistory writes that history: events of sessions no caller below asks about,
+// so the rows the statements answer with are still the fixture's alone. A twentieth carry a user
+// actor, which the partial index leaves out, so the index holds fewer rows than the table and a
+// read that reached events any other way costs more than one that takes it.
+func seedAgentActivityHistory(t *testing.T, database *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `
+		insert into events (issue_key, seq, type, actor, payload, notify, created_at)
+		select 'TEST-1', 100 + n, 'message.created',
+		       jsonb_build_object('kind', case when n % 20 = 0 then 'user' else 'session' end,
+		                          'id', 'history-' || (n % $2)),
+		       '{}', false, '2026-09-13T00:00:00Z'::timestamptz + make_interval(secs => n)
+		from generate_series(1, $1) as n
+	`, agentActivityHistory, agentActivityHistorySessions); err != nil {
+		t.Fatalf("seed the event history: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `analyze events`); err != nil {
+		t.Fatalf("analyze events: %v", err)
+	}
+}
+
 // The last activity reaches events only through events_session_actor_created_at_idx, the
 // partial index on ((actor->>'id'), created_at desc) for a session actor, and reads it once
 // for each session, stopping at that session's first row. Naming the index alone decides
@@ -102,7 +141,8 @@ func TestTheAgentsLastActivityAnswersWhatMainsStatementDid(t *testing.T) {
 // events.
 func TestTheAgentsLastActivityReadsEventsThroughTheSessionActorIndex(t *testing.T) {
 	database := newAgentActivityFixture(t)
-	plan := planWithoutSeqScans(t, database, agentLastActivityQuery, agentActivitySessions)
+	seedAgentActivityHistory(t, database)
+	plan := planOf(t, database, agentLastActivityQuery, agentActivitySessions)
 	if unkeyed := explaintest.ScansWithoutIndexCond(t, plan); len(unkeyed) > 0 {
 		t.Errorf("the last activity reads %v, which no index serves:\n%s", unkeyed, plan)
 	}

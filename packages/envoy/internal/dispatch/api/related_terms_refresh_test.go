@@ -535,10 +535,34 @@ func itemRowsRead(t *testing.T, pool *store.Pool) int64 {
 	return read
 }
 
+// flushEveryConnection makes every connection pool holds report what it has done, so that no
+// counter of theirs can land inside a window measured after it.
+//
+// Those counters are the database's, not the reading connection's, and a backend holds what it
+// has done for up to a second after it goes idle before the statistics collector takes it
+// (PostgreSQL's PGSTAT_MIN_INTERVAL): the rows the fixture's writes and its first full pass
+// read are still unreported when the fixture returns, and on a loaded runner they are reported
+// between the two readings below and read as the measured pass's work. This is the event that
+// wait is for - pg_stat_force_next_flush() on each of those connections, which reports before
+// the statement answers - rather than a sleep long enough to hope for it.
+func flushEveryConnection(t *testing.T, pool *store.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	for _, connection := range pool.AcquireAllIdle(ctx) {
+		_, err := connection.Exec(ctx, `select pg_stat_force_next_flush()`)
+		connection.Release()
+		if err != nil {
+			t.Fatalf("flush a pooled connection's statistics: %v", err)
+		}
+	}
+}
+
 // A3. A pass with nothing queued reads no item at all, which is what makes the refresh's work
-// proportional to what changed. The pass runs on a pool of one connection, so the two readings
-// are of the connection that ran it, and no server runs over this database, so nothing else
-// reads an item table between them.
+// proportional to what changed. The counters are the database's and nobody's in particular, so
+// the reading is held to the pass twice over: the pass runs on a pool of one connection, and
+// every other connection on this database - the fixture's pool, which wrote the items and ran
+// the first full pass over them - reports what it has done before the first reading, so the
+// only counter that can move between the two is the measured pass's own.
 func TestARefreshWithNoChangeReadsNoItem(t *testing.T) {
 	fixture := newTermFixture(t, "QUIET")
 	config, err := pgxpool.ParseConfig(fixture.database.Pool.Config().ConnString())
@@ -553,10 +577,27 @@ func TestARefreshWithNoChangeReadsNoItem(t *testing.T) {
 	t.Cleanup(raw.Close)
 	alone := store.NewPool(raw)
 
-	// The pass that empties the queue, so that the measured one has nothing to apply.
-	if _, err := refreshSearchTermStats(context.Background(), alone, fixture.project); err != nil {
-		t.Fatalf("refresh before the reading: %v", err)
+	// The passes that empty the queue, so that the measured one has nothing to apply. A pass
+	// applies the rows it claimed, and a row written while it ran is left for the next one, so
+	// what the measurement waits on is the queue's own depth rather than one pass: a queued
+	// change the measured pass picks up is an item read (R1, and searchTermQueueProjectSQL
+	// reads the owner row of each queue row), counted here as that pass's work. Measured in the
+	// whole package's run before this loop: one queue row left behind read one issue through
+	// its primary key and failed the reading by six.
+	const drains = 5
+	for drain := 1; ; drain++ {
+		if _, err := refreshSearchTermStats(context.Background(), alone, fixture.project); err != nil {
+			t.Fatalf("refresh before the reading: %v", err)
+		}
+		queued := queuedChanges(t, fixture.database)
+		if queued == 0 {
+			break
+		}
+		if drain == drains {
+			t.Fatalf("%d changes are still queued after %d passes", queued, drains)
+		}
 	}
+	flushEveryConnection(t, fixture.database.Pool)
 	before := itemRowsRead(t, alone)
 	measured, err := refreshSearchTermStats(context.Background(), alone, fixture.project)
 	if err != nil {
@@ -565,8 +606,7 @@ func TestARefreshWithNoChangeReadsNoItem(t *testing.T) {
 	if measured.Mode != searchTermModeStep || measured.Changes != 0 {
 		t.Fatalf("the pass ran mode=%s changes=%d, want a step with nothing to apply", measured.Mode, measured.Changes)
 	}
-	after := itemRowsRead(t, alone)
-	if after != before {
+	if after := itemRowsRead(t, alone); after != before {
 		t.Fatalf("the pass read %d rows of the item tables, want none", after-before)
 	}
 }

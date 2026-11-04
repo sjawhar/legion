@@ -570,15 +570,58 @@ func TestBacklinkCountsRefuseANodeKindWithNoDeclaredArms(t *testing.T) {
 	}
 }
 
-// planSettings is what every plan below is read under. Sequential scans off alone is not enough:
-// the planner can still hash or merge a whole relation into a join, reading it under a node that
-// carries no index condition, which is the unkeyed read this test exists to catch. With the two
-// join strategies that can do that off as well, what is left is the nested loop over an index
-// each arm is written for.
+// planSettings is what every plan below is read under. Sequential scans off alone is not
+// enough: the planner can still hash or merge a whole relation into a join, reading it under a
+// node that carries no index condition, which is the unkeyed read this test exists to catch.
+// With the two join strategies that can do that off as well, what is left is the nested loop
+// over an index each arm is written for.
 var planSettings = []string{
 	"set local enable_seqscan = off",
 	"set local enable_hashjoin = off",
 	"set local enable_mergejoin = off",
+}
+
+// freshStatisticsSQL puts every table and index of the schema where a freshly migrated
+// database has them: no column statistics, and pg_class.reltuples = -1, the value that says
+// nothing has counted this table. PostgreSQL 18's pg_clear_attribute_stats and
+// pg_clear_relation_stats do it, and the owner of a table may call them.
+//
+// It is what holds the plans below to the statement rather than to the database the harness
+// handed over. A plan is a judgement about data, and the fixture's tables hold a handful of
+// rows, so the judgement turns on what the planner has been told about them: on a clone of
+// the template, whose tables no migration analysed (reltuples = -1, where the planner assumes
+// ten pages), every arm of this count is keyed; on a database pgclone emptied and analysed
+// for the next test (reltuples = 0, a table the planner knows is empty) every mention arm was
+// read as `Index Only Scan on block_refs using block_refs_pkey` carrying no condition at all,
+// which is how this test failed in CI run 41897075339. Both states are the harness's and
+// neither is the statement's, so the test names the one its claim is about.
+//
+// The other way to hold a read to an index is to write the rows that make the index the
+// cheaper plan, which is what api.TestMyRepliesQueriesReadTheUnreadIndex and the two plan
+// tests of internal/dispatch/api do, and it is the better test where one statement reads one
+// table. Measured here, over twenty-six arms across eighteen tables, it is not available: a
+// history big enough for the planner to key every arm of its own accord needed about eight
+// thousand replies before a merge join over the whole of comments_replies_to_block stopped
+// being the cheaper plan, took this one test from 1.3 s to 54 s, and still left four arms read
+// whole under the generic plan, which estimates an address array it cannot see at ten elements
+// whatever the table holds. A join reads whichever of its two sides is cheaper to read whole,
+// so the tables have to grow together: two thousand blocks against the fixture's one reply
+// turned that arm around and read the reply through the whole of comments_replies_to_block.
+// What this test pins is that each arm is written so that an index can serve it; the rows it
+// would take to make Postgres demonstrate that are a benchmark, not a fixture.
+const freshStatisticsSQL = `
+	select pg_clear_attribute_stats(s.schemaname, s.tablename, s.attname, s.inherited)
+	from pg_stats s where s.schemaname = 'public';
+	select pg_clear_relation_stats(n.nspname, c.relname)
+	from pg_class c join pg_namespace n on n.oid = c.relnamespace
+	where n.nspname = 'public' and c.relkind in ('r', 'i')`
+
+// freshStatistics runs that on the database the test was handed.
+func freshStatistics(t *testing.T, database *store.Store) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), freshStatisticsSQL); err != nil {
+		t.Fatalf("put the statistics where a freshly migrated database has them: %v", err)
+	}
 }
 
 // Every arm of the count's statement reaches its table through an index, and through an index
@@ -586,9 +629,12 @@ var planSettings = []string{
 // values) and under a generic plan alike. The generic plan is the one at risk: it cannot assume
 // what an address parameter holds, so an arm whose index depends on the bound value loses it
 // there, and a fixture this small never reaches a generic plan on its own
-// (api.TestListIssueAsksOpenQueryUsesAsksOpenIndex says why), so the mode is forced.
+// (api.TestListIssueAsksOpenQueryUsesAsksOpenIndex says why), so the mode is forced. The
+// statistics are the fixture's other half: freshStatisticsSQL says what the plans are read
+// over and why neither state the harness hands out is it.
 func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 	fixture := newBacklinkFixture(t)
+	freshStatistics(t, fixture.database)
 	ctx := context.Background()
 	connection, err := fixture.database.Pool.Acquire(ctx)
 	if err != nil {
@@ -638,7 +684,8 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 	}
 }
 
-// customPlan is the plan Postgres builds for statement knowing the values bound to it.
+// customPlan is the plan Postgres builds for statement knowing the values bound to it, under
+// the same setting the generic plan is read under.
 func customPlan(t *testing.T, connection *pgxpool.Conn, statement string, args []any) json.RawMessage {
 	t.Helper()
 	ctx := context.Background()
