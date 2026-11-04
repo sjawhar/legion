@@ -27,7 +27,10 @@ test("Verification shows the requirements each check serves from one named graph
     const reads: string[] = [];
     page.on("request", (request) => {
       const path = new URL(request.url()).pathname;
-      if (request.method() === "GET" && /^\/api\/v1\/issues\/[^/]+\/(verification|results|coverage)$/.test(path)) {
+      if (
+        request.method() === "GET" &&
+        /^\/api\/v1\/issues\/[^/]+\/(verification|results|coverage)$/.test(path)
+      ) {
         reads.push(path);
       }
     });
@@ -55,6 +58,7 @@ test("Verification shows the requirements each check serves from one named graph
       issues: 1,
       mismatches: 0,
     });
+    await requirement.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("verification-serves.png") });
   } finally {
     await alice.close();
