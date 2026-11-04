@@ -1075,6 +1075,15 @@ export function eventRefreshTargets(event: Event, signedInLogin?: string): Refre
   if (changesReferenceGraph(event) || isMessageEvent(event) || isCommentLikeEvent(event)) {
     targets.push({ queryKey: ["person-nodes"] });
   }
+  if (
+    event.type.startsWith("comment.") ||
+    event.type.startsWith("message.") ||
+    event.type.startsWith("ask.") ||
+    event.type === "issue.updated" ||
+    event.type === "user_thread_state.updated"
+  ) {
+    targets.push({ queryKey: ["my-threads"] });
+  }
   const threadsIssue = askThreadsIssue(event);
   if (threadsIssue !== null) {
     targets.push(askThreadsOn(threadsIssue));

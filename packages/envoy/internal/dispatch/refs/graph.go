@@ -328,7 +328,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		args = append(args, query.ID)
 	}
 	relation := "graph_edges"
-	if query.Kind == "person" || query.Kind == "session" || query.Kind == "role" || slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") {
+	if query.Kind == "person" || query.Kind == "session" || query.Kind == "role" || slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") || slices.Contains(query.Kinds, "participates_in") {
 		relation = AllEdgesSQL
 	}
 	var arms string

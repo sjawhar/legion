@@ -1,0 +1,5 @@
+kind: Added
+body: Add the caller-only My threads graph query and dashboard view, including authored, mentioned and addressed threads after they have been read, with per-cause participation shadow counts.
+time: 2026-11-04T09:10:53Z
+custom:
+  Issue: pr2758

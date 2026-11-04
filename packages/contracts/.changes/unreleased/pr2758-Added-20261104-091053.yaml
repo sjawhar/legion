@@ -1,0 +1,5 @@
+kind: Added
+body: Add MyThread and MyThreads response types for the authenticated person's participation query.
+time: 2026-11-04T09:10:53Z
+custom:
+  Issue: pr2758

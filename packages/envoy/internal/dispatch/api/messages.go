@@ -578,14 +578,12 @@ func loadMessageReplyThread(ctx context.Context, tx pgx.Tx, message model.Messag
 	return parent.thread(ctx, tx)
 }
 
-// messageThreadCTE names `thread`: the message $1 and every ancestor it answers, up to the
-// thread root. A message's in_reply_to is set once at insert and never updated, so the chain
-// only ever points at older rows and the walk terminates.
+// messageThreadCTE names the message and its ancestors through the shared bounded,
+// cycle-guarded thread walk. A malformed chain has no terminal row.
 const messageThreadCTE = `
-		with recursive thread as (
-			select id, target, in_reply_to from messages where id = $1
-			union all
-			select m.id, m.target, m.in_reply_to from messages m join thread t on m.id = t.in_reply_to
+		with thread as (
+			select m.id, m.target, m.in_reply_to
+			from dispatch_thread_ancestors('message', $1) a join messages m on m.id = a.id
 		)`
 
 // threadRootDelivery walks a reply's ancestry to the thread root and returns that root's

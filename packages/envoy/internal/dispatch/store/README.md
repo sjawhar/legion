@@ -22,7 +22,7 @@ A migration that cannot be written that way is a stop-the-world migration, deplo
 
 ## Derived graph
 
-The complete graph uses `refs.AllEdgesSQL`: citation and structural `graph_edges`, identity and recorded-delivery `graph_person_edges`, indexed-inbox `graph_inbox_edges`, and identity-mention `graph_mention_edges`.
+The complete graph uses `refs.AllEdgesSQL`: citation and structural `graph_edges`, identity and recorded-delivery `graph_person_edges`, indexed-inbox `graph_inbox_edges`, identity-mention `graph_mention_edges`, and participation `graph_thread_edges`.
 `graph_edges` keeps its definition and existing builds' result sets; identity references are indexed under unknown storage target kinds `person_mention`, `session_mention` and `role_mention` that old readers skip.
 The complete union filters those storage kinds from its compatibility arm and maps them only through `graph_mention_edges`; none of these views stores or writes an edge.
 `person_aliases(person, alias_kind, alias)` derives canonical logins with `user_threads_login`, raw user actor ids, and session ids only where a stored session actor's server-verified `owner` identifies the person.
@@ -41,3 +41,8 @@ The mention view also reads explicit comment mentions, message targets and recor
 `envoy-dispatch census --mentions` independently compares source sets created, edited or resolved in the last 30 days in one read-only snapshot; exit 1 includes an empty recorded-mention set.
 An old build re-indexing identity-address text drops these unknown records; unchanged bodies are not automatically revisited by the owed sweep.
 After returning to the new build, run `envoy-dispatch rebuild-refs`, let the existing block-index reconciliation drain, then run the mention census.
+
+`graph_thread_participation` projects existing `user_threads` authorship alongside recorded mentions, deliveries and direct authorship; `graph_thread_edges` exposes the resulting `person -> participates_in -> thread root` relation.
+`dispatch_thread_ancestors` is the shared bounded, cycle- and owner-guarded root walk, including comment replies whose root is an ask.
+`GET /api/v1/me/threads/shadow` compares authored/answered membership against the source graph and server-owned answers, mentions against recorded resolution and addresses against recorded delivery; each cause reports missing/unexpected counts separately from membership beyond `user_threads`.
+Read marks do not affect membership or activity ordering, and no new path writes `user_threads`.

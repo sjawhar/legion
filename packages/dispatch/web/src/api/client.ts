@@ -86,6 +86,7 @@ import type {
   MessageRead,
   MyAnswersResponse,
   MyRepliesResponse,
+  MyThreads,
   PersonNodes,
   Project,
   ProjectDefaultAssignee,
@@ -1103,6 +1104,10 @@ export class DispatchApiClient {
     offset?: number;
   }): Promise<MyRepliesResponse> {
     return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", page));
+  }
+
+  listMyThreads(page: { limit: number; offset: number }): Promise<MyThreads> {
+    return this.json<MyThreads>(pathWithQuery("/api/v1/me/threads", page));
   }
 
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread

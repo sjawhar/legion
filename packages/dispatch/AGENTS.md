@@ -25,6 +25,11 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   Identity addresses in text use `dispatch://people/<login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>`; they use the shared contracts parser and the server's existing reference indexer.
   The signed-in name in the navigation footer links to the caller's person page; other user bylines keep their existing text-only rendering.
 
+- `web/src/features/threads/MyThreadsPage.tsx` is `/threads`, linked as My threads in the sidebar.
+  `GET /api/v1/me/threads` is one caller-only named query over `participates_in`: threads the person authored or answered, was recorded as mentioned in, or was addressed in, including read threads, newest actual write first.
+  `user_threads` stays the indexed issue/document authorship and read-state projection; mentions, addresses and authored direct conversations can add threads beyond it.
+  `GET /api/v1/me/threads/shadow` compares each cause with its source in a read-only snapshot and reports missing/unexpected counts separately from those expansions.
+
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/lib/timestamps.ts`'s `compareTimestamps` is how the SPA orders two server timestamps.
   The server writes RFC 3339 with trailing fractional zeros dropped (`…00.12Z`, `…00.123456Z`), so

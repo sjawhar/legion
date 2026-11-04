@@ -1218,6 +1218,29 @@ export interface InboxShadowReport {
   readonly complete_zero_days: number;
 }
 
+/** One root the signed-in person participated in, even after it was read. */
+export interface MyThread {
+  readonly kind: "ask" | "comment" | "message";
+  readonly thread_id: string;
+  readonly causes: ("authored" | "mentioned" | "addressed")[];
+  readonly subject: string;
+  readonly activity_at: string;
+  readonly issue_key: string | null;
+  readonly project: string | null;
+  readonly document: string | null;
+  /** Direct conversations link to Agents and never receive a dispatch:// address. */
+  readonly href: string;
+  readonly unread: boolean;
+}
+
+export interface MyThreads {
+  readonly person: string;
+  readonly rows: MyThread[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
 /** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
  *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
  *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it

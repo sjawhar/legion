@@ -304,31 +304,38 @@ func (s *server) namedReplyBlock(
 	return s.replyBlockOf(ctx, tx, kind, itemID, blockID, "reply_to_block", "INVALID_COMMENT")
 }
 
-// threadHeadOf climbs reply_to from an already-locked comment to the head of its thread: the
-// ask the thread hangs under, or the thread's root comment when it hangs under no ask. The
-// walk is bounded like every other parent walk (the outbox's thread walk, the issue ancestor
-// walk): comments.reply_to has no acyclicity constraint, so a cyclic chain answers 400
-// instead of holding the transaction open.
+// threadHeadOf uses the same owner-bounded, cycle-guarded ancestor walk as graph reads.
+// The caller already holds the owner and the starting comment; take the terminal
+// comment's lock before returning its content, as the original walk did.
 func (s *server) threadHeadOf(
 	ctx context.Context, tx pgx.Tx, owner owner, from model.Comment,
 ) (commentThreadTarget, error) {
-	root := from
-	for depth := 1; ; depth++ {
-		if root.AskID != nil {
-			return s.describeAsk(ctx, tx, owner, root.AskID)
-		}
-		if root.ReplyTo == nil {
-			return commentThreadTarget{ReplyTo: &root.ID, ReplyRoot: &root}, nil
-		}
-		if depth >= parentDepthCap {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
-		}
-		next, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, *root.ReplyTo)
-		if err != nil {
-			return commentThreadTarget{}, err
-		}
-		root = next
+	if from.AskID != nil {
+		return s.describeAsk(ctx, tx, owner, from.AskID)
 	}
+	if from.ReplyTo == nil {
+		return commentThreadTarget{ReplyTo: &from.ID, ReplyRoot: &from}, nil
+	}
+	var kind, id string
+	err := tx.QueryRow(ctx, `
+		select kind, id::text from dispatch_thread_ancestors('comment', $1)
+		where parent_id is null and issue_key is not distinct from $2
+		  and artifact_id is not distinct from $3
+	`, from.ID, owner.IssueKey, owner.ArtifactID).Scan(&kind, &id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
+	}
+	if err != nil {
+		return commentThreadTarget{}, err
+	}
+	if kind == "ask" {
+		return s.describeAsk(ctx, tx, owner, &id)
+	}
+	root, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, id)
+	if err != nil {
+		return commentThreadTarget{}, err
+	}
+	return commentThreadTarget{ReplyTo: &root.ID, ReplyRoot: &root}, nil
 }
 
 // describeAsk reads the ask on this owner that a reply joins, as the thread it heads, refusing one

@@ -201,6 +201,23 @@ test("sidebar lists Inbox, Pinned, Projects, and Settings with a truthful Needs-
   }
 });
 
+test("My threads is selected in a semantic navigation list", async () => {
+  const sidebar = renderSidebar("/threads");
+  try {
+    const link = await screen.findByRole("link", { name: /My threads/ });
+    expect(link.getAttribute("href")).toBe("/threads");
+    expect(link.getAttribute("aria-current")).toBe("page");
+    expect(link.closest("li")?.parentElement?.tagName).toBe("UL");
+  } finally {
+    sidebar.view.unmount();
+    sidebar.getCredentialPending.mockRestore();
+    sidebar.getInbox.mockRestore();
+    sidebar.getIssue.mockRestore();
+    sidebar.listIssues.mockRestore();
+    sidebar.listProjects.mockRestore();
+  }
+});
+
 test("sidebar counts a pending credential request in Needs you, beside the asks waiting on you", async () => {
   const sidebar = renderSidebar("/", [
     {

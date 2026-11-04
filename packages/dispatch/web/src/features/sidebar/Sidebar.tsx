@@ -205,6 +205,18 @@ export function Sidebar({
           <ul className="mt-1 space-y-0.5">
             <RailRow
               badge={undefined}
+              detail="Every thread you take part in"
+              label="My threads"
+              onNavigate={onNavigate}
+              selected={location.pathname === "/threads"}
+              to="/threads"
+            />
+          </ul>
+        </section>
+        <section>
+          <ul className="mt-1 space-y-0.5">
+            <RailRow
+              badge={undefined}
               detail="Deploys, merges, and pipeline failures"
               label="Delivery"
               onNavigate={onNavigate}

@@ -158,6 +158,9 @@ const UnifiedInboxPage = lazy(() =>
 const InboxShadowPage = lazy(() =>
   import("./features/inbox/InboxShadowPage").then((module) => ({ default: module.InboxShadowPage }))
 );
+const MyThreadsPage = lazy(() =>
+  import("./features/threads/MyThreadsPage").then((module) => ({ default: module.MyThreadsPage }))
+);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -822,6 +825,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<InboxShadowPage />} path="/inbox/shadow" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 <Route element={<RepliesPage />} path={REPLIES_PATH} />
+                <Route element={<MyThreadsPage />} path="/threads" />
                 <Route element={<PersonPage />} path="/people/:login" />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />

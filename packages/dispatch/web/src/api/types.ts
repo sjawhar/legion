@@ -197,6 +197,8 @@ export type {
   MyAnswersResponse,
   MyRepliesResponse,
   MyReplyRow,
+  MyThread,
+  MyThreads,
   OpenAskOwner,
   PersonNode,
   PersonNodes,

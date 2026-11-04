@@ -11,7 +11,7 @@ const PersonInboxEdgesSQL = "graph_inbox_edges"
 const MentionEdgesSQL = "graph_mention_edges"
 
 // AllEdgesSQL is the complete derived graph for new named reads. The sibling relations
-// add identity, recorded delivery and indexed inbox delivery without changing graph_edges,
+// add identity, recorded delivery, indexed inbox delivery, mentions and participation without changing graph_edges,
 // so existing builds retain their result sets and query plans during rollout and rollback.
 const AllEdgesSQL = `(
 	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from graph_edges
@@ -22,4 +22,6 @@ const AllEdgesSQL = `(
 	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from ` + PersonInboxEdgesSQL + `
 	union all
 	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from ` + MentionEdgesSQL + `
+	union all
+	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from graph_thread_edges
 )`
