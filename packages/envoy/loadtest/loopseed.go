@@ -412,17 +412,7 @@ const loopFiller = "the verified linux spec loop carried this proposal's text he
 
 // loopTextParagraph is one paragraph of a part's share of its proposal's text, of exactly n bytes.
 func loopTextParagraph(proposal, part, index, n int) string {
-	head := fmt.Sprintf("P%04d-%03d-%06d ", proposal, part, index)
-	if n <= len(head) {
-		return head[:n]
-	}
-	var b strings.Builder
-	b.Grow(n)
-	b.WriteString(head)
-	for b.Len() < n {
-		b.WriteString(loopFiller[:min(len(loopFiller), n-b.Len())])
-	}
-	return b.String()
+	return loopFillText(fmt.Sprintf("P%04d-%03d-%06d ", proposal, part, index), n)
 }
 
 // loopParagraphs is how many paragraphs a part's share of its proposal's text is written as.
@@ -520,6 +510,26 @@ type loopPacked struct {
 	quote int
 }
 
+// with is this part with thread j in it: one more thread, one more quote row, its replies, its
+// bytes and its quote row's markdown.
+func (pk loopPacked) with(j, quoteBytes int, row loopRow, totals []int64) loopPacked {
+	pk.part.Threads++
+	pk.part.QuoteRows++
+	pk.part.Replies += loopReplies(j, row.IDs, row.ReplyLines)
+	pk.part.ThreadBytes += totals[j]
+	pk.quote += quoteBytes
+	return pk
+}
+
+// fits is true for a part inside every cap the plan is built under: its threads inside the margin
+// budget given, and its quote rows, the proposal's spare rows counted, inside the markdown and
+// the elements one document holds.
+func (pk loopPacked) fits(spare int, margin int64) bool {
+	return pk.part.ThreadBytes <= margin &&
+		pk.quote+spare <= loopQuoteBudget &&
+		pk.part.QuoteRows+loopSpareQuotes <= loopMaxQuoteRows
+}
+
 // loopPackParts fills part documents with a proposal's threads in order, closing a part when the
 // next thread would take its margin past the earlier-part budget or its quote rows past what one
 // document's markdown and elements hold.
@@ -529,17 +539,13 @@ func loopPackParts(index int, row loopRow, totals []int64) []loopPacked {
 	for j := range row.IDs {
 		q := len(loopQuoteRow(index, j)) + loopBlockBytes
 		p := &packed[len(packed)-1]
-		if p.part.Threads > 0 && (p.part.ThreadBytes+totals[j] > loopEarlierMargin ||
-			p.quote+q+spare > loopQuoteBudget ||
-			p.part.QuoteRows+1+loopSpareQuotes > loopMaxQuoteRows) {
+		next := p.with(j, q, row, totals)
+		if p.part.Threads > 0 && !next.fits(spare, loopEarlierMargin) {
 			packed = append(packed, loopPacked{part: loopPart{FirstThread: j}})
 			p = &packed[len(packed)-1]
+			next = p.with(j, q, row, totals)
 		}
-		p.part.Threads++
-		p.part.QuoteRows++
-		p.part.Replies += loopReplies(j, row.IDs, row.ReplyLines)
-		p.part.ThreadBytes += totals[j]
-		p.quote += q
+		*p = next
 	}
 	return packed
 }
@@ -551,24 +557,17 @@ func loopSplitLast(index int, row loopRow, totals []int64, packed []loopPacked) 
 	spare := loopSpareBytes(index)
 	at := len(packed) - 1
 	last := packed[at]
-	if last.part.ThreadBytes <= loopLastMargin && last.quote+spare <= loopQuoteBudget &&
-		last.part.QuoteRows+loopSpareQuotes <= loopMaxQuoteRows {
+	if last.fits(spare, loopLastMargin) {
 		return packed
 	}
 	var tail loopPacked
 	first := last.part.FirstThread + last.part.Threads
 	for j := first - 1; j > last.part.FirstThread; j-- {
-		q := len(loopQuoteRow(index, j)) + loopBlockBytes
-		if tail.part.ThreadBytes+totals[j] > loopLastMargin ||
-			tail.quote+q+spare > loopQuoteBudget ||
-			tail.part.QuoteRows+1+loopSpareQuotes > loopMaxQuoteRows {
+		next := tail.with(j, len(loopQuoteRow(index, j))+loopBlockBytes, row, totals)
+		if !next.fits(spare, loopLastMargin) {
 			break
 		}
-		tail.part.Threads++
-		tail.part.QuoteRows++
-		tail.part.Replies += loopReplies(j, row.IDs, row.ReplyLines)
-		tail.part.ThreadBytes += totals[j]
-		tail.quote += q
+		tail = next
 		first = j
 	}
 	if tail.part.Threads == 0 {
@@ -673,9 +672,7 @@ func planLoopProposal(seed uint64, index int, row loopRow) (loopProposal, error)
 func (p *loopPlan) partThreads(proposal, part int) []loopThread {
 	pr := p.Proposals[proposal]
 	pt := pr.Parts[part]
-	row := loopRow{IDs: pr.IDs, LiveIDs: pr.LiveIDs, Met: pr.Met, Rejected: pr.Rejected,
-		Parked: pr.Parked, Withdrawn: pr.Withdrawn, Other: pr.Other,
-		ThreadBytes: pr.ThreadBytes, ReplyLines: pr.ReplyLines}
+	row := loopPlanRow(&pr)
 	sizes := loopBodySizes(p.Seed, proposal, row)
 	statuses := loopStatuses(p.Seed, proposal, row)
 	out := make([]loopThread, 0, pt.Threads)
@@ -738,7 +735,7 @@ func loopShare(total int, weights []int) ([]int, error) {
 		sum += int64(w)
 	}
 	if sum <= 0 {
-		return nil, fmt.Errorf("the %d weights to share %d over total %d", len(weights), total, sum)
+		return nil, fmt.Errorf("the %d weights to share %d over add up to %d", len(weights), total, sum)
 	}
 	out := make([]int, len(weights))
 	fracs := make([]float64, len(weights))
@@ -840,10 +837,16 @@ func loopReviewIndexLine(proposal, page int) string {
 	return fmt.Sprintf("- review page %03d of proposal %04d is in this review.", page, proposal)
 }
 
+// loopReviewIndexTitle is the heading of a live proposal's review index: the line
+// loopReviewIndexBytes counts and loopIndexText writes, so both read it from here.
+func loopReviewIndexTitle(proposal int) string {
+	return fmt.Sprintf("# review index of proposal %04d", proposal)
+}
+
 // loopReviewIndexBytes is the markdown of one live proposal's review index: its title and one line
 // per review page.
 func loopReviewIndexBytes(proposal, pages int) int64 {
-	n := int64(len(fmt.Sprintf("# review index of proposal %04d", proposal)) + loopBlockBytes)
+	n := int64(len(loopReviewIndexTitle(proposal)) + loopBlockBytes)
 	for page := range pages {
 		n += int64(len(loopReviewIndexLine(proposal, page)) + loopBlockBytes)
 	}

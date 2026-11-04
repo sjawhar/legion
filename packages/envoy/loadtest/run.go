@@ -190,7 +190,7 @@ func runLoad(args []string) error {
 	case *loopSeedPath != "" && *seedPath != "":
 		return fmt.Errorf("-seed applies only without -loop-seed: a loop step's issues are the loop seed's proposals, and seed.json is not read")
 	case *loopFactor < 0 || !finite(*loopFactor):
-		return fmt.Errorf("-loop-factor must be 0 or more")
+		return fmt.Errorf("-loop-factor must be 0 or more, not %g", *loopFactor)
 	case !replay && *sessions < 1:
 		return fmt.Errorf("-sessions is required and must be at least 1")
 	case *human < 0 || *human > 1 || !finite(*human):

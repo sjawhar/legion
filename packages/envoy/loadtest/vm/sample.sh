@@ -64,37 +64,47 @@ case $clk_tck in
   '' | *[!0-9]*) clk_tck=100 ;;
 esac
 
-# spec_dir ROLE[=CGROUP DIR]: the cgroup v2 directory a role's counters live in.
-spec_dir() {
-  case $1 in
-    *=*) echo "${1#*=}" ;;
-    *) echo "$cgroup_root/$1" ;;
-  esac
-}
-
-# spec_role ROLE[=CGROUP DIR]: the role name the reading carries.
-spec_role() {
-  case $1 in
-    *=*) echo "${1%%=*}" ;;
-    *) echo "$1" ;;
-  esac
+# readable FILE: true when the file can be read, else the reading's "error" line for it, which is
+# how a file this VM cannot read is reported rather than a dropped reading.
+readable() {
+  [ -r "$1" ] && return 0
+  echo "error $1 is not readable"
+  return 1
 }
 
 # emit_container ROLE DIR: one reading of the container whose cgroup v2 files are in DIR. The
 # keys are the ones cluster.sh's SAMPLE_SCRIPT prints, so the collector parses both the same way.
+# Every file is read with the shell's own builtins: this sampler runs inside the series it
+# measures, so a reading that forked a grep or a cat per file would report its own CPU.
 emit_container() {
   echo "role $1"
   echo "container ${2##*/}"
   for f in cpu.stat cpu.max memory.current memory.stat; do
-    if [ -r "$2/$f" ]; then
+    if readable "$2/$f"; then
       case $f in
-        cpu.stat) grep -E '^(usage_usec|throttled_usec) ' "$2/cpu.stat" ;;
-        cpu.max) echo "cpu_max $(cat "$2/cpu.max")" ;;
-        memory.current) echo "memory_current $(cat "$2/memory.current")" ;;
-        memory.stat) grep '^inactive_file ' "$2/memory.stat" ;;
+        cpu.stat)
+          while IFS= read -r line || [ -n "$line" ]; do
+            case $line in
+              usage_usec\ * | throttled_usec\ *) echo "$line" ;;
+            esac
+          done <"$2/cpu.stat"
+          ;;
+        cpu.max)
+          IFS= read -r line <"$2/cpu.max" || :
+          echo "cpu_max $line"
+          ;;
+        memory.current)
+          IFS= read -r line <"$2/memory.current" || :
+          echo "memory_current $line"
+          ;;
+        memory.stat)
+          while IFS= read -r line || [ -n "$line" ]; do
+            case $line in
+              inactive_file\ *) echo "$line" ;;
+            esac
+          done <"$2/memory.stat"
+          ;;
       esac
-    else
-      echo "error $2/$f is not readable"
     fi
   done
   echo end
@@ -107,9 +117,13 @@ emit_container() {
 # period, which a container gets unless its runtime sets another.
 machine_period() {
   for spec in "$@"; do
-    dir=$(spec_dir "$spec")
+    case $spec in
+      *=*) dir=${spec#*=} ;;
+      *) dir=$cgroup_root/$spec ;;
+    esac
     [ -r "$dir/cpu.max" ] || continue
-    p=$(awk 'NR == 1 { print $2 }' "$dir/cpu.max")
+    p=
+    read -r _ p <"$dir/cpu.max" || :
     case $p in
       '' | *[!0-9]*) ;;
       *)
@@ -134,7 +148,9 @@ machine_period() {
 emit_machine() {
   echo "role $machine_role"
   echo "container vm"
-  if [ -r "$proc/stat" ]; then
+  if readable "$proc/stat"; then
+    # awk and not $(( )) for the two /proc reads below: printf rounds where the shell's integer
+    # arithmetic truncates, so a host whose CLK_TCK does not divide 1,000,000 would read low.
     usage=$(awk -v hz="$clk_tck" '$1 == "cpu" { printf "%.0f\n", ($2 + $3 + $4 + $7 + $8 + $9) * 1000000 / hz; exit }' "$proc/stat")
     if [ -n "$usage" ]; then
       echo "usage_usec $usage"
@@ -142,20 +158,21 @@ emit_machine() {
     else
       echo "error $proc/stat has no cpu line"
     fi
-  else
-    echo "error $proc/stat is not readable"
   fi
-  if [ -r "$proc/cpuinfo" ]; then
-    processors=$(grep -c '^processor' "$proc/cpuinfo")
+  if readable "$proc/cpuinfo"; then
+    processors=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      case $line in
+        processor*) processors=$((processors + 1)) ;;
+      esac
+    done <"$proc/cpuinfo"
     if [ "$processors" -gt 0 ]; then
       echo "cpu_max $((processors * $1)) $1"
     else
       echo "error $proc/cpuinfo names no processor"
     fi
-  else
-    echo "error $proc/cpuinfo is not readable"
   fi
-  if [ -r "$proc/meminfo" ]; then
+  if readable "$proc/meminfo"; then
     awk -v f="$proc/meminfo" '
       /^MemTotal:/ { total = $2 }
       /^MemFree:/ { free = $2 }
@@ -167,8 +184,6 @@ emit_machine() {
           print "error " f " has no MemTotal"
         }
       }' "$proc/meminfo"
-  else
-    echo "error $proc/meminfo is not readable"
   fi
   echo end
 }
@@ -177,7 +192,10 @@ round=0
 while :; do
   period=$(machine_period "$@")
   for spec in "$@"; do
-    emit_container "$(spec_role "$spec")" "$(spec_dir "$spec")"
+    case $spec in
+      *=*) emit_container "${spec%%=*}" "${spec#*=}" ;;
+      *) emit_container "$spec" "$cgroup_root/$spec" ;;
+    esac
   done
   emit_machine "$period"
   round=$((round + 1))

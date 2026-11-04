@@ -9,7 +9,9 @@
 #       Starts every container of the deployment by image digest, with the CPU, memory and
 #       ephemeral limits of the specification below and nothing silently defaulted, installs
 #       loadgen and the stub embedder on the load-generator VM, and waits until Dispatch answers
-#       /healthz. It makes the run directory and names the run in <root>/current.
+#       /healthz. With no --run it makes the run directory and names the run in <root>/current;
+#       with --run it starts the deployment again under a run this pod started, and leaves
+#       <root>/current and that run's state.json as they are.
 #   vm.sh check --config FILE [--run ID]
 #       The read-back of acceptance criterion A1, as a markdown table of expected beside found:
 #       every container's CPU, memory and image, Dispatch's network mode and ephemeral limit,
@@ -191,6 +193,9 @@ CONTAINERS=(
 # The four listeners the loop's sessions register on: the unit sessions round-robin over all but
 # the last and the driver session takes the last (run.go -loop-listeners).
 LOAD_LISTENERS=(load-listener-1 load-listener-2 load-listener-3 load-listener-4)
+# Everything that holds a connection to the database, in the order it is stopped: the reset and
+# the template rename both stop all of it first, so nothing holds a connection or a consumer.
+DB_HOLDERS=(dispatch dispatch-listener "${LOAD_LISTENERS[@]}" hub-listener)
 # Dispatch's ephemeral storage limit, the setting that exists because Autopilot's 1Gi default
 # evicted production's Dispatch (agent-infra dispatch/Pulumi.prod.yaml appEphemeralStorage).
 # docker takes it as --storage-opt size=, which check reads back from HostConfig.StorageOpt.
@@ -723,7 +728,7 @@ use_run() {
 # loadgen_local ARGS: this pod's loadgen, with its root in the run directory.
 loadgen_local() {
   local bin
-  bin=${OPT[loadgen]:-$(cfg .paths.loadgen "${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}/bin/loadgen")}
+  bin=$(loadgen_bin)
   LOADTEST_ROOT=$RUN_DIR "$bin" "$@"
 }
 
@@ -941,7 +946,7 @@ cmd_seed() {
 # connection to it stopped first.
 seed_template() {
   local role
-  for role in dispatch dispatch-listener "${LOAD_LISTENERS[@]}" hub-listener; do
+  for role in "${DB_HOLDERS[@]}"; do
     container_stop "$role"
   done
   psql_at postgres "alter database $(cfg .cloudsql.database dispatch) rename to $1" >/dev/null ||
@@ -962,7 +967,7 @@ reset_deployment() {
   db_exists "$template" || die "the instance has no template database $template; vm.sh seed first"
 
   # 1. the Dispatch and listener containers stopped, so nothing holds a connection or a consumer.
-  for role in dispatch dispatch-listener "${LOAD_LISTENERS[@]}" hub-listener; do
+  for role in "${DB_HOLDERS[@]}"; do
     container_stop "$role"
     steps+=("stop $role")
   done
@@ -1171,8 +1176,10 @@ step_rates() {
   be=$(load_value baseline.events 4) br=$(load_value baseline.requests 60) bs=$(load_value baseline.sessions 400)
   lw=$(load_value loop.writes 3.5) lr=$(load_value loop.reads 38.5) lu=$(load_value loop.unit_starts 1.75)
   local v
-  for v in "$be" "$br" "$bs" "$lw" "$lr" "$lu"; do
-    valid number "$v" || die "the deployment file $CONFIG gives '$v' as one of the load rates, which is not a number"
+  for v in "baseline.events=$be" "baseline.requests=$br" "baseline.sessions=$bs" \
+    "loop.writes=$lw" "loop.reads=$lr" "loop.unit_starts=$lu"; do
+    valid number "${v#*=}" ||
+      die "the deployment file $CONFIG gives .load.${v%%=*} as '${v#*=}', which is not a number"
   done
   EVENTS=$(awk -v b="$be" -v l="$lw" -v f="$f" 'BEGIN { printf "%g", b + l * f }')
   REQUESTS=$(awk -v b="$br" -v l="$lr" -v f="$f" 'BEGIN { printf "%g", b + l * f }')
@@ -1231,7 +1238,7 @@ fetch_profiles() {
 # they start (R11), and a step the load never reached is no Dispatch failure to record.
 run_step() {
   local name=$1 factor=$2 duration=$3 warmup=$4
-  valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
+  valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-', and at most 63 of them"
   valid factor "$factor" || die "factor '$factor' is not a number"
   valid duration "$duration" || die "--duration '$duration' is not a whole number of s, m or h"
   valid duration "$warmup" || die "--warmup '$warmup' is not a whole number of s, m or h"

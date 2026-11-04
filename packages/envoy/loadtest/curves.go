@@ -34,8 +34,9 @@ type curveSeries struct {
 	// crits are the criteria of passCriteria this series judges, in the order its Pass table and
 	// curves.csv carry them.
 	crits []int
-	// void is set for a series that voids a step whose own generator was starved (markVoid).
-	void bool
+	// voidsStarved is set for a series that voids a step whose own generator was starved
+	// (markVoid).
+	voidsStarved bool
 }
 
 // clusterSeries is INFRA-598's cluster series: the grid 1, 2, 3, 5, 7, 10, a knee refined until
@@ -52,8 +53,8 @@ var clusterSeries = &curveSeries{
 // comes from a generator VM that can starve before Dispatch does.
 var loopSeries = &curveSeries{
 	name: "loop", grid: []float64{1, 2, 3, 4, 6, 8, 12, 16, 20}, bracket: 0.5,
-	crits: []int{critCommits, critRequests, critDelivery, critCPULimit, critPool, critFailed, critLost, critCloudSQLCPU},
-	void:  true,
+	crits:        []int{critCommits, critRequests, critDelivery, critCPULimit, critPool, critFailed, critLost, critCloudSQLCPU},
+	voidsStarved: true,
 }
 
 // curveSeriesByName are the series -series takes.
@@ -367,7 +368,7 @@ func (s *curveStep) judge() {
 // can never be void.
 func (s *curveStep) markVoid() error {
 	name := s.sum.Config.GeneratorRole
-	if !s.se.void || s.failed || name == "" || s.cgroup == nil {
+	if !s.se.voidsStarved || s.failed || name == "" || s.cgroup == nil {
 		return nil
 	}
 	r := s.role(name)
@@ -960,7 +961,7 @@ func renderCurvesCSV(se *curveSeries, steps []*curveStep) (string, error) {
 		}
 	}
 	header := []string{"step", "factor", "kind", "failed"}
-	if se.void {
+	if se.voidsStarved {
 		header = append(header, "void")
 	}
 	for _, c := range cols {
@@ -976,7 +977,7 @@ func renderCurvesCSV(se *curveSeries, steps []*curveStep) (string, error) {
 	}
 	for _, s := range steps {
 		row := []string{s.name, fmtFloat(s.factor), s.kindName(), strings.Join(s.failedKinds, ";")}
-		if se.void {
+		if se.voidsStarved {
 			row = append(row, s.voidReason())
 		}
 		for _, c := range cols {

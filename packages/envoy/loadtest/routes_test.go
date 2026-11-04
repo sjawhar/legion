@@ -246,6 +246,47 @@ func TestLoopRouteMixIsRefusedWithoutALoopSeed(t *testing.T) {
 	}
 }
 
+// TestArtifactIDIsDrawnForAPartUnderALoopSeed: under a loop seed {artifact_id} is filled from a
+// part document of the proposal the read lands on, exactly as {part_artifact_id} is, so a route
+// that uses it is drawn onto a proposal that holds one and is refused when no proposal does -
+// rather than reading /api/v1/artifacts//text. A plain seed.json run, where render fills it from
+// the issue, is unchanged.
+func TestArtifactIDIsDrawnForAPartUnderALoopSeed(t *testing.T) {
+	one, err := parseRouteMix("test", "1 pod agent GET /api/v1/artifacts/{artifact_id}/text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := one.Routes[0]
+	if rt.need != loopNeedPart {
+		t.Errorf("{artifact_id} needs %s, want a part document", loopNeedNames[rt.need])
+	}
+	if err := checkRouteMixSeed(one, nil); err != nil {
+		t.Fatalf("{artifact_id} without a loop seed is refused with %v, want the seed.json render", err)
+	}
+	is := seedIssue{Key: "LGA-7", ArtifactID: "0b6f1c3e-1111-2222-3333-444455556666"}
+	if got, want := rt.render(is, "LGB"), "/api/v1/artifacts/0b6f1c3e-1111-2222-3333-444455556666/text"; got != want {
+		t.Errorf("a plain seed renders %q, want %q", got, want)
+	}
+	none := &loopSeed{Project: "LOOP", SearchTerms: []string{"alpha"}, StatusTerms: loopStatusNames[:],
+		Proposals: []loopSeedProposal{{Index: 0, Name: "alpha", Key: "LOOP-1", IDs: 3, LastPart: -1}}}
+	none.prepare()
+	err = checkRouteMixSeed(one, none)
+	if err == nil || !strings.Contains(err.Error(), "{artifact_id}") || !strings.Contains(err.Error(), "a part document") {
+		t.Fatalf("a loop seed with no part document is refused with %v, want a refusal naming the placeholder and the record", err)
+	}
+	ls := loopTestSeed(t)
+	if err := checkRouteMixSeed(one, ls); err != nil {
+		t.Fatalf("{artifact_id} against a loop seed that holds parts: %v", err)
+	}
+	rng := rand.New(rand.NewPCG(5, 11))
+	for range 200 {
+		path := rt.renderLoop(ls, ls.pick(rt.need, rng.Float64()), rng)
+		if !strings.HasPrefix(path, "/api/v1/artifacts/") || strings.HasSuffix(path, "//text") {
+			t.Fatalf("a draw rendered %q, which reads no part document", path)
+		}
+	}
+}
+
 // TestRouteNeedsOneRecordOfItsProposal: a route that would read two records of one proposal is
 // refused at its line, since the proposal it lands on is drawn for one record.
 func TestRouteNeedsOneRecordOfItsProposal(t *testing.T) {

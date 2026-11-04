@@ -80,9 +80,6 @@ type cloudsqlCPUPoint struct {
 // cloudsqlTimeSeriesAnswer is the part of projects.timeSeries.list's answer this read needs.
 type cloudsqlTimeSeriesAnswer struct {
 	TimeSeries []struct {
-		Resource struct {
-			Labels map[string]string `json:"labels"`
-		} `json:"resource"`
 		Points []struct {
 			Interval struct {
 				StartTime time.Time `json:"startTime"`

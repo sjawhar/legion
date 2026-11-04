@@ -240,15 +240,14 @@ func (p *unitPlacer) spilled() int {
 	return p.spill
 }
 
-// unitStart is one unit session the schedule plans: its number in the step, when it starts, the
-// proposal the placement gave it, and whether the cap spilled it off the proposal it drew. A
-// start before the window is no different from one in it: what the delivery join reads is the
-// life each session went on to have (sessionWindow), not when it began.
+// unitStart is one unit session the schedule plans: its number in the step, when it starts and
+// the proposal the placement gave it. A start before the window is no different from one in it:
+// what the delivery join reads is the life each session went on to have (sessionWindow), not when
+// it began.
 type unitStart struct {
 	N        int
 	At       time.Time
 	Proposal int
-	Spilled  bool
 }
 
 // planUnitStarts walks the unit sessions' open-loop schedule on unitStartStream from start until
@@ -260,12 +259,12 @@ func planUnitStarts(rngSeed uint64, rate float64, life time.Duration, p *unitPla
 	n := 0
 	openLoopPlan(rngSeed, unitStartStream, rate, start, winStart, winEnd, func(r *rand.Rand, next time.Time, _ bool) bool {
 		x := r.Float64()
-		at, spilled := p.take(next, x, life)
+		at, _ := p.take(next, x, life)
 		if at < 0 {
 			return true
 		}
 		n++
-		return fn(unitStart{N: n, At: next, Proposal: at, Spilled: spilled})
+		return fn(unitStart{N: n, At: next, Proposal: at})
 	})
 }
 
@@ -368,7 +367,10 @@ func newLoopListener(url, token string) *loopListener {
 }
 
 // post sends body as JSON to path and reads the answer; a non-2xx answer is an error naming the
-// status and what the listener said, as the registrar's registration is (registrar.register).
+// endpoint and route it came from, the status and what the listener said, as the registrar's
+// registration names its status and answer (registrar.register). Five endpoints and three routes
+// share this one refusal, and the log lines that print it carry only the session id, so the URL
+// is what attributes a 401 to one of them.
 func (l *loopListener) post(ctx context.Context, path string, body any) ([]byte, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -387,7 +389,7 @@ func (l *loopListener) post(ctx context.Context, path string, body any) ([]byte,
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return b, fmt.Errorf("%d %s", resp.StatusCode, trunc(b))
+		return b, fmt.Errorf("%s: %d %s", l.url+path, resp.StatusCode, trunc(b))
 	}
 	return b, nil
 }
@@ -397,9 +399,11 @@ func (l *loopListener) post(ctx context.Context, path string, body any) ([]byte,
 // has taken. The flat population keeps the same by session index (relaySessions, which holds the
 // protocol); a loop session comes and goes, so it keeps its own.
 type loopRelay struct {
-	epoch    string
+	epoch string
+	// consumer is read once per delivered frame, on another goroutine than the registration that
+	// writes it, so it is an atomic as the flat population's is (relay.go).
+	consumer atomic.Bool
 	mu       sync.Mutex
-	consumer bool
 	stream   string
 	written  uint64
 	seen     map[uint64]struct{}
@@ -433,20 +437,16 @@ func (r *loopRelay) answered(body []byte) {
 		consumer, stream = ans.Delivery.Mode == sessionDeliveryConsumer, ans.Delivery.StreamID
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.consumer = consumer
 	if consumer && stream != "" && stream != r.stream {
 		r.stream, r.written = stream, 0
 	}
+	r.mu.Unlock()
+	r.consumer.Store(consumer)
 }
 
 // relayed reports whether the listener's last answer relays the session, so that a core copy of
 // one of its subjects is no receipt.
-func (r *loopRelay) relayed() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.consumer
-}
+func (r *loopRelay) relayed() bool { return r.consumer.Load() }
 
 // take reports whether seq is a frame the session has not taken. A repeat of one it has is the
 // stream's redelivery, which the plugin's ledger hides, and is no receipt.
@@ -535,7 +535,8 @@ func newLoopSessions(cfg runConfig, lg *log.Logger, nonce int64, b sessionBus, r
 		heartbeat:   loopHeartbeat,
 		startMs:     newCollector[float64](1 << 12),
 		subscribeMs: newCollector[float64](1 << 12),
-		// A heartbeat sends no unsubscribe, so a session gives one of each of the two below.
+		// Only the registration at a session's start is timed, not its heartbeats, so a session
+		// adds one subscribe sample and at most one unsubscribe sample.
 		unsubscribeMs: newCollector[float64](1 << 12),
 		concurrent:    newCollector[float64](1 << 10),
 	}
@@ -695,7 +696,7 @@ func (lp *loopSessions) run(ctx context.Context, s *loopSession, end time.Time) 
 	}
 	ready()
 
-	if !lp.live(ctx, s, end) {
+	if !lp.heartbeatUntil(ctx, s, end) {
 		// The step ended first: the session was still subscribed when it stopped measuring, so
 		// its window stays open and every later write is counted against it.
 		return
@@ -727,10 +728,10 @@ func (lp *loopSessions) failedStart(s *loopSession, err error) {
 	}
 }
 
-// live heartbeats the session until end, and answers true when it reached it; a session ctx ended
-// first answers false and neither publishes nor unsubscribes, since the step is over. The driver
-// session has no end and lives until ctx does.
-func (lp *loopSessions) live(ctx context.Context, s *loopSession, end time.Time) bool {
+// heartbeatUntil heartbeats the session until end, and answers true when it reached it; a session
+// ctx ended first answers false and neither publishes nor unsubscribes, since the step is over.
+// The driver session has no end and lives until ctx does.
+func (lp *loopSessions) heartbeatUntil(ctx context.Context, s *loopSession, end time.Time) bool {
 	var stop <-chan time.Time
 	if !end.IsZero() {
 		timer := time.NewTimer(time.Until(end))
@@ -815,6 +816,7 @@ func (lp *loopSessions) copies(s *loopSession, agent bool) func(busMsg) {
 // each stream sequence as the session's receipt, with the stream's store time, answers done and
 // moves its resume point, as the pi plugin does (relay.go).
 func (lp *loopSessions) frames(s *loopSession) func(busMsg) {
+	agentSubject := contracts.AgentSubject(s.id)
 	return func(m busMsg) {
 		now := time.Now().UnixNano()
 		_ = m.respond(relayReplyReceived)
@@ -825,7 +827,7 @@ func (lp *loopSessions) frames(s *loopSession) func(busMsg) {
 		}
 		if id, _, ok := envelopeEvent(m.data()); ok && s.relay.take(seq) {
 			lp.receipts.add(receipt{EventID: id, Recv: now, Published: stored, Session: s.id,
-				Agent: m.header(relayHeaderSubject) == contracts.AgentSubject(s.id)})
+				Agent: m.header(relayHeaderSubject) == agentSubject})
 		}
 		_ = m.respond(relayReplyDone)
 		s.relay.wrote(m.header(relayHeaderStreamID), seq)

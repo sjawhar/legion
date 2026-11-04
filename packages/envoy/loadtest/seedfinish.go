@@ -313,6 +313,7 @@ func (f seedFinisher) waitEmbedded(ctx context.Context) (err error) {
 	deadline := start.Add(f.embedTimeout)
 	var lastLog time.Time
 	for {
+		lacking := ""
 		coverage, readErr := f.coverage.readCoverage(ctx)
 		at := f.now()
 		// The first poll is always logged, and one more every seedEmbedLogEvery after it.
@@ -335,7 +336,7 @@ func (f seedFinisher) waitEmbedded(ctx context.Context) (err error) {
 			if failed := coverageFailed(coverage.Kinds); failed != "" {
 				return fmt.Errorf("Dispatch gave up embedding rows meaning search ranks: %s", failed)
 			}
-			lacking := coverageLacking(coverage.Kinds)
+			lacking = coverageLacking(coverage.Kinds)
 			if lacking == "" {
 				f.lg.Printf("meaning search covers the seed: %d items current, after %s", total.Current, seconds(at.Sub(start)))
 				return nil
@@ -348,7 +349,7 @@ func (f seedFinisher) waitEmbedded(ctx context.Context) (err error) {
 			if readErr != nil {
 				return fmt.Errorf("meaning search's coverage was unreadable for %s: %w", seconds(f.embedTimeout), readErr)
 			}
-			return fmt.Errorf("meaning search still lacks vectors after %s: %s", seconds(f.embedTimeout), coverageLacking(coverage.Kinds))
+			return fmt.Errorf("meaning search still lacks vectors after %s: %s", seconds(f.embedTimeout), lacking)
 		}
 		if !f.sleep(ctx, f.embedPoll) {
 			return ctx.Err()

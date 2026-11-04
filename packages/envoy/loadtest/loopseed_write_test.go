@@ -110,7 +110,10 @@ func (s *loopStub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.n++
-	id := fmt.Sprintf("00000000-0000-4000-8000-%012d", s.n)
+	// The number this answer is built from is taken under the lock: two concurrent workers must
+	// not read one another's, and the issue's key and its artifact id are one answer's.
+	n := s.n
+	id := fmt.Sprintf("00000000-0000-4000-8000-%012d", n)
 	s.mu.Unlock()
 	answer := map[string]any{}
 	status := http.StatusCreated
@@ -118,7 +121,7 @@ func (s *loopStub) serve(w http.ResponseWriter, r *http.Request) {
 	case "POST /api/v1/projects":
 		answer["key"] = body["key"]
 	case "POST /api/v1/issues":
-		answer["key"] = fmt.Sprintf("LOOP-%d", s.n)
+		answer["key"] = fmt.Sprintf("LOOP-%d", n)
 		answer["primary_artifact_id"] = id
 	case "POST /api/v1/issues/{key}/artifacts":
 		answer["artifact"] = map[string]any{"id": id}

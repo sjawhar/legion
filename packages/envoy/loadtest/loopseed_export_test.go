@@ -79,7 +79,7 @@ func TestLoopSeedServesWhatEachKindNeeds(t *testing.T) {
 		loopNeedOpenThread:     2,
 		loopNeedResolvedThread: 2,
 	} {
-		if got := ls.serves(need); got != want {
+		if got := ls.servingProposals(need); got != want {
 			t.Errorf("%s is served by %d proposals, want %d", loopNeedNames[need], got, want)
 		}
 	}

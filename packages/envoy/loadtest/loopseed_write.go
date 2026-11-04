@@ -75,6 +75,11 @@ var loopKinds = []string{loopKindProject, loopKindIssue, loopKindPart, loopKindT
 // deployment's agent bearer, as the rest of the harness does (api.go who).
 const loopSeedActor = "ses-loop-seed"
 
+// loopSeedActorBody is the actor every write of the seed names: one value, not one map per
+// record, since 464,602 comment rows would otherwise mint 464,602 identical maps. Nothing writes
+// to it - json.Marshal only reads - so the writers share it.
+var loopSeedActorBody = sessionActor(loopSeedActor)
+
 // loopProjectKeyPattern is a Dispatch project key (internal/dispatch/store/migrations/
 // 0001_init.up.sql: projects.key's check), so -project is refused before the first connection
 // rather than by a 400 after 891 issues have nowhere to go.
@@ -238,8 +243,8 @@ const loopIndexName = "review-index.md"
 
 // loopFillText is the deterministic ASCII text of exactly n bytes that one planned size is
 // written as: head, which names the object so no two texts are equal, then loopFiller until the
-// size is met. A size shorter than head is head cut to it, as loopTextParagraph does. The text is
-// ASCII, so its bytes are its UTF-16 units against loopBodyCap.
+// size is met. A size shorter than head is head cut to it. The text is ASCII, so its bytes are
+// its UTF-16 units against loopBodyCap.
 func loopFillText(head string, n int) string {
 	if n <= len(head) {
 		return head[:max(n, 0)]
@@ -319,7 +324,7 @@ func loopPageGeneration(text string) (int, bool) {
 func loopIndexText(proposal, pages int) string {
 	var b strings.Builder
 	b.Grow(int(loopReviewIndexBytes(proposal, pages)))
-	fmt.Fprintf(&b, "# review index of proposal %04d", proposal)
+	b.WriteString(loopReviewIndexTitle(proposal))
 	b.WriteString("\n\n")
 	for page := range pages {
 		b.WriteString(loopReviewIndexLine(proposal, page))
@@ -332,7 +337,7 @@ func loopIndexText(proposal, pages int) string {
 // that name (POST /api/v1/issues/{key}/artifacts {name, content, summary}).
 func loopDocBody(name, content, summary string) map[string]any {
 	return map[string]any{"name": name, "content": content, "summary": summary,
-		"actor": sessionActor(loopSeedActor)}
+		"actor": loopSeedActorBody}
 }
 
 // --- the writer ------------------------------------------------------------------------------
@@ -464,7 +469,8 @@ func (w *loopWriter) send(ctx context.Context, s loopSend) (string, bool, error)
 		// about the write, so it is not counted as a refusal.
 		return "", false, ctx.Err()
 	}
-	if !res.ok() && !(res.err == nil && slices.Contains(s.accept, res.status)) {
+	accepted := res.err == nil && slices.Contains(s.accept, res.status)
+	if !res.ok() && !accepted {
 		w.refuse(s, res.status, loopAnswerCode(res))
 		return "", false, nil
 	}
@@ -599,7 +605,7 @@ func (w *loopWriter) createProject(ctx context.Context) error {
 		kind: loopKindProject, path: loopKindProject, route: "POST /api/v1/projects",
 		method: "POST", url: "/api/v1/projects",
 		body: map[string]any{"key": w.project, "name": "Verified Linux spec loop " + w.project,
-			"actor": sessionActor(loopSeedActor)},
+			"actor": loopSeedActorBody},
 		accept:  []int{http.StatusConflict},
 		localID: func([]byte) string { return w.project },
 	})
@@ -613,14 +619,15 @@ func (w *loopWriter) proposal(ctx context.Context, index int) error {
 		kind: loopKindIssue, path: loopIssuePath(index), route: "POST /api/v1/issues",
 		method: "POST", url: "/api/v1/issues",
 		body: map[string]any{"project": w.project, "title": loopIssueTitle(pr),
-			"spec": loopIssueSpec(pr), "force": true, "actor": sessionActor(loopSeedActor)},
+			"spec": loopIssueSpec(pr), "force": true, "actor": loopSeedActorBody},
 		localID: localOfKey,
 	})
-	if err != nil || !ok {
-		if err == nil {
-			w.skipProposal(index, pr)
-		}
+	if err != nil {
 		return err
+	}
+	if !ok {
+		w.skipProposal(index, pr)
+		return nil
 	}
 	for part := range pr.Parts {
 		if err := w.part(ctx, key, index, part); err != nil {
@@ -700,7 +707,7 @@ func (w *loopWriter) thread(ctx context.Context, key, doc string, th loopThread)
 		kind: loopKindThread, path: loopThreadPath(th.Proposal, th.Part, th.Index),
 		route:  "POST /api/v1/issues/{key}/comments",
 		method: "POST", url: "/api/v1/issues/" + key + "/comments",
-		body: map[string]any{"body": body, "actor": sessionActor(loopSeedActor),
+		body: map[string]any{"body": body, "actor": loopSeedActorBody,
 			"anchor": map[string]any{"artifact": doc, "quote": th.Quote}},
 		bytes:   int64(len(body)),
 		localID: idOf,
@@ -722,7 +729,7 @@ func (w *loopWriter) thread(ctx context.Context, key, doc string, th loopThread)
 			route:  "POST /api/v1/issues/{key}/comments",
 			method: "POST", url: "/api/v1/issues/" + key + "/comments",
 			body: map[string]any{"body": reply, "reply_to": root,
-				"actor": sessionActor(loopSeedActor)},
+				"actor": loopSeedActorBody},
 			bytes:   int64(len(reply)),
 			localID: idOf,
 		}); err != nil {
@@ -736,7 +743,7 @@ func (w *loopWriter) thread(ctx context.Context, key, doc string, th loopThread)
 		kind: loopKindResolve, path: loopResolvePath(th.Proposal, th.Part, th.Index),
 		route:  "POST /api/v1/comments/{id}/resolve",
 		method: "POST", url: "/api/v1/comments/" + root + "/resolve",
-		body:    map[string]any{"actor": sessionActor(loopSeedActor)},
+		body:    map[string]any{"actor": loopSeedActorBody},
 		localID: func([]byte) string { return root },
 	})
 	return err

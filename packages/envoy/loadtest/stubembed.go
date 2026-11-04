@@ -153,8 +153,8 @@ func (s *stubEmbedder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // answer is what the stub replies to one request, and what that request carried. It refuses in
-// the order Azure would notice: the route and api-version first, then the credential, then the
-// batch, so a wrong key never tells the caller anything about its texts.
+// the order Azure would notice: the route, the method and the api-version first, then the
+// credential, then the batch, so a wrong key never tells the caller anything about its texts.
 func (s *stubEmbedder) answer(r *http.Request) stubEmbedAnswer {
 	switch {
 	case !strings.HasSuffix(r.URL.Path, stubEmbedRoute):
@@ -219,11 +219,12 @@ func (s *stubEmbedder) answer(r *http.Request) stubEmbedAnswer {
 func stubEmbedVectorOf(text string) []float32 {
 	seed := sha256.Sum256([]byte(text))
 	vector := make([]float32, stubEmbedDimension)
-	var counter [8]byte
+	var input [sha256.Size + 8]byte
+	copy(input[:sha256.Size], seed[:])
 	square := 0.0
 	for block := 0; block*8 < len(vector); block++ {
-		binary.BigEndian.PutUint64(counter[:], uint64(block))
-		digest := sha256.Sum256(append(seed[:], counter[:]...))
+		binary.BigEndian.PutUint64(input[sha256.Size:], uint64(block))
+		digest := sha256.Sum256(input[:])
 		for i := 0; i < 8 && block*8+i < len(vector); i++ {
 			word := binary.BigEndian.Uint32(digest[i*4 : i*4+4])
 			component := float32(float64(word)/float64(math.MaxUint32)*2 - 1)

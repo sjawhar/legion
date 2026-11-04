@@ -971,7 +971,9 @@ One route per line. Blank lines and lines that start with `#` are skipped.
 - Placeholders:
   - `{key}`: the key of a random issue among the issues in use.
   - `{project}`: a random seeded project key.
-  - `{artifact_id}`: the spec artifact id of that issue.
+  - `{artifact_id}`: the spec artifact id of that issue. Under a loop seed it is one of the
+    proposal's part documents instead, drawn exactly as `{part_artifact_id}` is, so a route that
+    uses it lands only on a proposal that holds a part document.
   - `{key_ref}`: `dispatch://<key>`, URL-escaped for a query string.
   - Six more resolve against the proposal the request landed on, and only the loop's own seed
     fills them (The spec loop's route mix, below): `{part_artifact_id}` and `{part_slug}`, the
@@ -1024,7 +1026,9 @@ up to 99, because the loop's remaining 1% is reads of no one shape.
 Which proposal a request lands on is drawn in proportion to that proposal's requirement ids, as
 each write's is. A route that uses one of the six placeholders is refused, naming the placeholder
 and its route, when the step has no `-loop-seed`, and again when no proposal of the loop seed
-holds the record that placeholder needs: a read of an empty id is no read.
+holds the record that placeholder needs: a read of an empty id is no read. `{artifact_id}`, which
+a plain `seed.json` run fills from its issue, is held to the same rule under a loop seed: it
+needs a part document.
 
 ### The dashboard stream
 

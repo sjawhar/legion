@@ -363,3 +363,28 @@ func TestVMSampleRestartsADeadSSH(t *testing.T) {
 		}
 	}
 }
+
+// TestVMSampleTakesASilentSSHForDead: a VM whose script is wedged holds its ssh open and prints
+// nothing; the stream is killed once it has been silent for the sampler's silence and says so,
+// rather than reporting the kill as an ssh that died. The timer goroutine writes that fact and
+// the stream reads it after the ssh ends, so this is also what the race detector reads.
+func TestVMSampleTakesASilentSSHForDead(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-ssh")
+	// One reading, then silence: the sampler's idle timer is what ends this ssh. The sleep is
+	// exec'd, so the process the timer kills is the one holding the stream open.
+	script := "#!/bin/sh\ncat >/dev/null\ncat <<'EOF'\n" +
+		vmReadingText("dispatch", "dispatch", 7, 0, "1600000 100000", 11, 1) + "EOF\nexec sleep 30\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &vmSampler{ssh: []string{fake}, interval: 100 * time.Millisecond, silence: 150 * time.Millisecond,
+		now: time.Now, lg: log.New(io.Discard, "", 0), out: io.Discard}
+	err := s.stream(t.Context(), vmTestTarget(t))
+	if err == nil || !strings.Contains(err.Error(), "printed nothing for") {
+		t.Fatalf("a wedged VM ended the stream with %v, want the silence it was taken for dead after", err)
+	}
+	if s.written != 1 {
+		t.Errorf("the stream wrote %d samples, want the one reading it printed before it went silent", s.written)
+	}
+}

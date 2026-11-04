@@ -203,13 +203,17 @@ func (sf seedFile) refuseKind(kind string) string {
 		return "seed.json holds no spare quote row to anchor a requirement thread on: the loop's kinds need the loop's own seed (-loop-seed)"
 	case kindStatus:
 		return "seed.json holds no resolved thread for a status change: the loop's kinds need the loop's own seed (-loop-seed)"
-	}
-	for _, is := range sf.Issues {
-		if kind == kindReply && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
-			return fmt.Sprintf("issue %s has no root comment ids for replies; reseed with this loadgen", is.Key)
+	case kindReply:
+		for _, is := range sf.Issues {
+			if len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
+				return fmt.Sprintf("issue %s has no root comment ids for replies; reseed with this loadgen", is.Key)
+			}
 		}
-		if kind == kindAnchored && len(is.Quotes) == 0 {
-			return fmt.Sprintf("issue %s has no quotes for anchored comments", is.Key)
+	case kindAnchored:
+		for _, is := range sf.Issues {
+			if len(is.Quotes) == 0 {
+				return fmt.Sprintf("issue %s has no quotes for anchored comments", is.Key)
+			}
 		}
 	}
 	return ""
@@ -641,7 +645,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		case res.ok():
 			pg.gen, pg.known = pg.gen+1, true
 		case res.status != http.StatusTooManyRequests:
-			w.resyncPage(ctx, pg, p, is.Key)
+			w.resyncPage(ctx, pg, p)
 		}
 	case kindRequirement:
 		w.record(loopClassRequirement, res)
@@ -790,11 +794,11 @@ func (w *writer) resync(ctx context.Context, issue int) {
 // since each would look for text the page no longer holds. A page whose text names no generation
 // is one this run cannot reproduce, which it logs rather than guesses at. The page's lock is the
 // caller's.
-func (w *writer) resyncPage(ctx context.Context, pg *loopPage, p eventPlan, key string) {
+func (w *writer) resyncPage(ctx context.Context, pg *loopPage, p eventPlan) {
 	w.mu.Lock()
 	w.pageResyncs++
 	w.mu.Unlock()
-	w.readPage(ctx, pg, p, key)
+	w.readPage(ctx, pg, p)
 }
 
 // readPageGeneration is the same read before this run's first verdict on a page, which learns
@@ -804,20 +808,20 @@ func (w *writer) readPageGeneration(ctx context.Context, pg *loopPage, p eventPl
 	w.mu.Lock()
 	w.pageReads++
 	w.mu.Unlock()
-	w.readPage(ctx, pg, p, w.loop.Proposals[p.issue].Key)
+	w.readPage(ctx, pg, p)
 }
 
 // readPage reads a review page and takes the generation its paragraph names. A page whose text
 // names none is one this run cannot reproduce, which it logs rather than guesses at, leaving the
 // generation it had; a page it read is known, so the next verdict on it sends no speculative
 // find. The page's lock is the caller's.
-func (w *writer) readPage(ctx context.Context, pg *loopPage, p eventPlan, key string) {
+func (w *writer) readPage(ctx context.Context, pg *loopPage, p eventPlan) {
 	page := w.loop.Proposals[p.issue].ReviewPages[p.page]
 	res, markdown := w.artifactText(ctx, page.ArtifactID, who{})
 	n, ok := loopPageGeneration(markdown)
 	if !ok {
 		w.lg.Printf("write %s %s: read review page %s for its generation: %d %s %v",
-			p.kind, key, page.ArtifactID, res.status, trunc(res.body), res.err)
+			p.kind, w.sf.Issues[p.issue].Key, page.ArtifactID, res.status, trunc(res.body), res.err)
 		return
 	}
 	pg.gen, pg.known = n, true

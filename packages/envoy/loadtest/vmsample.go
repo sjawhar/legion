@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -182,8 +183,11 @@ func (ts *vmTargets) Set(value string) error {
 type vmSampler struct {
 	ssh      []string
 	interval time.Duration
-	now      func() time.Time
-	lg       *log.Logger
+	// silence is how long a stream may print nothing before it is taken for dead: the run's is
+	// vmSampleSilence, and a test shortens it rather than waiting half a minute.
+	silence time.Duration
+	now     func() time.Time
+	lg      *log.Logger
 
 	mu      sync.Mutex
 	out     io.Writer
@@ -354,22 +358,22 @@ func (s *vmSampler) stream(ctx context.Context, t *vmTarget) error {
 	}
 	// A VM whose script is wedged prints nothing and its ssh never ends, so the stream is killed
 	// once it has been silent for vmSampleSilence and started again, as any dead one is.
-	silent := false
-	idle := time.AfterFunc(vmSampleSilence, func() {
-		silent = true
+	var silent atomic.Bool
+	idle := time.AfterFunc(s.silence, func() {
+		silent.Store(true)
 		_ = cmd.Process.Kill()
 	})
 	defer idle.Stop()
 	parseErr := parseVMReadings(stdout, t, s.now, func(sample cgroupSample) {
-		idle.Reset(vmSampleSilence)
+		idle.Reset(s.silence)
 		s.write(sample)
 	})
 	waitErr := cmd.Wait()
 	switch {
 	case ctx.Err() != nil:
 		return ctx.Err()
-	case silent:
-		return fmt.Errorf("the VM printed nothing for %s", seconds(vmSampleSilence))
+	case silent.Load():
+		return fmt.Errorf("the VM printed nothing for %s", seconds(s.silence))
 	case parseErr != nil:
 		return parseErr
 	case waitErr != nil:
@@ -454,6 +458,7 @@ func runVMSample(args []string) error {
 	s := &vmSampler{
 		ssh:      sshFields,
 		interval: *interval,
+		silence:  vmSampleSilence,
 		now:      time.Now,
 		lg:       log.New(os.Stderr, "loadgen vm-sample: ", log.LstdFlags),
 		out:      f,

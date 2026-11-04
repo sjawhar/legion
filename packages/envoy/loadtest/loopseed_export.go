@@ -63,8 +63,11 @@ type loopSeed struct {
 	Proposals   []loopSeedProposal `json:"proposals"`
 	Missing     loopSeedMissing    `json:"missing"`
 
-	// picks is the weighted draw of each need, built by prepare; it is no part of the file.
-	picks [loopNeedCount]loopPicks
+	// picks is the weighted draw of each need, and searchEsc and statusEsc the two term lists
+	// escaped for the query they land in; all three are built by prepare and are no part of the
+	// file.
+	picks                [loopNeedCount]loopPicks
+	searchEsc, statusEsc []string
 }
 
 // loopSeedProposal is one proposal of the loop as a run addresses it: the records the id map holds
@@ -347,7 +350,7 @@ func (ls *loopSeed) exportThreads(seed uint64, pr *loopProposal, sp *loopSeedPro
 
 // exportReview records the live proposal's review pages, in the plan's order, each with the index
 // and the byte size its text is drawn from, and its review index.
-func (ls *loopSeed) exportReview(pr *loopProposal, sp *loopSeedProposal, pages []loopReviewPage, index bool, ids map[string]string) {
+func (ls *loopSeed) exportReview(pr *loopProposal, sp *loopSeedProposal, pages []loopReviewPage, hasIndex bool, ids map[string]string) {
 	for _, page := range pages {
 		id, ok := ids[loopPagePath(sp.Index, page.Index)]
 		if !ok {
@@ -360,7 +363,7 @@ func (ls *loopSeed) exportReview(pr *loopProposal, sp *loopSeedProposal, pages [
 	if len(pages) > 0 && len(sp.ReviewPages) == 0 {
 		ls.Missing.ProposalsWithoutReviewPage++
 	}
-	if !index {
+	if !hasIndex {
 		return
 	}
 	if id, ok := ids[loopIndexPath(sp.Index)]; ok {
@@ -417,12 +420,21 @@ func (ls *loopSeed) prepare() int {
 			p.cum = append(p.cum, p.total)
 		}
 	}
+	// The two term lists are fixed, so each term is escaped once here rather than on every draw.
+	ls.searchEsc = make([]string, len(ls.SearchTerms))
+	for i, term := range ls.SearchTerms {
+		ls.searchEsc[i] = url.QueryEscape(term)
+	}
+	ls.statusEsc = make([]string, len(ls.StatusTerms))
+	for i, term := range ls.StatusTerms {
+		ls.statusEsc[i] = url.QueryEscape(term)
+	}
 	return before - len(ls.Proposals)
 }
 
-// serves is how many proposals hold what one need asks, which is 0 for a need the seed cannot
-// serve at all.
-func (ls *loopSeed) serves(need loopNeed) int { return len(ls.picks[need].at) }
+// servingProposals is how many proposals hold what one need asks, which is 0 for a need the seed
+// cannot serve at all.
+func (ls *loopSeed) servingProposals(need loopNeed) int { return len(ls.picks[need].at) }
 
 // pick maps x in [0, 1) to one of the proposals that serve the need, in proportion to its
 // requirement ids: the loop's load is its requirements, so a proposal of 4,000 ids takes four
@@ -463,7 +475,7 @@ func (ls *loopSeed) refuseKind(kind string) string {
 }
 
 func (ls *loopSeed) refuseNeed(need loopNeed, why string) string {
-	if ls.serves(need) > 0 {
+	if ls.servingProposals(need) > 0 {
 		return ""
 	}
 	return fmt.Sprintf("no proposal holds %s: %s", loopNeedNames[need], why)
@@ -472,8 +484,10 @@ func (ls *loopSeed) refuseNeed(need loopNeed, why string) string {
 // seedFile is the step's issue list: one issue per proposal, in the seed's own order, so that
 // index i of the step's issues is proposal i of the loop seed. The issues are not sorted by key as
 // readSeed sorts seed.json's, since that order is the plan's and the weighted draw addresses it.
-// An issue's document is the proposal's first part document, which is what a read of
-// {artifact_id} lands on.
+// An issue's document is the proposal's first part document. Under a loop seed a read of
+// {artifact_id} is drawn for a proposal that holds a part and renders that drawn part's id
+// (renderLoop), so this one is what a reader of the step's issue list sees, not what the read
+// lands on.
 func (ls *loopSeed) seedFile() seedFile {
 	sf := seedFile{Projects: []string{ls.Project}, Issues: make([]seedIssue, len(ls.Proposals))}
 	for i := range ls.Proposals {
@@ -488,14 +502,14 @@ func (ls *loopSeed) seedFile() seedFile {
 }
 
 // searchTerm and statusTerm are the terms a requirement query reads by, drawn from the seed's two
-// lists. A proposal name carries spaces and punctuation, so it is escaped for the query it lands
-// in.
+// lists. A proposal name carries spaces and punctuation, so prepare escaped every term for the
+// query it lands in.
 func (ls *loopSeed) searchTerm(r *rand.Rand) string {
-	return url.QueryEscape(ls.SearchTerms[r.IntN(len(ls.SearchTerms))])
+	return ls.searchEsc[r.IntN(len(ls.searchEsc))]
 }
 
 func (ls *loopSeed) statusTerm(r *rand.Rand) string {
-	return url.QueryEscape(ls.StatusTerms[r.IntN(len(ls.StatusTerms))])
+	return ls.statusEsc[r.IntN(len(ls.statusEsc))]
 }
 
 // --- the subcommand --------------------------------------------------------------------------
