@@ -349,6 +349,10 @@ for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
   tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
   tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
 done"""
+# The fixture check's `-run` and its `-args --check` are not flags the simple form reduces, and
+# they move no closure: the whole pmdoc package compiles, whichever test the run selects.
+FIXTURE_STEP = "Check the web app's display-tree fixture is up to date"
+FIXTURE_SCRIPT = "go test -count=1 -run TestWebDisplayFixture ./internal/dispatch/pmdoc/ -args --check"
 SCHEMA_STEP = "The envoy-infra plugin's schema carries the version and the download URL it was built with"
 SCHEMA_SCRIPT = (
     'url=$(GITHUB_REPOSITORY=cybermonklabs/legion ../../../.github/scripts/repo-paths.sh plugin_download_url)\n'
@@ -650,6 +654,10 @@ GATES = [
             (ENVOY, ["./cmd/listener"], f"GOOS=linux GOARCH={arch} go build ./cmd/listener",
              {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
             for arch in targets(GO_TARGETS, "envoy")
+        ]),
+        # The display-tree fixture check: one test of pmdoc, which compiles that package.
+        pinned_step("envoy-go", FIXTURE_STEP, ENVOY, FIXTURE_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/pmdoc/"], "go test ./internal/dispatch/pmdoc/", {}),
         ]),
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),

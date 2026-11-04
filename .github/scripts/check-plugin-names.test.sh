@@ -137,7 +137,7 @@ representatives=(
   packages/claude-envoy/.changes/unreleased/INFRA-1-note.yaml
   packages/envoy/CHANGELOG.md
   packages/envoy/.changes/unreleased/INFRA-1-note.yaml
-  packages/contracts/src/dispatch-api.ts
+  packages/contracts/src/dispatch-api-search.ts
   packages/contracts/AGENTS.md
   packages/envoy/internal/dispatch/model/model.go
   packages/dispatch/web/src/features/agent-view/AgentConversationPage.tsx

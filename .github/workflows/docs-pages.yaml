@@ -131,6 +131,7 @@ on:
       - 'packages/envoy/internal/dispatch/architecture/*'
       - 'packages/envoy/internal/dispatch/asks/*'
       - 'packages/envoy/internal/dispatch/auth/*'
+      - 'packages/envoy/internal/dispatch/bytelru/*'
       - 'packages/envoy/internal/dispatch/config/*'
       - 'packages/envoy/internal/dispatch/dashboard/*'
       - 'packages/envoy/internal/dispatch/delivery/**'
