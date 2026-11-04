@@ -319,9 +319,9 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 		{"/projects/CORE/documents/handbook-md?version=3#b-ship-it", Ref{Kind: "artifact", Project: "CORE", ID: "handbook-md"}},
 		{"/issues/CORE-1/spec?comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
 		{"/issues/CORE-1/spec?v=2&comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
-		{"/projects/CORE/documents/handbook-md?comment=c1#b-b2", Ref{Kind: "comment", Project: "CORE", ID: "c1"}},
+		{"/projects/CORE/documents/handbook-md?comment=c1#b-b2", Ref{Kind: "comment", Project: "CORE", ID: "c1", Document: "handbook-md"}},
 		{"/issues/CORE-1/spec?ask=a1#b-ship-it", Ref{Kind: "ask", IssueKey: "CORE-1", ID: "a1"}},
-		{"/projects/CORE/documents/handbook-md?ask=a1#b-b2", Ref{Kind: "ask", Project: "CORE", ID: "a1"}},
+		{"/projects/CORE/documents/handbook-md?ask=a1#b-b2", Ref{Kind: "ask", Project: "CORE", ID: "a1", Document: "handbook-md"}},
 		{"/issues/CORE-1/artifacts/notes-md?ask=a1#b-ship-it", Ref{Kind: "ask", IssueKey: "CORE-1", ID: "a1"}},
 	}
 	for _, tc := range cases {
@@ -348,13 +348,13 @@ func TestExtractParsesItemBlockReferences(t *testing.T) {
 	pinned := commentBlock
 	pinned.Pin = 1
 	messageBlock := Ref{Kind: "block", Item: "message", IssueKey: "CORE-1", ID: message, Block: "b2"}
-	projectBlock := Ref{Kind: "block", Item: "comment", Project: "CORE", ID: comment, Block: "b2"}
+	projectBlock := Ref{Kind: "block", Item: "comment", Project: "CORE", ID: comment, Document: "handbook-md", Block: "b2"}
 	projectPinned := projectBlock
 	projectPinned.Pin = 3
 	askBlock := Ref{Kind: "block", Item: "ask", IssueKey: "CORE-1", ID: ask, Block: "b3"}
 	askPinned := askBlock
 	askPinned.Pin = 2
-	projectAsk := Ref{Kind: "block", Item: "ask", Project: "CORE", ID: ask, Block: "b3"}
+	projectAsk := Ref{Kind: "block", Item: "ask", Project: "CORE", ID: ask, Document: "handbook-md", Block: "b3"}
 	for _, test := range []struct {
 		reference string
 		want      []Ref
@@ -374,11 +374,11 @@ func TestExtractParsesItemBlockReferences(t *testing.T) {
 		{"dispatch://CORE-1/comment/" + comment + "#c-b2", []Ref{}, ""},
 		{server + "/issues/CORE-1/comments/" + comment + "#b-b2", []Ref{commentBlock}, "comment/" + comment + "#b2"},
 		{server + "/issues/CORE-1/messages/" + message + "#b-b2", []Ref{messageBlock}, "message/" + message + "#b2"},
-		{server + "/projects/CORE/documents/handbook-md?comment=" + comment + "#b-b2", []Ref{{Kind: "comment", Project: "CORE", ID: comment}}, comment},
+		{server + "/projects/CORE/documents/handbook-md?comment=" + comment + "#b-b2", []Ref{{Kind: "comment", Project: "CORE", ID: comment, Document: "handbook-md"}}, comment},
 		{server + "/issues/CORE-1/comments/" + comment + "#b-b2@v1", []Ref{{Kind: "comment", IssueKey: "CORE-1", ID: comment}}, comment},
 		{server + "/issues/CORE-1/asks/" + ask + "#b-b3", []Ref{askBlock}, "ask/" + ask + "#b3"},
 		{server + "/issues/CORE-1/asks/" + ask + "#b-b3@v2", []Ref{{Kind: "ask", IssueKey: "CORE-1", ID: ask}}, ask},
-		{server + "/projects/CORE/documents/handbook-md?ask=" + ask + "#b-b3", []Ref{{Kind: "ask", Project: "CORE", ID: ask}}, ask},
+		{server + "/projects/CORE/documents/handbook-md?ask=" + ask + "#b-b3", []Ref{{Kind: "ask", Project: "CORE", ID: ask, Document: "handbook-md"}}, ask},
 	} {
 		t.Run(test.reference, func(t *testing.T) {
 			got := Extract("See "+test.reference+".", server)
@@ -540,7 +540,7 @@ func TestEveryReferenceIsBoundedByItsTargetID(t *testing.T) {
 		{"an ask on an issue's spec", "dispatch://CORE-1/ask/", "", server + "/issues/CORE-1/spec?ask=", "", "a", 0,
 			func(run string) Ref { return Ref{Kind: "ask", IssueKey: "CORE-1", ID: run} }},
 		{"a comment on a project's document", "dispatch://CORE/artifact/plan-md/comment/", "", server + "/projects/CORE/documents/plan-md?comment=", "", "a", 0,
-			func(run string) Ref { return Ref{Kind: "comment", Project: "CORE", ID: run} }},
+			func(run string) Ref { return Ref{Kind: "comment", Project: "CORE", ID: run, Document: "plan-md"} }},
 		{"an item id counted decoded", "dispatch://CORE-1/comment/", "", server + "/issues/CORE-1/comments/", "", "%C3%A9", 0,
 			func(run string) Ref {
 				return Ref{Kind: "comment", IssueKey: "CORE-1", ID: strings.ReplaceAll(run, "%C3%A9", "é")}
@@ -631,11 +631,11 @@ func TestExtractParsesProjectDocumentReferences(t *testing.T) {
 	want := []Ref{
 		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
 		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
-		{Kind: "ask", Project: "CORE", ID: "a1"},
-		{Kind: "comment", Project: "CORE", ID: "c1"},
-		{Kind: "ask", Project: "CORE", ID: "a3"},
+		{Kind: "ask", Project: "CORE", ID: "a1", Document: "design-notes"},
+		{Kind: "comment", Project: "CORE", ID: "c1", Document: "design-notes"},
+		{Kind: "ask", Project: "CORE", ID: "a3", Document: "design-notes"},
 		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
-		{Kind: "ask", Project: "CORE", ID: "a2"},
+		{Kind: "ask", Project: "CORE", ID: "a2", Document: "design-notes"},
 	}
 	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Extract() = %#v; want %#v", got, want)

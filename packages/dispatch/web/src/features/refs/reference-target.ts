@@ -160,18 +160,37 @@ export const blockQuery = (reference: string | undefined) =>
     refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
-/** The asks the question map of a text's document is built from: an issue's asks (the list the
- *  margin already reads) or a project document's. Only a text that writes a `#id` asks for it. */
+/** The document itself, read for the owner that serves its asks. It is the read every other
+ *  surface of a document already shares (`["artifact", id]`), so a page showing the document
+ *  pays nothing for it. */
+const documentQuery = (artifactId: string) =>
+  queryOptions({
+    queryKey: ["artifact", artifactId],
+    queryFn: () => api.getArtifact(artifactId),
+  });
+
+/** The asks the question map of a text's document is built from, read on the route that serves
+ *  that document's owner: an issue's asks for a document an issue owns, since
+ *  `/artifacts/{id}/asks` refuses one (`ARTIFACT_LINKED`), and the document's own asks for a
+ *  project's. A document source carries no issue key, so the owner comes from the document
+ *  itself; both answers are the one document's asks, so they are read under its own key and a
+ *  second text of the same document reads nothing. Only a text that writes a `#id` asks for it. */
 export const documentAsksQuery = (source: TextSource | undefined) =>
   queryOptions<Ask[]>({
     queryKey:
       source?.kind === "document"
         ? ["artifact", source.artifactId, "asks"]
         : ["asks", source?.kind === "issue" ? source.key : undefined],
-    queryFn: () =>
-      source?.kind === "document"
+    queryFn: async ({ client }) => {
+      if (source?.kind !== "document") {
+        return api.listIssueAsks(source?.kind === "issue" ? source.key : "", "all");
+      }
+      const document = await client.ensureQueryData(documentQuery(source.artifactId));
+      const issue = document.issue_key;
+      return issue === null || issue === ""
         ? api.listArtifactAsks(source.artifactId, "all")
-        : api.listIssueAsks(source?.kind === "issue" ? source.key : "", "all"),
+        : api.listIssueAsks(issue, "all");
+    },
   });
 
 /** The question map of `source`: each question block id its document declares to the reference

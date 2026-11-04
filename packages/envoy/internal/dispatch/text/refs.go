@@ -64,6 +64,10 @@ func IsSessionID(value string) bool {
 // the component id for components. Project is set instead of IssueKey for
 // unlinked project-document references and for components, and Session instead of
 // both for an artifact an agent's conversation owns (`agent/<session id>/artifact/<slug>`).
+// Document is the slug of the project document an ask or a comment is written on
+// (`dispatch://<PROJECT>/artifact/<slug>/ask/<id>`, and the dashboard address of the same item),
+// the owner such an item has in place of an issue; it is empty for every other reference,
+// an item of an issue's document included, since that item's reference names the issue alone.
 // A block (Kind "block") carries the block's id as written in Block, and in Pin the version or
 // revision a pinned reference (`@v<N>` after the fragment) names, or 0. A block of a document
 // carries its document's fields; a block of an ask, a comment or a message carries the item's
@@ -75,6 +79,7 @@ type Ref struct {
 	Project  string
 	Session  string
 	ID       string
+	Document string
 	Block    string
 	Pin      int
 }
@@ -265,8 +270,9 @@ func parseDispatch(value string) (Ref, bool) {
 	case len(parts) == 1:
 		return Ref{Kind: "artifact", Project: key, ID: slug}, true
 	case len(parts) == 3 && (parts[1] == "ask" || parts[1] == "comment"):
+		// The document the item is written on is its owner, so the reference carries its slug.
 		if id, ok := itemSegment(parts[2]); ok {
-			return Ref{Kind: parts[1], Project: key, ID: id}, true
+			return Ref{Kind: parts[1], Project: key, ID: id, Document: slug}, true
 		}
 	}
 	return Ref{}, false
@@ -676,7 +682,13 @@ func documentItem(document Ref, query url.Values) (Ref, bool) {
 	if !ok {
 		return Ref{}, false
 	}
-	return Ref{Kind: kind, IssueKey: document.IssueKey, Project: document.Project, ID: id}, true
+	// A project document's item is addressed under that document, as its `dispatch://` form
+	// writes it; an issue's document's item is addressed under the issue, which names no slug.
+	slug := ""
+	if document.Project != "" {
+		slug = document.ID
+	}
+	return Ref{Kind: kind, IssueKey: document.IssueKey, Project: document.Project, ID: id, Document: slug}, true
 }
 
 // searchParams reads a query as the browser's URLSearchParams does, which is how the dashboard

@@ -156,6 +156,82 @@ func TestMentionsStoreTheWholeIdOfAShortReferenceAndTheKeysThatExist(t *testing.
 	}
 }
 
+// An ask or a comment written on a project document is owned by that document, and its
+// reference names it (`dispatch://<PROJECT>/artifact/<slug>/ask/<id>`), so a short id in it is
+// stored under the whole id the one item of that document carries. The same prefix carried only
+// by an item of another document of the project, or by one of an issue, names nothing there and
+// is stored as the text writes it.
+func TestMentionsStoreTheWholeIdOfAProjectDocumentsShortReference(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "ACME")
+	insertResolverIssue(t, tx, "ACME-1", 1)
+	const handbookID = "8b000000-0000-4000-8000-00000000000a"
+	const notesID = "8b000000-0000-4000-8000-00000000000b"
+	insertPrefixDocument(t, tx, handbookID, nil, "ACME", "handbook", "Handbook", false)
+	insertPrefixDocument(t, tx, notesID, nil, "ACME", "notes", "Notes", false)
+	const handbookAsk = "2c000000-0000-4000-8000-000000000001"
+	const notesAsk = "2c000000-0000-4000-8000-000000000002"
+	const handbookComment = "3d000000-0000-4000-8000-000000000001"
+	const issueAsk = "3d000000-0000-4000-8000-000000000002"
+	handbook, notes, issue := handbookID, notesID, "ACME-1"
+	insertPrefixAsk(t, tx, handbookAsk, nil, &handbook, "Which vendor?")
+	insertPrefixAsk(t, tx, notesAsk, nil, &notes, "Which region?")
+	insertPrefixDocumentComment(t, tx, handbookComment, handbookID, "A remark on the handbook.")
+	insertPrefixAsk(t, tx, issueAsk, &issue, nil, "Which way?")
+
+	for index, test := range []struct {
+		name string
+		body string
+		want []Target
+	}{
+		{
+			"a prefix one ask of the document carries",
+			"See dispatch://ACME/artifact/handbook/ask/" + handbookAsk[:8] + ".",
+			[]Target{{"ask", handbookAsk}},
+		},
+		{
+			"the same prefix on the other document of the project",
+			"See dispatch://ACME/artifact/notes/ask/" + notesAsk[:8] + ".",
+			[]Target{{"ask", notesAsk}},
+		},
+		{
+			"a prefix one comment of the document carries",
+			"See dispatch://ACME/artifact/handbook/comment/" + handbookComment[:8] + ".",
+			[]Target{{"comment", handbookComment}},
+		},
+		{
+			"a prefix only an ask of the issue carries",
+			"See dispatch://ACME/artifact/handbook/ask/" + issueAsk[:8] + ".",
+			[]Target{{"ask", issueAsk[:8]}},
+		},
+		{
+			"a prefix only an ask of the other document carries",
+			"See dispatch://ACME/artifact/handbook/comment/" + notesAsk[:8] + ".",
+			[]Target{{"comment", notesAsk[:8]}},
+		},
+		{
+			"a document's prefix under the issue",
+			"See dispatch://ACME-1/ask/" + handbookAsk[:8] + ".",
+			[]Target{{"ask", handbookAsk[:8]}},
+		},
+	} {
+		source := resolverSource(index + 100)
+		insertPrefixComment(t, tx, source, "ACME-1", test.body)
+		if _, err := ReplaceCounted(ctx, tx, "comment", source, test.body, resolverServer); err != nil {
+			t.Fatalf("index %s: %v", test.name, err)
+		}
+		if got := storedRefs(t, tx, "comment", source); !reflect.DeepEqual(got, test.want) {
+			t.Errorf("%s stored %v; want %v", test.name, got, test.want)
+		}
+	}
+}
+
 // A `#id` is stored as the edge the ask's own address makes, resolved against the question blocks
 // of the document the text belongs to: a comment anchored to a document reads that document's
 // questions, and one on an issue and no document its issue's spec. A `#id` the text's own

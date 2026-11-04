@@ -175,10 +175,11 @@ func (r *resolver) Questions() (map[string]text.Ref, error) {
 func (r *resolver) Items(prefixes []text.Prefix) (map[int]string, error) {
 	resolved := make(map[int]string, len(prefixes))
 	for index, prefix := range prefixes {
-		key, ok := prefixScope(prefix)
+		kind, scope, id, ok := PrefixScope(prefix)
 		if !ok {
 			continue
 		}
+		key := prefixKey{kind: kind, scope: scope, prefix: id}
 		whole, known := r.items[key]
 		if !known {
 			var err error
@@ -211,37 +212,39 @@ func (r *resolver) resolveItem(key prefixKey) (string, error) {
 	return "", err
 }
 
-// prefixScope is what one short id asks ResolvePrefix: the kind the reference names and the owner
-// it names, as a Scope. A block's prefix is matched among the blocks of the document the block is
-// of, at the version the reference pins, and an item's within its issue.
+// PrefixScope is what one short id asks ResolvePrefix: the kind the reference names, the owner
+// it names as a Scope, and the prefix itself. A block's is matched among the blocks of the
+// document the block is of, at the version the reference pins; an item's within the owner its
+// reference names, the issue or the project document it is written on
+// (`dispatch://<PROJECT>/artifact/<slug>/ask/<id>`, whose slug the parsed reference carries in
+// Document). Both callers of a short id ask it: the resolver that rewrites a body's short ids as
+// it is indexed, and the `?to=` route that answers a node under its whole id.
 //
 // ok is false for a reference whose owner no Scope holds, which is then left as the text wrote
-// it: an ask's or a comment's on a project document, since `dispatch://<PROJECT>/artifact/<slug>/
-// ask/<id>` parses to the project alone and the slug no Scope can be built without is no part of
-// it, and a block of an ask, a comment or a message, whose blocks are numbered (`b2`) and are no
-// id a prefix can shorten.
-func prefixScope(prefix text.Prefix) (prefixKey, bool) {
+// it: an item of no owner at all, and a block of an ask, a comment or a message, whose blocks
+// are numbered (`b2`) and are no id a prefix can shorten.
+func PrefixScope(prefix text.Prefix) (kind string, scope Scope, id string, ok bool) {
 	ref := prefix.Ref
 	if prefix.Block {
 		if ref.Item != "" {
-			return prefixKey{}, false
+			return "", Scope{}, "", false
 		}
 		document := ref
 		document.Kind, document.Block, document.Pin = "artifact", "", 0
-		return prefixKey{
-			kind:   "block",
-			scope:  Scope{Document: text.TargetID(document), Version: ref.Pin},
-			prefix: ref.Block,
-		}, true
+		return "block", Scope{Document: text.TargetID(document), Version: ref.Pin}, ref.Block, true
 	}
-	kind := ref.Kind
+	kind = ref.Kind
 	if kind == "block" {
 		kind = ref.Item
 	}
-	if ref.IssueKey == "" {
-		return prefixKey{}, false
+	switch {
+	case ref.IssueKey != "":
+		return kind, Scope{IssueKey: ref.IssueKey}, ref.ID, true
+	case ref.Project != "" && ref.Document != "":
+		document := text.Ref{Kind: "artifact", Project: ref.Project, ID: ref.Document}
+		return kind, Scope{Document: text.TargetID(document)}, ref.ID, true
 	}
-	return prefixKey{kind: kind, scope: Scope{IssueKey: ref.IssueKey}, prefix: ref.ID}, true
+	return "", Scope{}, "", false
 }
 
 // failed logs a failure reaching the database, which leaves the text indexed as it is written.

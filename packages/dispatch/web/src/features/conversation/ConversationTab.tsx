@@ -221,7 +221,7 @@ function ConversationReply({
       author={reply.author}
       body={
         <>
-          <MarkdownBody markdown={reply.body} />
+          <MarkdownBody markdown={reply.body} source={issueSource(issueKey)} />
           <Unfurl body={reply.body} source={issueSource(issueKey)} />
         </>
       }
@@ -353,7 +353,7 @@ function MessageTurn({
             <Timestamp at={item.root.created_at} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={issueSource(issueKey)} />
           <Unfurl body={item.root.body} source={issueSource(issueKey)} />
         </div>
         <TurnActions>
@@ -847,7 +847,7 @@ function TargetedMessageTurn({
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={issueSource(issueKey)} />
           <Unfurl body={item.root.body} source={issueSource(issueKey)} />
         </>
       }

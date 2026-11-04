@@ -190,7 +190,7 @@ func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Re
 		ids[index] = block.id
 	}
 	questions, err := scanQuestions(q.Query(ctx, `
-		select k.block_id, k.id::text, k.issue_key, a.project_key
+		select k.block_id, k.id::text, k.issue_key, a.project_key, a.slug
 		from asks k join artifacts a on a.id = k.block_artifact_id
 		where k.block_artifact_id = $1 and k.block_id = any($2::text[])
 	`, doc, ids))
@@ -212,7 +212,7 @@ func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Re
 		return questions, nil
 	}
 	copied, err := scanQuestions(q.Query(ctx, `
-		select k.id::text, k.id::text, k.issue_key, a.project_key
+		select k.id::text, k.id::text, k.issue_key, a.project_key, coalesce(a.slug, '')
 		from asks k
 		left join artifacts a on a.id = coalesce(k.block_artifact_id, (k.anchor->>'artifact_id')::uuid, k.artifact_id)
 		where k.id = any($1::uuid[])
@@ -228,12 +228,12 @@ func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Re
 	return questions, nil
 }
 
-// scanQuestions reads rows of (key, ask id, issue key, project key) into each ask's reference by
-// key: an ask on an issue as `dispatch://<KEY>/ask/<id>` reads, one on a project document as
-// `dispatch://<PROJECT>/artifact/<slug>/ask/<id>` does (itemRef writes both, and the slug is no
-// part of the reference the second parses to). An ask whose document is an agent conversation's
-// has no address (itemRef answers none); it is still the ask the `#id` names, and the edge
-// stored for it is the one its id makes.
+// scanQuestions reads rows of (key, ask id, issue key, project key, document slug) into each
+// ask's reference by key: an ask on an issue as `dispatch://<KEY>/ask/<id>` reads, one on a
+// project document as `dispatch://<PROJECT>/artifact/<slug>/ask/<id>` does (itemRef writes
+// both, and the document of the second is the owner its reference names). An ask whose document
+// is an agent conversation's has no address (itemRef answers none); it is still the ask the
+// `#id` names, and the edge stored for it is the one its id makes.
 func scanQuestions(rows pgx.Rows, err error) (map[string]text.Ref, error) {
 	if err != nil {
 		return nil, err
@@ -241,16 +241,16 @@ func scanQuestions(rows pgx.Rows, err error) (map[string]text.Ref, error) {
 	defer rows.Close()
 	found := map[string]text.Ref{}
 	for rows.Next() {
-		var key, id string
+		var key, id, slug string
 		var issueKey, project *string
-		if err := rows.Scan(&key, &id, &issueKey, &project); err != nil {
+		if err := rows.Scan(&key, &id, &issueKey, &project, &slug); err != nil {
 			return nil, err
 		}
 		ref := text.Ref{Kind: "ask", ID: id}
 		if issueKey != nil {
 			ref.IssueKey = *issueKey
 		} else if project != nil {
-			ref.Project = *project
+			ref.Project, ref.Document = *project, slug
 		}
 		found[key] = ref
 	}

@@ -1125,3 +1125,44 @@ test("ProofDocument focuses nothing for a short block id two blocks of the docum
     view.unmount();
   }
 });
+
+// INFRA-869: a `#id` names a question of the text's own document, so a reader who follows one
+// from the margin stays on the page already open. The editor binds once; the block focus
+// follows the address from then on.
+test("a hash change on the page already open focuses the block it names, whole and short", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", "/");
+  const { connections, editors, sync, view } = renderProofDocument({
+    fake: runtimeWithBlocks([WHOLE_BLOCK]),
+  });
+
+  const follow = async (fragment: string) => {
+    await act(async () => {
+      window.history.replaceState(null, "", fragment);
+      window.dispatchEvent(new Event("hashchange"));
+    });
+  };
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    // The page was opened at no block, so the bind focused none.
+    expect(editors[0]?.focusedBlocks).toEqual([]);
+
+    await follow(`#b-${WHOLE_BLOCK}`);
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual([WHOLE_BLOCK]));
+
+    // A short id names the one block of this document it starts, and the address carries the
+    // whole one from then on.
+    await follow(`#b-${SHORT_BLOCK}`);
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual([WHOLE_BLOCK, WHOLE_BLOCK]));
+    expect(window.location.hash).toBe(`#b-${WHOLE_BLOCK}`);
+
+    // One editor on one connection throughout: following the address binds nothing again.
+    expect(editors).toHaveLength(1);
+    expect(connections).toHaveLength(1);
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
+    view.unmount();
+  }
+});

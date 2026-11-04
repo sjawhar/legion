@@ -505,6 +505,85 @@ func TestAReferenceResolvesAPrefixWithinTheOwnerItNames(t *testing.T) {
 	}
 }
 
+// TestAReferenceResolvesAPrefixWithinTheProjectDocumentItNames: an ask and a comment written on
+// a project document are owned by that document, and the reference names it
+// (`dispatch://<PROJECT>/artifact/<slug>/ask/<id>`), so `?to=` reads a short id as the one item
+// of that document carrying it. The same prefix on another document of the project, and under
+// the project's issue, names that owner's item or nothing at all.
+func TestAReferenceResolvesAPrefixWithinTheProjectDocumentItNames(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "PDR", "Short ids on a document", "# Spec\n\nA passage.")
+	handbook := createProjectDocument(t, handler, "PDR", "Handbook", "# Handbook\n")
+	notes := createProjectDocument(t, handler, "PDR", "Notes", "# Notes\n")
+
+	// One ask under the prefix on each document, so the prefix names one item within either and
+	// two across the project; one comment on the handbook, and one ask of the issue under the
+	// comment's prefix, which no document owns.
+	handbookAsk, notesAsk := chosenID("ba000001", 1), chosenID("ba000001", 2)
+	handbookComment, issueAsk := chosenID("bc000001", 1), chosenID("bc000001", 2)
+	for _, item := range []struct{ id, artifact, question string }{
+		{handbookAsk, handbook.ID, "Which vendor?"},
+		{notesAsk, notes.ID, "Which region?"},
+	} {
+		seedExec(t, database, "a document ask", `
+			insert into asks (id, artifact_id, author, question) values ($1::uuid, $2::uuid, $3::jsonb, $4)
+		`, item.id, item.artifact, idPrefixAuthor, item.question)
+	}
+	seedExec(t, database, "a document comment", `
+		insert into comments (id, artifact_id, author, body) values ($1::uuid, $2::uuid, $3::jsonb, $4)
+	`, handbookComment, handbook.ID, idPrefixAuthor, "A remark on the handbook.")
+	seedAsk(t, database, issue.Key, issueAsk, "Which way?")
+
+	node := func(reference string) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodGet, "/api/v1/references?to="+reference, nil, "alice")
+	}
+	answeredID := func(response *httptest.ResponseRecorder) string {
+		t.Helper()
+		return decodeBody[struct {
+			Node struct {
+				ID string `json:"id"`
+			} `json:"node"`
+		}](t, response).Node.ID
+	}
+	for _, test := range []struct {
+		name, reference, want string
+	}{
+		{"an ask of the handbook", "dispatch://PDR/artifact/" + handbook.Slug + "/ask/ba000001", handbookAsk},
+		{"an ask of the notes", "dispatch://PDR/artifact/" + notes.Slug + "/ask/ba000001", notesAsk},
+		{"a comment of the handbook", "dispatch://PDR/artifact/" + handbook.Slug + "/comment/bc000001", handbookComment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := node(test.reference)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s: status=%d body=%s, want 200", test.name, response.Code, response.Body.String())
+			}
+			if answered := answeredID(response); answered != test.want {
+				t.Fatalf("%s: the node carries id %q, want the whole id %q", test.name, answered, test.want)
+			}
+		})
+	}
+
+	// The same prefix under another owner: the issue's ask carries `bc000001`, and the handbook
+	// holds no ask of it.
+	elsewhere := node("dispatch://PDR/artifact/" + handbook.Slug + "/ask/bc000001")
+	if elsewhere.Code != http.StatusNotFound {
+		t.Fatalf("a prefix only the issue's ask carries: status=%d body=%s, want 404",
+			elsewhere.Code, elsewhere.Body.String())
+	}
+	// And the issue owns neither document's item, so the document's prefix names nothing there.
+	onTheIssue := node("dispatch://" + issue.Key + "/ask/ba000001")
+	if onTheIssue.Code != http.StatusNotFound {
+		t.Fatalf("a document's prefix under the issue: status=%d body=%s, want 404",
+			onTheIssue.Code, onTheIssue.Body.String())
+	}
+	// A whole id is read whatever owner the reference names, as this route has always read one.
+	whole := node("dispatch://PDR/artifact/" + notes.Slug + "/ask/" + handbookAsk)
+	if whole.Code != http.StatusOK || answeredID(whole) != handbookAsk {
+		t.Fatalf("the whole id under another document: status=%d body=%s, want the 200 this route has always given",
+			whole.Code, whole.Body.String())
+	}
+}
+
 // TestTheQuestionMapRouteAnswersEverySourceKind: a `#id` in one source's text resolves against
 // the question map of the document that text belongs to, and the route answers that map for a
 // source of each of the four kinds, by whole id and by prefix; a source whose text belongs to no

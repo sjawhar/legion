@@ -56,6 +56,18 @@ func insertPrefixComment(t *testing.T, tx pgx.Tx, id, issueKey, body string) {
 	}
 }
 
+// insertPrefixDocumentComment writes a comment of a document under the id the test chose, the
+// other owner a comment has (comments_one_owner).
+func insertPrefixDocumentComment(t *testing.T, tx pgx.Tx, id, artifactID, body string) {
+	t.Helper()
+	if _, err := tx.Exec(context.Background(), `
+		insert into comments (id, artifact_id, author, body)
+		values ($1::uuid, $2::uuid, '{"kind":"user","id":"alice"}', $3)
+	`, id, artifactID, body); err != nil {
+		t.Fatalf("insert document comment %s: %v", id, err)
+	}
+}
+
 // insertPrefixAsk writes an ask under the id the test chose, of an issue or of a document
 // (asks_one_owner: one of the two).
 func insertPrefixAsk(t *testing.T, tx pgx.Tx, id string, issueKey, artifactID *string, question string) {

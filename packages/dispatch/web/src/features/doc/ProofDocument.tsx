@@ -1,3 +1,4 @@
+import { decodeBlockId } from "@legion/contracts";
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -8,8 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link } from "react-router-dom";
-
+import { Link, useLocation } from "react-router-dom";
 import {
   api,
   isArtifactNotFound,
@@ -273,6 +273,9 @@ export function ProofDocument({
     [artifact.id, owner]
   );
   const followReference = useReferenceClick();
+  // The address's fragment as the dashboard's own navigation leaves it: a click on a link to a
+  // block of this document changes it in place, firing no event of the browser's own.
+  const { hash: routedHash } = useLocation();
   const documentRef = buildDispatchReference(documentRoute(artifact));
   const blockSchemaQuery = useQuery({
     queryFn: loadBlockSchema,
@@ -451,6 +454,75 @@ export function ProofDocument({
     focus();
     disposeRefocusRef.current = refocusAfterDiagrams(refocus);
   }, []);
+  // The fragment the block focus last followed, which the focus of a short id rewrites to the
+  // whole block's: an address this document wrote itself is no change for it to follow again.
+  const followedHashRef = useRef<string | undefined>(undefined);
+  // The block the address names, focused in `handle`: a `#b-` hash names a block of the
+  // document the reader is on, written whole or short, and an id written short names the one
+  // block of this document it starts. A hash naming no block of it focuses nothing.
+  const followBlockHash = useCallback(
+    (handle: EditorHandle) => {
+      const blockLink = window.location.hash;
+      if (!blockLink.startsWith("#b-") || blockLink === followedHashRef.current) {
+        return;
+      }
+      followedHashRef.current = blockLink;
+      const linkedBlockId = decodeBlockId(blockLink.slice(3));
+      if (linkedBlockId === undefined) {
+        return;
+      }
+      // The hash the address holds: the one the reader followed until a short id resolves, the
+      // whole block's from then on.
+      let linkHash = blockLink;
+      const focusLinked = () => {
+        // An id written short names the one block of this document it starts; a whole id is
+        // the block's own, with nothing to resolve and no read to make.
+        const whole = isIdPrefix(linkedBlockId)
+          ? wholeBlockId(handle.view.dom, linkedBlockId)
+          : linkedBlockId;
+        if (whole === undefined) {
+          return;
+        }
+        if (whole !== linkedBlockId) {
+          // The address carries the whole id from here on, so one copied off the page names
+          // the block outright; replacing it leaves no history entry behind, as the rewrite
+          // of an item address does.
+          linkHash = blockFragment(whole);
+          followedHashRef.current = linkHash;
+          window.history.replaceState(null, "", linkHash);
+        }
+        handle.focusBlock(whole);
+      };
+      // The re-run lands only while the hash still names this block.
+      focusInEditor(focusLinked, () => {
+        if (window.location.hash === linkHash) focusLinked();
+      });
+    },
+    [focusInEditor]
+  );
+  // A `#id` names a question of the text's own document, so a reader who follows one from the
+  // margin, or any other `#b-` link of the document already open, stays on this page: the
+  // editor is bound already and binds no second time. The focus follows the address instead -
+  // the dashboard's own navigation, which changes the hash with no event of its own
+  // (`routedHash`), and an assignment to `location.hash`, which fires one.
+  useEffect(() => {
+    if (!page) {
+      return;
+    }
+    const follow = () => {
+      const handle = editorRef.current;
+      if (handle !== undefined) {
+        followBlockHash(handle);
+      }
+    };
+    // A fragment the dashboard navigated to is a change with no event of its own; the address
+    // the browser holds is what `follow` then reads.
+    if (routedHash !== "") {
+      follow();
+    }
+    window.addEventListener("hashchange", follow);
+    return () => window.removeEventListener("hashchange", follow);
+  }, [followBlockHash, page, routedHash]);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
   // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
@@ -577,36 +649,12 @@ export function ProofDocument({
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
-      const blockLink = window.location.hash;
       // The hash names a block of the page the reader is on, never one of a document beside its
-      // list, so a pane never follows it.
-      if (page && blockLink.startsWith("#b-")) {
-        const linkedBlockId = decodeURIComponent(blockLink.slice(3));
-        // The hash the address holds: the one the reader followed until a short id resolves,
-        // the whole block's from then on.
-        let linkHash = blockLink;
-        const focusLinked = () => {
-          // An id written short names the one block of this document it starts; a whole id is
-          // the block's own, with nothing to resolve and no read to make.
-          const whole = isIdPrefix(linkedBlockId)
-            ? wholeBlockId(handle.view.dom, linkedBlockId)
-            : linkedBlockId;
-          if (whole === undefined) {
-            return;
-          }
-          if (whole !== linkedBlockId) {
-            // The address carries the whole id from here on, so one copied off the page names
-            // the block outright; replacing it leaves no history entry behind, as the rewrite
-            // of an item address does.
-            linkHash = blockFragment(whole);
-            window.history.replaceState(null, "", linkHash);
-          }
-          handle.focusBlock(whole);
-        };
-        // The re-run lands only while the hash still names this block.
-        focusInEditor(focusLinked, () => {
-          if (window.location.hash === linkHash) focusLinked();
-        });
+      // list, so a pane never follows it. A newly bound editor follows the address whatever the
+      // editor before it followed: its blocks are drawn again, and the reader is at the link.
+      if (page) {
+        followedHashRef.current = undefined;
+        followBlockHash(handle);
       }
       // `CSS.highlights["dispatch-search"]` and the margin's open document are one apiece for the
       // whole page; a pane writes neither.
@@ -852,6 +900,7 @@ export function ProofDocument({
     createEditor,
     documentRef,
     focusInEditor,
+    followBlockHash,
     loadTransport,
     page,
     pendingWaiter,

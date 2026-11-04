@@ -175,39 +175,26 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 // wrote it short: the one item of the owner the reference names that carries the prefix. ok is
 // false once it has written the answer itself, the 409 of a prefix two items or more carry.
 //
-// Which owner, and so which set the prefix names one of, is read from the reference exactly as
-// the index-time resolver reads it (refs' prefixScope): an ask's, a comment's or a message's
-// within its issue, a document block's among the blocks of the document the reference names, at
-// the version it pins. A reference whose owner no scope holds is left as written, which answers
-// what it answered before: an ask's or a comment's on a project document, since
-// `dispatch://<PROJECT>/artifact/<slug>/ask/<id>` parses to the project alone and the slug a
-// document scope needs is no part of it, and a block of an ask, a comment or a message, whose
-// blocks are numbered (`b2`) and are no id a prefix shortens. A prefix nothing carries is left
-// as written too (notFoundNone), and the read answers the 404 it always did for a node it has
-// no edge of.
+// Which owner, and so which set the prefix names one of, is read from the reference by the one
+// rule the index-time resolver reads it by (refs.PrefixScope): an ask's, a comment's or a
+// message's within its issue, an ask's or a comment's written on a project document within that
+// document, and a document block's among the blocks of the document the reference names, at the
+// version it pins. A reference whose owner no scope holds is left as written: a block of an ask,
+// a comment or a message, whose blocks are numbered (`b2`) and are no id a prefix shortens. A
+// prefix nothing carries is left as written too (notFoundNone), and the read answers the 404 it
+// always did for a node it has no edge of.
 func (s *server) wholeReference(w http.ResponseWriter, r *http.Request, ref text.Ref, viewer refs.Viewer) (text.Ref, bool) {
-	if ref.Kind == "block" && ref.Item == "" {
-		if !text.IsIDPrefix(ref.Block) {
-			return ref, true
-		}
-		document := ref
-		document.Kind, document.Block, document.Pin = "artifact", "", 0
-		scope := refs.Scope{Document: text.TargetID(document), Version: ref.Pin}
-		whole, ok := s.wholeID(w, r, "block", scope, ref.Block, viewer, notFoundNone)
-		if ok && whole != "" {
-			ref.Block = whole
-		}
-		return ref, ok
-	}
-	kind := ref.Kind
-	if kind == "block" {
-		kind = ref.Item
-	}
-	if ref.IssueKey == "" || !text.IsIDPrefix(ref.ID) {
+	block := ref.Kind == "block" && ref.Item == ""
+	kind, scope, written, ok := refs.PrefixScope(text.Prefix{Ref: ref, Block: block})
+	if !ok || !text.IsIDPrefix(written) {
 		return ref, true
 	}
-	whole, ok := s.wholeID(w, r, kind, refs.Scope{IssueKey: ref.IssueKey}, ref.ID, viewer, notFoundNone)
-	if ok && whole != "" {
+	whole, ok := s.wholeID(w, r, kind, scope, written, viewer, notFoundNone)
+	switch {
+	case !ok || whole == "":
+	case block:
+		ref.Block = whole
+	default:
 		ref.ID = whole
 	}
 	return ref, ok
