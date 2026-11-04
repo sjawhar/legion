@@ -1,5 +1,0 @@
-kind: Fixed
-body: 'A registration of a session on consumer delivery with a new epoch no longer restarts a relay run whose last restart read the session''s topics and consumer after the registration, such as the run the registration''s own entry write starts. The relay restarted such a run a second time when its loop heard the registration only after that run had restarted, which sent the session every unacked message again and dropped its answers to the frames it held. Each registration now carries a mark taken once its topics are stored and its consumer updated, and each relay restart takes one before those reads (a run that keeps the consumer the durable-binding burst listed takes the mark from before that list); a new epoch restarts only a run whose last restart took its mark first. A registration heard while a run was returning on its own, or waiting to retry, now starts or restarts the relay at once.'
-time: 2026-11-03T18:30:00.000000000Z
-custom:
-    Issue: pr2728

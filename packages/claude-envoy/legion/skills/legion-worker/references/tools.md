@@ -3,7 +3,7 @@
 Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
 not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
 anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
-cites is in cybermonklabs/legion.
+cites is in sjawhar/legion.
 
 ## The database your tests use
 
@@ -405,7 +405,7 @@ halves are yours to type.
 ## When no runner reaches it
 
 A tool that is neither in the image nor reachable through one of the three runners is an image
-change: a pull request against cybermonklabs/legion that carries the same name through every site that
+change: a pull request against sjawhar/legion that carries the same name through every site that
 spells it out, and those sites are not all held by a test.
 
 Do not work from a list of those sites. This page has carried one twice and it was wrong both
@@ -473,7 +473,7 @@ figure came from
 ## The tests your pod cannot run
 
 Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
-A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
+A tmux pane runs on its host, and none of this holds there. Their evidence is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
 the known ones, not every one: a failure they do not name is yours to explain. Several of them
 reach any work a pod runs, a test or a tool of your own, not a test suite alone. One habit holds

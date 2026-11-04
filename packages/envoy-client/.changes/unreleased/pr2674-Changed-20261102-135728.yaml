@@ -1,5 +1,0 @@
-kind: Changed
-body: 'The `envoy_publish` tool description no longer names `ENVOY_SUBSCRIBE_ALL_TOPICS`, which the listener has deleted. A registration''s `port` is documented as always 0: the listener refuses a registration whose port is above 0, naming the field.'
-time: 2026-11-02T13:57:28.229252539Z
-custom:
-    Issue: pr2674

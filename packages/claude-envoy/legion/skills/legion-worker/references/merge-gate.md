@@ -2,14 +2,14 @@
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
 approval, the implementer on a look of its closed issue's production check, or the merger
-building READY. Every path it cites is in cybermonklabs/legion.
+building READY. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head → the
 architect's acceptance, in `accepting` → retro → the merger's READY → the merge, which closes the
 issue → the implementer's production check, after the close. Every handoff is a record on the
-Dispatch issue, never a commit, so the head that merges carries none. After the approval, only
-retro's commits leave it standing on their own: those that change only `docs/solutions/`
-(*Retro*, below); READY also lets through a file under `.legion/` that GitHub's compare lists as
+Dispatch issue, never a commit, so the head that merges carries none. Retro commits nothing
+(*Retro*, below), so the approved head is the head that merges. READY still lets a commit that
+changes only `docs/solutions/` stand, and a file under `.legion/` that GitHub's compare lists as
 removed, the commit `legion handoffs import` makes to remove the directory where handoffs lived
 before they moved to Dispatch. A conflict-forced merge goes back to the reviewer for a
 confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
@@ -18,8 +18,9 @@ other change to the head voids it.
 
 ## The reviewer
 
-- The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
-  never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
+- The reviewer reads CI on GitHub and verifies the `Threads` facts and the issue's results there
+  and with `dispatch results --issue <issue>` — never from a handoff — then runs
+  `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   waits for each one's result with `wait`, since each runs as a job of its own, and records the
   verdict from what those results say. The CI it reads is the head's own checks: no handoff is a
@@ -56,7 +57,9 @@ other change to the head voids it.
   still in progress: wait for it. When no
   run at the head holds the job, or nothing will run it (a check only a commit status reports, a
   workflow another repository defines), tell the architect and do not approve.
-  Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
+  Approval is refused while any `before_merge` check of the issue's own Verification document has no passing result that is current at the head being reviewed: `REQUEST_CHANGES` naming each such check by its block id, and `dispatch results --issue <issue>` is the read that decides it.
+  An issue with no Verification document, or whose Verification document holds no `before_merge` check, is a gap you name in the review body, never a review that asks for changes: say which of the two it is, and tell the architect, who writes the checks. Your own findings and the checks that do exist still decide the review, and on an issue that has none the architect's acceptance is the gate.
+  A result is current at that head while the head is the head of an open pull request, or the final head of a merged one, attributed to the check's own issue. A child's pull request never makes a root check's result current, and a child never records the result that proves a root's check. A child that carries part of a root's requirement proves it with a check on the child's own Verification document whose `serves` names that requirement, and that result is current at the child's head. A root's own checks are proven at the root's own head, or on the default branch for an `after_merge` check, in the root's last round.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
   reviewed — always named by SHA — carrying every inline comment in that single
@@ -96,9 +99,9 @@ other change to the head voids it.
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
   below), and that read is no new round. A round after a READY refusal is the one exception. Its
-  approval needs the tester's `E2E` line to name the head, or an ancestor with only files under
-  `.legion/` removed since. So there you fix no prose yourself, and you name each prose finding in
-  a `REQUEST_CHANGES`.
+  approval needs the tester's results to be current at the head, or at an ancestor with only files
+  under `.legion/` removed since. So there you fix no prose yourself, and you name each prose
+  finding in a `REQUEST_CHANGES`.
 
 A reviewer's phase ends with its completion, not with its review. Every round records a handoff
 and takes this order: read CI as above; write the handoff and record it with
@@ -118,15 +121,24 @@ reviewing until you finish.
 
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
-  tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines and the reviewer's
+  tester's handoff, `dispatch results --issue <issue>` at the approved head and the reviewer's
   approval of the head by SHA; the daemon lets no child hold it; a parent's waits for its last
   round, `skill://legion-architect`, section 4) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
-  as its `Reason:` line and counts a review round. The architect also reads the reviewer's own
-  prose commits here, with the rest of the evidence, and that read is no new round. It does not
+  as its `Reason:` line and counts a review round. The acceptance comment names each check with
+  its result. An issue with no Verification document, or with no `before_merge` check, reaches
+  the architect as a gap the tester and the reviewer named and neither refused, so the
+  architect's acceptance is the only gate on it: the acceptance comment names that gap and
+  decides there, accepting the issue or sending it back with the checks the architect writes,
+  which closes no design gate while dispatch://INFRA-175 has not shipped. The architect also
+  reads the reviewer's own prose commits here, with the rest of the evidence, and that read is no
+  new round. It does not
   accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
-  controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
+  controller takes it"). The issue's approval is gated by the `before_merge` checks of its own
+  Verification document at its own head, so a child's result against a root's check proves
+  nothing for the root: the root's checks are proven at the root's own head, in its last round.
+  The acceptance asks for no `after_merge` result: that one is recorded
   after the close (*The production check after the close*, below).
   CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
   head the review App pushed is the exception: the daemon marks it a planned red and acts on it
@@ -134,21 +146,23 @@ reviewing until you finish.
 
 ## Retro
 
-- **Retro's commits do not void the reviewer's approval.** Retro's `docs/solutions/` commits above
-  the approved head (`skill://legion-retro` gives the steps) leave the approval standing, and the
-  tree goes to the merger — never back to the tester or reviewer. Anything else above the approved
-  head does void it, except the handoff import's removal of `.legion/` files: READY is refused
+- **Retro commits nothing.** It reads the evidence, writes what the work taught as a
+  `dispatch comment` on the issue for the skill librarian, brings the PR body up to date and
+  completes (`skill://legion-retro` gives the steps), so the approved head is the head READY
+  names. Anything above the approved
+  head voids the approval, except the handoff import's removal of `.legion/` files and a commit
+  that changes only `docs/solutions/`, which READY still lets through: READY is refused
   `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
   the head back to review instead of completing, the move's reason naming the refusal's code and
   what it found. A conflict merge pushed above the approved head with no review round after it
   brings the base's paths above that head, so READY refuses it the same way; one sent back through
   `implementing` by the conflict procedure gets its confirmation before READY runs. A READY
   refusal's return reaches the reviewer as a new round, never a fingerprint confirmation. Retro
-  removes nothing, and a retro with no learnings pushes nothing.
+  removes nothing.
 - **Retro brings the PR body's path-derived content up to date before it completes.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
-  and writes into the live body before its push, or before it completes when it pushes nothing (`skill://legion-retro`), since the merger
+  and writes into the live body before it completes (`skill://legion-retro`), since the merger
   reports a stale body rather than rewriting it. A body edit changes no commit, so the approval
   stands.
 
@@ -167,8 +181,9 @@ reviewing until you finish.
   `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
   `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
   head (or one line saying the body carries no brief — the packet still goes out), then the
-  `--summary` output and the PR body's gate facts. The READY packet names both the implementer's
-  and tester's `E2E` lines; a missing one is reported to the architect instead of completing.
+  `--summary` output and the PR body's gate facts. The READY packet names each `before_merge`
+  check with its latest result, as `dispatch results --issue <issue>` prints it; a check with no
+  current passing result is reported to the architect instead of completing.
 - READY is `handoff_complete` with `ready: true` and the packet as its `summary`; the merger runs
   no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
   checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
@@ -262,21 +277,24 @@ reviewing until you finish.
   with `expects_reply: none`, and await no reply. Read whether production carries the merge. Then
   report one of three outcomes:
   - `pass`, once you drove the changed path in production through the user's own access path and
-    wrote the record: the PR body's `Production:` line,
-    `<what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>`,
-    and one pull-request comment carrying the Legion footer. A staging pass is not this, since a
+    recorded the result: `dispatch result` against the issue's `after_merge` check, at the merge
+    commit, its `observed` ending `woken by <event>`, with the printed line in the PR body's
+    `Checks` block and one pull-request comment carrying the Legion footer. A closed issue takes a
+    result for an `after_merge` or `default_branch` check and refuses every other write. A staging
+    pass is not this, since a
     staging gate does not run every resource production does.
   - `pending`, when production does not carry the merge yet (a shared profile still holding the
     previous release, a daemon still running the previous commit, a deploy nobody has run): the
-    summary names what is missing, and the `Production:` line stays at
-    `pending deploy of <merge sha>`.
-  - `fail`, for a defect: file no issue, and take the path
+    summary names what is missing, nothing is recorded, and the check's line in the body stays at
+    `- Check <block id> (after_merge): not yet run`.
+  - `fail`, for a defect: record the failing result with `dispatch result --verdict fail`, file no
+    issue, and take the path
     `skill://legion-worker/references/findings.md` gives it. A defect with a clear fix goes to the
     controller topic, with its evidence comment on the controller's report issue. A defect that
     needs a decision is a `dispatch ask` on the report issue, and you publish its reference to the
     controller topic. Either names this issue, the pull request, the merge commit, what you drove
     and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
-    `Production:` line and in the summary.
+    result's `observed` and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
   queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
   with its pod and disk; where a wake arrived while the look was open, the next look starts at once
@@ -285,13 +303,13 @@ reviewing until you finish.
   `issue.deployed` event for the pull request; when the project's `legion.yaml` names the
   repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
   on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
-  job; or, for `cybermonklabs/legion`, on a Legion daemon's boot on a build containing the merge, on
+  job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
   Dispatch's `server.started` announcing that every server process serves such a build, or on the
   build the daemon read from Dispatch at its boot. The woken look's task names the event
   (`Dispatch's issue.deployed: run <id> completed <t>`,
   `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <t>`,
   `the Legion daemon's boot on build <sha>`, `Dispatch serving build <sha> on every server process`,
-  `Dispatch's build <sha>`), and its `Production:` line names it too, so the pull request carries
+  `Dispatch's build <sha>`), and the result you record names it too, so the pull request carries
   the cause. Never poll for the deploy, never wait on a reply, and never ask anyone for approval
   to deploy. Open a `dispatch ask` to a person only when the instructions name nobody for that
   deploy; it starts with the production gap and why it matters, then names the required install or
@@ -301,11 +319,12 @@ reviewing until you finish.
   default) from the close, and the wake at that bound is the last look, told so in its task
   (`the bound: production did not carry the merge within <N days>`). A `pass` or `fail` there
   closes the check as any look's would; a `pending` closes it as not run, and before reporting it
-  you write on the pull request, in the `Production:` line and a comment, that the check did not
+  you write on the pull request, in the check's line and a comment, that the check did not
   run because production did not carry the merge within the bound.
-- **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
-  on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
-  issue" is the pull request for a closed issue. A defect reaches Dispatch by the two paths above:
+- **The record lives on the pull request and in the result.** Dispatch refuses a message, a
+  comment or an ask on a closed issue (`ISSUE_CLOSED`) and takes only a result for an
+  `after_merge` or `default_branch` check, so the deployment instructions' "on the pull request
+  and the issue" is the pull request and that result. A defect reaches Dispatch by the two paths above:
   a clear defect as the message to the controller, which gives it to the tree that owns that code,
   and any other as the ask on the
   controller's report issue. The architect accepted the issue before the merge and is asked

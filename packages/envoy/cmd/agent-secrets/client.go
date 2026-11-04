@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -67,8 +68,12 @@ var terminalRenewal = struct {
 	LegacyMessage: "not live",
 }
 
+// newClient is the HTTP client every agent-secrets call goes out on, renewals among them. Its
+// whole-call timeout is leasetime.RenewClientTimeout, the same figure the broker's lease bound
+// charges a renewal an outage black-holes: a connection a front door accepts with nothing
+// behind it costs this renewer the whole of it.
 func newClient(baseURL string) *client {
-	return &client{baseURL: baseURL, http: &http.Client{Timeout: 30 * time.Second}}
+	return &client{baseURL: baseURL, http: &http.Client{Timeout: leasetime.RenewClientTimeout}}
 }
 
 // apiError is the broker's {"code":...,"error":...} error envelope, plus the HTTP status it came
