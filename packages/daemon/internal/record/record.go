@@ -137,6 +137,17 @@ type Issue struct {
 	// write them: PutIssue keeps the stored values.
 	DeclaredSeq int64
 	DeclaredAt  time.Time
+	// MemoryGroup is the memory group of the issue's tree, `memory` or `none`, and "" exactly while
+	// nothing has drawn for it;
+	// MemoryDrawMode the project's memory mode in force when that group was drawn
+	// (config.MemoryMode's words); and MemoryDrawnAt when it was drawn, nil for a record with no
+	// draw: a tree first opened before the setting existed, or a root the draw never reached, which
+	// has no group and runs without memory. The draw is made once, when the tree's lifecycle row is
+	// first created, and only Store.DrawMemory and Store.CarryMemory write the three: PutIssue keeps
+	// the stored values, so a re-admission, a new generation and ClearTreeGeneration keep the draw.
+	MemoryGroup    string
+	MemoryDrawMode string
+	MemoryDrawnAt  *time.Time
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -1171,6 +1182,19 @@ type Store interface {
 	// RestartCaughtUp sets issue's catch-up cursor back to 0, so its next catch-up reads from its
 	// last handout: a re-admission's new generation, whose old generation's events are not its own.
 	RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error
+	// DrawMemory records the memory group drawn for root's tree: the group (`memory` or `none`),
+	// the mode it was drawn under (a config.MemoryMode word, taken as a
+	// string because internal/config reads internal/store, whose own tests read this package, so
+	// an import of config here would close a cycle) and the time of the draw, written once and
+	// never again. It reports whether it wrote the row. Writing nothing is no error: a root that
+	// already carries a draw keeps it, whatever the project's mode says now, and a tree whose root
+	// has no issue record — an operator's spawn — records no draw at all.
+	DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error)
+	// CarryMemory copies the draw of from onto key verbatim, the original draw time included: the
+	// hand-over of a child to a tree of its own, which keeps the group it has been running under.
+	// It reports whether it wrote, and writes nothing when key already carries a draw of its own or
+	// from has none to give.
+	CarryMemory(ctx context.Context, tx pgx.Tx, key, from string) (bool, error)
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
