@@ -539,7 +539,9 @@ curl -s http://127.0.0.1:<port>/debug/vars | jq .dispatch_rooms
 - `pools.room_appends`, `pools.rooms`: each pool's connections held (`acquired`) and idle (`idle`), the acquires that found no idle connection (`empty_acquires`), and the time acquires waited in all (`acquire_duration_ns`); zeros for a pool not opened yet.
 - `read_cache`: the cold reads' cache's weight in bytes (`bytes`), its entries (`entries`) and its budget (`budget`).
 - `preloads`: the cold sockets' loaded states waiting for their room's load.
-- `resident_bytes`: the encoded bytes the resident rooms took, each load and every update since.
+- `resident_bytes`: the encoded bytes the resident rooms took, each load and every update since: loaded state only.
+  It leaves out the updates a room parks while they wait for an edit it has not received.
+  ygo bounds those per room by `MaxPendingItems`, which Dispatch sets to `maxUpdateItems` (1<<20, `internal/dispatch/docs/service.go` `New`): a count of parked items and, separately, of parked delete ranges, not bytes.
 - `head_tracker`: whether the head tracker trusts what it heard (`trusted`: false while its LISTEN is down, and while that connection has delivered nothing, not even a `dispatch_doc_ping` ping, for 3 s) and how many documents it holds (`entries`): one for each document its process holds a room, a cached read, a preload or a cold read in flight of, or is writing, and none for a document it only heard another process write. The evictor pings, through the shared pool, once its connection has delivered nothing for a second plus a jitter under a second, and only while its process holds a room, a cached read or a preload; a ping resets every process's wait, so a deployment sends about one ping a second while some process holds one of those and no document write is announced, and none otherwise, and a process that holds none of them reports `trusted: false` once 3 s pass with nothing heard.
 - `evictor_queries`: the stale-room evictor's reads of a document's head.
 - `settlement_wakeups`: the wakes of the waits for a room's appends.

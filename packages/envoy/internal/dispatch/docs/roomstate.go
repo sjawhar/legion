@@ -256,8 +256,9 @@ func (s *Service) releaseIfUnused(room string) {
 
 // releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so it no longer counts among
 // the resident rooms, nor holds a place under the room cap unless a socket still holds a
-// reservation on it, the bytes its load took no longer count as resident (roomUnloaded, which
-// takes back what that load counted in onLoadDocument), and its state goes too unless something
+// reservation on it, the bytes of one load of the name no longer count as resident (roomUnloaded,
+// which ends the name's oldest load: the one ending, save in the out-of-order case below), and its
+// state goes too unless something
 // still holds it, whose end releases it instead. ygo calls it exactly once for each room whose
 // load succeeded, and only for a room that has left its map, whichever way the room goes: the
 // idle sweep, the last peer leaving, CloseRoom.
@@ -802,9 +803,10 @@ type roomSlot struct {
 // both left ygo's map and report their unloads out of order, when each ends the other's, and the
 // total is exact once both have run.
 //
-// bytes and ended are guarded by roomSlots.mu: ended marks a token whose bytes an unload has
-// taken back, so each load's bytes leave the count exactly once and a load that is over counts
-// nothing more (countResidentBytes).
+// bytes and ended are guarded by roomSlots.mu. A token leaves the name's list in the same hold of
+// that lock that takes its bytes back (roomUnloaded), so each load's bytes leave the count once;
+// ended, set there too, is what refuses a count that arrives for a load already over
+// (countResidentBytes), such as an update the room's drain classifies after its unload.
 type residentLoad struct {
 	bytes int64
 	ended bool
@@ -918,18 +920,17 @@ func (s *Service) roomUnloaded(room string, load *residentLoad) {
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	slot := s.roomSlots.rooms[room]
-	at := 0
+	at := -1
 	if load != nil {
 		at = slices.Index(slot.loads, load)
 	} else if len(slot.loads) > 0 {
-		load = slot.loads[0]
+		at = 0
 	}
-	if load != nil && at >= 0 {
+	if at >= 0 {
+		load = slot.loads[at]
 		slot.loads = slices.Delete(slot.loads, at, at+1)
-		if !load.ended {
-			load.ended = true
-			s.residentBytes.Add(-load.bytes)
-		}
+		load.ended = true
+		s.residentBytes.Add(-load.bytes)
 	}
 	s.roomSlots.setLocked(room, slot)
 	s.residentRooms.Add(-1)

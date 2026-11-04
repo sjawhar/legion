@@ -573,179 +573,169 @@ func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoad
 }
 
 // The resident bytes the room figures report (RoomFigures, dispatch_rooms.resident_bytes) are the
-// bytes the loads ygo holds took, and each load's own unload takes its own back. A room that
-// loaded again before an earlier room of the same name reported its unload keeps the bytes it
+// bytes the loads ygo holds took, and each unload of a name ends the name's oldest load. A room
+// that loaded again before an earlier room of the same name reported its unload keeps the bytes it
 // counted: that late unload is the older load's end, and ygo's OnUnloadDocument names the room
-// alone, so bytes kept by the room's name, or on its record, would be taken back by it - leaving
-// the figure short by the whole of the resident room's history, for as long as that room lives.
+// alone, so bytes kept on the room's record would be taken back by it - leaving the figure short
+// by the whole of the resident room's history, for as long as that room lives.
 func TestAnEarlierRoomsLateUnloadLeavesTheResidentRoomsBytesResident(t *testing.T) {
-	database := storetest.Open(t)
-	service, server := newTestServiceInstance(t, database)
-	artifactID := createDocuments(t, database, 1)[0]
-	admitSocket(t, server.URL, artifactID, "the socket that loads the first room").Close()
-	// The service holds this room alone, so the figure is the first room's load.
-	first := service.residentBytes.Load()
-	if first <= 0 {
-		t.Fatalf("the first room's load counted %d resident bytes, want the history it decoded; nothing here is tested", first)
-	}
-
-	// The first room's unload waits here, where ygo has already taken the room out of its map.
-	// Every unload of this room reports itself once it has run, this one included.
-	unloading := make(chan struct{})
-	unloadGo := make(chan struct{})
-	unloaded := make(chan struct{}, 2)
-	var unloadOnce, unloadGoOnce sync.Once
-	letUnload := func() { unloadGoOnce.Do(func() { close(unloadGo) }) }
-	t.Cleanup(letUnload)
-	unload := service.srv.OnUnloadDocument
-	service.srv.OnUnloadDocument = func(ctx context.Context, room string) {
-		if room != artifactID {
-			unload(ctx, room)
-			return
-		}
-		unloadOnce.Do(func() { close(unloading); <-unloadGo })
-		unload(ctx, room)
-		unloaded <- struct{}{}
-	}
-	awaitUnload := func(what string) {
-		t.Helper()
-		select {
-		case <-unloaded:
-		case <-time.After(roomWait(t)):
-			t.Fatalf("%s never reported its unload", what)
-		}
-	}
-	closed := make(chan error, 1)
-	go func() { closed <- service.srv.CloseRoom(artifactID, true) }()
-	select {
-	case <-unloading:
-	case <-time.After(roomWait(t)):
-		t.Fatal("the first room never reached its unload, so nothing here is tested")
-	}
-
-	// The room loads afresh while the first room's unload is held, so the service counts both
-	// loads, and a write the second room takes counts against it alone. The two loads then hold
-	// different counts, so an unload that took back the wrong load's bytes would show.
-	second := admitSocket(t, server.URL, artifactID, "the socket that loads the second room")
-	if _, err := joinedReplaceText(service, artifactID, "A write the second room takes, longer than the seed.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("write to the second room: %v", err)
-	}
-	resident := service.residentBytes.Load() - first
-	if resident <= first {
-		t.Fatalf("the second room counted %d resident bytes against the first room's %d, want more; nothing here is tested", resident, first)
-	}
-
-	letUnload()
-	if err := <-closed; err != nil {
-		t.Fatalf("close the first room: %v", err)
-	}
-	awaitUnload("the first room")
+	r := unloadAcrossAReload(t)
+	r.letFirstUnload()
+	r.awaitFirstClose()
+	r.awaitUnload("the first room")
 	// What is left is the second room's load and its write.
-	if got := service.residentBytes.Load(); got != resident {
-		t.Errorf("the resident bytes after the first room's late unload = %d, want the %d the second room counted with its write: that unload takes back the bytes of the load that ended", got, resident)
+	if got := r.service.residentBytes.Load(); got != r.second {
+		t.Errorf("the resident bytes after the first room's late unload = %d, want the %d the second room counted with its write: that unload takes back the bytes of the load that ended", got, r.second)
 	}
 
-	// The second room's own unload takes back what that load counted, and nothing is left.
-	_ = second.Close()
-	if err := service.srv.CloseRoom(artifactID, true); err != nil {
+	// The second room's unload takes back what that load counted, and nothing is left.
+	_ = r.socket.Close()
+	if err := r.service.srv.CloseRoom(r.room, true); err != nil {
 		t.Fatalf("close the second room: %v", err)
 	}
-	awaitUnload("the second room")
-	if got := service.residentBytes.Load(); got != 0 {
-		t.Errorf("the resident bytes once every room of the document has unloaded = %d, want 0", got)
-	}
+	r.awaitUnload("the second room")
+	r.requireNothingCounted("once every room of the document has unloaded")
 }
 
 // Two rooms of one document that have both left ygo's map can report their unloads in either
 // order, and an unload that has begun may wait while a later room of the document loads and
 // unloads in full. Whatever the order, each unload ends one of the loads counted under the name,
-// so once both have run no bytes of either are counted and the name holds no place.
+// so once both have run no bytes of either are counted and the name counts no load.
 func TestUnloadsOfTwoRoomsInEitherOrderLeaveNoResidentBytes(t *testing.T) {
-	database := storetest.Open(t)
-	service, server := newTestServiceInstance(t, database)
-	artifactID := createDocuments(t, database, 1)[0]
-	admitSocket(t, server.URL, artifactID, "the socket that loads the first room").Close()
-
-	// The first room's unload begins, then waits inside it before it ends a load.
+	r := unloadAcrossAReload(t)
+	// The first room's unload goes on past what releaseUnloadedRoom reads, then waits before it
+	// ends a load (beforeUnloadEndsLoad); only that unload waits, and a sync.Once would make the
+	// second wait for the first as well.
 	waiting := make(chan struct{})
 	proceed := make(chan struct{})
 	var proceedOnce sync.Once
 	letProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
 	t.Cleanup(letProceed)
-	// Only the first unload waits; a sync.Once would make the second wait for the first as well.
 	var held atomic.Bool
-	service.beforeUnloadEndsLoad = func(room string) {
-		if room != artifactID || held.Swap(true) {
+	r.service.beforeUnloadEndsLoad = func(room string) {
+		if room != r.room || held.Swap(true) {
 			return
 		}
 		close(waiting)
 		<-proceed
 	}
-	// ygo calls the first room's unload only after a second room has loaded, and that unload then
-	// waits, as above, while the second room unloads in full. Every unload of the room reports
-	// itself once it has run.
-	entering := make(chan struct{})
-	enter := make(chan struct{})
-	var enterOnce sync.Once
-	letEnter := func() { enterOnce.Do(func() { close(enter) }) }
-	t.Cleanup(letEnter)
-	var entered atomic.Bool
-	unloaded := make(chan struct{}, 2)
-	unload := service.srv.OnUnloadDocument
-	service.srv.OnUnloadDocument = func(ctx context.Context, room string) {
-		if room == artifactID && !entered.Swap(true) {
-			close(entering)
-			<-enter
-		}
-		unload(ctx, room)
-		if room == artifactID {
-			unloaded <- struct{}{}
-		}
-	}
-	closed := make(chan error, 1)
-	go func() { closed <- service.srv.CloseRoom(artifactID, true) }()
-	select {
-	case <-entering:
-	case <-time.After(roomWait(t)):
-		t.Fatal("the first room never reached its unload, so nothing here is tested")
-	}
-	second := admitSocket(t, server.URL, artifactID, "the socket that loads the second room")
-	letEnter()
+	r.letFirstUnload()
 	select {
 	case <-waiting:
 	case <-time.After(roomWait(t)):
 		t.Fatal("the first room never began its unload, so nothing here is tested")
 	}
 
-	// The second room takes a write, and unloads in full while the first unload waits. The
-	// first close holds the service's close gate for the room (roomServer.CloseRoom) until its
-	// unload returns, so the second room is closed by ygo's own CloseRoom, as ygo's idle sweep and
-	// a last browser's departure retire a room, taking no gate.
-	if _, err := joinedReplaceText(service, artifactID, "A write the second room takes.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("write to the second room: %v", err)
-	}
-	_ = second.Close()
-	if err := service.srv.Server.CloseRoom(artifactID, true); err != nil {
+	// The second room unloads in full while the first unload waits. The first close holds the
+	// service's close gate for the room (roomServer.CloseRoom) until its unload returns, so the
+	// second room is closed by ygo's own CloseRoom, as ygo's idle sweep and a last browser's
+	// departure retire a room, taking no gate.
+	_ = r.socket.Close()
+	if err := r.service.srv.Server.CloseRoom(r.room, true); err != nil {
 		t.Fatalf("close the second room: %v", err)
 	}
-	select {
-	case <-unloaded:
-	case <-time.After(roomWait(t)):
-		t.Fatal("the second room never reported its unload, so nothing here is tested")
-	}
+	r.awaitUnload("the second room")
 
 	letProceed()
-	if err := <-closed; err != nil {
-		t.Fatalf("close the first room: %v", err)
+	r.awaitFirstClose()
+	r.requireNothingCounted("once both rooms have unloaded")
+}
+
+// reloadedRoom is a document whose first room has left ygo's map with its unload held, and whose
+// second room has loaded and taken a write meanwhile (unloadAcrossAReload). first and second are
+// the resident bytes each load counted, and second is larger, so an unload that took back the
+// wrong load's bytes shows.
+type reloadedRoom struct {
+	t              *testing.T
+	service        *Service
+	room           string
+	socket         *gws.Conn
+	first, second  int64
+	letFirstUnload func()
+	closed         chan error
+	unloaded       chan struct{}
+}
+
+// unloadAcrossAReload loads a document's room, closes it, holds ygo's call of the room's unload,
+// and loads and writes to the room again while that unload is held.
+func unloadAcrossAReload(t *testing.T) *reloadedRoom {
+	t.Helper()
+	database := storetest.Open(t)
+	service, server := newTestServiceInstance(t, database)
+	r := &reloadedRoom{t: t, service: service, room: createDocuments(t, database, 1)[0], closed: make(chan error, 1), unloaded: make(chan struct{}, 2)}
+	admitSocket(t, server.URL, r.room, "the socket that loads the first room").Close()
+	// The service holds this room alone, so the figure is the first room's load.
+	if r.first = service.residentBytes.Load(); r.first <= 0 {
+		t.Fatalf("the first room's load counted %d resident bytes, want the history it decoded; nothing here is tested", r.first)
 	}
-	if got := service.residentBytes.Load(); got != 0 {
-		t.Errorf("the resident bytes once both rooms have unloaded = %d, want 0: a load whose bytes no unload took back stays counted for good", got)
+
+	// ygo calls the first room's unload, after taking the room out of its map, only once it is let
+	// go. Every unload of the room reports itself once it has run.
+	entering := make(chan struct{})
+	enter := make(chan struct{})
+	var enterOnce sync.Once
+	r.letFirstUnload = func() { enterOnce.Do(func() { close(enter) }) }
+	t.Cleanup(r.letFirstUnload)
+	var entered atomic.Bool
+	unload := service.srv.OnUnloadDocument
+	service.srv.OnUnloadDocument = func(ctx context.Context, room string) {
+		if room == r.room && !entered.Swap(true) {
+			close(entering)
+			<-enter
+		}
+		unload(ctx, room)
+		if room == r.room {
+			r.unloaded <- struct{}{}
+		}
 	}
-	service.roomSlots.mu.Lock()
-	slot := service.roomSlots.rooms[artifactID]
-	service.roomSlots.mu.Unlock()
+	go func() { r.closed <- service.srv.CloseRoom(r.room, true) }()
+	select {
+	case <-entering:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the first room never reached its unload, so nothing here is tested")
+	}
+
+	// The room loads afresh while the first room's unload is held, so the service counts both
+	// loads, and a write the second room takes counts against it alone.
+	r.socket = admitSocket(t, server.URL, r.room, "the socket that loads the second room")
+	if _, err := joinedReplaceText(service, r.room, "A write the second room takes, longer than the seed.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write to the second room: %v", err)
+	}
+	if r.second = service.residentBytes.Load() - r.first; r.second <= r.first {
+		t.Fatalf("the second room counted %d resident bytes against the first room's %d, want more; nothing here is tested", r.second, r.first)
+	}
+	return r
+}
+
+// awaitUnload waits for the next unload of the room to have run.
+func (r *reloadedRoom) awaitUnload(what string) {
+	r.t.Helper()
+	select {
+	case <-r.unloaded:
+	case <-time.After(roomWait(r.t)):
+		r.t.Fatalf("%s never reported its unload", what)
+	}
+}
+
+// awaitFirstClose waits for the first room's close to return.
+func (r *reloadedRoom) awaitFirstClose() {
+	r.t.Helper()
+	if err := <-r.closed; err != nil {
+		r.t.Fatalf("close the first room: %v", err)
+	}
+}
+
+// requireNothingCounted requires that no bytes and no load of the room are counted.
+func (r *reloadedRoom) requireNothingCounted(when string) {
+	r.t.Helper()
+	if got := r.service.residentBytes.Load(); got != 0 {
+		r.t.Errorf("the resident bytes %s = %d, want 0: a load whose bytes no unload took back stays counted for good", when, got)
+	}
+	r.service.roomSlots.mu.Lock()
+	slot := r.service.roomSlots.rooms[r.room]
+	r.service.roomSlots.mu.Unlock()
 	if len(slot.loads) != 0 {
-		t.Errorf("the document still counts %d loads once both rooms have unloaded, want none", len(slot.loads))
+		r.t.Errorf("the document still counts %d loads %s, want none", len(slot.loads), when)
 	}
 }
 
