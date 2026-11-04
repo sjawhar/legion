@@ -19,9 +19,16 @@ The App configuration below uses `agent-secrets`; `provider_keys` can still read
 
 ## How the daemon launcher gets tokens
 
-Make `agent-secrets` available on the `PATH` of the shell that starts the daemon.
-The helper uses the machine login a person approves through `agent-secrets machine login`.
+Start the daemon inside an `agent-secrets` session, so every `token_command` it runs inherits that session:
+
+```sh
+export AGENT_SECRETS_URL=<the broker URL>
+agent-secrets register --wait 10 --exec -- legion start …
+```
+
+The `agent-secrets` helper must be running, with the machine login a person approves through `agent-secrets machine login` ([Log a machine in](site/src/content/docs/broker/guides/log-a-machine-in.md)).
 That login must be allowed to request both Apps' broker secrets.
+A daemon started from a plain shell is no session: each `token_command` then fails with `NOT_A_SESSION` ([Troubleshooting](site/src/content/docs/broker/guides/troubleshooting.md)).
 
 ## The `legion-implementer` and `legion-reviewer` Apps
 
@@ -425,12 +432,12 @@ Rotate the keys in the broker's `github-app` secrets, not on the daemon's machin
 
 1. In each GitHub App's settings, generate a new private key and leave the old key active.
 
-2. Update the matching broker secret, `LEGION_IMPLEMENT_APP` or `LEGION_REVIEW_APP`, with the new
-   key.
-   The secret remains a `github-app` secret that releases installation tokens, not key material.
+2. Update the matching broker secret, `LEGION_IMPLEMENT_APP` or `LEGION_REVIEW_APP`, as [Store the App key](site/src/content/docs/broker/guides/github-app-for-a-dev-box.md) shows:
+   its value is the JSON document `{"app_id": …, "private_key": "<the new PEM>"}`, set with `agent-secrets secret set <NAME> < app-key.json`, never the bare PEM.
+   Keep the secret's `github-app` kind and its GitHub owners.
 
-3. Confirm the broker mints fresh installation tokens with the new keys, then confirm a fresh
-   worker pane's `gh auth status` succeeds with account `x-access-token`.
+3. Run each role's `token_command` from [the App section](#the-legion-implementer-and-legion-reviewer-apps) in the daemon's session, with `LEGION_GITHUB_OWNER` and `LEGION_GITHUB_READ_ONLY` unset, and confirm it prints the installations' tokens.
+   Then confirm a fresh worker pane's `gh auth status` succeeds with account `x-access-token`.
    The daemon needs no restart: `token_command` gets fresh tokens as its cached leases near expiry.
 
 4. Only then revoke the old private keys in GitHub App settings.
