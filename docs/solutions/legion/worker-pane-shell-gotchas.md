@@ -86,7 +86,7 @@ symptoms:
 
 # Worker-Pane Shell Gotchas
 
-Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1 and 3 are from
+Things every phase worker on `cybermonklabs/legion` hits in a worker pane or on the smoke rig. Sections 1 and 3 are from
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 are from LEGION-22; 7–8 are
 from LEGION-18; the 60-second grant lifetime in §1, the `packages/daemon` note in §2, and §9 are from LEGION-14, whose
 four workers hit §1–§3 again; the `packages/pi-envoy` note in §2 and the independent confirmation of §1's cause are
@@ -465,7 +465,7 @@ To exercise the branch's build live, build it in the workspace and run it by pat
 
 ```bash
 cd -- "$LEGION_WORKSPACE/packages/daemon" && go build -o /tmp/<issue>-legion ./cmd/legion
-/tmp/<issue>-legion gh pr view <n> -R sjawhar/legion --json url --jq .url
+/tmp/<issue>-legion gh pr view <n> -R cybermonklabs/legion --json url --jq .url
 ```
 
 That is the branch's `legion gh` reading the command and picking the owner's directory under the pane's

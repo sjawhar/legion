@@ -217,7 +217,7 @@ type apiRoute struct {
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
 // mux.HandleFunc. The comment above each row says what the route does; the broker's generated
 // HTTP reference (cmd/broker-refgen, published at
-// https://sjawhar.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
+// https://cybermonklabs.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
 		// The broker's own OAuth 2.0 authorization server metadata (RFC 8414): its issuer, its

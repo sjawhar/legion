@@ -83,7 +83,8 @@ func errNoBrokerConfigured() *apiError {
 // A caller that names a service and no person is a machine nobody has signed in on
 // (`agent-secrets login`). It reads as any session does, and writeNeedsASignedInPerson refuses
 // its every write at the one chokepoint (project_scope.go), so no write is recorded under an
-// empty writer.
+// empty writer. It holds no OAuth scope either, so the rows a person's own credential reaches
+// turn it away earlier still (gateRouteScopes): there is no person for it to act as.
 //
 // Each refusal is its own code, and none of them repeats the token the caller presented:
 //
@@ -140,9 +141,26 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, errorf(http.StatusServiceUnavailable, "BROKER_UNAVAILABLE",
 			"the secrets broker cannot be reached; try again in a minute")
 	}
+	// Both scopes go to a token the broker scoped to its person: that token is the person's own
+	// agent acting for them, so it may do what they may, approvals included. A token scoped to a
+	// project gets none, because the deployment mapped that token to a project and not to the
+	// person: it proves a session, not that any person stands behind the request. A token that
+	// names a service and no person gets none either, whatever scope the broker answered: there
+	// is no person for it to act as, and a scope that said otherwise would let it act as the
+	// session's own id on the routes that read what belongs to a person.
+	var scopes []string
+	if caller.Person != "" && caller.ProjectScope == brokertoken.ProjectScopePerson {
+		scopes = model.Scopes
+	}
+	actor := model.Actor{
+		Kind: "session",
+		ID:   caller.Session,
+		// The broker proved this session, so the credential already names the agent behind the
+		// request and no request body has to name it.
+		Credential: &model.Credential{Scopes: scopes, Session: caller.Session},
+	}
 	// A caller names a person or a service, never both and never neither (brokertoken.Caller),
 	// and the two fields are set from the token alone, never from a body. whoami reports both.
-	actor := model.Actor{Kind: "session", ID: caller.Session}
 	if caller.Person != "" {
 		actor.Owner = &caller.Person
 	}

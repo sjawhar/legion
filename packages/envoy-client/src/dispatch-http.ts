@@ -26,6 +26,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialPendingResponse,
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,
@@ -35,6 +36,7 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  InboxRow,
   Issue,
   IssueCheckResults,
   IssueCoverage,
@@ -77,7 +79,12 @@ import {
 import { textHead } from "./ask-answer";
 import type { RequestCredential } from "./bearer";
 
-export type { DispatchServiceErrorShape } from "@legion/contracts";
+export type {
+  CredentialPendingResponse,
+  CredentialPendingRow,
+  CredentialSession,
+  DispatchServiceErrorShape,
+} from "@legion/contracts";
 
 /** The stored bytes of one version of an uploaded file, and the MIME type Dispatch serves them as. */
 export interface ArtifactFileVersion {
@@ -1040,6 +1047,23 @@ export class DispatchClient {
 
   async whoami(): Promise<WhoamiResponse> {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+
+  /** `GET /api/v1/inbox?assignee=<who>`: the open asks one person's Inbox lists, in the server's
+   *  own order (the owning issue's priority, then whose turn it is, then the latest activity),
+   *  which no reader re-sorts. `me` is the caller, and keeps the rows on issues assigned to them,
+   *  which is what the Inbox page shows by default. The route reads the caller's own `person`
+   *  scope and refuses a credential without it with 403 OAUTH_SCOPE_REQUIRED. */
+  async inbox(assignee: string): Promise<InboxRow[]> {
+    return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
+  }
+
+  /** `GET /api/v1/credential-requests?approver=me`: the credential requests the caller may
+   *  decide, relayed from the secrets broker, or null from a Dispatch that has no broker
+   *  configured, which is an ordinary deployment rather than a failure. `me` is the only approver
+   *  the route takes. It needs the same `person` scope the Inbox does. */
+  async credentialPending(): Promise<CredentialPendingResponse | null> {
+    return this.#json("GET", ["api", "v1", "credential-requests"], undefined, { approver: "me" });
   }
 
   /** `POST /api/v1/projects`: create a project. A key that already exists is 409

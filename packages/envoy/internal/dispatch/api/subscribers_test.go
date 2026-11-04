@@ -284,7 +284,9 @@ func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
 	}
 }
 
-func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
+// The subscriber list needs the person scope: the deployment's shared token holds none and is
+// turned away, and a person's own token reads the list their browser reads.
+func TestListIssueSubscribersRejectsACredentialWithoutThePersonScope(t *testing.T) {
 	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, nil, nil)
@@ -295,8 +297,13 @@ func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token: status=%d body=%s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/subscribers", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK {
+		t.Fatalf("a person's own token: status=%d body=%s", own.Code, own.Body.String())
 	}
 }
 
@@ -552,7 +559,9 @@ func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T)
 	}
 }
 
-func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
+// Unsubscribing a session needs the person scope, which the deployment's shared token, holding
+// none, does not.
+func TestUnsubscribeIssueSessionRejectsACredentialWithoutThePersonScope(t *testing.T) {
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -564,8 +573,8 @@ func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token: status=%d body=%s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
 	}
 }
 

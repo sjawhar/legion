@@ -277,8 +277,14 @@ func TestALiveTokenWithASoundProofIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify refused a live token with a sound proof: %v", err)
 	}
-	if decided != (brokertoken.Caller{Session: "ses_a1b2c3", Person: "sjawhar", Project: "INFRA"}) {
-		t.Fatalf("Verify = %+v, want the session, the person and the project and nothing else of the answer", decided)
+	wantCaller := brokertoken.Caller{
+		Session:      "ses_a1b2c3",
+		Person:       "sjawhar",
+		Project:      "INFRA",
+		ProjectScope: brokertoken.ProjectScopeNamed,
+	}
+	if decided != wantCaller {
+		t.Fatalf("Verify = %+v, want the session, the person, the project and its scope and nothing else of the answer", decided)
 	}
 	if rig.broker.Count() != 1 {
 		t.Fatalf("the broker was asked %d times, want once", rig.broker.Count())
@@ -304,8 +310,9 @@ func TestAPersonScopedTokenNamesNoProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify refused a person-scoped token: %v", err)
 	}
-	if decided != (brokertoken.Caller{Session: "ses_a1b2c3", Person: "sjawhar"}) {
-		t.Fatalf("Verify = %+v, want the session and the person with no project", decided)
+	want := brokertoken.Caller{Session: "ses_a1b2c3", Person: "sjawhar", ProjectScope: brokertoken.ProjectScopePerson}
+	if decided != want {
+		t.Fatalf("Verify = %+v, want the session and the person with the person scope and no project", decided)
 	}
 }
 

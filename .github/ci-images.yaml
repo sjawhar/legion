@@ -1,5 +1,5 @@
 # The container images this repository's CI jobs fetch, each copied into one package this
-# repository publishes: ghcr.io/sjawhar/legion/ci. Every job fetches its copy by digest, so no
+# repository publishes: ghcr.io/cybermonklabs/legion/ci. Every job fetches its copy by digest, so no
 # CI job depends on a third-party registry (sjawhar/legion#2512).
 #
 # One row per distinct upstream image. Each row holds:
@@ -43,7 +43,7 @@
 # container package of an account private, and exposes no API that makes one public, so each
 # package is one irreversible act by a person: Sami made this one public by hand, so a job pulls
 # it with no login (sjawhar/legion#2512).
-registry: ghcr.io/sjawhar/legion/ci
+registry: ghcr.io/cybermonklabs/legion/ci
 
 images:
   # Postgres with pgvector: the `services:` Postgres of ten CI jobs, and testpg.Image.
