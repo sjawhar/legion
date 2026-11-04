@@ -828,6 +828,29 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 	}
 }
 
+// The check task is held to the retired phrases the composed prompts are held to
+// (internal/prompts' TestNoComposedPromptTeachesAnE2ELineOrAProofArray): what a look proves is a
+// result recorded against the issue's after_merge check, so each of the three verdicts asks for
+// `dispatch result` at the merge commit and none asks for the retired Production: line. The task
+// is prose for a pane, so it carries the phrases without their backticks.
+func TestTheCheckTaskAsksForARecordedResultAndNoRetiredLine(t *testing.T) {
+	issue := record.Issue{Key: "LEGION-208", Title: "A production check"}
+	check := record.ProductionCheck{Issue: issue.Key, Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43", OpenedAt: checkOpened, Looks: 1}
+	for _, last := range []bool{false, true} {
+		task := checkTask(issue, check, wakeMerge, "", last)
+		for _, retired := range []string{"Production: line", "pending deploy of", "proof array"} {
+			if strings.Contains(task, retired) {
+				t.Errorf("the check task (last %t) still says %q", last, retired)
+			}
+		}
+		for _, want := range []string{"merge commit merge-43", "dispatch result"} {
+			if !strings.Contains(task, want) {
+				t.Errorf("the check task (last %t) omits %q", last, want)
+			}
+		}
+	}
+}
+
 // checkCompares decodes the check_compare rows of issue, oldest first, each OpenedAt in UTC so a
 // row compares equal to the time the test opened the check at, whatever location the row's JSON
 // decoded to.

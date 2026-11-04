@@ -3,6 +3,109 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.1.0] - 2026-11-04
+
+### Changed
+
+- A Legion phase records what it saw as a result against a check of the issue's Verification document, with `dispatch result`, in place of the six-field proof a handoff carried and the two `E2E` lines of the pull-request body, which is now one line per check.
+  The reviewer approves only when every before-merge check has a passing result that is current at the head it reviews, and the architect's acceptance names each check with its result.
+  The planner writes its plan's tasks as `plan_task` blocks, runs the plan review without a round limit, sends a repeated finding to the architect, and records the plan's approval with `dispatch plan-approve`.
+  Retro commits nothing: its findings are a comment on the issue.
+
+## [18.0.0] - 2026-11-03
+
+### Added
+
+- The controller skill handles the Go daemon's `parked-decision` notice and walks the parked roots
+  and their children at its start and on each `tick`. It re-admits a root it parked for a hold of
+  its own, a park it marks with a comment that begins `Parked by Legion while it waits on:`, when a
+  person's decision after the park gives its work a next step. It leaves every other park, a
+  person's, another session's or an operator's `legion status`, for whoever made it to set to
+  `todo`, and answers a person's question on its ask
+  (`skill://legion-controller/references/parked-decisions.md`).
+
+### Changed
+
+- The skill-scenario rig starts its Envoy listener without `ENVOY_HOST_BRIDGE`, which the listener no longer reads.
+
+## [17.6.2] - 2026-11-03
+
+### Fixed
+
+- The `legion-controller` skill's escalation reference says what happens to unpushed work when the
+  daemon replaces an issue's pod. Before the replacement, the daemon checks every workspace on the
+  pod's disk, a failed claim's included, and pushes what the remote lacks to a rescue branch,
+  `legion/<KEY>-rescue-<pod>-<n>`, which the issue is told of. When that check fails, the pod is
+  not replaced, and the `update-stalled` wake's `reason` names the claim, the workspace and the
+  error. The controller opens a finding ask for it, as for a replacement the cluster refuses. A
+  worker the controller prompts is told to put any scratch evidence it still needs on Dispatch
+  before it answers.
+
+## [17.5.1] - 2026-11-03
+
+### Changed
+
+- The architect's design-gate reference names a second version that keeps the approval: one
+  whose text is exactly the text of the version a person approved, with no decision block in it
+  decided since, such as an accidental edit undone exactly. Dispatch records the approval at that
+  version and emits `artifact.approved`, so the daemon reopens the gate. The reference tells the
+  architect to undo an accidental edit of an approved root spec exactly, to request nothing when
+  the spec then reads Approved, and to request approval again when it does not.
+
+## [17.2.0] - 2026-11-03
+
+### Added
+
+- The `legion` tool's `ready_for_update` operation, for a phase worker and for an architect: it
+  answers the daemon's update task on the issue's pod. The plugin reads the head of
+  `legion/<issue>@origin` with the pane's own jj and sends it with the answer, and leaves it out
+  when the branch is not on the remote. The operation ends no phase, and the turn it answered in
+  is not continued by a phase reminder: after the answer the worker waits, and no reminder
+  follows, because the daemon is what wakes it. The daemon replaces the pod only once every
+  worker of that pod has answered, and holds the worker's next task until its process comes back
+  on the new pod in the same session, where its workspace is provisioned afresh from the issue's
+  pushed branch.
+  `legion.daemonApiVersion` is 46.
+
+## [17.0.0] - 2026-11-02
+
+### Added
+
+- **Breaking:** daemon API contract 45: a phase handoff is a record on the issue's Dispatch issue,
+  no longer a file committed under `.legion/<issue>/` on its branch. The `legion` tool's
+  `handoff_complete` for a planning, implementing, testing or reviewing phase reports the phase's
+  Dispatch handoff record, `handoffId` and `handoffVersion`: the newest record of the phase's word
+  (`plan`, `implement`, `test`, `review`), read from the Dispatch the pane's `dispatch` command
+  reaches, which the daemon reads back and holds to the issue, the phase, the version and the
+  claim's session. A phase with no record is refused naming `dispatch handoff-write`, and a
+  Dispatch that does not answer is refused with its answer. The implementer also reports its
+  pushed tip, the commit `legion/<issue>@origin` names, and is refused, naming the push, when `@-`
+  is not on that branch yet; retro and the merger's READY report `@-`. No committed `.legion/`
+  handoff file is looked up. Install this release with a `legion` built from the same commit, in
+  this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch issues"): deploy the
+  Dispatch server that carries the handoff routes first, then run `legion handoffs import` while
+  the old daemon still runs, then roll out the daemon and the plugins, then run the import again,
+  which catches a file an old worker pushed in between, until no line asks for another run and
+  none says `kept`.
+  A handoff record carries no `completed` time and no `previousHandoff`: Dispatch records when it
+  was written, and its version names the record before it. A reviewer's still carries
+  `headReviewed`.
+- The skills this plugin ships teach the handoff record: a worker writes its phase's handoff with
+  `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <file>` and reads the previous
+  role's with `dispatch handoff-read`, at the version its task's `Handoff:` line names
+  (`--version <n>`), rather than committing and pushing `.legion/<issue>/<phase>.json`. The
+  `LEGION_WORKSPACE_RECREATED` notice tells a worker whose workspace was recreated to re-read the
+  last handoff recorded on its issue with `dispatch handoff-read --issue <KEY> --phase <phase>`,
+  since Dispatch keeps it whatever the workspace lost.
+
+### Removed
+
+- The handoff commit checks go with the committed handoff: `handoff_complete` no longer requires
+  that the commit carrying the handoff was authored by the identity the daemon put on the pane,
+  `JJ_USER`/`JJ_EMAIL` (the App-identity check). The skills drop the commit trailer that kept a
+  commit of handoffs alone from starting CI, and retro's removal of `.legion/<issue>/` from the
+  branch; the `legion-worker` reference on that trailer is deleted.
+
 ## [16.1.0] - 2026-11-01
 
 ### Changed

@@ -1164,7 +1164,7 @@ func killGitGC(t *testing.T, feed string) {
 	slowGitGC(t, feed)
 	command := exec.Command("/usr/bin/git", "--git-dir="+feed, "gc", "--prune=now")
 	command.Dir = feed
-	environment := without(fixtureEnvironment(), "PATH")
+	environment := without(setupEnvironment(), "PATH")
 	for _, key := range []string{"OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION"} {
 		environment = without(environment, key)
 	}

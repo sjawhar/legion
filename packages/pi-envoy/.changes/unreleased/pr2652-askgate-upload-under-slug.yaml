@@ -1,8 +1,0 @@
-kind: Fixed
-body: |-
-    AskGate's rules check reads an upload named after a document's slug as a new version of that
-    document, as Dispatch now stores it, so the ask blocks that document already holds are no longer
-    judged as new asks.
-time: 2026-11-02T01:10:00.000000000Z
-custom:
-    Issue: pr2652
