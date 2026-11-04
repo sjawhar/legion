@@ -496,6 +496,10 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 		rendered := ghconfig.Render("ghs_idle_rig", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
 		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
+	// The owner set the pods' gh directories are built from, which sandbox.New now requires
+	// (checkSupervision) and the runtime reads a running pod's gh projection against: the rig's
+	// issues are all on liveRepo, so its owner is the whole set.
+	opts.GitHubOwners = func() []string { return []string{strings.Split(liveRepo, "/")[0]} }
 	opts.Mapped = func() []ghrepo.Repository { return nil }
 	opts.Tools.Legion = idleRigLegionTool(r.t, tools)
 	opts.Agent = idleRigAgentTool(r.t, tools)
