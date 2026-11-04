@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -264,7 +265,17 @@ func seedRedeliveredIssue(t *testing.T, pool *pgxpool.Pool) {
 			token, redeliveredIssue); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `insert into slots (issue, index, admitted_at) values ($1, 0, now())`, redeliveredIssue)
+		held, err := claim.NewToken(token, redeliveredIssue, claim.RoleImplementer)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, serving_generation, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $3, $4, 1, 'ses', '/sessions/ses.jsonl', $5, 1, 0, 0, 0, 0)`,
+			string(held), token, redeliveredIssue, string(claim.RoleImplementer), string(supervise.StateWorking)); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `insert into slots (issue, index, admitted_at) values ($1, 0, now())`, redeliveredIssue)
 		return err
 	}); err != nil {
 		t.Fatalf("seed %s: %v", redeliveredIssue, err)
