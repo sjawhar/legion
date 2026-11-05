@@ -175,7 +175,7 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 		log = slog.Default()
 	}
 	if gatedSteps == nil {
-		gatedSteps = config.Gates{}.Steps()
+		gatedSteps = config.DesignGateRootIssues.Steps()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,

@@ -677,7 +677,7 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
 	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
 	step := record.DesignStepSpec
@@ -775,7 +775,7 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child, artifact = "LEGION-1", "LEGION-2", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
 			approved := 1
 			seedSlotted(t, pool, root, "A")

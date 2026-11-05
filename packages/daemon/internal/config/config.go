@@ -894,7 +894,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Runtime:              Runtime{Name: defaultRuntimeName},
 		AdmissionCap:         defaultAdmissionCap,
 		EnvoyURL:             defaultEnvoyURL,
-		Gates:                Gates{Design: DesignGateRootIssues},
+		Gates:                Gates{Design: DesignGateRootIssues.Steps()},
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
 		PodUpdateRetask:      time.Hour,

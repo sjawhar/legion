@@ -47,7 +47,7 @@ func newAdoptionHarness(t *testing.T, cap int) *adoptionHarness {
 	h := newHarness(t)
 	records := record.NewStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), Linger: time.Hour}, log)
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour}, log)
 	admission := admit.New(records, engine, cap, testProject, log)
 	statuses := &statusRecorder{issues: map[string]dispatch.Issue{
 		adoptionTree: {Key: adoptionTree, ResolvedRepo: "acme/widgets", Status: "in_progress"},

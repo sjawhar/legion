@@ -190,6 +190,11 @@ const legionGateView = z.object({
   approvedVersion: z.number().int().positive().nullable(),
 });
 
+/** `record.DesignStep` — one step of a deployment's design gate, each naming one document of the
+ * root issue: `decisions` its decisions document, `criteria` its Verification document, `spec`
+ * its primary document. */
+const legionDesignStep = z.enum(["decisions", "criteria", "spec"]);
+
 /** `api.GatedStepView` — one step of the deployment's design gate as one issue stands in it
  * (contract 50). `artifactId` and `currentVersion` are the document its architect registered for
  * the step and that document's current version, absent until one is registered; `approvedVersion`
@@ -200,7 +205,7 @@ const legionGateView = z.object({
  * step) or `changes_requested` (its reviewer asked for changes at its current version, with
  * `changesReason` the reason they gave; absent under every other status). */
 const legionGatedStepView = z.object({
-  step: z.enum(["decisions", "criteria", "spec"]),
+  step: legionDesignStep,
   artifactId: nonEmptyString.optional(),
   currentVersion: z.number().int().positive().optional(),
   approvedVersion: z.number().int().positive().nullable(),
@@ -911,12 +916,16 @@ export const LegionIssueStatusRequest = z.strictObject({
   status: z.enum(["todo", "backlog", "icebox"]),
 });
 
-/** `api.GateRegisterRequest`, the architect's current Dispatch document approval target. */
+/** `api.GateRegisterRequest`, the architect's current Dispatch document approval target, for one
+ * step of the deployment's design gate. `step` is the step the document is for; a deployment
+ * that gates one step alone takes a request that leaves it out, and one that gates several
+ * refuses it (`GATE_STEP_REQUIRED`). */
 export const LegionGateRegisterRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
   artifactId: z.uuid(),
   version: z.number().int().positive(),
+  step: legionDesignStep.optional(),
 });
 
 /** `api.WaveReleaseRequest`, the architect's selected child issues. */

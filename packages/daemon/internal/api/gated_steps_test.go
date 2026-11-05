@@ -69,7 +69,7 @@ func TestGatedStepsAnswerEachConfiguredStepsOwnState(t *testing.T) {
 		},
 		{
 			name:  "a deployment that gates no step, whose issue holds a gate all the same",
-			steps: config.Gates{Design: config.DesignGateOff}.Steps(),
+			steps: config.DesignGateOff.Steps(),
 			gates: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: specChanges},
 			want:  []GatedStepView{},
 		},
@@ -102,7 +102,7 @@ func TestGatedStepsUnderRootIssuesAnswerTheSpecStepBesideTheDesignGate(t *testin
 			CurrentVersion:  gate.LatestVersion,
 			ApprovedVersion: gate.ApprovedVersion,
 		},
-		GatedSteps: GatedStepViewsOf(config.Gates{Design: config.DesignGateRootIssues}.Steps(), gates),
+		GatedSteps: GatedStepViewsOf(config.DesignGateRootIssues.Steps(), gates),
 	}
 
 	encoded, err := json.Marshal(issue)
@@ -140,7 +140,7 @@ func TestGatedStepsOfAnIssueWithNoneAreLeftOffTheWire(t *testing.T) {
 		Key:        "LEGION-209",
 		Phase:      Unrecorded,
 		Status:     string(Unrecorded),
-		GatedSteps: GatedStepViewsOf(config.Gates{Design: config.DesignGateOff}.Steps(), nil),
+		GatedSteps: GatedStepViewsOf(config.DesignGateOff.Steps(), nil),
 	})
 	if err != nil {
 		t.Fatalf("marshal the issue: %v", err)

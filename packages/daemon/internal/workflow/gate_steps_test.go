@@ -221,7 +221,7 @@ func TestGatedStepsHoldEveryPhaseUntilEveryStepIsApproved(t *testing.T) {
 			seedGatedTree(t, pool)
 			bindStep(t, pool, record.DesignStepCriteria, criteriaDoc)
 
-			apply("register-criteria", intake.GateRegistered{Issue: gatedRoot, ArtifactID: criteriaDoc, Version: 2})
+			apply("register-criteria", intake.GateRegistered{Issue: gatedRoot, Step: record.DesignStepCriteria, ArtifactID: criteriaDoc, Version: 2})
 			apply("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4})
 			applyMirrored(t, pool, engine, "child-todo", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion",
 				Seq: 2, Type: "issue.updated", Status: "todo", Title: "child", Parent: gatedRoot, Rank: "V"})
@@ -284,7 +284,7 @@ func TestGatedStepsHoldEveryPhaseUntilEveryStepIsApproved(t *testing.T) {
 
 			// Each registration reads an approval request of its own document open on the person's
 			// turn, so each hands that document to the person.
-			apply("register-criteria", intake.GateRegistered{Issue: gatedRoot, ArtifactID: criteriaDoc, Version: 2,
+			apply("register-criteria", intake.GateRegistered{Issue: gatedRoot, Step: record.DesignStepCriteria, ArtifactID: criteriaDoc, Version: 2,
 				RequestAsk: "ask-criteria", Since: record.EventMark{Seq: 5}})
 			apply("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4,
 				RequestAsk: "ask-spec", Since: record.EventMark{Seq: 6}})
@@ -326,7 +326,7 @@ func TestGatedStepsAChangesRequestOnOneStepLeavesTheOtherOpen(t *testing.T) {
 
 	// Each registration carries the approval its read of Dispatch found, so both steps open.
 	reviewer := dispatch.Actor{Kind: "user", ID: "alice"}
-	apply("register-criteria", intake.GateRegistered{Issue: gatedRoot, ArtifactID: criteriaDoc, Version: 2, ApprovedVersion: 2, ReviewedBy: reviewer})
+	apply("register-criteria", intake.GateRegistered{Issue: gatedRoot, Step: record.DesignStepCriteria, ArtifactID: criteriaDoc, Version: 2, ApprovedVersion: 2, ReviewedBy: reviewer})
 	apply("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4, ApprovedVersion: 4, ReviewedBy: reviewer})
 	if got := phaseOf(t, pool, gatedRoot); got != phase.Planning {
 		t.Fatalf("the root = %s with both steps approved, want planning", got)
@@ -459,7 +459,7 @@ func TestUnregisteredStepHoldsTheWorkAndRaisesNoWait(t *testing.T) {
 		}
 
 		bindStep(t, pool, record.DesignStepDecisions, decisionsDoc)
-		apply("register-decisions", intake.GateRegistered{Issue: gatedRoot, ArtifactID: decisionsDoc, Version: 3})
+		apply("register-decisions", intake.GateRegistered{Issue: gatedRoot, Step: record.DesignStepDecisions, ArtifactID: decisionsDoc, Version: 3})
 		if got := phaseOf(t, pool, gatedRoot); got != phase.Admitted {
 			t.Fatalf("the root = %s with the decisions step registered and closed, want it admitted", got)
 		}
@@ -479,7 +479,7 @@ func TestUnregisteredStepHoldsTheWorkAndRaisesNoWait(t *testing.T) {
 		apply("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4,
 			RequestAsk: "ask-spec", Since: record.EventMark{Seq: 5}})
 		apply("approve-spec", stepApproval(gatedRoot, gateDoc, 4, record.EventMark{Seq: 6}))
-		apply("register-decisions", intake.GateRegistered{Issue: gatedRoot, ArtifactID: decisionsDoc, Version: 3,
+		apply("register-decisions", intake.GateRegistered{Issue: gatedRoot, Step: record.DesignStepDecisions, ArtifactID: decisionsDoc, Version: 3,
 			RequestAsk: "ask-decisions", Since: record.EventMark{Seq: 7}})
 
 		if entered := reconcileAwaiting(t, pool, engine); len(entered) != 1 || entered[0] != gatedRoot {
@@ -525,7 +525,7 @@ func TestChangedStepListTakesHoldAtTheNextBoot(t *testing.T) {
 
 	// The boot after it gates no step, and the spec row the tree holds is open, so what the added
 	// step held runs.
-	off := stepsEngine(config.Gates{Design: config.DesignGateOff}.Steps(), nil)
+	off := stepsEngine(config.DesignGateOff.Steps(), nil)
 	startUnblockedChildren(t, pool, off)
 	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
 		t.Fatalf("the held child = %s after a boot that gates no step, want planning", got)

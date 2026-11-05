@@ -40,7 +40,7 @@ func statusHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder) {
 	h := newHarness(t)
 	records := record.NewStore()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps()}, quiet)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quiet)
 	handlers := []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 2, testDispatchProject, quiet)}
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{

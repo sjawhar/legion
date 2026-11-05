@@ -1014,7 +1014,7 @@ func TestAHeadTheBranchReturnsToIsHeldAndDecidedAgain(t *testing.T) {
 			var logged bytes.Buffer
 			at := func(d time.Duration) *Engine {
 				return New(record.NewStore(), Config{
-					Project: "LEGION", Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+					Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 					Clock: func() time.Time { return start.Add(d) },
 				}, slog.New(slog.NewTextHandler(&logged, nil)))
 			}

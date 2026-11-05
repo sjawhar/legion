@@ -67,8 +67,14 @@ type Options struct {
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
 	Controller ControllerStore
-	// DesignGate is the project's `gates.design`, which the controller secret route answers.
+	// DesignGate is the project's `gates.design` as one word, which the controller secret route
+	// answers (config.Gates.Policy).
 	DesignGate config.DesignGate
+	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order it
+	// named them: what register_gate resolves a registration's step against. A nil list takes the
+	// shipped default, the one step spec, as workflow.Config.Steps does; the empty list gates no
+	// step.
+	Steps []record.DesignStep
 	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
 	// daemon`): one controller runs per project, so the controller secret route refuses the operator
 	// and a registration registers the controller only from a launch of the controller's claim.
@@ -234,6 +240,8 @@ type server struct {
 	operatorHash    [sha256.Size]byte
 	controller      ControllerStore
 	designGate      config.DesignGate
+	// steps is Options.Steps, resolved: the deployment's design-gate steps, nil never.
+	steps []record.DesignStep
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
 	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
@@ -303,6 +311,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
+		steps:              opts.Steps,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
@@ -334,6 +343,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
 		decisions:          opts.Decisions,
+	}
+	if s.steps == nil {
+		s.steps = []record.DesignStep{record.DesignStepSpec}
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))

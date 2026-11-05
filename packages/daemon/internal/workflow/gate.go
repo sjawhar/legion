@@ -33,11 +33,11 @@ func gateOfDocument(gates map[record.DesignStep]record.DesignGate, document stri
 }
 
 // gateRegistered records the gate an architect registered for its root, and logs it. The row it
-// writes is the one the registered document names, by its step. On a step the deployment does
-// not gate it is approved at once, whatever the gate held before; once every step the deployment
-// gates is open the registration advances the admitted tree and releases any READY the gate
-// refused, including one refused before any gate was registered.
-// What register_gate read of Dispatch's approval travels with the registration, so
+// writes is the one of the step the registration names, which register_gate bound to the document
+// it carries. On a step the deployment does not gate it is approved at once, whatever the gate
+// held before; once every step the deployment gates is open the registration advances the
+// admitted tree and releases any READY the gate refused, including one refused before any gate
+// was registered. What register_gate read of Dispatch's approval travels with the registration, so
 // a person's review given before the architect registered is applied here: an approval of the
 // latest version (ApprovedVersion) records the gate open, and the root keeps its slot and starts
 // planning; a changes request on it (ChangesRequestedVersion) records it closed with the architect
@@ -79,14 +79,18 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err != nil {
 		return intake.Result{}, err
 	}
-	// The row the registration writes is the one the document it names already holds, so a
-	// re-registration of a step's document keeps that step. register_gate carries no step of its
-	// own yet, so a document no gate of the issue holds records the spec step, which is what a
-	// deployment resolves `root-issues` to.
-	stored := gateOfDocument(gates, fact.ArtifactID)
-	step := record.DesignStepSpec
-	if stored != nil {
-		step = stored.Step
+	// The row the registration writes is the step's, and the step is register_gate's, which
+	// resolved it against the deployment's list and bound it to the document (api's
+	// gateRegister). A fact naming no step is of the spec step, as a row naming none is
+	// (record.Store.PutGate). A step whose row holds another document — a carried root's, whose
+	// architect registers this issue's own — is registered afresh.
+	step := fact.Step
+	if step == "" {
+		step = record.DesignStepSpec
+	}
+	var stored *record.DesignGate
+	if held, found := gates[step]; found && held.ArtifactID == fact.ArtifactID {
+		stored = &held
 	}
 	// A step the deployment does not gate asks no person: its registration opens it at once, as
 	// every registration did under `gates.design: off`, and no artifact event moves it

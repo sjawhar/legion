@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
@@ -249,9 +250,10 @@ type MergeSettings struct {
 	ByHand []string `json:"by_hand"`
 }
 
-// GatesSettings is `gates`.
+// GatesSettings is `gates`. Design is the design-gate steps the deployment gates, in the order
+// `gates.design` named them, and `[]` for a deployment that gates none.
 type GatesSettings struct {
-	Design config.DesignGate `json:"design"`
+	Design []record.DesignStep `json:"design"`
 }
 
 // GitHubAppsSettings is `github_apps`, each App its id and installations alone: never a private
@@ -310,7 +312,7 @@ func SettingsOf(cfg config.Config) Settings {
 		NatsURLs:                                make([]string, len(cfg.NatsURLs)),
 		DispatchURL:                             endpointOf(cfg.DispatchURL),
 		Projects:                                make(map[string]ProjectSettings, len(cfg.Projects)),
-		Gates:                                   GatesSettings{Design: cfg.Gates.Design},
+		Gates:                                   GatesSettings{Design: append([]record.DesignStep{}, cfg.Gates.Steps()...)},
 		LingerHours:                             cfg.Linger.Hours(),
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
 		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),

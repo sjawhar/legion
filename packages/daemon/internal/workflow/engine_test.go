@@ -47,7 +47,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 
 	engine := New(store, Config{
 		Project:        "LEGION",
-		Steps:          config.Gates{Design: config.DesignGateOff}.Steps(),
+		Steps:          config.DesignGateOff.Steps(),
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
 		Linger:         time.Hour,
@@ -958,7 +958,7 @@ const testReviewApp = "legion-reviewer[bot]"
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", Steps: config.Gates{Design: policy}.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", Steps: policy.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }

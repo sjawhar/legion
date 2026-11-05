@@ -680,7 +680,7 @@ func seedFinishingTree(t *testing.T) (*pgxpool.Pool, *Admission, intake.Handler)
 	t.Helper()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, finishedRoot, "A")
 	parent := finishedRoot
 	child := func(key string, at phase.Phase, status string) record.Issue {

@@ -51,7 +51,7 @@ func TestUnregisteredStepHoldsTheWorkAndRaisesNoWait(t *testing.T) {
 
 		// Registering and approving the decisions step is what starts the tree.
 		seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepDecisions, ArtifactID: decisionsDoc, LatestVersion: 1})
-		applyFact(t, pool, admission, "register-decisions", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: decisionsDoc, Version: 2})
+		applyFact(t, pool, admission, "register-decisions", intake.GateRegistered{Issue: "LEGION-100", Step: record.DesignStepDecisions, ArtifactID: decisionsDoc, Version: 2})
 		if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted {
 			t.Fatalf("the root = %s with the decisions step registered and closed, want it admitted", got.Phase)
 		}
@@ -70,7 +70,7 @@ func TestUnregisteredStepHoldsTheWorkAndRaisesNoWait(t *testing.T) {
 
 		applyFact(t, pool, admission, "register-spec", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root",
 			Version: 3, ApprovedVersion: 3, RequestAsk: "ask-approval", Since: record.EventMark{Seq: 5}})
-		applyFact(t, pool, admission, "register-decisions", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: decisionsDoc,
+		applyFact(t, pool, admission, "register-decisions", intake.GateRegistered{Issue: "LEGION-100", Step: record.DesignStepDecisions, ArtifactID: decisionsDoc,
 			Version: 2, RequestAsk: "ask-decisions", Since: record.EventMark{Seq: 6}})
 
 		waiting := issue(t, pool, "LEGION-100")

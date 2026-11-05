@@ -185,6 +185,11 @@ var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
 // zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
 // recorded before it kept the sequence, and from a Dispatch that predates it. By is who gave the
 // review State shows (an approval or a changes request), zero when Dispatch names nobody.
+//
+// Primary, Role and Slug are what the document is on its issue, which is how a design-gate step
+// finds the document it binds to (api's gateRegister): Primary is the issue's primary document,
+// Role the part it plays beside it (ArtifactRoleVerification, ArtifactRoleDecisions, or "" for
+// none) and Slug the name Dispatch filed it under.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -196,7 +201,20 @@ type Approval struct {
 	At            time.Time
 	Seq           int64
 	By            Actor
+	Primary       bool
+	Role          string
+	Slug          string
 }
+
+// ArtifactRoleVerification and ArtifactRoleDecisions are two of the parts Dispatch records a
+// document playing on its issue (model.Artifact.Role), and DecisionsSlug the name it files a
+// decisions document under. No mechanism shares a value between this module and Dispatch's, so
+// the spellings change together.
+const (
+	ArtifactRoleVerification = "verification"
+	ArtifactRoleDecisions    = "decisions"
+	DecisionsSlug            = "decisions-md"
+)
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
 // version, and 0 otherwise.

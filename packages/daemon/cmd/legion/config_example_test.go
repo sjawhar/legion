@@ -136,7 +136,7 @@ current-context: legion-daemon
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-	want := "Config OK: project=WIDGETS\n" + defaultCacheLine +
+	want := "Config OK: project=WIDGETS design-gate-steps=spec\n" + defaultCacheLine +
 		"plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
 	if code != 0 || out.String() != want {
 		t.Fatalf("legion start --check-config on the shipped example = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)

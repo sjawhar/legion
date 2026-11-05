@@ -20,7 +20,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// DesignGate is the human design-review policy the workflow applies to root issues.
+// DesignGate is the word `gates.design` took before it took a list of steps, and which it still
+// accepts in place of one: `root-issues` for the single step spec, `off` for no step at all.
 type DesignGate string
 
 const (
@@ -28,39 +29,48 @@ const (
 	DesignGateOff        DesignGate = "off"
 )
 
-// Valid says whether gate is one of the two policies a daemon runs, which `legion.yaml`'s
-// `gates.design` accepts and `legion controller start` requires the daemon to answer.
+// Valid says whether gate is one of the two words, which `legion controller start` requires the
+// daemon to answer.
 func (gate DesignGate) Valid() bool {
 	return gate == DesignGateRootIssues || gate == DesignGateOff
 }
 
-// OrDefault is gate, or root-issues when gate is unset: the policy a workflow applies when its
-// configuration names none, which the engine and the outbox's hand-over read alike.
-func (gate DesignGate) OrDefault() DesignGate {
-	if gate == "" {
-		return DesignGateRootIssues
+// Steps is the design-gate steps the word resolves to: no step under `off`, and the single step
+// spec under `root-issues` and under an unset word, which is what the gate held before a
+// deployment could name a list.
+//
+// A deployment that gates nothing answers an empty slice that is not nil, so a caller can tell it
+// from a list nothing has read, whose zero workflow.Config takes the shipped default
+// (workflow.Config.Steps).
+func (gate DesignGate) Steps() []record.DesignStep {
+	if gate == DesignGateOff {
+		return []record.DesignStep{}
 	}
-	return gate
+	return []record.DesignStep{record.DesignStepSpec}
 }
 
 // Gates contains the workflow gates the daemon enforces.
 type Gates struct {
-	Design DesignGate
+	// Design is the design-gate steps the deployment gates, in the order `gates.design` names
+	// them, which is the order a root's architect takes them in. The empty list gates no step.
+	Design []record.DesignStep
 }
 
-// Steps is the design-gate steps the deployment gates, in the order a root's architect takes
-// them: the one step spec under `root-issues` and under no `gates.design` at all, and no step
-// under `off`. The daemon keeps one gate record for each step, and every reader of the gate asks
-// this list (classify.RequiredSteps).
-//
-// A deployment that gates nothing answers an empty slice that is not nil, so a caller can tell it
-// from a configuration that names no policy, whose zero Gates this method never sees but whose
-// zero workflow.Config does (workflow.Config.Steps).
+// Steps is the design-gate steps the deployment gates, in the order it named them. The daemon
+// keeps one gate record for each step, and every reader of the gate asks this list
+// (classify.RequiredSteps).
 func (g Gates) Steps() []record.DesignStep {
-	if g.Design.OrDefault() == DesignGateOff {
-		return []record.DesignStep{}
+	return g.Design
+}
+
+// Policy is the deployment's list as the one word the controller secret route still answers
+// (api.ControllerSecretResponse): `off` where it gates no step, `root-issues` where it gates any.
+// The word cannot say which steps, so a deployment of several reads as `root-issues` there.
+func (g Gates) Policy() DesignGate {
+	if len(g.Design) == 0 {
+		return DesignGateOff
 	}
-	return []record.DesignStep{record.DesignStepSpec}
+	return DesignGateRootIssues
 }
 
 // Project is a Dispatch project prefix's configuration: its optional merge-queue role, merge rules,
@@ -372,18 +382,55 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 	if err != nil {
 		return nil, err
 	}
-	gates := Gates{Design: DesignGateRootIssues}
-	design, err := stringOf(fields["design"], key+".design")
-	if err != nil {
-		return nil, err
-	}
-	if design != "" {
-		gates.Design = DesignGate(design)
-	}
-	if !gates.Design.Valid() {
-		return nil, fmt.Errorf("%s.design must be 'root-issues' or 'off'", key)
+	gates := Gates{Design: DesignGateRootIssues.Steps()}
+	if design := fields["design"]; design != nil {
+		steps, err := readDesignSteps(design, key+".design")
+		if err != nil {
+			return nil, err
+		}
+		gates.Design = steps
 	}
 	return &gates, nil
+}
+
+// designStepNames names the three steps, for every refusal of a value that is not one of them.
+const designStepNames = "'decisions', 'criteria' or 'spec'"
+
+// readDesignSteps is `gates.design`: the steps the deployment gates, in the order it names them.
+// A list of step names is that list, and the empty list gates no step. The two words the key
+// took before it took a list are read as the lists they mean: `root-issues` is the single step
+// spec, `off` no step. An absent key is the single step spec, which readGates applies.
+//
+// A step named twice is refused rather than collapsed, as a repeated merge rule is
+// (readPathPatterns): one gate record is kept for each step, so the second name is either a
+// mistake or an order the daemon cannot keep.
+func readDesignSteps(value *yaml.Node, key string) ([]record.DesignStep, error) {
+	refusal := fmt.Errorf("%s must be a list of %s, or 'root-issues' for the single step 'spec', or 'off' for no step", key, designStepNames)
+	switch {
+	case value.Kind == yaml.ScalarNode && value.Tag == "!!str":
+		word := DesignGate(value.Value)
+		if !word.Valid() {
+			return nil, refusal
+		}
+		return word.Steps(), nil
+	case value.Kind != yaml.SequenceNode:
+		return nil, refusal
+	}
+	steps := make([]record.DesignStep, 0, len(value.Content))
+	for index, entry := range value.Content {
+		if entry.Kind != yaml.ScalarNode || entry.Tag != "!!str" {
+			return nil, fmt.Errorf("%s[%d] must be %s", key, index, designStepNames)
+		}
+		step := record.DesignStep(entry.Value)
+		if !step.Valid() {
+			return nil, fmt.Errorf("%s[%d] must be %s", key, index, designStepNames)
+		}
+		if slices.Contains(steps, step) {
+			return nil, fmt.Errorf("%s names '%s' twice", key, step)
+		}
+		steps = append(steps, step)
+	}
+	return steps, nil
 }
 
 func readGitHubApps(value *yaml.Node, key string) (*GitHubApps, error) {

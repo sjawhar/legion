@@ -609,7 +609,9 @@
       }
     },
     "gates": {
-      "design": "root-issues"
+      "design": [
+        "spec"
+      ]
     },
     "github_apps": {
       "implement": {

@@ -89,7 +89,7 @@ func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 // workflow.Config's zero value, which is the armed gate.
 func newAdmissionWithGate(t *testing.T, cap int, gate config.DesignGate, log *slog.Logger) *Admission {
 	t.Helper()
-	return newAdmissionWithSteps(t, cap, config.Gates{Design: gate}.Steps(), log)
+	return newAdmissionWithSteps(t, cap, gate.Steps(), log)
 }
 
 // newAdmissionWithSteps is newAdmission under a design gate of several steps, which is what a

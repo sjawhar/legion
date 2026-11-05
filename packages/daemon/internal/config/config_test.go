@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
@@ -33,6 +34,110 @@ github_apps:
     app_id: "2"
     private_key: review-test-key
 nats_urls: [nats://127.0.0.1:4222]
+`
+
+// The five `gates.design` shapes the configuration check drives `legion start --check-config`
+// against: a list, the empty list, no `gates` key at all, a word the key does not take, and a
+// list naming one step twice. Each is a whole legion.yaml but for the one thing it tests, so the
+// check reads the OK line or the refusal and nothing else can be what failed. Their paths are
+// relative, which the loader resolves against the file: the check writes the two bearer files
+// beside the file it writes, wherever it writes it.
+const gatesListFile = `project: DEMO
+state_dir: ./state
+postgres_dsn: postgres://legion@127.0.0.1:5432/legion
+dispatch_url: http://127.0.0.1:8080
+dispatch_token_file: ./dispatch-token
+operator_token_file: ./operator-token
+projects:
+  DEMO: {}
+github_apps:
+  implement:
+    app_id: "1"
+    private_key: implement-test-key
+  review:
+    app_id: "2"
+    private_key: review-test-key
+nats_urls: [nats://127.0.0.1:4222]
+gates:
+  design: [decisions, criteria]
+`
+
+const gatesEmptyListFile = `project: DEMO
+state_dir: ./state
+postgres_dsn: postgres://legion@127.0.0.1:5432/legion
+dispatch_url: http://127.0.0.1:8080
+dispatch_token_file: ./dispatch-token
+operator_token_file: ./operator-token
+projects:
+  DEMO: {}
+github_apps:
+  implement:
+    app_id: "1"
+    private_key: implement-test-key
+  review:
+    app_id: "2"
+    private_key: review-test-key
+nats_urls: [nats://127.0.0.1:4222]
+gates:
+  design: []
+`
+
+const gatesAbsentFile = `project: DEMO
+state_dir: ./state
+postgres_dsn: postgres://legion@127.0.0.1:5432/legion
+dispatch_url: http://127.0.0.1:8080
+dispatch_token_file: ./dispatch-token
+operator_token_file: ./operator-token
+projects:
+  DEMO: {}
+github_apps:
+  implement:
+    app_id: "1"
+    private_key: implement-test-key
+  review:
+    app_id: "2"
+    private_key: review-test-key
+nats_urls: [nats://127.0.0.1:4222]
+`
+
+const gatesUnknownWordFile = `project: DEMO
+state_dir: ./state
+postgres_dsn: postgres://legion@127.0.0.1:5432/legion
+dispatch_url: http://127.0.0.1:8080
+dispatch_token_file: ./dispatch-token
+operator_token_file: ./operator-token
+projects:
+  DEMO: {}
+github_apps:
+  implement:
+    app_id: "1"
+    private_key: implement-test-key
+  review:
+    app_id: "2"
+    private_key: review-test-key
+nats_urls: [nats://127.0.0.1:4222]
+gates:
+  design: sometimes
+`
+
+const gatesRepeatedStepFile = `project: DEMO
+state_dir: ./state
+postgres_dsn: postgres://legion@127.0.0.1:5432/legion
+dispatch_url: http://127.0.0.1:8080
+dispatch_token_file: ./dispatch-token
+operator_token_file: ./operator-token
+projects:
+  DEMO: {}
+github_apps:
+  implement:
+    app_id: "1"
+    private_key: implement-test-key
+  review:
+    app_id: "2"
+    private_key: review-test-key
+nats_urls: [nats://127.0.0.1:4222]
+gates:
+  design: [spec, criteria, spec]
 `
 
 // The refusals of the replaced keys, of app_logins, and of gates.merge, quoted here so a change to
@@ -120,7 +225,7 @@ func defaultsFor(port int) Config {
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
 		Projects:                                map[string]Project{"DEMO": {}},
-		Gates:                                   Gates{Design: DesignGateRootIssues},
+		Gates:                                   Gates{Design: DesignGateRootIssues.Steps()},
 		GitHubApps: GitHubApps{
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
@@ -272,8 +377,8 @@ max_fix_attempts: 4
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}
-	if cfg.Gates.Design != DesignGateOff {
-		t.Errorf("Gates.Design = %q, want %q", cfg.Gates.Design, DesignGateOff)
+	if len(cfg.Gates.Design) != 0 {
+		t.Errorf("Gates.Design = %v, want no step for 'off'", cfg.Gates.Design)
 	}
 	if got := cfg.GitHubApps.Implement; got.AppID != "11" || got.PrivateKey != "implement-key" || got.Installations["sjawhar"] != "101" {
 		t.Errorf("implement app = %#v", got)
@@ -283,6 +388,50 @@ max_fix_attempts: 4
 	}
 	if cfg.Linger != 96*time.Hour || cfg.ProductionCheckBound != 48*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
 		t.Errorf("Linger=%s ProductionCheckBound=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 48h, 5, 4", cfg.Linger, cfg.ProductionCheckBound, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
+	}
+}
+
+// `gates.design` takes the steps a deployment gates, in the order it names them, and the two
+// words it took before the list as the lists they mean. A value it does not take, and a list
+// naming one step twice, are refused by a message naming what the key takes.
+func TestLoadReadsTheDesignGateSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		want    []record.DesignStep
+		refusal string
+	}{
+		{name: "a list", body: gatesListFile, want: []record.DesignStep{record.DesignStepDecisions, record.DesignStepCriteria}},
+		{name: "the empty list", body: gatesEmptyListFile, want: []record.DesignStep{}},
+		{name: "no gates key", body: gatesAbsentFile, want: []record.DesignStep{record.DesignStepSpec}},
+		{name: "the word root-issues", body: minimalFile, want: []record.DesignStep{record.DesignStepSpec}},
+		{name: "the word off", body: strings.Replace(minimalFile, "design: root-issues", "design: off", 1), want: []record.DesignStep{}},
+		{
+			name:    "a word the key does not take",
+			body:    gatesUnknownWordFile,
+			refusal: "gates.design must be a list of 'decisions', 'criteria' or 'spec', or 'root-issues' for the single step 'spec', or 'off' for no step",
+		},
+		{name: "a step named twice", body: gatesRepeatedStepFile, refusal: "gates.design names 'spec' twice"},
+		{name: "a step the key does not take", body: strings.Replace(minimalFile, "design: root-issues", "design: [spec, later]", 1),
+			refusal: "gates.design[1] must be 'decisions', 'criteria' or 'spec'"},
+		{name: "a value that is neither a string nor a list", body: strings.Replace(minimalFile, "design: root-issues", "design: {step: spec}", 1),
+			refusal: "gates.design must be a list of 'decisions', 'criteria' or 'spec', or 'root-issues' for the single step 'spec', or 'off' for no step"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeConfigFile(t, tc.body), noEnv)
+			if tc.refusal != "" {
+				if err == nil || err.Error() != tc.refusal {
+					t.Fatalf("Load = %v, want the refusal %q", err, tc.refusal)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.Gates.Steps(), tc.want) {
+				t.Fatalf("Gates.Steps() = %v, want %v", cfg.Gates.Steps(), tc.want)
+			}
+		})
 	}
 }
 
@@ -649,7 +798,7 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		{
 			name: "gates design is invalid",
 			body: minimalFile + "gates: {design: later}\n",
-			want: "gates.design must be 'root-issues' or 'off'",
+			want: "gates.design must be a list of 'decisions', 'criteria' or 'spec', or 'root-issues' for the single step 'spec', or 'off' for no step",
 		},
 		{
 			name: "gates has an unknown setting",

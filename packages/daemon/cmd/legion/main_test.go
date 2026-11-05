@@ -696,7 +696,7 @@ func TestStartCheckConfigValidatesAndStartsNothing(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("legion start --check-config = %d, stderr %q", code, errb.String())
 	}
-	if want := "Config OK: project=DEMO\n" + tmuxCapabilityGaps; out.String() != want {
+	if want := "Config OK: project=DEMO design-gate-steps=spec\n" + tmuxCapabilityGaps; out.String() != want {
 		t.Fatalf("stdout = %q, want %q", out.String(), want)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -944,9 +944,9 @@ func TestStartCheckConfigReadsTheLaunchSecretsAsBootDoes(t *testing.T) {
 			if strings.Contains(out.String()+errb.String(), seed) {
 				t.Fatalf("the check printed the seed: stdout %q stderr %q", out.String(), errb.String())
 			}
-			want := "Config OK: project=DEMO\n"
+			want := "Config OK: project=DEMO design-gate-steps=spec\n"
 			if tc.key == seedKey {
-				want = "Config OK: project=DEMO nats-nkey-user=" + public + "\n"
+				want = "Config OK: project=DEMO design-gate-steps=spec nats-nkey-user=" + public + "\n"
 			}
 			want += tmuxCapabilityGaps
 			if tc.refusal == nil {
@@ -1007,7 +1007,7 @@ func TestStartCheckConfigReadsTheDaemonNATSSeedAsBootDoes(t *testing.T) {
 				t.Fatalf("the check printed a seed: stdout %q stderr %q", out.String(), errb.String())
 			}
 			if tc.refusal == nil {
-				if want := "Config OK: project=DEMO nats-nkey-user=" + paneUser + " nats-daemon-nkey-user=" + daemonUser + "\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
+				if want := "Config OK: project=DEMO design-gate-steps=spec nats-nkey-user=" + paneUser + " nats-daemon-nkey-user=" + daemonUser + "\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
 					t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 				}
 			} else if want := "legion start: " + tc.refusal(path); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
@@ -1183,7 +1183,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-			if want := "Config OK: project=DEMO\n" + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+			if want := "Config OK: project=DEMO design-gate-steps=spec\n" + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
 		})
@@ -1246,7 +1246,7 @@ func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
 			secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
-			want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + tc.want
+			want := "Config OK: project=DEMO design-gate-steps=spec\n" + secretsGap + defaultCacheLine + tc.want
 			if code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
@@ -1276,7 +1276,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		}
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO design-gate-steps=spec\n" + secretsGap + budgetLine + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1285,7 +1285,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		config := kubernetesCheckConfig(t, "")
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO design-gate-steps=spec\n" + secretsGap + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1294,7 +1294,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		config, _ := workflowConfig(t, 13370, "")
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO design-gate-steps=spec\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1315,7 +1315,7 @@ func TestStartCheckConfigNamesTheRepositoryCache(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 	cache := "repository cache: a 50Gi volume per mapped repository, fetched from GitHub every 5 minutes, kept 24 hours after its repository leaves the mapping; its container reserves cpu 2, memory 4Gi under 8Gi, ephemeral storage 1Gi under 2Gi\n"
-	if want := "Config OK: project=DEMO\n" + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+	if want := "Config OK: project=DEMO design-gate-steps=spec\n" + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 	}
 }

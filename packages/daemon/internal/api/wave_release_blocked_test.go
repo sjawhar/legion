@@ -75,7 +75,7 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 // the Dispatch consumer applies a delivered event with: the mirror, then the engine.
 func releaseHandlers() []intake.Handler {
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps()},
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine}
 }
@@ -565,7 +565,7 @@ func releaseHarnessWithAdmission(t *testing.T) (*harness, *statusRecorder) {
 	h, statuses := releaseHarness(t, true)
 	records := record.NewStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.Gates{Design: config.DesignGateRootIssues}.Steps()}, log)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
 		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
