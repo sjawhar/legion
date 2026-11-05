@@ -233,7 +233,7 @@ func (r *liveRig) checkResources() error {
 		if nprocErr != nil {
 			nprocOut = fmt.Sprintf("(exec failed: %v)", nprocErr)
 		}
-		note("operator", "pod cgroup cpu quota %.3f cores (cfs_quota_us=%s/cfs_period_us=%s) matches the containers' summed cpu limits %s; nproc reports %s, which is 2 whatever the pod reserves on this platform, not asserted; MemTotal %d kB, within 3%% of the summed memory limits %s",
+		note("operator", "pod cgroup cpu quota %.3f cores (cfs_quota_us=%s/cfs_period_us=%s) matches the containers' summed cpu limits %s; nproc reports %s, not asserted (a sandboxed pod on GKE Autopilot's container-optimized compute platform reads 2 whatever it reserves); MemTotal %d kB, within 3%% of the summed memory limits %s",
 			gotCPUs, strings.TrimSpace(quotaOut), strings.TrimSpace(periodOut), cpuSum.String(), strings.TrimSpace(nprocOut), memTotalKB, memorySum.String())
 		return nil
 	}
