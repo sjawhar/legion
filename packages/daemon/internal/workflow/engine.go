@@ -175,10 +175,13 @@ func (e *Engine) apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		// A settlement on the head of a released pod's pull request wakes that pod before the
 		// settlement is applied, so the woken role's task names the settlement this very
 		// transaction records (wakeOnSettlement).
-		if err := e.wakeOnSettlement(ctx, tx, fact); err != nil {
+		// The role it woke is told no role message of that settlement: its wake task already
+		// names it (tellChecks).
+		woken, err := e.wakeOnSettlement(ctx, tx, fact)
+		if err != nil {
 			return intake.Result{}, err
 		}
-		return e.checks(ctx, tx, fact)
+		return e.checks(ctx, tx, fact, woken)
 	case intake.PullRequestMergeability:
 		return e.mergeability(ctx, tx, fact)
 	case intake.PullRequestReview:

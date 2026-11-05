@@ -22,7 +22,7 @@ import (
 // it says (tellChecks). It moves nothing: a failed CI check is information the worker holding the
 // phase decides on - rerun, wait, or fix - and not the daemon's to read the semantics of
 // (dispatch://INFRA-714/spec R1).
-func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
+func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks, woken claim.Role) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
@@ -51,7 +51,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.tellChecks(ctx, tx, pr, told)
+	return intake.Result{}, e.tellChecks(ctx, tx, pr, told, woken)
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
@@ -213,10 +213,16 @@ func namedConclusions(conclusions map[string]record.RunConclusion) string {
 // (record.TreeLingers): every role of the tree is suspended there, so the settlement is recorded
 // and nobody is told.
 //
+// A role whose released pod this same settlement woke is told nothing: its wake task already
+// names the settlement (WakeTask with pods.WakeChecks), and a message about the same settlement
+// would reach it as a second wake of one release, described to the worker as something somebody
+// published to its role topic. woken is that role, "" when the settlement woke nobody, and every
+// other role — a live one, and one the wake did not reach — is told as before.
+//
 // A holder this daemon cannot name is an error here, and with it the settlement's whole
 // transaction: the settlement moves no issue, so there is nothing kept by telling the rest, and
 // the next settlement of the head asks again.
-func (e *Engine) tellChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, told string) error {
+func (e *Engine) tellChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, told string, woken claim.Role) error {
 	settled := settledChecks(*pr)
 	if settled == "" || settled == told {
 		return nil
@@ -230,9 +236,12 @@ func (e *Engine) tellChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReque
 	}
 	// The tree's architect owns the tree, so its claim is the tree root's; a phase the architect
 	// itself holds (accepting) is that same claim, and is told once with it.
-	recipients := []roleRecipient{{issue: issue.Tree, role: claim.RoleArchitect, row: issue.Key}}
+	recipients := []roleRecipient{}
+	if woken != claim.RoleArchitect {
+		recipients = append(recipients, roleRecipient{issue: issue.Tree, role: claim.RoleArchitect, row: issue.Key})
+	}
 	for _, role := range []claim.Role{RoleFor(issue.Phase), claim.RoleImplementer} {
-		if role == claim.RoleArchitect {
+		if role == claim.RoleArchitect || role == woken {
 			continue
 		}
 		recipients = append(recipients, roleRecipient{issue: issue.Key, role: role, row: issue.Key})

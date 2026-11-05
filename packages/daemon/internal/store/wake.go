@@ -376,6 +376,17 @@ func (p *PodRecords) ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, sess
 // took the wake; false is a wake another pass already took, and then the caller resumes nothing,
 // because the first wake is already bringing the pod back.
 //
+// A role is woken once per release, whatever else reaches it. The mark's key is the wake's own
+// identity, so it holds one wake reported twice but not two wakes of different kinds: a CI
+// settlement wakes the pod and, in the same transaction, sends that worker a role message, whose
+// listener report then arrives while the claim is still released. Both are the same pod coming
+// back for the same role, and recording the second would leave one release with two resumes of
+// that role and two start rows for it — one describing the daemon's own settlement to the worker
+// as a message somebody published — against R6's one task per wake. So a role that already has a
+// resume of this release takes no second one, and the cause the record keeps is the wake that
+// brought the pod back. Another role of the same pod is not held by it: a wake resumes one
+// claim, and a role whose wake was dropped would have no process in a pod that is running.
+//
 // Every wake runs through here — the four the workflow applies inside a fact's transaction and
 // the delivery wake the outbox takes in one of its own (Store.TakePodWake) — so there is one
 // account of what a wake writes and one order it writes it in.
@@ -388,11 +399,28 @@ func (p *PodRecords) TakePodWake(ctx context.Context, tx pgx.Tx, issue string, r
 	if err != nil {
 		return false, err
 	}
+	woken, err := podRoleWoken(ctx, tx, p.project, issue, role, release)
+	if err != nil || woken {
+		return false, err
+	}
 	if _, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: p.project, Issue: issue,
 		Role: string(role), Kind: kind, At: at}); err != nil {
 		return false, err
 	}
 	return true, CancelPodBackstops(ctx, tx, p.project, issue, role)
+}
+
+// podRoleWoken is whether role already has a resume recorded against release, which is whether
+// this pod is already coming back for it. A release the record does not hold reads as 0, the id
+// every resume of such a pod carries, so the question is the same one.
+func podRoleWoken(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role, release int64) (bool, error) {
+	var woken bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from pod_resumes
+		where project = $1 and issue = $2 and role = $3 and release_id = $4)`,
+		project, issue, string(role), release).Scan(&woken); err != nil {
+		return false, fmt.Errorf("read whether the release of %s is already woken for its %s: %w", issue, role, err)
+	}
+	return woken, nil
 }
 
 // FirePodBackstop marks backstop id fired and answers whether this call was the one that fired

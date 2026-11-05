@@ -749,13 +749,17 @@ func TestAWakeTakenAfterTheMarkCancelsTheRelease(t *testing.T) {
 			releasedClaim(t, st, claim.RoleArchitect)
 			releasedClaim(t, st, claim.RoleImplementer)
 			at := time.Now().UTC()
-			// The pod was woken once before this release: that wake is spent.
+			// The pod was woken once before this release: that wake is spent. Each release
+			// records its own row as the lane does (outbox.recordPodRelease), because a resume
+			// is recorded against the release it ends and a wake reads the newest one.
+			recordRelease(t, st, at.Add(-2*time.Hour))
 			if taken, err := st.TakePodWake(ctx, "legion", rootIssue, claim.RoleArchitect,
 				pods.WakeDelivery, "row-1", at.Add(-time.Hour)); err != nil || !taken {
 				t.Fatalf("take the wake before the mark = %t, %v; want it taken", taken, err)
 			}
 
 			first, boundary, last := releaseThroughTheStore(t, st)
+			recordRelease(t, st, at)
 			if err := st.ReleaseSuspendedClaim(ctx, "legion", rootIssue, claim.RoleImplementer, boundary); err != nil {
 				t.Fatalf("record the implementer's suspension: %v", err)
 			}
@@ -854,5 +858,15 @@ func TestACancelOfAnIssueOutOfTheWorkflowQueuesNoResumeSoItsCloseActs(t *testing
 		record.OutOfWorkflow)
 	if err != nil || !act {
 		t.Fatalf("the close = %t, %v; want it to act: its Sandbox deletion is what takes the pod's role Secrets with it", act, err)
+	}
+}
+
+// recordRelease records one release of the tree's pod, as the outbox lane does when a release
+// runs: the row a wake's resume is recorded against.
+func recordRelease(t *testing.T, st *Store, at time.Time) {
+	t.Helper()
+	if _, err := st.RecordPodRelease(context.Background(), PodRelease{Project: "legion", Issue: rootIssue,
+		Generation: 1, Roles: []string{string(claim.RoleArchitect)}, At: at}); err != nil {
+		t.Fatalf("record the pod's release: %v", err)
 	}
 }
