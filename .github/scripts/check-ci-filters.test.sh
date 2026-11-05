@@ -11,12 +11,14 @@
 # on.push.paths must equal its filter, no `if:` of ci.yaml may test for a push event or compare
 # github.ref with a branch ref, every job a merge-group run runs must have a follower cancel job
 # carrying the one follower condition, every job's if: must hold the term that skips it on a
-# re-run attempt of a merge-group run, and ci-caches.yaml's save of a cache family must carry
-# the key and the paths ci.yaml's restore of that family names, its own restores being lookups.
+# re-run attempt of a merge-group run, ci-caches.yaml's save of a cache family must carry
+# the key and the paths ci.yaml's restore of that family names, its own restores being lookups,
+# and ci_job_reads.py's WORKSPACES must name exactly the workspaces of the root package.json.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
-# module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
-# symlinks the real script, its engine (ci_filter_coverage.py), the rules of ci.yaml it runs
+# module, a ci.yaml whose `changes` job gates one job, a root package.json with one workspace, and
+# a ci_job_reads.py describing them - and symlinks the real script, its engine
+# (ci_filter_coverage.py), the rules of ci.yaml it runs
 # (ci_workflow_rules.py) and the path model they import (workflow_paths.py) into it, so the code
 # under test is the code CI runs. It needs go and a
 # python3 with PyYAML.
@@ -37,8 +39,10 @@ source "$script_dir/test-lib.sh"
 # cmd/app and lib (cmd/app imports lib); lib's test reads fixtures/data.json through `..`, which
 # RULES records; mod/other is a package nothing imports. The image job runs only on a pull
 # request, and both end with the ci-ok report step. The site filter gates no job: site.yaml, which
-# PUSH_WORKFLOWS pairs with it, runs on a push whose paths are that filter flattened. Echoes the
-# fixture root.
+# PUSH_WORKFLOWS pairs with it, runs on a push whose paths are that filter flattened. The root
+# package.json has the one workspace packages/widget, which WORKSPACES names, since rule 14 holds
+# those two lists to each other; no job here runs Bun, so that manifest is nothing the app gate
+# reads. Echoes the fixture root.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -46,7 +50,7 @@ fixture() {
     return 1
   fi
   mkdir -p "$root/.github/scripts" "$root/.github/workflows" "$root/mod/cmd/app" "$root/mod/lib" \
-    "$root/mod/other" "$root/fixtures" "$root/docs"
+    "$root/mod/other" "$root/fixtures" "$root/docs" "$root/packages/widget"
   for linked in check-ci-filters.sh ci_filter_coverage.py ci_workflow_rules.py workflow_paths.py; do
     ln -s "$script_dir/$linked" "$root/.github/scripts/$linked"
   done
@@ -71,6 +75,8 @@ GO
   printf 'package other\n' > "$root/mod/other/other.go"
   echo '{}' > "$root/fixtures/data.json"
   echo 'unrelated' > "$root/docs/readme.md"
+  printf '{\n  "name": "fixture",\n  "workspaces": ["packages/widget"]\n}\n' > "$root/package.json"
+  printf '{\n  "name": "widget"\n}\n' > "$root/packages/widget/package.json"
   cat > "$root/.github/scripts/ci_job_reads.py" <<'PY'
 from ci_filter_coverage import Read, at, gate, run
 
@@ -83,6 +89,7 @@ GATES = [
 ]
 EXCLUDED = {"image": "an image build another check proves"}
 PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
+WORKSPACES = ["packages/widget"]
 PY
   cat > "$root/.github/workflows/ci.yaml" <<'YAML'
 name: CI
@@ -800,6 +807,7 @@ GATES = [
 ]
 EXCLUDED = {"image": "an image build another check proves"}
 PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
+WORKSPACES = ["packages/widget"]
 PY
   replace "$1/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" \
     $'        run: |\n          for pkg in ./cmd/app ./lib; do\n            go test -count=1 "$pkg"\n          done'
@@ -975,5 +983,22 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the family" \
   "$(contains "$out" "job fill's actions/cache/restore of family go-app has restore-keys")"
+
+echo "case: a workspace of the root manifest that WORKSPACES does not name"
+root=$(fixture workspace-untabled)
+replace "$root/.github/scripts/ci_job_reads.py" 'WORKSPACES = ["packages/widget"]' 'WORKSPACES = []'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the workspace and the table" \
+  "$(contains "$out" "::error file=package.json::workspaces names packages/widget, which .github/scripts/ci_job_reads.py's WORKSPACES does not")"
+
+echo "case: a WORKSPACES entry the root manifest does not list"
+root=$(fixture workspace-unlisted)
+replace "$root/.github/scripts/ci_job_reads.py" 'WORKSPACES = ["packages/widget"]' \
+  'WORKSPACES = ["packages/widget", "packages/gone"]'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the entry and the manifest" \
+  "$(contains "$out" "::error file=.github/scripts/ci_job_reads.py::WORKSPACES names packages/gone, which the root manifest's workspaces does not")"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

@@ -974,6 +974,7 @@ def main() -> int:
     rules.check_rerun_guard(document, problems)
     rules.check_followers(document, problems)
     rules.check_cache_round_trip(document, problems)
+    rules.check_workspace_table(data.WORKSPACES, problems)
     expander = Expander(files)
     check_dead_patterns(data, filters, expander, problems)
     session = Session()

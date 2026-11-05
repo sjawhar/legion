@@ -105,6 +105,15 @@
 #      alone runs in full on a re-run attempt of a merge-group run and posts a ci-ok on a head
 #      the queue has thrown away. Each job needs the one term, so rules 12 and 13 never ask one
 #      job for two.
+#  14. a workspace of the root package.json that ci_job_reads.py's WORKSPACES does not name, or a
+#      WORKSPACES entry the root manifest does not list, naming the workspace. A frozen
+#      `bun install` reads every workspace manifest, so the table declares each of them a read of
+#      every Bun job and this check holds every filter gating such a job to all of them. A
+#      workspace missing from the table is therefore a manifest no filter has to select, and a
+#      change to that package starts no job at all: that is how packages/broker-client, a
+#      workspace of the root manifest from the day it was added, came to have its typecheck and
+#      its tests run in no job. The other way round is a read every Bun job declares of a
+#      manifest no install reads.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,
@@ -164,10 +173,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# The engine (ci_filter_coverage.py), its data (ci_job_reads.py), the rules of ci.yaml that read
-# neither (ci_workflow_rules.py: rules 10, 11, 12 and 13 above) and the path model
-# (workflow_paths.py) sit beside this script in the repository it checks. The engine is imported,
-# not run as a script, so the data's `from ci_filter_coverage import ...` binds the same classes.
+# The engine (ci_filter_coverage.py), its data (ci_job_reads.py), the rules that read no filter
+# and no go command (ci_workflow_rules.py: rules 10, 11, 12, 13 and 14 above, the last of them
+# given that data's WORKSPACES by main() rather than importing the data itself) and the path
+# model (workflow_paths.py) sit beside this script in the repository it checks. The engine is
+# imported, not run as a script, so the data's `from ci_filter_coverage import ...` binds the
+# same classes.
 # PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the tree.
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts exec python3 -c \
   'import sys, ci_filter_coverage; sys.exit(ci_filter_coverage.main())'

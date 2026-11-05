@@ -1,9 +1,12 @@
 """The rules about ci.yaml that stand on their own: what no `if:` of it may say, what every job's
-`if:` must say, which jobs must carry a follower cancel job, and what ci-caches.yaml must save
-for the entries ci.yaml restores. None of them
+`if:` must say, which jobs must carry a follower cancel job, what ci-caches.yaml must save
+for the entries ci.yaml restores, and which workspaces ci_job_reads.py's WORKSPACES must name.
+None of them
 reads a filter, a gate or a go command, so none belongs in the filter-coverage engine beside
-them; check-ci-filters.sh's header numbers them 10, 13, 12 and 11, and ci_filter_coverage.main()
-is what runs them, over the ci.yaml document it already loaded.
+them; check-ci-filters.sh's header numbers them 10, 13, 12, 11 and 14, and ci_filter_coverage.main()
+is what runs them, over the ci.yaml document it already loaded - the last of them over the root
+manifest and the WORKSPACES table main() hands it, since what this module imports is the
+engine's names, never the data's.
 
 It sits beside that engine (and workflow_paths.py, the path model) in the repository it checks,
 and imports the engine's names for the two workflow files, the repository root, the two env
@@ -228,3 +231,38 @@ def check_cache_round_trip(document: dict, problems: list) -> None:
             problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id}'s actions/cache/restore of family "
                             f"{family} has restore-keys: a prefix hit would answer for an older key, and the build "
                             f"that fills this one would be skipped, leaving the key empty")
+
+
+# ---------------------------------------------------------------- the workspaces and the table
+# The root manifest, whose workspaces ci_job_reads.py's WORKSPACES must name one for one, and the
+# file that table is in. Both are named in the errors below, each in the one it is about.
+MANIFEST = "package.json"
+TABLE = ".github/scripts/ci_job_reads.py"
+
+
+def check_workspace_table(workspaces: list, problems: list) -> None:
+    """The root manifest's workspaces and ci_job_reads.py's WORKSPACES name the same packages.
+    A frozen `bun install` reads every workspace manifest, so bun_job() declares each of
+    WORKSPACES as a read of every Bun job, and the engine holds every filter gating such a job to
+    all of them. A workspace the table leaves out is therefore a manifest no filter has to select,
+    and a change to that package starts no job at all - which is how packages/broker-client came
+    to have its typecheck and its tests run nowhere. The other way round is a read every Bun job
+    declares of a manifest no install reads. The table is an argument because main() holds it
+    already, and because nothing here imports ci_job_reads: the engine's names are all this
+    module takes. A tree with no root manifest has no workspaces to hold, as one with
+    no ci-caches.yaml has no cache round trip."""
+    if not (REPO / MANIFEST).is_file():
+        return
+    declared = (json.loads((REPO / MANIFEST).read_text()) or {}).get("workspaces") or []
+    for workspace in declared:
+        if workspace in workspaces:
+            continue
+        problems.append(f"::error file={MANIFEST}::workspaces names {workspace}, which {TABLE}'s WORKSPACES does "
+                        f"not: a frozen `bun install` reads that manifest in every Bun job, so until the table "
+                        f"names it no filter has to select it, and a change to the package starts no job at all")
+    for workspace in workspaces:
+        if workspace in declared:
+            continue
+        problems.append(f"::error file={TABLE}::WORKSPACES names {workspace}, which the root manifest's workspaces "
+                        f"does not: every Bun job then declares a read of {workspace}/package.json that no install "
+                        f"of this repository reads")

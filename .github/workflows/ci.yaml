@@ -304,6 +304,7 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
+              - 'packages/broker-client/package.json'
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
@@ -802,6 +803,10 @@ jobs:
               - *bun_install
               - *biome
               - 'packages/envoy-client/**'
+              # src/broker-credential.ts:21-22 imports @legion/broker-client/environment and
+              # @legion/broker-client/token-client, and this job runs that package's own typecheck
+              # and tests.
+              - 'packages/broker-client/**'
               - 'packages/contracts/src/**'
               # src/__tests__/delivery.test.ts:16-17 and dispatch-config.test.ts:5.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
@@ -2157,6 +2162,17 @@ jobs:
       - name: Typecheck Envoy client
         run: bun run typecheck
         working-directory: packages/envoy-client
+      # packages/envoy-client/src/broker-credential.ts:21-22 imports
+      # @legion/broker-client/environment and @legion/broker-client/token-client, so this job
+      # already stands on that package; its own typecheck and tests run in no other job. They sit
+      # before the NATS pull because they need no image and no server: the five test files import
+      # only bun:test, jose, node: and the package's own modules.
+      - name: Typecheck broker client
+        run: bun run typecheck
+        working-directory: packages/broker-client
+      - name: Test broker client
+        run: bun run test
+        working-directory: packages/broker-client
       - name: Pre-pull the NATS image the credential tests run
         # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
         # pulls the image here, and does not call .github/actions/pull-test-images: that action

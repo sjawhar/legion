@@ -94,8 +94,8 @@ def envoy_top_level_but_infra():
 
 # ---------------------------------------------------------------- shared step reads
 WORKSPACES = [
-    "packages/contracts", "packages/envoy-client", "packages/pi-envoy", "packages/pi-legion",
-    "packages/pi-shared", "packages/claude-envoy", "packages/proof-editor",
+    "packages/broker-client", "packages/contracts", "packages/envoy-client", "packages/pi-envoy",
+    "packages/pi-legion", "packages/pi-shared", "packages/claude-envoy", "packages/proof-editor",
     "packages/dispatch", "packages/envoy/internal/dispatch/pmdoc/gen", "docs/site",
 ]
 
@@ -532,6 +532,7 @@ GATES = [
 
     gate("envoy_client", "envoy-client", reads=reads(
         ("packages/envoy-client/**", f"{at('envoy-client', 'Lint Envoy client')}, typecheck, test and build in packages/envoy-client"),
+        ("packages/broker-client/**", f"{at('envoy-client', 'Typecheck broker client')} and test in packages/broker-client; packages/envoy-client/src/broker-credential.ts:21-22 imports @legion/broker-client/environment and @legion/broker-client/token-client"),
         (CONTRACTS_SRC, f"{at('envoy-client', 'Build contracts for Envoy client')}; tsconfig paths @legion/contracts -> ../contracts/src/index.ts"),
         (f"{FIX}/dispatch-targeted-delivery.json", "packages/envoy-client/src/__tests__/delivery.test.ts:16-17, dispatch-text.test.ts:117-118"),
         (f"{FIX}/dispatch-public-url.json", "packages/envoy-client/src/__tests__/dispatch-config.test.ts:5"),
