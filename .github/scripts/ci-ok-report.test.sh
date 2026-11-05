@@ -240,4 +240,18 @@ run_report '{"result": "success", "outputs": {}}' pull_request "$script_dir/../w
 check "reads it and posts" "$(is "$(posted)" 1)"
 check "passes" "$(is "$(field .conclusion)" success)"
 
+echo "case: a merge_group run whose reporting job its timeout-minutes cancelled"
+# ci.yaml's followers fire on `failure` or `cancelled`, and ci.yaml's own comment on them says
+# the `cancelled` branch is there for a job cut off by its `timeout-minutes` (measured on probe
+# run 41869007039). That follower then force-cancels the run, and a force-cancel leaves every
+# `if: always()` step skipped, so no later job of the run ever reports: this reporting job is
+# the run's last chance to post ci-ok, and a group that gets none sits in the queue until
+# GitHub's 180-minute check timeout removes it.
+report ci-ok-typecheck-1-cancelled
+jobs typecheck=completed/cancelled lint=in_progress envoy-client=queued
+run_report "$group_selects" merge_group
+check "exits 0" "$(is "$status" 0)"
+check "posts one check run rather than waiting" "$(is "$(posted)" 1)"
+check "failing" "$(is "$(field .conclusion)" failure)"
+
 summary "ci-ok-report.sh posts ci-ok only once every job that runs has reported"
