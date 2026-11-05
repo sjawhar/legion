@@ -429,7 +429,7 @@ func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 	const headRead = "gh pr view <n> --repo <the issue's repository> --json headRefOid --jq .headRefOid"
 	step := []string{
 		headRead,
-		"about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with only the last read deciding",
+		"about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with a read that gives the pushed commit ending the step there and only the last read deciding a mismatch",
 		"once the branch has an open pull request",
 		"an empty one when your work is complete",
 		"tell your architect the commit you pushed",
@@ -437,15 +437,15 @@ func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 	}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester,
 		claim.RoleReviewer, claim.RoleMerger} {
-		text := composedText(t, composer, role, false)
+		text := foldWhitespace(composedText(t, composer, role, false))
 		for _, phrase := range step {
 			if !strings.Contains(text, phrase) {
-				t.Errorf("the composed %s prompt (root %t) omits %q", role, false, phrase)
+				t.Errorf("the composed %s prompt omits %q", role, phrase)
 			}
 		}
 	}
 	for _, isRoot := range []bool{true, false} {
-		text := composedText(t, composer, claim.RoleArchitect, isRoot)
+		text := foldWhitespace(composedText(t, composer, claim.RoleArchitect, isRoot))
 		if strings.Contains(text, headRead) {
 			t.Errorf("the composed %s prompt (root %t) says %q", claim.RoleArchitect, isRoot, headRead)
 		}
