@@ -446,28 +446,45 @@ test.describe("inbox search", () => {
     }
   });
 
-  // The counts a reader reads off the list are the narrowed list's: a group's own `· N asks` and
-  // the `ask N of M` each row's controls are named by (`features/inbox/ask-name.ts`).
-  test("the group counts and the row ordinals count the narrowed list", async ({ browser }) => {
+  // The counts a reader reads off the list are the narrowed list's: the band's own heading count
+  // and the `ask N of M` each row's controls are named by (`features/inbox/ask-name.ts`).
+  // INFRA-450 took the owner groups out of the list, so the count that stands over a set of rows
+  // is the View menu's own band; **Waiting on** is the banding the sections below stand for.
+  test("the band counts and the row ordinals count the narrowed list", async ({ browser }) => {
     await seedInbox();
     const alice = await asUser(browser, "alice");
     try {
       const page = await alice.newPage();
       await openInbox(page);
+      await page.goto("/?group=waiting-on");
 
-      // Three questions on one issue: one header, and three rows that say which of three.
-      const group = page.locator('[data-inbox-group-header="issue:LEDGER-2"]');
-      await expect(group).toContainText("· 3 asks");
-      for (const index of [1, 2, 3]) {
+      // What the band's own heading says, which is what a reader counts the band by.
+      const bandCount = async (band: string): Promise<number> => {
+        const heading = await page
+          .getByRole("button", { name: new RegExp(`^${band} \\(\\d+\\)$`) })
+          .textContent();
+        return Number(/\((\d+)\)/.exec(heading ?? "")?.[1]);
+      };
+      const waitingOnYou = page.locator('[data-inbox-section="human"]');
+
+      // Three questions on one issue: three rows that say which of three.
+      await expect(
+        page.getByRole("checkbox", { name: /^Select LEDGER-2, ask 1 of 3:/ })
+      ).toHaveCount(1);
+      expect(await bandCount("Waiting on you")).toBe(await waitingOnYou.count());
+      // What the list draws before any word narrows it, which clearing the box must bring back.
+      const drawn = await rows(page).count();
+      for (const index of [2, 3]) {
         await expect(
           page.getByRole("checkbox", { name: new RegExp(`^Select LEDGER-2, ask ${index} of 3:`) })
         ).toHaveCount(1);
       }
 
-      // The word drops one of the three; the header and the names count what is left.
+      // The word drops one of the three; the heading and the names count what is left.
       await searchInbox(page, "ledger auditor");
       await expect(rows(page)).toHaveCount(2);
-      await expect(group).toContainText("· 2 asks");
+      await expect(waitingOnYou).toHaveCount(2);
+      expect(await bandCount("Waiting on you")).toBe(2);
       for (const index of [1, 2]) {
         await expect(
           page.getByRole("checkbox", { name: new RegExp(`^Select LEDGER-2, ask ${index} of 2:`) })
@@ -477,16 +494,13 @@ test.describe("inbox search", () => {
         page.getByRole("checkbox", { name: /^Select LEDGER-2, ask 3 of 3:/ })
       ).toHaveCount(0);
 
-      // The bands hold what is left of them, and the band with nothing left is gone.
-      await expect(page.locator('[data-inbox-section="human"]')).toHaveCount(2);
-      await expect(page.locator('[data-inbox-section="agent"]')).toHaveCount(0);
-      await expect(page.getByRole("heading", { name: "Waiting on agents" })).toHaveCount(0);
-
-      // Cleared, every count is the whole list's again.
+      // Cleared, every count is the whole list's again. The number is the list's own rather than
+      // the seed's: INFRA-450 bands the list by the View menu's own field, and a band below the
+      // first is folded, so fewer rows are drawn than the eight the seed holds and what the
+      // clearing must restore is what was drawn.
       await searchInbox(page, "");
-      await expect(rows(page)).toHaveCount(8);
-      await expect(group).toContainText("· 3 asks");
-      await expect(page.locator('[data-inbox-section="agent"]')).toHaveCount(1);
+      await expect(rows(page)).toHaveCount(drawn);
+      expect(await bandCount("Waiting on you")).toBe(await waitingOnYou.count());
     } finally {
       await alice.close();
     }
@@ -506,7 +520,8 @@ test.describe("inbox search", () => {
 
       await selectRow(page, seed.clockAskId);
       await page.keyboard.press("x");
-      const bar = page.getByRole("group", { name: "Selected asks" });
+      // INFRA-450's bar serves both kinds of row, so its own name is **Selected rows**.
+      const bar = page.getByRole("group", { name: "Selected rows" });
       await expect(bar).toContainText("1 selected");
       await expect(inboxRow(page, seed.clockAskId).getByRole("checkbox")).toBeChecked();
 
