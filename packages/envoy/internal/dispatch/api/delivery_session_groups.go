@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -151,11 +149,14 @@ func (s *server) deleteDeliverySessionGroup(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sessionGroupID reads the {id} path value, refusing one that is not a uuid before it reaches the
-// table's uuid column, where the cast would answer 500.
+// sessionGroupID is the canonical spelling of the {id} path value, refusing one that is not a
+// uuid before it reaches the table's uuid column, where the cast would answer 500. The route
+// resolves no id prefix, so an id written another of uuid.Parse's ways is canonicalized here
+// (canonicalizeUUIDPath): Postgres refuses `urn:uuid:<uuid>`, and the raw value would answer 500
+// where the canonical one answers the 404 of a group nothing holds.
 func sessionGroupID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
+	id, ok := canonicalizeUUIDPath(r, "id", r.PathValue("id"))
+	if !ok {
 		writeError(w, "SESSION_GROUP_ID_INPUT", http.StatusBadRequest, "session group ids are UUIDs")
 		return "", false
 	}

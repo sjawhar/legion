@@ -31,19 +31,26 @@ func writeAmbiguousID(w http.ResponseWriter, ambiguous *refs.ErrPrefixAmbiguous)
 
 // canonicalizeUUIDPath rewrites a path value that is a whole uuid written in one of the other
 // spellings uuid.Parse reads - `urn:uuid:<uuid>`, the braced one, and 32 hex digits - to the
-// canonical spelling, so every layer behind it reads one spelling of the id the path names.
+// canonical spelling, so every layer behind it reads one spelling of the id the path names, and
+// answers with that spelling and whether the value was a uuid at all: a caller that refuses a
+// value that is none reads both and parses once, and the prefix layer, whose route refuses it
+// further down, ignores both.
 // Such a value is no id prefix (text.IsIDPrefix refuses its colons, braces, and a whole uuid
 // alike), so the prefix layer would otherwise leave it as written and it would reach a `::uuid`
 // column as the caller spelled it. Postgres reads the braced and 32-digit spellings and refuses
 // `urn:uuid:` ("invalid input syntax for type uuid"), so that one address, which this server
 // reads, would answer 500; it is why documentRefKey sends the canonical form too. A value that
-// is no uuid at all is left alone for the route to refuse.
-func canonicalizeUUIDPath(r *http.Request, name, value string) {
+// is no uuid at all is left alone, and answered as written, for the route to refuse.
+func canonicalizeUUIDPath(r *http.Request, name, value string) (string, bool) {
 	parsed, err := uuid.Parse(value)
-	if err != nil || parsed.String() == value {
-		return
+	if err != nil {
+		return value, false
 	}
-	r.SetPathValue(name, parsed.String())
+	canonical := parsed.String()
+	if canonical != value {
+		r.SetPathValue(name, canonical)
+	}
+	return canonical, true
 }
 
 // resolveIDPrefixes rewrites a route's {id}, and the {block_id} of a document block, from an id

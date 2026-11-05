@@ -20,7 +20,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/singleflight"
 
@@ -1413,9 +1412,14 @@ func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 // nothing carries or a value that is no id at all. So the refusal states the rule a caller can
 // act on - a whole uuid, or a prefix of it long enough to name one item - rather than telling
 // them to write the whole id, which is no longer what the route needs.
+//
+// A value uuid.Parse reads in one of its other spellings is rewritten to the canonical one
+// (canonicalizeUUIDPath) before the handler behind this reads it, so a handoff's route and every
+// other route that resolves no prefix reads the same spelling the prefix layer leaves: Postgres
+// refuses `urn:uuid:<uuid>` on a `::uuid` column, and the raw value would answer 500 where the
+// canonical one answers the route's own 404.
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
+	if _, ok := canonicalizeUUIDPath(r, "id", r.PathValue("id")); !ok {
 		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, idPathProblem(kind))
 		return false
 	}
