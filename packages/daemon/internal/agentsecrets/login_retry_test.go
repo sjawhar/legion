@@ -10,8 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,59 +78,95 @@ func quietTLSServer(t *testing.T, with ...func(*tls.Config)) *httptest.Server {
 // the question and carrying no record, which is all the resolver reads to tell "no such host"
 // (RCODE 3, NXDOMAIN) from "server misbehaving" (RCODE 2, SERVFAIL).
 //
-// It also answers the nameserver's address as the resolver asked for it, which the resolver names
-// in its error and which comes from this machine's resolv.conf, not from this test. On a machine
-// whose resolv.conf names several nameservers, the row says so rather than guess which one the
-// error it reads came from.
-func nameServer(t *testing.T, rcode byte) (resolver *net.Resolver, asked func() string) {
+// Every question goes here and none to the machine's own nameservers: the resolver's Dial drops
+// the address it was handed and dials this server instead. That address is still one this
+// machine's resolv.conf names, and the resolver puts it into the error it returns, so no row
+// reads that error whole. Which nameserver a run names, and how many the resolver walks before
+// it gives up, are the machine's to decide and not this test's: SERVFAIL sends Go on to the next
+// nameserver where NXDOMAIN does not, so on a machine whose resolv.conf names two, this server
+// answers both of a row's questions and the error names whichever the resolver asked with last.
+//
+// It answers over TCP as well as UDP, because a resolv.conf carrying `options use-vc` asks every
+// question over TCP, and a port that only reads packets would refuse those rows their exchange.
+//
+// What a row does read is that this server answered at all, which is what makes the failure the
+// row reads this exchange's and not the network's. That is also what a machine whose
+// /etc/nsswitch.conf resolves host names out of /etc/hosts alone trips: such a run reaches no
+// nameserver at all, and the row says so rather than reading a name the machine resolved.
+func nameServer(t *testing.T, rcode byte) *net.Resolver {
 	t.Helper()
-	socket, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for DNS questions: %v", err)
+	var answered atomic.Int64
+	answerTo := func(question []byte) []byte {
+		answer := make([]byte, len(question))
+		copy(answer, question)
+		answer[2] = 0x81                  // an answer to a question that asked for recursion
+		answer[3] = 0x80 | (rcode & 0x0f) // recursion available, and this server's verdict
+		clear(answer[6:12])               // no answer, authority or additional record
+		answered.Add(1)
+		return answer
 	}
-	t.Cleanup(func() { socket.Close() })
+	packets, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for DNS questions over UDP: %v", err)
+	}
+	t.Cleanup(func() { packets.Close() })
+	stream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for DNS questions over TCP: %v", err)
+	}
+	t.Cleanup(func() { stream.Close() })
+	t.Cleanup(func() {
+		if answered.Load() == 0 {
+			t.Error("this row's own nameserver answered no question, so its failure is not the one it drove")
+		}
+	})
 	go func() {
 		question := make([]byte, 512)
 		for {
-			n, from, err := socket.ReadFrom(question)
+			n, from, err := packets.ReadFrom(question)
 			if err != nil {
 				return
 			}
 			if n < 12 {
 				continue
 			}
-			answer := make([]byte, n)
-			copy(answer, question[:n])
-			answer[2] = 0x81                  // an answer to a question that asked for recursion
-			answer[3] = 0x80 | (rcode & 0x0f) // recursion available, and this server's verdict
-			clear(answer[6:12])               // no answer, authority or additional record
-			socket.WriteTo(answer, from)
+			packets.WriteTo(answerTo(question[:n]), from)
 		}
 	}()
-	var mu sync.Mutex
-	var dialed []string
-	resolver = &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			mu.Lock()
-			dialed = append(dialed, address)
-			mu.Unlock()
-			return (&net.Dialer{}).DialContext(ctx, network, socket.LocalAddr().String())
-		},
-	}
-	return resolver, func() string {
-		t.Helper()
-		mu.Lock()
-		defer mu.Unlock()
-		if len(dialed) == 0 {
-			t.Fatal("the resolver asked no nameserver, so this row drove no real exchange")
-		}
-		for _, address := range dialed {
-			if address != dialed[0] {
-				t.Fatalf("the resolver asked %v: this row needs a resolv.conf that names one nameserver", dialed)
+	go func() {
+		for {
+			conn, err := stream.Accept()
+			if err != nil {
+				return
 			}
+			// Over TCP each message is its own length in two bytes, then the message.
+			go func() {
+				defer conn.Close()
+				for {
+					var size [2]byte
+					if _, err := io.ReadFull(conn, size[:]); err != nil {
+						return
+					}
+					question := make([]byte, int(size[0])<<8|int(size[1]))
+					if _, err := io.ReadFull(conn, question); err != nil || len(question) < 12 {
+						return
+					}
+					if _, err := conn.Write(append(size[:], answerTo(question)...)); err != nil {
+						return
+					}
+				}
+			}()
 		}
-		return dialed[0]
+	}()
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			address := packets.LocalAddr().String()
+			if strings.HasPrefix(network, "tcp") {
+				address = stream.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		},
 	}
 }
 
@@ -187,8 +224,9 @@ func TestEachFailedLoginLogsItsClassItsScheduleAndItsCause(t *testing.T) {
 		// rig answers the broker's URL, the client to reach it with, and the whole cause the log
 		// line must carry, read once the login has failed.
 		rig func(t *testing.T) (brokerURL string, client *http.Client, cause func() string)
-		// causeHas replaces cause for the one row that cannot know its cause in full.
-		causeHas string
+		// causeHas replaces cause for the rows that cannot know their cause in full. Every one of
+		// its parts must be in the cause the line carries.
+		causeHas []string
 	}{
 		{
 			name:     "a TLS certificate that does not verify",
@@ -239,11 +277,12 @@ func TestEachFailedLoginLogsItsClassItsScheduleAndItsCause(t *testing.T) {
 			class:    "daemon-side-fault",
 			schedule: "long",
 			rig: func(t *testing.T) (string, *http.Client, func() string) {
-				resolver, asked := nameServer(t, 3)
 				const brokerURL = "https://broker.invalid"
-				return brokerURL, resolvingWith(t, resolver), func() string {
-					return failedCall(brokerURL, "dial tcp: lookup broker.invalid on "+asked()+": no such host")
-				}
+				return brokerURL, resolvingWith(t, nameServer(t, 3)), nil
+			},
+			causeHas: []string{
+				failedCall("https://broker.invalid", "dial tcp: lookup broker.invalid on "),
+				": no such host",
 			},
 		},
 		{
@@ -277,7 +316,7 @@ func TestEachFailedLoginLogsItsClassItsScheduleAndItsCause(t *testing.T) {
 				})
 				return "http://" + address, &http.Client{}, nil
 			},
-			causeHas: "read: connection reset by peer",
+			causeHas: []string{"read: connection reset by peer"},
 		},
 		{
 			name:     "a timeout",
@@ -301,11 +340,12 @@ func TestEachFailedLoginLogsItsClassItsScheduleAndItsCause(t *testing.T) {
 			class:    "broker-unavailable",
 			schedule: "short",
 			rig: func(t *testing.T) (string, *http.Client, func() string) {
-				resolver, asked := nameServer(t, 2)
 				const brokerURL = "https://broker.invalid"
-				return brokerURL, resolvingWith(t, resolver), func() string {
-					return failedCall(brokerURL, "dial tcp: lookup broker.invalid on "+asked()+": server misbehaving")
-				}
+				return brokerURL, resolvingWith(t, nameServer(t, 2)), nil
+			},
+			causeHas: []string{
+				failedCall("https://broker.invalid", "dial tcp: lookup broker.invalid on "),
+				": server misbehaving",
 			},
 		},
 		{
@@ -345,14 +385,23 @@ func TestEachFailedLoginLogsItsClassItsScheduleAndItsCause(t *testing.T) {
 			const msg = "agent-secrets: the token login failed; retrying"
 			head := fmt.Sprintf("level=ERROR msg=%q class=%s schedule=%s retry_in=%s error=",
 				msg, row.class, row.schedule, wait)
-			if row.causeHas != "" {
-				if !strings.HasPrefix(got, head) || !strings.Contains(got, row.causeHas) {
-					t.Fatalf("the line\n\t%s\nwants the head\n\t%s\nand a cause naming %q", got, head, row.causeHas)
+			if !strings.HasPrefix(got, head) {
+				t.Fatalf("the line\n\t%s\nwants the head\n\t%s", got, head)
+			}
+			gotCause, err := strconv.Unquote(strings.TrimPrefix(got, head))
+			if err != nil {
+				t.Fatalf("the line\n\t%s\ncarries an error the handler did not quote: %v", got, err)
+			}
+			if len(row.causeHas) > 0 {
+				for _, part := range row.causeHas {
+					if !strings.Contains(gotCause, part) {
+						t.Fatalf("the cause\n\t%s\nwants a part naming %q", gotCause, part)
+					}
 				}
 				return
 			}
-			if want := head + fmt.Sprintf("%q", cause()); got != want {
-				t.Fatalf("the line\n\t%s\nwant\n\t%s", got, want)
+			if want := cause(); gotCause != want {
+				t.Fatalf("the cause\n\t%s\nwant\n\t%s", gotCause, want)
 			}
 		})
 	}
