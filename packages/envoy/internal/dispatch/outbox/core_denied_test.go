@@ -450,15 +450,16 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 	body := response.Body.String()
 	// This read has gone red once in CI, with `denied` 4 at an attempt_count of 1: both
 	// destinations denied twice, so a second send the test never asked for. Three causes have
-	// been proposed and two are refuted. A deadline race, which would leave one destination
-	// under `unanswered` (batch.go) and `denied` at 1, cannot give 4. A back-off retry cannot
-	// either: a denied send is answered at publishAcknowledgementTimeout (5 s, bus/async.go) and
-	// the first retry waits retry.Delay(1) = 1 s, so its denials are counted no earlier than
-	// about 11 s, and that run failed at 10.32 s. The third, a batch left unrecorded when the
-	// publisher hold's deadline passes during the ack wait (settleAndRecord in publisher.go,
-	// publisherHoldOptions in lease.go), fits both numbers and is unproven. So the log goes in
-	// the messages below: a count above the one asserted is one more send, and only the log
-	// names which send it was, which is what the next occurrence needs and the last one lacked.
+	// been proposed and two are refuted. A deadline race, which would leave a destination
+	// uncounted (fenced) or under `failed` (batch.go) and `denied` at 1 or less, cannot give 4.
+	// A back-off retry cannot either: a denied send is answered at publishAcknowledgementTimeout
+	// (5 s, bus/async.go) and the first retry waits retry.Delay(1) = 1 s, so its denials are
+	// counted no earlier than about 11 s, and that run failed at 10.32 s. The third, a batch left
+	// unrecorded when the publisher hold's deadline passes during the ack wait (settleAndRecord
+	// in publisher.go, publisherHoldOptions in lease.go), fits both numbers and is unproven. So
+	// the log goes in the messages below: a count above the one asserted is one more send, and
+	// only the log names which send it was, which is what the next occurrence needs and the last
+	// one lacked.
 	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
 		t.Fatalf("/metrics body = %q, want both denied destinations counted as denials; the publisher logged:\n%s",
 			body, logged.String())
