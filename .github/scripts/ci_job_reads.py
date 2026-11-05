@@ -92,7 +92,7 @@ def envoy_top_level_but_infra():
 
 # ---------------------------------------------------------------- shared step reads
 def root_workspaces():
-    """Every workspace package.json:19-31 lists, as a path relative to the repository root."""
+    """Every workspace the root manifest's `workspaces` lists, relative to the repository root."""
     return [workspace.removesuffix("/") for workspace in targets("package.json", "workspaces")]
 
 
