@@ -396,6 +396,7 @@ func main() {
 	// restoreDecidedWordings, which takes the copy lock (see below).
 	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
 	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
+	fillReviewContentHashes(ctx, database.Pool, reviewContentHashFillTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -1322,6 +1323,17 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 				return nil, err
 			}
 			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+const reviewContentHashFillTimeout = 30 * time.Second
+
+// fillReviewContentHashes pins reviews from before the hash columns were added.
+func fillReviewContentHashes(ctx context.Context, pool *store.Pool, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: fill reviews' content hashes", "dispatch: filled reviews' content hashes",
+		func(ctx context.Context) ([]any, error) {
+			result, err := docs.FillReviewContentHashes(ctx, pool)
+			return []any{"filled", result.Filled, "unhashable", result.Unhashable}, err
 		})
 }
 
