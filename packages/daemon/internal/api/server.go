@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -48,6 +49,11 @@ type Options struct {
 	ConsumerLag func(ctx context.Context) []intake.ConsumerLag
 	// Supervisor is the claims the claim and operator routes post their requests to.
 	Supervisor Supervisor
+	// PodUpdateRounds answers what the daemon's last pod-update sweep decided, which the claim
+	// listing carries beside the claims (the daemon's podUpdateRoundsView). Nil answers the zero
+	// record, which says the daemon has not swept yet: a deployment that serves the route with no
+	// sweep behind it says so rather than read as a sweep that held no issue back.
+	PodUpdateRounds func() PodUpdateRounds
 	// BootTokens resolves a registration's boot token.
 	BootTokens *BootTokens
 	// Project and DispatchProject are the two names this one project answers to, and the daemon
@@ -123,6 +129,15 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
+	// Memory is the project's `memory` block (config.Project.Memory), under whose mode the
+	// operator's spawn draws the memory group of a tree it opens for the first time
+	// (memorygroup.DrawAndRecord). The zero block is a project that names none, which draws
+	// every tree `none`. MemoryCoin is the coin the `random` mode is drawn with; nil is
+	// memorygroup.CryptoCoin, and a test pins it. Now is the clock that draw's instant is read
+	// from; nil is time.Now, and a test pins it.
+	Memory     config.Memory
+	MemoryCoin func() (bool, error)
+	Now        func() time.Time
 	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
@@ -151,7 +166,10 @@ type Options struct {
 	// workflow's tests import this package). The operator's retry of a failed phase worker applies
 	// its issue's held phase only when that phase's role is the claim's (retryClaim); nil retries no
 	// held phase, leaving every one to its architect.
-	RoleFor  func(phase.Phase) claim.Role
+	RoleFor func(phase.Phase) claim.Role
+	// Record is the issue record the routes read and write (record.NewStore()). Nil is defaulted
+	// to one: the Postgres implementation is stateless, so a server given none still draws an
+	// operator tree's memory group. A route that needs a database as well tests Pool.
 	Record   record.Store
 	Dispatch dispatch.Client
 	// ClaimReady is told of each claim whose agent's ready the claim took, on the session it
@@ -182,9 +200,12 @@ type Options struct {
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
 // an operator root opens its tree's lifecycle before its claim is stored, and the tree's close
-// reserves the tree's cleanup, then finishes it once every claim of the tree has retired.
+// reserves the tree's cleanup, then finishes it once every claim of the tree has retired. The
+// open's created runs in the open's own transaction where it created the tree's row, and is where
+// the tree's memory group is drawn (store.Store.OpenOperatorTreeLifecycle).
 type TreeLifecycles interface {
-	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
+	OpenOperatorTreeLifecycle(ctx context.Context, project, tree string,
+		created func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error)
 	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
@@ -210,7 +231,9 @@ type server struct {
 	consumerLag       func(ctx context.Context) []intake.ConsumerLag
 	callerPod         func(addr netip.Addr) (string, bool)
 	supervisor        Supervisor
-	bootTokens        *BootTokens
+	// podUpdateRounds is Options.PodUpdateRounds.
+	podUpdateRounds func() PodUpdateRounds
+	bootTokens      *BootTokens
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
 	project         string
 	dispatchProject string
@@ -238,6 +261,11 @@ type server struct {
 	grants     *credential.Grants
 	releaser   store.TreeReleaser
 	trees      TreeLifecycles
+	// memory, coin and now are Options.Memory, Options.MemoryCoin and Options.Now: what the
+	// spawn's own draw of a tree it opens for the first time reads (drawMemory).
+	memory     config.Memory
+	coin       func() (bool, error)
+	now        func() time.Time
 	pool       *pgxpool.Pool
 	handlers   []intake.Handler
 	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
@@ -277,6 +305,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		consumerLag:        opts.ConsumerLag,
 		callerPod:          opts.CallerPod,
 		supervisor:         opts.Supervisor,
+		podUpdateRounds:    opts.PodUpdateRounds,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,
@@ -292,6 +321,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
+		memory:             opts.Memory,
+		coin:               opts.MemoryCoin,
+		now:                opts.Now,
 		grants:             opts.Grants,
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
@@ -313,6 +345,15 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
+	}
+	if s.coin == nil {
+		s.coin = memorygroup.CryptoCoin
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.records == nil {
+		s.records = record.NewStore()
 	}
 	if s.grants == nil {
 		s.grants = credential.New(nil)
@@ -519,19 +560,32 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 
 // stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
 // the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
-// record the plugin contract each registration declared. A plugin reads the state with a strict
-// schema and refuses the whole body for one key it does not know, and an update round serves a
+// record the plugin contract each registration declared. A plugin older than INFRA-1048 — which is
+// who this function is kept for — reads the state with a strict schema and refuses the whole body
+// for one key it does not know, where today's plugin strips one; and an update round serves a
 // claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
 // whose claims record a contract below supervise.PodUpdateContract, the contract that added
 // `updateRound` and `updateHead` to the claim views, is served the state without them
-// (withoutUpdateRounds), which is the body that contract's schema describes. Every later reader
-// takes the two as optional, so the body this serves when the claims cannot be read is the one
-// both read. Any other caller — a pod at this contract, the operator's `legion state`, a tmux
-// pane — is served the state as this contract writes it.
+// (withoutUpdateRounds), which is the body that contract's schema describes; and a caller below
+// memoryContract, the contract that added the issues' memory group, is served it without those
+// three fields (withoutMemory). The two compose: each is applied when the state carries something
+// of its own, so a caller below both — a pod below supervise.PodUpdateContract — is served a body
+// without either. Every later reader takes all five as optional, so the body this serves when the
+// claims cannot be read is the one every reader from 45 on takes. Any other caller — a pod at this
+// contract, the operator's `legion state`, a tmux pane — is served the state as this contract
+// writes it.
 func (s *server) stateFor(r *http.Request, state State) State {
-	// A state with no update round on any claim view is the body every contract reads, so it is
-	// served as it is with no read of the claims: outside a roll, that is every request.
-	if s.callerPod == nil || s.supervisor == nil || !carriesUpdateRounds(state) {
+	// A daemon that does not know its callers' pods serves every caller the state as it is, and
+	// scans nothing for it: under runtime tmux that is every request of every pane and of
+	// `legion state`.
+	if s.callerPod == nil || s.supervisor == nil {
+		return state
+	}
+	// A state with no update round on any claim view and no memory group on any issue is the body
+	// every contract reads, so it is served as it is with no read of the claims: outside a roll of
+	// a project with no memory, that is every request.
+	rounds, memory := carriesUpdateRounds(state), carriesMemory(state)
+	if !rounds && !memory {
 		return state
 	}
 	caller, err := netip.ParseAddrPort(r.RemoteAddr)
@@ -544,15 +598,27 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	}
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round fields, which every plugin contract since 45 reads",
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round and memory fields, which every plugin contract since 45 reads",
 			"pod", pod, "error", err)
-		return withoutUpdateRounds(state)
+		return withoutMemory(withoutUpdateRounds(state))
 	}
-	if contract := podContract(claims, pod); contract == 0 || contract >= supervise.PodUpdateContract {
+	contract := podContract(claims, pod)
+	if contract == 0 {
 		return state
 	}
-	return withoutUpdateRounds(state)
+	if rounds && contract < supervise.PodUpdateContract {
+		state = withoutUpdateRounds(state)
+	}
+	if memory && contract < memoryContract {
+		state = withoutMemory(state)
+	}
+	return state
 }
+
+// memoryContract is the daemon contract that added the issues' memory group to the state
+// (version.go's 49): a plugin before it reads the state with a strict schema that knows none of
+// `memoryGroup`, `memoryDrawMode` and `memoryDrawnAt` and refuses the whole body for one of them.
+const memoryContract = 49
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -565,6 +631,16 @@ func carriesUpdateRounds(state State) bool {
 			if carries(worker.Claim) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// carriesMemory is whether any issue of state carries its tree's memory draw.
+func carriesMemory(state State) bool {
+	for _, issue := range state.Issues {
+		if issue.MemoryGroup != "" || issue.MemoryDrawMode != "" || issue.MemoryDrawnAt != nil {
+			return true
 		}
 	}
 	return false
@@ -606,6 +682,20 @@ func withoutUpdateRounds(state State) State {
 			}
 			issue.Workers = workers
 		}
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
+}
+
+// withoutMemory is state with no issue carrying `memoryGroup`, `memoryDrawMode` or
+// `memoryDrawnAt`, the three fields memoryContract added to the state; nothing else of that
+// contract is on the route but `settings` keys, which every plugin reads loosely. The issue map is
+// copied, so the state the source answered is left as it was.
+func withoutMemory(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		issue.MemoryGroup, issue.MemoryDrawMode, issue.MemoryDrawnAt = "", "", nil
 		issues[key] = issue
 	}
 	state.Issues = issues

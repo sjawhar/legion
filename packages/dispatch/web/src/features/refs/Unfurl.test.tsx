@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
@@ -468,18 +468,18 @@ test("Unfurl shows no card, and asks nothing, for a body with prose beside its r
   }
 });
 
-// Every comment body and ask question passes this check as it renders, and a comment holds up to
-// DISPATCH_BODY_MAX UTF-16 units. A body of repeated schemes splits into references in
-// exponentially many ways, and a pattern that tried them ran for minutes in V8 on one of these
-// bodies, hanging every reader's tab; JavaScriptCore, which runs these tests, gives up after a
-// second or so per body.
-test(`Unfurl reads ${DISPATCH_BODY_MAX}-character bodies of repeated schemes in one pass`, () => {
+// Every comment body and ask question passes this check as it renders, and one block of a
+// comment holds up to DISPATCH_BLOCK_UNITS UTF-16 units. A body of repeated schemes splits into
+// references in exponentially many ways, and a pattern that tried them ran for minutes in V8 on
+// one of these bodies, hanging every reader's tab; JavaScriptCore, which runs these tests, gives
+// up after a second or so per body.
+test(`Unfurl reads ${DISPATCH_BLOCK_UNITS}-character bodies of repeated schemes in one pass`, () => {
   const start = performance.now();
   const views = [];
   for (const scheme of ["http://", "https://", "dispatch://"]) {
     // The repeat leaves room for the two units the ` x` and `\nx` cases append, so every body
-    // here is at or just under the cap.
-    const references = scheme.repeat(Math.floor((DISPATCH_BODY_MAX - 2) / scheme.length));
+    // here is at or just under the bound.
+    const references = scheme.repeat(Math.floor((DISPATCH_BLOCK_UNITS - 2) / scheme.length));
     views.push(renderUnfurl(`${references} x`), renderUnfurl(`${references}\nx`));
     // The run itself names nothing - no scheme repeated is a reference - so it cards nothing
     // either; what this holds is that reading it costs one pass.
