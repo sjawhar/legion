@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -137,15 +138,21 @@ func (a *podUpdateAllowance) take() {
 }
 
 // podUpdateSweep is what one sweep may still open under the project's two limits, the issues it
-// has held back so far, and the issues it has opened a round for. slots is how many more issues
-// may hold an open round, counted over the whole project at the top of the sweep; budget is how
-// many more rounds this one sweep may open. Both are spent only by an opening that reached a
-// worker (openPodUpdate), because an ask that reached nobody opens no round.
+// has held back so far, and the issues it reads as being in a round. slots is how many more
+// issues may hold an open round, counted over the whole project at the top of the sweep; budget
+// is how many more rounds this one sweep may open. Both are spent only by an opening that
+// reached a worker (openPodUpdate), because an ask that reached nobody opens no round.
+//
+// inFlight is this daemon's own openings whose claims record no round yet, by issue, as
+// podUpdateOpenings read them once before the walk. An issue whose round is one of them is that
+// opening being asked again rather than a new one (reasks), and the walk reads it here rather
+// than taking the openings' own mutex at every issue.
 type podUpdateSweep struct {
-	slots   podUpdateAllowance
-	budget  podUpdateAllowance
-	waiting []podUpdateHeld
-	opened  []string
+	slots    podUpdateAllowance
+	budget   podUpdateAllowance
+	inFlight map[string]string
+	waiting  []podUpdateHeld
+	inRound  []string
 }
 
 // holds is whether a limit of the project holds this issue's opening back, and records the issue
@@ -171,7 +178,29 @@ func (sweep *podUpdateSweep) holds(issue string) bool {
 func (sweep *podUpdateSweep) charge(issue string) {
 	sweep.slots.take()
 	sweep.budget.take()
-	sweep.opened = append(sweep.opened, issue)
+	sweep.inRound = append(sweep.inRound, issue)
+}
+
+// reasks is whether this issue's round is an opening of this daemon's own that is still in
+// flight — the sweep that made it charged a slot for it, and the machine it was posted to has
+// not recorded it yet — and records the issue as being in a round where it is.
+//
+// Such an ask is that opening again rather than a second one, and it is a round for both of the
+// sweep's readings. No limit holds it back: the slot it is held behind is the one it is itself
+// holding (beginPodUpdateSweep), and an issue whose workers the daemon has already told their
+// pod is going waits for nothing. Nothing more is charged for it either: charged a second slot,
+// it would leave another drifted issue waiting for a slot nothing is using. And the record the
+// operator reads names it in a round rather than waiting for one, which is where it is
+// (recordPodUpdateSweep).
+//
+// An entry naming another round says the pod changed under that opening, and the round over the
+// pod the claims record now is an opening of its own, charged like any other.
+func (sweep *podUpdateSweep) reasks(issue, round string) bool {
+	if sweep.inFlight[issue] != round {
+		return false
+	}
+	sweep.inRound = append(sweep.inRound, issue)
+	return true
 }
 
 // held names every issue a limit held back at this sweep, with the limit that held it, for the
@@ -192,15 +221,16 @@ func (sweep podUpdateSweep) held() []string {
 // at an earlier sweep whose claims have not recorded one yet, which are openings all the same:
 // the post that carries a round to a machine is asynchronous and a machine in a relaunch can
 // take minutes to take it, so a sweep that counted only the claims would read one slot short
-// and open an issue above the limit.
+// and open an issue above the limit. Those openings are carried in the sweep, because its walk
+// weighs them again at the issue each was made for (podUpdateSweep.reasks).
 //
 // The sweep's own budget is the whole of the per-minute limit, spent at this one sweep rather
 // than paced inside it, and nothing at all within podUpdateOpeningGap of the last opening.
 func (s *supervision) beginPodUpdateSweep(now time.Time, byIssue map[string][]supervise.Claim) podUpdateSweep {
-	opened, openings := s.podUpdateOpenings(byIssue)
-	var sweep podUpdateSweep
+	opened, inFlight := s.podUpdateOpenings(byIssue)
+	sweep := podUpdateSweep{inFlight: inFlight}
 	if rounds := s.cfg.PodUpdateMaxOpenRounds; rounds != nil {
-		held := openings
+		held := len(inFlight)
 		for _, group := range byIssue {
 			if holdsOpenRound(group) {
 				held++
@@ -218,7 +248,7 @@ func (s *supervision) beginPodUpdateSweep(now time.Time, byIssue map[string][]su
 }
 
 // podUpdateOpenings is this daemon's own record of the rounds it has opened: when it last opened
-// one, and how many of its openings the claims have not recorded yet. Nothing of it is in the
+// one, and the openings the claims have not recorded yet, by issue. Nothing of it is in the
 // store, so a daemon that has just booted opens at its first sweep whatever the one before it
 // opened a moment earlier — one interval of openings at worst, which is what the limits are
 // written in.
@@ -227,7 +257,12 @@ func (s *supervision) beginPodUpdateSweep(now time.Time, byIssue map[string][]su
 // because the claims then count the slot themselves, and dropped too when no claim of the issue
 // records a pod at all: the issue holds no slot then, however the post went, and the next sweep
 // reads its pod round from the claims as it reads every other.
-func (s *supervision) podUpdateOpenings(byIssue map[string][]supervise.Claim) (time.Time, int) {
+//
+// The openings are answered rather than counted, because the sweep weighs them twice: once as
+// the slots they hold over the whole project, and once at the issue each was made for, whose
+// round they say is this daemon's own ask still in flight (beginPodUpdateSweep). What is
+// answered is a copy of the sweep's own, so the walk reads it without this mutex.
+func (s *supervision) podUpdateOpenings(byIssue map[string][]supervise.Claim) (time.Time, map[string]string) {
 	s.podUpdateMu.Lock()
 	defer s.podUpdateMu.Unlock()
 	for issue, round := range s.podUpdateOpened {
@@ -236,7 +271,7 @@ func (s *supervision) podUpdateOpenings(byIssue map[string][]supervise.Claim) (t
 			delete(s.podUpdateOpened, issue)
 		}
 	}
-	return s.podUpdateOpenedAt, len(s.podUpdateOpened)
+	return s.podUpdateOpenedAt, maps.Clone(s.podUpdateOpened)
 }
 
 // recordPodUpdateOpening charges one opening that reached a worker to this sweep and to this
@@ -262,17 +297,18 @@ func (s *supervision) recordPodUpdateOpening(sweep *podUpdateSweep, issue, round
 // record an operator reads during a fleet-wide roll would be minutes old at every sweep.
 //
 // An issue is in a round where its claims hold one of the project's slots (holdsOpenRound) or
-// where this sweep's own opening reached a worker in it, which those same claims cannot yet say:
-// the post that carries a round to a machine is asynchronous, and the slot is held from the
-// opening (podUpdateOpenings). The walk is in key order, so reading the issues back in that order
-// names each of them once and in the order the operator's line prints them.
+// where the walk read it in one of this daemon's own openings, which those same claims cannot
+// yet say: the post that carries a round to a machine is asynchronous, and the slot is held from
+// the opening — this sweep's own (podUpdateSweep.charge), or an earlier sweep's that is still in
+// flight (podUpdateSweep.reasks). The walk is in key order, so reading the issues back in that
+// order names each of them once and in the order the operator's line prints them.
 //
 // The waiting issues are the walk's own record of them (podUpdateSweep.holds), where an issue
 // both limits held back is already under the limit on open rounds alone.
 func (s *supervision) recordPodUpdateSweep(issues []string, byIssue map[string][]supervise.Claim, sweep podUpdateSweep) {
-	opened := map[string]bool{}
-	for _, issue := range sweep.opened {
-		opened[issue] = true
+	inRound := map[string]bool{}
+	for _, issue := range sweep.inRound {
+		inRound[issue] = true
 	}
 	rounds := api.PodUpdateRounds{
 		Swept:           true,
@@ -280,7 +316,7 @@ func (s *supervision) recordPodUpdateSweep(issues []string, byIssue map[string][
 		RoundsPerMinute: s.cfg.PodUpdateRoundsPerMinute,
 	}
 	for _, issue := range issues {
-		if opened[issue] || holdsOpenRound(byIssue[issue]) {
+		if inRound[issue] || holdsOpenRound(byIssue[issue]) {
 			rounds.InRound = append(rounds.InRound, issue)
 		}
 	}
@@ -457,8 +493,13 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	// holds back: a round held back after it opened would leave its workers waiting in a pod the
 	// daemon has already told them is going, and these limits are about how fast a change
 	// reaches the fleet, not about how long a round may run.
+	//
+	// A round this daemon has already opened, whose post the claims have not recorded yet, is
+	// that same ask again rather than a new one, and no limit holds that back either
+	// (podUpdateSweep.reasks): it is in a round for the sweep's record, and nothing more is
+	// charged for it.
 	round := supervise.PodRound(pod)
-	opening := open != round
+	opening := open != round && !sweep.reasks(issue, round)
 	if opening && sweep.holds(issue) {
 		// The claims' own plugin rounds are carried all the same, as they are for an issue with
 		// no drift at all: what one of those replaces is the claim's process, not the pod, and
@@ -1168,14 +1209,19 @@ func (s *supervision) endRoundOverAGonePod(ctx context.Context, issue string, gr
 // asked like any other and answers by ending the turn its task starts (supervise's
 // answerByTurnEnd), so no claim of the round is one the operator must act on for its contract.
 //
-// It reports whether the ask reached a worker, which is what the project's limits charge an
-// opening for (reconcileIssuePodUpdate). An issue with no claim that blocks the round is posted
-// nothing, records no round and so holds no slot: charged an opening all the same, it would
-// take the one opening of every sweep for ever, and the issues behind it would never get one.
+// It reports whether this ask can reach a claim whose machine records the round, which is what
+// the project's limits charge an opening for (reconcileIssuePodUpdate). Those are the claims the
+// round asks (askedClaims) rather than every claim it posts to: a failed claim is posted like
+// any other and its machine ignores the event (supervise's table), so an ask whose blocking
+// claims have all failed is recorded by no claim at all. An issue with no claim the round can
+// reach records no round and so holds no slot: charged an opening all the same, it would be
+// read as an opening of this daemon's still in flight at every later sweep (podUpdateOpenings),
+// hold that slot for ever, and leave every other drifted issue waiting until the daemon
+// restarts.
 func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []supervise.Claim, pod, reasons string, now time.Time) bool {
 	round := supervise.PodRound(pod)
 	blocking := blockingClaims(group)
-	reached := len(blocking) > 0
+	reached := len(askedClaims(group)) > 0
 	task := supervise.UpdateTask(round, reasons)
 	for _, c := range blocking {
 		s.supervisor.post(c.Token, supervise.PodUpdateOpen{Claim: c.Token, Round: round, Reasons: reasons, Task: task})

@@ -21,6 +21,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -62,20 +63,28 @@ var fleetStart = time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
 
 // fleetIssue is one issue the fleet round covers: its key, the phase its record stands in, the pod
 // every role of it runs in, and the roles that run there. Every role is a registered worker on
-// this daemon's contract, which is what a fleet-wide drift finds, unless noWorker says no agent
-// has run for the issue at all: each of its roles is seeded launching in the pod with no session
-// of its own, as a role whose process has started and whose agent has not registered yet. Such a
-// claim blocks no round (blockingClaims), so the sweep's ask reaches nobody there. pluginRound
-// seeds each role of the issue in a plugin round instead, the round supervise's refreshPlugin
-// opens over a worker whose process speaks a plugin contract this daemon does not: one process
-// to replace rather than a pod, as an earlier release left it.
+// this daemon's contract, which is what a fleet-wide drift finds, but for the roles the two
+// lists below name.
+//
+// unregistered is each role seeded launching in the issue's pod with no session of its own, as a
+// role whose process has started and whose agent has not registered yet. Such a claim blocks no
+// round (blockingClaims), so the sweep's ask never reaches it, and it records the issue's pod
+// all the same. failed is each role seeded failed — its launches or prompts ran out — with the
+// session its agent registered and no locator, as supervise's fail leaves one: such a claim
+// blocks the round (blockingClaims) and the round asks it nothing (askedClaims), because its
+// machine ignores the round's post (supervise's table).
+//
+// pluginRound seeds each role of the issue in a plugin round instead, the round supervise's
+// refreshPlugin opens over a worker whose process speaks a plugin contract this daemon does not:
+// one process to replace rather than a pod, as an earlier release left it.
 type fleetIssue struct {
-	key         string
-	phase       phase.Phase
-	pod         string
-	roles       []claim.Role
-	noWorker    bool
-	pluginRound bool
+	key          string
+	phase        phase.Phase
+	pod          string
+	roles        []claim.Role
+	unregistered []claim.Role
+	failed       []claim.Role
+	pluginRound  bool
 }
 
 // fleetClaim names one claim of the fleet: the issue it is of and the role it runs.
@@ -124,9 +133,12 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 				CapabilityHash: []byte(issue.key + ":" + string(role)), ServingGeneration: 1,
 				Locator: podUpdateLocator(token, issue.key, issue.pod),
 			}
-			if issue.noWorker {
+			switch {
+			case slices.Contains(issue.unregistered, role):
 				seeded.State, seeded.Session, seeded.SessionFile = supervise.StateLaunching, "", ""
 				seeded.PluginContract, seeded.CapabilityHash, seeded.ServingGeneration = 0, nil, 0
+			case slices.Contains(issue.failed, role):
+				seeded.State, seeded.Locator = supervise.StateFailed, nil
 			}
 			if issue.pluginRound {
 				opened := fleetStart

@@ -11,8 +11,10 @@ package daemon
 // These tests drive the fleet rig (podupdate_fleet_test.go) over several issues, each with a pod
 // and one architect of its own, and tick it by hand: its clock is held, so which sweep runs when
 // is the test's to say and no ticker of Go's decides it. Which claim of an issue answers when is
-// podupdate_test.go's business, so one role per issue is the whole of a round here, and what
-// each sweep opens is what these tests read.
+// podupdate_test.go's business, so one role per issue answers every round here, and what each
+// sweep opens is what these tests read. The two issues whose round reaches no claim that can
+// record it carry a second role of their own, because which claims an opening can reach is what
+// the sweep charges it against.
 //
 // A pod a replacement built carries the template the runtime has now, so an issue is scripted no
 // drift once its pod has been replaced. Left drifted for ever it would open a round again at
@@ -23,12 +25,15 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
@@ -362,7 +367,9 @@ func TestPodUpdateMaxOpenRoundsChargesOnlyAnAskThatReachedAWorker(t *testing.T) 
 	issues := make([]fleetIssue, 0, len(keys))
 	for i, key := range keys {
 		issue := limitIssue(i+1, key)
-		issue.noWorker = key == workerless
+		if key == workerless {
+			issue.unregistered = issue.roles
+		}
 		issues = append(issues, issue)
 	}
 	rig := newFleetRig(t, issues...)
@@ -388,6 +395,161 @@ func TestPodUpdateMaxOpenRoundsChargesOnlyAnAskThatReachedAWorker(t *testing.T) 
 		t.Errorf("the pod of the issue with no worker was replaced %d times, want never: no round was ever opened over it", len(calls))
 	}
 	rig.replacedOnce(keys[1:]...)
+}
+
+// An opening is charged for an ask that can reach a claim whose machine records it, and a failed
+// claim is not one: it is posted like every other claim with a session and its machine ignores
+// the post (supervise's table). An issue whose only claim with a session has failed therefore
+// records no round however often it is asked, while another claim of it — one launching for the
+// first time — records the pod, which is what keeps the sweep reading the issue as one whose
+// round this daemon opened and whose claims have not recorded it yet. Charged an opening, it
+// would hold its own slot for ever: at a cap of one, every other drifted issue of the fleet
+// would wait for the daemon to restart.
+func TestPodUpdateMaxOpenRoundsChargesNoOpeningPostedOnlyToAFailedClaim(t *testing.T) {
+	unreachable := "INFRA-1"
+	keys := []string{unreachable, "INFRA-2", "INFRA-3"}
+	issues := make([]fleetIssue, 0, len(keys))
+	for i, key := range keys {
+		issue := limitIssue(i+1, key)
+		if key == unreachable {
+			// The architect failed, which keeps the session its agent registered and drops its
+			// locator; the implementer is a process that has started whose agent has not
+			// registered yet, which is what records the pod. The round's post goes to the
+			// architect alone, and its machine ignores it.
+			issue.roles = []claim.Role{claim.RoleArchitect, claim.RoleImplementer}
+			issue.failed = []claim.Role{claim.RoleArchitect}
+			issue.unregistered = []claim.Role{claim.RoleImplementer}
+		}
+		issues = append(issues, issue)
+	}
+	rig := newFleetRig(t, issues...)
+	for _, key := range keys {
+		rig.drifts(key, limitDrift)
+	}
+	rig.s.cfg.PodUpdateMaxOpenRounds = new(1)
+
+	// The issue whose round can reach nobody sorts first, so the sweep reaches it before either
+	// of the others: the one slot goes to the issue behind it all the same. The sweep's own
+	// record is read before the round lands, because the sweep writes it where it decides it.
+	rig.tick()
+	rig.wantPodUpdateRecord("the first sweep", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(1),
+		InRound:                []string{"INFRA-2"},
+		WaitingOnMaxOpenRounds: []string{"INFRA-3"},
+	})
+	rig.awaitRounds("the first sweep under a cap of one, walked from the issue no round can reach", "INFRA-2")
+
+	// And the slot comes back: the issue that took it answers, its pod is replaced, and the last
+	// issue of the fleet gets the slot rather than waiting behind an opening nothing recorded.
+	rig.answer("INFRA-2")
+	rig.sweepUntilReplaced("INFRA-2")
+	rig.awaitRoundEnded("INFRA-2")
+	rig.drifts("INFRA-2")
+	rig.sweepUntilRounds("the pod of INFRA-2 was replaced and its slot freed", "INFRA-3")
+
+	if got := rig.claimOf(unreachable, claim.RoleArchitect).UpdateRound; got != "" {
+		t.Errorf("the failed architect records round %q, want none: no machine of a failed claim takes the round's post", got)
+	}
+	if calls := rig.replacementsOf(rig.pods[unreachable]); len(calls) != 0 {
+		t.Errorf("the pod of the issue no round can reach was replaced %d times, want never: no round was ever opened over it", len(calls))
+	}
+	rig.replacedOnce("INFRA-2")
+}
+
+// An opening still in flight is one round, not two. The post that carries a round to a machine
+// is asynchronous and a machine in a relaunch takes minutes to take it, so the sweep after an
+// opening reads the claims of that issue recording no round at all. Read there as a new opening,
+// the issue is either held behind the slot it is itself holding — and the operator's line then
+// names an issue in a round as one waiting for a slot — or opened again and charged a second
+// slot, which leaves another drifted issue waiting for a slot nothing is using.
+//
+// The lever is the state the defect is about. The issue's architect is held inside a Resume, as
+// a relaunch into a pod being built holds it: its machine's lock is held for the whole of the
+// sweeps below, so the round posted to it waits in its inbox and no sleep is needed to say so. A
+// relaunching claim records no locator (supervise's letGo), so the pod the sweep reads is the
+// one the issue's implementer records — a process that has started whose agent has not
+// registered yet, which the round posts nothing to — and no claim of the issue can record the
+// round until that relaunch ends.
+func TestPodUpdateMaxOpenRoundsChargesNoSecondSlotForAnOpeningStillInFlight(t *testing.T) {
+	inFlight, second := "INFRA-1", "INFRA-2"
+	relaunching := limitIssue(1, inFlight)
+	relaunching.roles = []claim.Role{claim.RoleArchitect, claim.RoleImplementer}
+	relaunching.unregistered = []claim.Role{claim.RoleImplementer}
+	rig := newFleetRig(t, relaunching, limitIssue(2, second))
+	for _, key := range []string{inFlight, second} {
+		rig.drifts(key, limitDrift)
+	}
+	rig.s.cfg.PodUpdateMaxOpenRounds = new(2)
+	rig.s.cfg.PodUpdateRoundsPerMinute = new(1)
+
+	// The relaunch comes back into the pod the claim already ran in, which is what a role whose
+	// process died in a pod that is still there does. Its locator is read before the machine is
+	// held: a read of the claim itself waits the decision in flight out (Machine.Claim).
+	architect := rig.token(inFlight, claim.RoleArchitect)
+	died := *rig.claimOf(inFlight, claim.RoleArchitect).Locator
+	rig.rt.ScriptResume(fake.SpawnResult{Locator: *podUpdateLocator(architect, inFlight, rig.pods[inFlight])})
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseMachine := sync.OnceFunc(func() { close(release) })
+	rig.rt.HoldResume(func() {
+		rig.rt.HoldResume(nil)
+		close(entered)
+		<-release
+	})
+	defer releaseMachine()
+	go func() {
+		m, _ := rig.sup.Machine(architect)
+		_ = m.Handle(rig.ctx, supervise.RuntimeObservation{
+			Observation: runtime.Observation{Locator: died, Kind: runtime.Gone, Detail: "the process ended"},
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the architect's machine never reached the Resume this test holds it in")
+	}
+
+	// The first sweep opens the round of the held issue and spends the minute's budget on it.
+	// Nothing of it reaches any claim's record: the one machine it was posted to is relaunching.
+	rig.tick()
+	rig.wantPodUpdateRecord("the sweep that opened the round of the relaunching issue", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+		InRound:                  []string{inFlight},
+		WaitingOnRoundsPerMinute: []string{second},
+	})
+
+	// A minute on, that opening is still in flight and is still the one round it was: the second
+	// issue opens its own under the cap's other slot, rather than waiting for a slot the first
+	// issue was charged twice for.
+	rig.clock.advance(time.Minute)
+	rig.tick()
+	rig.wantPodUpdateRecord("the sweep after the opening, with its post still in flight", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+		InRound: []string{inFlight, second},
+	})
+	rig.awaitRound(second, claim.RoleArchitect)
+
+	// With both slots held — one by the opening in flight, one by the round the second issue's
+	// claims now record — the issue whose post has not landed is in a round, and the operator's
+	// line says so rather than naming it as one waiting for the slot it is holding.
+	rig.clock.advance(time.Minute)
+	rig.tick()
+	rig.wantPodUpdateRecord("the sweep with both of the cap's slots held", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+		InRound: []string{inFlight, second},
+	})
+
+	// The relaunch ends and the machine takes the post it was holding: the round the sweeps have
+	// been counting all along is the round its claim records, and nothing is charged for it
+	// again now that the claims say it themselves.
+	releaseMachine()
+	rig.awaitRounds("the relaunch ended and the held machine took the round it was posted", inFlight, second)
+
+	rig.clock.advance(time.Minute)
+	rig.tick()
+	rig.wantPodUpdateRecord("the sweep after the opening landed on its claim", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+		InRound: []string{inFlight, second},
+	})
 }
 
 // The per-minute limit is what paces a fleet-wide roll in time rather than in slots: with it, the
