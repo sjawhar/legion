@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -50,6 +51,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wakepace"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -968,6 +970,12 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
+	// wakes is the one wake limiter of this daemon (openSupervision): the machines reserve their
+	// launches from it through supervise.Deps.WakePace, and the lanes that wake a live session in
+	// place of a launch — the outbox's tasks and notices, the workflow engine's own — reserve
+	// from this same one, so that the rate the operator set is the rate of every wake the daemon
+	// causes rather than of each lane apart.
+	wakes *wakepace.Limiter
 	// imageReport is what the worker image's passed probe reported: of the image, from its OK line,
 	// and of the pool, the attempts that waited on its capacity (bootprobe.ImageReport); under
 	// tmux, the model-fallback mark alone, read by plan.modelFallback. probed is whether the probe
@@ -1041,6 +1049,19 @@ func shimAddress(bound, advertiseHost string) (string, error) {
 	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
 }
 
+// wakeJitter is the spread the daemon gives every paced release of its wake limiter: drawn
+// uniformly from [0, interval), where interval is what one wake costs at rate wakes a minute.
+// Without it two daemons restarted together would let their wakes out on the same instants, and
+// the organization they share would see both bursts in one minute. A rate of zero or less is the
+// pacing off, which draws nothing because the limiter never releases late (wakepace.New).
+func wakeJitter(rate int) func() time.Duration {
+	if rate <= 0 {
+		return nil
+	}
+	interval := time.Minute / time.Duration(rate)
+	return func() time.Duration { return rand.N(interval) }
+}
+
 // openSupervision reads the claims the store holds and their sessions' capability reports, takes
 // the worker stream, and builds the runtime over it, for supervision's lifetime and with the
 // workflow's App tokens (nil without a workflow): every step of supervision that can refuse, so a
@@ -1079,6 +1100,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
+	// One limiter for the whole daemon: every wake it causes — the launches supervision makes
+	// here, and the tasks and notices its other lanes queue to wake a live session in place of a
+	// launch — draws from the same rate, because what the cap counts is the uncached input of the
+	// minute after the wake, whichever lane caused it.
+	wakes := wakepace.New(cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst, wakeJitter(cfg.WorkerWakesPerMinute))
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
@@ -1113,6 +1139,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Stop:                  cfg.WorkerStopTimeout,
 			LaunchBackoff:         launchBackoffFirst,
 		},
+		WakePace: supervise.WakePace{
+			Reserve: wakes.Reserve,
+			Rate:    cfg.WorkerWakesPerMinute,
+			Burst:   cfg.WorkerWakeBurst,
+		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
 		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(cfg, c) },
@@ -1120,7 +1151,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
-		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
+		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims, wakes: wakes,
 		reports: reportsOfClaims(reports, claims), reportStore: st,
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,

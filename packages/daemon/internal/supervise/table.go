@@ -114,6 +114,10 @@ const (
 	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
 	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
+	// TimerWake is the turn the wake pacing gave a launch it held back (reserveWake): the launch
+	// runs when it fires (wakeNow). A claim with no process of its own waits launching with none
+	// until then; one whose process still runs waits exactly as the wake found it.
+	TimerWake TimerKind = "wake"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -254,7 +258,15 @@ type PodUpdateSignalled struct {
 }
 
 // RequestSpawn launches a queued claim.
-type RequestSpawn struct{ Claim claim.Token }
+type RequestSpawn struct {
+	Claim claim.Token
+	// Exempt is the caller saying this launch is not one the wake pacing may hold (reserveWake):
+	// the daemon's operator API, whose spawn a person is waiting on, and the controller keeper.
+	// The zero value is paced, so a caller that has not thought about it is paced: a flood of
+	// launches is the fault the pacing exists to fix, and a wake let through by default would
+	// put it back one caller at a time.
+	Exempt bool
+}
 
 // RequestRegister is the agent's registration, already authenticated by its boot token: the
 // session it became, the transcript it persists, and the hash of the secret it is being issued.
@@ -307,6 +319,10 @@ type RequestResume struct{ Claim claim.Token }
 type RequestRuleResume struct {
 	Claim  claim.Token
 	Reason string
+	// Exempt is the caller saying this resume is not one the wake pacing may hold (reserveWake):
+	// the daemon's operator API and the controller keeper. The zero value is paced, so a caller
+	// that has not thought about it is paced, as it is on RequestSpawn.
+	Exempt bool
 }
 
 // RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
@@ -340,7 +356,13 @@ type RequestOperatorClose struct{ Claim claim.Token }
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
 // re-admitted after its linger stopped every claim.
-type RequestRetry struct{ Claim claim.Token }
+type RequestRetry struct {
+	Claim claim.Token
+	// Exempt is the caller saying this retry is not one the wake pacing may hold (reserveWake):
+	// the daemon's operator API and the controller keeper. The zero value is paced, so a caller
+	// that has not thought about it is paced, as it is on RequestSpawn.
+	Exempt bool
+}
 
 // RequestOperatorRetry is the operator relaunching a failed architect through the API: the retry
 // RequestRetry makes, fresh budgets and the same session, from failed alone, for the root and
@@ -448,6 +470,7 @@ const (
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
+	onWakeTimer     eventKind = timerPrefix + eventKind(TimerWake)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -708,6 +731,17 @@ func fillTable(t *builder) {
 		[]ClaimState{StateFailed, StateSuspended}, StateLaunching)
 	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
+
+	// The turn the wake pacing gave a launch it held back. A claim with no process of its own
+	// waits launching; one whose process still runs waits in the state the wake found it, which
+	// is every other live state.
+	t.row(onWakeTimer, "the wake the pacing held runs its launch now, or a suspension held meanwhile ends it instead", wakeNow,
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, live...)
+	t.ignore(onWakeTimer, "no wake is waiting: a paced wake of a claim with no process is written launching before it waits", StateQueued)
+	t.ignore(onWakeTimer, "no wake is waiting: nothing is launched for this claim until its previous launch's pane is decided", StateLaunchUncertain)
+	t.ignore(onWakeTimer, "no wake is waiting: the suspension let the claim's process go, and the wake with it", StateSuspended)
+	t.ignore(onWakeTimer, "no wake is waiting: the failure let the claim's process go, and the wake with it", StateFailed)
+	t.ignore(onWakeTimer, "no wake is waiting: the retirement let the claim's process go, and the wake with it", StateRetired)
 
 	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
 	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
@@ -1473,7 +1507,7 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC), taskRead)
 }
 
-func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
+func spawn(m *Machine, ctx context.Context, ev Event) error { return m.revive(ctx, exemptWake(ev)) }
 
 // register records the session the agent became. The boot intervals end
 // with the registration, but not the deadline: it is armed again at its base bound, and only the
@@ -1552,7 +1586,7 @@ func reready(m *Machine, ctx context.Context, _ Event) error {
 	return finishReady(m, ctx)
 }
 
-func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
+func resume(m *Machine, ctx context.Context, ev Event) error { return m.revive(ctx, exemptWake(ev)) }
 
 // resumeByRule is the daemon's own resume of a suspended claim (RequestRuleResume): the same
 // session relaunched, as the operator's resume relaunches it, unless an operator suspended the
@@ -1567,15 +1601,16 @@ func resumeByRule(m *Machine, ctx context.Context, ev Event) error {
 		return nil
 	}
 	m.log.Info("supervise: resuming by rule", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
-	return m.revive(ctx)
+	return m.revive(ctx, exemptWake(ev))
 }
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
-// the claim kept goes once the agent is ready.
-func retry(m *Machine, ctx context.Context, _ Event) error {
+// the claim kept goes once the agent is ready. Its event is the workflow's retry or the
+// operator's own (operatorRetry), and the pacing reads each its own way (exemptWake).
+func retry(m *Machine, ctx context.Context, ev Event) error {
 	m.claim.Budgets = Budgets{}
-	return m.revive(ctx)
+	return m.revive(ctx, exemptWake(ev))
 }
 
 // operatorRetry is the operator's retry of a failed claim: retry, for an architect, whether its
@@ -1761,7 +1796,8 @@ func deliverNow(m *Machine, ctx context.Context, ev Event) error {
 // task (an outbox delivery, which carries a durable id) resumes a claim unless an operator
 // suspended it: an operator's suspension answers ErrHeldByOperator, queuing
 // nothing, and its start waits for the operator's resume. The operator's own delivery resumes the
-// claim whoever suspended it.
+// claim whoever suspended it. Either way the resume is paced like every other wake the daemon
+// causes (reserveWake): the task waits on the claim until the launch it waits for runs.
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	d := ev.(RequestDeliver)
 	if d.ID != "" && !m.claim.RuleMayResume() {
@@ -1770,7 +1806,7 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.queue(ctx, d); err != nil {
 		return err
 	}
-	return m.revive(ctx)
+	return m.revive(ctx, false)
 }
 
 // exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is
@@ -2001,7 +2037,8 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 				"round", open.Round)
 			return nil
 		}
-		return m.revive(ctx)
+		// The round's ask is a wake of the daemon's own, paced like every other (reserveWake).
+		return m.revive(ctx, false)
 	}
 	return m.sendPending(ctx)
 }

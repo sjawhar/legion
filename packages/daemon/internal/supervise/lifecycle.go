@@ -19,14 +19,16 @@ import (
 
 // revive binds an explicitly spawned, resumed or retried claim to the open tree epoch before
 // launching. In-lifetime recovery only rechecks the bound epoch (checkLaunch), so an old launch
-// cannot cross a cleanup confirmation into a later admission.
-func (m *Machine) revive(ctx context.Context) error {
+// cannot cross a cleanup confirmation into a later admission. exempt is whether the request that
+// asked for it is one the wake pacing never makes wait (exemptWake); every caller reads it from
+// its own event, so a request that carries no such field is paced.
+func (m *Machine) revive(ctx context.Context, exempt bool) error {
 	bound, err := m.deps.Store.AdmitClaim(ctx, m.claim)
 	if err != nil {
 		return err
 	}
 	m.claim.TreeEpoch = bound.TreeEpoch
-	return m.launch(ctx)
+	return m.launchAfter(ctx, false, exempt)
 }
 
 // checkLaunch is the lifecycle recheck every launch makes first: a claim whose tree cleanup is

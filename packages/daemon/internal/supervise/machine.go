@@ -386,6 +386,29 @@ type Timeouts struct {
 	LaunchBackoff time.Duration
 }
 
+// WakePace is the pace the daemon lets the wakes it causes out at — in this package, every role
+// process a launch starts (reserveWake). A restart or a plugin wave wakes every claim at once,
+// and the sessions those wakes start read their context in the minute that follows, which is what
+// pushes an Anthropic organization over its per-minute uncached-input cap. The three parts travel
+// together because they are read together: the reservation decides when a launch runs, and the
+// rate and the burst are what the line that launch writes says it was held to (wakeRan).
+type WakePace struct {
+	// Reserve is the moment this wake may run, given the caller's own now, and never a moment
+	// before it. A wake is charged on the reserve rather than on the release, so one reserved and
+	// then dropped has still spent a wake's worth of the rate, and the wakes behind it keep the
+	// turns they hold. nil is the pacing off — every launch runs as it is raised — which is this
+	// package's convention for a collaborator a deployment does not have, as Secrets and
+	// PhaseHolds are: the daemon builds one internal/wakepace limiter for all its lanes and hands
+	// its Reserve here, and this package reads no configuration and knows no limiter
+	// (openSupervision in internal/daemon).
+	Reserve func(now time.Time) time.Time
+	// Rate and Burst are the pace the operator set (worker_wakes_per_minute, worker_wake_burst),
+	// carried for the line a wake writes as it runs and read for nothing else: the reservation
+	// above is the whole of the decision.
+	Rate  int
+	Burst int
+}
+
 // Deps is what a machine is built from.
 type Deps struct {
 	Runtime  runtime.Runtime
@@ -396,6 +419,9 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
+	// WakePace is how fast the daemon lets this machine's launches out (reserveWake); its zero
+	// value is the pacing off.
+	WakePace WakePace
 	// Secrets is the secrets broker's enrollment routes for the runtime's pods. nil
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
 	Secrets Enroller
@@ -645,6 +671,14 @@ type Machine struct {
 	// lives as long as that timer, which letGo disarms with it. It is memory only, as the timer is: a
 	// restart launches that claim again as an unfinished launch.
 	relaunch func(context.Context) error
+	// wake is the launch the wake pacing holds until its turn (reserveWake), run when TimerWake
+	// fires (wakeNow); nil for none. It lives as long as that timer, which letGo disarms with it,
+	// and it is memory only, as relaunch and staleRelaunch are: a restart loses no wake. A
+	// process-less one parked the claim launching with no process, which the boot repairs to
+	// launch_uncertain and relaunches; one over a process still running is posted again by the
+	// boot's own stale-plugin pass, or raised again by the runtime's next observation of a
+	// process that has died. Each is paced again from an empty bucket, and no wake runs twice.
+	wake *wake
 	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
 	// to the shim over the claim's current connection.
@@ -729,7 +763,9 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // the claim's state does not allow is refused with a RefusedError; a fenced request is refused
 // with the claim refusal it violates (claim.StaleGeneration, claim.SameAgentRefusal). Any other
 // event that is stale is logged once and dropped. A suspension of a claim whose agent is in a turn
-// answers ErrSuspendHeld (holdSuspension).
+// answers ErrSuspendHeld (holdSuspension). A request the wake pacing never makes wait, reaching a
+// claim a paced wake parked, drops that wake before the lookup and is decided against the claim
+// the gate found (dropWakeFor).
 //
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
@@ -758,16 +794,21 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		m.identity = &heldIdentity{incarnation: m.claim.Locator.Incarnation, AgentSecretsIdentity: identity}
 		m.enrollmentSent = false
 	}
+	dropped := m.dropWakeFor(ev)
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]
 	if !ok {
 		return fmt.Errorf("supervise: no row for %s in %s", k.kind, k.state)
 	}
 	if r.act == nil {
+		// The refusal names the state that decided it, which is the state the gate found for a
+		// claim whose wake was just dropped: the re-park moves the claim back to launching after.
+		var refusal error
 		if name, ok := requestName(ev); ok {
-			return &RefusedError{State: m.claim.State, Request: name, Reason: r.ignore}
+			refusal = &RefusedError{State: m.claim.State, Request: name, Reason: r.ignore}
 		}
-		return nil
+		m.reparkWake(ctx, dropped)
+		return refusal
 	}
 	// A row ends only in a state it names, except that a held suspension may end in suspended from
 	// whichever row the end comes through (holdSuspension); a claim that holds none may not.
@@ -777,6 +818,7 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		err = errors.Join(err, fmt.Errorf("supervise: row %q moved %s from %s to %s, outside %v",
 			r.name, m.claim.Token, from, to, r.to))
 	}
+	m.reparkWake(ctx, dropped)
 	return err
 }
 
@@ -1028,7 +1070,8 @@ func (m *Machine) Wait() {
 // refused. The process that sent it is not the claim's: its launch was cut short by the daemon's
 // stop, which the next boot launches again once its orphan reconciliation has reaped every process
 // no claim records, or it is the process a relaunch waiting at the probe interval let go
-// (relaunchLater), which the relaunch waits out.
+// (relaunchLater) or a wake waiting its turn in the pacing let go (reserveWake), which that
+// relaunch and that wake each wait out.
 func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	pending := m.claim.Pending
 	switch ev := ev.(type) {
@@ -1146,8 +1189,9 @@ func (m *Machine) fenceRequest(request string, generation uint64, session string
 }
 
 // launchRecordsNoProcess is whether the claim is launching with no process recorded: a launch
-// written launching before it starts (launchAfter) and cut short, or a relaunch waiting at the
-// probe interval (relaunchLater). Every other live state records its process.
+// written launching before it starts (launchAfter) and cut short, a relaunch waiting at the probe
+// interval (relaunchLater), or a wake the pacing parked there until its turn (reserveWake). Every
+// other live state records its process.
 func (m *Machine) launchRecordsNoProcess() bool {
 	return m.claim.State == StateLaunching && m.claim.Locator == nil
 }
@@ -1174,21 +1218,43 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // let go (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch)
 // starts nothing and is charged nothing (relaunchRefused), and so is one whose context ended under
 // it — the daemon's stop. A runtime waits out a cluster that answers a launch's requests overloaded
-// inside the launch's own deadline, so what reaches here failed the launch.
+// inside the launch's own deadline, so what reaches here failed the launch. This launch waits its
+// turn in the wake pacing first (reserveWake), the project controller's claim excepted: it is the
+// recovery path, which no request raises, so there is no request here to let one through. A
+// launch a request raised that the pacing lets through goes by launchAfter (revive).
 func (m *Machine) launch(ctx context.Context) error {
-	return m.launchAfter(ctx, false)
+	return m.launchAfter(ctx, false, false)
 }
 
 // launchAfter is launch, whose first try waits the backoff when charged: the launch follows a
-// launch failure charged just before it (relaunchAfterFailure). Each try is written launching, at
-// its generation and with every charge so far, before its backoff waits. A try whose write fails
-// has started nothing and is tried again at the probe interval (relaunchLater), the process it let
-// go stopped: by then the claim records no process, so nothing else would launch it before a
-// restart. One the daemon's stop cut short is left to the next boot, as a start it cut short is.
-func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
+// launch failure charged just before it (relaunchAfterFailure). exempt is whether the request
+// that raised it is one the wake pacing never makes wait (exemptWake); every other path into a
+// launch is paced, and the gate sits here, between the lifecycle check and letGo, because a
+// launch the tree lifecycle refuses charges no budget and so takes no token either, while a
+// launch that waits its turn keeps the process it still runs until that turn comes.
+//
+// The reservation is taken once, before the loop: the loop's own retry of a failed start and the
+// turn the wake waited for both re-enter launchNow, which takes no second token.
+func (m *Machine) launchAfter(ctx context.Context, charged, exempt bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
-		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged) }, err)
+		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged, exempt) }, err)
 	}
+	if waits, err := m.reserveWake(ctx, wakeLaunch, exempt, func(ctx context.Context) error {
+		return m.launchNow(ctx, charged, exempt)
+	}); waits || err != nil {
+		return err
+	}
+	return m.launchNow(ctx, charged, exempt)
+}
+
+// launchNow is launchAfter past its lifecycle check and its wake gate: the launch itself, and the
+// one entry the wake's own turn re-enters by (wakeNow), which is what keeps that turn from taking
+// a second token. Each try is written launching, at its generation and with every charge so far,
+// before its backoff waits. A try whose write fails has started nothing and is tried again at the
+// probe interval (relaunchLater), the process it let go stopped: by then the claim records no
+// process, so nothing else would launch it before a restart. One the daemon's stop cut short is
+// left to the next boot, as a start it cut short is.
+func (m *Machine) launchNow(ctx context.Context, charged, exempt bool) error {
 	m.letGo()
 	for {
 		m.claim.Generation++
@@ -1204,7 +1270,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 			}
 			m.log.Warn("supervise: the launch could not be written; trying it again at the probe interval",
 				"generation", m.claim.Generation, "error", err)
-			m.relaunchLater(func(ctx context.Context) error { return m.launchAfter(ctx, charged) })
+			m.relaunchLater(func(ctx context.Context) error { return m.launchAfter(ctx, charged, exempt) })
 			return err
 		}
 		if charged {
@@ -1238,6 +1304,204 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		}
 		charged = true
 	}
+}
+
+// wakeLaunch is the kind of wake this package reserves: a role process a launch starts. The two
+// other kinds the wake line names are their own callers' — "plugin-task", the update task a
+// plugin round queues to a live session in place of a launch, and "catch-up", the one the
+// daemon's outbox queues to it — and each reserves from the same limiter.
+const wakeLaunch = "launch"
+
+// wake is a launch the pacing holds until its turn: the moment it may run (at), the moment it was
+// reserved, which the line it writes reports as how long it waited, what kind of wake it is for
+// that line, the state the gate found the claim in — which a request that never waits restores
+// before it acts (dropWakeFor) — and the launch itself.
+type wake struct {
+	at       time.Time
+	reserved time.Time
+	kind     string
+	state    ClaimState
+	run      func(context.Context) error
+}
+
+// reserveWake is the wake gate: it asks the pacing when this wake may run and, when that moment
+// is later than now, records the wake on the machine, arms TimerWake for it (wakeNow) and reports
+// that the caller's work waits. A wake that need not wait reports false, having written the line
+// it writes as it goes (wakeRan).
+//
+// A claim that records no process when the gate holds it — a spawn from queued, a rule resume
+// from suspended, a retry from failed or retired, a process already retired by the decision that
+// launches — is written launching and persisted first, exactly as relaunchLater writes one. That
+// is not cosmetic: the outbox's start row delivers its task after the launch call, and a task
+// delivered to a claim left failed is a named ignore, while one delivered to a claim left
+// suspended launches it a second time (deliverResuming). At launching the task is queued
+// (deliverLater) and goes at the next ready. A claim that still records its process is left
+// exactly as it is, so a restart never finds it launching with a live process; the launch lets
+// that process go when its turn comes (launchNow).
+//
+// Exempt is the request saying so (exemptWake) or the claim being the project controller's: a
+// death, a stale address or a displaced pod reaches a launch through displaced and repoint with
+// no request at all, and the controller is the one session the operator's own read of a running
+// wave relies on. An exempt wake is charged nothing and writes its line as it goes.
+//
+// A second launch raised over a claim whose wake still waits replaces that wake and takes a token
+// of its own; the one the first took is spent either way, since the limiter charges on the
+// reserve. No paced request reaches here twice over a parked claim: the table answers a second
+// start of a claim at launching without launching anything.
+func (m *Machine) reserveWake(ctx context.Context, kind string, exempt bool, run func(context.Context) error) (bool, error) {
+	exempt = exempt || claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
+	reserve := m.deps.WakePace.Reserve
+	// The operator counts the paced wakes of a minute against the rate and the burst this line
+	// names (R6), so a wake no pacing could have held — the pacing off, or this wake let through
+	// — says so rather than swelling that count.
+	paced := reserve != nil && m.deps.WakePace.Rate > 0 && !exempt
+	if exempt || reserve == nil {
+		m.wakeRan(kind, paced, 0)
+		return false, nil
+	}
+	now := m.deps.Clock.Now()
+	at := reserve(now)
+	if !at.After(now) {
+		m.wakeRan(kind, paced, 0)
+		return false, nil
+	}
+	m.wake = &wake{at: at, reserved: now, kind: kind, state: m.claim.State, run: run}
+	m.arm(TimerWake, at.Sub(now), "")
+	if m.claim.Locator != nil {
+		return true, nil
+	}
+	m.claim.State = StateLaunching
+	return true, m.persist(ctx)
+}
+
+// wakeNow is the wake's turn (TimerWake): the launch the gate held runs now, and takes no second
+// token — its reservation was taken once, before it waited. A suspension held meanwhile ends here
+// instead of in a launch, exactly as relaunchAgain ends one: a suspend that reaches a parked claim
+// is held rather than run (holdSuspendUntilReady on a claim with no process, holdSuspension on one
+// in a turn), and the wake's turn is when that hold is answered. The process the claim still
+// records, where it records one, is stopped first, as the relaunch this wake holds would have
+// stopped it (replaceProcess, endHeld).
+func wakeNow(m *Machine, ctx context.Context, _ Event) error {
+	waiting := m.wake
+	m.wake = nil
+	if m.held != nil {
+		if m.claim.Locator != nil {
+			return m.endHeld(ctx)
+		}
+		return m.suspendedFor(ctx, *m.held)
+	}
+	m.wakeRan(waiting.kind, true, m.deps.Clock.Now().Sub(waiting.reserved))
+	return waiting.run(ctx)
+}
+
+// wakeRan is the one line a wake writes, where it runs: at Info, so the production handler keeps
+// it, and in one shape whether the wake waited or not, because the operator counts the wakes of a
+// minute from it. kind is which wake it was, paced says whether the pacing could have held this
+// wake at all — false for the controller's own claim, for a request the pacing lets through, and
+// for a daemon whose rate is 0, which is the pacing off — and waitedFor is how long it was held,
+// left out of a wake that was not. rate and burst are the pace it was held to, so one line says
+// both what happened and what the operator set. The claim is the logger's own (NewMachine).
+func (m *Machine) wakeRan(kind string, paced bool, waitedFor time.Duration) {
+	fields := []any{"kind", kind, "waited", waitedFor > 0}
+	if waitedFor > 0 {
+		fields = append(fields, "waitedFor", waitedFor)
+	}
+	fields = append(fields, "paced", paced, "rate", m.deps.WakePace.Rate, "burst", m.deps.WakePace.Burst)
+	m.log.Info("supervise: wake ran", fields...)
+}
+
+// dropWakeFor is an operator's wake never waiting: a request the pacing lets through, reaching a
+// claim a paced wake parked with no process, drops that wake and is then decided against the
+// claim the gate found. Parked, the claim answers an operator's resume "the claim is not
+// suspended" and an operator's forget-session "the claim has a live process or launch", and
+// neither is true of a claim that is only waiting its turn.
+//
+// Only a wake with no process is dropped: one over a process still running left the claim exactly
+// as it was, so every row already decides it as it stands. The state is restored in memory alone,
+// and the decision that follows writes the claim — a resume, a retry and a spawn launch, and a
+// forget-session persists. The dropped wake's token is not handed back, since the limiter charges
+// on the reserve, so every wake behind it keeps the turn it already holds.
+//
+// The wake is returned so that a decision which launched nothing can take it up again
+// (reparkWake): a wake that waits must lose nothing, and a refusal, a named ignore or a
+// forget-session leaves the claim exactly where the gate found it, with the launch this wake
+// holds still owed to it.
+//
+// A paced request drops nothing: a second wake request takes no second token, and the claim's
+// own wake is the launch it is asking for.
+func (m *Machine) dropWakeFor(ev Event) *wake {
+	if m.wake == nil || m.claim.Locator != nil || !dropsWaitingWake(ev) {
+		return nil
+	}
+	dropped := m.wake
+	request, _ := requestName(ev)
+	m.log.Info("supervise: a request that does not wait reached a claim the wake pacing holds; dropping the wake",
+		"request", request, "kind", dropped.kind, "due", dropped.at, "state", dropped.state)
+	m.claim.State = dropped.state
+	m.disarm(TimerWake)
+	m.wake = nil
+	return dropped
+}
+
+// reparkWake takes a dropped wake up again when the decision it was dropped for launched nothing
+// (Handle, after both the named ignore's refusal and the row that acted): the claim is in the
+// state the gate found, with no process and no wake of its own, which is where a refusal, an
+// ignore and a forget-session each leave it — and the launch the wake holds is still owed. It is
+// parked again exactly as reserveWake parked it, at the same release moment, for whatever is
+// left of the wait: the token was taken once, so this costs nothing and the wakes behind it keep
+// their turns.
+//
+// A write that fails is logged and changes no verdict: the request is answered as the table
+// answered it, and the claim stands as that answer left it, which is what a refusal leaves today.
+// The wake still waits in memory, and a restart loses it as it loses any other.
+func (m *Machine) reparkWake(ctx context.Context, dropped *wake) {
+	if dropped == nil || m.wake != nil || m.claim.Locator != nil || m.claim.State != dropped.state {
+		return
+	}
+	m.wake = dropped
+	m.arm(TimerWake, max(dropped.at.Sub(m.deps.Clock.Now()), 0), "")
+	m.claim.State = StateLaunching
+	m.log.Info("supervise: the request launched nothing; the wake the pacing holds keeps its turn",
+		"kind", dropped.kind, "due", dropped.at, "state", dropped.state)
+	if err := m.persist(ctx); err != nil {
+		m.log.Warn("supervise: the wake that keeps its turn could not be written; it waits in memory alone",
+			"kind", dropped.kind, "due", dropped.at, "error", err)
+	}
+}
+
+// dropsWaitingWake is whether ev is a request the wake pacing never makes wait: the three that
+// reach a machine from the operator's own route alone, and a spawn or a retry whose caller marked
+// it exempt. The daemon's resume by rule is none of them, exempt or not: it meets a parked claim
+// with "the claim runs: nothing to resume" (nothingToDo), which is the truth — the wake the claim
+// waits for is the launch that rule would make.
+func dropsWaitingWake(ev Event) bool {
+	switch ev := ev.(type) {
+	case RequestResume, RequestOperatorRetry, RequestForgetSession:
+		return true
+	case RequestSpawn:
+		return ev.Exempt
+	case RequestRetry:
+		return ev.Exempt
+	}
+	return false
+}
+
+// exemptWake is whether the launch a request raises is one the wake pacing lets through: the
+// field the three paced requests carry (RequestSpawn, RequestRuleResume, RequestRetry), and
+// always for the two that reach a machine from the operator's own route alone (RequestResume,
+// RequestOperatorRetry). Every other path into a launch is paced, so every other event is too.
+func exemptWake(ev Event) bool {
+	switch ev := ev.(type) {
+	case RequestSpawn:
+		return ev.Exempt
+	case RequestRuleResume:
+		return ev.Exempt
+	case RequestRetry:
+		return ev.Exempt
+	case RequestResume, RequestOperatorRetry:
+		return true
+	}
+	return false
 }
 
 // leftPodRoundAt records that the claim has left its pod round, in the one decision that records
@@ -1428,14 +1692,16 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
-// on one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
-// relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
-// and the process the claim records, when it records one, moves into previous — the claim no
-// longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
-// session waits it out.
+// on one (relaunchLater), no wake of the pacing waits its turn (reserveWake) — the launch it was
+// to make is the one this end replaces — no send talks to it, no suspension is held for its turn,
+// no stale-plugin relaunch waits for that turn either (refreshPlugin) — the process it was to
+// replace is gone — and the process the claim records, when it records one, moves into previous —
+// the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch
+// of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
+	m.wake = nil
 	m.forgetSend()
 	m.held = nil
 	m.staleRelaunch = nil
