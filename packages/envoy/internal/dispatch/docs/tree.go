@@ -381,11 +381,10 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return newCappedDocumentCopy(maxUpdateItems, options...)
 }
 
-// newCappedDocumentCopy builds every copy that replays a document's stored or room updates, and
-// is the one place a copy is built: at the pending queue of the instance the decode runs for -
-// PgVersioned.maxPendingItems or Service.maxPendingItems, both maxUpdateItems in production and
-// lowered only by a test (shrinkPendingItems) - so a copy decodes what that instance decodes and
-// no more, and refuses what it would refuse. See maxUpdateItems for what those caps hold.
+// newCappedDocumentCopy builds a fresh document for replay at the instance's pending-queue cap:
+// a copy of its room decodes what that instance decodes and refuses what it would refuse. The
+// cap follows the instance (newRoomServer, loadTree, replica); other callers use newDocumentCopy.
+// See maxUpdateItems for the production and protocol caps.
 //
 // Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
 // remote apply that changes formatted text with a commit of its own: every update a copy applies
