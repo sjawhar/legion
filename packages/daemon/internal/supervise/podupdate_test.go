@@ -3,7 +3,9 @@ package supervise
 // An update round is the daemon asking a claim's worker to push its work and answer
 // ready_for_update before the process holding that claim is replaced. These tests pin what the
 // machine does with the round's two events: a round that opens once and asks once, a phase task
-// the round never displaces, a suspended claim revived for the task, a claim asked again after
+// the round never displaces, the free delivery slot a turn's end and the operator's resume each
+// leave behind, which an unanswered round's ask takes before the claim's own next task can,
+// a suspended claim revived for the task, a claim asked again after
 // PodUpdateRetask, a worker answering by the end of its task's turn at every plugin contract,
 // whatever operations its own `legion` tool holds, the next task held back
 // from the moment the worker answers and confirmed by no turn after a daemon restart, and the
@@ -230,6 +232,221 @@ func TestPodUpdateDoesNotDisplaceAPhaseTask(t *testing.T) {
 	if c := h.claim(); c.UpdateTaskedAt == nil {
 		t.Error("UpdateTaskedAt is nil after the update task was sent")
 	}
+}
+
+// The measured failure, and the whole of what the free delivery slot changes. A claim holds one
+// delivery and queue refuses a second (ErrDeliveryPending), so a worker whose own next task is
+// pending at every tick refuses the sweep's ask at every tick: on the issue this was measured
+// on the round stayed open about 43 hours, the ask was refused every minute, and the worker was
+// never asked at all. No answer can come from a task that never reaches the worker, so the
+// round could not end. The end of the worker's own turn is where that slot is free, and the
+// round's ask takes it there (takeSlotForUpdate) rather than waiting a sweep behind the next
+// task, which refuses it again.
+func TestPodUpdateTheRoundsAskTakesTheSlotTheWorkersOwnTurnFrees(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+	h.must(StreamTurnStart{Claim: h.token})
+	own := h.wantPrompts(1)[0]
+
+	// The sweep posts the round at every tick it runs, and the task in flight refuses each post.
+	h.openUpdate(testRound, testReasons)
+	h.advance(time.Minute)
+	h.openUpdate(testRound, testReasons)
+
+	h.wantState(StateWorking)
+	if c := h.wantRound(testRound); c.UpdateTaskedAt != nil {
+		t.Fatalf("UpdateTaskedAt = %v, want nil: every post of the round was refused behind the worker's own task", c.UpdateTaskedAt)
+	}
+	if refused := h.logs.lines("the claim holds a task of its own"); len(refused) != 2 {
+		t.Fatalf("the sweep's ask was refused %d times, want both posts refused: %v", len(refused), refused)
+	}
+	if got := h.pending().ID; got != own.DeliveryID {
+		t.Fatalf("pending delivery = %q, want the worker's own task %q still in its hands", got, own.DeliveryID)
+	}
+	h.wantPrompts(1)
+
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	if c := h.claim(); c.Pending == nil || c.UpdateTaskedAt == nil {
+		t.Fatalf("the turn ended and the round has asked nothing: claim = %+v. The round stays open, and the task of the next phase takes the slot and refuses every sweep after it, which is the measured 43 hours",
+			c)
+	}
+	ask := h.wantPrompts(2)[1]
+	if !asksRound(ask.DeliveryID, testRound) || ask.Message != UpdateTask(testRound, testReasons) {
+		t.Fatalf("the task after the turn = %+v, want the round's own words under an ask of %q: the slot that turn freed is the round's, and a sweep an instant later would be refused behind the next task",
+			ask, testRound)
+	}
+	if c := h.wantRound(testRound); c.UpdateTaskedAt == nil || !c.UpdateTaskedAt.Equal(h.clock.Now()) {
+		t.Errorf("UpdateTaskedAt = %v, want the send's clock at %v, written as the sweep's own ask writes it",
+			c.UpdateTaskedAt, h.clock.Now())
+	}
+
+	// The worker reads the ask in the turn it starts, answers it, and the round ends.
+	h.must(StreamTurnStart{Claim: h.token})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	if c := h.claim(); c.UpdateSignalledAt == nil || c.UpdateHead != "c0ffee" {
+		t.Fatalf("claim after the worker read the ask = %+v, want its answer and the head it reported", c)
+	}
+	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+	h.wantRound("")
+}
+
+// The operator's resume is the other moment the slot is free, and the round's ask takes it there
+// too (revive). A suspension ends the phase the worker was in, so the task it was working
+// retires with the turn and the slot the resumed claim comes back with is empty — and the
+// workflow's task for its next phase is on its way. A resume that let that task in first would
+// leave the round waiting on a worker nothing had asked, which is how the measured round
+// survived a suspend and a resume.
+func TestPodUpdateTheRoundsAskTakesTheSlotTheOperatorsResumeLeavesFree(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+	h.must(StreamTurnStart{Claim: h.token})
+	h.wantPrompts(1)
+	h.openUpdate(testRound, testReasons)
+
+	// The operator suspends the claim while its worker is in that turn, so the suspension is
+	// held for the turn's end and stops the process there.
+	if err := h.handle(RequestSuspend{Claim: h.token, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the suspension of a working claim returned %v, want it held for the turn", err)
+	}
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	h.wantState(StateSuspended)
+	if c := h.wantRound(testRound); c.Pending != nil || c.UpdateTaskedAt != nil {
+		t.Fatalf("the suspended claim = %+v, want its slot free and the round's ask still unmade", c)
+	}
+
+	h.must(RequestResume{Claim: h.token})
+
+	h.wantState(StateLaunching)
+	ask := h.pending()
+	if !asksRound(ask.ID, testRound) || ask.Task != UpdateTask(testRound, testReasons) {
+		t.Fatalf("pending after the resume = %+v, want the round's own words under an ask of %q", ask, testRound)
+	}
+	if c := h.claim(); c.UpdateTaskedAt == nil {
+		t.Error("UpdateTaskedAt is nil after the resume queued the round's ask")
+	}
+	// The workflow's task for the claim's next phase arrives behind the ask and waits there, as
+	// every task behind a pending one waits.
+	if err := h.handle(RequestDeliver{Claim: h.token, Task: "review the pull request"}); !errors.Is(err, ErrDeliveryPending) {
+		t.Fatalf("the next phase's task returned %v, want the wait a pending delivery answers", err)
+	}
+
+	h.relaunched()
+
+	sent := h.wantPrompts(2)[1]
+	if !asksRound(sent.DeliveryID, testRound) {
+		t.Errorf("the first prompt after the resume = %q, want the round's ask before any task of the claim's own", sent.DeliveryID)
+	}
+}
+
+// The order an answered round holds, which the free slot does not touch: the claim's next task
+// waits for the round's end whatever turns run meanwhile. The worker answered by ending the turn
+// its ask started, so its own plugin reminds it of the WAITING line it left, a turn at a time,
+// and each of those turns ends with the slot holding that next task. A round that asked again
+// there would prompt a worker that is waiting to be replaced, and a send would start it on work
+// the replacement is about to throw away.
+func TestPodUpdateAnAnsweredRoundStillHoldsTheNextTaskThroughATurnsEnd(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token})
+	if c := h.claim(); c.UpdateSignalledAt == nil || !c.UpdateAnsweredByTurnEnd {
+		t.Fatalf("claim after the ask's turn = %+v, want the answer its end gave", c)
+	}
+	h.must(RequestDeliver{Claim: h.token, Task: "review the pull request"})
+	h.wantPrompts(1)
+
+	// The worker's own reminder turn, and its end.
+	h.advance(15 * time.Minute)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	h.wantPrompts(1)
+	c := h.wantRound(testRound)
+	if c.UpdateSignalledAt == nil {
+		t.Fatalf("claim after the reminder turn = %+v, want the answer its task's turn gave standing", c)
+	}
+	if p := h.pending(); p.Task != "review the pull request" || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending = %+v, want the next task held unread, not an ask the round made over it", p)
+	}
+
+	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+
+	if released := h.wantPrompts(2)[1]; released.Message != "review the pull request" {
+		t.Errorf("the task after the round = %q, want the one it held back", released.Message)
+	}
+}
+
+// A claim already holding an ask of this round is given no second one, at either moment the
+// slot is read. That ask is the task the claim is about to be given — it waits for the
+// operator's resume, or for the turn in flight to end — and a second one would only rotate its
+// id for nobody: the shim answers a prompt carrying an id it already holds itself and prompts
+// Oh My Pi with nothing (internal/shimwire's Dedupe), so the rotation would cost the worker the
+// ask it was about to read.
+func TestPodUpdateTheFreeSlotGivesNoSecondAskToAClaimHoldingThisRoundsOwn(t *testing.T) {
+	t.Run("the operator's resume of a claim the sweep already asked", func(t *testing.T) {
+		h := updateHarness(t, PodUpdateContract)
+		h.reach(StateIdle)
+		h.must(RequestSuspend{Claim: h.token, By: SuspendedByOperator})
+		h.wantState(StateSuspended)
+		sent := len(h.prompts())
+		// The sweep's own ask, queued for the suspended claim and waiting for the resume.
+		h.openUpdate(testRound, testReasons)
+		queued := h.pending()
+		tasked := h.wantRound(testRound).UpdateTaskedAt
+
+		h.advance(2 * testPodUpdateRetask)
+		h.must(RequestResume{Claim: h.token})
+		h.relaunched()
+
+		if got := h.wantPrompts(sent + 1)[sent]; got.DeliveryID != queued.ID {
+			t.Errorf("the prompt after the resume = %q, want the ask the claim already held, %q", got.DeliveryID, queued.ID)
+		}
+		if c := h.claim(); c.UpdateTaskedAt == nil || !c.UpdateTaskedAt.Equal(*tasked) {
+			t.Errorf("UpdateTaskedAt = %v, want the clock of the ask the sweep made, %v: the resume made no ask of its own",
+				c.UpdateTaskedAt, tasked)
+		}
+	})
+
+	t.Run("the end of a turn of another cause", func(t *testing.T) {
+		h := updateHarness(t, PodUpdateContract)
+		h.inPod(testRoundPod)
+		h.openUpdate(testRound, testReasons)
+		h.wantPrompts(1)
+		// The daemon restarts holding that ask pending and unconfirmed, so it asks the agent
+		// before it sends again, and the agent is in a turn of another cause. The pod was
+		// replaced again meanwhile, so the round that answer is for is the newer pod's: its ask
+		// is queued behind the turn, and the first round's goes with the round it was of.
+		h.restart()
+		h.conn.SetStreaming(true)
+		second := PodRound(testOtherPod)
+		h.openUpdate(second, testReasons)
+		h.wantState(StateWorking)
+		ask := h.pending()
+		if !asksRound(ask.ID, second) || !ask.ConfirmedAt.IsZero() {
+			t.Fatalf("pending during the turn = %+v, want the second round's ask unread", ask)
+		}
+		// Long enough that the re-task bound would let another ask through; the ask the claim
+		// holds is the whole of what stops one.
+		h.advance(2 * testPodUpdateRetask)
+
+		h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+		sent := h.wantPrompts(2)[1]
+		if sent.DeliveryID != ask.ID {
+			t.Errorf("the prompt after the turn = %q, want the ask the claim already held, %q", sent.DeliveryID, ask.ID)
+		}
+		if p := h.claim().Pending; p == nil || p.ID != ask.ID {
+			t.Errorf("pending after the turn = %+v, want the same ask, with no second one made over it", p)
+		}
+	})
 }
 
 // A suspended claim is queued the round's task and revived for it, the way an outbox delivery
@@ -467,6 +684,7 @@ func TestAnswerByTurnEndEveryContract(t *testing.T) {
 
 	t.Run("a turn this daemon did not see start is no answer", func(t *testing.T) {
 		h := asked(t, PodUpdateContract)
+		first := h.prompts()[0].DeliveryID
 
 		h.restart()
 		h.must(StreamTurnStart{Claim: h.token})
@@ -476,8 +694,15 @@ func TestAnswerByTurnEndEveryContract(t *testing.T) {
 		if c.UpdateSignalledAt != nil || c.UpdateAnsweredByTurnEnd {
 			t.Errorf("claim after a turn restored from an earlier daemon's record = %+v, want no answer", c)
 		}
-		if c.UpdateTaskedAt != nil {
-			t.Errorf("UpdateTaskedAt = %v, want the ask's clock taken back so the round asks again at once", c.UpdateTaskedAt)
+		// The refusal takes the ask's clock back, and the end of that same turn is where the
+		// round asks again: the turn retired the ask it was refused for, so the slot it leaves
+		// free is this round's (takeSlotForUpdate). The clock the claim carries is that new
+		// ask's own, which is what the re-task bound then measures.
+		if p := c.Pending; p == nil || !asksRound(p.ID, testRound) || p.ID == first {
+			t.Errorf("pending after the refusal = %+v, want a fresh ask of %q: the round asks at this turn's end rather than a sweep behind it", p, testRound)
+		}
+		if c.UpdateTaskedAt == nil {
+			t.Error("UpdateTaskedAt is nil after the round asked again; want the clock of the ask the turn's end made")
 		}
 	})
 
@@ -1539,14 +1764,15 @@ func TestPodUpdateARoundThatReplacedThePodTellsItsWorkerNothing(t *testing.T) {
 // Nothing there says what the turn has already done, so its end is no answer to the round, and
 // the round asks again. The same holds for a turn start that is the first thing a restarted
 // daemon hears of the turn, which only askFirst confirms (turnStarted). Each refusal takes the
-// ask's clock back, so the next sweep asks again rather than the round waiting out the re-task
-// bound.
+// ask's clock back, and the end of that same turn is where the round asks again: the turn
+// retired the ask it was refused for, and the free slot it leaves is the round's
+// (takeSlotForUpdate), so the worker is asked there rather than a sweep behind it.
 func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testing.T) {
 	t.Run("the send asked the agent whether it was streaming", func(t *testing.T) {
 		h := updateHarness(t, PodUpdateContract-1)
 		h.reach(StateReady)
 		h.openUpdate(testRound, testReasons)
-		h.wantPrompts(1)
+		first := h.wantPrompts(1)[0].DeliveryID
 		// The daemon restarts: the ask is pending and unconfirmed, and the restored machine asks
 		// the agent first.
 		h.restart()
@@ -1560,9 +1786,11 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		if c.UpdateSignalledAt != nil {
 			t.Errorf("UpdateSignalledAt = %v, want nil: this daemon never saw the turn start", c.UpdateSignalledAt)
 		}
-		if c.UpdateTaskedAt != nil {
-			t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
-				c.UpdateTaskedAt)
+		if p := c.Pending; p == nil || !asksRound(p.ID, testRound) || p.ID == first {
+			t.Errorf("pending after the refusal = %+v, want a fresh ask of %q at this turn's end", p, testRound)
+		}
+		if c.UpdateTaskedAt == nil {
+			t.Error("UpdateTaskedAt is nil after the round asked again; want the clock of the ask the turn's end made")
 		}
 	})
 
@@ -1570,7 +1798,7 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		h := updateHarness(t, PodUpdateContract-1)
 		h.reach(StateReady)
 		h.openUpdate(testRound, testReasons)
-		h.wantPrompts(1)
+		first := h.wantPrompts(1)[0].DeliveryID
 		// The daemon restarts with the ask pending and unconfirmed, so askFirst is armed and no
 		// send of its own is in flight. The start it then reads is of a turn an earlier daemon's
 		// process began.
@@ -1583,9 +1811,11 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		if c.UpdateSignalledAt != nil {
 			t.Errorf("UpdateSignalledAt = %v, want nil: only askFirst made this turn the ask's, and this daemon never saw it begin", c.UpdateSignalledAt)
 		}
-		if c.UpdateTaskedAt != nil {
-			t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
-				c.UpdateTaskedAt)
+		if p := c.Pending; p == nil || !asksRound(p.ID, testRound) || p.ID == first {
+			t.Errorf("pending after the refusal = %+v, want a fresh ask of %q at this turn's end", p, testRound)
+		}
+		if c.UpdateTaskedAt == nil {
+			t.Error("UpdateTaskedAt is nil after the round asked again; want the clock of the ask the turn's end made")
 		}
 	})
 

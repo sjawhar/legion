@@ -1340,12 +1340,21 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 // an unretired task back from the process it replaces (refreshPlugin) — so it may not run while
 // the task whose turn just ended is still unsettled. The send runs last, as it does from every
 // other decision.
+//
+// The delivery slot the settled turn just freed is an open update round's before it is anything
+// else's (takeSlotForUpdate): a worker whose own next task is pending at every tick refuses the
+// sweep's ask at every tick, and this is the one moment the daemon knows the slot is free. The
+// send that follows carries whichever task the slot now holds, the round's ask or the claim's
+// own.
 func (m *Machine) afterTurn(ctx context.Context) error {
 	if held := m.staleRelaunch; held != nil {
 		m.staleRelaunch = nil
 		if err := m.refreshPlugin(ctx, *held); err != nil {
 			return err
 		}
+	}
+	if err := m.takeSlotForUpdate(ctx, false); err != nil {
+		return err
 	}
 	return m.sendPending(ctx)
 }
@@ -2054,6 +2063,72 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 		return m.revive(ctx)
 	}
 	return m.sendPending(ctx)
+}
+
+// takeSlotForUpdate gives this claim's open pod round its ask while the claim's one delivery
+// slot is free, which is what the end of a turn and the operator's resume each leave behind
+// (afterTurn, revive). A claim holds one delivery and queue refuses a second
+// (ErrDeliveryPending), so a worker whose own next task is pending at every tick refuses the
+// sweep's ask at every tick: the round this was measured on stayed open about 43 hours, the ask
+// was refused every minute, and the worker was never asked at all. An answer can only come from
+// a task the worker reads, so the free slot is the round's before it is anything else's.
+//
+// The ask is built from the claim's own record — the round it stands in and the reasons that
+// round holds — because no event is in hand here: the sweep's post is what carries them in
+// (PodUpdateOpen), and this runs between two of its ticks. The id is this ask's own
+// (updateTaskID) and the send's clock goes with it exactly as the sweep's ask writes it
+// (askForUpdate, UpdateTaskedAt), so the re-ask bound governs an ask made here as it governs
+// that one: a worker already given the task and still to answer is asked again no sooner than
+// PodUpdateRetask.
+//
+// Three things it does not do.
+//
+// It displaces no delivery the claim already holds. Taking back a task nothing has read would
+// lose it for good: the outbox row that gave it is already recorded against the claim
+// (Claim.DeliveredRows), so no retry of that row would ever give it again. A claim holding a
+// task here keeps it, and the end of that task's own turn is the next chance the round gets —
+// which is the whole of the fix, because that end is now a moment this daemon acts on rather
+// than one it waits a sweep behind.
+//
+// It asks no claim that already holds an ask of this round, answered or not: that task is the
+// one the claim is about to be given, and a second one would only rotate its id for nobody
+// (askForUpdate makes the same judgement, over the same pending delivery).
+//
+// It changes no other order. A claim that has answered its round is asked nothing more and
+// still holds its next task until the round ends (answeredOpenRound, openRoundHoldsTask); a
+// claim the daemon started again in another pod than the round's own is asked nothing ever
+// (Claim.LeftPodRound); and the round's own ask is held back from no worker it is asking.
+//
+// launching says the caller starts the claim's process now, which is the resume's own entry
+// (revive): the claim has no process yet, and the launch is what carries the ask to it. Every
+// other caller asks only a claim whose agent is up to read the ask (HoldsCapability). A
+// suspended claim is the sweep's to ask, because the sweep's ask revives it for the task where
+// the daemon's own suspension holds it (askForUpdate); an ask queued here instead would leave
+// it suspended holding a task, which that sweep reads as a claim already asked and revives for
+// nothing.
+func (m *Machine) takeSlotForUpdate(ctx context.Context, launching bool) error {
+	if !launching && !HoldsCapability(m.claim.State) {
+		return nil
+	}
+	if !m.claim.InPodRound() || m.claim.UpdateSignalledAt != nil ||
+		m.claim.LeftPodRound(m.claim.UpdateRound) || m.claim.Pending != nil {
+		return nil
+	}
+	now := m.deps.Clock.Now()
+	if tasked := m.claim.UpdateTaskedAt; tasked != nil && now.Sub(*tasked) < m.deps.podUpdateRetask() {
+		return nil
+	}
+	task := RequestDeliver{
+		Claim: m.claim.Token, ID: updateTaskID(m.claim.UpdateRound),
+		Task: UpdateTask(m.claim.UpdateRound, m.claim.UpdateReasons),
+	}
+	if err := m.queue(ctx, task); err != nil {
+		return err
+	}
+	m.claim.UpdateTaskedAt = &now
+	m.log.Info("supervise: this claim holds no task and has not answered its update round, so the round's ask takes the free delivery slot",
+		"round", m.claim.UpdateRound, "delivery", task.ID, "state", m.claim.State)
+	return m.persist(ctx)
 }
 
 // endPodUpdate is the round over for this claim (PodUpdateEnded): the ask it left unread goes,
