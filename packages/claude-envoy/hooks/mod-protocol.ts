@@ -313,7 +313,9 @@ export type ModEvent =
       /** The step's position in the turn, from 0. */
       readonly index: number
       readonly model: string
-      /** Absent for a model without effort, as `TurnStepInput.effort` is. */
+      /** The effort the request carried: what Claude Code named for its model, with the
+       *  `set-effort` pick over it where there was one. Absent for a model Claude Code names no
+       *  effort for, which takes none however the pick stands (`./mod`, `turn.step`). */
       readonly effort?: ModEffort
       readonly parts: readonly ModStepPart[]
       /** True on the one snapshot sent after the response is whole. */
@@ -392,8 +394,9 @@ export interface ModCallArguments {
   "config.list": undefined
   /** `$.command.list()`. */
   "command.list": undefined
-  /** Not a `$` call: the effort the mod puts on every later `turn.step` request, or null to stop
-   *  putting one on and leave the session's own. */
+  /** Not a `$` call: the effort the mod puts on every later `turn.step` request that names an
+   *  effort of its own, or null to stop putting one on and leave the session's own. A request
+   *  Claude Code names no effort for takes none whatever this says (`./mod`, `turn.step`). */
   "set-effort": { readonly effort: ModEffort | null }
 }
 

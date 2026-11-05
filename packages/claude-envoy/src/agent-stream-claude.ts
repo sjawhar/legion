@@ -137,9 +137,10 @@ export interface ClaudeAgentStream {
   /**
    * The effort a person's pick put in force. Claude Code reports an effort only on a request's
    * own `turn.step`, so until the session's next turn its report is the level before the pick;
-   * the pick itself is what set the effort the mod puts on every later request, whatever model
-   * runs it (`../hooks/mod`, `effortNow`), so from the moment it lands the settings frame says
-   * so and keeps saying so until another pick changes it.
+   * the pick itself is what set the effort the mod puts on every later request that names an
+   * effort of its own (`../hooks/mod`, `turn.step`), so from the moment it lands the settings
+   * frame says so and keeps saying so until another pick changes it or a step reports that the
+   * request ran at another level, or at none - which is what a model with no effort to set does.
    */
   readonly pickedEffort: (effort: ModEffort) => void
   /** Forget the conversation's timestamps and the effort read off it: the session id moved, and
@@ -262,7 +263,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
   let allocated = 0
   let observed: ObservedEffort | undefined
   /** The effort the last pick put in force, which is the effort the mod puts on every later
-   *  request until another pick changes it. */
+   *  request that names an effort of its own, until a step disagrees or another pick changes it. */
   let picked: ModEffort | undefined
 
   /** The timestamp this step keeps for every snapshot of it. */
@@ -455,9 +456,10 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         reported: true,
         // Claude Code reports the effort on each request's `turn.step` and nowhere else, so a
         // pick is the only other thing that knows one: it set the effort the mod puts on every
-        // later request whatever model runs it, so from the moment it lands it is the level in
-        // force, and it survives a model pick whose later step reports that same effort. A step
-        // that reports another level, or none at all, ends the pick and answers for itself
+        // later request that names an effort of its own, so from the moment it lands it is the
+        // level in force, and it survives a model pick whose later step reports that same
+        // effort. A step that reports another level, or none at all - a model Claude Code names
+        // no effort for takes none whatever the pick set - ends the pick and answers for itself
         // (`recordStep`). Before this session's first request and before any pick there is a
         // selector and no level to show; a step that named no effort is a model with no thinking
         // to adjust. A step of another model is no answer about this one.

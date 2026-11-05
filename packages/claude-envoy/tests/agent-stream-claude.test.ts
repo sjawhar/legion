@@ -614,11 +614,11 @@ test("a thinking pick is the level the header shows at once, until a step report
   expect(reported.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })
 })
 
-// The mod puts the effort it was last told to set on every later request, whatever model the
-// session runs (`../hooks/mod`, `effortNow`), and only another pick changes it. So a person who
-// picks a model after picking a level is still thinking at that level, and the header says so:
-// falling back to the model's default would tell the person a level the requests do not carry
-// (INFRA-1026).
+// The mod puts the effort it was last told to set on every later request that names an effort of
+// its own (`../hooks/mod`, `turn.step`), and only another pick changes it. So a person who picks
+// a model after picking a level is still thinking at that level until a step of that model says
+// otherwise, and the header says so: falling back to the model's default would tell the person a
+// level the requests do not carry (INFRA-1026).
 test("a model pick keeps the effort the mod puts on every later request in the header", async () => {
   const recorded = await fixture("claude-2.1.310-turn")
   const live = harness()
@@ -638,8 +638,8 @@ test("a model pick keeps the effort the mod puts on every later request in the h
     }),
   )
 
-  // The person now picks another model. No step of that model has run, but the mod still sets
-  // low on its requests, so low is the level in force.
+  // The person now picks another model. No step of that model has run, and the mod still sets
+  // low on a request that names an effort of its own, so low is the level in force.
   const switched = live.stream.settings("claude-sonnet-4-5", rows)
   if (!switched.reported) throw new Error("the settings were not reported")
   expect(switched.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })

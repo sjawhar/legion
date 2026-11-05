@@ -135,7 +135,8 @@ interface SessionLink {
   readonly send: (event: ModEvent) => void
   /** Watch for the id a `/clear` moves the session to and send it when it arrives. */
   readonly followSessionId: () => Promise<void>
-  /** The effort the server last asked for, for the next `turn.step`; null for none. */
+  /** The effort the server last asked for, for the next `turn.step` that names one of its own;
+   *  null for none. */
   readonly effortNow: () => ModEffort | null
 }
 
@@ -176,7 +177,8 @@ function createLink(): SessionLink {
   let started = false
   /** The id the socket is named for, which a `/clear` does not move. */
   let currentSessionId: string | undefined
-  /** The effort the server last asked for, put on every later `turn.step`; null for none. */
+  /** The effort the server last asked for, put on every later `turn.step` that names an effort
+   *  of its own; null for none. */
   let effort: ModEffort | null = null
   const queued: ModEvent[] = []
   let flushing = false
@@ -514,8 +516,17 @@ export function register(on: On): void {
   })
 
   on("turn.step", async function* (_, e, next) {
-    const effort = link.effortNow()
-    const request: TurnStepInput = effort === null ? e : { ...e, effort }
+    // The effort the request really carries. Claude Code names the effort of the model the
+    // request is for, and names none for a model that takes none: measured on 2.1.310, a request
+    // of `claude-opus-5-5` before any pick carried `output_config.effort: medium`, while with a
+    // pick of `low` in force a request of `claude-haiku-4-5` carried `thinking=None` and dropped
+    // the effort set here (the stack's model-request log, 2026-11-05). So the server's pick rides
+    // on an effort Claude Code named and never fills in an absent one, and the step reports what
+    // went out rather than what was set: a step that echoed a pick its own request did not carry
+    // held the live view's header on a level nothing was thinking at (INFRA-1026).
+    const set = link.effortNow()
+    const request: TurnStepInput =
+      set === null || e.effort === undefined ? e : { ...e, effort: set }
     const step: StepParts = { parts: [], blocks: new Map() }
     const snapshot = (done: boolean, stopReason?: ModStopReason): void => {
       link.send({
