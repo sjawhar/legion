@@ -854,6 +854,11 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		WriteJSON(w, http.StatusConflict, body)
 		return
 	}
+	var removedDecision *docs.ErrAnsweredDecisionRemoved
+	if errors.As(err, &removedDecision) {
+		writeError(w, "ANSWERED_DECISION_REMOVED", http.StatusConflict, removedDecision.Error())
+		return
+	}
 	var invalidPrecondition *docs.ErrInvalidPrecondition
 	if errors.As(err, &invalidPrecondition) {
 		writeError(w, "INVALID_PRECONDITION", http.StatusBadRequest, invalidPrecondition.Error())
