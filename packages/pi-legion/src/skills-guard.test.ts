@@ -484,3 +484,68 @@ test("every prompt and agent that may write says to make its own scratch and del
     ]
   );
 });
+
+// dispatch://INFRA-764's two rules, each written once per file that carries it (R4). A reviewer
+// that sends a correct change back for a text finding costs a whole round — implement, test and
+// review again — so the verdict rule and retro's thread pass are the change, and a copy that
+// disagrees with another is read twice and followed once. The pin fails when an edit drops the
+// sentence from a file or writes it twice; it does not show that an agent follows it, which the
+// issue's two rig scenarios measure.
+test("one verdict rule for the reviewer, in every copy", () => {
+  countedOncePerFile(
+    "A reviewer submits `REQUEST_CHANGES` only when a behavioural finding stands — one whose closing changes code that runs — and otherwise approves the head it read, named by SHA, leaving every text finding as the inline review thread it already writes.",
+    [
+      "skills/legion-worker/SKILL.md",
+      "skills/legion-worker/references/merge-gate.md",
+      "skills/legion-worker/references/review-threads.md",
+      "packages/daemon/internal/prompts/roles/reviewer.md",
+      "packages/daemon/internal/prompts/roles/core/reviewer.md",
+      "packages/daemon/internal/prompts/go/reviewer.md",
+    ]
+  );
+  for (const file of [
+    "skills/legion-worker/SKILL.md",
+    "skills/legion-worker/references/merge-gate.md",
+    "packages/daemon/internal/prompts/roles/reviewer.md",
+    "packages/daemon/internal/prompts/roles/core/reviewer.md",
+    "packages/daemon/internal/prompts/go/reviewer.md",
+  ]) {
+    const text = collapsed(
+      file.startsWith("skills/")
+        ? path.join(staged, file.slice("skills/".length))
+        : path.join(REPO_ROOT, file)
+    );
+    expect(text, `${file} still has the reviewer fix a prose-only finding itself`).not.toContain(
+      "prose-only"
+    );
+  }
+});
+
+// The other half of the same rule: the finding the reviewer leaves open is closed by retro, which
+// is why the reviewer may approve over it at all.
+test("retro commits the text fixes that close the threads, in every copy", () => {
+  countedOncePerFile(
+    "Retro commits the text fixes that close the pull request's open review threads, and nothing else.",
+    [
+      "skills/legion-retro/SKILL.md",
+      "skills/legion-worker/references/merge-gate.md",
+      "packages/daemon/internal/prompts/roles/implementer.md",
+      "packages/daemon/internal/prompts/go/implementer.md",
+    ]
+  );
+});
+
+// R3's first clause, which no reading of prose can keep true: nothing in Legion holds the merge
+// for an open review thread. The daemon reads no thread state at all, so a Go file of it that
+// names GitHub's thread API is the clause going quietly false.
+test("no Go file of the daemon reads a review thread's state", () => {
+  // grep exits 1 when it matches nothing, which is this test's passing case, so the status is
+  // read rather than thrown: 0 names files, 1 names none, anything else is grep itself failing.
+  const grep = Bun.spawnSync({
+    cmd: ["grep", "-rlE", "reviewThreads|isResolved|resolveReviewThread", "--include=*.go", "."],
+    cwd: path.join(REPO_ROOT, "packages/daemon"),
+  });
+  expect(grep.exitCode, grep.stderr.toString()).toBeLessThan(2);
+  const named = grep.stdout.toString().split("\n").filter(Boolean);
+  expect(named).toEqual([]);
+});
