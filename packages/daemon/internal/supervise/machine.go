@@ -743,6 +743,11 @@ type Machine struct {
 	// providerError is the turn that ended in a provider error whose decision is not yet made,
 	// nil for none (providererror.go, which says why it is never written to the store).
 	providerError *providerError
+	// owed is the task an update round's question went before, nil for none: the claim holds one
+	// delivery, the question has it, and this task takes it back when the question's delivery
+	// ends (delivery.go's holdOwedTask and giveBackOwedTask, which say why it is a hold and what
+	// a restart inside the round costs).
+	owed *Delivery
 }
 
 type sending struct {

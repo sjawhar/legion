@@ -488,9 +488,11 @@ claim, which is retired rather than failed, so name that one with `--claim`.
 `legion claims retry --claim <token> --fresh-session` is the whole recovery for a claim whose
 session a provider keeps refusing: it forgets the session that claim recorded and starts the claim
 in a new session with its phase's task, so no `legion claims forget-session` comes before it. It
-forgets that session only once the restart is accepted, so a retry the daemon refuses leaves the
-recorded session on the claim and the same command works once the refusal's cause is gone. What a
-refusal does on its own, before any of this, is in the paragraphs above and in
+forgets that session before it starts the phase, because the start runs the moment the restart
+commits and would otherwise resume the very session you are dropping. A retry the daemon then
+refuses has forgotten the session all the same: the claim keeps its state and its task, the
+daemon's log names the session it dropped, and the same command works once the refusal's cause
+is gone. What a refusal does on its own, before any of this, is in the paragraphs above and in
 [Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged).
 
 When a failed architect's session was lost with its volume, clear the stopped claim's matching

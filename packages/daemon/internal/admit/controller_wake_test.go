@@ -238,38 +238,44 @@ func TestTheTickAloneCarriesWhatLegionWaitsOn(t *testing.T) {
 // tellOfProviderErrors is the supervisor telling the controller that one claim's turns keep
 // ending in a provider error, as internal/daemon's providerErrorRunReached does: outside any
 // fact, in a transaction of the caller's own (TellController).
-func tellOfProviderErrors(t *testing.T, pool *pgxpool.Pool, admission *Admission, issue string) {
+func tellOfProviderErrors(t *testing.T, pool *pgxpool.Pool, admission *Admission, issue string, role claim.Role) {
 	t.Helper()
 	ctx := context.Background()
-	notice := record.ControllerNotice{Kind: record.ProviderErrorsNotice, Role: claim.RoleImplementer,
+	notice := record.ControllerNotice{Kind: record.ProviderErrorsNotice, Role: role,
 		Reason: "6 turns in a row ended in a provider error"}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return admission.TellController(ctx, tx, notice, issue)
 	}); err != nil {
-		t.Fatalf("tell the controller of %s's provider errors: %v", issue, err)
+		t.Fatalf("tell the controller of %s's %s provider errors: %v", issue, role, err)
 	}
 }
 
-// A provider-errors notice is one claim's, so one stands per issue: in an outage every claim's
-// turns fail, and the machine tells at exactly the sixth turn in a row and not again until a turn
-// with no error puts that run back to zero, so a second issue's notice dropped behind the first
-// issue's would never be sent at all. One claim that keeps failing still tells once: a second
-// notice for the same issue finds the first one waiting.
-func TestEachIssuesProviderErrorsNoticeStandsWhileAnothersWaits(t *testing.T) {
+// A provider-errors notice is one claim's, so one stands per claim: in an outage every claim's
+// turns fail, and the machine tells at exactly the sixth turn in a row and not again until a
+// turn with no error puts that run back to zero, so a second claim's notice dropped behind the
+// first claim's would never be sent at all. Two claims of one issue — its architect and its
+// worker — are two such claims, so the issue alone is not the key. One claim that keeps failing
+// still tells once: a second notice for the same issue and role finds the first one waiting.
+func TestEachClaimsProviderErrorsNoticeStandsWhileAnothersWaits(t *testing.T) {
 	pool := migratedPool(t)
 	admission := quiet(t, 2)
 	registerController(t, pool)
-	notice := func(issue string) effect {
+	notice := func(issue string, role claim.Role) effect {
 		return effect{kind: record.OutboxKindControllerNotice, issue: issue, payload: record.ControllerNotice{
-			Kind: record.ProviderErrorsNotice, Role: claim.RoleImplementer,
+			Kind: record.ProviderErrorsNotice, Role: role,
 			Reason: "6 turns in a row ended in a provider error"}}
 	}
 
-	tellOfProviderErrors(t, pool, admission, "LEGION-209")
-	tellOfProviderErrors(t, pool, admission, "LEGION-210")
-	tellOfProviderErrors(t, pool, admission, "LEGION-209")
+	tellOfProviderErrors(t, pool, admission, "LEGION-209", claim.RoleImplementer)
+	tellOfProviderErrors(t, pool, admission, "LEGION-210", claim.RoleImplementer)
+	tellOfProviderErrors(t, pool, admission, "LEGION-209", claim.RoleArchitect)
+	tellOfProviderErrors(t, pool, admission, "LEGION-209", claim.RoleImplementer)
 
-	assertControllerNotices(t, pool, []effect{notice("LEGION-209"), notice("LEGION-210")})
+	assertControllerNotices(t, pool, []effect{
+		notice("LEGION-209", claim.RoleImplementer),
+		notice("LEGION-210", claim.RoleImplementer),
+		notice("LEGION-209", claim.RoleArchitect),
+	})
 }
 
 // The slot wakes keep their own rule: one pending notice of the kind per project, whatever issue

@@ -2137,10 +2137,11 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // so the ask would cost one turn and teach the round nothing. It is asked nothing however often
 // it is started again, and a suspension does not bring it back into the round.
 //
-// A claim whose task a provider error took back is asked at once: queue replaces such a task with
-// this question rather than refusing the question behind it, so the round never waits out a
-// ladder whose steps reach ten minutes and whose run of errors has no end of its own
-// (dispatch://INFRA-956 R2, queue's own words).
+// A claim whose task a provider error took back is asked at once: queue gives this question the
+// slot that task held rather than refusing the question behind it, so the round never waits out
+// a ladder whose steps reach ten minutes and whose run of errors has no end of its own. The
+// task is not dropped for it — it waits behind the question and is the claim's again once the
+// question's delivery ends (queue's holdOwedTask and giveBackOwedTask, dispatch://INFRA-956 R2).
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
 	if m.claim.UpdateSignalledAt != nil || m.claim.LeftPodRound(m.claim.UpdateRound) {
 		return nil

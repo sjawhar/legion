@@ -395,22 +395,23 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 // caller built it, so a kind that says something of its own — the role and the reason of
 // TellController's — carries it here.
 //
-// Which notices count as the same one is the kind's own rule (record.NoticePerIssue): a kind that
-// speaks for the project is one wake per project, which is what the slot wakes and the tick want,
-// and a kind that speaks for one claim is one wake per issue. The second is the provider-errors
-// notice: in an outage every claim's turns fail, each claim owes a notice of its own, and the
-// machine tells at exactly the sixth turn in a row, so a notice dropped because another issue's
-// still waited would never be sent.
+// Which notices count as the same one is the kind's own rule (record.NoticePerClaim): a kind
+// that speaks for the project is one wake per project, which is what the slot wakes and the tick
+// want, and a kind that speaks for one claim is one wake per claim — its issue and its role. The
+// second is the provider-errors notice: in an outage every claim's turns fail, each claim owes a
+// notice of its own, and the machine tells at exactly the sixth turn in a row, so a notice
+// dropped because another claim's still waited would never be sent. Two claims of one issue, an
+// architect and its worker, are two such claims, which is why the role is part of the key.
 func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string, dueAt time.Time) error {
 	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
 	if err != nil || !registered {
 		return err
 	}
-	of := ""
-	if record.NoticePerIssue(notice.Kind) {
-		of = issue
+	of, from := "", claim.Role("")
+	if record.NoticePerClaim(notice.Kind) {
+		of, from = issue, notice.Role
 	}
-	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, notice.Kind, of)
+	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, notice.Kind, of, from)
 	if err != nil || pending {
 		return err
 	}
@@ -430,7 +431,7 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, notice record
 // Deps.ProviderErrorRunReached, wired in internal/daemon, which opens the transaction). It is
 // wakeController and nothing else: a controller that is not registered is told nothing, and a
 // notice the same wake already waits to send stops this one, so a run of the same cause on the
-// same issue is one wake and a second issue's run is a wake of its own (record.NoticePerIssue).
+// same claim is one wake and another claim's run is a wake of its own (record.NoticePerClaim).
 func (a *Admission) TellController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string) error {
 	return a.wakeController(ctx, tx, notice, issue, a.now())
 }

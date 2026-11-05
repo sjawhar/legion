@@ -1552,14 +1552,15 @@ func (s *Postgres) ControllerRegistered(ctx context.Context, tx pgx.Tx, project 
 }
 
 // ControllerNoticePending reads the project's unpublished notices of this kind, narrowed to one
-// issue when the caller named one: the same read either way, with the issue as a fourth term that
-// an empty string leaves out, so a project-wide wake's answer is what it always was.
-func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind, issue string) (bool, error) {
+// issue when the caller named one and to one role of that issue when it named a role as well:
+// the same read every way, with the issue and the role as two more terms that an empty string
+// leaves out, so a project-wide wake's answer is what it always was.
+func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind, issue string, role claim.Role) (bool, error) {
 	var pending bool
 	if err := tx.QueryRow(ctx, `select exists (select 1 from outbox
 		where kind = $1 and split_part(issue, '-', 1) = $2 and payload->>'kind' = $3
-		and ($4 = '' or issue = $4))`,
-		string(OutboxKindControllerNotice), project, string(kind), issue).Scan(&pending); err != nil {
+		and ($4 = '' or issue = $4) and ($5 = '' or payload->>'role' = $5))`,
+		string(OutboxKindControllerNotice), project, string(kind), issue, string(role)).Scan(&pending); err != nil {
 		return false, fmt.Errorf("read whether %s has a %s controller notice pending: %w", project, kind, err)
 	}
 	return pending, nil

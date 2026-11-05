@@ -723,10 +723,10 @@ func TestTheOperatorsRetryOfAStoppedPhaseWorkerRestartsItsPhase(t *testing.T) {
 	}
 }
 
-// --fresh-session has the claim leave its recorded session behind once the phase's restart is
-// accepted, so the start spawns a new agent and gives it the phase's task: what a session the
-// provider refuses needs, since resuming it would be refused again.
-func TestTheOperatorsFreshSessionRetryForgetsTheSessionOnceTheRestartIsAccepted(t *testing.T) {
+// --fresh-session has the claim leave its recorded session behind, so the start the phase's
+// restart queues spawns a new agent and gives it the phase's task: what a session the provider
+// refuses needs, since resuming it would be refused again.
+func TestTheOperatorsFreshSessionRetryForgetsTheSession(t *testing.T) {
 	facts := &phaseRestarter{}
 	h, workerToken := stoppedImplementer(t, facts)
 
@@ -744,18 +744,66 @@ func TestTheOperatorsFreshSessionRetryForgetsTheSessionOnceTheRestartIsAccepted(
 	}
 }
 
-// A refused retry relaunches nothing, so it leaves the session where it stood: an issue the retry
-// leaves held because its tree lingers is answered 409, and the session the operator may still
-// want to resume or to name is the claim's own until a retry is accepted.
-func TestTheOperatorsRefusedFreshSessionRetryLeavesTheSession(t *testing.T) {
+// sessionAtApply is the phase's restart, recording what the claim held when the fact was
+// applied. It is how a case reads the order of the forget and the fact, which no answer of the
+// route shows: a handler runs inside intake.ApplyFact, so the claim it reads there is the claim
+// as the forget left it.
+type sessionAtApply struct {
+	phaseRestarter
+	read func() supervise.Claim
+	seen string
+	saw  bool
+}
+
+func (r *sessionAtApply) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	r.seen, r.saw = r.read().Session, true
+	return r.phaseRestarter.Apply(ctx, tx, fact)
+}
+
+// The forget goes before the fact. The start the fact queues is an outbox row a lane runs as soon
+// as the fact commits, so a forget behind the fact races that lane, and a lane that reaches the
+// machine first relaunches the claim on the very session the operator asked to drop — where the
+// forget is ignored, the operator reads a refusal, and the phase runs on in the refused session.
+func TestTheOperatorsFreshSessionRetryForgetsTheSessionBeforeTheRestartIsApplied(t *testing.T) {
+	facts := &sessionAtApply{}
+	h, workerToken := stoppedImplementer(t, facts)
+	m, ok := h.supervisor.Machine(workerToken)
+	if !ok {
+		t.Fatalf("the supervisor holds no machine for %s", workerToken)
+	}
+	facts.read = m.Claim
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", RetryRequest{FreshSession: true})
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("fresh-session retry = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	if !facts.saw {
+		t.Fatal("the fresh-session retry applied no fact at all")
+	}
+	if facts.seen != "" {
+		t.Errorf("the phase's restart was applied while the claim still recorded session %q, want the forget before the fact: the lane the fact wakes would relaunch that session", facts.seen)
+	}
+}
+
+// A refused retry has forgotten the session all the same, and that is what this order costs: the
+// forget runs before the fact, so an issue the retry leaves held because its tree lingers is
+// answered 409 by a claim that records no session. Only the claim's record goes — the session
+// stands, and the route logs the id — and the claim keeps its state and its task, so the
+// operator retries it again.
+func TestTheOperatorsRefusedFreshSessionRetryHasAlreadyForgottenTheSession(t *testing.T) {
 	facts := &heldRetrier{lingers: true}
 	h, workerToken := stoppedImplementer(t, facts)
 	heldIssue(t, h, phase.Implementing)
 
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", RetryRequest{FreshSession: true}), http.StatusConflict,
 		"LEGION-209 is still held after the retry of its phase implementing, so nothing relaunched "+string(workerToken)+": its tree lingers, and a lingering tree's members stay where they stood")
-	if after := h.stored(workerToken); after.Session != "ses_implementer" {
-		t.Errorf("the refused fresh-session retry left session %q on the claim, want the recorded one kept", after.Session)
+	after := h.stored(workerToken)
+	if after.Session != "" || after.SessionFile != "" {
+		t.Errorf("the refused fresh-session retry left session %q (%q) on the claim, want both forgotten before the fact", after.Session, after.SessionFile)
+	}
+	if after.State != supervise.StateRetired {
+		t.Errorf("the refused fresh-session retry left the claim %s, want it retired with its task, for the operator to retry again", after.State)
 	}
 }
 

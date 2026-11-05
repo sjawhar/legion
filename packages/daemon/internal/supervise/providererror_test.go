@@ -377,14 +377,17 @@ func TestANewerTaskQueuedWhileTheLadderWaitsReplacesTheOwedTask(t *testing.T) {
 	}
 }
 
-// R2's other half: an update round's question goes before the task a provider error took back.
-// The round is the daemon replacing this claim's pod, and a question refused behind the owed task
-// (ErrDeliveryPending) would wait out a ladder whose steps reach ten minutes, so in a run of
-// errors the round would never get in.
+// R2's other half: an update round's question goes before the task a provider error took back,
+// and goes before it rather than instead of it. The round is the daemon replacing this claim's
+// pod, and a question refused behind the owed task (ErrDeliveryPending) would wait out a ladder
+// whose steps reach ten minutes, so in a run of errors the round would never get in; a question
+// that retired the owed task would lose it for good, since the outbox row that gave it is
+// recorded on the claim and no retry of that row gives it again, and the claim would come back
+// in its new pod with work owed and nothing pending.
 func TestAnUpdateRoundsQuestionGoesBeforeTheOwedTask(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
-	owed := h.pending().ID
+	owed := h.pending()
 
 	h.openUpdate(testRound, testReasons)
 
@@ -393,10 +396,33 @@ func TestAnUpdateRoundsQuestionGoesBeforeTheOwedTask(t *testing.T) {
 		t.Fatalf("sent %+v, want the round's question before the owed task", sent)
 	}
 	if p := h.pending(); !asksRound(p.ID, testRound) {
-		t.Fatalf("pending %+v, want the round's question, not the task %s the provider error took back", p, owed)
+		t.Fatalf("pending %+v, want the round's question, not the task %s the provider error took back", p, owed.ID)
 	}
 	if _, armed := h.m.timers[TimerPromptRetry]; armed {
-		t.Error("the ladder's wait is still armed for a task the question replaced")
+		t.Error("the ladder's wait is still armed for a task the question went before")
+	}
+
+	// The worker reads the question, answers it and ends its turn. The task it owes comes back
+	// to the claim there, and the answered round holds it until the round is over.
+	h.must(StreamTurnStart{Claim: testToken})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	p := h.pending()
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("after the question's turn pending %+v, want the owed task %s back: nothing else ever gives it again", p, owed.ID)
+	}
+	if p.ProviderErrorRetries != owed.ProviderErrorRetries {
+		t.Errorf("the owed task came back with %d sends counted, want the %d it had: its ladder goes on from where it stood",
+			p.ProviderErrorRetries, owed.ProviderErrorRetries)
+	}
+	h.wantPrompts(2)
+
+	h.must(PodUpdateEnded{Claim: testToken, Round: testRound})
+
+	again := h.wantPrompts(3)[2]
+	if again.DeliveryID != owed.ID || !strings.HasSuffix(again.Message, providerErrorTaskText) {
+		t.Errorf("the prompt after the round = %+v, want the owed task %s sent again", again, owed.ID)
 	}
 }
 

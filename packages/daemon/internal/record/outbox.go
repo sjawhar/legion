@@ -421,16 +421,19 @@ const (
 	ProviderErrorsNotice NoticeKind = "provider-errors"
 )
 
-// NoticePerIssue is whether one unpublished controller notice of kind stands per issue rather
-// than one per project (admit.Admission.wakeController reads it before it queues a wake).
+// NoticePerClaim is whether one unpublished controller notice of kind stands per claim — the
+// issue and the role that names it — rather than one per project
+// (admit.Admission.wakeController reads it before it queues a wake).
 //
 // A provider-errors notice is the one such kind: it names the claim whose turns keep ending in a
-// provider error, and in an outage every claim of the project has a notice of its own to send. It
-// is told at exactly the sixth turn in a row and never again until a turn with no error puts that
-// run back to zero, so a second claim's notice dropped behind the first claim's would never be
-// sent at all. Every other kind says something about the project — a free slot, a todo issue, the
-// day's tick — which one wake carries however many facts find it pending.
-func NoticePerIssue(kind NoticeKind) bool {
+// provider error, and in an outage every claim of the project has a notice of its own to send.
+// It is told at exactly the sixth turn in a row and never again until a turn with no error puts
+// that run back to zero, so a second claim's notice dropped behind the first claim's would never
+// be sent at all. Two claims of one issue are two such claims — an issue's architect and its
+// worker fail their turns in the same outage — so the issue alone is not the key; the role is
+// the rest of it. Every other kind says something about the project — a free slot, a todo issue,
+// the day's tick — which one wake carries however many facts find it pending.
+func NoticePerClaim(kind NoticeKind) bool {
 	return kind == ProviderErrorsNotice
 }
 
