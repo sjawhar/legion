@@ -54,6 +54,12 @@ var (
 	// credential its exchange minted is no longer live: revoked, past the expiry its Google
 	// identity token gave it, or its account no longer listed for its service (Renew).
 	ErrMachineLoginEnded = errors.New("the machine login that enrolled this session has ended")
+	// ErrSessionHeld refuses an enrollment whose session name another principal holds, read from
+	// the one table that says who holds a name — the same one the token exchange binds every
+	// token's name in (oauthstore.Store.BindSession, oauthstore.ErrSessionHeld). Its text names
+	// the session and says what to do about it, as that refusal's own text and the exchange's
+	// do, and names no holder: whoever holds the name is not this caller's to learn.
+	ErrSessionHeld = errors.New("another identity holds this session name")
 )
 
 type Credential struct {
@@ -129,6 +135,15 @@ type PodVerifier interface {
 	VerifyAccount(ctx context.Context, raw string) (AccountClaims, error)
 }
 
+// SessionBinder binds a session name to the principal that holds it and refuses it to every
+// other: oauthstore.Store, whose BindSession the token exchange binds the name of every token it
+// mints with. It is an interface here for the same reason PodVerifier is one — so a test wires a
+// binder of its own — and it joins the transaction the context carries (oauthstore.WithTx), which
+// is how an enrollment's bind and its own rows commit or roll back together.
+type SessionBinder interface {
+	BindSession(ctx context.Context, session, principal string, fixed bool, expires time.Time) (string, error)
+}
+
 type Service struct {
 	Store *store.Store
 	Lease time.Duration
@@ -136,6 +151,18 @@ type Service struct {
 	// BROKER_K8S_OIDC_AUDIENCE; nil on a broker that trusts no Kubernetes token issuer, which enrolls
 	// no pod and serves no Kubernetes token login.
 	Pod PodVerifier
+
+	// Sessions binds every enrollment that names a session to the principal that enrollment
+	// belongs to (carryPrincipal), in the enrollment's own transaction, and refuses it a name
+	// another principal holds (Create, ErrSessionHeld). It is the broker's one record of which
+	// principal holds a session name, oauth_session_bindings, written here and by the token
+	// exchange alike, so the name a session writes its Dispatch tokens under and the name its
+	// grant follows have the same holder.
+	//
+	// nil on a broker that binds nothing: such a broker writes no binding, refuses no
+	// enrollment its name, and so lets two principals enrol one name, each adopting nothing of
+	// the other's (adopt). cmd/broker/main.go wires the real oauthstore.Store.
+	Sessions SessionBinder
 
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
 	// call: a launcher_credentials row is never trusted on its own, since it must still trace
@@ -396,6 +423,13 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // principal and one with no predecessor each adopt nothing, an idempotent re-enrollment
 // (Existing) adopts nothing, and a pod's token check and the pod-uid ratchet run exactly as they
 // did. Only the rows move.
+//
+// Because a grant follows a name under one principal, the name has to belong to one principal,
+// and before anything is adopted the enrollment binds its session name to that principal
+// (bindSessionName): a name no principal holds becomes this one's, and a name another principal
+// holds is ErrSessionHeld, the whole enrollment refused and nothing written. An enrollment that
+// names no session, and one whose caller proved no principal, bind nothing and are refused
+// nothing.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot
@@ -448,7 +482,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 // its lease had lapsed and recovery ended it — in which case Create should try again. It first
 // takes the credential's row for share, which RevokeCredential's lock waits behind, and refuses a
 // revoked credential (ErrUnauthenticated): an insert either commits before a revoke reads the
-// credential's enrollments, and is ended with them, or finds the credential revoked.
+// credential's enrollments, and is ended with them, or finds the credential revoked. Then it
+// binds the enrollment's session name to its principal (bindSessionName), which is the one other
+// thing that can refuse an attempt outright.
 func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollment) (result Enrollment, retry bool, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -460,6 +496,9 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, ErrUnauthenticated
 	}
 	if err != nil {
+		return Enrollment{}, false, err
+	}
+	if err := s.bindSessionName(ctx, tx, in); err != nil {
 		return Enrollment{}, false, err
 	}
 	// pod_token_renewed_at starts null on every row, a pod's included: the first renewal carrying
@@ -492,6 +531,46 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, err
 	}
 	return in, false, tx.Commit(ctx)
+}
+
+// bindSessionName binds in's session name to the principal the enrollment belongs to (in.carry),
+// in the enrollment's own transaction, which oauthstore.WithTx is how the binder joins: the name
+// is this principal's from here on, and the binding and the enrollment commit or roll back
+// together, so a refused name leaves no enrollment and a rolled-back enrollment leaves no
+// binding.
+//
+// It is the same claim the token exchange makes for every token it mints
+// (oauthstore.Store.BindSession) on the same table, which is the point: a Legion role's pod
+// trades a token under its session name before or after it enrolls under that name, and the two
+// claims are the same principal's (exchange.AccountPrincipal of the ServiceAccount subject its
+// projected token proved, which carryPrincipal spells the same way), so neither refuses the
+// other. A name another principal holds is ErrSessionHeld, naming the session and no holder.
+//
+// An enrollment with no principal beside its name binds nothing and is refused nothing, as it
+// adopts nothing: that is an enrollment stating no session, and one whose credential proved no
+// principal at all (carryPrincipal). The claim is made for the enrollment's lease, so the name
+// stays this principal's for oauthstore.SessionRetention past the lease, as a token's name stays
+// its principal's past the token.
+//
+// The claim is not fixed: the configuration fixes a name for a principal at the exchange's own
+// entries (exchange.Set.Reservations), and an enrollment is no entry, so a name the
+// configuration fixes for someone else refuses an enrollment exactly as it refuses a trade.
+//
+// Locks: this takes the credential's row (createAttempt, for share) and then the name's own row,
+// which is the order the exchange takes them in too — it mints the launcher credential before it
+// claims the name (oauth.Provider.claimSession) — so neither can deadlock with the other.
+func (s *Service) bindSessionName(ctx context.Context, tx pgx.Tx, in Enrollment) error {
+	if s.Sessions == nil || in.carry == nil {
+		return nil
+	}
+	_, err := s.Sessions.BindSession(oauthstore.WithTx(ctx, tx), *in.SessionID, *in.carry, false, in.LeaseExpires)
+	if errors.Is(err, oauthstore.ErrSessionHeld) {
+		return fmt.Errorf("%w: %s. Enrol under a name of your own.", ErrSessionHeld, *in.SessionID)
+	}
+	if err != nil {
+		return fmt.Errorf("bind the enrollment's session name: %w", err)
+	}
+	return nil
 }
 
 // carryPrincipal is the identity an enrollment belongs to, which the insert writes into
@@ -563,7 +642,8 @@ func carryPrincipal(cred Credential, in Enrollment) *string {
 // session reads a secret it never asked this box for lands on the box that did.
 //
 // Locks, in the order this transaction takes them: the launcher credential's row (for share,
-// taken by createAttempt before anything else), then the enrollments rows, then the grant,
+// taken by createAttempt before anything else), then the session name's own row
+// (bindSessionName), then the enrollments rows, then the grant,
 // request and withheld rows under them. The predecessors are taken for update, in id order, so
 // no end, revoke or sweep moves what they hold while it is moving, and two concurrent adoptions
 // of one pair cannot hold each other's first row. That is the order every other writer of these
