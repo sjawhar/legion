@@ -43,16 +43,17 @@ const (
 	// creates may reach it (dispatch://INFRA-1160/spec#b-r4). Measured on the same replay: 133
 	// creates nudged, 11.5%. The next bar down, 0.55, nudges 182, 15.7%, over that ceiling.
 	duplicateNudgeScore = 0.60
-	// duplicateMinTerms is how many terms the new text must carry before the gate judges it at
+	// duplicateMinTerms is how many terms the new text must carry before the gate scores it at
 	// all. The score is a share of the picked terms, and pickRelatedTerms keeps only a term some
-	// other item of the project holds (a term no other item holds has df 0 and is dropped). So a
-	// text that yields one or two terms scores 1.0 against any issue that holds them, and a
-	// two-word title would be refused as a near copy of an issue it shares one word with. Three
-	// is what the title rule this replaces asked for as well (`shared >= 3`), and it is as high
-	// as it can go: one near-copy pair the replay must refuse, INFRA-432 against INFRA-431, is
-	// two issues with one title and no spec at all, and it carries three terms. It is also the
-	// number the picker fills back up to from the words it dropped as common, so a title every
-	// word of which the project has made common is still judged (pickRelatedTerms).
+	// other item of the project holds (a term no other item holds has df 0 and is dropped), and
+	// drops one more than a tenth of the project holds as common. So a text that yields one or
+	// two terms scores 1.0 against any issue that holds them, and a two-word title would be
+	// refused as a near copy of an issue it shares one word with. Three is what the title rule
+	// this replaces asked for as well (`shared >= 3`).
+	//
+	// Below it the gate does not score at all: it refuses only an open issue whose title and
+	// spec hold the same lexemes as the new text's, which is duplicateEqualLexemesQuery. A short
+	// text is a near copy only when its words are the same ones.
 	duplicateMinTerms = 3
 )
 
@@ -152,6 +153,53 @@ select s.key, i.title, i.status, s.shared, s.score,
   from scored s join issues i on i.key = s.key
  where s.score >= $5
  order by s.score desc, i.updated_at desc
+ limit ` + strconv.Itoa(duplicateCandidateLimit) + `
+`
+
+// duplicateEqualLexemesQuery finds the project's open issues, other than the new issue's
+// ancestors, whose title and spec hold exactly the lexemes the new title and spec hold. It is the
+// whole of the gate below duplicateMinTerms, where there is too little text to score a share of:
+// a short text is a near copy only when its words are the same ones, so "Held by a stopped agent"
+// and "Held by a running agent" are two issues and a second copy of either is one.
+//
+// Each side's lexemes are built the way the row that stores them was built, or the comparison
+// would answer on a difference in construction rather than in words. A title's are
+// title_lexemes() (migration 0088), the function the issues trigger writes issues.title_lexemes
+// with. A spec's are the document vector artifact_versions_search() builds (migration 0058),
+// ask blocks stripped, which document_search holds for the primary document's latest version
+// (migration 20261101182454). tsvector_to_array answers a vector's lexemes sorted and each once,
+// as title_lexemes does, so array equality is set equality here.
+//
+// A spec is compared whether or not either side has one, which covers the architect's rule for
+// both: with no spec on either side the two empty sets are equal and the titles decide, and with
+// one on either side the specs must hold the same lexemes too. An issue whose primary document
+// has no vector - a file upload, a document of ask blocks alone - is read as the empty set, which
+// is what document_search holds for it.
+//
+// A title that yields no lexemes at all, every word of it a stopword, matches nothing: there is
+// no text to be a copy of. Without that guard it would name every other such issue in the
+// project.
+//
+// Parameters: $1 project, $2 the new title, $3 the new spec, $4 the new issue's ancestors,
+// $5 the headline options.
+var duplicateEqualLexemesQuery = `
+with new_text as (
+  select title_lexemes($2) as title_lex,
+         tsvector_to_array(to_tsvector('english',
+           regexp_replace(search_text($3), '(?s):::ask\{.*?:::', '', 'g'))) as spec_lex
+)
+select i.key, i.title, i.status, cardinality(n.title_lex)::int as shared, 1::float8 as score,
+       ts_headline('english', search_text(i.title),
+         to_tsquery('simple', (select string_agg(quote_literal(x), ' | ') from unnest(n.title_lex) x)), $5) as headline
+  from new_text n
+  join issues i
+    on i.project_key = $1 and i.status <> 'done' and i.key <> all($4::text[])
+   and i.title_lexemes = n.title_lex
+  left join artifacts a on a.issue_key = i.key and a.kind = 'doc' and a.is_primary
+  left join document_search d on d.artifact_id = a.id
+ where cardinality(n.title_lex) > 0
+   and coalesce(tsvector_to_array(d.search), '{}') = n.spec_lex
+ order by i.updated_at desc
  limit ` + strconv.Itoa(duplicateCandidateLimit) + `
 `
 
@@ -286,11 +334,23 @@ func (s *server) readDuplicateCandidates(
 		lexemes = append(lexemes, term.Lexeme)
 		weights = append(weights, term.IDF)
 	}
-	if len(lexemes) < duplicateMinTerms {
-		return nil, nil
-	}
 	if ancestors == nil {
 		ancestors = []string{}
+	}
+	if len(lexemes) < duplicateMinTerms || picked.TextLexemes <= duplicateMinTerms {
+		// Too little to score a share of, so the only near copy is one holding the same words:
+		// duplicateEqualLexemesQuery. Either the pick came out short, or the text itself holds
+		// no more words than duplicateMinTerms, which is the case a share reads wrongly: a
+		// three-word title scores 1.0 against any wordy issue that happens to hold its three
+		// words, so "Held by a stopped agent" is refused as a copy of "Held by a running agent"
+		// whose spec mentions a stopped one. Its answer is an equality rather than a score, so
+		// floor does not apply to it - a match is 1 and nothing else is answered.
+		rows, err := tx.Query(ctx, duplicateEqualLexemesQuery,
+			project, title, spec, ancestors, duplicateHeadlineOptions)
+		if err != nil {
+			return nil, err
+		}
+		return scanDuplicateCandidates(rows)
 	}
 	rows, err := tx.Query(ctx, duplicateScoreQuery,
 		project, lexemes, weights, ancestors, floor, duplicateHeadlineOptions)

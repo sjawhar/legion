@@ -296,16 +296,14 @@ func TestCreateIssueDuplicateOrdersCandidatesByScore(t *testing.T) {
 
 // pickRelatedTerms drops a lexeme more than a tenth of the project holds, and never fewer than
 // relatedCommonFloor of its items (`commonAbove`). So in a project whose items have made the
-// words of a title common, a title yields no picked term at all and the gate judges nothing: an
-// exact copy of an open issue, spec for spec, is created.
+// words of a title common, a title yields no picked term at all and there is no share to score.
 //
 // dispatch://INFRA-1160/artifact/verification-md's check k4 names INFRA-432 against INFRA-431 —
-// two open issues with one title and no spec at all — as a pair the rule must refuse. It is
-// refused in TestNearCopyRefusalReplay only while the replay lets the project's term statistics
-// lag ten creates behind (DISPATCH_NEARCOPY_REFRESH_EVERY=10). Production refreshes them every
-// SearchTermStatsInterval, ten minutes, against about one INFRA create every twenty, so the
-// statistics a create meets there are current; replayed that way the pair scores 0.000 and is
-// created.
+// two open issues with one title and no spec at all — as a pair the rule must refuse. Below
+// duplicateMinTerms the gate scores nothing and asks the other question instead: does an open
+// issue hold the same lexemes, title and spec alike (duplicateEqualLexemesQuery). A copy does,
+// which is this case and that pair, and a title differing in one meaning word does not, which is
+// TestCreateIssueDuplicateCreatesTwoTitlesThatDifferInTheirOneMeaningWord.
 func TestCreateIssueDuplicateRefusesACopiedTitleWhoseWordsAreCommon(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createDuplicateTestProject(t, handler, "COMMON")

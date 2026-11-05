@@ -482,6 +482,12 @@ type relatedTerms struct {
 	Items int
 	// NoLexemes is a text that holds no lexeme at all: blank, or stopwords alone.
 	NoLexemes bool
+	// TextLexemes is how many distinct lexemes the text itself holds, numbers and hashes aside,
+	// before the cap and before a word is dropped as unpriced or as common. The near-copy gate
+	// reads it to tell a short text from a long one whose pick came out short: a text holding no
+	// more words than duplicateMinTerms is judged on whether its words are the same ones, not on
+	// a share of them (duplicateEqualLexemesQuery).
+	TextLexemes int
 }
 
 // relatedTermsSQL reads, for every lexeme of the text, its frequency there (tf), its df from the
@@ -720,6 +726,7 @@ func (s *server) pickRelatedTerms(
 	candidates = slices.DeleteFunc(candidates, func(candidate relatedCandidate) bool {
 		return relatedNoise(candidate.Lexeme)
 	})
+	picked.TextLexemes = len(candidates)
 	if probe {
 		if err := probeRelatedCandidates(ctx, q, project, exclude.issueKey, artifactID, candidates); err != nil {
 			return relatedTerms{}, err
@@ -748,35 +755,9 @@ func (s *server) pickRelatedTerms(
 	}
 
 	commonAbove := max(float64(relatedCommonFloor), float64(picked.Items)/10)
-	kept := candidates[:0]
-	var common []relatedCandidate
-	for _, candidate := range candidates {
-		switch {
-		case !candidate.known || candidate.DF == 0:
-		case float64(candidate.DF) > commonAbove:
-			common = append(common, candidate)
-		default:
-			kept = append(kept, candidate)
-		}
-	}
-	candidates = kept
-	// A title every word of which the project has made common leaves the gate nothing to judge,
-	// and an exact copy of it is created: that is INFRA-432 against INFRA-431, two open issues
-	// with one title and no spec at all, which k4 requires the gate to refuse. So where the cap
-	// leaves the gate under duplicateMinTerms, the rarest of the words it dropped go back in
-	// until there are that many. The related-item check keeps the cap whole: a common word there
-	// buys a reader nothing, while here it is all there is to compare.
-	if !probe && len(candidates) < duplicateMinTerms {
-		slices.SortFunc(common, func(a, b relatedCandidate) int {
-			return cmp.Or(cmp.Compare(a.DF, b.DF), strings.Compare(a.Lexeme, b.Lexeme))
-		})
-		for _, candidate := range common {
-			if len(candidates) == duplicateMinTerms {
-				break
-			}
-			candidates = append(candidates, candidate)
-		}
-	}
+	candidates = slices.DeleteFunc(candidates, func(candidate relatedCandidate) bool {
+		return !candidate.known || candidate.DF == 0 || float64(candidate.DF) > commonAbove
+	})
 	for index := range candidates {
 		candidate := &candidates[index]
 		// N is floored at df: in probe mode N is 0, and an idf below zero would rank the words the
