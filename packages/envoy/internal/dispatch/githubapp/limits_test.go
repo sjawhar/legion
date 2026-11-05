@@ -313,12 +313,12 @@ func TestAnExpiredTokensInstallationIsForgottenAtTheNextMint(t *testing.T) {
 		t.Fatalf("token past the first ones' expiry: %v", err)
 	}
 	for _, token := range expired {
-		if scope := client.tokenScope(token); scope != "" {
+		if scope := client.TokenScope(token); scope != "" {
 			t.Fatalf("expired token %s still answers scope %q", token, scope)
 		}
 	}
-	if scope := client.tokenScope(current); scope != installationScope(7) {
-		t.Fatalf("current token's scope = %q, want %q", scope, installationScope(7))
+	if scope := client.TokenScope(current); scope != InstallationScope(7) {
+		t.Fatalf("current token's scope = %q, want %q", scope, InstallationScope(7))
 	}
 }
 

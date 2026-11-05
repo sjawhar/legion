@@ -231,7 +231,7 @@ func (c *ttlCache[K, V]) forget(key K) {
 // Limits is the GitHub rate limits every process obeys together (ratelimit.Store, over
 // github_rate_limits): GitHub budgets the App and each installation, not a process, so a limit
 // one process meets must stop the others from asking too. Scopes are AppScope and
-// installationScope's.
+// InstallationScope's.
 type Limits interface {
 	// Wait is how long the limit in force on scope has left, zero when none is, and when that limit
 	// was last recorded: the same for one limit however much of it has passed, changed by every
@@ -245,9 +245,11 @@ type Limits interface {
 // App webhook's delivery endpoints, which GitHub budgets as the App's.
 const AppScope = "app"
 
-// installationScope is the scope of every call made with installation id's token, which GitHub
-// budgets as that installation's.
-func installationScope(id int64) string { return "installation:" + strconv.FormatInt(id, 10) }
+// InstallationScope is the scope of every call made with installation id's token, which GitHub
+// budgets as that installation's. It is exported so a caller outside this package -- a poller
+// that budgets its own passes against an installation's limit -- can name the scope its
+// requests are counted under.
+func InstallationScope(id int64) string { return "installation:" + strconv.FormatInt(id, 10) }
 
 // Option configures a Client New builds.
 type Option func(*Client)
@@ -277,7 +279,7 @@ type Client struct {
 	// and its backups.
 	tokens map[int64]cachedToken
 	// installationOf maps each token this client minted to its installation and expiry, so a call
-	// made with a token is made under that installation's scope (tokenScope). A token keeps its
+	// made with a token is made under that installation's scope (TokenScope). A token keeps its
 	// entry until it expires, not only while it is the cached one: a caller that took it before
 	// the next mint replaced it in tokens (a long sync, or a concurrent first mint) still holds a
 	// token GitHub budgets under that installation. Each mint removes the expired entries, so the
@@ -471,7 +473,7 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 		var installations []Installation
 		for page := 1; ; page++ {
 			target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
-			body, status, header, err := c.request(ctx, AppScope, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
+			body, status, header, err := c.request(ctx, AppScope, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, "", nil, responseLimit)
 			if err != nil {
 				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
 			}
@@ -601,10 +603,18 @@ func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, htt
 // ReadWithin is Read with the caller's own body limit, for a caller that keeps only part of a
 // large answer; a body past limit is a *ResponseTooLargeError.
 func (c *Client) ReadWithin(ctx context.Context, token, path string, limit int64) ([]byte, int, http.Header, error) {
+	return c.ReadConditionalWithin(ctx, token, path, "", limit)
+}
+
+// ReadConditionalWithin is ReadWithin with the ETag a caller remembered from this URL's last
+// answer: it sends If-None-Match, so GitHub answers 304 Not Modified when nothing changed, which
+// costs none of the rate limit. A 304 is a status the caller reads, with an empty body, never an
+// error. An empty etag sends no If-None-Match header, which is an unconditional read.
+func (c *Client) ReadConditionalWithin(ctx context.Context, token, path, etag string, limit int64) ([]byte, int, http.Header, error) {
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
 	}
-	return c.request(ctx, c.tokenScope(token), http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, nil, limit)
+	return c.request(ctx, c.TokenScope(token), http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, etag, nil, limit)
 }
 
 // GraphQL posts query/variables to the API origin's /graphql endpoint with an installation token,
@@ -622,7 +632,7 @@ func (c *Client) GraphQL(ctx context.Context, token string, query string, variab
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("encode GraphQL request: %w", err)
 	}
-	return c.request(ctx, c.tokenScope(token), http.MethodPost, c.base+"/graphql", "Bearer "+token, mediaTypeJSON, bytes.NewReader(payload), responseLimit)
+	return c.request(ctx, c.TokenScope(token), http.MethodPost, c.base+"/graphql", "Bearer "+token, mediaTypeJSON, "", bytes.NewReader(payload), responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the
@@ -689,7 +699,7 @@ func (c *Client) CheckSource(ctx context.Context, owner, repo string) (Source, e
 		return Source{}, err
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
-	body, status, _, err := c.do(ctx, installationScope(installation.ID), http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.do(ctx, InstallationScope(installation.ID), http.MethodGet, target, "Bearer "+token)
 	if err != nil {
 		return Source{}, err
 	}
@@ -702,14 +712,14 @@ func (c *Client) CheckSource(ctx context.Context, owner, repo string) (Source, e
 	return Source{InstallationID: installation.ID, AppSlug: installation.AppSlug}, nil
 }
 
-// tokenScope is the scope of a call made with token: its installation's when this client minted
-// it, until the next mint after its expiry forgets it. A token this client did not mint is under
-// no shared limit, since nothing says whose it is.
-func (c *Client) tokenScope(token string) string {
+// TokenScope is the shared rate-limit scope of a call made with token: its installation's when
+// this client minted the token, until the next mint after its expiry forgets it, and empty
+// otherwise, since nothing then says whose it is.
+func (c *Client) TokenScope(token string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if minted, ok := c.installationOf[token]; ok {
-		return installationScope(minted.installation)
+		return InstallationScope(minted.installation)
 	}
 	return ""
 }
@@ -719,12 +729,14 @@ func (c *Client) do(ctx context.Context, scope, method, target, authorization st
 }
 
 func (c *Client) doLimited(ctx context.Context, scope, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
-	return c.request(ctx, scope, method, target, authorization, mediaTypeJSON, nil, limit)
+	return c.request(ctx, scope, method, target, authorization, mediaTypeJSON, "", nil, limit)
 }
 
 // request performs one API call under scope asking for the accept media type and returns its
 // complete body when it fits within limit, status and headers. body is nil for every GET call;
-// GraphQL is this package's only POST with a body.
+// GraphQL is this package's only POST with a body. A non-empty ifNoneMatch sends that ETag as
+// If-None-Match, so GitHub answers 304 Not Modified when its answer has not changed since the
+// caller read it, and charges the rate limit nothing for it; an empty one sends no such header.
 //
 // It is the one function that sends anything to GitHub, so it is where the shared rate limits are
 // obeyed: while a limit is in force on scope it sends nothing and returns a held *RateLimitError,
@@ -733,7 +745,7 @@ func (c *Client) doLimited(ctx context.Context, scope, method, target, authoriza
 // or recorded (the database failing) is logged and the request goes ahead, as
 // embedqueue.reserveTokens goes ahead: GitHub still answers each process's own requests with the
 // limit. An empty scope, or a client without Limits, is no shared limit.
-func (c *Client) request(ctx context.Context, scope, method, target, authorization, accept string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+func (c *Client) request(ctx context.Context, scope, method, target, authorization, accept, ifNoneMatch string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
 	shared := c.limits != nil && scope != ""
 	if shared {
 		wait, recorded, err := c.limits.Wait(ctx, scope)
@@ -752,6 +764,9 @@ func (c *Client) request(ctx context.Context, scope, method, target, authorizati
 	}
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Accept", accept)
+	if ifNoneMatch != "" {
+		request.Header.Set("If-None-Match", ifNoneMatch)
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -795,7 +810,7 @@ func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (st
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/commits/" + url.PathEscape(branch)
-	body, status, _, err := c.request(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token, mediaTypeSHA, nil, responseLimit)
+	body, status, _, err := c.request(ctx, c.TokenScope(token), http.MethodGet, target, "Bearer "+token, mediaTypeSHA, "", nil, responseLimit)
 	if err != nil {
 		return "", err
 	}
@@ -827,7 +842,7 @@ func (c *Client) Branch(ctx context.Context, token, owner, repo, branch string) 
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/git/ref/heads/" + url.PathEscape(branch)
-	body, status, _, err := c.do(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.do(ctx, c.TokenScope(token), http.MethodGet, target, "Bearer "+token)
 	if err != nil {
 		return "", err
 	}
@@ -888,7 +903,7 @@ func (c *Client) Dir(ctx context.Context, token, owner, repo, sha, dir string) (
 	dir = strings.Trim(dir, "/")
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/git/trees/" + url.PathEscape(sha+":"+dir)
-	body, status, _, err := c.do(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.do(ctx, c.TokenScope(token), http.MethodGet, target, "Bearer "+token)
 	if err != nil {
 		return Dir{}, err
 	}
@@ -958,7 +973,7 @@ func (c *Client) DirFiles(ctx context.Context, token, owner, repo string, listin
 
 func (c *Client) blob(ctx context.Context, token, repoBase, path, sha string) ([]byte, error) {
 	target := repoBase + "/git/blobs/" + url.PathEscape(sha)
-	body, status, _, err := c.doLimited(ctx, c.tokenScope(token), http.MethodGet, target, "Bearer "+token, blobResponseLimit)
+	body, status, _, err := c.doLimited(ctx, c.TokenScope(token), http.MethodGet, target, "Bearer "+token, blobResponseLimit)
 	if err != nil {
 		return nil, err
 	}
