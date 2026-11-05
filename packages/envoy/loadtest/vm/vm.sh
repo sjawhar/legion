@@ -1567,10 +1567,19 @@ reset_deployment() {
     die "create database $database from $template failed"
   steps+=("create database $database template $template")
   # 4. NATS again on a fresh JetStream store: the store is its machine's disk, so the restart
-  # alone would keep every stream, consumer and KV bucket of the step before.
+  # alone would keep every stream, consumer and KV bucket of the step before. The removal goes
+  # through sudo, as every docker call on these machines does, because what is inside the store
+  # is the NATS container's: that container runs as root and makes jetstream/ there at mode 700,
+  # which the ssh user cannot descend into, so that user's own rm -rf of the store is refused
+  # "Permission denied" and a series fails at its first reset (dispatch://INFRA-988). The mkdir
+  # that follows stays the ssh user's, because what this step must leave is the store exactly as
+  # up leaves it: that user's own directory, at the mode that user's umask gives, under a remote
+  # root up has already given to the same user. A store remade with sudo would be root's at
+  # root's umask, which the NATS container would go on writing in while every reset after this
+  # one met the same refusal -- the defect hidden rather than fixed.
   container_stop nats
   # shellcheck disable=SC2016 # expanded by that machine's sh
-  on_vm "$(container_vm nats)" sh -c 'rm -rf -- "$1" && mkdir -p -- "$1"' sh "$(nats_store)" ||
+  on_vm "$(container_vm nats)" sh -c 'sudo rm -rf -- "$1" && mkdir -p -- "$1"' sh "$(nats_store)" ||
     die "emptying the JetStream store $(nats_store) on the $(container_vm nats) VM failed"
   steps+=("fresh jetstream store $(nats_store)")
   container_start nats

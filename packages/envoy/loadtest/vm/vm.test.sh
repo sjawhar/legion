@@ -19,7 +19,10 @@
 # test says otherwise; `loadgen` records its argv, writes the files the next step reads, and as
 # the stub embedder holds a port, which a second stub on it is refused; `pprof-tunnel` is the
 # deployment file's pprof_tunnel_command, which stands for the `ssh -N -L ...` a step runs on
-# the load machine. `jq`, `ssh-keygen` and `sudo`'s own commands are the real ones.
+# the load machine. `jq`, `ssh-keygen` and `sudo`'s own commands are the real ones, and `rm` is
+# the real one but for a path a case registers as another user's directory at mode 700, which it
+# refuses to remove unless the removal came through `sudo`: this pod is not root, so no fake can
+# make a file of another user.
 #
 # Asserts that: (a) every subcommand refuses a missing --config, and refuses one that is not
 # readable JSON, before it reaches a VM; (b) up starts every container of the specification, in
@@ -93,7 +96,9 @@
 # credential file its owner's alone, the loadgen copy executable -- and every path up hands a
 # container, read out of the docker run calls up made rather than listed here, is reachable by
 # whoever reads it: a mounted path by the container's own user, an environment file by docker as
-# root alone.
+# root alone. And (w) reset empties a JetStream store that the NATS container has written in --
+# a directory inside the store that the ssh user cannot remove -- with sudo, and leaves the
+# store there, empty, and the ssh user's own at the mode up leaves it at.
 set -euo pipefail
 # Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
 # given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
@@ -106,6 +111,10 @@ readonly vm=$here/vm.sh
 # fake sleep that returns at once never turns its wait into a spin.
 REAL_SLEEP=$(command -v sleep)
 readonly REAL_SLEEP
+# The real rm, caught the same way: the fake rm below delegates to it, and this test's own
+# cleanup removes its directory with it, whatever a case has told the fake to refuse.
+REAL_RM=$(command -v rm)
+readonly REAL_RM
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/vm-test.XXXXXX")
 readonly tmp
 readonly fake=$tmp/fake bin=$tmp/bin
@@ -118,7 +127,7 @@ export LOADTEST_VM_ROOT=$tmp/root
 # anything of another run.
 cleanup() {
   pkill -f "$tmp/" 2>/dev/null || true
-  rm -rf -- "$tmp"
+  "$REAL_RM" -rf -- "$tmp"
 }
 trap cleanup EXIT
 
@@ -545,7 +554,9 @@ cat >"$bin/sudo" <<'EOF'
 #!/usr/bin/env bash
 # The fake sudo: records the call and runs it here. This pod is not root and has no
 # /mnt/stateful_partition, so a path under the stateful partition is made under FAKE_DIR/stateful
-# instead; the log keeps the path vm.sh asked for, which is what the cases read.
+# instead; the log keeps the path vm.sh asked for, which is what the cases read. What it runs is
+# run with FAKE_SUDO=1, which is how the fake rm tells a removal root makes from one the ssh
+# user makes.
 set -u
 printf 'sudo\t%s\t%s\n' "${FAKE_SSH_TARGET:-local}" "$*" >>"$FAKE_DIR/actions.log"
 args=()
@@ -555,6 +566,7 @@ for a in "$@"; do
     *) args+=("$a") ;;
   esac
 done
+export FAKE_SUDO=1
 exec "${args[@]}"
 EOF
 
@@ -608,6 +620,35 @@ cat >"$bin/chown" <<'EOF'
 set -u
 printf 'chown\t%s\t%s\n' "${FAKE_SSH_TARGET:-local}" "$*" >>"$FAKE_DIR/actions.log"
 exit 0
+EOF
+
+cat >"$bin/rm" <<EOF
+#!/usr/bin/env bash
+REAL_RM=$REAL_RM
+EOF
+cat >>"$bin/rm" <<'EOF'
+# The fake rm: the real rm, but for the one thing the real one cannot do in this pod. A path
+# listed in FAKE_DIR/root-owned stands for a directory another user made at mode 700 -- what the
+# NATS container, running as root, leaves inside the JetStream store. This pod is not root and
+# cannot make a directory of another user, so the fake refuses to remove such a path, in the
+# words the real rm uses, unless the call came through the fake sudo (FAKE_SUDO), which stands
+# for root removing it. Only a command running on a machine meets the refusal
+# (FAKE_SSH_TARGET), so this test's own removals are the real rm's whatever a case has listed.
+set -u
+if [ -n "${FAKE_SSH_TARGET:-}" ] && [ "${FAKE_SUDO:-}" != 1 ] && [ -f "${FAKE_DIR:-}/root-owned" ]; then
+  while IFS= read -r guarded; do
+    [ -n "$guarded" ] && [ -e "$guarded" ] || continue
+    for arg in "$@"; do
+      case $guarded in
+        "$arg" | "$arg"/*)
+          printf "rm: cannot remove '%s': Permission denied\n" "$guarded" >&2
+          exit 1
+          ;;
+      esac
+    done
+  done <"$FAKE_DIR/root-owned"
+fi
+exec "$REAL_RM" "$@"
 EOF
 
 chmod +x "$bin"/*
@@ -2143,5 +2184,65 @@ while IFS=$'\t' read -r target name kind spec; do
   esac
 done <<<"$given_to_containers"
 pass "every path up hands a container is reachable by the reader that reads it: a mounted path by the container's own user, an environment file by docker as root alone"
+
+# ---- (w) reset empties a JetStream store the NATS container wrote in -------------------------
+
+# dispatch://INFRA-988, the sibling of case (v) and the defect that killed the series at its
+# first step, 90 seconds in. Case (v) reads what up leaves, and up leaves the store the ssh
+# user's own, so no case of it can see what the store holds once a container has written there.
+# The NATS container runs as root and makes jetstream/ inside the store at mode 700. The ssh
+# user owns the store and writes in it, but cannot descend into that directory, so the reset's
+# own `rm -rf <store>` was refused "Permission denied" on the deployment -- a confusing partial
+# failure, since the store itself was that user's all along -- and reset ended there, before any
+# step of the series had measured anything.
+#
+# What the fakes can show: this pod is not root, so a directory of another user is the one thing
+# no fake can make. The fake rm stands in for it -- a path registered in FAKE_DIR/root-owned is
+# refused to everything but the fake sudo -- and the case holds reset to the whole of the live
+# shape: that it succeeds over such a store, that the store is empty afterwards, and that it is
+# back at the owner and mode up leaves it at, so that the next container start and the next
+# reset meet what the first one met.
+
+reset_fake
+# The machines' own umask, as in case (v) above: the store's mode follows the shell the ssh ran
+# in, and the mkdir of up and the mkdir of reset must both be under it.
+saved_umask=$(umask)
+umask 022
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the JetStream store case: see the output above"
+seeded_run
+store=$remote/app/nats
+up_mode=$(stat -c %a "$store") up_owner=$(stat -c %U "$store")
+# What the NATS container leaves in the store, in the shape it leaves it: a directory inside the
+# store that the ssh user cannot remove, holding the streams of the step before.
+mkdir -p "$store/jetstream/\$G/streams/KV_envoy_interests"
+printf 'a stream the NATS container wrote as root\n' >"$store/jetstream/\$G/streams/KV_envoy_interests/1.blk"
+printf '%s\n' "$store/jetstream" >"$fake/root-owned"
+# And the fakes do refuse it, in the words the deployment answered with: a case that proves
+# nothing is worse here than no case, since this is the step the whole series died at.
+refusal=$(FAKE_SSH_TARGET=$nats_target rm -rf -- "$store" 2>&1) || true
+[ "$refusal" = "rm: cannot remove '$store/jetstream': Permission denied" ] ||
+  fail "the fakes do not refuse the ssh user's own removal of $store/jetstream, so this case would pass whatever reset does: ${refusal:-the removal succeeded}"
+: >"$fake/actions.log"
+run_vm reset --config "$config"
+umask "$saved_umask"
+((RC == 0)) || fail "reset failed over a JetStream store the NATS container had written in: see the output above"
+sudo_log "$nats_target" | grep -qxF -- "rm -rf -- $store" ||
+  fail "reset did not remove the JetStream store with sudo on $nats_target: what is inside the store is the NATS container's, written as root at mode 700, and the ssh user cannot remove it: $(sudo_log "$nats_target")"
+[ -d "$store" ] || fail "reset left no JetStream store at $store, so the NATS container it started next has nothing at /data"
+[ -z "$(ls -A -- "$store")" ] ||
+  fail "reset left $(ls -A -- "$store" | tr '\n' ' ')in the JetStream store at $store: step N+1 would start with step N's streams, consumers and KV buckets"
+store_mode=$(stat -c %a "$store") store_owner=$(stat -c %U "$store")
+[ "$store_owner" = "$up_owner" ] ||
+  fail "reset left the JetStream store owned by $store_owner and up leaves it owned by $up_owner: a store that is not the ssh user's is one that user cannot empty, which is this defect rather than its fix"
+[ "$store_mode" = "$up_mode" ] ||
+  fail "reset left the JetStream store at mode $store_mode and up leaves it at $up_mode: the next container start would meet a store the first one did not"
+((8#$store_mode & 8#044)) && ((8#$store_mode & 8#011)) ||
+  fail "reset left the JetStream store at mode $store_mode, which its owner alone can read or enter, and the NATS container mounts it at /data as its own user"
+sudo_log "$nats_target" | grep -q -- "mkdir -p -- $store" &&
+  fail "reset made the JetStream store again with sudo, which leaves it root's at root's umask: the NATS container would go on writing in a store that no later reset could empty as the ssh user, which is this defect hidden rather than fixed"
+actions | grep -qx wipe-jetstream ||
+  fail "reset's own record of the emptied store is gone from the action log: $(actions)"
+pass "reset empties a JetStream store the NATS container wrote in as root -- the removal with sudo, the store made again as the ssh user -- and leaves it there, empty, at the owner and mode up leaves it at"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'

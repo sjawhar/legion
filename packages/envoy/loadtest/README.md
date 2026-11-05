@@ -3043,6 +3043,11 @@ NATS and listener restart is part of it because the listener keeps interests, se
 claims in NATS KV, and every unit session leaves a durable consumer with a 72-hour inactivity
 threshold: without it, step N+1 would start with step N's consumers.
 
+The store is the NATS container's to write and the driver's to clear: that container makes
+`jetstream/` inside it as root at mode 700, which the ssh user cannot descend into, so `reset`
+removes the store with `sudo` and makes it again as the ssh user at the mode `up` leaves it at
+(dispatch://INFRA-988).
+
 ### The profiling tunnel
 
 Dispatch's profiling port binds `127.0.0.1` only (`cmd/dispatch/pprof.go`), and Dispatch runs with
