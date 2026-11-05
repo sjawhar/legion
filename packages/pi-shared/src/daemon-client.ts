@@ -34,8 +34,12 @@ import type { z } from "zod";
  * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
  * every Legion session through.
  *
- * Every response is read through the strict schemas of `@legion/contracts/legion-api`, which the
- * daemon's golden tests hold to its own types; the requests are the claim wire of
+ * Every response is read through the answer schemas of `@legion/contracts/legion-api`, which
+ * ignore a key they do not name: a daemon one contract ahead of this build is read rather than
+ * refused, and the key it added is dropped from the value handed on. A missing field or a field
+ * of a type the schema does not describe is still a refusal, and the daemon's golden tests still
+ * hold the reader to the daemon's own types, by the equality between each golden's parse and its
+ * file in `packages/contracts/src/legion-api.test.ts`. The requests are the claim wire of
  * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
  * secret recovery: the daemon persists a registration's capability before it answers, so a
  * restart forgets no secret.
@@ -336,8 +340,11 @@ export async function retryWhileDaemonRestarts<T>(
   }
 }
 
-/** `body` read through `schema`, or the reason it is not what the schema describes. */
-function parseStrictly<T>(
+/** `body` read through `schema`, or the reason it is not what the schema describes. The answer
+ * schemas ignore a key they do not name, so a body carrying a field this build's contract has no
+ * name for is read and that field left out of the value; what is refused is a body that is not
+ * JSON, a missing required field, and a field of a type the schema does not describe. */
+function parseBody<T>(
   schema: z.ZodType<T>,
   body: string
 ): { readonly value: T } | { readonly problem: string } {
@@ -381,13 +388,15 @@ export function createLegionDaemonClient(
     });
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
-    const refusal = parseStrictly(LegionErrorResponse, text);
+    const refusal = parseBody(LegionErrorResponse, text);
     if ("value" in refusal) {
-      const code =
-        "code" in refusal.value && typeof refusal.value.code === "string"
-          ? refusal.value.code
-          : undefined;
-      throw new LegionDaemonApiError(method, path, response.status, code, refusal.value.error);
+      throw new LegionDaemonApiError(
+        method,
+        path,
+        response.status,
+        refusal.value.code,
+        refusal.value.error
+      );
     }
     throw new LegionDaemonApiError(
       method,
@@ -406,14 +415,14 @@ export function createLegionDaemonClient(
     signal?: AbortSignal
   ): Promise<T> => {
     const { status, text } = await call(method, path, body, signal);
-    const parsed = parseStrictly(schema, text);
+    const parsed = parseBody(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
     }
     return parsed.value;
   };
 
-  /** Parses the request before it leaves the pane, then parses the route's strict success body. */
+  /** Parses the request before it leaves the pane, then reads the route's success body. */
   const post = <Input, Output>(
     path: string,
     request: z.ZodType<Input>,
