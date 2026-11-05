@@ -134,6 +134,13 @@ func TestStatementTimings(t *testing.T) {
 	// query without it would be of a statement production never runs (relatedEFSearch).
 	meaningSetup := []string{relatedEFSearch}
 	searchMeaningArguments := slices.Concat(searchArguments, meaning)
+	// Search's own two statements bind the search bar's filters and the issues a query names by
+	// key beside the eight and eleven main binds (searchQueryArguments). Every one of them is
+	// empty here, so the before and after texts are measured on the same subject.
+	afterSearchArguments := searchQueryArguments(searchParameters{
+		text: word, project: subjects.Project, limit: searchDefaultLimit,
+	})
+	afterSearchMeaningArguments := slices.Concat(afterSearchArguments[:8], meaning, afterSearchArguments[8:])
 	relatedKeywordArguments := slices.Concat(relatedArguments, []any{lexemes, weights})
 	relatedMeaningArguments := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
 	// The probe is measured on a subject of its own, subjects.ProbeLexemes, the project's twenty
@@ -181,10 +188,10 @@ func TestStatementTimings(t *testing.T) {
 
 	runner.Pair(t, "searchQuery, keywords only",
 		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
-		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
+		benchtime.Statement{SQL: searchQuery, Args: afterSearchArguments})
 	runner.Pair(t, "searchQueryMeaning",
 		benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchMeaningArguments},
-		benchtime.Statement{SQL: searchQueryMeaning, Args: searchMeaningArguments})
+		benchtime.Statement{SQL: searchQueryMeaning, Args: afterSearchMeaningArguments})
 	// relatedKeywordQuery and relatedMeaningQuery are gated on the document arm they share
 	// rather than on either whole statement. The arm is the piece whose text differs, and it is
 	// a fraction of a second of a statement of about ten, whose other four arms, fusion, page

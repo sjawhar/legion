@@ -189,6 +189,17 @@ const SearchKindDepth = 100
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
 
+// SearchOperatorPhrase, SearchOperatorOr and SearchOperatorExclude are the operator forms
+// GET /api/v1/search reads in a person's words and names in its answer's query.operators: a
+// quoted phrase, the OR between two words, and a -word it leaves out. Generated from
+// SEARCH_OPERATOR_PHRASE, SEARCH_OPERATOR_OR and SEARCH_OPERATOR_EXCLUDE in packages/contracts so
+// the strings Dispatch answers and the strings a client reads them by cannot drift apart.
+const (
+	SearchOperatorPhrase  = "phrase"
+	SearchOperatorOr      = "or"
+	SearchOperatorExclude = "exclude"
+)
+
 // MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
 // MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
 const MaxIssueBlockers = 20

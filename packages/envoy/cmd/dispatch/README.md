@@ -1907,6 +1907,17 @@ Migration 0010 added stored generated `search` columns.
 Migrations `0057`–`0061` made them plain columns that a `BEFORE INSERT OR UPDATE` trigger per table fills (`issues_search`, `artifact_versions_search`, `comments_search`, `asks_search`, `messages_search`), so no application code writes or refreshes a search vector.
 Every indexed text, headline, and duplicate-title comparison first passes through `search_text` (0056), which puts a space after every sixteenth underscore-joined segment.
 A query is not normalised and is limited to 1,000 characters.
+`websearch_to_tsquery` ANDs a person's words, so a question of theirs answers nothing as soon as one of its words is in no item at all.
+Past `searchBroadenWords` (5) words search ORs the query's own words onto it, each stemmed by the same `websearch_to_tsquery`, and the words the query excludes are ANDed onto that leg, so a `-word` still leaves its rows out.
+`ts_rank_cd` then ranks a row by how many of the words it holds, which puts a row holding all of them first, and a query of five words or fewer is the AND it has always been.
+The operator forms a person writes — a `"phrase"`, an `OR`, a `-word` — are `websearch_to_tsquery`'s own reading throughout, and the answer names the ones it read (`query.operators`, `contracts.SearchOperator*`) and whether it broadened the query (`query.broadened`).
+
+Three filters narrow every leg of a search beside `project`, each in the arm itself rather than over the page, so a filtered search reads its own matches as deep as any other search reads (`searchRowFilters`):
+`status` is the status of the issue a row belongs to, and a row whose kind has no issue — a project document, and a comment or ask on one — matches no status at all;
+`author` is the actor that wrote the item the row names, matched on its id (a person's login or a session's id), an issue's and a document's being their creator;
+and `updated_since` (RFC 3339) is when the item itself was last written, not when anything on its issue moved, since an issue's `updated_at` moves whenever anything on it does.
+The answer carries the filters it applied (`filters`), as it carries how it read the words.
+
 Search covers issue titles, the latest settled document text, comments, asks (questions, option labels and descriptions, free-text answers and the options an answer chose), and messages.
 An issue's own vector carries its key and its title at weight `A`, as `0088` left them, and the markdown of the latest version of its primary document at weight `C` (`20261105145242`), so an issue whose title holds none of its spec's words is still found by them, and below every issue whose key or title holds them:
 `ts_rank_cd`, which ranks every keyword arm, scores `A` at 1.0 and `C` at 0.2.
@@ -1958,7 +1969,12 @@ Each leg contributes its own score — the keyword leg's `ts_rank_cd` with lengt
 A row both legs find scores the sum of both, which is above what either leg alone gives it.
 No kind is ranked ahead of another, in the legs or in the page: a kind leads only by scoring highest.
 Hits that score alike are ordered by recency and id, so the order is total and consecutive `offset`s walk it once while the corpus holds still.
-An issue whose key is the whole query leads the page by `searchOwnKeyLead`, which is above every score the legs can reach together.
+An issue the query names by key leads the page by `searchOwnKeyLead`, which is above every score the legs can reach together.
+A query that is one issue key is read in each form a person writes it (`searchKeyForms`): `INFRA-1042`, `infra-1042`, `INFRA 1042` with a space where the hyphen is, and the number alone.
+Only the first two match an issue's own vector, which holds its key as one hyphenated lexeme (`'infra' <-> '-1042'`), so the statement is given the keys themselves (`q.own_keys`) and its issue arm matches an issue named by key as well as one its tsquery finds.
+The number alone names the issue of that number in the `project` a request names, or in every project at once, and then every one of them heads the list, in project order, before any other row.
+The forms are read in Go rather than by a pattern inside the statement, because the statement then matches a list of keys against the issues primary key, which an index answers, where a pattern tested over every row of `issues` is a scan of that table on every search.
+A number alone is the one form that costs a read of its own (`searchOwnIssueKeys`), since only `issues` knows which projects hold that number.
 Each leg keeps its best `contracts.SearchKindDepth` (100) hits:
 the answer's `total` counts every match of every kind, and `reachable` the hits the pages can return, so an `offset` at or past `reachable` answers no hits with both counts.
 

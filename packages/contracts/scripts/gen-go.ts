@@ -31,6 +31,9 @@ import {
   PROJECT_NAME_MAX,
   RECEIPT_TIMEOUT_CAUSE,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
+  SEARCH_OPERATOR_EXCLUDE,
+  SEARCH_OPERATOR_OR,
+  SEARCH_OPERATOR_PHRASE,
 } from "../src/dispatch-api";
 import {
   ASK_QUESTION_MAX,
@@ -165,6 +168,17 @@ const SearchKindDepth = ${SEARCH_KIND_DEPTH}
 // Generated from SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE in packages/contracts so the string
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE)}
+
+// SearchOperatorPhrase, SearchOperatorOr and SearchOperatorExclude are the operator forms
+// GET /api/v1/search reads in a person's words and names in its answer's query.operators: a
+// quoted phrase, the OR between two words, and a -word it leaves out. Generated from
+// SEARCH_OPERATOR_PHRASE, SEARCH_OPERATOR_OR and SEARCH_OPERATOR_EXCLUDE in packages/contracts so
+// the strings Dispatch answers and the strings a client reads them by cannot drift apart.
+const (
+	SearchOperatorPhrase  = ${JSON.stringify(SEARCH_OPERATOR_PHRASE)}
+	SearchOperatorOr      = ${JSON.stringify(SEARCH_OPERATOR_OR)}
+	SearchOperatorExclude = ${JSON.stringify(SEARCH_OPERATOR_EXCLUDE)}
+)
 
 // MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
 // MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.

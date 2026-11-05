@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/embed"
 )
 
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan proves each meaning candidate CTE's own
@@ -49,8 +46,8 @@ func TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan(t *testing.T) {
 
 	const q = "index test"
 	var planJSON []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+searchQueryMeaning, q, "", searchDefaultLimit, firstTerm(q), headlineOptions,
-		0, contracts.SearchKindDepth, searchFusionK, embed.Literal(queryVector()), searchMeaningFloor, embedder.Identity()).Scan(&planJSON); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+searchQueryMeaning, searchMeaningQueryArguments(
+		searchParameters{text: q, limit: searchDefaultLimit}, queryVector(), embedder.Identity())...).Scan(&planJSON); err != nil {
 		t.Fatalf("explain: %v", err)
 	}
 	var plan []struct {
