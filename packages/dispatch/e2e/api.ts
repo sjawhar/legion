@@ -37,6 +37,7 @@ import type {
   HandoffSummary,
   InboxRow,
   Issue,
+  IssueCheckResults,
   IssueCoverage,
   IssueDetails,
   IssueSummary,
@@ -275,6 +276,21 @@ export function recordCheckResult(
   );
 }
 
+/** `GET /api/v1/issues/{key}/results`: the checks of the issue's Verification document in
+ *  document order, each with every result recorded against it, newest first, and each result's
+ *  currency as the server computes it on the read. */
+export function getIssueResults(
+  issue: string,
+  options: ApiOptions = {}
+): Promise<IssueCheckResults> {
+  return request<IssueCheckResults>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/results`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. */
 export function getIssueCoverage(issue: string, options: ApiOptions = {}): Promise<IssueCoverage> {
   return request<IssueCoverage>(
@@ -438,6 +454,27 @@ export function createIssueArtifact(
     input,
     options
   );
+}
+
+/** Uploads bytes as an issue artifact through the multipart form the file picker posts. The JSON
+ *  body `createIssueArtifact` sends carries text only, so an image can only be seeded this way. */
+export async function uploadIssueFile(
+  issue: string,
+  input: { bytes: Uint8Array<ArrayBuffer>; contentType: string; name: string },
+  login = "alice"
+): Promise<ArtifactUploadResponse> {
+  const form = new FormData();
+  form.append("name", input.name);
+  form.append("file", new Blob([input.bytes], { type: input.contentType }), input.name);
+  const response = await fetch(
+    new URL(`/api/v1/issues/${encodeURIComponent(issue)}/artifacts`, baseUrl),
+    { body: form, headers: await userHeaders(login), method: "POST" }
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`upload ${input.name} to ${issue} failed: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ArtifactUploadResponse;
 }
 
 export function getProjectArtifact(
