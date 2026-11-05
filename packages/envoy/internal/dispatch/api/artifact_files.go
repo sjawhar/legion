@@ -1,15 +1,20 @@
 package api
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 )
 
@@ -85,29 +90,40 @@ func (s *server) refuseUploadBeforeItsObject(ctx context.Context, target artifac
 // bytes is served from the row, whatever store is configured; a row the backfill cleared, or that
 // an upload wrote with a store, names its object by hash and is streamed from the store.
 //
+// The answer carries the file's own name (fileDisposition), inline for a type a browser draws
+// where the reader is and attachment for every other, and names the bytes by their hash in a
+// quoted entity tag, the only form net/http reads back from If-Range and If-None-Match.
+//
+// A reader may ask for part of a file: every answer says so (`Accept-Ranges: bytes`), since a
+// player decides from the first answer it gets whether it may seek. Row bytes and, for a request
+// that carries a Range, store bytes are answered by http.ServeContent, which writes the length
+// and the status itself and answers Range, 206, Content-Range, 416 and the conditional reads. A
+// store request with no Range is streamed as it always was, so a file is never held in memory
+// for a reader who asked for the whole of it.
+//
 // The headers wait for the object to open, so a store that fails answers 502 and never a 200 cut
-// short; a body that fails after that, or does not hash to the row's hash, aborts the response
-// mid-stream rather than ending it as if whole.
+// short; a body that fails after that, or does not hash to the row's hash, aborts the streamed
+// response mid-stream rather than ending it as if whole.
 //
 // A version's bytes never change, so a browser keeps them for a year without asking again: the
 // pictures a conversation shows inline are fetched once. `private`, since the route is
 // authenticated and no shared cache may hold them. A document version is not served here and
 // keeps its headers.
-func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, contentType, sha *string, size *int64) {
-	headers := func(length int64) {
-		w.Header().Set("Content-Type", cmp.Or(deref(contentType), "application/octet-stream"))
+func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifactID, name string, number int, content []byte, contentType, sha *string, size *int64) {
+	storedType := cmp.Or(deref(contentType), "application/octet-stream")
+	headers := func() {
+		w.Header().Set("Content-Type", storedType)
 		if sha != nil {
-			w.Header().Set("ETag", *sha)
+			w.Header().Set("ETag", `"`+*sha+`"`)
 		}
 		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
-		w.Header().Set("Content-Disposition", "attachment")
+		w.Header().Set("Content-Disposition", fileDisposition(storedType, name))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Accept-Ranges", "bytes")
 	}
 	if content != nil {
-		headers(int64(len(content)))
-		_, _ = w.Write(content)
+		headers()
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(content))
 		return
 	}
 	if s.deps.Files == nil {
@@ -143,7 +159,29 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		writeError(w, "FILE_MISSING", http.StatusInternalServerError, "this file's bytes cannot be found")
 		return
 	}
-	headers(object.Size)
+	if r.Header.Get("Range") != "" {
+		// A part of the file is answered from the whole of it: the store hands out one stream
+		// from the object's start, and the reader that checks the hash must see all of it
+		// (files.ReadAll reads an object this way too). The object is at most
+		// files.MaxObjectSize, which the store's own writes are held to, so the read is bounded.
+		whole := make([]byte, object.Size)
+		if _, err := io.ReadFull(object.Body, whole); err != nil {
+			if r.Context().Err() != nil {
+				return // The client went away; nothing to tell it.
+			}
+			// Nothing is written yet, so a body that fails or does not hash to the row's hash
+			// is named rather than cut short: the bytes the row names cannot be served.
+			slog.Error("dispatch: read a file version from the file store for a ranged request", "artifact", artifactID, "version", number, "sha256", *sha, "error", err)
+			writeError(w, "FILE_MISSING", http.StatusInternalServerError, "this file's bytes cannot be found")
+			return
+		}
+		headers()
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(whole))
+		return
+	}
+	headers()
+	w.Header().Set("Content-Length", strconv.FormatInt(object.Size, 10))
+	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, object.Body); err != nil {
 		if r.Context().Err() != nil {
 			return // The client went away; nothing to tell it.
@@ -151,4 +189,74 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		slog.Error("dispatch: stream a file version from the file store", "artifact", artifactID, "version", number, "sha256", *sha, "error", err)
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// fileDisposition is a version download's Content-Disposition: inline for a content type a
+// browser draws where the reader is (contracts.InlineContentTypes, which the dashboard reads
+// too), attachment for every other one, with the artifact's own name as the filename either way,
+// so a saved file keeps the name Dispatch shows. The stored type is matched without its
+// parameters, since `image/png; charset=binary` is the same picture as `image/png`.
+//
+// The name is given twice, as RFC 6266 says: `filename`, which every client reads and only ASCII
+// can express, and `filename*`, RFC 8187's encoding of the whole name, which every browser since
+// IE9 prefers.
+func fileDisposition(storedType, name string) string {
+	mediaType := storedType
+	if parsed, _, err := mime.ParseMediaType(storedType); err == nil {
+		mediaType = parsed
+	}
+	disposition := "attachment"
+	if _, inline := contracts.InlineContentTypes[mediaType]; inline {
+		disposition = "inline"
+	}
+	// Both parameters are written here rather than by mime.FormatMediaType, which writes one
+	// parameter of a name: it leaves a value that is a token unquoted, and for a name holding a
+	// character a token may not carry it writes the RFC 2231 extended parameter in place of the
+	// plain one, which would leave a client that reads only `filename` with no name at all.
+	return disposition +
+		`; filename="` + plainFilename(name) + `"` +
+		"; filename*=UTF-8''" + percentEncodeFilename(name)
+}
+
+// plainFilename is name as the text inside the quotes of a `filename` parameter: a character the
+// parameter cannot carry - a control character, or anything outside printable ASCII, which only
+// `filename*` can express - written as an underscore, and a quote or a backslash escaped by a
+// backslash, which is the whole of RFC 6266's quoted-string. A client that reads `filename*`
+// never sees it.
+func plainFilename(name string) string {
+	plain := make([]byte, 0, len(name))
+	for _, char := range name {
+		switch {
+		case char < 0x20 || char > 0x7e:
+			plain = append(plain, '_')
+		case char == '"' || char == '\\':
+			plain = append(plain, '\\', byte(char))
+		default:
+			plain = append(plain, byte(char))
+		}
+	}
+	return string(plain)
+}
+
+// percentEncodeFilename is name as a `filename*` parameter's value, the text after its charset
+// and language: every byte outside RFC 8187's attr-char set percent-encoded. Hand-rolled because
+// the standard library's escapes are for URLs, not for this: url.PathEscape leaves a semicolon, a
+// comma and a quote through, each of which would end the parameter where the name has not, and
+// url.QueryEscape writes a space as a plus sign, which a client reads as a plus sign.
+func percentEncodeFilename(name string) string {
+	const hexDigits = "0123456789ABCDEF"
+	var encoded strings.Builder
+	encoded.Grow(len(name))
+	for _, char := range []byte(name) {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9',
+			strings.IndexByte("!#$&+-.^_`|~", char) >= 0:
+			encoded.WriteByte(char)
+		default:
+			encoded.WriteByte('%')
+			encoded.WriteByte(hexDigits[char>>4])
+			encoded.WriteByte(hexDigits[char&0xf])
+		}
+	}
+	return encoded.String()
 }

@@ -882,7 +882,7 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.serveFileVersion(w, r, artifact.ID, number, content, contentType, sha, size)
+	s.serveFileVersion(w, r, artifact.ID, artifact.Name, number, content, contentType, sha, size)
 }
 
 // deref is the string a nullable column holds, or "".
