@@ -402,6 +402,62 @@ test("an upload's file survives a reload and the upload resumes with it", async 
   });
 });
 
+// W24. A Retry Dispatch's refusal sends under a new key takes the upload's file with it: the file
+// is kept under the key its attempt carries, so one row is left, under the new key, and a reload
+// makes the upload again from it.
+test("a retried upload's file moves to its new key, and a reload resumes it there", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const files = memoryFiles();
+    const file = new File(["spec body"], "spec.md", { type: "text/markdown" });
+    const form = new FormData();
+    form.set("name", "spec.md");
+    form.set("file", file);
+    const upload: WriteRequest = {
+      body: form,
+      method: "POST",
+      path: "/api/v1/issues/CORE-1/artifacts",
+    };
+    const send = spyOn(api, "send").mockResolvedValue({ artifact: {}, version: {} } as never);
+    const before = new Writes(signedIn(), tab.page(), files);
+    try {
+      let answer: () => Promise<unknown> = () => Promise.reject(verdict);
+      void before
+        .run({
+          detail: null,
+          file,
+          kind: plainWrite,
+          label: "Upload of spec.md",
+          presentation: "indicator",
+          write: attemptOf(upload, () => answer()),
+        })
+        .catch(() => {});
+      await settle();
+      const refused = row(before);
+      expect(refused?.status).toBe("refused");
+
+      answer = () => Promise.withResolvers<never>().promise;
+      before.retry(refused?.id ?? 0);
+      await settle();
+      const key = row(before)?.key ?? "";
+      expect(key).not.toBe(refused?.key);
+      expect([...files.rows.keys()]).toEqual([key]);
+
+      // With no file under the new key the resumed upload has no request to make (`requestFrom`)
+      // and no attempt: that this one goes out under that key is the file found there.
+      const after = new Writes(signedIn(), tab.page(), files);
+      after.resume("alice");
+      await settle();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0]?.[1] as WriteBounds).key).toBe(key);
+      expect(after.rows()).toEqual([]);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
 // W26. A write belongs to the person who pressed it: another login's kept write is dropped unmade
 // on load, and once someone else is signed in, every write of another login stops and goes - in
 // memory and in storage - and its press is refused.

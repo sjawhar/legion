@@ -420,12 +420,25 @@ export class Writes {
 
   /** Makes the refused write `id` again, at the back of its target's line: under its own key when
    *  it ended without Dispatch's verdict, under a new one when Dispatch refused it
-   *  (`retriesUnderItsKey`). */
+   *  (`retriesUnderItsKey`), an upload's kept file moving to that new key with it. */
   retry(id: number): void {
     const entry = this.#entries.get(id);
     if (entry?.write.status !== "refused") return;
-    const key = retriesUnderItsKey(entry.write.refusal) ? entry.write.key : newSendKey();
-    if (key !== entry.write.key) this.#kept.forget(entry.write.key);
+    const old = entry.write.key;
+    const key = retriesUnderItsKey(entry.write.refusal) ? old : newSendKey();
+    if (key !== old) {
+      this.#kept.forget(old);
+      const { file } = entry;
+      const { login } = entry.write;
+      // The file is kept under the key its attempt carries, so it moves to the new one. The old
+      // row goes only once the new one is in, so a reload between the two finds the file under
+      // one key or the other and never under neither. The put stamps the new row with the time
+      // it was made, which is the age `keepOnly` measures, so the file's day and its key's run
+      // together.
+      if (file !== undefined && login !== undefined) {
+        void this.#files.put(key, login, file).then(() => this.#files.delete(old));
+      }
+    }
     entry.stop = new AbortController();
     entry.write = {
       ...baseOf(entry.write),
@@ -433,7 +446,7 @@ export class Writes {
       key,
       pressedAt: Date.now(),
       retried: false,
-      sent: key === entry.write.key && entry.write.sent,
+      sent: key === old && entry.write.sent,
       status: "queued",
       uploaded: undefined,
     };
