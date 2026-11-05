@@ -974,6 +974,31 @@ test("IssuePage opens the Decisions tab with the t d chord", async () => {
   }
 });
 
+test("IssuePage opens the Collaborators tab with the t o chord", async () => {
+  const restore = stubIssuePage(issue);
+  const collaborators = spyOn(api, "getIssueCollaborators").mockResolvedValue({
+    agents: [],
+    issue_key: "CORE-1",
+    legion_registry: "ok",
+    people: [],
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.keyDown(document.body, { key: "t" });
+    fireEvent.keyDown(document.body, { key: "o" });
+
+    await screen.findByRole("tab", { name: "Collaborators", selected: true });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/collaborators");
+    await waitFor(() => expect(collaborators).toHaveBeenCalledWith("CORE-1"));
+  } finally {
+    view.unmount();
+    collaborators.mockRestore();
+    restore();
+  }
+});
+
 test("IssuePage renders a not-found view for an unrecognized tab suffix without fetching the issue", async () => {
   const getIssueSpy = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getMyStateSpy = spyOn(api, "getMyState").mockResolvedValue({

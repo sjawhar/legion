@@ -32,6 +32,7 @@ import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { VerificationTab } from "../verification/VerificationTab";
 import { ChildrenTab } from "./ChildrenTab";
+import { CollaboratorsTab } from "./CollaboratorsTab";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { IssueHeader } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
@@ -584,6 +585,15 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             issueKey={issueKey}
           />
         ) : null}
+      </div>
+      <div
+        aria-hidden={activeTab !== "collaborators"}
+        aria-labelledby="issue-collaborators-tab"
+        hidden={activeTab !== "collaborators"}
+        id="issue-collaborators-panel"
+        role="tabpanel"
+      >
+        {activatedTabs.collaborators ? <CollaboratorsTab issueKey={issueKey} /> : null}
       </div>
     </section>
   );
