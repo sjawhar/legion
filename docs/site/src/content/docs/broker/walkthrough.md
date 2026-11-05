@@ -68,7 +68,8 @@ The link opens the request's page on the broker. The browser in the video holds 
 yet, so the link passes through the broker's sign-in, which signs alice in and brings her to the
 page; with a session already held it opens at once. The page prints, from the broker's own record,
 what was asked for, by which enrollment, why, for how long, who may approve it and its state. The
-request named no `--ttl`, so its grant lasts 12 hours, or less if the session ends first.
+request named no `--ttl`, so its grant lasts 15 minutes for a human-tier secret and 12 hours for
+any other, or less if the session ends first.
 
 ![The secrets broker's page Approve a secret request, signed in as alice@example.com: the secret ALICE_DEPLOY_KEY, requested by a pod enrollment the broker verified, its reason, lasting until the session ends, its requested and expiry times, approver alice@example.com, state pending, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
 

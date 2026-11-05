@@ -233,9 +233,9 @@ marked with tags or annotations:
   refused `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
   secret must ask for a lifetime no longer than the tag; a request with no `--ttl` asks for the
-  12-hour default.
+  default, 15 minutes when any secret it names is human tier and 12 hours otherwise.
 - **`default-grant`** is optional. Its one value is `session`: a request with no `--ttl` whose
-  secrets all carry it gets a grant that lasts until its session ends instead of 12 hours. Any other
+  secrets all carry it gets a grant that lasts until its session ends instead of that default. Any other
   value is refused `default-grant-malformed`. Set it with `agent-secrets secret create|retag
   --default-grant session`.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
@@ -396,7 +396,7 @@ reason of at most 400 characters. The broker evaluates every name
   end a grant, revoke it. A kind secret the broker stops serving, such as one whose
   `github-owners` is removed or malformed, stops releasing until the secret is served again.
 - A secret with `max-grant` needs a lifetime no longer than that duration. A request whose `--ttl`
-  (or, with none, the 12-hour default, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
+  (or, with none, the default of 15 minutes for a human-tier secret and 12 hours otherwise, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a release that finds
   a live grant lasting longer ends it for good (`GRANT_NOT_LIVE`), and a pending request that asked
   for longer is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again
