@@ -1,5 +1,36 @@
 # Changelog
 
+## [16.6.0] - 2026-11-05
+
+### Added
+
+- An Oh My Pi session gets its Dispatch token and its listener credential from the secrets
+  broker when no bearer is configured: `src/dispatch-session.ts`, the extension's listener
+  client and the AskGate report reader all present the one credential a resolved section
+  carries, which is a DPoP-bound access token traded for this machine's own identity. A session
+  configured with a bearer is unaffected.
+
+
+### Fixed
+
+- A broker-minted token now names the session that is using it. The plugin passes the session it
+  last bound, read again at every trade, to Dispatch, to the listener client and to AskGate's own
+  reads, so a fleet entry that fixes no session accepts the trade and the listener accepts a
+  subscribe, an unsubscribe, a role claim and a send naming this session. Nothing has to set
+  `AGENT_SECRETS_SESSION`, and a session the process switched to presents its own name rather
+  than the one the process started on.
+
+## [16.4.0] - 2026-11-05
+
+### Added
+
+- The plugin ships an `agent-secrets` skill, so every session with Dispatch learns the secrets
+  broker's client from one place: the `agent-secrets NAME… -- <command>` form, why a `$NAME` the
+  calling shell expands sends an empty value, that a 200 answer can still hold `"ok": false`,
+  what each exit status means, where a secret name comes from and how it may be used, what to do
+  before reporting a service out of reach, and what a person does on their own machine. The
+  plugin's skill partition is eight.
+
 ## [16.3.1] - 2026-11-04
 
 ### Fixed

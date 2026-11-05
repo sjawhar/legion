@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import type { ActiveDispatchConfig } from "../dispatch-config";
 import type * as SessionAnswersModule from "../session-answers";
 import {
@@ -418,7 +419,11 @@ let dispatchCount = 0;
 /** A Dispatch of its own per test: the 404 back-off is process-wide, by URL. */
 function dispatchAt(): ActiveDispatchConfig {
   dispatchCount += 1;
-  return { enabled: true, url: `http://answers-${dispatchCount}.test`, token: "test-token" };
+  return {
+    enabled: true,
+    url: `http://answers-${dispatchCount}.test`,
+    credential: bearerCredential("test-token"),
+  };
 }
 let sessionCount = 0;
 /** A session of its own per test: the read state is process-wide, by session. */

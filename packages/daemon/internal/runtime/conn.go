@@ -69,6 +69,13 @@ const (
 	RescueFailed  = "error"
 )
 
+// WorkspaceBundleTimeout is how long the agent's side is given to build its workspace's bundle:
+// a handful of jj reads and one `git bundle create` over the commits no remote branch holds,
+// which is a pack of a working copy's own change and a few unpushed commits, never the clone's
+// history. It is the runtimes' budget for the request, not a setting: a release that cannot get
+// a bundle in this long is one the daemon stops rather than one it waits longer for.
+const WorkspaceBundleTimeout = 5 * time.Minute
+
 // Conn is one agent's live connection, as everything above the transport sees it: a way to ask
 // the agent to do something, and nothing more. The facts that come back — the acknowledgement,
 // the turn starting, the turn ending, the connection closing — are events on the stream, never
@@ -93,6 +100,11 @@ type Conn interface {
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a
 	// workspace the daemon cannot reach itself.
 	AdoptWorkingCopy(ctx context.Context, id GitIdentity, timeout time.Duration) error
+	// BundleWorkspace has the agent's side bundle the unpushed work of the workspace every role
+	// of issue shares, for a release that is about to take the pod, its disk and that workspace
+	// away. A bundle larger than MaxWorkspaceBundleBytes is refused rather than sent, with the
+	// size it would have been in the refusal, so the release can stop and record why.
+	BundleWorkspace(ctx context.Context, issue string, timeout time.Duration) (WorkspaceBundle, error)
 	// RescueUnpushed asks the agent's shim to check every workspace on its pod's disk for work the
 	// remote lacks and to push that work to rescue branches, as the agent's role. A shim that does
 	// not know the request is ErrRescueUnsupported; every other error is transport or a refusal.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -76,7 +77,7 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 		handler http.HandlerFunc
 	}{
 		{"/v1/registry/" + unreadable, sessionEntryHandler(state)},
-		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions, nil)},
+		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions, nil, logging.New("test"))},
 	} {
 		t.Run(route.path, func(t *testing.T) {
 			recorder := get(route.handler, route.path)
