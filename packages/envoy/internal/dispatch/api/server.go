@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/singleflight"
 
@@ -1426,13 +1427,11 @@ func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 // act on - a whole uuid, or a prefix of it long enough to name one item - rather than telling
 // them to write the whole id, which is no longer what the route needs.
 //
-// A value uuid.Parse reads in one of its other spellings is rewritten to the canonical one
-// (canonicalizeUUIDPath) before the handler behind this reads it, so a handoff's route and every
-// other route that resolves no prefix reads the same spelling the prefix layer leaves: Postgres
-// refuses `urn:uuid:<uuid>` on a `::uuid` column, and the raw value would answer 500 where the
-// canonical one answers the route's own 404.
+// A value uuid.Parse reads in one of its other spellings reaches here already rewritten to the
+// canonical one: the prefix layer canonicalizes the {id} of every route that takes one
+// (canonicalizeUUIDPath), so this parse only decides whether the value is an id at all.
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
-	if _, ok := canonicalizeUUIDPath(r, "id", r.PathValue("id")); !ok {
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
 		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, idPathProblem(kind))
 		return false
 	}

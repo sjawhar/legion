@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -696,6 +697,103 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 	if wrongKind.Code != http.StatusBadRequest || decodeBody[refusedAnswer](t, wrongKind).Code != "INVALID_KIND" {
 		t.Fatalf("a kind that is no reference source: status=%d body=%s, want 400 INVALID_KIND",
 			wrongKind.Code, wrongKind.Body.String())
+	}
+}
+
+// The id the question map takes arrives in the query string, which the prefix layer never
+// touches: that layer rewrites path values alone (resolveIDPrefixes), so this route
+// canonicalizes its own `?id=` (getReferenceQuestions) and refs.ScopeOf binds the canonical
+// spelling of whatever it is given. Without both, `urn:uuid:<uuid>` reaches a uuid column as
+// written, Postgres refuses it ("invalid input syntax for type uuid", SQLSTATE 22P02) and the
+// read answers 500 where the canonical id answers the document; the braced spelling, which
+// Postgres does read, answers that document under a name in braces rather than the id every
+// other read of it carries. Every spelling of one id answers what the canonical id answers,
+// and one nothing carries this route's own 404.
+func TestTheQuestionMapRouteReadsEveryUuidSpellingAsTheCanonicalID(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "QMU", "A spec with a question", "# Spec\n\nA passage.")
+	seedExec(t, database, "a version declaring a question block", `
+		insert into artifact_versions (artifact_id, number, markdown)
+		values ($1::uuid, (select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1::uuid), $2)
+	`, issue.PrimaryArtifactID, "# Spec\n\n:::ask{#q1}\nWhich way?\n:::\n")
+	blockAsk := chosenID("ca000001", 1)
+	seedExec(t, database, "the ask settled for the question block", `
+		insert into asks (id, issue_key, author, question, block_artifact_id, block_id)
+		values ($1::uuid, $2, $3::jsonb, 'Which way?', $4::uuid, 'q1')
+	`, blockAsk, issue.Key, idPrefixAuthor, issue.PrimaryArtifactID)
+	seedAskOpenedEvent(t, database, issue.Key, blockAsk)
+
+	type questionsAnswer struct {
+		Document  string `json:"document"`
+		Questions []struct {
+			BlockID string `json:"block_id"`
+			Ask     string `json:"ask"`
+		} `json:"questions"`
+	}
+	questions := func(kind, id string) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodGet,
+			"/api/v1/references/questions?kind="+kind+"&id="+url.QueryEscape(id), nil, "alice")
+	}
+	for _, test := range []struct{ name, kind, id string }{
+		{"the spec written urn:uuid:", "artifact", "urn:uuid:" + issue.PrimaryArtifactID},
+		{"the spec written in braces", "artifact", "{" + issue.PrimaryArtifactID + "}"},
+		{"the block's ask written urn:uuid:", "ask", "urn:uuid:" + blockAsk},
+		{"the block's ask written in braces", "ask", "{" + blockAsk + "}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			read := questions(test.kind, test.id)
+			if read.Code != http.StatusOK {
+				t.Fatalf("%s: status=%d body=%s, want the 200 the canonical id answers",
+					test.name, read.Code, read.Body.String())
+			}
+			answer := decodeBody[questionsAnswer](t, read)
+			if answer.Document != issue.PrimaryArtifactID {
+				t.Fatalf("%s: document=%q, want the canonical id of the issue's spec %q",
+					test.name, answer.Document, issue.PrimaryArtifactID)
+			}
+			if len(answer.Questions) != 1 || answer.Questions[0].BlockID != "q1" || answer.Questions[0].Ask != blockAsk {
+				t.Fatalf("%s: questions=%+v, want q1 naming %s", test.name, answer.Questions, blockAsk)
+			}
+		})
+	}
+
+	const unknown = "00000000-0000-4000-8000-000000000000"
+	for _, written := range []string{unknown, "urn:uuid:" + unknown, "{" + unknown + "}"} {
+		missing := questions("ask", written)
+		if missing.Code != http.StatusNotFound || decodeBody[refusedAnswer](t, missing).Code != "NOT_FOUND" {
+			t.Fatalf("an ask nothing carries, written %q: status=%d body=%s, want 404 NOT_FOUND",
+				written, missing.Code, missing.Body.String())
+		}
+	}
+}
+
+// `?to=` and `?from=` carry the other query-string id of these two routes, an item id inside a
+// dispatch:// reference. A spelling other than the canonical one is no 500 there: the graph
+// keys an item node by the id as text (loadAskNodes matches on `id::text`), so nothing binds
+// the value to a uuid column, and a reference naming no node gets the 404 this route answers
+// for one. The canonical id, which the graph does hold, answers its node.
+func TestAReferenceWritingAnIDAnotherWayIsNoFiveHundred(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "URN", "An ask a reference names", "# Spec\n\nA passage.")
+	id := chosenID("cb000001", 1)
+	seedAsk(t, database, issue.Key, id, "Which way?")
+	for _, direction := range []string{"to", "from"} {
+		for _, test := range []struct {
+			written string
+			want    int
+		}{
+			{written: id, want: http.StatusOK},
+			{written: "urn:uuid:" + id, want: http.StatusNotFound},
+			{written: "{" + id + "}", want: http.StatusNotFound},
+		} {
+			reference := "dispatch://" + issue.Key + "/ask/" + test.written
+			response := dispatchRequest(t, handler, http.MethodGet,
+				"/api/v1/references?"+direction+"="+url.QueryEscape(reference), nil, "alice")
+			if response.Code != test.want {
+				t.Errorf("?%s=%s: status=%d body=%s, want %d",
+					direction, reference, response.Code, response.Body.String(), test.want)
+			}
+		}
 	}
 }
 

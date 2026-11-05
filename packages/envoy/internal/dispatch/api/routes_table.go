@@ -220,7 +220,7 @@ func (route idRoute) resolves() bool { return route.Kind != "" || route.Blocks }
 // idRoutes is, by "<method> <pattern>", what the {id} and {block_id} of every route that
 // carries one name: the kind whose prefix is resolved into it and the 404 that route answers
 // for an id of that kind it does not hold, or the reason it resolves none. It stands beside the
-// table for writeClasses' reason — the columns would have to be written on all 163 rows, and
+// table for writeClasses' reason — the columns would have to be written on all 164 rows, and
 // most rows carry no id at all — and it is keyed by method and pattern as writeClasses is,
 // because two methods of one pattern can answer a missing row differently: PUT
 // /api/v1/me/asks/{id}/snooze answers 404 and DELETE answers 204.
@@ -363,7 +363,7 @@ type routeScopeSet []string
 
 // routeScopes is the set each route needs, by "<method> <pattern>", and it stands beside the
 // table for the reason writeClasses does: Go leaves no field out of a positional composite
-// literal, so a sixth value on the row would have to be written on all 163 rows, and most rows
+// literal, so a sixth value on the row would have to be written on all 164 rows, and most rows
 // need no scope. routes() stamps it onto the row, so apiRoute.OAuthScopes is what every reader
 // of a route sees — GET /api/v1 and `envoy-dispatch routes` among them — and
 // scopedRoutesNotMounted holds the map to the table, a name that is no row refusing to mount

@@ -39,10 +39,14 @@ const commentOwnScopeJoin = `left join asks k on k.id = c.ask_id ` + askScopeJoi
 //   - an issue message: its issue's spec;
 //   - a direct message (no issue), any other kind, and an id that is not a uuid: none.
 //
+// An id written in one of uuid.Parse's other spellings is read, and answered, as the canonical
+// one (canonicalUUID).
+//
 // A reply whose chain of parents loops before any of them names a document has none. ScopeSources
 // is its inverse, and the two must agree on every shape above (TestScopeOfAndScopeSourcesAgree).
 func ScopeOf(ctx context.Context, q Queryer, kind, id string) (string, error) {
-	if !isUUID(id) {
+	id, ok := canonicalUUID(id)
+	if !ok {
 		return "", nil
 	}
 	switch kind {
@@ -155,9 +159,11 @@ const scopeSourcesQuery = `
 
 // ScopeSources is the inverse of ScopeOf: every reference source, by kind and id, whose text
 // belongs to the document doc, in kind then id order. A document that does not exist, or an id
-// that is not a uuid, has none.
+// that is not a uuid, has none; one written in another of uuid.Parse's spellings is read as the
+// canonical one (canonicalUUID).
 func ScopeSources(ctx context.Context, q Queryer, doc string) ([]Target, error) {
-	if !isUUID(doc) {
+	doc, ok := canonicalUUID(doc)
+	if !ok {
 		return []Target{}, nil
 	}
 	sources, err := scanTargets(q.Query(ctx, scopeSourcesQuery, doc))
@@ -399,6 +405,16 @@ func trimContainerMarkers(line string) string {
 	}
 }
 
-func isUUID(id string) bool {
-	return uuid.Validate(id) == nil
+// canonicalUUID is id in the one spelling the graph and Postgres read it by, and false for a
+// value that is no uuid at all. uuid.Parse reads `urn:uuid:<uuid>`, the braced spelling and 32
+// hex digits beside the canonical one, and every id this package stores, binds and answers with
+// is the canonical one: Postgres refuses `urn:uuid:` on a uuid column, so a value bound as
+// written would fail the read where the id it names answers it, and a document answered back in
+// another spelling would name a node nothing else writes.
+func canonicalUUID(id string) (string, bool) {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return "", false
+	}
+	return parsed.String(), true
 }

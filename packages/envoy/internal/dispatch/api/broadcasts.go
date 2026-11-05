@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 
@@ -613,16 +614,16 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/broadcasts/{id}
 //
-// A broadcast's route resolves no id prefix, so the canonical spelling of an id written another
-// of uuid.Parse's ways is this handler's to read (canonicalizeUUIDPath): Postgres refuses
-// `urn:uuid:<uuid>` on the uuid column and the raw value would answer 500 where the canonical
+// A broadcast's route resolves no id prefix, but the prefix layer canonicalizes its {id} all the
+// same (canonicalizeUUIDPath), so this handler parses the one spelling of it: Postgres refuses
+// `urn:uuid:<uuid>` on the uuid column, and the raw value would answer 500 where the canonical
 // one answers this route's own 404.
 func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
-	id, ok := canonicalizeUUIDPath(r, "id", r.PathValue("id"))
-	if !ok {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
 		writeError(w, "BROADCAST_NOT_FOUND", http.StatusNotFound, "broadcast not found")
 		return
 	}

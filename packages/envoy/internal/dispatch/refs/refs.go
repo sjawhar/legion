@@ -184,10 +184,11 @@ func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found 
 // not a source whose refs this writes, and only the scope drain settles it. A from_id that is no
 // uuid (a test's synthetic source) owes nothing, since the queue keys its id as one.
 func settleOwed(ctx context.Context, tx pgx.Tx, fromKind, fromID string) error {
-	if !isUUID(fromID) {
+	id, ok := canonicalUUID(fromID)
+	if !ok {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `delete from refs_grammar_owed where kind = $1 and id = $2::uuid`, fromKind, fromID); err != nil {
+	if _, err := tx.Exec(ctx, `delete from refs_grammar_owed where kind = $1 and id = $2::uuid`, fromKind, id); err != nil {
 		return fmt.Errorf("settle the index owed by %s %s: %w", fromKind, fromID, err)
 	}
 	return nil

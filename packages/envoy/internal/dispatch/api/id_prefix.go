@@ -29,28 +29,30 @@ func writeAmbiguousID(w http.ResponseWriter, ambiguous *refs.ErrPrefixAmbiguous)
 	})
 }
 
-// canonicalizeUUIDPath rewrites a path value that is a whole uuid written in one of the other
-// spellings uuid.Parse reads - `urn:uuid:<uuid>`, the braced one, and 32 hex digits - to the
-// canonical spelling, so every layer behind it reads one spelling of the id the path names, and
-// answers with that spelling and whether the value was a uuid at all: a caller that refuses a
-// value that is none reads both and parses once, and the prefix layer, whose route refuses it
-// further down, ignores both.
-// Such a value is no id prefix (text.IsIDPrefix refuses its colons, braces, and a whole uuid
-// alike), so the prefix layer would otherwise leave it as written and it would reach a `::uuid`
-// column as the caller spelled it. Postgres reads the braced and 32-digit spellings and refuses
-// `urn:uuid:` ("invalid input syntax for type uuid"), so that one address, which this server
-// reads, would answer 500; it is why documentRefKey sends the canonical form too. A value that
-// is no uuid at all is left alone, and answered as written, for the route to refuse.
-func canonicalizeUUIDPath(r *http.Request, name, value string) (string, bool) {
+// canonicalizeUUIDPath rewrites the path value `name`, where it is a whole uuid written in one
+// of the other spellings uuid.Parse reads - `urn:uuid:<uuid>`, the braced one, and 32 hex
+// digits - to the canonical spelling. It is the one place the spelling of a path id is decided:
+// the prefix layer runs it for every route that takes an id, ahead of the scope checks, and
+// every reader behind it parses the value as it stands (requireUUIDPath, getBroadcast,
+// sessionGroupID, documentRefKey), so the check that decides whether a write is the caller's to
+// make and the handler that then makes it cannot disagree about which object the path named
+// (project_scope.go).
+//
+// Such a value is no id written short (text.IsIDPrefix refuses its colons, braces, and a whole
+// uuid alike), so without this it would reach a `::uuid` column as the caller spelled it.
+// Postgres reads the braced and 32-digit spellings and refuses `urn:uuid:` ("invalid input
+// syntax for type uuid"), so that one address, which this server reads, would answer 500 where
+// the canonical spelling gets the route's own answer. A value that is no uuid at all is left
+// alone, and answered as written, for the route to refuse.
+func canonicalizeUUIDPath(r *http.Request, name string) {
+	value := r.PathValue(name)
 	parsed, err := uuid.Parse(value)
 	if err != nil {
-		return value, false
+		return
 	}
-	canonical := parsed.String()
-	if canonical != value {
+	if canonical := parsed.String(); canonical != value {
 		r.SetPathValue(name, canonical)
 	}
-	return canonical, true
 }
 
 // resolveIDPrefixes rewrites a route's {id}, and the {block_id} of a document block, from an id
@@ -59,7 +61,7 @@ func canonicalizeUUIDPath(r *http.Request, name, value string) (string, bool) {
 // write is the caller's to make and the handler that then makes it read one value and cannot
 // disagree about which object the path named (project_scope.go). What each route's wildcards
 // name, which routes name none of the five kinds, and what 404 each route answers for an id it
-// does not hold is idRoutes; a route that resolves nothing is returned unwrapped and pays
+// does not hold is idRoutes; a route whose pattern carries no id is returned unwrapped and pays
 // nothing.
 //
 // A value that is no id written short (text.IsIDPrefix — at least eight hex digits and hyphens,
@@ -67,7 +69,9 @@ func canonicalizeUUIDPath(r *http.Request, name, value string) (string, bool) {
 // seven-character stub and a block id such as b1 or ship_it cost nothing and get the answer they
 // always got, the 400 of a route that parses its id included. The one such value this does
 // rewrite is a whole uuid an {id} spells another of uuid.Parse's ways, which is rewritten to the
-// canonical spelling and still costs no query (canonicalizeUUIDPath).
+// canonical spelling for every route that takes an id, one that resolves no prefix included:
+// that rewrite is the whole of this layer's work there, a parse and at most one SetPathValue
+// before the scope checks, with no query and no actor resolved (canonicalizeUUIDPath).
 //
 // A value that is one is looked for among the items of its kind, within the owner the route
 // names — the issue of /issues/{key}/messages/{id}, the document of
@@ -84,17 +88,20 @@ func canonicalizeUUIDPath(r *http.Request, name, value string) (string, bool) {
 // Nothing is read for a caller that did not authenticate: every route with an id in its path is
 // an authenticated one, and its own refusal is the handler's to write.
 func (s *server) resolveIDPrefixes(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
-	entry := idRoutes[route.Method+" "+route.Pattern]
-	if !entry.resolves() {
+	entry, named := idRoutes[route.Method+" "+route.Pattern]
+	if !named {
 		return handler
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		canonicalizeUUIDPath(r, "id")
+		if !entry.resolves() {
+			handler(w, r)
+			return
+		}
 		var id, blockID string
 		if entry.Kind != "" {
 			if value := r.PathValue("id"); text.IsIDPrefix(value) {
 				id = value
-			} else {
-				canonicalizeUUIDPath(r, "id", value)
 			}
 		}
 		if entry.Blocks {
@@ -234,17 +241,15 @@ func itemNotFound(notFound, prefix string) string {
 // document under; "" for an id that is no uuid or that no document has, which is an id the
 // route behind this is about to refuse anyway.
 //
-// The id is parsed and sent in its canonical form, as parseArtifactID sends it: uuid.Parse reads
-// the `urn:uuid:<uuid>` and braced spellings of an id beside the plain one, which the routes
-// behind this read as the document they name, and Postgres's `::uuid` refuses both, so the raw
-// value would answer 500 for an address the route itself answers.
+// The id is the one this layer canonicalized a step earlier (canonicalizeUUIDPath), so it is
+// sent as it stands, and the parse here decides one thing only: whether the value is an id at
+// all, since a value that is none names no document.
 func (s *server) documentRefKey(ctx context.Context, id string) (string, error) {
-	parsed, err := uuid.Parse(id)
-	if err != nil {
+	if _, err := uuid.Parse(id); err != nil {
 		return "", nil
 	}
 	var refKey string
-	if err := s.deps.Store.Pool.QueryRow(ctx, `select ref_key from artifacts where id = $1::uuid`, parsed.String()).Scan(&refKey); err != nil {
+	if err := s.deps.Store.Pool.QueryRow(ctx, `select ref_key from artifacts where id = $1::uuid`, id).Scan(&refKey); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil
 		}
