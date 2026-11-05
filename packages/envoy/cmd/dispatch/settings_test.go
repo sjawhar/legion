@@ -1845,7 +1845,7 @@ func TestDocumentDepsCarryEveryBootSetting(t *testing.T) {
 		{"MaxDocConnections", got.MaxDocConnections, boot.MaxDocConnections},
 	} {
 		if field.got != field.want {
-			t.Errorf("docs.Deps.%s = %v, want boot's %v: newDocumentService drops the setting", field.name, field.got, field.want)
+			t.Errorf("docs.Deps.%s = %v, want boot's %v: documentDeps drops the setting", field.name, field.got, field.want)
 		}
 	}
 }
