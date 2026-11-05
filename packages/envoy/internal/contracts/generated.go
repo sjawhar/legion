@@ -193,9 +193,10 @@ const SearchKindDepth = 100
 const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
 
 // The names of the frames one answer's stream carries: text as the answer arrives, item for each
-// thing the answer cites, cut when the answer reached its word cap, changed when hits were
-// dropped from what the model was shown, none when Dispatch holds no answer, and end and error,
-// the two that end a stream. Generated from GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
+// thing the answer cites, cut when the answer reached its word cap, changed when the answer
+// linked something the model was never given and the server dropped that link, none when the
+// answer links nothing, and end and error, the two that end a stream. Generated from
+// GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
 // GOING_EVENT_CHANGED, GOING_EVENT_NONE, GOING_EVENT_END and GOING_EVENT_ERROR in
 // packages/contracts so the frames the server writes and the frames the page reads cannot drift
 // apart.
@@ -227,7 +228,8 @@ const GoingSearchTool = "search_dispatch"
 const GoingAnswerWordMax = 120
 
 // GoingHitRuneMax is the most of one hit's own text the model is shown, and GoingRequestRuneMax
-// the most hit text one run shows it in total; the hits past the total are dropped and counted.
+// the most hit text one run shows it in total; a hit past the total is still named to the model
+// with no body, and stays something the answer may cite.
 // Generated from GOING_HIT_RUNE_MAX and GOING_REQUEST_RUNE_MAX in packages/contracts so the
 // server's bounds and the page's account of them cannot drift apart.
 const GoingHitRuneMax = 2000

@@ -17,8 +17,9 @@ export const GOING_EVENT_ITEM = "item";
  *  Generated into Go as `contracts.GoingEventCut`. */
 export const GOING_EVENT_CUT = "cut";
 
-/** The frame saying hits were dropped from what the model was shown, because the run reached
- *  `GOING_REQUEST_RUNE_MAX`. Generated into Go as `contracts.GoingEventChanged`. */
+/** The frame saying the answer was changed: it linked something the model was never given, and
+ *  the server dropped that link rather than emitting it. `dropped` is how many it dropped.
+ *  Generated into Go as `contracts.GoingEventChanged`. */
 export const GOING_EVENT_CHANGED = "changed";
 
 /** The frame saying Dispatch holds nothing that answers the question.
@@ -59,8 +60,9 @@ export const GOING_ANSWER_WORD_MAX = 120;
  *  fill the run's budget. Generated into Go as `contracts.GoingHitRuneMax`. */
 export const GOING_HIT_RUNE_MAX = 2000;
 
-/** The most hit text one run shows the model in total, in runes; the hits past it are dropped and
- *  counted in a `changed` frame. Generated into Go as `contracts.GoingRequestRuneMax`. */
+/** The most hit text one run shows the model in total, in runes; a hit past it is still named to
+ *  the model, with its kind, id and title and no body, and stays something the answer may cite.
+ *  Generated into Go as `contracts.GoingRequestRuneMax`. */
 export const GOING_REQUEST_RUNE_MAX = 30000;
 
 /** The most searches one run makes, the server's own seeding search counting as the first, so the
@@ -107,7 +109,8 @@ export interface GoingCutEvent {
   readonly data: { readonly words: number };
 }
 
-/** What the model was shown was cut; `dropped` is how many hits it lost. */
+/** The answer linked something the model was never given; `dropped` is how many such links the
+ *  server dropped. */
 export interface GoingChangedEvent {
   readonly event: typeof GOING_EVENT_CHANGED;
   readonly data: { readonly dropped: number };

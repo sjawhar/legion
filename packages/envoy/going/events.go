@@ -1,8 +1,8 @@
 // Package going answers a question from what Dispatch holds: it searches, shows the hits to a
 // text model, and streams the model's answer to the reader as server-sent events. It sits outside
 // internal/ so the daemon can speak the same stream, and it holds no store and no HTTP route of
-// its own: the frames of the stream, the hit they name, and the chat-completions client that
-// generates the text.
+// its own: the frames of the stream, the hit they name, the chat-completions client that
+// generates the text, and the filter that clears that text before a reader sees a byte of it.
 //
 // Every name, code and bound of the stream comes from contracts, generated from
 // packages/contracts, so the server that writes a frame and the page that reads it cannot drift
@@ -42,7 +42,8 @@ type CutData struct {
 	Words int `json:"words"`
 }
 
-// ChangedData says hits were dropped from what the model was shown, with how many.
+// ChangedData says the answer linked something the model was never given, with how many such
+// links the server dropped rather than emitting them.
 type ChangedData struct {
 	Dropped int `json:"dropped"`
 }
@@ -83,7 +84,8 @@ func Cut(words int) Event {
 	return Event{Name: contracts.GoingEventCut, Data: CutData{Words: words}}
 }
 
-// Changed says dropped hits were left out of what the model was shown.
+// Changed says the answer was changed: it linked what the model was never given, and the server
+// dropped that link.
 func Changed(dropped int) Event {
 	return Event{Name: contracts.GoingEventChanged, Data: ChangedData{Dropped: dropped}}
 }
