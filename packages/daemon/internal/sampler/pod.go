@@ -126,6 +126,10 @@ type PodOptions struct {
 	Now func() time.Time
 	// Log takes one line about a read that failed or about the profile the sampler read.
 	Log func(string)
+	// Passed, where it is set, is called at the end of every pass the collector completes. It
+	// is what GET /healthz reports, so that answer says a pod has been read and not that the
+	// collector has been running.
+	Passed func()
 }
 
 // check refuses options the collector could not run with, in the shape internal/repocache's own
@@ -160,6 +164,9 @@ func RunPod(ctx context.Context, opts PodOptions) error {
 	// sampler started is answered with readings rather than with an empty registry.
 	for tick := int64(0); ; tick++ {
 		collector.pass(tick)
+		if opts.Passed != nil {
+			opts.Passed()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

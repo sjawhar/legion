@@ -111,6 +111,10 @@ type NodeOptions struct {
 	Now func() time.Time
 	// Log takes one line about a read that failed or about the node the sampler reads.
 	Log func(string)
+	// Passed, where it is set, is called at the end of every pass the collector completes,
+	// the first of which waits for the API server's first list of this node's pods. It is what
+	// GET /healthz reports, so that answer says a node's pods have been read.
+	Passed func()
 }
 
 // check refuses options the collector could not run with, in the shape PodOptions.check uses:
@@ -181,6 +185,9 @@ func RunNode(ctx context.Context, opts NodeOptions) error {
 	defer ticker.Stop()
 	for tick := int64(0); ; tick++ {
 		collector.pass(tick)
+		if opts.Passed != nil {
+			opts.Passed()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

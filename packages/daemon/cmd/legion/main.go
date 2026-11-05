@@ -91,6 +91,7 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
+	"sampler":        {runSampler, "read this pod's roles, or this node's pods, and serve their CPU and memory as Prometheus series (the launcher starts it in every issue pod)"},
 	"handoffs":       {runHandoffs, "copy each in-flight branch's committed .legion/ handoff files onto its Dispatch issue, then remove .legion/ from the branch"},
 	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
