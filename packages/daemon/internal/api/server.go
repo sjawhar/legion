@@ -49,6 +49,11 @@ type Options struct {
 	ConsumerLag func(ctx context.Context) []intake.ConsumerLag
 	// Supervisor is the claims the claim and operator routes post their requests to.
 	Supervisor Supervisor
+	// PodUpdateRounds answers what the daemon's last pod-update sweep decided, which the claim
+	// listing carries beside the claims (the daemon's podUpdateRoundsView). Nil answers the zero
+	// record, which says the daemon has not swept yet: a deployment that serves the route with no
+	// sweep behind it says so rather than read as a sweep that held no issue back.
+	PodUpdateRounds func() PodUpdateRounds
 	// BootTokens resolves a registration's boot token.
 	BootTokens *BootTokens
 	// Project and DispatchProject are the two names this one project answers to, and the daemon
@@ -226,7 +231,9 @@ type server struct {
 	consumerLag       func(ctx context.Context) []intake.ConsumerLag
 	callerPod         func(addr netip.Addr) (string, bool)
 	supervisor        Supervisor
-	bootTokens        *BootTokens
+	// podUpdateRounds is Options.PodUpdateRounds.
+	podUpdateRounds func() PodUpdateRounds
+	bootTokens      *BootTokens
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
 	project         string
 	dispatchProject string
@@ -298,6 +305,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		consumerLag:        opts.ConsumerLag,
 		callerPod:          opts.CallerPod,
 		supervisor:         opts.Supervisor,
+		podUpdateRounds:    opts.PodUpdateRounds,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,

@@ -26,6 +26,10 @@ bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
+pod_update_max_open_rounds: 2          # issues holding an open pod-update round at once; a round asks every
+                                       # worker of its issue to push and wait. Leave the key out for no limit
+pod_update_rounds_per_minute: 1        # pod-update rounds one sweep of the daemon opens; a sweep within 50
+                                       # seconds of the last opening opens none. Leave the key out for no limit
 controller: operator                   # who runs the controller: operator (legion controller start,
                                        # the default) or daemon (a pod this daemon launches and keeps;
                                        # under runtime: tmux, a pane in a window of its own)
