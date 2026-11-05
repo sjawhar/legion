@@ -391,14 +391,15 @@ func indexItemBlocks(
 			}
 		}
 	}
-	if err := storeItemState(ctx, tx, kind, tables, itemID, revision, counter, source.bodySum); err != nil {
-		return nil, err
-	}
 	windowContext, err := source.windowContext(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeItemWindows(ctx, tx, kind, tables, itemID, windowContext, source.blocks, ids); err != nil {
+	// The item's state row, the windows of its blocks and the stamp of the state those windows
+	// were written from go in one statement, so an index pays no round trip for its windows
+	// beyond the one it already spends recording what it indexed (writeWindows).
+	if err := writeItemWindows(ctx, tx, kind, itemID, windowContext, source.blocks, ids,
+		indexedItemState(tables, itemID, revision, counter, source.bodySum)); err != nil {
 		return nil, err
 	}
 	return moved, nil
@@ -406,51 +407,68 @@ func indexItemBlocks(
 
 // writeItemWindows writes the windows of the item's blocks (blocks, under ids, embedded under
 // windowContext), in the caller's transaction, and stamps the state those blocks are in beside
-// them (stampItemWindowState). Every index of an item's blocks writes them, one that found
-// nothing changed included: the window of a text that did not move is a no-op upsert
-// (writeWindows). An item whose blocks are indexed and whose windows are not - one written
-// before meaning search moved to windows, one whose write failed between the two - takes them
-// from the block-index tick's window arm instead, which writes these windows and no block
-// (WriteItemWindows).
+// them, as state says (indexedItemState for an index, which settles the item's state row in the
+// same statement; storedItemState for a write that leaves that row alone). Every index of an
+// item's blocks writes them, one that found nothing changed included: the window of a text that
+// did not move is a no-op upsert (writeWindows). An item whose blocks are indexed and whose
+// windows are not - one written before meaning search moved to windows, one whose write failed
+// between the two - takes them from the block-index tick's window arm instead, which writes
+// these windows and no block (WriteItemWindows).
 func writeItemWindows(
 	ctx context.Context,
 	tx pgx.Tx,
 	kind ItemKind,
-	tables itemTables,
 	itemID, windowContext string,
 	blocks []itemblocks.Block,
 	ids []string,
+	state windowState,
 ) error {
 	windowed := make([]itemblocks.WindowBlock, len(blocks))
 	for i, block := range blocks {
 		windowed[i] = itemblocks.WindowBlock{ID: ids[i], Type: block.Type, Text: block.Text}
 	}
-	if err := writeWindows(ctx, tx, kind.WindowKind(), kind.WindowOwnerKey(itemID), itemblocks.Windows(windowContext, windowed)); err != nil {
-		return err
-	}
-	return stampItemWindowState(ctx, tx, kind, tables, itemID)
+	return writeWindows(ctx, tx, kind.WindowKind(), kind.WindowOwnerKey(itemID),
+		itemblocks.Windows(windowContext, windowed), state)
 }
 
 // itemBlockState is the state of an item's blocks that its windows are stamped with
-// (stampItemWindowState) and read back against (ItemsOwedWindows): the sum of the body they
-// were split from, over the kind's state table as s. An item with no sum recorded - one no
-// block-aware build has indexed - stamps and compares as the empty string.
+// (indexedItemState, storedItemState) and read back against (ItemsOwedWindows): the sum of the
+// body they were split from, over the kind's state table as s. An item with no sum recorded -
+// one no block-aware build has indexed - stamps and compares as the empty string.
 const itemBlockState = `coalesce(s.body_sha256, '')`
 
-// stampItemWindowState records the state of the item's blocks beside the windows this
-// transaction has just written them. storeItemState has already written the sum of the body
-// they came from, so the statement reads that sum rather than being told it.
-func stampItemWindowState(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTables, itemID string) error {
-	if _, err := tx.Exec(ctx, `
-		insert into embedding_window_states (kind, owner_key, block_state, written_at)
-		select $2, $3, `+itemBlockState+`, now()
-		  from `+tables.state+` s where s.`+tables.item+` = $1::uuid
-		on conflict (kind, owner_key) do update
-		  set block_state = excluded.block_state, written_at = excluded.written_at
-	`, itemID, kind.WindowKind(), kind.WindowOwnerKey(itemID)); err != nil {
-		return fmt.Errorf("record the block state the windows of %s %s were written from: %w", kind, itemID, err)
+// indexedItemState records the item indexed from the text whose sum is bodySum, at revision
+// with next as the next block number for a kind that counts revisions, settles its owed_at, and
+// stamps that sum beside the windows the same statement writes (writeWindows). The update
+// returns the sum it has just written rather than the statement reading it back, since a
+// separate read would see the row as it stood before.
+func indexedItemState(tables itemTables, itemID string, revision, next int, bodySum string) windowState {
+	stamp := `select $1::text, $2::text, settled.block_state, now() from settled`
+	if tables.revisions() {
+		return windowState{
+			settle: `update ` + tables.state + ` s set revision = $6, next_block = $7, body_sha256 = $8, owed_at = null
+			         where s.` + tables.item + ` = $5::uuid returning ` + itemBlockState + ` as block_state`,
+			stamp: stamp,
+			args:  []any{itemID, revision, next, bodySum},
+		}
 	}
-	return nil
+	return windowState{
+		settle: `update ` + tables.state + ` s set body_sha256 = $6, owed_at = null
+		         where s.` + tables.item + ` = $5::uuid returning ` + itemBlockState + ` as block_state`,
+		stamp: stamp,
+		args:  []any{itemID, bodySum},
+	}
+}
+
+// storedItemState stamps the state the item's state row already holds beside the windows the
+// statement writes, for a write that settles no such row of its own: the block-index tick's
+// window arm, which windows an item whose block index already stands (WriteItemWindows).
+func storedItemState(tables itemTables, itemID string) windowState {
+	return windowState{
+		stamp: `select $1::text, $2::text, ` + itemBlockState + `, now()
+		          from ` + tables.state + ` s where s.` + tables.item + ` = $5::uuid`,
+		args: []any{itemID},
+	}
 }
 
 // itemState is an item's state row as indexItemBlocks found it: whether a block-aware build
@@ -733,26 +751,6 @@ func replaceItemBlockRefs(
 	return append(moved, added...), nil
 }
 
-// storeItemState records the item indexed from the text whose sum is bodySum, at revision with
-// next as the next block number for a kind that counts revisions, and settles its owed_at.
-func storeItemState(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTables, itemID string, revision, next int, bodySum string) error {
-	var err error
-	if tables.revisions() {
-		_, err = tx.Exec(ctx, `
-			update `+tables.state+` set revision = $2, next_block = $3, body_sha256 = $4, owed_at = null
-			where `+tables.item+` = $1::uuid
-		`, itemID, revision, next, bodySum)
-	} else {
-		_, err = tx.Exec(ctx, `
-			update `+tables.state+` set body_sha256 = $2, owed_at = null where `+tables.item+` = $1::uuid
-		`, itemID, bodySum)
-	}
-	if err != nil {
-		return fmt.Errorf("record the blocks of %s %s indexed: %w", kind, itemID, err)
-	}
-	return nil
-}
-
 // OwedItemBlock is one comment, message or ask owed a block index: its state row's owed_at is
 // set, by the trigger on a write no block-aware build indexed (a build without the index wrote
 // it, during the roll or after a rollback), or by rebuild-refs.
@@ -873,7 +871,7 @@ func WriteItemWindows(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID stri
 	if !aligned {
 		return false, markItemBlocksOwed(ctx, tx, kind, tables, itemID)
 	}
-	if err := writeItemWindows(ctx, tx, kind, tables, itemID, windowContext, blocks, ids); err != nil {
+	if err := writeItemWindows(ctx, tx, kind, itemID, windowContext, blocks, ids, storedItemState(tables, itemID)); err != nil {
 		return false, err
 	}
 	return true, nil
