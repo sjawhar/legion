@@ -242,7 +242,7 @@ func TestReadThroughCommitPullsStoresEveryPullRequestNamedForACommit(t *testing.
 	fake.handle("GET /repos/acme/widgets/pulls/8/commits", func(w http.ResponseWriter, _ *http.Request) {
 		mustEncode(t, w, []any{map[string]any{"commit": map[string]any{"message": "fix: a typo"}}})
 	})
-	written, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
+	written, _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
 		"5555555555555555555555555555555555555555", time.Now())
 	if err != nil {
 		t.Fatalf("read through the commit's pull requests: %v", err)
@@ -292,7 +292,7 @@ func TestAPullRequestNamingAnIssueOfAnotherRepositoryAttributesNobody(t *testing
 	fake.handle("GET /repos/acme/other/pulls/11/commits", func(w http.ResponseWriter, _ *http.Request) {
 		mustEncode(t, w, []any{map[string]any{"commit": map[string]any{"message": "work"}}})
 	})
-	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/other",
+	if _, _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/other",
 		"7777777777777777777777777777777777777777", time.Now()); err != nil {
 		t.Fatalf("read through the commit's pull requests: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestAPullRequestTitledAfterAnotherRepositorysIssueKeepsItsOwn(t *testing.T)
 	}
 
 	// The read-through path: #22, the same title, learned from the commit alone.
-	if _, err := ReadThroughCommitPulls(ctx, pool, client, "acme/gadgets", sha, time.Now()); err != nil {
+	if _, _, err := ReadThroughCommitPulls(ctx, pool, client, "acme/gadgets", sha, time.Now()); err != nil {
 		t.Fatalf("read through the commit's pull requests: %v", err)
 	}
 	fromReadThrough := readHead(t, ctx, pool, "acme/gadgets", 22)
@@ -491,7 +491,7 @@ func TestAForkPullRequestNamedForACommitMakesNoResultCurrent(t *testing.T) {
 		t.Error("the read-through paged a fork's commit messages; a fork attributes nobody whatever they say")
 		mustEncode(t, w, []any{})
 	})
-	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
+	if _, _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
 		"9999999999999999999999999999999999999999", time.Now()); err != nil {
 		t.Fatalf("read through the commit's pull requests: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestAReadThroughKeepsAnAttributionOnlyTheCommitMessagesName(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
 	})
-	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
+	if _, _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", time.Now()); err != nil {
 		t.Fatalf("read through the commit's pull requests: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestOnePullRequestStoredUnderBothNamesEndsAsOneRow(t *testing.T) {
 
 	fake := gadgetsFake(t, 522, issue+": the work", head)
 	client := fake.newTestClient()
-	written, err := ReadThroughCommitPulls(ctx, pool, client, gadgetsRepo, head, time.Now())
+	written, _, err := ReadThroughCommitPulls(ctx, pool, client, gadgetsRepo, head, time.Now())
 	if err != nil || written != 1 {
 		t.Fatalf("read through %s at %s = %d, %v; want one row written", gadgetsRepo, head, written, err)
 	}

@@ -185,24 +185,35 @@ func HeadAttributedTo(ctx context.Context, pool *store.Pool, issueKey, sha strin
 	return found, nil
 }
 
-// HeadStoredAt reports whether sha is the head of any pull request stored for repoFull, whatever
-// its state and whatever issue it is attributed to: whether Dispatch has been told of a pull
-// request at that commit at all. It is a weaker question than HeadAttributedTo's and it is asked
-// for another purpose — the results read asks it before it reads GitHub for a commit, since a
-// commit some row already heads is one Dispatch's own passes keep and a read from there repairs
-// nothing (api/results_currency.go, currencyReader.readThroughHead).
+// HeadStoredAt reports whether sha is the head of an open or merged pull request stored for
+// repoFull, whatever issue it is attributed to: whether Dispatch holds a pull request at that
+// commit that its own passes keep reading. It is a weaker question than HeadAttributedTo's and
+// it is asked for another purpose — the results read asks it before it reads GitHub for a commit,
+// since a commit such a row already heads is one the reconcile re-reads and a read from there
+// repairs nothing (api/results_currency.go, currencyReader.readThroughHead).
 //
-// repoFull is the canonical name of the repository (refs.CanonicalRepo), which is the one name
-// any row is written under (upsertHeadUnderCanonicalName). The read is one index lookup on
-// pull_request_heads_repo_head (migration 20261105112616): pull_request_heads_issue_head is
-// partial on `issue_key is not null` and keyed on the issue, so it serves no lookup by
-// repository and head commit.
+// A closed-unmerged row is counted for nothing, as HeadAttributedTo counts it for nothing: it
+// makes no result current, the reconcile keeps no such row in its passes
+// (ListStalePullRequestHeads takes the open and the merged), and a pull request closed at a
+// commit does not stop another being opened from the same head. Counting one would leave every
+// result at that commit `older` for good.
+//
+// repoFull is the canonical name of the repository (refs.CanonicalRepo), compared without case,
+// as every other comparison of a repository here is (refs.CanonicalRepoSQL): a row written from
+// a `pull_request` envelope carries GitHub's own spelling of the repository (`Acme/Widgets`),
+// while the results read is passed the lowercased spelling the repository-to-project mapping
+// stores (api's canonicalRepo), so an exact comparison would answer "no row" for a repository
+// whose owner writes their name with capitals. The read is one index lookup on
+// pull_request_heads_repo_head (migration 20261105112616), which is built on
+// `(lower(repo), head_sha)` for that reason: pull_request_heads_issue_head is partial on
+// `issue_key is not null` and keyed on the issue, so it serves no lookup by repository and head
+// commit.
 func HeadStoredAt(ctx context.Context, pool *store.Pool, repoFull, sha string) (bool, error) {
 	var found bool
 	if err := pool.QueryRow(ctx, `
 		select exists (
 			select 1 from pull_request_heads
-			where repo = $1 and head_sha = $2
+			where lower(repo) = lower($1) and head_sha = $2 and state in ('open', 'merged')
 		)
 	`, repoFull, sha).Scan(&found); err != nil {
 		return false, fmt.Errorf("read the stored pull request heads of %s at %s: %w", repoFull, sha, err)
@@ -512,10 +523,21 @@ func repositoryUnreadable(err error) bool {
 // ReadThroughCommitPulls teaches Dispatch the pull requests GitHub names for one commit
 // (`GET /repos/{o}/{r}/commits/{sha}/pulls`) and writes each one's head row, so a result
 // recorded at the head of a pull request no event has reached Dispatch for is current at once.
-// It answers how many rows it wrote. A repository the App cannot read writes nothing and comes
-// back as the App's own error, which each caller logs at Info and carries on from
-// (api/results.go's readThroughPullRequests, api/results_currency.go's readThroughHead): the
-// currency of that result stands as its stored rows leave it.
+// It answers how many rows it wrote and whether any pull request it saw has sha as its head
+// (atHead). A repository the App cannot read writes nothing and comes back as the App's own
+// error, which each caller logs at Info and carries on from (api/results.go's
+// readThroughPullRequests, api/results_currency.go's readThroughHead): the currency of that
+// result stands as its stored rows leave it.
+//
+// atHead is the difference between the two answers GitHub gives about a commit no pull request
+// of Dispatch's heads. GitHub naming nothing leaves the question open — the pull request may
+// open at that commit a moment later, which is the whole of what this read repairs — while
+// GitHub naming a pull request whose head is another commit has answered it for good: the
+// commit is behind that pull request and no later read can put the head back on it. The
+// read-time caller settles the pair on that answer rather than asking again every
+// CommitPullReadStaleAfter for ever (delivery.CommitPullReads.Settle). The rows written say
+// nothing of it on their own: the row of a pull request whose head has moved on is written at
+// the head it has now, not at the commit that was asked about.
 //
 // Each row is attributed through all five sources, the commit messages included (attributeHead),
 // exactly as the envelope writer attributes one. Attributing from fewer and calling it complete
@@ -535,39 +557,43 @@ func repositoryUnreadable(err error) bool {
 // rule reaches the canonical name in one step, so this read changes nothing there; it is here
 // because this function's key is its argument's, not its caller's, and the record-time caller
 // hands over the name refs.IssueRepository answered.
-func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time) (int, error) {
+func ReadThroughCommitPulls(
+	ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time,
+) (written int, atHead bool, err error) {
 	canonical, err := refs.CanonicalRepo(ctx, pool, repoFull)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	owner, repo, err := splitRepo(canonical)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
-		return 0, fmt.Errorf("mint installation token for %s: %w", canonical, err)
+		return 0, false, fmt.Errorf("mint installation token for %s: %w", canonical, err)
 	}
 	pulls, err := fetchCommitPullPayloads(ctx, client, token, owner, repo, sha)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	written := 0
 	for _, pull := range pulls {
+		if pull.Head.SHA == sha {
+			atHead = true
+		}
 		attributed, err := attributePayload(ctx, pool, client, token, canonical, pull)
 		if err != nil {
-			return written, err
+			return written, atHead, err
 		}
 		var checkedAt *time.Time
 		if attributed.complete {
 			checkedAt = &now
 		}
 		if err := upsertHeadUnderCanonicalName(ctx, pool, headRow(canonical, pull, attributed, checkedAt), repoFull); err != nil {
-			return written, err
+			return written, atHead, err
 		}
 		written++
 	}
-	return written, nil
+	return written, atHead, nil
 }
 
 // recordPullRequestHead writes the head row one `pull_request` envelope reports, whatever its

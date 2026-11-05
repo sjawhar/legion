@@ -253,7 +253,7 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 			results = []model.CheckResult{}
 		}
 		for result := range results {
-			results[result].Currency = currency.of(r.Context(), checks[index], results, result)
+			results[result].Currency = currency.of(r.Context(), checks[index], results[result])
 		}
 		checks[index].Results = results
 	}
@@ -775,7 +775,7 @@ func (s *server) readThroughPullRequests(ctx context.Context, checkIssueKey, sha
 	if err != nil || repo == nil {
 		return
 	}
-	if _, err := delivery.ReadThroughCommitPulls(ctx, s.deps.Store.Pool, s.deps.GitHub, *repo, sha, time.Now()); err != nil {
+	if _, _, err := delivery.ReadThroughCommitPulls(ctx, s.deps.Store.Pool, s.deps.GitHub, *repo, sha, time.Now()); err != nil {
 		slog.Info("dispatch: GitHub named no pull request for a recorded result's commit",
 			"repo", *repo, "commit", sha, "error", err)
 	}

@@ -50,3 +50,38 @@ func TestAClaimSweepsTheEntriesNoBoundCanRefuse(t *testing.T) {
 		t.Fatal("the entry the sweep kept refused nothing, want the bound to stand")
 	}
 }
+
+// A settled pair is refused for good, and the sweep keeps it. GitHub has named a pull request
+// for that commit whose head is another commit (ReadThroughCommitPulls' atHead), so it has
+// answered about this commit and a pull request's head never moves back to a commit it has left:
+// a claim a day later buys the same answer again, and the sweep, which drops the moments no
+// bound can be refused by, must not drop what refuses every claim.
+func TestASettledCommitIsRefusedEveryClaimAndTheSweepKeepsIt(t *testing.T) {
+	var reads CommitPullReads
+	start := time.Date(2026, 11, 5, 7, 15, 8, 0, time.UTC)
+	if !reads.Claim("acme/widgets", "abc", start) || !reads.Claim("acme/widgets", "def", start) {
+		t.Fatal("the first claim of a pair was refused, want it granted")
+	}
+	reads.Settle("acme/widgets", "abc")
+	if reads.Claim("acme/widgets", "abc", start.Add(24*time.Hour)) {
+		t.Fatal("a claim of a settled pair a day later was granted, want it refused for good")
+	}
+	// Enough pairs to pass commitPullReadSweepAt, then one claim to run the sweep over them: the
+	// settled pair's own moment goes with the rest and the settling stands on its own.
+	for number := range commitPullReadSweepAt {
+		if !reads.Claim("acme/widgets", fmt.Sprintf("%040x", number), start) {
+			t.Fatalf("claim %d of a pair of its own was refused, want it granted", number)
+		}
+	}
+	if !reads.Claim("acme/widgets", "fresh", start.Add(CommitPullReadStaleAfter)) {
+		t.Fatal("a claim of a pair nothing is held for was refused, want it granted")
+	}
+	if reads.Claim("acme/widgets", "abc", start.Add(CommitPullReadStaleAfter)) {
+		t.Fatal("the swept pair was claimed again, want the settling kept: GitHub has answered about it")
+	}
+	// A pair nothing settled is bounded by the span alone, so the settling refuses its own pair
+	// and no other.
+	if !reads.Claim("acme/widgets", "def", start.Add(CommitPullReadStaleAfter)) {
+		t.Fatal("a claim of an unsettled pair one span later was refused, want it granted")
+	}
+}

@@ -43,9 +43,17 @@ const CommitPullReadStaleAfter = 5 * time.Minute
 // since a granted claim drops every older entry once the map has passed commitPullReadSweepAt.
 // That sweep walks the whole map under the lock, and it runs only on a claim that is granting a
 // GitHub call, so what waits for it is already waiting for a round trip.
+//
+// Beside those moments it holds the pairs GitHub has answered for good (Settle), which no claim
+// may spend a call on again and which the sweep must not drop: a read that named a pull request
+// whose head is another commit has had GitHub's whole answer about this commit, and a later read
+// would buy the same answer again. What bounds them is the results Dispatch holds — one entry per
+// repository and commit a recorded result named whose pull request has moved past it — and a
+// restart empties the lot, which costs one read-through of each such commit again and no more.
 type CommitPullReads struct {
-	mu    sync.Mutex
-	reads map[commitPullKey]time.Time
+	mu      sync.Mutex
+	reads   map[commitPullKey]time.Time
+	settled map[commitPullKey]struct{}
 }
 
 // commitPullReadSweepAt is the size the map is swept from. An entry read CommitPullReadStaleAfter
@@ -61,9 +69,10 @@ type commitPullKey struct {
 	sha  string
 }
 
-// Claim reports whether sha's pull requests in repoFull may be read through at now — nothing is
-// held for the pair, or what is held was read CommitPullReadStaleAfter ago or longer — and
-// records the read when it answers yes, under the one lock that read the bound.
+// Claim reports whether sha's pull requests in repoFull may be read through at now — the pair is
+// not settled, and either nothing is held for it or what is held was read CommitPullReadStaleAfter
+// ago or longer — and records the read when it answers yes, under the one lock that read the
+// bound.
 //
 // A read that fails is claimed with the rest: GitHub was asked, and a repository whose every ask
 // fails must not be asked again on every read. One read of one issue's results asks about a
@@ -72,6 +81,9 @@ func (c *CommitPullReads) Claim(repoFull, sha string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := commitPullKey{repo: repoFull, sha: sha}
+	if _, settled := c.settled[key]; settled {
+		return false
+	}
 	if last, found := c.reads[key]; found && now.Sub(last) < CommitPullReadStaleAfter {
 		return false
 	}
@@ -86,4 +98,22 @@ func (c *CommitPullReads) Claim(repoFull, sha string, now time.Time) bool {
 	}
 	c.reads[key] = now
 	return true
+}
+
+// Settle ends the asking about one repository and commit: GitHub has been read for the pair and
+// named a pull request whose head is another commit, so this commit is behind that pull request
+// and nothing GitHub says later can make a result at it current (api/results_currency.go,
+// currencyReader.readThroughHead). Without it the pair would be claimed again every
+// CommitPullReadStaleAfter for as long as the result is read, since nothing is stored at a commit
+// no pull request heads.
+//
+// It carries no moment, because the answer does not go stale: a pull request's head never moves
+// back to a commit it has left. A settled pair the sweep kept is held until the process restarts.
+func (c *CommitPullReads) Settle(repoFull, sha string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.settled == nil {
+		c.settled = map[commitPullKey]struct{}{}
+	}
+	c.settled[commitPullKey{repo: repoFull, sha: sha}] = struct{}{}
 }
