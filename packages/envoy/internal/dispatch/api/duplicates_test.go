@@ -340,3 +340,28 @@ func TestCreateIssueDuplicateRefusesACopiedTitleWhoseWordsAreCommon(t *testing.T
 		t.Fatalf("candidates = %v, want %q first", keys, original.Key)
 	}
 }
+
+// Two short titles that differ in the one word carrying their meaning are different work, and
+// R2 says a text sharing only common words is created. pickRelatedTerms now fills its list back
+// up to duplicateMinTerms from the words it dropped as common, so in a project of two issues the
+// filled list is almost all shared words and the share the candidate holds reaches the refusal
+// bar: the second issue is refused as a near copy of the first.
+//
+// These two titles are the seed of packages/dispatch/e2e/agent-name.e2e.ts, whose ten browser
+// tests fail at this head with `POST /api/v1/issues failed: 409` on the second create.
+func TestCreateIssueDuplicateCreatesTwoTitlesThatDifferInTheirOneMeaningWord(t *testing.T) {
+	handler := newTestHandler(t)
+	createDuplicateTestProject(t, handler, "AGT")
+
+	requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+		"project": "AGT", "title": "Held by a running agent",
+		"spec": "The running agent comments here. The stopped agent comments there.",
+	}))
+	second := createIssueRequest(t, handler, map[string]any{
+		"project": "AGT", "title": "Held by a stopped agent",
+	})
+
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second create: status=%d body=%s", second.Code, second.Body.String())
+	}
+}
