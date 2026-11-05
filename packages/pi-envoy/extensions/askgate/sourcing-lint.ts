@@ -61,8 +61,15 @@ const MAX_TEXT_CHARS = 512 * 1024;
  * A false positive costs the sender a sentence they must defend, which is how a mechanical check
  * gets turned off. But a token that matches ordinary English silences a real claim for free, and
  * a review found several: `GPT-5` and `UTF-8` read as dispatch keys, `11/05/2026` as a path, and
- * `defaced` and `effaced` as shas. Each pattern below is narrowed against that: a dispatch key's
- * number is two digits or more, a sha carries a digit, a path segment carries a letter.
+ * `defaced` and `effaced` as shas. Each pattern is narrowed against that: a dispatch key's number
+ * is two digits or more, a sha carries a digit, a slash token starts with a letter.
+ *
+ * **Every pattern here must be unambiguous**, and the ones that need a condition a deterministic
+ * pattern cannot state check it in code instead. This text is agent-authored and arrives at the
+ * size of a report: two patterns written as `[\w-]*[A-Za-z][\w-]*\/…`, with overlapping
+ * quantifiers over one character class, took **54.9 s and 60.8 s** on a 524,000-character write
+ * in review. A pattern that needs a lookahead, a nested quantifier, or two quantifiers over the
+ * same class does not belong in this array.
  */
 const CITATIONS: readonly RegExp[] = [
   /`[^`\n]+`/, // a backticked command, path, symbol or literal
@@ -70,29 +77,36 @@ const CITATIONS: readonly RegExp[] = [
   /\b[a-z][a-z0-9+.-]*:\/\//i, // dispatch://, agent://, pr://, issue://, local://
   /\[[^\]\n]+\]\s*[([][^)\]\n]+[)\]]/, // a markdown link, inline or reference-style
   /\b[A-Z][A-Z0-9]{1,9}-\d{2,}\b/, // a dispatch key (INFRA-515, BET-571), never GPT-5 or UTF-8
-  /\b[\w.-]+\/[\w.-]+#\d+\b/, // owner/repo#123, the way a cross-repository reference is written
   /(?:^|[\s([])#\d+\b/, // a pull request or issue number
   /\b(?:PR|pull request|issue|commit)\s+#?\d+\b/i,
-  // A sha: a whole token of seven to forty hex characters (git's own abbreviation is seven),
-  // upper or lower case, holding at least one digit — so an English word of hex letters
-  // (`defaced`, `effaced`) is not one, and a plain number, which is the thing being claimed, is
-  // not the source of itself. Two bounded quantifiers with no alternation inside them: the first
-  // spelling of this backtracked over a long run of hex characters, and a 70 KiB body of `b`
-  // took the lint past a five-second budget.
+  // A sha: seven to forty hex characters (git's own abbreviation is seven), upper or lower case,
+  // holding at least one digit — so an English word of hex letters (`defaced`, `effaced`) is not
+  // one, and a plain number, the thing being claimed, is not the source of itself.
   /\b(?=[0-9a-f]{7,40}\b)[a-f]*[0-9][0-9a-f]*\b/i,
-  /[\w.@-]+\.(?:ts|tsx|js|jsx|json|jsonl|md|mdx|py|rs|go|java|rb|c|h|cpp|yaml|yml|toml|sh|sql|lean|thy|txt|log|csv|kdl|lock)\b/, // a file name
-  /(?:^|[\s("'])(?:\.{1,2})?\/[\w.@-]+\/[\w.@/-]+/, // an absolute or relative path of two segments
-  // owner/repo/path, packages/x/y — a segment must carry a letter, so `11/05/2026` is a date.
-  /\b[\w-]*[A-Za-z][\w-]*\/[\w-]+\/[\w.@/-]+/,
-  // A named run or job id: a word, a slash, a token carrying a digit (`farm/20261103t005431z-25e6a4`).
-  // The letter keeps `11/05/2026` a date; the digit keeps `and/or` ordinary English.
-  /\b[\w-]*[A-Za-z][\w-]*\/[\w-]*\d[\w-]*\b/,
+  // A file name: a known extension with a name in front of it. Read from the extension backwards,
+  // so no quantifier has to decide where the dots end.
+  /(?<=[\w@-])\.(?:ts|tsx|js|jsx|json|jsonl|md|mdx|py|rs|go|java|rb|c|h|cpp|yaml|yml|toml|sh|sql|lean|thy|txt|log|csv|kdl|lock)\b/,
+  /(?:^|[\s("'])\.{0,2}\/[\w.@-]+\//, // an absolute or relative path
   /\$\s+\S+/, // a shell prompt line
   // A pointer into the document itself. `step` and `row` are left out: they name a position in a
   // procedure or a table far more often than a place a reader can check.
   /§\s*\d|\b(?:section|entry|table|figure|appendix)\s+\d/i,
 ];
 
+/**
+ * A token holding a slash, starting with a letter: `owner/repo`, `packages/x/y`,
+ * `farm/20261103t005431z-25e6a4`, `theorem-labs/machcsl-riscv#52`. One quantifier per segment and
+ * none of them overlapping, so it scans the text once.
+ *
+ * Starting with a letter is what keeps `11/05/2026` a date. What makes it a citation rather than
+ * `and/or` is then decided in code: a second slash (a path), a digit after the first slash (a run
+ * or job id), or a `#123` (a cross-repository reference).
+ */
+const SLASH_TOKEN = /\b[A-Za-z][\w.-]*\/[\w.@/-]*(?:#\d+)?/g;
+const NAMES_SOMETHING = (token: string) => {
+  const tail = token.slice(token.indexOf("/") + 1);
+  return tail.includes("/") || /\d/.test(tail);
+};
 /**
  * A sentence the writer has already marked as something other than a measurement they took: an
  * inference, an estimate, a conditional, a requirement, a plan. The lint asks a sender to source a
@@ -148,8 +162,12 @@ const KINDS: ReadonlyArray<[SourcingFlag["kind"], (sentence: string) => boolean]
 ];
 
 /** Whether the sentence carries something a reader can go and check. */
-export const hasCitation = (sentence: string) =>
-  CITATIONS.some((pattern) => pattern.test(sentence));
+export function hasCitation(sentence: string): boolean {
+  if (CITATIONS.some((pattern) => pattern.test(sentence))) return true;
+  SLASH_TOKEN.lastIndex = 0;
+  for (const [token] of sentence.matchAll(SLASH_TOKEN)) if (NAMES_SOMETHING(token)) return true;
+  return false;
+}
 
 /**
  * The text split into candidate sentences, with what no reader reads as prose left out: fenced

@@ -4045,6 +4045,29 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
         },
       ]);
     });
+    // The sourcing lint reads the same arguments the model does (`review`), not the command's own
+    // operands (`args`): a `--path` upload's operands hold the path and none of the document, so
+    // reading them left every real markdown upload — the longest writes the gate sees — unlinted.
+    test("a --path upload's document is read by the sourcing lint, not just its path", async () => {
+      fs.writeFileSync(
+        path.join(work, "measured.md"),
+        "# Result\n\nThe regrade moved 15 of 79 rewrites.\n"
+      );
+      const g = bind({ env: STUB, cwd: work });
+      expect(
+        await g.bash(
+          "u-sourcing",
+          "dispatch artifact --issue DSP-1 --name measured.md --path measured.md"
+        )
+      ).toBeUndefined();
+      const note = (
+        (await g.event("tool_result", { toolCallId: "u-sourcing", content: [] }))?.content ?? []
+      )
+        .map((block) => (typeof block.text === "string" ? block.text : ""))
+        .join("\n");
+      expect(note).toContain('check="sourcing"');
+      expect(note).toContain("The regrade moved 15 of 79 rewrites.");
+    });
     // Design 5 with design 3: an upload of a markdown document that opens an ask gets the rules
     // check too, and the two reads stay apart — the rules check judges the `--path` file's text,
     // which only `review` carries, while the marker binds the printed arguments the CLI will post.

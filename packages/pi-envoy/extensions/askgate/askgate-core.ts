@@ -3471,7 +3471,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       let revised: Input | undefined;
       // What the call's dry run printed and the digests of the files the gate read, which a
       // marker for the command it ran binds.
-      let dryRun: { args: Input; files: readonly FileDigest[] } | undefined;
+      // `review` is `args` with an upload's file text read into `content`: what the model judges,
+      // and what the sourcing lint must read. `args` alone is the command's own operands, so for
+      // `dispatch artifact --path report.md` it holds the path and none of the document.
+      let dryRun: { args: Input; review: Input; files: readonly FileDigest[] } | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
@@ -3562,7 +3565,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                   run.slow ? renderSlowDryRun(run.failure) : undefined
                 );
               else {
-                dryRun = { args: run.args, files: run.files };
+                dryRun = { args: run.args, review: run.review, files: run.files };
                 const { key, label } = breakerKey(scoped.tool, run.review);
                 base = {
                   ...base,
@@ -3645,16 +3648,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // session files on 2026-11-05) still gets it, which is the point of having a check that
       // needs no call. It reports and never refuses, so it changes no decision and no record.
       //
-      // It reads what the write posts, not what the agent typed: `dryRun.args` for a `dispatch`
-      // command, where the raw input is a shell command and a body can come from a file the
-      // command names, and the device's own arguments otherwise. Each field is read on its own
+      // It reads what the write posts, not what the agent typed: `dryRun.review` for a `dispatch`
+      // command — the same arguments the model is shown, an upload's `--path` document read into
+      // `content` among them, since the raw input there is only a shell command naming a file —
+      // and the device's own arguments otherwise. Each field is read on its own
       // (`sourcingLintArgs`), so a routing field's issue key never sources the body's prose.
       // A call this gate refused gets no note: its text posted nowhere, and a note that says the
       // write went out would contradict the refusal beside it.
       let sourcingNotice: string | undefined;
       try {
         if (decision.result?.block !== true)
-          sourcingNotice = renderSourcingNotice(sourcingLintArgs(dryRun?.args ?? event.input));
+          sourcingNotice = renderSourcingNotice(sourcingLintArgs(dryRun?.review ?? event.input));
       } catch {
         // Best effort, as the notices above are: a lint that throws never holds a write.
       }
