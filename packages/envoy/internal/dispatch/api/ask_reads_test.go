@@ -479,6 +479,32 @@ func TestTargetedReadsReadAUrnUuidIDAsTheCanonicalID(t *testing.T) {
 	}
 }
 
+// The same spelling on a route the prefix layer does not wrap. canonicalizeUUIDPath runs only
+// for the 48 rows of idRoutes whose kind resolves, so a handoff's, a broadcast's and a Delivery
+// session group's id still reaches Postgres as written and answers 500 where the canonical
+// spelling answers that route's own refusal. Each pair below is measured over live HTTP: the
+// canonical id's answer first, which is what the URN spelling must give too.
+func TestRoutesThatResolveNoPrefixReadAUrnUuidIDAsTheCanonicalID(t *testing.T) {
+	handler := newTestHandler(t)
+	const unknown = "00000000-0000-4000-8000-000000000000"
+	if response := sessionRequest(t, handler, http.MethodGet, "/api/v1/handoffs/urn:uuid:"+unknown, nil); response.Code != http.StatusNotFound {
+		t.Errorf("handoff by urn:uuid: status=%d body=%s, want 404 as the canonical id answers", response.Code, response.Body.String())
+	}
+	for _, test := range []struct {
+		method string
+		target string
+		body   any
+	}{
+		{method: http.MethodGet, target: "/api/v1/broadcasts/urn:uuid:" + unknown},
+		{method: http.MethodPatch, target: "/api/v1/delivery/session-groups/urn:uuid:" + unknown, body: map[string]any{"name": "A group that does not exist"}},
+	} {
+		response := dispatchRequest(t, handler, test.method, test.target, test.body, "alice")
+		if response.Code != http.StatusNotFound {
+			t.Errorf("%s %s: status=%d body=%s, want 404 as the canonical id answers", test.method, test.target, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestResolveAskRejectsNumberedIDWithClientGuidance(t *testing.T) {
 	handler := newTestHandler(t)
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/3/resolve", map[string]any{
