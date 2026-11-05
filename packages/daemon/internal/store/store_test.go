@@ -666,6 +666,22 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 	}
 }
 
+// thisRelease is the version of every migration this branch adds, and idleRelease the newest
+// version of the release it merged (main's `20261101222956_issue_idle_release`). Together they
+// build the database shapes a deployment really has: one that recorded the other release's
+// versions and none of this one's. The list is what
+// `jj diff --from main@origin --to @ --name-only packages/daemon/internal/store/migrations`
+// names, so a migration this branch adds later belongs in it; one left out makes the cases below
+// weaker, never red, which is why the comment says where it comes from.
+var thisRelease = map[int]bool{
+	20261029120000: true, 20261029120100: true, 20261029120200: true, 20261029120300: true,
+	20261029120400: true, 20261029120600: true, 20261029120700: true, 20261029120800: true,
+	20261029120900: true, 20261029121000: true, 20261029121100: true, 20261029121200: true,
+	20261102003600: true, 20261105081500: true,
+}
+
+const idleRelease = 20261101222956
+
 // Every outbox kind the daemon writes is one the schema's check admits, on a fresh database and on
 // databases that applied a lower migration late. 0016 (the READY packet's publish) and 0020
 // (controller_notice) would each redefine the check with the other's kind missing, and a database
@@ -696,12 +712,22 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 		{"a fresh database", func(migrations.Migration) bool { return false }},
 		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
 		{"a database that ran 0031 through 0038 before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || (m.Version >= 31 && m.Version <= 38) }},
-		// A database main deployed, at its newest migration, with the kinds of that release
-		// already queued. A rewrite of a CHECK validates the rows the table holds, so a release
-		// whose new list forgets a kind another release queues cannot be applied at all: the
-		// daemon fails its boot on every restart until someone deletes the row. That is what this
-		// case holds, and the seeds below are what make it bite.
-		{"a database at main's newest migration", func(m migrations.Migration) bool { return m.Version <= 67 }},
+		// A database the release this branch merged had already migrated, which is every
+		// deployment running main: it recorded main's versions, so this branch's binary applies
+		// only the versions it adds, and each of main's is skipped for ever. That is the shape
+		// `Store.apply` makes possible at all — it asks whether each migration's own version is
+		// recorded rather than comparing against the highest — and it is the one a filter on a
+		// version number cannot build, because the versions this release adds are spread on
+		// either side of main's newest. A rewrite of a CHECK also validates the rows the table
+		// holds, so a release whose list forgets a kind another release queues cannot be applied
+		// at all: the daemon fails its boot on every restart until someone deletes the row. That
+		// is what this case holds, and the seeds below are what make it bite.
+		{"a database main migrated", func(m migrations.Migration) bool { return !thisRelease[m.Version] }},
+		// The same database one release earlier, at the idle release's own newest migration: this
+		// release's binary then applies its own versions and main's later ones together.
+		{"a database at the idle release", func(m migrations.Migration) bool {
+			return !thisRelease[m.Version] && m.Version <= idleRelease
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

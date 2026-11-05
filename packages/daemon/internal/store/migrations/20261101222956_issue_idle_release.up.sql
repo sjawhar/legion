@@ -7,15 +7,13 @@
 -- and never the `suspend` supervise op reused, because the open-issue invariant matches on kind
 -- and payload->>'op' and a reader must be able to say which act it is reading: a close stops an
 -- issue that has left the workflow, a release stops the pod of an issue that is still in it. The
--- constraint is rewritten whole, naming every kind, as 0049 and 0066 did: the kinds it names are
--- the ones 20261029120600 and 20261029120800 left, so `role_message` is in it and the three kinds
--- of the daemon's own merge, which those migrations deleted with the rows that carried them, are
--- not.
+-- constraint is rewritten whole, naming every kind, as 0049 and 0066 did.
 alter table outbox drop constraint outbox_kind_check;
 alter table outbox add constraint outbox_kind_check check (kind in (
   'dispatch_status', 'dispatch_message', 'notice', 'controller_notice', 'supervise', 'gate_seed',
-  'linger_close', 'workspace_remove', 'issue_branch', 'issue_suspend', 'check_compare',
-  'check_look', 'check_bound', 'role_message', 'phase_ended', 'issue_bundle', 'issue_release'));
+  'linger_close', 'workspace_remove', 'merge_queue_publish', 'issue_branch', 'issue_suspend',
+  'auto_merge_disable', 'ready_merge', 'check_compare', 'check_look', 'check_bound',
+  'phase_ended', 'issue_bundle', 'issue_release'));
 
 -- issue_releases is the mark one release in progress leaves, written in the same transaction that
 -- read the idle view and queued the release's rows, and deleted when the release finishes or is
