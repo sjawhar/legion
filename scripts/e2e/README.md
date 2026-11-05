@@ -73,7 +73,7 @@ Each item below names a script, then what it proves.
   the Agent Sandbox install check accepts and refuses by name;
   the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author;
   every container of its pod reserves the issue pod's one cpu and memory reservation with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and the checkpoint reads that one reservation, which all six roles share, back inside the pod:
-  `nproc` and `MemTotal` on AWS, the pod's cgroup cpu quota and `MemTotal` on GKE, where a sandboxed pod reads `nproc` 2 whatever it reserves;
+  `nproc` and `MemTotal` on AWS, the pod's cgroup cpu quota and `MemTotal` on GKE, where a sandboxed pod on the container-optimized compute platform reads `nproc` 2 whatever it reserves;
   a second role joins the root's issue pod;
   suspend, resume, a same-agent refusal of a session the table lacks, a pod killed in place, and a relaunch before registration each hold;
   a new tree's root and child spawned at once each provision an issue pod whose Sandbox owns no claim template and whose disk is that pod's own, neither able to read the other's workspace;
@@ -1875,7 +1875,8 @@ What the run had to learn about GKE (`LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernete
 
 - **A gVisor-sandboxed pod on GKE Autopilot's container-optimized compute platform reads `nproc` 2 whatever it reserves, so `resources` asserts the pod's cgroup cpu quota there instead.**
   Measured 2026-11-05 (dispatch://INFRA-928/artifact/measurements-2026-11-05-md):
-  probe pods at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, all read `nproc` 2, `sched_getaffinity` 2 and `cpuset.cpus` `0-1`, while the pod's cgroup cpu quota (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` over `cpu.cfs_period_us`, identically presented by every container, since one gVisor sandbox covers the whole pod) read Σ cpu limits exactly at each of those sizes.
+  probe pods at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, all read `nproc` 2, and the pod's cgroup cpu quota (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` over `cpu.cfs_period_us`, identically presented by every container, since one gVisor sandbox covers the whole pod) read Σ cpu limits exactly at each of those sizes;
+  the probe pods that requested 2, 3, 4 and 6 CPU also read `sched_getaffinity` 2 and `cpuset.cpus` `0-1`.
   A live issue pod at 3 CPU on an 8-vCPU node read the same 2, and so did Go's `runtime.NumCPU` and Python's `os.cpu_count` in it.
   So the count there is neither the pod's own cgroup limit nor the size of the node under it:
   the nodes held 8 vCPU and the pods read 2.

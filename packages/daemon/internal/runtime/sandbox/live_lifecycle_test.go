@@ -193,19 +193,19 @@ func (r *liveRig) checkResources() error {
 		// gVisor on GKE Autopilot's container-optimized compute platform: a sandboxed pod reads
 		// nproc 2 whatever it reserves and whatever its host holds. Measured 2026-11-05
 		// (dispatch://INFRA-928/artifact/measurements-2026-11-05-md): probe pods at 2, 2.5, 3, 4
-		// and 6 CPU, each on an 8-vCPU node, all read nproc 2, sched_getaffinity 2 and
-		// cpuset.cpus 0-1, while the pod's cgroup cpu quota — read from
-		// `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`, identically presented by
-		// every container in the pod, since one gVisor sandbox covers the whole pod — read the
-		// containers' summed cpu limits exactly at each of those sizes. A pod of the same cluster
-		// placed on a node of a named machine series (cloud.google.com/machine-family) read nproc
-		// 3 at a 3-CPU limit, its whole reservation, where the nproc rule in this method's doc
-		// comment holds. The earlier reading, 2026-10-17, says the same: two debug pods summing
-		// to 2.5 and to exactly 3.0 cores (one container each at 1 and 2 cores) both reported
-		// nproc=2 on an 8-vCPU node with 7.91 allocatable, while the quota tracked the configured
-		// sum exactly in both (300000/100000 = 3.0 cores; 250000/100000 = 2.5 cores). So the
-		// quota is what this check asserts here, and nproc is only logged. AWS keeps nproc below;
-		// it is proven reliable there.
+		// and 6 CPU, each on an 8-vCPU node, all read nproc 2, while the pod's cgroup cpu quota —
+		// read from `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`, identically
+		// presented by every container in the pod, since one gVisor sandbox covers the whole pod —
+		// read the containers' summed cpu limits exactly at each of those sizes; the probe pods
+		// that requested 2, 3, 4 and 6 CPU also read sched_getaffinity 2 and cpuset.cpus 0-1. A pod
+		// of the same cluster placed on a node of a named machine series
+		// (cloud.google.com/machine-family) read nproc 3 at a 3-CPU limit, its whole reservation,
+		// where the nproc rule in this method's doc comment holds. The earlier reading,
+		// 2026-10-17, says the same: two debug pods summing to 2.5 and to exactly 3.0 cores (one
+		// container each at 1 and 2 cores) both reported nproc=2 on an 8-vCPU node with 7.91
+		// allocatable, while the quota tracked the configured sum exactly in both (300000/100000 =
+		// 3.0 cores; 250000/100000 = 2.5 cores). So the quota is what this check asserts here, and
+		// nproc is only logged. AWS keeps nproc below; it is proven reliable there.
 		quotaOut, err := r.execPod(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
 		if err != nil {
 			return err
