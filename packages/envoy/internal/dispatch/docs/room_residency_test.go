@@ -597,10 +597,10 @@ func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Poin
 // goes in the collection that takes the document the load read, through the cleanup keepInstance
 // attaches to it. Nothing else clears it for a room whose load succeeded: beginRoomLoad only
 // replaces the record of a room that loads again, so a room evicted and never loaded again keeps
-// its own, and the one other delete is a failed load's (failRoomLoad, reached from the socket's
-// load path), which an eviction does not take. A running Dispatch process keeps one service for
-// its whole life, so a record the cleanup fails to take is one more for every room the process
-// ever loads.
+// its own, and every other delete is a failed load's (onLoadDocument's deferred delete, and
+// failRoomLoad, reached from onLoadDocument and from the socket's load path), which an eviction
+// does not take. A running Dispatch process keeps one service for its whole life, so a record
+// the cleanup fails to take is one more for every room the process ever loads.
 func TestAnEvictedRoomsLoadRecordGoesWithIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
