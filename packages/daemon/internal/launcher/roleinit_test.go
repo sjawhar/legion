@@ -140,7 +140,7 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent home-mounts-view", "0", "the container's view of the home's volumes is covered: the role sees each at its own path alone"},
 		{"agent tmp-mount", "mounted-a", "a mount /tmp carried is bound back over the role's own /tmp"},
 		{"agent home-carryover", "absent", "the role's first generation starts on a home layer with nothing of its own"},
-		{"agent home-dir-rename", "ok", "the role renames a directory on its own home layer and the sandbox lives, which is what userxattr buys"},
+		{"agent home-dir-rename", "ok", "the role renames a directory on its own home layer and the sandbox lives; under gVisor without userxattr the rename panics the sandbox instead"},
 		{"stage upper-home", "present", "what the role wrote under its home landed on its own layer"},
 		{"stage upper-tmp", "present", "what the role wrote in /tmp landed in its own temporary directory"},
 		{"stage upper-var-tmp", "present", "what the role wrote in /var/tmp landed in its own temporary directory"},
@@ -1037,18 +1037,17 @@ func TestARoleHomeLayerIsMountedWithUserxattr(t *testing.T) {
 
 // A refused home layer names the options the mount was tried with, userxattr among them, so the
 // operator who reads the failure is told what the launch asked the kernel for rather than that
-// the mount failed. The home here is a regular file with the role's upper and work directories
-// beside it: it carries no mount, so the call reaches the mount itself, which no caller can make
-// over a file. The case asserts the message alone, never an errno, since root is refused with
-// ENOTDIR and an unprivileged caller with EPERM; nothing is mounted and no directory is renamed.
+// the mount failed. The home here is a regular file and the upper layer does not exist, only the
+// work directory beside it: the file carries no mount, so the call reaches the mount itself,
+// which is refused for every caller on every runtime because there is no upper layer to mount.
+// Nothing is mounted and no directory is renamed. The case reads the refusal's text alone, and
+// fails when the error is nil.
 func TestARefusedRoleHomeLayerNamesTheOptionsItTried(t *testing.T) {
 	dir := t.TempDir()
 	homes, home := filepath.Join(dir, "homes"), filepath.Join(dir, "home")
 	upper, work := filepath.Join(homes, "upper"), filepath.Join(homes, "work", "0000000001")
-	for _, made := range []string{upper, work} {
-		if err := os.MkdirAll(made, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(home, []byte("no caller mounts over a file"), 0o600); err != nil {
 		t.Fatal(err)
