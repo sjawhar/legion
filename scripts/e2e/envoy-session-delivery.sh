@@ -1193,18 +1193,23 @@ cat "$table"
 # run can never print the order as held having compared nothing. A run whose windows publish no
 # comment at all (--disruptions g alone, whose one event is neither a comment nor Dispatch's) has
 # nothing to compare, and says so.
+#
+# Which of those two an empty comparison is, the run's event record says, and only a run has one:
+# the function's own unit harness sets neither events nor disruptions, so both are read with a
+# default and an empty comparison without a record is the failure, which is the case that harness
+# drives. The function runs under set -u, where naming an unset variable ends the shell.
 compare_issue_order() {
   local m label line last shown
   local -a written
   read -r -a written <<<"$written_order"
   order_ok=1
   if ((${#written[@]} == 0)); then
-    if jq -se 'any(.[]; .kind == "issue")' "$events" >/dev/null; then
+    if [[ -s "${events:-}" ]] && ! jq -se 'any(.[]; .kind == "issue")' "${events}" >/dev/null; then
+      printf 'issue order: no window of this run (--disruptions %s) publishes a comment of %s, so there is nothing to compare\n' \
+        "${disruptions:-}" "$followed_issue" | tee -a "$table"
+    else
       printf 'issue order: no comment of %s was recorded, so nothing was compared\n' "$followed_issue" | tee -a "$table"
       order_ok=0
-    else
-      printf 'issue order: no window of this run (--disruptions %s) publishes a comment of %s, so there is nothing to compare\n' \
-        "$disruptions" "$followed_issue" | tee -a "$table"
     fi
     return
   fi
