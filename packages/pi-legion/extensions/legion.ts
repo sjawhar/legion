@@ -390,8 +390,9 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   // The host walked this session's own fallback chain: the plugin owns the return, since the
-  // host's restore never comes for a refusal it pinned (dispatch://INFRA-956, the plan's answer
-  // 1). A settled turn then says whether the turn that earned it was a refusal.
+  // host's restore never comes for a refusal it pinned (dispatch://INFRA-956). The event's own
+  // reason says whether a content filter earned the walk, and a settled turn says so for a host
+  // build whose event carries none (src/model-fallback.ts).
   pi.on("retry_fallback_applied", async (event, context) => {
     if (!(await modelFallbackSession(context))) return;
     modelFallback.armFromEvent(event, context);

@@ -1,6 +1,8 @@
 /**
- * What a turn's last assistant message says about the provider that ended it: nothing wrong, a
- * content filter, or any other provider failure.
+ * What the provider that ended a turn left behind: nothing wrong, a content filter, or any other
+ * provider failure. A caller holding the turn's last assistant message reads it with
+ * `classifyProviderTurn`, and one holding an error text alone with `classifyProviderError`; both
+ * read the one list of patterns below, so a refusal reads the same either way.
  *
  * A worker whose turn ends in a content filter has to step down Oh My Pi's model fallback chain,
  * because the same prompt on the same model is refused again; a 429 or a 529 is the opposite, a
@@ -66,16 +68,36 @@ const LEADING_STATUS = /^(\d{3})\b/;
  * (`packages/coding-agent/src/extensibility/shared-events.ts:285` at the pinned tag). */
 const TAGGED_STATUS = /\bstatus:(\d{3})\b/;
 
+/** What the host puts in front of the provider's own error text when it names why it walked the
+ * fallback chain: ``reason: `Request failed: ${message.errorMessage ?? "provider returned an
+ * error without details"}` `` (`packages/coding-agent/src/session/turn-recovery.ts` at the
+ * pinned tag). It is taken off before the texts above are read, so one list of patterns reads
+ * both a message's own error text and that reason. */
+const REQUEST_FAILED = /^Request failed: /;
+
 /** How the provider ended the turn that this message settled. */
 export function classifyProviderTurn(message: unknown): ProviderTurnOutcome {
   if (typeof message !== "object" || message === null) return { kind: "clean" };
   if (!("stopReason" in message) || message.stopReason !== "error") return { kind: "clean" };
   const fromDetails = filterFromStopDetails(message);
-  if (fromDetails !== undefined) return fromDetails;
-  const text = errorText(message);
-  const fromText = filterFromText(text);
-  if (fromText !== undefined) return fromText;
-  const status = statusOf(LEADING_STATUS.exec(text)) ?? statusOf(TAGGED_STATUS.exec(text));
+  return fromDetails ?? classifyProviderError(errorText(message));
+}
+
+/**
+ * How the provider ended a turn, read from its error text alone: the content filter the text
+ * names, and a provider error for every other text — with the status when the text carries one,
+ * as `classifyProviderTurn` reads it. No text answers `clean`: a text is an error's.
+ *
+ * This is the entry point for a caller that holds a text and no message, which is what the
+ * host's `retry_fallback_applied` hands one (`packages/pi-legion/src/model-fallback.ts`). A
+ * content filter answers the same outcome either way, its category included, so a refusal reads
+ * the same whichever of the two a caller has.
+ */
+export function classifyProviderError(text: string): ProviderTurnOutcome {
+  const error = text.replace(REQUEST_FAILED, "").trim();
+  const filter = filterFromText(error);
+  if (filter !== undefined) return filter;
+  const status = statusOf(LEADING_STATUS.exec(error)) ?? statusOf(TAGGED_STATUS.exec(error));
   return status === undefined ? { kind: "provider-error" } : { kind: "provider-error", status };
 }
 

@@ -15,7 +15,7 @@ import type {
   RetryFallbackAppliedEvent,
   SessionContext,
 } from "@legion/pi-shared/pi-types";
-import { classifyProviderTurn } from "@legion/pi-shared/provider-refusal";
+import { classifyProviderError, classifyProviderTurn } from "@legion/pi-shared/provider-refusal";
 
 /**
  * The session's model across a provider's refusal (INFRA-956 R1): a content filter that refuses a
@@ -64,7 +64,8 @@ export interface ModelFallback {
    * this session has never fallen back. A relaunched worker comes back with its due time and its
    * doubling levels. */
   readonly restore: (state: FallbackCooldownState | undefined) => void;
-  /** The host's `retry_fallback_applied`: the host walked the chain itself. */
+  /** The host's `retry_fallback_applied`: the host walked the chain itself, and its own reason
+   * says whether a content filter is what it walked for. */
   readonly armFromEvent: (event: RetryFallbackAppliedEvent, ctx: ModelFallbackContext) => void;
   /** The host's `agent_end`: a turn that has settled, which the provider ended cleanly, with a
    * content filter, or with some other failure. */
@@ -276,9 +277,12 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     const outcome = classifyProviderTurn(lastAssistantMessage(event.messages));
     const current = ctx.models?.current?.();
     if (outcome.kind === "content-filter") {
-      // The host walked the chain for this very refusal: the arming it left is a refusal's, so it
-      // waits out the growing cooldown rather than the host's own suppression.
+      // The host walked the chain for this very refusal: the arming it left becomes a refusal's,
+      // so it waits out the growing cooldown rather than the host's own suppression. A host
+      // build whose event named the filter armed that already, and arming it twice would double
+      // the selector's level for one walk, so this is the path for a build that named nothing.
       if (applied !== undefined && state.arming?.entryId === applied) {
+        if (state.arming.cause === "refusal") return;
         save(
           step({
             kind: "fallback-applied",
@@ -364,12 +368,29 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         // the one it has just left; a fallback after any other model change starts a new arming.
         const previous = state.arming;
         const continues = previous !== undefined && own.previousEntryId === previous.entryId;
+        // What the host walked for, in the provider's own words: it names the reason as
+        // `Request failed: ` and the error text of the message that failed
+        // (`session/turn-recovery.ts` at the pinned tag `v18.16.0-sami.20261104-021732`), so
+        // `Request failed: Refusal (cyber): Declined` reads as Anthropic's `cyber` filter and
+        // arms the same refusal the plugin's own walk arms, category and all.
+        //
+        // Reading it here is what covers a refusal that came before the model sent any text:
+        // the host walks the chain itself and then replays the turn, which succeeds, so the
+        // settled turn's last assistant message is clean and `settled` below never sees that
+        // refusal. An `"other"` arming would then wait on a suppression the host never applies
+        // — for a classifier refusal it pins the fallback instead
+        // (`session/turn-recovery.ts:3229` at the pinned tag) — and hand the session straight
+        // back to the model that had just refused it, with no cooldown at all.
+        //
+        // A host build that sends no reason arms `"other"`, as every arming did before: for it
+        // `settled` stays the path that re-arms the fallback as a refusal once the turn ends on
+        // the filter's own message. That is why both paths exist.
+        const refusal =
+          event.reason === undefined ? undefined : classifyProviderError(event.reason);
         save(
           step({
             kind: "fallback-applied",
-            // The host names no reason on this event, so the turn's own end decides whether this
-            // was a refusal (`settled`); until then it waits on the host's own suppression.
-            cause: "other",
+            cause: refusal?.kind === "content-filter" ? "refusal" : "other",
             restoreTo: continues ? previous.restoreTo : event.from,
             entryId: own.entryId,
             now: deps.now(),

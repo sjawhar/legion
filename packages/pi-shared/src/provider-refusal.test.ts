@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { classifyProviderTurn } from "./provider-refusal";
+import {
+  classifyProviderError,
+  classifyProviderTurn,
+  type ProviderTurnOutcome,
+} from "./provider-refusal";
 
 /** A turn that ended on a provider error, as `agent_end` hands its last assistant message. */
 function errorTurn(errorMessage: string): unknown {
@@ -163,5 +167,93 @@ describe("a turn no provider ended badly", () => {
     expect(classifyProviderTurn(undefined)).toEqual({ kind: "clean" });
     expect(classifyProviderTurn(null)).toEqual({ kind: "clean" });
     expect(classifyProviderTurn("Refusal")).toEqual({ kind: "clean" });
+  });
+});
+
+describe("an error text on its own", () => {
+  /** Every filter text the module matches, and the outcome it reads as. */
+  const FILTERS: readonly [string, ProviderTurnOutcome][] = [
+    ["Refusal", { kind: "content-filter", provider: "anthropic" }],
+    [
+      "Refusal (csam): we cannot help with that",
+      { kind: "content-filter", provider: "anthropic", category: "csam" },
+    ],
+    ["Refusal: we cannot help with that", { kind: "content-filter", provider: "anthropic" }],
+    ["Provider finish_reason: content_filter", { kind: "content-filter", provider: "openai" }],
+    ["incomplete: content_filter", { kind: "content-filter", provider: "openai" }],
+    [
+      "Generation failed with finish reason: SAFETY",
+      { kind: "content-filter", provider: "google", category: "SAFETY" },
+    ],
+    [
+      "Generation failed with finish reason: IMAGE_SAFETY",
+      { kind: "content-filter", provider: "google", category: "IMAGE_SAFETY" },
+    ],
+    [
+      "Request blocked by Google (SAFETY): hate",
+      { kind: "content-filter", provider: "google", category: "SAFETY" },
+    ],
+    [
+      "Generation was blocked by content filters (PROHIBITED)",
+      { kind: "content-filter", provider: "google", category: "PROHIBITED" },
+    ],
+    [
+      "Response filtered by Amazon Bedrock content filters (stop reason: guardrail).",
+      { kind: "content-filter", provider: "amazon-bedrock" },
+    ],
+    [
+      "Response blocked by Amazon Bedrock guardrail (stop reason: guardrail).",
+      { kind: "content-filter", provider: "amazon-bedrock" },
+    ],
+  ];
+
+  test("reads every provider's filter text as the turn's own message reads it", () => {
+    for (const [text, outcome] of FILTERS) {
+      expect(classifyProviderError(text)).toEqual(outcome);
+      // The one list of patterns: the two exports answer the same text the same way.
+      expect(classifyProviderTurn(errorTurn(text))).toEqual(outcome);
+    }
+  });
+
+  test("reads a filter text the host wrapped as the reason it walked its chain for", () => {
+    // What `retry_fallback_applied` carried in the live pane proof of INFRA-956 R1.
+    expect(classifyProviderError("Request failed: Refusal (cyber): Declined")).toEqual({
+      kind: "content-filter",
+      provider: "anthropic",
+      category: "cyber",
+    });
+    for (const [text, outcome] of FILTERS) {
+      expect(classifyProviderError(`Request failed: ${text}`)).toEqual(outcome);
+    }
+  });
+
+  test("reads a 429 and a 529 as provider errors carrying their status", () => {
+    expect(classifyProviderError("429 Too Many Requests")).toEqual({
+      kind: "provider-error",
+      status: 429,
+    });
+    expect(classifyProviderError("Request failed: 429 Too Many Requests")).toEqual({
+      kind: "provider-error",
+      status: 429,
+    });
+    expect(classifyProviderError("529 Overloaded")).toEqual({
+      kind: "provider-error",
+      status: 529,
+    });
+    expect(classifyProviderError("Request failed: 529 Overloaded")).toEqual({
+      kind: "provider-error",
+      status: 529,
+    });
+  });
+
+  test("reads anything else as a provider error, an empty text included", () => {
+    expect(classifyProviderError("socket hang up")).toEqual({ kind: "provider-error" });
+    expect(classifyProviderError("Generation failed with finish reason: OTHER")).toEqual({
+      kind: "provider-error",
+    });
+    expect(
+      classifyProviderError("Request failed: provider returned an error without details")
+    ).toEqual({ kind: "provider-error" });
+    expect(classifyProviderError("")).toEqual({ kind: "provider-error" });
   });
 });

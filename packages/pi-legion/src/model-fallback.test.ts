@@ -110,9 +110,17 @@ function fixture(startOn = OPUS) {
   };
 }
 
-/** The `retry_fallback_applied` payload the host emits for a session's own walk. */
-function applied(from: string, to: string, role = "default") {
-  return { from, to, role };
+/** The reason the host names on the event when a content filter refused the turn it walked for:
+ * what the live pane proof measured (dispatch://INFRA-956 R1). */
+const REFUSAL_REASON = "Request failed: Refusal (cyber): Declined";
+/** A reason that is no content filter: the busy model the host's own retry handles. */
+const BUSY_REASON = "Request failed: 529 Overloaded";
+
+/** The `retry_fallback_applied` payload the host emits for a session's own walk. `reason` is the
+ * host's own wording of the error it walked for; a build that names none sends the event with no
+ * such field at all. */
+function applied(from: string, to: string, role = "default", reason?: string) {
+  return { from, to, role, ...(reason === undefined ? {} : { reason }) };
 }
 
 beforeEach(() => {
@@ -120,7 +128,7 @@ beforeEach(() => {
 });
 
 describe("a fallback the host applied", () => {
-  test("is armed without a cooldown until the turn's own end calls it a refusal", () => {
+  test("names no reason, so it is armed without a cooldown until the turn's end calls it one", () => {
     const pane = fixture();
     const entry = pane.hostFallback(SONNET);
 
@@ -133,6 +141,66 @@ describe("a fallback the host applied", () => {
       cause: "other",
     });
     // Nothing is refused yet, so no selector's wait has doubled.
+    expect(pane.last()?.levels).toEqual({});
+  });
+
+  test("whose reason names a content filter is armed as a refusal, which waits out its wait", async () => {
+    const pane = fixture();
+    const entry = pane.hostFallback(SONNET);
+
+    pane.runner.armFromEvent(applied(OPUS, SONNET, "default", REFUSAL_REASON), pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: pane.live.now + HOUR,
+      cause: "refusal",
+    });
+    // The level rises as it does for the plugin's own walk: the next refusal waits twice as long.
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+
+    // The host's own replay of that turn succeeded, so the settled turn reads clean and the
+    // arming the event made is the whole of it.
+    const saves = pane.saved.length;
+    await pane.runner.turnSettled(CLEAN, pane.ctx);
+    expect(pane.saved.length).toBe(saves);
+
+    // The host suppresses nothing for a refusal it walked for, so an `other` arming would be
+    // handed back at the very next request. This one goes back only once its wait is over.
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([]);
+    pane.live.now += HOUR;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([OPUS]);
+  });
+
+  test("whose reason names a filter is not armed a second time by the turn that settles on it", async () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+    pane.runner.armFromEvent(applied(OPUS, SONNET, "default", REFUSAL_REASON), pane.ctx);
+    const armed = pane.last();
+
+    // The host's replay was refused too, so this settled turn carries the filter the reason
+    // named: the same walk, which must not raise the selector's level twice.
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.last()).toBe(armed);
+    expect(pane.setModelCalls).toEqual([]);
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+  });
+
+  test("whose reason names no content filter is armed as any other fallback is", () => {
+    const pane = fixture();
+    const entry = pane.hostFallback(SONNET);
+
+    pane.runner.armFromEvent(applied(OPUS, SONNET, "default", BUSY_REASON), pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: pane.live.now,
+      cause: "other",
+    });
     expect(pane.last()?.levels).toEqual({});
   });
 

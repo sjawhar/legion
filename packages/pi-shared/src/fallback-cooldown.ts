@@ -12,10 +12,12 @@ import { integerSetting, type StallLimitsLog } from "./stall-limits";
  * then two, four, and eight hours at most. A clean turn on a model puts its wait back to one hour;
  * a provider error that is no content filter leaves the wait as it is, because a rate limit is not
  * the model refusing. A fallback the host applied for any other reason carries no cooldown at all:
- * Oh My Pi's `retry_fallback_applied` names no reason, nothing reports when the host's own
- * suppression of a model expires, and the host restores such a fallback itself, so that arming
- * waits for the suppression to end (`modelRegistry.isSelectorSuppressed`, `src/pi-types.ts`) and
- * `restoreDue` is told whether it still holds.
+ * nothing reports when the host's own suppression of a model expires, and the host restores such a
+ * fallback itself, so that arming waits for the suppression to end
+ * (`modelRegistry.isSelectorSuppressed`, `src/pi-types.ts`) and `restoreDue` is told whether it
+ * still holds. Which of the two a fallback is, the caller decides: the host's
+ * `retry_fallback_applied` carries the reason it stepped down for
+ * (`packages/pi-legion/src/model-fallback.ts`).
  */
 
 /** Why the session fell back: its turn was refused by a content filter, or anything else the host
