@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
@@ -611,6 +612,48 @@ func TestReadyForUpdateRequestGolden(t *testing.T) {
 		Round:      "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22",
 		Head:       "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35",
 	})
+}
+
+// The release records a pod reads of its deployment's idle release, built through
+// releaseRecordsBody from the store's own rows, so the fixture is what the route writes rather
+// than a literal. The store's `Project` is no field of the wire — the route answers one
+// project's records — so the rows carry only what is served.
+//
+// Two rows of each list, because one row of each pins less than the shape:
+//   - the releases are a release that suspended two roles and saved a bundle, and one whose
+//     stops suspended no claim and whose workspace held nothing unpushed (recordPodRelease
+//     counts only the claims this release's own stops suspended, and the store reads an empty
+//     `roles` column back as none): `roles` is `[]` and never `null`, and `bundleBytes` is 0
+//     rather than absent;
+//   - the resumes are a wake whose pod was Ready and whose role took its first turn, which is
+//     the row that fills both optional stamps, and a wake of a pod with no release row recorded
+//     for it (`release` is 0) that went ten minutes with no turn, so it is `stuck` and its
+//     `firstTurnAt` is left out until something observes it;
+//   - the holds are a background-work streak over eleven passes with the kinds its session
+//     reported in `detail`, and a teardown's overtaken hold, which reads a hold and not the view
+//     behind it and so carries no detail at all (outbox.recordPodHold).
+func TestReleaseRecordsResponseGolden(t *testing.T) {
+	released := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	golden(t, "release-records.json", releaseRecordsBody(store.PodReleaseRecords{
+		Releases: []store.PodRelease{
+			{ID: 101, Issue: "LEGION-208", Generation: 3, Roles: []string{"implementer", "tester"},
+				At: released, BundleBytes: 4096},
+			{ID: 102, Issue: "LEGION-209", Generation: 1, At: released.Add(15 * time.Minute)},
+		},
+		Resumes: []store.PodResume{
+			{ID: 201, Release: 101, Issue: "LEGION-208", Role: "implementer", Kind: "delivery",
+				At: released.Add(30 * time.Minute), PodReadyAt: released.Add(31 * time.Minute),
+				FirstTurnAt: released.Add(32 * time.Minute)},
+			{ID: 202, Issue: "LEGION-207", Role: "architect", Kind: "backstop",
+				At: released.Add(45 * time.Minute), PodReadyAt: released.Add(46 * time.Minute), Stuck: true},
+		},
+		Holds: []store.PodHold{
+			{ID: 301, Issue: "LEGION-210", Reason: "background_work", Detail: "subagent,async-job",
+				FirstAt: released.Add(time.Hour), At: released.Add(70 * time.Minute), Passes: 11},
+			{ID: 302, Issue: "LEGION-211", Reason: "overtaken",
+				FirstAt: released.Add(65 * time.Minute), At: released.Add(65 * time.Minute), Passes: 1},
+		},
+	}))
 }
 
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side

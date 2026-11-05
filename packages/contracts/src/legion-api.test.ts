@@ -59,6 +59,9 @@ const schemas: Record<string, z.ZodType> = {
   // `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
   // pushed everything it wants kept and its process may be replaced.
   "ready-for-update.json": LegionReadyForUpdateRequest,
+  // What a pod reads of its deployment's idle release: every release, resume and hold of the
+  // window it named (`api.ReleaseRecordsResponse`).
+  "release-records.json": LegionReleaseRecordsResponse,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
   "controller-github-credential.json": LegionControllerCredentialResponse,
@@ -155,6 +158,32 @@ test("every Go-written fixture parses to a value equal to the file", () => {
     expect(dropped, `${name}: the Go field ${dropped} has no line in its schema`).toBeUndefined();
     expect(parsed?.data, `${name} parses to a value the file does not equal`).toEqual(file);
   }
+});
+
+// The other direction of that gate, and the hole a merge opened in it: the case above walks the
+// goldens, so an answer schema no golden names is walked by nothing and a Go field it gains is
+// dropped in silence — which is what `LegionReleaseRecordsResponse` was between the merge that
+// brought it and the fixture above. Every answer schema the module exports must therefore be the
+// schema of some golden, and the roster is derived (`exportedSchemas`), so the next answer
+// schema added with no fixture fails here by its own name. `LegionEmptyResponse` is the schema
+// of eight fact-route goldens, so it is a value of the map eight times over and passes as any
+// other does.
+test("every answer schema the module exports is the schema of a golden", () => {
+  const held = new Set(Object.values(schemas));
+  const roster = exportedSchemas("answer");
+  const names = Object.keys(roster).sort();
+  console.log(`answer roster (${names.length} schemas) held by a golden: ${names.join(", ")}`);
+
+  // A roster that matched nothing would leave the assertion below holding vacuously.
+  expect(names.length).toBeGreaterThan(0);
+  const without = Object.entries(roster)
+    .filter(([, schema]) => !held.has(schema))
+    .map(([name]) => name)
+    .sort();
+  expect(
+    without,
+    `these answer schemas have no Go-written golden under fixtures/daemon-api: ${without.join(", ")}`
+  ).toEqual([]);
 });
 
 // What that equality catches, and the one place it is blind. A key no schema names is dropped
