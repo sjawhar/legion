@@ -35,8 +35,9 @@ const (
 // listener makes it (the pass creates no bucket), a loopback GitHub serving the installation
 // lookup, the token mint and the four reads one pass makes, and one repo_projects row for the
 // repository it serves. The process's own log is the evidence: the duty loop's leased pass under
-// the ci-reconcile lease, and the pass's own INFO line with the three records it wrote -- an
-// ordinary completed check run, the review App's `tester` verdict and the head's check suite.
+// the ci-reconcile lease, and the pass's own INFO line with the one record it changed -- the one
+// head's record, which an ordinary completed check run, the review App's `tester` verdict and
+// the head's check suite all write.
 func TestTheCIReconcilePassRunsInTheDispatchProcess(t *testing.T) {
 	database := storetest.Open(t)
 	mapCIReconcileRepository(t, database)
@@ -59,7 +60,7 @@ func TestTheCIReconcilePassRunsInTheDispatchProcess(t *testing.T) {
 	process.waitHealthy(t)
 	process.WaitForOutput(t,
 		`msg="dispatch: reconciling the CI records GitHub's webhook never delivered" client_id=Iv1.cireconcile interval=1s`,
-		`msg="ci reconcile pass" list_pages=1 heads=1 head_requests=2 heads_not_modified=0 records=3 mappings_skipped=0 heads_too_large=0 rate_limited=false`,
+		`msg="ci reconcile pass" list_pages=1 heads=1 head_requests=2 heads_not_modified=0 records=1 mappings_skipped=0 heads_too_large=0 rate_limited=false`,
 		`msg="dispatch duty: leased pass ran" lease=ci-reconcile`,
 	)
 }

@@ -352,6 +352,8 @@ It runs under the lease `ci-reconcile` with that 5 minutes as its period, so one
   The pass records no limit of its own: the App client records GitHub's own answer, as every process's App call does.
 
 - Every pass logs one INFO `msg="ci reconcile pass"` line: `list_pages`, `heads`, `head_requests`, `heads_not_modified`, `records`, `mappings_skipped`, `heads_too_large`, `rate_limited`, with `rate_limit_scope` and `rate_limit_until` when it stopped at one, and `duration`.
+  `records` counts the records the pass changed, one for each head whose record a write of the pass changed, never one for each observation it wrote:
+  a head's runs and its suites all write the one record of that head (`cistore.Key`), so a pass that records a head's run and its suite reports 1.
   `DISPATCH_TEST_CI_RECONCILE_INTERVAL` replaces the 5 minutes for an end-to-end test, and a deployment never sets it.
 
 ## Moving uploaded files to the bucket

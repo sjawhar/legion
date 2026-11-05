@@ -69,7 +69,7 @@ const (
 // cistore.OpenWriter, which creates nothing. It is an interface rather than the writer itself so
 // that a caller may put its own writer in the pass's way, as every other collaborator of a
 // Reconciler is its caller's to choose; *cistore.Writer satisfies it. Its two record calls answer
-// whether the observation changed the head's record, which is what the pass counts.
+// whether the observation changed the head's record, which is how the pass knows a head to count.
 type Writer interface {
 	Record(context.Context, contracts.CIObservation) (bool, error)
 	RecordSuite(context.Context, contracts.CIObservation) (bool, error)
@@ -161,9 +161,11 @@ type counts struct {
 	headRequests int
 	// notModified counts the heads every page of whose two listings answered 304.
 	notModified int
-	// records counts the records the pass changed: an observation the store applied as no change,
-	// which is what every observation of a head the listener already recorded is, counts for
-	// nothing, so a pass that mended nothing reports none.
+	// records counts the records the pass changed, one for each head a write of the pass changed
+	// the record of: a head's runs and suites all write the one record cistore.Key names, so a
+	// head whose run and whose suite the pass both recorded counts once. An observation the
+	// store applied as no change, which is what every observation of a head the listener already
+	// recorded is, changes no record, so a pass that mended nothing reports none.
 	records int
 	// mappingsSkipped counts the repo_projects rows the pass skipped, and tooLarge the heads
 	// whose answer was past what githubapp reads.
@@ -192,9 +194,10 @@ func (r *Reconciler) Pass(ctx context.Context) {
 	// pass makes, and it leaves no handle to go stale.
 	writer, err := r.Open()
 	if err != nil {
-		// The listener makes the CI bucket and Dispatch's NATS connects in the background, so a
-		// pass before either is an ordinary moment of a boot, not a fault: it reads GitHub nothing
-		// and a later pass binds the writer.
+		// The listener makes the CI bucket and Dispatch's NATS connects in the background, and
+		// every pass binds the writer afresh, so a pass before either, or one while NATS is down
+		// at any later moment of the process's life, is no fault: it reads GitHub nothing, logs
+		// no pass line, and a later pass binds the writer again.
 		r.Logger.Info("ci reconcile pass bound no CI record writer", "error", err)
 		return
 	}

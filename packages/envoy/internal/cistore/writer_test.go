@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,5 +278,137 @@ func TestAWriterReportsWhetherTheObservationChangedTheRecord(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("an older observation of the same check is reported as a change")
+	}
+}
+
+// Concurrent callers of one head are each told what their own observation did, not what the write
+// that carried it did. The combiner folds every mutation queued while one caller writes into that
+// one compare-and-swap, so a batch carries several callers at once, and one answer for the whole
+// batch would tell a caller whose observation the record already held that it mended something --
+// which is what the pass counting the records it changed would then count.
+//
+// Six callers write one head at the same time: two pairs each sending one observation the record
+// lacks, and two sending the check run it already holds. Within a pair, whichever of the two the
+// combiner applies first changes the record and the other finds its own observation already
+// there, so however the six fall into batches and whichever of them writes, exactly the two
+// observations new to the record change it and exactly two callers report a change.
+func TestConcurrentCallersOfOneHeadEachReportTheirOwnChange(t *testing.T) {
+	ctx := context.Background()
+	_, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("bus connect: %v", err)
+	}
+	defer client.Close()
+	// The listener's store makes the bucket a writer only binds; the record itself is read out of
+	// that bucket below, since a writer keeps no cache to read it from.
+	openListener(t, client.Conn)
+	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	if err != nil {
+		t.Fatalf("open the writer: %v", err)
+	}
+
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "dddddddddddddddddddddddddddddddddddddddd"
+	)
+	held := contracts.CIObservation{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		SHA:        sha,
+		CheckName:  "build",
+		CheckRunID: 7,
+		Status:     "completed",
+		Conclusion: "success",
+		ObservedAt: "2026-09-07T03:01:00Z",
+	}
+	if changed, err := writer.Record(ctx, held); err != nil || !changed {
+		t.Fatalf("seed the record with the check the burst finds it already holding: changed = %v, %v", changed, err)
+	}
+	newRun := held
+	newRun.CheckName = "ci-ok"
+	newRun.CheckRunID = 8
+	newRun.ObservedAt = "2026-09-07T03:02:00Z"
+	newSuite := contracts.CIObservation{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		SHA:        sha,
+		SuiteID:    "9001",
+		AppID:      "15368",
+		Status:     "completed",
+		Conclusion: "success",
+		ObservedAt: "2026-09-07T03:02:05Z",
+	}
+
+	callers := []func() (bool, error){
+		func() (bool, error) { return writer.Record(ctx, newRun) },
+		func() (bool, error) { return writer.Record(ctx, newRun) },
+		func() (bool, error) { return writer.Record(ctx, held) },
+		func() (bool, error) { return writer.Record(ctx, held) },
+		func() (bool, error) { return writer.RecordSuite(ctx, newSuite) },
+		func() (bool, error) { return writer.RecordSuite(ctx, newSuite) },
+	}
+	// The two observations the seeded record lacks, which is how many of the six callers can
+	// have changed it.
+	const wantChanged = 2
+
+	answers := make([]bool, len(callers))
+	failures := make([]error, len(callers))
+	// Every caller waits on one channel rather than on a sleep, so they reach the record
+	// together whatever the machine is doing, and the test waits for all six rather than for a
+	// moment by the clock.
+	start := make(chan struct{})
+	var running sync.WaitGroup
+	running.Add(len(callers))
+	for i, call := range callers {
+		go func() {
+			defer running.Done()
+			<-start
+			answers[i], failures[i] = call()
+		}()
+	}
+	close(start)
+	running.Wait()
+
+	changed := 0
+	for i, answer := range answers {
+		if failures[i] != nil {
+			t.Fatalf("caller %d of the burst: %v", i, failures[i])
+		}
+		if answer {
+			changed++
+		}
+	}
+	if changed != wantChanged {
+		t.Fatalf("%d of the %d concurrent callers report a change, want %d: only the new run and the new suite were not in the record (%v)",
+			changed, len(callers), wantChanged, answers)
+	}
+
+	entry, err := client.JS().KeyValue(bus.CIStateBucket)
+	if err != nil {
+		t.Fatalf("open the CI bucket: %v", err)
+	}
+	raw, err := entry.Get(cistore.Key(owner, repo, number, sha))
+	if err != nil {
+		t.Fatalf("get the head's record: %v", err)
+	}
+	var state cistore.State
+	if err := json.Unmarshal(raw.Value(), &state); err != nil {
+		t.Fatalf("the record is not JSON: %v", err)
+	}
+	if len(state.Checks) != 2 || len(state.Suites) != 1 {
+		t.Fatalf("the record holds %+v, want the two checks and the one suite the burst wrote", state)
+	}
+	for _, name := range []string{held.CheckName, newRun.CheckName} {
+		if _, ok := state.Checks[name]; !ok {
+			t.Fatalf("the record holds no %s check: %+v", name, state.Checks)
+		}
+	}
+	if _, ok := state.Suites[newSuite.SuiteID]; !ok {
+		t.Fatalf("the record holds no %s suite: %+v", newSuite.SuiteID, state.Suites)
 	}
 }

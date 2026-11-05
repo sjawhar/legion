@@ -115,7 +115,14 @@ func (r *Reconciler) readHead(ctx context.Context, writer Writer, head pullHead,
 	if err != nil {
 		return r.headFailed(err, head, c)
 	}
-	wanted, ok := r.record(ctx, writer, head, runs, suites, c)
+	wanted, changedRecord, ok := r.record(ctx, writer, head, runs, suites)
+	if changedRecord {
+		// A head's runs and suites all write the one record cistore.Key names, so a head whose
+		// writes changed that record counts once here however many of them changed it. This is
+		// before the ok check: a record a write changed was changed whether or not a later write
+		// of the same head failed.
+		c.records++
+	}
 	if !ok {
 		// A write that did not land must not be hidden behind an ETag: the next pass reads this
 		// head in full and writes it again.
@@ -183,12 +190,13 @@ func (r *Reconciler) headFailed(err error, head pullHead, c *counts) *stop {
 
 // record writes every observation the rules say to record from the pages GitHub answered 200
 // with, under the pull request's number and the owner and name GitHub itself gave. wanted counts
-// the observations those rules named, whether or not the record already held them; the pass's own
-// records count takes only the writes that changed a record, so a pass over what the listener
-// already holds reports none. ok is false when a write failed and a later pass might make it
-// land, which is every failure but a refusal (refused); it is what makes the pass drop this
-// head's ETags.
-func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, runs, suites []pageOf[object], c *counts) (wanted int, ok bool) {
+// the observations those rules named, whether or not the record already held them.
+// changedRecord answers whether any of those writes changed this head's record, which is the one
+// record of the head (cistore.Key) and so is what the pass counts once; a pass over what the
+// listener already holds changes none. ok is false when a write failed and a later pass might
+// make it land, which is every failure but a refusal (refused); it is what makes the pass drop
+// this head's ETags.
+func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, runs, suites []pageOf[object]) (wanted int, changedRecord, ok bool) {
 	ok = true
 	repository := head.repository()
 	for _, page := range runs {
@@ -231,7 +239,7 @@ func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, r
 				continue
 			}
 			if changed {
-				c.records++
+				changedRecord = true
 			}
 		}
 	}
@@ -261,11 +269,11 @@ func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, r
 				continue
 			}
 			if changed {
-				c.records++
+				changedRecord = true
 			}
 		}
 	}
-	return wanted, ok
+	return wanted, changedRecord, ok
 }
 
 // refused reports whether a failed write is one every later pass would meet again: cistore

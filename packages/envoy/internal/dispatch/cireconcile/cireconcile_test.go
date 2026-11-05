@@ -406,12 +406,15 @@ func TestThePassLineCountsWhatThePassDid(t *testing.T) {
 	h.pass()
 
 	line := h.passLine()
+	// The head's completed run and its completed suite are two observations of the one record
+	// that head has, and records counts one for each head whose record the pass changed, so the
+	// pass reports 1.
 	for field, want := range map[string]int{
 		"list_pages":         1,
 		"heads":              1,
 		"head_requests":      2,
 		"heads_not_modified": 0,
-		"records":            2,
+		"records":            1,
 		"mappings_skipped":   0,
 		"heads_too_large":    0,
 	} {
@@ -495,12 +498,12 @@ func TestThePassLineTellsItsPagesHeadsAndRecordsApart(t *testing.T) {
 	)
 
 	// The pass before the one this test is about is what earns the 304s: it reads both heads of
-	// the first repository in full and records the three observations they hold, and the second
-	// repository has no open pull request yet.
+	// the first repository in full and records the three observations they hold, changing each
+	// head's record, and the second repository has no open pull request yet.
 	h.pass()
 
-	if got := number(t, h.passLine(), "records"); got != 3 {
-		t.Fatalf("the pass before changed %d records, want the run and the suite of one head and the run of the other: %v",
+	if got := number(t, h.passLine(), "records"); got != 2 {
+		t.Fatalf("the pass before changed %d records, want the records of its two heads, the one holding a run and a suite and the one holding a run: %v",
 			got, h.passLine())
 	}
 
@@ -658,6 +661,16 @@ func TestTheStopNamesTheScopeTheReadWasBudgetedUnder(t *testing.T) {
 	if line["rate_limit_scope"] != want {
 		t.Fatalf("the pass line names scope %v, want the installation the read was budgeted under, %s: %v",
 			line["rate_limit_scope"], want, line)
+	}
+	// The line carries the reset time of that same answer beside its scope, which is the other
+	// half of what k12 asks a stopped pass's line for: an alarm reads it to say when GitHub
+	// takes a request under the scope again.
+	until, ok := line["rate_limit_until"].(string)
+	if !ok {
+		t.Fatalf("the pass line says when the limit GitHub answered with ends: %v", line)
+	}
+	if _, err := time.Parse(time.RFC3339, until); err != nil {
+		t.Fatalf("the pass line's rate_limit_until %q is not RFC3339: %v", until, err)
 	}
 	wait, _, err := h.reconciler.Limits.Wait(h.ctx, want)
 	if err != nil || wait <= 0 {

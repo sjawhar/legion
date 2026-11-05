@@ -19,13 +19,6 @@ type keyCombiner struct {
 type pendingMutation struct {
 	mutate func(*State) bool
 	done   chan combineOutcome
-	// changed is what this caller's own mutation answered in the attempt that wrote the batch,
-	// which is a different question from whether the batch changed the record: another caller's
-	// mutation may have changed it while this one applied as no change. The batch's closure
-	// assigns it on every attempt, so a retry from a fresh read leaves the answer of the attempt
-	// that finally wrote. It is read by the goroutine that wrote the batch, and by a queued
-	// caller only through the outcome its channel carries.
-	changed bool
 }
 
 type combineOutcome struct {
@@ -50,12 +43,10 @@ type combineOutcome struct {
 // KV calls of the batch it writes (write), so every caller in a batch shares the bound of the
 // caller writing it.
 //
-// changed answers whether this caller's own mutation changed the record, which is a different
-// question from whether the batch's write changed it: a batch carries several callers' mutations,
-// and one the record already held, or one its own rules refuse as older, changes nothing although
-// the write lands. A caller whose write failed, and one whose write was refused for bounds (write
-// answers boundsRefusal's error while still writing the record marked Overflowed), changed nothing
-// it meant to either, so changed is false whenever err is non-nil.
+// changed answers whether this caller's own mutation changed the record, which writeBatch's own
+// answers below are. A caller whose write failed, and one whose write was refused for bounds
+// (write answers boundsRefusal's error while still writing the record marked Overflowed), changed
+// nothing it meant to either, so changed is false whenever err is non-nil.
 func (s *Store) update(ctx context.Context, owner, repo, number, sha string, mutate func(*State) bool) (changed bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, recordWait)
 	defer cancel()
@@ -135,22 +126,30 @@ func (s *Store) handOverLocked(key string, c *keyCombiner) {
 // writeBatch writes every mutation queued for the record in one compare-and-swap within ctx, tells
 // each queued caller the outcome, and hands the writer's role to the first caller that queued
 // since. It reports and hands over even when the write panics, so no queued caller waits forever.
-// changed is what own's own mutation left in the attempt that wrote, and nothing when the write
+// ownChanged is own's own answer out of the batch's answers below, and nothing when the write
 // failed; each queued caller is told its own in the same way.
-func (s *Store) writeBatch(ctx context.Context, key string, c *keyCombiner, own *pendingMutation, identity State) (changed bool, err error) {
+func (s *Store) writeBatch(ctx context.Context, key string, c *keyCombiner, own *pendingMutation, identity State) (ownChanged bool, err error) {
 	s.combineMu.Lock()
 	batch := c.queue
 	c.queue = nil
 	s.combineMu.Unlock()
+	// changed holds one answer per caller of the batch, indexed as batch is. The answer is per
+	// caller rather than per batch because a batch carries several callers' mutations: one the
+	// record already held, or one the record's own rules refuse as older, changes nothing
+	// although the write it rode lands and another caller's mutation in it changed the record.
+	// Keeping the answers here rather than on each pendingMutation keeps them to the goroutine
+	// writing the batch, which is the only one that may read or write them, so a caller that has
+	// left the queue races nobody for its own.
+	changed := make([]bool, len(batch))
 	defer func() {
 		recovered := recover()
 		if recovered != nil {
 			err = fmt.Errorf("cistore: record write panicked: %v", recovered)
 		}
 		s.combineMu.Lock()
-		for _, pending := range batch {
+		for i, pending := range batch {
 			if pending != own {
-				pending.done <- combineOutcome{err: err, changed: err == nil && pending.changed}
+				pending.done <- combineOutcome{err: err, changed: err == nil && changed[i]}
 			}
 		}
 		s.handOverLocked(key, c)
@@ -159,18 +158,18 @@ func (s *Store) writeBatch(ctx context.Context, key string, c *keyCombiner, own 
 			panic(recovered)
 		}
 	}()
-	// Each attempt assigns every pending's own answer afresh, since a retry applies the batch to
-	// a record it has read again, so what the attempt that finally wrote left is what each caller
-	// is told.
 	err = s.write(ctx, identity, len(batch), func(st *State) bool {
+		// Each attempt answers for every caller afresh, since a retry applies the batch to a
+		// record it has read again, so what the attempt that finally wrote left is what each
+		// caller is told.
 		batchChanged := false
-		for _, pending := range batch {
-			pending.changed = pending.mutate(st)
-			if pending.changed {
+		for i, pending := range batch {
+			changed[i] = pending.mutate(st)
+			if changed[i] {
 				batchChanged = true
 			}
 		}
 		return batchChanged
 	})
-	return err == nil && own.changed, err
+	return err == nil && changed[slices.Index(batch, own)], err
 }
