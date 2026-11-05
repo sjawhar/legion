@@ -674,7 +674,8 @@ see Critical conventions for what keeps those filters current.
 
 A cleanup this package registers captures nothing that reaches the document it is attached to.
 `runtime.AddCleanup` says what that costs: "If ptr is reachable from cleanup or arg, ptr will never be collected and the cleanup will never run."
-The runtime keeps a cleanup's closure alive for as long as the document, and the service and each of its listings reaches every resident document through ygo's room table, so a closure holding either of them strongly held that document, its replica and its trees for the life of the process, which is what took `envoy-go-race-docs` over its runner's memory (dispatch://INFRA-1085).
+The runtime keeps a cleanup's closure alive for as long as the document, and the service and each of its listings reaches every resident document through ygo's room table, so a closure holding either of them strongly made a dropped service and every room still loaded in it immortal, which is what took `envoy-go-race-docs` over its runner's memory (dispatch://INFRA-1085): each test binary builds many services.
+A running Dispatch process keeps one service for its whole life, so there the cycle pinned a service that was alive anyway, and an evicted room's document was still freed.
 `keepInstance` (`docs/roomcursor.go`) and `listResident` (`docs/tree.go`) therefore hold their owner through `weak.Make` and do nothing when its `Value()` is nil;
 a pointer to a field of the service, such as a listing, counts as the service, and dies with that one allocation.
 `envoy-go-docs-finalizers` runs `GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 26m ./internal/dispatch/docs/` on the same `envoy_go_race_docs` filter, and fails on `is reachable from cleanup or cleanup argument` and then `fatal error: detected possible issues with cleanups and/or finalizers`;
