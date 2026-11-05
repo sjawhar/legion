@@ -253,6 +253,21 @@ type PodUpdateSignalled struct {
 	Head       string
 }
 
+// PodUpdateReask is the daemon asking this claim's worker again for an answer it already gave by
+// ending the turn the round's task started. The round's pod runs a shim that predates the
+// daemon's own push check, so no one can read the disk before it is deleted and the workers'
+// answers are the whole of the guard (internal/daemon's checkUnpushed): the weakest of those
+// answers is worth one more ask, which this makes. Round is the round the daemon read on the
+// claim, and a claim in any other round, or in none, is left alone (podUpdateReask).
+//
+// The daemon posts it once per claim per round: the mark it sets is what says so
+// (Claim.UpdateReaskedForPushCheck), since the second answer can be another turn's end and a
+// round that refused its own replacement at each of them would never end.
+type PodUpdateReask struct {
+	Claim claim.Token
+	Round string
+}
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -412,6 +427,7 @@ func (StalePlugin) isEvent()          {}
 func (PodUpdateOpen) isEvent()        {}
 func (PodUpdateEnded) isEvent()       {}
 func (PodUpdateSignalled) isEvent()   {}
+func (PodUpdateReask) isEvent()       {}
 func (RequestSpawn) isEvent()         {}
 func (RequestRegister) isEvent()      {}
 func (RequestReady) isEvent()         {}
@@ -469,6 +485,7 @@ const (
 	onPodUpdateOpen      eventKind = "pod_update_open"
 	onPodUpdateEnded     eventKind = "pod_update_ended"
 	onPodUpdateSignalled eventKind = "pod_update_signalled"
+	onPodUpdateReask     eventKind = "pod_update_reask"
 
 	timerPrefix eventKind = "timer:"
 )
@@ -503,6 +520,8 @@ func kindOf(ev Event) eventKind {
 		return onPodUpdateEnded
 	case PodUpdateSignalled:
 		return onPodUpdateSignalled
+	case PodUpdateReask:
+		return onPodUpdateReask
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -736,6 +755,15 @@ func fillTable(t *builder) {
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onPodUpdateSignalled, "the claim failed; the process that would have signalled is gone", StateFailed)
 	t.ignore(onPodUpdateSignalled, "the claim is retired; its update round ended with it", StateRetired)
+
+	// The round asking a worker again for an answer its turn's end gave, because the pod's shim
+	// cannot be asked what the disk still holds (internal/daemon's checkUnpushed).
+	t.row(onPodUpdateReask, "take back the answer the turn's end gave, and let the round ask this worker again", podUpdateReask,
+		nil, StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended)
+	t.ignore(onPodUpdateReask, "a claim with no registered agent has given no answer to take back",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+	t.ignore(onPodUpdateReask, "the claim failed; the process whose turn answered is gone, and the round asks it nothing", StateFailed)
+	t.ignore(onPodUpdateReask, "the claim is retired; its update round ended with it", StateRetired)
 
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
@@ -1200,18 +1228,28 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // Two turns keep the answer. One is the turn of an ask of this round (updatesRound): that is the
 // turn the worker answers in.
 //
-// The other is a turn the daemon sent nothing for, in a claim whose plugin cannot answer the
-// round (CannotAnswerUpdate). The update task tells such a worker to end its last message with a
-// WAITING line, and its plugin's phase-stall reminder answers that line with a turn of its own
-// when the wait is over (15 minutes by default), or at once when the line is missing. That
-// reminder carries no instruction of the daemon's, and the worker still holds the task's "Do not
-// start new work now". A plugin that can answer holds its reminder while its answer stands
-// (`awaiting-update` in pi-shared's phase-stall), so a turn the daemon sent nothing for in such a
-// claim is an Envoy notice, a background job's result or a person's steer, and takes the answer
-// back. In a claim that cannot answer, the daemon cannot tell those turns from the reminder, so
-// they keep the answer too. Nothing verifies the branch before the pod goes: the answer is the
-// only guard, so such a turn that commits work against the task the worker read, and does not push
-// it, loses that work with the pod.
+// The other is a turn the daemon sent nothing for, in a claim whose standing answer was given by
+// the end of the turn the round's own task started (Claim.UpdateAnsweredByTurnEnd). The update
+// task tells such a worker to end its last message with a WAITING line, and its plugin's
+// phase-stall reminder answers that line with a turn of its own when the wait is over (15
+// minutes by default), or at once when the line is missing. That reminder carries no instruction
+// of the daemon's, and the worker still holds the task's "Do not start new work now". The daemon
+// cannot tell that turn from an Envoy notice, a background job's result or a person's steer, so
+// it keeps the answer rather than costing the round a re-ask and a model turn at every quarter
+// of an hour the round waits.
+//
+// How the answer was given decides it, not the contract the plugin records. A worker at this
+// daemon's own contract whose `legion` tool has no ready_for_update operation answers by its
+// turn's end exactly as a worker of an older plugin does, and read by its contract it lost that
+// answer to its own reminder every fifteen minutes, for the hours its round then stayed open. An
+// answer the worker gave with the call is taken back by such a turn all the same: a plugin that
+// can answer holds its reminder while its answer stands (`awaiting-update` in pi-shared's
+// phase-stall), so a turn the daemon sent nothing for after that answer is something else.
+//
+// Nothing verifies the branch before the pod goes: the answer is the only guard, so a kept turn
+// that commits work against the task the worker read, and does not push it, loses that work with
+// the pod. A pod whose shim cannot run the daemon's push check is asked once more for exactly
+// that reason (internal/daemon's checkUnpushed).
 //
 // A claim relaunched into another pod than its round's own keeps its answer whatever turn starts
 // (Claim.LeftPodRound): the answer was given in the pod the round is about, and no turn of the
@@ -1230,8 +1268,8 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 	if ownTask && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
 		return
 	}
-	if !ownTask && CannotAnswerUpdate(m.claim) {
-		m.log.Info("supervise: a turn the daemon sent nothing for started after this claim answered its update round; its plugin has no ready_for_update op and reminds the worker on its own, so the answer stands",
+	if !ownTask && m.claim.UpdateAnsweredByTurnEnd {
+		m.log.Info("supervise: a turn the daemon sent nothing for started after this claim answered its update round by the end of its task's turn; its plugin reminds the worker on its own, so the answer stands",
 			"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract, "delivery", pendingID(m.claim.Pending))
 		return
 	}
@@ -1312,24 +1350,35 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 	return m.sendPending(ctx)
 }
 
-// answerByTurnEnd records the answer of a worker that has no ready_for_update op to answer with:
-// its plugin predates PodUpdateContract (CannotAnswerUpdate), it read the round's own task, and
-// the task told it to push its work and end its turn. The end of that turn is the answer, so the
-// round completes and the pod is replaced like any other. No head is recorded: the worker had no
-// call to report one in, and the head is the operator's reading aid rather than anything the
-// daemon acts on (podUpdateSignalled).
+// answerByTurnEnd records the answer a worker gives by ending the turn the round's own task
+// started: it read that task, and the task told it to push its work and to end its turn. The
+// end of that turn is the answer, so the round completes and the pod is replaced like any
+// other. No head is recorded: the worker had no call to report one in, and the head is the
+// operator's reading aid rather than anything the daemon acts on (podUpdateSignalled).
 //
-// It is what lets a contract change roll with no drain and no operator. The round asks such a
-// claim (askForUpdate), this takes its answer, and the replacement brings it up on the new image
-// in its own session.
+// Every claim's turn's end is read this way, whatever plugin contract its registration
+// declared. A worker below PodUpdateContract has no ready_for_update in the closed enum its
+// plugin compiled (CannotAnswerUpdate), and so has a worker at this daemon's own contract whose
+// `legion` tool was built without the operation: the daemon cannot tell the two apart, and read
+// as able to call the operation such a worker's turn end recorded nothing, its round stayed
+// open for hours, and its own phase reminder started a turn every fifteen minutes of them. The
+// worker that can call the operation loses nothing by this: it calls it, and the call is the
+// answer it gives first.
 //
-// Four things must hold, and each is the claim as it stands at the end of this turn rather than
-// when the round opened. The claim is in a round and has not answered it. Its process runs a
-// plugin that cannot answer — a claim that can is counted only by its own call, since it can
-// end a turn for any reason at all. The delivery this turn confirmed is an ask of that same
-// round (updatesRound), so the worker read the words that asked it to push: a turn an Envoy
-// message or a person's steer started read nothing of the round and says nothing about the
-// branch.
+// It is what lets a contract change roll with no drain and no operator. The round asks every
+// claim (askForUpdate), this takes the answer of each that ends its task's turn without
+// calling, and the replacement brings each up on the new image in its own session.
+//
+// How the answer was given is written with it (Claim.UpdateAnsweredByTurnEnd), in this same
+// write, because the rule that reads it decides a turn hours later and after a restart: a turn
+// the daemon sent nothing for keeps such an answer, where it takes a called one back
+// (takeBackSignal).
+//
+// Three more things must hold, and each is the claim as it stands at the end of this turn
+// rather than when the round opened. The claim is in a round and has not answered it. The
+// delivery this turn confirmed is an ask of that same round (updatesRound), so the worker read
+// the words that asked it to push: a turn an Envoy message or a person's steer started read
+// nothing of the round and says nothing about the branch.
 //
 // The last is the turn this daemon cannot vouch for, and it costs the round one more ask rather
 // than a disk: this daemon saw the turn start (askFirst and unseenTurn, which turnEnded clears
@@ -1347,7 +1396,7 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 // settlement, as every confirmed delivery is.
 func (m *Machine) answerByTurnEnd() {
 	p := m.claim.Pending
-	if m.claim.UpdateRound == "" || m.claim.UpdateSignalledAt != nil || !CannotAnswerUpdate(m.claim) {
+	if m.claim.UpdateRound == "" || m.claim.UpdateSignalledAt != nil {
 		return
 	}
 	if !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
@@ -1364,7 +1413,8 @@ func (m *Machine) answerByTurnEnd() {
 	}
 	at := m.deps.Clock.Now()
 	m.claim.UpdateSignalledAt = &at
-	m.log.Info("supervise: the worker's plugin has no ready_for_update op, so the end of the turn its update task started is its answer",
+	m.claim.UpdateAnsweredByTurnEnd = true
+	m.log.Info("supervise: the worker ended the turn its update task started without calling ready_for_update, so that end is its answer",
 		"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract, "podUpdateContract", PodUpdateContract)
 }
 
@@ -2142,13 +2192,16 @@ func (m *Machine) endCurrentPluginRound(ctx context.Context) error {
 // means: the round the sweep ends (endPodUpdate), the round a new one replaces, whose fields are
 // each the earlier round's (openPodUpdate), and the round a claim retires in (retire).
 //
-// It is the one place the round a claim left goes too (UpdateLeftRound): the end of the round is
-// the only thing that may forget that part of it, and a relaunch, a suspension, a letGo and a
-// restart each leave it exactly as it is.
+// It is the one place the round a claim left goes too (UpdateLeftRound), and the one place the
+// two marks of how the round's answer was given go (UpdateAnsweredByTurnEnd,
+// UpdateReaskedForPushCheck): the end of the round is the only thing that may forget any part
+// of it, and a relaunch, a suspension, a letGo and a restart each leave all three exactly as
+// they are.
 func (m *Machine) clearUpdate() {
 	m.claim.UpdateRound, m.claim.UpdateReasons, m.claim.UpdateHead = "", "", ""
 	m.claim.UpdateOpenedAt, m.claim.UpdateTaskedAt = nil, nil
 	m.claim.UpdateSignalledAt, m.claim.UpdateToldAt = nil, nil
+	m.claim.UpdateAnsweredByTurnEnd, m.claim.UpdateReaskedForPushCheck = false, false
 	m.claim.UpdateLeftRound = ""
 }
 
@@ -2172,6 +2225,11 @@ func (m *Machine) clearUpdate() {
 // suspended since — its locator gone with its process (letGo) — refuses the late answer the
 // same way.
 //
+// The answer this records came from the call, so the mark that says the standing answer came
+// from a turn's end goes in this same write (Claim.UpdateAnsweredByTurnEnd): an earlier turn's
+// end may have answered this very round, and a turn the daemon sends nothing for after a called
+// answer takes it back (takeBackSignal).
+//
 // The line it logs is the one durable record of the head: the claim's UpdateHead goes with the
 // round that ends (clearUpdate), and the answer is what an operator reads the replacement back
 // against — `git ls-remote` of each head a worker reported says whether the work survived the pod.
@@ -2190,8 +2248,43 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 	at := m.deps.Clock.Now()
 	m.claim.UpdateSignalledAt = &at
 	m.claim.UpdateHead = signal.Head
+	m.claim.UpdateAnsweredByTurnEnd = false
 	m.log.Info("supervise: the worker answered the update round; its work is pushed and its process may be replaced",
 		"round", m.claim.UpdateRound, "head", signal.Head)
+	return m.persist(ctx)
+}
+
+// podUpdateReask takes back an answer the end of a turn gave and asks this claim's worker again
+// (PodUpdateReask). The round's pod runs a shim that cannot run the daemon's push check, so
+// nothing but the workers' answers stands between the disk and the delete, and the end of a
+// turn is the weakest of those answers: the worker said nothing, and what it pushed is read
+// from a turn that ended rather than from a call it made or a disk anybody looked at.
+//
+// The answer goes, the mark of how it was given goes with it, and the ask's own clock goes too
+// (UpdateTaskedAt), so the next sweep asks at once rather than at the re-task bound hours away.
+// What stays is the record that this round has now asked this claim once more for this reason
+// (UpdateReaskedForPushCheck), which the daemon reads before it refuses a replacement again: a
+// second turn-end answer is taken as it stands, and the round ends.
+//
+// Nothing is taken back where the claim has moved on since the daemon read it. A claim in
+// another round, or in none, is deciding another question entirely; one whose answer is already
+// gone — a turn took it back between the read and this post — is asked by the round's own next
+// post; one whose standing answer came from the call has given the stronger answer this asks
+// for; and a claim that left the round's pod answers nothing more of it at all
+// (Claim.LeftPodRound).
+func podUpdateReask(m *Machine, ctx context.Context, ev Event) error {
+	ask := ev.(PodUpdateReask)
+	if ask.Round != m.claim.UpdateRound || m.claim.UpdateSignalledAt == nil || !m.claim.UpdateAnsweredByTurnEnd {
+		return nil
+	}
+	if m.claim.LeftPodRound(m.claim.UpdateRound) {
+		return nil
+	}
+	m.log.Warn("supervise: this claim answered its update round by the end of its task's turn, and the round's pod cannot be checked for unpushed work; the answer is taken back and the worker is asked once more",
+		"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract)
+	m.claim.UpdateSignalledAt, m.claim.UpdateTaskedAt = nil, nil
+	m.claim.UpdateAnsweredByTurnEnd = false
+	m.claim.UpdateReaskedForPushCheck = true
 	return m.persist(ctx)
 }
 

@@ -749,10 +749,11 @@ var errReplacementNotDue = errors.New("the pod replacement is no longer due")
 //
 // The push check is here, after both waits and under the pod's launch turn, because nothing
 // else guards what is on the disk at the moment it is deleted. A worker's answer says it pushed
-// when it answered; a failed claim is asked nothing; and a worker whose plugin has no
-// ready_for_update op keeps its answer through a turn the daemon sent nothing for, which can
-// commit and push nothing. Checked any earlier, a turn of any of these could leave work behind
-// after the check.
+// when it answered; a failed claim is asked nothing; and a worker that answered by ending the
+// turn its task started keeps that answer through a turn the daemon sent nothing for, which can
+// commit and push nothing (supervise's takeBackSignal). Checked any earlier, a turn of any of
+// these could leave work behind after the check. A pod whose shim cannot run the check at all
+// is asked once more for each of those turn-end answers instead (checkUnpushed).
 func (s *supervision) replacementDue(issue, round, pod string, checked *pushCheck) func(context.Context) error {
 	return func(ctx context.Context) error {
 		claims, err := s.supervisor.Claims(ctx)
@@ -837,11 +838,19 @@ func rescueBranch(issue, pod string) string {
 // at all. Any workspace whose check failed, and a pod no process of which could be asked, is
 // errPushCheckFailed naming each claim, workspace and error.
 //
-// A pod whose shim predates the check (runtime.ErrRescueUnsupported) is not refused: every pod
-// started from an image before this check has such a shim, and refusing them would hold every
-// such pod until its tree ends. Its replacement is guarded by the workers' answers alone, as every
-// replacement was before this check, and the line and the issue's message say so (checked's
-// unchecked).
+// A pod whose shim predates the check (runtime.ErrRescueUnsupported) is refused only where some
+// claim of the round answered by the end of its own task's turn (reaskedForPushCheck). Every pod
+// started from an image before this check has such a shim, and refusing them all would hold
+// every such pod until its tree ends; where every answer was a worker's own ready_for_update
+// call, the replacement is guarded by those answers alone, as every replacement was before this
+// check, and the line and the issue's message say so (checked's unchecked).
+//
+// Where one was a turn's end, that is the weakest answer the round has and the disk cannot be
+// read behind it, so each such worker is asked once more before the disk goes: the replacement
+// is refused with errReplacementNotDue, which costs the round one sweep and tells nobody, and
+// each of those claims is posted supervise.PodUpdateReask, which takes its answer back and lets
+// the round ask it at the next tick. One ask each, which the claim's own mark records: the
+// second answer can be another turn's end, and a round that refused again on it would never end.
 func (s *supervision) checkUnpushed(ctx context.Context, issue, round, pod string, group []supervise.Claim, checked *pushCheck) error {
 	timeout := rescueTimeout
 	if deadline, ok := ctx.Deadline(); ok {
@@ -855,6 +864,15 @@ func (s *supervision) checkUnpushed(ctx context.Context, issue, round, pod strin
 	for _, c := range rescuers(group, round) {
 		report, err := s.runtime.RescueUnpushed(ctx, runtime.Known{Claim: c.Token, Locator: c.Locator}, request)
 		if errors.Is(err, runtime.ErrRescueUnsupported) {
+			if again := reaskedForPushCheck(group, round); len(again) > 0 {
+				for _, asked := range again {
+					s.supervisor.post(asked.Token, supervise.PodUpdateReask{Claim: asked.Token, Round: round})
+				}
+				s.log.Warn("supervise: the pod's shim predates the push check, and a worker of this round answered by the end of its task's turn; the replacement is refused and each such worker is asked once more",
+					"issue", issue, "round", round, "pod", pod, "claim", c.Token, "reasked", namesOf(again), "error", err)
+				return fmt.Errorf("%w: the pod's shim cannot check the disk for unpushed work, and %s answered by the end of its task's turn; each is asked once more",
+					errReplacementNotDue, strings.Join(namesOf(again), ", "))
+			}
 			*checked = pushCheck{role: c.Role, unchecked: "the pod's shim predates the push check; only the workers' answers guarded this replacement"}
 			s.log.Warn("supervise: the pod's shim predates the push check; its workspaces are not checked before the replacement",
 				"issue", issue, "round", round, "pod", pod, "claim", c.Token, "error", err)
@@ -1582,6 +1600,39 @@ func askedClaims(group []supervise.Claim) []supervise.Claim {
 		}
 	}
 	return asked
+}
+
+// reaskedForPushCheck is every claim of round whose standing answer is the end of the turn the
+// round's own task started, and which the round has not already asked again because the pod's
+// shim could not be asked what the disk still holds (checkUnpushed). Each of them is asked once
+// more, and the replacement waits for that second answer.
+//
+// A turn's end is the weakest answer a round takes: the worker said nothing, and the daemon read
+// its silence from a turn that was over. Where the disk can be read before it is deleted, that
+// is enough — the check is what finds work nobody pushed. Where the pod's shim predates the
+// check, nothing is left but the answer itself, and one more ask costs the round a sweep and a
+// model turn against a disk that is deleted either way.
+//
+// Four claims are left where they are. One that already holds the mark has been asked its once:
+// its next answer, by a turn's end or by the call, lets the replacement run, and asking again on
+// each would leave the round open for ever, since a turn's end sets the first mark again. One
+// that answered with the call gave the stronger answer this asks for. One that has left the
+// round's own pod answers nothing more of it (supervise's Claim.LeftPodRound), and one that
+// failed is asked nothing at all (askedClaims). A claim below supervise.PodUpdateContract is
+// left too: it has no ready_for_update to call, so the second ask could only take the same
+// answer again, one turn later.
+func reaskedForPushCheck(group []supervise.Claim, round string) []supervise.Claim {
+	var again []supervise.Claim
+	for _, c := range askedClaims(group) {
+		if !answered(c, round) || !c.UpdateAnsweredByTurnEnd || c.UpdateReaskedForPushCheck {
+			continue
+		}
+		if c.LeftPodRound(round) || c.PluginContract < supervise.PodUpdateContract {
+			continue
+		}
+		again = append(again, c)
+	}
+	return again
 }
 
 // memberOf is whether c is one of round's claims: the round it records is this one. A claim that

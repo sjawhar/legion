@@ -4,7 +4,8 @@ package supervise
 // ready_for_update before the process holding that claim is replaced. These tests pin what the
 // machine does with the round's two events: a round that opens once and asks once, a phase task
 // the round never displaces, a suspended claim revived for the task, a claim asked again after
-// PodUpdateRetask, a claim below the contract answering by its turn's end, the next task held back
+// PodUpdateRetask, a worker answering by the end of its task's turn at every plugin contract,
+// whatever operations its own `legion` tool holds, the next task held back
 // from the moment the worker answers and confirmed by no turn after a daemon restart, and the
 // round's end — which releases that task for a pod's
 // round, relaunches the process for a claim's own plugin round, and tells the worker of a pod
@@ -276,19 +277,28 @@ func TestPodUpdateLeavesAnOperatorSuspendedClaimSuspended(t *testing.T) {
 	}
 }
 
-// A worker that read the round's task and ended its turn without answering is asked again, once
-// the last send is PodUpdateRetask old and not before. The second ask is a delivery of its own:
-// the shim answers a prompt that carries the delivery id it already holds itself — the
-// acknowledgement, the replayed start, and the end of a turn already over — and prompts Oh My Pi
-// with nothing (internal/shimwire's Dedupe), so a re-task under the first ask's id would say
-// nothing to the one worker it is for.
+// A worker the round asked and that answered nothing is asked again, once the last send is
+// PodUpdateRetask old and not before. The second ask is a delivery of its own: the shim answers
+// a prompt that carries the delivery id it already holds itself — the acknowledgement, the
+// replayed start, and the end of a turn already over — and prompts Oh My Pi with nothing
+// (internal/shimwire's Dedupe), so a re-task under the first ask's id would say nothing to the
+// one worker it is for.
+//
+// What leaves a worker asked and unanswered, now that the end of the ask's own turn is the
+// answer (answerByTurnEnd), is a prompt Oh My Pi ran inside a turn of the worker's own: the
+// daemon matched no turn to the ask, so its end answered nothing, and the prompt's result is
+// what ends the ask (promptResulted) and leaves the claim holding no task for the next ask to
+// be.
 func TestPodUpdateAsksAnUnansweredClaimAgainUnderANewDeliveryID(t *testing.T) {
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateReady)
 	h.openUpdate(testRound, testReasons)
 	first := h.wantPrompts(1)[0]
-	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnStart{Claim: h.token, DeliveryID: "a-turn-of-the-worker-s-own"})
 	h.must(StreamTurnEnd{Claim: h.token})
+	if c := h.claim(); c.UpdateSignalledAt != nil || c.Pending != nil {
+		t.Fatalf("claim after the worker's own turn = %+v, want no answer and no task left", c)
+	}
 
 	h.advance(testPodUpdateRetask - time.Minute)
 	h.openUpdate(testRound, testReasons)
@@ -362,22 +372,130 @@ func TestPodUpdateTakesTheTurnsEndAsTheAnswerOfAClaimBelowTheContract(t *testing
 	}
 }
 
-// The turn's end is the answer of a claim that cannot call the op, and of no other claim. A
-// worker whose plugin has ready_for_update answers by calling it: it ends a turn for every
-// reason there is, and reading one of those as "my work is pushed" would delete a disk holding
-// work nobody pushed.
-func TestPodUpdateTakesNoTurnsEndAsTheAnswerOfAClaimThatCanCallTheOp(t *testing.T) {
-	h := updateHarness(t, PodUpdateContract)
-	h.reach(StateReady)
-
-	h.openUpdate(testRound, testReasons)
-	h.wantPrompts(1)
-	h.must(StreamTurnStart{Claim: h.token})
-	h.must(StreamTurnEnd{Claim: h.token})
-
-	if c := h.claim(); c.UpdateSignalledAt != nil {
-		t.Errorf("UpdateSignalledAt = %v, want nil: this worker answers by calling ready_for_update", c.UpdateSignalledAt)
+// The end of the turn an update task started is that worker's answer at every plugin contract,
+// and the claim records that the answer came that way. A `legion` tool built with no
+// ready_for_update operation is one the daemon cannot tell from a tool that has it: the contract
+// a registration declares says which daemon the plugin was built against, never which operations
+// the closed enum compiled into it holds. Read as able to call the operation, such a worker at
+// this daemon's own contract recorded no answer at all when its task's turn ended, its round
+// stayed open for hours, and its own phase-stall reminder started a turn every fifteen minutes
+// of them — which is the measured failure this pins.
+//
+// The mark is what carries the rule past the answer, and it is in the store because the turn it
+// decides can come after a restart: a turn the daemon sent nothing for keeps an answer a turn's
+// end gave, and takes back one the worker made the call for (takeBackSignal).
+func TestAnswerByTurnEndEveryContract(t *testing.T) {
+	// asked brings a claim at contract up in the round's own pod and opens the round over it,
+	// with this daemon one contract ahead of the oldest plugin a test here uses.
+	asked := func(t *testing.T, contract int) *harness {
+		t.Helper()
+		h := updateHarness(t, contract)
+		h.inPod(testRoundPod)
+		h.m.deps.PluginContract = PodUpdateContract
+		h.openUpdate(testRound, testReasons)
+		h.wantPrompts(1)
+		return h
 	}
+	// wantAnswered holds the claim to an answer the turn's end gave: recorded, marked as that
+	// kind of answer, with no head, and in the store, which is what a later daemon reads.
+	wantAnswered := func(t *testing.T, h *harness) time.Time {
+		t.Helper()
+		c := h.claim()
+		if c.UpdateSignalledAt == nil {
+			t.Fatal("the end of the update task's turn recorded no answer")
+		}
+		if !c.UpdateAnsweredByTurnEnd {
+			t.Error("UpdateAnsweredByTurnEnd is false; this answer is the end of the task's own turn")
+		}
+		if c.UpdateHead != "" {
+			t.Errorf("UpdateHead = %q, want none: a turn's end reports no head", c.UpdateHead)
+		}
+		if stored := h.store.load(h.token); stored.UpdateSignalledAt == nil || !stored.UpdateAnsweredByTurnEnd {
+			t.Errorf("stored claim = %+v, want the answer and its mark written; a restart reads them", stored)
+		}
+		return *c.UpdateSignalledAt
+	}
+
+	for _, contract := range []int{PodUpdateContract, PodUpdateContract - 1} {
+		t.Run("the ask's turn ends at contract "+strconv.Itoa(contract), func(t *testing.T) {
+			h := asked(t, contract)
+
+			h.must(StreamTurnStart{Claim: h.token})
+			h.must(StreamTurnEnd{Claim: h.token})
+
+			wantAnswered(t, h)
+		})
+	}
+
+	t.Run("the reminder turns of an open round leave that answer standing", func(t *testing.T) {
+		h := asked(t, PodUpdateContract)
+		h.must(StreamTurnStart{Claim: h.token})
+		h.must(StreamTurnEnd{Claim: h.token})
+		answered := wantAnswered(t, h)
+
+		// The worker's own plugin reminds it of the WAITING line it left, a turn at a time, for
+		// as long as the round waits: the daemon sent none of them and cannot tell one from an
+		// Envoy notice. On the first roll of this contract they arrived every fifteen minutes.
+		for reminder := 1; reminder <= 3; reminder++ {
+			h.advance(15 * time.Minute)
+			h.must(StreamTurnStart{Claim: h.token})
+			h.openUpdate(testRound, testReasons)
+			h.must(StreamTurnEnd{Claim: h.token})
+
+			c := h.wantRound(testRound)
+			if c.UpdateSignalledAt == nil || !c.UpdateSignalledAt.Equal(answered) {
+				t.Fatalf("UpdateSignalledAt after reminder turn %d = %v, want the answer of %v standing",
+					reminder, c.UpdateSignalledAt, answered)
+			}
+			if !c.UpdateAnsweredByTurnEnd {
+				t.Fatalf("the mark of how the answer was given went with reminder turn %d", reminder)
+			}
+			h.wantPrompts(1)
+		}
+	})
+
+	t.Run("a turn something else started is no answer", func(t *testing.T) {
+		h := asked(t, PodUpdateContract)
+
+		h.must(StreamTurnStart{Claim: h.token, DeliveryID: "a-delivery-of-the-worker-s-own"})
+		h.must(StreamTurnEnd{Claim: h.token})
+
+		if c := h.claim(); c.UpdateSignalledAt != nil || c.UpdateAnsweredByTurnEnd {
+			t.Errorf("claim after a turn of the worker's own = %+v, want no answer: that turn read none of the round's words", c)
+		}
+	})
+
+	t.Run("a turn this daemon did not see start is no answer", func(t *testing.T) {
+		h := asked(t, PodUpdateContract)
+
+		h.restart()
+		h.must(StreamTurnStart{Claim: h.token})
+		h.must(StreamTurnEnd{Claim: h.token})
+
+		c := h.claim()
+		if c.UpdateSignalledAt != nil || c.UpdateAnsweredByTurnEnd {
+			t.Errorf("claim after a turn restored from an earlier daemon's record = %+v, want no answer", c)
+		}
+		if c.UpdateTaskedAt != nil {
+			t.Errorf("UpdateTaskedAt = %v, want the ask's clock taken back so the round asks again at once", c.UpdateTaskedAt)
+		}
+	})
+
+	t.Run("an answer the call gave is still taken back by a turn the daemon sent nothing for", func(t *testing.T) {
+		h := asked(t, PodUpdateContract)
+		h.must(StreamTurnStart{Claim: h.token})
+		h.signalUpdate("c0ffee")
+		h.must(StreamTurnEnd{Claim: h.token})
+		if c := h.claim(); c.UpdateSignalledAt == nil || c.UpdateAnsweredByTurnEnd {
+			t.Fatalf("claim after the call = %+v, want its answer recorded and marked as the call's", c)
+		}
+
+		h.must(StreamTurnStart{Claim: h.token})
+
+		if c := h.claim(); c.UpdateSignalledAt != nil {
+			t.Errorf("UpdateSignalledAt = %v, want the called answer taken back: the worker's own plugin holds its reminder while such an answer stands", c.UpdateSignalledAt)
+		}
+	})
 }
 
 // A turn that read none of the round's words answers nothing, whatever the claim's contract. An
@@ -889,22 +1007,29 @@ func TestPodUpdateATurnAfterTheAnswerTakesItBackAndAsksAgain(t *testing.T) {
 	}
 }
 
-// A turn the daemon sent nothing for, after the answer, is decided by whether the claim's plugin
-// can call ready_for_update (CannotAnswerUpdate). A plugin that cannot is told to end with a WAITING
-// line, and its own phase-stall reminder starts a turn when that wait is over: on the first
+// A turn the daemon sent nothing for, after the answer, is decided by how that answer was given
+// (Claim.UpdateAnsweredByTurnEnd), never by the contract the claim's plugin speaks. A worker
+// that answered by ending its task's turn was told to end its last message with a WAITING line,
+// and its own phase-stall reminder starts a turn when that wait is over: on the first
 // contract-46 roll every one of 194 withdrawals was such a turn, with nothing pending, and each
 // cost the round a re-ask and a model turn. That claim keeps its answer, asks nothing more, and
-// the round ends. A plugin that can answer holds its reminder while its answer stands, so the same
-// turn there is an Envoy notice or a person's steer: it takes the answer back and the round asks
-// again, as TestPodUpdateATurnAfterTheAnswerTakesItBackAndAsksAgain pins.
-func TestPodUpdateATurnTheDaemonSentNothingForKeepsOnlyTheAnswerOfAClaimThatCannotCallTheOp(t *testing.T) {
+// the round ends. A worker that made the call holds its reminder while that answer stands, so
+// the same turn there is an Envoy notice or a person's steer: it takes the answer back and the
+// round asks again, as TestPodUpdateATurnAfterTheAnswerTakesItBackAndAsksAgain pins.
+//
+// The contract is in the table beside the answer because it decides nothing here: a plugin at
+// this daemon's own contract can be built with no ready_for_update in it, and then it answers
+// by its turn's end exactly as the released plugin before it does.
+func TestPodUpdateATurnTheDaemonSentNothingForKeepsOnlyTheAnswerATurnsEndGave(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		contract int
+		calls    bool
 		keeps    bool
 	}{
-		{name: "a plugin with no ready_for_update op", contract: PodUpdateContract - 1, keeps: true},
-		{name: "a plugin with the op", contract: PodUpdateContract, keeps: false},
+		{name: "a turn's end answered, at a contract behind", contract: PodUpdateContract - 1, keeps: true},
+		{name: "a turn's end answered, at this daemon's own contract", contract: PodUpdateContract, keeps: true},
+		{name: "the worker called ready_for_update", contract: PodUpdateContract, calls: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := updateHarness(t, tc.contract)
@@ -913,7 +1038,7 @@ func TestPodUpdateATurnTheDaemonSentNothingForKeepsOnlyTheAnswerOfAClaimThatCann
 			h.openUpdate(testRound, testReasons)
 			h.wantPrompts(1)
 			h.must(StreamTurnStart{Claim: h.token})
-			if !CannotAnswerUpdate(h.claim()) {
+			if tc.calls {
 				h.signalUpdate("c0ffee")
 			}
 			h.must(StreamTurnEnd{Claim: h.token})

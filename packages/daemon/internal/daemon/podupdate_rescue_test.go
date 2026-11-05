@@ -306,6 +306,86 @@ func TestPodUpdateReplacesAPodWhoseShimPredatesTheCheckAndSaysSo(t *testing.T) {
 	}
 }
 
+// A pod whose shim cannot run the push check is asked once more for each answer that was the end
+// of a turn, and only for those. Nothing reads such a pod's disk before it is deleted, so the
+// workers' answers are the whole of the guard, and a turn that ended is the weakest of them: the
+// worker made no call, and the daemon read a turn's end as its word that the work is pushed. The
+// replacement is refused — which logs, leaves the round open and tells nobody, since the next
+// answer clears the condition — and each such claim has its answer, its turn-end mark and its
+// ask clock taken back, so the next sweep asks it at once.
+//
+// Once for each claim, which the second mark is what says: the next answer can be another turn's
+// end, and a round that refused again on it would never replace its pod. A claim whose plugin
+// predates the operation is left as it is: it has nothing else to answer with, so a second ask
+// could only take the same answer one turn later. Both marks are columns of the claim, so a
+// daemon that restarts between that second answer and the replacement reads them rather than
+// starting the refusal over.
+func TestAnswerByTurnEndEveryContract(t *testing.T) {
+	unsupported := func(r *podUpdateRig) {
+		r.rt.RescueWith(func(context.Context, runtime.Known, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+			return nil, fmt.Errorf("worker-stream: %w (its agent answered: Unknown command: rescue-unpushed)", runtime.ErrRescueUnsupported)
+		})
+	}
+	// answersByTurnEnd is the worker reading the round's ask and ending that turn with no
+	// ready_for_update call, which is the answer of a `legion` tool that has no such operation
+	// at whatever contract its plugin declared (supervise's answerByTurnEnd).
+	answersByTurnEnd := func(r *podUpdateRig, role claim.Role, asked supervise.Claim) {
+		r.t.Helper()
+		r.handle(role, supervise.StreamTurnStart{Claim: r.tokens[role]})
+		r.endTurn(role, asked.Pending.ID)
+		r.awaitClaim(role, "the answer its turn's end gave", func(c supervise.Claim) bool {
+			return c.UpdateSignalledAt != nil && c.UpdateAnsweredByTurnEnd && c.Pending == nil
+		})
+	}
+
+	rig := newPodUpdateRig(t,
+		podUpdateRole{role: claim.RoleImplementer, state: supervise.StateReady, session: true, inPod: true,
+			contract: supervise.PodUpdateContract},
+		podUpdateRole{role: claim.RoleTester, state: supervise.StateReady, session: true, inPod: true,
+			contract: supervise.PodUpdateContract - 1},
+	)
+	unsupported(rig)
+	rig.drifts(podUpdateDrift)
+	rig.tick()
+	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
+		answersByTurnEnd(rig, role, rig.awaitRound(role, podUpdateRound))
+	}
+
+	reasked := rig.awaitSwept(claim.RoleImplementer, "its answer taken back for a pod no check can read", func(c supervise.Claim) bool {
+		return c.UpdateReaskedForPushCheck
+	})
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("the pod was replaced %d times on answers no check could stand behind, want none", len(calls))
+	}
+	if refusals := rig.notDue(); len(refusals) == 0 {
+		t.Fatal("the replacement was never refused inside ReplacePod; the round asked nobody again")
+	}
+	if reasked.UpdateSignalledAt != nil || reasked.UpdateAnsweredByTurnEnd || reasked.UpdateTaskedAt != nil {
+		t.Fatalf("the implementer = %+v, want its answer, its turn-end mark and its ask clock all taken back", reasked)
+	}
+	if tester := rig.claimOf(claim.RoleTester); tester.UpdateSignalledAt == nil || tester.UpdateReaskedForPushCheck {
+		t.Fatalf("the tester = %+v, want its answer standing and no second ask: its plugin has no operation to answer with", tester)
+	}
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Fatalf("the controller was told %+v; a refusal the next answer clears is nobody's to act on", notices)
+	}
+
+	again := rig.awaitSwept(claim.RoleImplementer, "the round to ask it again", func(c supervise.Claim) bool {
+		return c.UpdateTaskedAt != nil && c.Pending != nil
+	})
+	answersByTurnEnd(rig, claim.RoleImplementer, again)
+
+	rig = rig.restart()
+	restored := rig.claimOf(claim.RoleImplementer)
+	if restored.UpdateSignalledAt == nil || !restored.UpdateAnsweredByTurnEnd || !restored.UpdateReaskedForPushCheck {
+		t.Fatalf("the implementer after the restart = %+v, want its second answer and both marks read back from the store", restored)
+	}
+	unsupported(rig)
+	rig.drifts(podUpdateDrift)
+
+	rig.awaitReplacement(1, "once the worker asked again has answered again")
+}
+
 // A check the shim could not run at all — a transport failure, a shim with no workspace to read —
 // is no pass: the next process of the pod is asked, and with none left the round holds.
 func TestPodUpdateHoldsTheRoundWhenNoProcessCanRunThePushCheck(t *testing.T) {

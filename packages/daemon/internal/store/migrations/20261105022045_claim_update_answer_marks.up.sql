@@ -1,0 +1,27 @@
+-- 20261105022045_claim_update_answer_marks.up.sql — how a claim answered its update round, which
+-- the daemon reads in place of the plugin contract the claim records (INFRA-1116). A worker
+-- registered at the contract that introduced ready_for_update can still run a `legion` tool with
+-- no such operation, and the daemon cannot tell it from one that has it: read by the contract, the
+-- end of its task's turn recorded no answer at all, and the round stayed open for hours while the
+-- worker's own phase reminder started a turn every fifteen minutes.
+--
+-- claims.update_answered_by_turn_end is whether the answer claims.update_signalled_at records came
+-- from the end of the turn the round's task started, rather than from the worker's own
+-- ready_for_update call. Every answer is written with it, and the call's write clears it, so the
+-- column always says how the answer standing now was given. It decides one rule: a turn the daemon
+-- sent nothing for keeps an answer the turn's end gave — that turn is the worker's own phase-stall
+-- reminder, which no plugin holds back while an answer of this kind stands — and takes a called
+-- answer back. The rule outlives the daemon that recorded the answer, which is why the column is
+-- here and not in memory.
+--
+-- claims.update_reasked_for_push_check is whether this round has already asked this claim's worker
+-- again because the pod's shim predates the daemon's push check of the disk. Such a pod cannot be
+-- read before it is deleted, so the workers' answers are the whole of the guard, and the weakest
+-- of those answers — a turn that ended — is worth one more ask. Once only: the second answer can
+-- be another turn's end, and a round that read update_answered_by_turn_end alone would refuse its
+-- own replacement at every attempt and never end.
+--
+-- Both go with the round: the end of a round clears every column the round wrote, these two
+-- included, so the next round over the claim starts with neither mark.
+alter table claims add column update_answered_by_turn_end boolean not null default false;
+alter table claims add column update_reasked_for_push_check boolean not null default false;
