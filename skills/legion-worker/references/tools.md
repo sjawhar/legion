@@ -39,9 +39,9 @@ heavy run goes where your deployment's instructions say.
   Make one and point the variable at it:
   `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
   The DSN's own database is owned by your login and writable, so what keeps two roles out of it is
-  this rule rather than the server. `packages/daemon/internal/daemon`'s own tests are this
-  repository's case: they hand `LEGION_TEST_PG_DSN` to a daemon that migrates whatever database it
-  is given, so two roles must not run that package at the same time.
+  this rule rather than the server. A suite that migrates into the database its DSN names takes
+  one of its own: `packages/daemon/internal/daemon` is this repository's case, whose `TestMain`
+  takes one database for the package's run through `internal/testpg`.
 - The server is empty in every new pod and dies with it. Every database made from `template1`
   has pgvector.
 - `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
