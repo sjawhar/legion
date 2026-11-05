@@ -173,6 +173,11 @@ type Horizon struct {
 	stallAfter time.Duration
 	warnEvery  time.Duration
 	logger     *slog.Logger
+	// afterObservationParked runs, outside the lock, each time a caller finds an observation
+	// already in flight and parks on it rather than running one of its own. Nothing in
+	// production sets it; the package's own test of concurrent callers waits on it instead of
+	// sleeping for a share of them to arrive.
+	afterObservationParked func()
 
 	mu sync.Mutex
 	// generation counts Resets. An observation records only into the generation it started in,
@@ -206,11 +211,6 @@ type Horizon struct {
 	persistedAt     time.Time
 	persisting      bool
 	persistWarnedAt time.Time
-	// afterObservationParked runs, outside the lock, each time a caller finds an observation
-	// already in flight and parks on it rather than running one of its own. Nothing in
-	// production sets it; the package's own test of concurrent callers waits on it instead of
-	// sleeping for a share of them to arrive.
-	afterObservationParked func()
 }
 
 // horizonObservation is one observation: its number, A, X and when it was recorded.

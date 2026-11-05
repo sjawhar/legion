@@ -224,37 +224,73 @@ func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
 // and every minute after (internal/dispatch/docs/resume.go:14,22) and indexes the blocks of every
 // document owed one, both of which read whole documents: left owed, either runs inside the next
 // window, and the peak measured there is that work's memory and not the request's.
+//
+// It does that work itself rather than waiting for it. Between one server's stop and the next
+// server's start no process in this test is settling anything, so a settlement a write left on a
+// server that has since stopped would stand for ever: the first text of this guard waited ten
+// seconds for such a row and failed the run, which is how every memory test of this package red
+// on CI (INFRA-985, run 42013424869).
 func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	t.Helper()
 	owed := h.readOwed(t)
+	if owed.settlements+owed.documents+owed.items+owed.itemBlocks == 0 {
+		t.Logf("block index before start (%s): indexed 0 documents, 0 items, 0 item blocks; owed 0", t.Name())
+		return
+	}
+	// One service for both pieces of work, shut down before the server starts, so neither its
+	// compaction queue nor a lease of its own outlives this step. ServerURL is the port the test
+	// already holds, the one refs.ReindexOwedItem hands text.ExtractAt, so the index this writes
+	// is the index the server would have written.
+	service := docs.New(docs.Deps{Store: h.database, Events: events.NewBroker(), ServerURL: "http://127.0.0.1:" + port})
+	defer service.Shutdown(context.Background())
 	if owed.settlements > 0 {
-		h.awaitOwedSettlements(t)
+		h.settleOwed(t, service)
 	}
 	var documents, items, itemBlocks int
 	if owed.documents+owed.items+owed.itemBlocks > 0 {
-		documents, items, itemBlocks = h.writeOwedBlockIndex(t, port)
+		documents, items, itemBlocks = h.writeOwedBlockIndex(t, service)
 	}
 	t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed 0",
 		t.Name(), documents, items, itemBlocks)
 }
 
-// awaitOwedSettlements waits for the settlements owed before a server starts to go. A running
-// server settles a write two seconds after it and nothing in this test process settles anything,
-// so a row that stands past the wait is one no server will clear: the test that wrote the document
-// must wait for it.
-func (h *memoryHarness) awaitOwedSettlements(t *testing.T) {
+// settleOwed settles, on this goroutine, every document owed a settlement, by the issue each
+// belongs to: SettleIssueDocuments is the only exported synchronous settle, and it returns when
+// the settlements it ran have committed. A row still owed after it is one nothing here can clear,
+// and the failure names it.
+func (h *memoryHarness) settleOwed(t *testing.T, service *docs.Service) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		pending := h.pendingSettlements(t)
-		if len(pending) == 0 {
-			return
+	ctx := context.Background()
+	rows, err := h.database.Pool.Query(ctx, `
+		select distinct coalesce(artifacts.issue_key, '')
+		from doc_settlements_pending pending join artifacts on artifacts.id = pending.artifact_id
+	`)
+	if err != nil {
+		t.Fatalf("read the issues of the documents owed a settlement: %v", err)
+	}
+	var issues []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			t.Fatalf("read the issue of a document owed a settlement: %v", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("a settlement was still owed ten seconds before a measured server started (%s); the test must call memory.waitForSettled on each document it wrote before it starts a measured server",
-				strings.Join(pending, "; "))
+		if key != "" {
+			issues = append(issues, key)
 		}
-		time.Sleep(100 * time.Millisecond)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the issues of the documents owed a settlement: %v", err)
+	}
+	for _, issue := range issues {
+		if err := service.SettleIssueDocuments(ctx, issue); err != nil {
+			t.Fatalf("settle the documents of issue %s before a measured server starts: %v", issue, err)
+		}
+	}
+	if pending := h.pendingSettlements(t); len(pending) > 0 {
+		t.Fatalf("a settlement was still owed after this harness settled every issue that owed one (%s); a document that belongs to no issue cannot be settled from here",
+			strings.Join(pending, "; "))
 	}
 }
 
@@ -282,22 +318,17 @@ func (h *memoryHarness) pendingSettlements(t *testing.T) []string {
 	return pending
 }
 
-// writeOwedBlockIndex writes the block index the server would have written, through a service of
-// this test process on the test's database, and reports what it indexed. ServerURL is the port the
-// test already holds, the one refs.ReindexOwedItem hands text.ExtractAt, so the index is the one
-// the server would have written. The service is built only where something is owed and is shut
-// down before the server starts, so neither its compaction queue nor a lease of its own outlives
-// this step.
-func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, port string) (documents, items, itemBlocks int) {
+// writeOwedBlockIndex writes, through service, the block index the server would have written, and
+// reports what it indexed.
+func (h *memoryHarness) writeOwedBlockIndex(t *testing.T, service *docs.Service) (documents, items, itemBlocks int) {
 	t.Helper()
-	service := docs.New(docs.Deps{Store: h.database, Events: events.NewBroker(), ServerURL: "http://127.0.0.1:" + port})
-	defer service.Shutdown(context.Background())
 	ctx := context.Background()
 	deadline := time.Now().Add(120 * time.Second)
 	var cursor string
 	// liveAheadTicks counts the ticks in a row that indexed nothing and found a document live
-	// ahead: two of them say the drain cannot finish, since only a settlement moves such a
-	// document on and nothing here settles one.
+	// ahead: a document whose stored text is ahead of its latest version is moved on by a
+	// settlement, which settleOwed has already run for every issue that owed one, so two such
+	// ticks say the drain cannot finish.
 	liveAheadTicks := 0
 	for {
 		tick, err := service.ReconcileBlockIndex(ctx, cursor, nil)

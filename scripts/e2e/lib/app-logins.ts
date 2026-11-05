@@ -98,8 +98,8 @@ const tokenPattern = /(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/
  * loginPattern). */
 const loginPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 /** How long the run's last line may take to drain before it exits anyway: a reader that stops
- *  taking the bytes must not hold the run open, and a pipe nobody reads is exactly what the
- *  bound above leaves behind (exitAfterWriting). */
+ * taking the bytes must not hold the run open, and a pipe nobody reads is exactly what the
+ * output cap (outputLimit) leaves behind (exitAfterWriting). */
 const finalWriteDrainMs = 2_000;
 
 /** `text` with every GitHub token in it replaced. */
@@ -372,14 +372,14 @@ function parseRoles(value: string): AppRole[] | undefined {
  * has already written here. Exiting at once then loses the diagnosis with the unflushed tail -
  * measured as 638,976 to 1,003,640 bytes of 1,052,672 received by the caller, with the cap
  * message absent in two runs of six (INFRA-985). The timer is the backstop the explicit exit
- * below is for: a reader that never takes the bytes must not keep the run alive.
+ * below is for: a reader that never takes the bytes must not keep the run alive. The call
+ * returns at once: the exit comes from the write's callback or from that timer, not from here.
  */
-function exitAfterWriting(stream: NodeJS.WriteStream, line: string, code: number): never {
+function exitAfterWriting(stream: NodeJS.WriteStream, line: string, code: number): void {
   const leave = () => process.exit(code);
   const backstop = setTimeout(leave, finalWriteDrainMs);
-  backstop.unref?.();
+  backstop.unref();
   stream.write(line, leave);
-  return undefined as never;
 }
 
 if (import.meta.main) {

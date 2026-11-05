@@ -152,7 +152,7 @@ type liveAheadDocuments map[string]owedDocument
 // without reading and keeps up to date.
 func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	// A caller outside this package can only pass nil, since liveAheadDocuments is unexported:
-	// the api package's block-index deferral tests and cmd/dispatch's memory harness, which
+	// the api package's tests and cmd/dispatch's memory harness, which
 	// drains what is owed before it measures a server, both do. The map is a cache the calling
 	// loop keeps across its own ticks, so a throwaway one costs no more than reading again the
 	// documents this one tick finds live ahead.

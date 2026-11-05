@@ -747,10 +747,10 @@ func (m *sessionRelays) restartFailed(ctx context.Context, sessionID string, err
 // relayNATS restarts a NATS session's consumer at its ack floor and publishes each message it pulls
 // as a frame on the session's relay subject, in stream order, with up to the consumer's
 // MaxAckPending in flight. It pauses, sending nothing more, once the oldest frame the session has
-// not answered has waited relayReceiptWait: the frames in flight are left to their ack wait, and
-// the relay starts again at the ack floor after its pause backoff or at the session's next
-// registration, whichever comes first (sessionRelays.relay), so the messages it was sending reach
-// a session that was only slow without waiting for a registration.
+// not answered has waited the receipt wait (receiptWait): the frames in flight are left to their
+// ack wait, and the relay starts again at the ack floor after its pause backoff or at the
+// session's next registration, whichever comes first (sessionRelays.relay), so the messages it
+// was sending reach a session that was only slow without waiting for a registration.
 func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutcome {
 	sessionID := run.sessionID
 	start, pull, outcome := m.restart(ctx, run)
@@ -826,8 +826,8 @@ func (m *sessionRelays) publishFrame(ctx context.Context, run *relayRun, msg bus
 	})
 }
 
-// receiptDeadline is when the oldest frame of run the session has not answered reaches
-// relayReceiptWait, and whether there is one.
+// receiptDeadline is when the oldest frame of run the session has not answered reaches the
+// receipt wait (receiptWait), and whether there is one.
 func (m *sessionRelays) receiptDeadline(run *relayRun) (time.Time, bool) {
 	m.framesMu.Lock()
 	defer m.framesMu.Unlock()
