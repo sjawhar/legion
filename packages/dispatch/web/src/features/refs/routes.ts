@@ -71,6 +71,11 @@ export interface InboxRoute {
    *  the whole memory of that selection, so a link carries the reader's place in the list. */
   item?: string;
   section?: "needs-you";
+  /** The text the Inbox's search box narrows the list by, as typed. It is a field of the route
+   *  rather than a search parameter of its own because `buildInboxPath` rebuilds the whole query
+   *  string from this type and `usePaneSelection` navigates with it on every selection change, so
+   *  a parameter outside the type would be dropped by the next `j`. */
+  q?: string;
   /** Who the listed asks are for. Absent is the page's default, the reader's own work; an empty
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
    *  literal `unassigned`. */
@@ -909,6 +914,12 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (params.get("section") === "needs-you") {
     route.section = "needs-you";
   }
+  // Neither trimmed nor cut: a reader mid-word has a trailing space that is part of what they
+  // typed, and the box rewrites no address a link arrived with.
+  const q = params.get("q");
+  if (q !== null && q !== "") {
+    route.q = q;
+  }
   // Nothing refuses an email the page has never heard of: the filter is a client-side split of
   // one inbox response, so an unlisted or misspelled person simply matches no row.
   const assignees: string[] = [];
@@ -938,6 +949,9 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   }
   if (route.section !== undefined) {
     query.set("section", route.section);
+  }
+  if (route.q !== undefined) {
+    query.set("q", route.q);
   }
   if (route.assignees !== undefined) {
     if (route.assignees.length === 0) {
