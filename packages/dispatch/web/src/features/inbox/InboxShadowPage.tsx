@@ -57,7 +57,7 @@ export function InboxShadowPage(): ReactNode {
               ? "All active people checked"
               : `${shadow.data.uncovered_users} people not checked recently`}
           </p>
-          <dl className="mt-3 text-sm">
+          <dl className="mt-2 text-sm">
             {causes.map(([cause, label]) => (
               <div className="flex flex-wrap justify-between gap-2" key={cause}>
                 <dt>{label}</dt>
@@ -76,7 +76,7 @@ export function InboxShadowPage(): ReactNode {
               <dd>{shadow.data.expansions.mention ?? 0}</dd>
             </div>
           </dl>
-          <div className={`mt-3 border-t pt-3 text-sm ${borderDefault}`}>
+          <div className={`mt-2 border-t pt-2 text-sm ${borderDefault}`}>
             <p className="font-medium">
               {shadow.data.ready
                 ? "Comparison gate met; cutover still requires review"
