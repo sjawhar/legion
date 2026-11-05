@@ -73,11 +73,36 @@ func differs(base, head *string) bool {
 // rendering it would store: one that reads back as another document (ErrMisreadRendering) or that
 // no reader of this package reads at all (ErrRenderingRefused). The comparison runs in the head's
 // binary, so it asks the error rather than reading the dump's sentence, which each revision
-// writes in its own words.
-func refusesItsRendering(markdown string) bool {
+// writes in its own words. Parts of a write run outside recoverPanic, and the dump step ran this
+// same call under diffStep, which records a panic rather than dying of it; so this one recovers
+// too and answers the panic, which the comparison counts as a gate of its own instead of losing
+// the whole summary to it.
+func refusesItsRendering(markdown string) (refuses bool, panicked string) {
+	defer func() {
+		if value := recover(); value != nil {
+			refuses, panicked = false, fmt.Sprint(value)
+		}
+	}()
 	SetBlockIDGenerator(counterBlockIDs())
-	_, err := ParseForWrite(markdown, nil)
-	return errors.Is(err, ErrMisreadRendering) || errors.Is(err, ErrRenderingRefused)
+	_, err := gateWrite(markdown)
+	return errors.Is(err, ErrMisreadRendering) || errors.Is(err, ErrRenderingRefused), ""
+}
+
+// gateWrite is the write refusesItsRendering asks about, a variable so that a test can plant a
+// panic in it; nothing but a test replaces it.
+var gateWrite = func(markdown string) (*Node, error) { return ParseForWrite(markdown, nil) }
+
+func TestTheGateAnswersAPanicInItsReParse(t *testing.T) {
+	previous := gateWrite
+	gateWrite = func(string) (*Node, error) { panic("planted: a write that panics outside recoverPanic") }
+	defer func() { gateWrite = previous }()
+	refuses, panicked := refusesItsRendering("- a\n")
+	if refuses {
+		t.Error("a write that panicked was taken for a refusal of its rendering")
+	}
+	if !strings.Contains(panicked, "planted") {
+		t.Errorf("the panic is answered as %q, which does not name it", panicked)
+	}
 }
 
 func TestDifferentialCompare(t *testing.T) {
@@ -196,9 +221,16 @@ func TestDifferentialCompare(t *testing.T) {
 		// store - one that reads back as another document, or that no reader reads at all - which
 		// is read from the error this binary raises for it (refusesItsRendering) rather than from
 		// the sentence the dump recorded; one the base stores is newly refused by the writer, and
-		// gates.
-		writerRefuses := head.dump.Parse == "" && head.dump.Write != "" && head.ReadsAsEngine &&
-			refusesItsRendering(written.MD)
+		// gates. A write that panics in that re-read answers no refusal and gates on its own, as
+		// the dump's own panic does.
+		writerRefuses := false
+		if head.dump.Parse == "" && head.dump.Write != "" && head.ReadsAsEngine {
+			refuses, panicked := refusesItsRendering(written.MD)
+			writerRefuses = refuses
+			if panicked != "" {
+				flag("head panic in the gate's re-read", sides)
+			}
+		}
 		if writerRefuses {
 			flag("refused by the writer", sides)
 		}
@@ -220,6 +252,7 @@ func TestDifferentialCompare(t *testing.T) {
 		{"engine-tree regressions (base renders the engine's tree correctly, head does not)", "engine-tree regression"},
 		{"engine-tree churn (base renders the engine's tree correctly, head's bytes differ)", "engine-tree churn"},
 		{"head panics (recovered or not)", "head panic"},
+		{"head panics in the gate's re-read of a refused write", "head panic in the gate's re-read"},
 		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
 		{"newly refused by the writer (base stores, head refuses the rendering it would store)", "newly refused by the writer"},
 		{"engine readings Go's schema refuses (FromJSON cannot hold what the engine read)", "engine reading Go's schema refuses"},

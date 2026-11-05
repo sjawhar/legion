@@ -44,9 +44,11 @@ for path in "${corpora[@]}"; do
 done
 echo "corpus: $(wc -l < "$corpus") documents in $out" >&2
 
-# One test binary per revision. The base is built with the head's copy of the reading
-# (differential_test.go) and its own of everything else, the judgment (differential_gate_test.go)
-# included, which runs in the head's binary alone and names what the head holds.
+# One test binary per revision. The head is the working tree, or the revision --head names, built
+# whole. The base is built with its own revision of everything but the reading, which is the
+# head's copy (differential_test.go), and with no judgment at all: the base runs the dump alone,
+# and a judgment of its own (differential_gate_test.go, once a base carries this commit) would
+# compile against the head's reading and break the base build the first time that reading changes.
 build() { # <name> <rev or empty for the working tree>
   local tree=$pmdoc
   if [ -n "$2" ]; then
@@ -55,6 +57,7 @@ build() { # <name> <rev or empty for the working tree>
     git -C "$repo" archive "$2" packages/envoy | tar -x -C "$root"
     tree=$root/packages/envoy/internal/dispatch/pmdoc
     cp "$pmdoc/differential_test.go" "$tree/"
+    rm -f "$tree/differential_gate_test.go"
   fi
   (cd "$tree" && GOWORK=off go test -c -o "$out/$1.test" .)
 }
