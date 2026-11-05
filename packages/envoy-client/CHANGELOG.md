@@ -1,5 +1,40 @@
 # Changelog
 
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- A session row and a role answer carry the session's state: `SessionWireSchema` gains `state`,
+  `RoleWireSchema` gains `state` and `holder_state`, a send answer gains `recipient_state` and
+  `last_seen`, and `listSessions` takes `include`. A refusal that names a session carries its
+  state too: `EnvoyApiError` reads the `state`, `holder`, `holder_state`, `last_seen` and
+  `claim_released` a refused send and a lapsed role's 404 answer, and its message says which
+  state the session is in and when it was last seen, so a role lookup or a publish refused by
+  an unresponsive holder no longer reads as that holder's death. A listener that names no
+  state is read as `live`, so an older listener still works. An `envoy_publish` answer names
+  every session its message was only stored for, under `unresponsive`, and for a role publish
+  the holder and the state the listener resolved that holder in (`holder_state`), so the agent
+  that published hears that a peer has not taken the message yet. The tool descriptions say
+  what the three states mean and what to do about them, in place of "List all live sessions"
+  and "stays registered for up to 5 minutes": an unresponsive session is not dead, so start no
+  replacement for it and take no claim from it until it is `gone`, or until
+  `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` has passed since its `last_seen`, the sum the Dispatch
+  server itself refuses a take by, counted into the sentence rather than written as a number
+  nothing enforces.
+
+### Fixed
+
+- A `dispatch_issues` list row says an unresponsive holder is unresponsive, and since when, as
+  `dispatch_read` and the dashboard do. The rows judged a claim by membership of the live agent
+  list alone, and that list now carries unresponsive sessions, because an unresponsive session
+  keeps its roles and its claims: such a holder read as plainly holding. Each row now reads the
+  holder's own state and last registration from its agent row, and a Dispatch server that names
+  no state is read by membership as before.
+- `dispatch issues` and `dispatch read` say a route's status is unknown because the Envoy
+  listener's agent list is refilling (`route_status_reason: "refilling"`), so to try again in a
+  moment, where they used to say the listener did not answer, which they now say only of a
+  listener that did not.
+
 ## [main@87fb43e754ba] - 2026-11-05
 
 ### Changed
