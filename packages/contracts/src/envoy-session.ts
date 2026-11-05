@@ -1,0 +1,68 @@
+// The timings of Envoy session registration, declared here once and read by every language that
+// holds one of them: the pi-envoy plugin that refreshes a pane's listener registration, the
+// envoy-client transport that makes the call, the Go listener that expires the record, and the
+// daemon that decides a session is gone.
+//
+// The numbers are one arrangement, not six independent settings: three refresh intervals plus one
+// whole listener call - SESSION_HEARTBEAT_MS * 3 plus LISTENER_CALL_ATTEMPTS * timeout +
+// (LISTENER_CALL_ATTEMPTS - 1) * retryDelay, which is 10,250 ms - must fall strictly short of
+// SESSION_RECORD_LIFETIME_MS: 3 * 90,000 + 10,250 = 280,250 ms inside 300,000 ms. A record that
+// expires unless refreshed is renewed at a third of its lifetime, so two whole refreshes may fail
+// and the third still saves it; and that third refresh must COMPLETE, not merely be posted,
+// before the record expires. At equality it has not yet paid for its round trip, and
+// `setInterval` only ever fires late, so equality really buys one failed refresh, not two. Change
+// one of these numbers and check the sum again.
+
+/**
+ * The interval at which an Oh My Pi pane's pi-envoy plugin refreshes its Envoy listener
+ * registration. The Envoy listener drops a session record `SESSION_RECORD_LIFETIME_MS` after its
+ * last write, so this interval is set to a third of that lifetime less one whole call's budget:
+ * two whole refreshes may fail and the third still completes before the record is dropped.
+ * Generated into Go as `contracts.SessionHeartbeat` so the pane's refresh and the listener's
+ * expiry are one arrangement rather than two numbers that drift apart.
+ */
+export const SESSION_HEARTBEAT_MS = 90_000;
+
+/**
+ * How long the Envoy listener keeps a session record after its last write: `OpenSessionRegistry`'s
+ * default `ttl` and so the `envoy_sessions` bucket's `MaxAge`. A pane that stops heartbeating
+ * disappears from session lists this long after its last refresh. Generated into Go as
+ * `contracts.SessionRecordLifetime` so the lifetime the listener writes into the bucket and the
+ * lifetime the heartbeat interval is derived from are one number.
+ */
+export const SESSION_RECORD_LIFETIME_MS = 300_000;
+
+/**
+ * How long a session's role claim may go unrefreshed before a reader treats the process that
+ * wrote it as gone. At `SESSION_HEARTBEAT_MS` this allows three missed heartbeats before a reader
+ * assumes the holder is gone. Role resolution reads it, and with it the role lane's stale-holder
+ * check and Dispatch's outbox; a session route's own write weighs no claim's freshness, since the
+ * route follows whichever process heartbeated last. Generated into Go as
+ * `contracts.SessionClaimStale` so every reader of a claim counts the same misses before dropping
+ * a holder.
+ */
+export const SESSION_CLAIM_STALE_MS = 300_000;
+
+/**
+ * How long one attempt of an envoy-client call waits for the listener's answer before it is
+ * abandoned and, if attempts remain, retried. Generated into Go as `contracts.ListenerCallTimeout`
+ * so the budget a whole call is allowed and the lifetime a refresh must complete inside are
+ * weighed against the same attempt cost.
+ */
+export const LISTENER_CALL_TIMEOUT_MS = 5_000;
+
+/**
+ * The delay between one envoy-client attempt and the next: long enough for a listener restarting
+ * under the same address to be listening again, short enough to leave the whole call inside its
+ * caller's budget. Generated into Go as `contracts.ListenerCallRetryDelay` so a whole call's cost
+ * is computed from one number on both sides.
+ */
+export const LISTENER_CALL_RETRY_DELAY_MS = 250;
+
+/**
+ * How many attempts one envoy-client call makes, unless the caller turns retrying off, in which
+ * case it makes one. Generated into Go as `contracts.ListenerCallAttempts` so a whole call's cost
+ * - attempts * `LISTENER_CALL_TIMEOUT_MS` plus the delays between them - is the same number
+ * wherever it is checked against `SESSION_RECORD_LIFETIME_MS`.
+ */
+export const LISTENER_CALL_ATTEMPTS = 2;
