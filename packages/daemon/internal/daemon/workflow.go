@@ -384,16 +384,19 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 // engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
 // login from its boot lease and the daemon's own build: its own project's merge_queue_role is the
 // role the merger's READY is published to, its own project's deploys are the workflows whose runs
-// wake its production checks, and the repository the binary is built from is the one whose open
-// production checks a build is compared against — only for a release build, one with a revision,
-// since nothing else names a commit a merge could be in; a build with none compares nothing,
-// Dispatch's announcement that every server process serves a build (server.started) included.
+// wake its production checks, its own project's production_check is the role that works the
+// checks a merge opens (empty, it opens none), and the repository the binary is built from is the
+// one whose open production checks a build is compared against — only for a release build, one
+// with a revision, since nothing else names a commit a merge could be in; a build with none
+// compares nothing, Dispatch's announcement that every server process serves a build
+// (server.started) included.
 func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
-		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
+		ProductionCheckRole: project.ProductionCheck,
+		ReviewAppLogin:      reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
 		RepositoryRenames: cfg.RepositoryRenames,
 	}
 	if build.Revision != "" {

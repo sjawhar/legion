@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -48,8 +49,9 @@ type Gates struct {
 }
 
 // Project is a Dispatch project prefix's configuration: its optional merge-queue role, merge rules,
-// the Slack channels whose @-mentions reach its controller, and the deploy workflows whose runs
-// wake its production checks. Its repositories are Dispatch's mapping (Settings → Repositories →
+// the Slack channels whose @-mentions reach its controller, the deploy workflows whose runs
+// wake its production checks, and whether a merge that closes one of its issues opens such a
+// check at all. Its repositories are Dispatch's mapping (Settings → Repositories →
 // Projects), which the daemon reads at boot and when it changes, never this file.
 type Project struct {
 	MergeQueueRole string
@@ -63,6 +65,13 @@ type Project struct {
 	// Memory is `memory`, the project's per-tree memory setting; its zero value is off, which a
 	// file that names no block leaves.
 	Memory Memory
+	// ProductionCheck is `production_check`, the role that works the production check a merge
+	// closing one of the project's issues opens: the tester, which a project that names no key
+	// gets, or the empty role, which is the file's `off` and opens no check at all. The key
+	// decides the checks opened after a load, never one already open: a check running under the
+	// role the file named when it opened keeps that role, and moving the key to off ends no
+	// check that is already open.
+	ProductionCheck claim.Role
 }
 
 // Deploy is one `projects.<KEY>.deploys` entry: Workflow, a workflow file of Repo (its path, as
@@ -178,7 +187,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "deploys", "memory", "merge", "merge_queue_role", "mergeQueueRole", "slack_channels")
+	fields, err := members(value, key, "deploys", "memory", "merge", "merge_queue_role", "mergeQueueRole", "production_check", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		if unknown.name == "repo" {
@@ -219,6 +228,24 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if memory := fields["memory"]; memory != nil {
 		if project.Memory, err = readMemory(memory, key+".memory"); err != nil {
 			return Project{}, err
+		}
+	}
+	// production_check is read by the key's presence rather than by its value: a project that
+	// names no key gets the tester, and the one word that takes the check away, `off`, is the
+	// empty role. A bare `off` reaches the reader as the string, as `memory.mode`'s does.
+	project.ProductionCheck = claim.RoleTester
+	if check := fields["production_check"]; check != nil {
+		word, err := stringOf(check, key+".production_check")
+		if err != nil {
+			return Project{}, err
+		}
+		switch word {
+		case "off":
+			project.ProductionCheck = ""
+		case string(claim.RoleTester):
+			project.ProductionCheck = claim.RoleTester
+		default:
+			return Project{}, fmt.Errorf("%s.production_check must be off or tester (got %q)", key, word)
 		}
 	}
 	return project, nil

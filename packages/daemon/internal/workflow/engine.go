@@ -44,6 +44,11 @@ type Config struct {
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
+	// ProductionCheckRole is the project's `production_check` (config.Project.ProductionCheck):
+	// the role that works the production check a merge closing an issue opens, and empty for the
+	// project that opens none. It decides the checks opened under this configuration, never one
+	// already open, whose role its own row holds.
+	ProductionCheckRole claim.Role
 	// BuiltFrom is the repository the daemon's binary is built from (`cybermonklabs/legion` in a release
 	// build): a build the daemon boots on, or Dispatch announces every server process serves
 	// (server.started), is compared only against the open production checks of that repository,

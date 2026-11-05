@@ -141,6 +141,7 @@ var settingsEmitted = map[string]string{
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
 	"Project.Deploys":                                "projects.<KEY>.deploys",
 	"Project.Memory":                                 "projects.<KEY>.memory",
+	"Project.ProductionCheck":                        "projects.<KEY>.production_check",
 	"Memory.Mode":                                    "projects.<KEY>.memory.mode",
 	"Memory.ConfigFiles":                             "projects.<KEY>.memory.config_files",
 	"Memory.InstructionsPath":                        "projects.<KEY>.memory.instructions",
@@ -287,7 +288,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
 
-	// (b) runtime.kubernetes, and one App.
+	// (b) runtime.kubernetes, one project, and one App.
 	runtimeKeys := keysOf(t, top["runtime"])
 	assertKeys(t, "settings.runtime", runtimeKeys, []string{"name", "kubernetes"})
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
@@ -304,6 +305,11 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	apps := keysOf(t, top["github_apps"])
 	assertKeys(t, "settings.github_apps", apps, []string{"implement", "review"})
 	assertKeys(t, "settings.github_apps.implement", keysOf(t, apps["implement"]), []string{"app_id", "installations"})
+	projects := keysOf(t, top["projects"])
+	assertKeys(t, "settings.projects", projects, []string{"LEGION", "WIDGETS"})
+	assertKeys(t, "settings.projects.WIDGETS", keysOf(t, projects["WIDGETS"]), []string{
+		"merge_queue_role", "merge", "slack_channels", "deploys", "memory", "production_check",
+	})
 
 	// (c) Nothing planted reaches the wire, and no key of a credential's shape does either.
 	for _, planted := range settingsFixturePlanted {
@@ -343,6 +349,14 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if settings.Projects["WIDGETS"].MergeQueueRole != "merge-queue" {
 		t.Errorf("projects = %+v, want WIDGETS's merge queue role", settings.Projects)
+	}
+	// The project that names no `production_check` shows the default role, and the one that turns
+	// the check off shows that word, never the empty string the role takes for off.
+	if got := settings.Projects["LEGION"].ProductionCheck; got != "tester" {
+		t.Errorf("projects.LEGION.production_check = %q, want tester, which a project that names no key gets", got)
+	}
+	if got := settings.Projects["WIDGETS"].ProductionCheck; got != "off" {
+		t.Errorf("projects.WIDGETS.production_check = %q, want the file's off as the word", got)
 	}
 	if settings.ProductionCheckHours != 240 {
 		t.Errorf("production_check_hours = %v, want the file's 240", settings.ProductionCheckHours)

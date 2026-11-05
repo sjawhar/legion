@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -119,7 +120,7 @@ func defaultsFor(port int) Config {
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
-		Projects:                                map[string]Project{"DEMO": {}},
+		Projects:                                map[string]Project{"DEMO": {ProductionCheck: claim.RoleTester}},
 		Gates:                                   Gates{Design: DesignGateRootIssues},
 		GitHubApps: GitHubApps{
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
@@ -266,9 +267,9 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {},
-		"OTHER": {MergeQueueRole: "merge-queue"},
-		"EMPTY": {},
+		"DEMO":  {ProductionCheck: claim.RoleTester},
+		"OTHER": {MergeQueueRole: "merge-queue", ProductionCheck: claim.RoleTester},
+		"EMPTY": {ProductionCheck: claim.RoleTester},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}

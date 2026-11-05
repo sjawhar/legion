@@ -81,6 +81,7 @@ projects:
     merge_queue_role: merge-queue
     merge:
       by_hand: ['^deploy/', '\.sql$']
+    production_check: off
 gates:
   design: root-issues
 github_apps:

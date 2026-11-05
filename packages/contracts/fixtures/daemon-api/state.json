@@ -556,7 +556,8 @@
         ],
         "memory": {
           "config_files": []
-        }
+        },
+        "production_check": "tester"
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -570,7 +571,8 @@
         "deploys": [],
         "memory": {
           "config_files": []
-        }
+        },
+        "production_check": "off"
       }
     },
     "gates": {

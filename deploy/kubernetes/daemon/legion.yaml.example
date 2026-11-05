@@ -50,6 +50,11 @@ projects:
   #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
   #                                    # whose Apply step succeeds after a merge wakes that pull
   #                                    # request's open production check
+  #   production_check: tester         # optional: who works the production check a merge closing
+  #                                    # one of this project's issues opens: tester (the default,
+  #                                    # and what a project that names no key gets) runs the check
+  #                                    # as the tester; off opens none. The key decides the checks
+  #                                    # opened after a load, never one already open
   #   memory:                          # optional: what each tree this project opens runs with:
   #     mode: on                       # off (the default, and what a project with no memory block
   #                                    # gets), on, or random, a fair coin for each tree. The draw is

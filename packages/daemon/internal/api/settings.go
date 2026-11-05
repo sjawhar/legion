@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
@@ -215,6 +216,11 @@ type ProjectSettings struct {
 	SlackChannels  []string         `json:"slack_channels"`
 	Deploys        []DeploySettings `json:"deploys"`
 	Memory         MemorySettings   `json:"memory"`
+	// ProductionCheck is `production_check` as the file writes it: the role that works the
+	// production check a merge closing one of the project's issues opens, or the word `off`
+	// for the project that opens none (productionCheckOf), never the empty string the role
+	// takes for off.
+	ProductionCheck string `json:"production_check"`
 }
 
 // MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
@@ -340,6 +346,7 @@ func SettingsOf(cfg config.Config) Settings {
 				ConfigFiles:  stringsOf(project.Memory.ConfigFiles),
 				Instructions: project.Memory.InstructionsPath,
 			},
+			ProductionCheck: productionCheckOf(project.ProductionCheck),
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
@@ -444,6 +451,16 @@ func gitHubAppSettingsOf(app config.GitHubApp) GitHubAppSettings {
 	settings := GitHubAppSettings{AppID: app.AppID, Installations: make(map[string]string, len(app.Installations))}
 	maps.Copy(settings.Installations, app.Installations)
 	return settings
+}
+
+// productionCheckOf is a project's `production_check` as the state shows it: the role that works
+// the production check a merge opens, and the word `off` for the empty role, which opens none,
+// so a reader of the settings sees back a word the file could have been written with.
+func productionCheckOf(role claim.Role) string {
+	if role == "" {
+		return "off"
+	}
+	return string(role)
 }
 
 // seconds is d in whole seconds, as the file's `*_seconds` keys take it.
