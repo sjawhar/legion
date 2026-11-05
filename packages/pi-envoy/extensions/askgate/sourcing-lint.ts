@@ -10,17 +10,21 @@
 // in the charter prompt — it has no provider dependency, so it runs for a session the model review
 // skips.
 //
-// What it does: a sentence that asserts a measurement (a count, a ratio, a percentage, a status, a
-// does/does-not, a claim about what a file or symbol does) and carries no citation token (a path, a
-// sha, a ref, a backticked command, a URL, a dispatch key) is handed back to the sender to source or
-// to label. Nothing is refused and nothing is blocked.
+// What it does: a sentence that asserts a measurement (a count, a ratio, a percentage, or a pass
+// or failure a run reached) and carries no citation token (a path, a sha, a ref, a backticked
+// command, a URL, a dispatch key) is handed back to the sender to source or to label. Nothing is
+// refused and nothing is blocked.
 //
 // What it does NOT do, stated so no reader concludes the opposite: it says nothing about a claim
 // that IS sourced. A confidently wrong sentence that names a command nobody re-ran passes it
-// untouched. Only a reader who re-runs the command catches those. This ships the check that cannot
-// be fooled, not the one that would catch more.
+// untouched, and so does one whose "citation" is a token that sources nothing — the tokens are
+// syntax, never checked for relevance. Only a reader who re-runs the command catches those. This
+// ships the check that cannot be argued with, not the one that would catch more.
 //
-// A leaf module: it imports nothing of the gate, as `text.ts` does not.
+// Near a leaf: of the gate it imports only `text.ts`, itself a leaf, for the one transform every
+// agent-facing text of the gate goes through.
+
+import { agentFacing } from "./text";
 
 /** One sentence the lint flags, with the trigger that put it there. */
 export interface SourcingFlag {
@@ -34,8 +38,12 @@ export interface SourcingFlag {
 const SENTENCE_MAX = 220;
 /** How many flagged sentences the notice names; the count says how many more there are. */
 export const SOURCING_FLAG_CAP = 6;
-/** Below this a "sentence" is a fragment (a table cell, a heading word), never an assertion. */
-const MIN_SENTENCE_CHARS = 25;
+/**
+ * Below this a "sentence" is a fragment — a stray cell, a heading word — never an assertion. It
+ * was 25, which silently dropped the shortest real claims there are: `The suite passed.`, `All 79
+ * tests passed.` Those are exactly what the check exists for.
+ */
+const MIN_SENTENCE_CHARS = 14;
 /**
  * Above this it is not a sentence either: a pasted log, a base64 blob, a minified line. Nothing a
  * reader reads as one claim runs this long, and the cap is what keeps the lint's cost flat on a
@@ -48,29 +56,41 @@ const MAX_TEXT_CHARS = 512 * 1024;
 /**
  * A citation token: something a reader can go and check.
  *
- * Deliberately generous. A false negative (a sentence with a token that sources nothing) costs the
- * reader nothing — the gate said nothing about it, as it says nothing about most text. A false
- * positive costs the sender a sentence they must defend, which is how a mechanical check gets turned
- * off. So anything that even looks checkable counts.
+ * Generous, but not accidental. A false negative (a sentence with a token that sources nothing)
+ * costs the reader nothing — the gate said nothing about it, as it says nothing about most text.
+ * A false positive costs the sender a sentence they must defend, which is how a mechanical check
+ * gets turned off. But a token that matches ordinary English silences a real claim for free, and
+ * a review found several: `GPT-5` and `UTF-8` read as dispatch keys, `11/05/2026` as a path, and
+ * `defaced` and `effaced` as shas. Each pattern below is narrowed against that: a dispatch key's
+ * number is two digits or more, a sha carries a digit, a path segment carries a letter.
  */
 const CITATIONS: readonly RegExp[] = [
   /`[^`\n]+`/, // a backticked command, path, symbol or literal
   /\bhttps?:\/\//i, // a URL
   /\b[a-z][a-z0-9+.-]*:\/\//i, // dispatch://, agent://, pr://, issue://, local://
-  /\b[A-Z][A-Z0-9]{1,9}-\d+\b/, // a dispatch key (INFRA-515, BET-571)
+  /\[[^\]\n]+\]\s*[([][^)\]\n]+[)\]]/, // a markdown link, inline or reference-style
+  /\b[A-Z][A-Z0-9]{1,9}-\d{2,}\b/, // a dispatch key (INFRA-515, BET-571), never GPT-5 or UTF-8
   /\b[\w.-]+\/[\w.-]+#\d+\b/, // owner/repo#123, the way a cross-repository reference is written
   /(?:^|[\s([])#\d+\b/, // a pull request or issue number
   /\b(?:PR|pull request|issue|commit)\s+#?\d+\b/i,
-  // A sha: a whole token of seven to forty hex characters that is not all digits, since a plain
-  // number is the thing being claimed, not the source of itself. One bounded quantifier with no
-  // alternation inside it: the earlier `[0-9a-f]*[a-f][0-9a-f]*` spelling backtracked over a long
-  // run of hex characters, and a 70 KiB body of `b` took the lint past a test's five-second budget.
-  /\b(?![0-9]+\b)[0-9a-f]{7,40}\b/,
+  // A sha: a whole token of seven to forty hex characters (git's own abbreviation is seven),
+  // upper or lower case, holding at least one digit — so an English word of hex letters
+  // (`defaced`, `effaced`) is not one, and a plain number, which is the thing being claimed, is
+  // not the source of itself. Two bounded quantifiers with no alternation inside them: the first
+  // spelling of this backtracked over a long run of hex characters, and a 70 KiB body of `b`
+  // took the lint past a five-second budget.
+  /\b(?=[0-9a-f]{7,40}\b)[a-f]*[0-9][0-9a-f]*\b/i,
   /[\w.@-]+\.(?:ts|tsx|js|jsx|json|jsonl|md|mdx|py|rs|go|java|rb|c|h|cpp|yaml|yml|toml|sh|sql|lean|thy|txt|log|csv|kdl|lock)\b/, // a file name
   /(?:^|[\s("'])(?:\.{1,2})?\/[\w.@-]+\/[\w.@/-]+/, // an absolute or relative path of two segments
-  /\b[\w-]+\/[\w-]+\/[\w.@/-]+/, // owner/repo/path, packages/x/y
+  // owner/repo/path, packages/x/y — a segment must carry a letter, so `11/05/2026` is a date.
+  /\b[\w-]*[A-Za-z][\w-]*\/[\w-]+\/[\w.@/-]+/,
+  // A named run or job id: a word, a slash, a token carrying a digit (`farm/20261103t005431z-25e6a4`).
+  // The letter keeps `11/05/2026` a date; the digit keeps `and/or` ordinary English.
+  /\b[\w-]*[A-Za-z][\w-]*\/[\w-]*\d[\w-]*\b/,
   /\$\s+\S+/, // a shell prompt line
-  /§\s*\d|\b(?:section|entry|slice|row|table|figure|appendix|step)\s+\d/i, // a pointer into the document itself
+  // A pointer into the document itself. `step` and `row` are left out: they name a position in a
+  // procedure or a table far more often than a place a reader can check.
+  /§\s*\d|\b(?:section|entry|table|figure|appendix)\s+\d/i,
 ];
 
 /**
@@ -227,18 +247,35 @@ export function sourcingLint(text: string): SourcingFlag[] {
   return flags;
 }
 
-/** Every string in a tool call's arguments, in the order the arguments hold them. */
-export function proseOf(input: unknown): string {
+/**
+ * Each string of a tool call's arguments, on its own, in the order the arguments hold them.
+ *
+ * They are kept apart rather than joined, and that is a correctness requirement, not tidiness: a
+ * call's routing fields sit beside its body, so joining them let `issue: "INFRA-515"` count as the
+ * citation of the body's first sentence and silenced it. A field cannot source another field.
+ */
+export function proseParts(input: unknown): string[] {
   const parts: string[] = [];
-  const walk = (value: unknown): void => {
+  // An explicit stack, not recursion, and a seen set: arguments reach this from a tool call, and
+  // a deeply nested or self-referencing value must cost a flag, not the process. 25,000 nested
+  // arrays overflowed the call stack when this recursed, and a cycle never returned.
+  const seen = new Set<object>();
+  const stack: unknown[] = [input];
+  while (stack.length > 0) {
+    const value = stack.pop();
     if (typeof value === "string") parts.push(value);
-    else if (Array.isArray(value)) for (const item of value) walk(item);
-    else if (value !== null && typeof value === "object")
-      for (const item of Object.values(value)) walk(item);
-  };
-  walk(input);
-  return parts.join("\n");
+    else if (value !== null && typeof value === "object") {
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const children = Array.isArray(value) ? value : Object.values(value);
+      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]);
+    }
+  }
+  return parts;
 }
+
+/** Every flagged sentence of a tool call's arguments, each field read on its own. */
+export const sourcingLintArgs = (input: unknown) => proseParts(input).flatMap(sourcingLint);
 
 const WHAT: Record<SourcingFlag["kind"], string> = {
   number: "a count or a ratio",
@@ -252,18 +289,26 @@ const WHAT: Record<SourcingFlag["kind"], string> = {
 export function renderSourcingNotice(flags: readonly SourcingFlag[]): string | undefined {
   if (flags.length === 0) return undefined;
   const shown = flags.slice(0, SOURCING_FLAG_CAP);
+  // The sentence is the agent's own text inside the gate's tag, so it goes through the same
+  // transform every other agent-facing text of the gate does (`agentFacing`, `text.ts`): without
+  // it a flagged sentence could close `</advisor-gate>` and open a tag of its own.
   const lines = shown.map(
     ({ sentence, kind }) =>
-      `- ${WHAT[kind]}: ${sentence.length <= SENTENCE_MAX ? sentence : `${sentence.slice(0, SENTENCE_MAX - 1)}…`}`
+      `- ${WHAT[kind]}: ${agentFacing(sentence.length <= SENTENCE_MAX ? sentence : `${sentence.slice(0, SENTENCE_MAX - 1)}…`)}`
   );
   const more =
     flags.length > shown.length ? `\n…and ${flags.length - shown.length} more like them.` : "";
   return [
     `<advisor-gate advisor="AskGate" check="sourcing">`,
-    `${flags.length} sentence${flags.length === 1 ? "" : "s"} in this write assert${flags.length === 1 ? "s" : ""} something measured and name nothing a reader can check — no path, sha, ref, command, URL or dispatch key:`,
+    flags.length === 1
+      ? "One sentence in this write asserts something measured and names nothing a reader can check — no path, sha, ref, command, URL or dispatch key:"
+      : `${flags.length} sentences in this write assert something measured and name nothing a reader can check — no path, sha, ref, command, URL or dispatch key:`,
     ...lines,
     `${more}`,
-    "This blocks nothing; the write went as you sent it. For each one, either name what you read it from, or mark it as what it is — an inference, not an observation. The gate cannot tell the two apart, which is why it asks rather than refuses, and it says nothing at all about a wrong claim that is sourced.",
+    // Never "the write went out": the gate let the call run, and the call can still have failed
+    // (a review found this note beside a Dispatch write whose command exited 7). What the check
+    // knows is that it held nothing back; whether the write landed is the tool result's to say.
+    "This check held nothing back — it does not refuse, and it did not touch this call. For each sentence above, either name what you read it from, or mark it as what it is: an inference, not an observation. The check cannot tell the two apart, which is why it asks rather than refuses, and it says nothing at all about a wrong claim that is sourced.",
     "</advisor-gate>",
   ]
     .filter((line) => line !== "")

@@ -275,7 +275,7 @@ import {
   type Usage,
   type Walked,
 } from "./rules-check";
-import { proseOf, renderSourcingNotice, sourcingLint } from "./sourcing-lint";
+import { renderSourcingNotice, sourcingLintArgs } from "./sourcing-lint";
 import {
   agentFacing,
   byteLength,
@@ -3644,9 +3644,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // model review skips ("skipped", 3,823 of 28,463 gate entries read from this machine's
       // session files on 2026-11-05) still gets it, which is the point of having a check that
       // needs no call. It reports and never refuses, so it changes no decision and no record.
+      //
+      // It reads what the write posts, not what the agent typed: `dryRun.args` for a `dispatch`
+      // command, where the raw input is a shell command and a body can come from a file the
+      // command names, and the device's own arguments otherwise. Each field is read on its own
+      // (`sourcingLintArgs`), so a routing field's issue key never sources the body's prose.
+      // A call this gate refused gets no note: its text posted nowhere, and a note that says the
+      // write went out would contradict the refusal beside it.
       let sourcingNotice: string | undefined;
       try {
-        sourcingNotice = renderSourcingNotice(sourcingLint(proseOf(event.input)));
+        if (decision.result?.block !== true)
+          sourcingNotice = renderSourcingNotice(sourcingLintArgs(dryRun?.args ?? event.input));
       } catch {
         // Best effort, as the notices above are: a lint that throws never holds a write.
       }
@@ -3728,28 +3736,32 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         notices.delete(event.toolCallId);
         return minted;
       }
-      // The minted marker's note, then the sourcing lint's. The lint rides the result of every
-      // call that still posts — a refused one is not one, since its text never went anywhere and
-      // the sender is rewriting it anyway.
-      const extra = [minted?.additionalContext, sourcingNotice].filter(
-        (note) => note !== undefined
-      );
-      if (extra.length > 0)
-        decision.result = {
-          ...decision.result,
-          additionalContext: [decision.result?.additionalContext, ...extra]
-            .filter((note) => note !== undefined)
-            .join("\n"),
-        };
+      // The minted marker's note on the call's result.
+      //
+      // Assembled into a new object, never written back into `decision`: some decisions are
+      // shared constants of this binding (`noModelRole`), and a call's own context stored in one
+      // is handed to the next call that returns the same decision.
+      const additionalContext = [decision.result?.additionalContext, minted?.additionalContext]
+        .filter((note): note is string => note !== undefined)
+        .join("\n");
+      const result: ToolCallResult =
+        decision.result === undefined && additionalContext === ""
+          ? undefined
+          : { ...decision.result, ...(additionalContext === "" ? {} : { additionalContext }) };
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
       // never sees reads like a gate that is working. The rules notice rides there too, on this
       // call alone, never on the session-start notices a later session would repeat.
-      const owed = [decision.result?.additionalContext, rulesNotice].filter(
+      //
+      // The sourcing lint's note rides this channel **only**. Every other note of the gate goes
+      // both ways on purpose and is one line; this one lists sentences, and a sender who reads
+      // its own flagged text twice in one turn learns to skip it. The call's own result is the
+      // channel that reaches every caller, the eval cell included, so it is the one it takes.
+      const owed = [result?.additionalContext, rulesNotice, sourcingNotice].filter(
         (note): note is string => note !== undefined
       );
       if (owed.length > 0) rememberNotice(event.toolCallId, owed.join("\n"));
-      return revised === undefined ? decision.result : { ...decision.result, input: revised };
+      return revised === undefined ? result : { ...result, input: revised };
     };
 
     pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
