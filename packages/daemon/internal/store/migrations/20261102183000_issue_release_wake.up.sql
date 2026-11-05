@@ -1,0 +1,26 @@
+-- 20261102183000_issue_release_wake.up.sql — a release's mark records the newest wake its pod had
+-- when the mark was written, so a wake taken after it cancels the release (INFRA-945).
+--
+-- wake_row is max(pod_resumes.id) of the issue at the moment the release was marked, and a
+-- pod_resumes row above it is a wake this release did not see. Every wake writes one, in the
+-- wake's own transaction (store.PodRecords.TakePodWake), so the row is the fact "this pod was
+-- woken" whichever claim the wake was for and whatever that claim looks like by the time the
+-- teardown reads it.
+--
+-- The claims say less than the wake does. The outbox's wake of a delivery it holds resumes its
+-- role by rule (supervise.RequestRuleResume), which queues no start row and moves no
+-- last_start_row, and a wake for a claim an earlier release left `released` touches no claim this
+-- release suspended — so a release that read only the claims released a pod that was coming back,
+-- and left the role it had stopped suspended in a pod that stands.
+--
+-- A mark written before this column names no wake, and its zero makes every recorded wake of that
+-- pod read as newer, which would cancel a release for a wake that is long over. The table holds
+-- one row per release in flight and is empty between releases, so the marks are cleared rather
+-- than guessed at: each of their rows then finishes without acting. A mark whose pod still stands
+-- and whose role stops had not yet run is decided again by the next idle tick. A mark whose stops
+-- had run is not: its claims stay `released` in a pod that stands, with no backstop armed and no
+-- live claim for the idle rule to read (workflow.IdleHoldNoPod), so a wake of one of those roles
+-- is what brings the pod back. This reaches only a database that ran an earlier commit of this
+-- branch, since no release of a deployed daemon is in flight at this migration.
+delete from issue_releases;
+alter table issue_releases add column wake_row bigint not null default 0;

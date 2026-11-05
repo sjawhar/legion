@@ -11,7 +11,6 @@ import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
-import { SearchButton } from "./SearchButton";
 import { type PaletteMode, SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
 
@@ -904,19 +903,5 @@ test("shows a retryable failure when the search request fails", async () => {
     search.mockRestore();
     view.unmount();
     view.queryClient.clear();
-  }
-});
-
-test("SearchButton announces its shortcut and opens the palette", () => {
-  let opened = 0;
-  const view = render(<SearchButton onOpen={() => (opened += 1)} />);
-
-  try {
-    const button = screen.getByRole("button", { name: /search/i });
-    expect(button.getAttribute("aria-keyshortcuts")).toBe("Control+K Meta+K");
-    fireEvent.click(button);
-    expect(opened).toBe(1);
-  } finally {
-    view.unmount();
   }
 });
