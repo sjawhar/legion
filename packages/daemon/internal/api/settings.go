@@ -211,6 +211,19 @@ type PluginsSettings struct {
 type ProjectSettings struct {
 	SlackChannels []string         `json:"slack_channels"`
 	Deploys       []DeploySettings `json:"deploys"`
+	Memory        MemorySettings   `json:"memory"`
+}
+
+// MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
+// drawn under, absent for a project that names no block, which is off (config.Memory.Word); the
+// Oh My Pi overlays every role of a memory-group tree names after the operator's and its own, `[]`
+// for a project that names none; and the one instructions file the daemon appends to such a role's
+// system prompt, absent when the block names none. The paths are the operator's own file names,
+// which no credential rides in.
+type MemorySettings struct {
+	Mode         config.MemoryMode `json:"mode,omitempty"`
+	ConfigFiles  []string          `json:"config_files"`
+	Instructions string            `json:"instructions,omitempty"`
 }
 
 // DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
@@ -311,6 +324,11 @@ func SettingsOf(cfg config.Config) Settings {
 		entry := ProjectSettings{
 			SlackChannels: stringsOf(project.SlackChannels),
 			Deploys:       make([]DeploySettings, len(project.Deploys)),
+			Memory: MemorySettings{
+				Mode:         project.Memory.Mode,
+				ConfigFiles:  stringsOf(project.Memory.ConfigFiles),
+				Instructions: project.Memory.InstructionsPath,
+			},
 		}
 		for i, deploy := range project.Deploys {
 			entry.Deploys[i] = DeploySettings{Repo: deploy.Repo.String(), Workflow: deploy.Workflow, Step: deploy.Step}

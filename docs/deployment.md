@@ -340,6 +340,44 @@ provider_keys:
   every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
   the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
   overlay file; only loading is per role, so never put a secret in one.
+- **`projects.<KEY>.memory`**, the project's own block, is the second thing that appends to a
+  pane's `PI_CONFIG_FILES`
+  (`memory: {mode: random, config_files: [/etc/legion-memory/memory.yml], instructions: /etc/legion-daemon/memory-instructions.md}`).
+  `mode` is `off`, `on` or `random`: `off` gives no tree a memory group and is what a project with
+  no block gets, `on` gives every new tree one, and `random` draws a fair coin for each new tree.
+  `config_files` are the Oh My Pi overlays a memory-group tree's panes name, and `instructions` the
+  one markdown file the daemon reads at boot and appends to their prompt; both are absolute paths.
+  The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
+  root issue record with the mode it was drawn under and the time of the draw.
+  A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
+  hands over as a tree of its own takes the answer of the tree it leaves at the hand-over: that
+  tree's draw verbatim where it had one, and no draw at all where that tree had been opened with
+  none.
+  A tree first opened before this release has no group and runs without memory, nothing draws for
+  it later, and a change of mode reaches only the trees opened after it.
+  A child out of a tree the daemon never opened has run under nothing and the hand-over gives it
+  nothing, so its own first open draws it like any other new tree.
+  Every role of a memory-group tree names the memory overlays last in `PI_CONFIG_FILES`, after
+  `pi_config_files` and the role's own, and ends its one `--append-system-prompt` value with the
+  memory instructions, after the deployment's own.
+  The controller and every role of a no-memory tree get neither, and a block with no
+  `instructions` appends nothing.
+  The launch follows the record, not the mode:
+  a tree the daemon drew into the memory group keeps its overlays and its instructions while the
+  block still names them, whatever the mode is now, so `mode: off` stops new draws and takes
+  memory from no tree already running with it.
+  Taking the files away is removing them from the block.
+  The loader refuses a `mode` that is no word of the three, and a mode other than `off` that names
+  no `config_files`.
+  It refuses a block that names `config_files` while `worker_backends` puts an issue role on
+  Claude Code, which reads no `PI_CONFIG_FILES`, whatever the mode, since a drawn tree's role
+  would be given overlays Claude Code never reads.
+  Boot refuses an overlay no pane could read, naming the key and the file, as it does one of
+  `role_config_files`, and an `instructions` file it cannot read or that holds nothing; neither
+  reads the mode either.
+  `legion start --check-config` makes every one of these refusals and starts nothing.
+  `docs/kubernetes.md` ("Operator configuration") has what the block does under `runtime:
+  kubernetes`.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a

@@ -130,6 +130,12 @@ type Options struct {
 	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles, so each
 	// outranks those, by role, the controller's pane included. Nil is none.
 	RoleConfigFiles map[claim.Role][]string
+	// MemoryConfigFiles is the project's `memory.config_files`: absolute paths of Oh My Pi
+	// settings overlays a pane whose tree is in the memory group (runtime.SpawnSpec.Memory) names
+	// last in PI_CONFIG_FILES, after PiConfigFiles and the role's own, so they outrank both. The
+	// daemon hands them over whatever the project's mode is, since a tree already drawn into the
+	// memory group names them under any mode; a project with no block names none. Nil is none.
+	MemoryConfigFiles []string
 	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
 	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
 	// to refuse them, as every locator of another runtime is refused without it.
@@ -183,6 +189,9 @@ type Runtime struct {
 	operatorEnv      map[string]string
 	piConfigFiles    []string
 	roleConfigFiles  map[claim.Role][]string
+	// memoryConfigFiles are the project's memory overlays (Options.MemoryConfigFiles), named last
+	// in PI_CONFIG_FILES by a pane whose tree is in the memory group alone.
+	memoryConfigFiles []string
 	// takeOver is the runtime whose locators this runtime takes over (Options.TakeOver):
 	// runtime.RuntimeSandbox under TakeOverKubernetes, "" for none.
 	takeOver string
@@ -284,6 +293,7 @@ func New(opts Options) (*Runtime, error) {
 	for _, files := range opts.RoleConfigFiles {
 		overlays = append(overlays, files...)
 	}
+	overlays = append(overlays, opts.MemoryConfigFiles...)
 	for _, path := range overlays {
 		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
 			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
@@ -300,39 +310,40 @@ func New(opts Options) (*Runtime, error) {
 	}
 	markers, agents := agentMarkers(opts.Launchers)
 	r := &Runtime{
-		socket:           "legion-" + opts.Project,
-		stateDir:         opts.StateDir,
-		streamAddress:    opts.StreamAddress,
-		daemonURL:        opts.DaemonURL,
-		envoyURL:         opts.EnvoyURL,
-		natsURLs:         opts.NatsURLs,
-		dispatchURL:      opts.DispatchURL,
-		dispatchToken:    opts.DispatchTokenFile,
-		gitHubCredential: opts.GitHubCredential,
-		gh:               opts.GH,
-		repositoryOwner:  opts.RepositoryOwner,
-		launchers:        opts.Launchers,
-		markers:          markers,
-		agents:           agents,
-		stopGrace:        opts.StopGrace,
-		probeInterval:    opts.ProbeInterval,
-		adoptTimeout:     opts.AdoptTimeout,
-		commandTimeout:   opts.CommandTimeout,
-		conns:            opts.Conns,
-		paneEnv:          paneEnv,
-		tmuxPath:         tmuxPath,
-		legion:           legion,
-		now:              opts.Now,
-		log:              opts.Log,
-		providerEnvDir:   opts.ProviderEnvDir,
-		providerKeys:     providerKeys,
-		operatorEnv:      opts.PaneEnv,
-		piConfigFiles:    opts.PiConfigFiles,
-		roleConfigFiles:  opts.RoleConfigFiles,
-		takeOver:         takeOver,
-		readProc:         os.ReadFile,
-		tracked:          map[string]*trackedProcess{},
-		displaced:        map[claim.Token]runtime.Locator{},
+		socket:            "legion-" + opts.Project,
+		stateDir:          opts.StateDir,
+		streamAddress:     opts.StreamAddress,
+		daemonURL:         opts.DaemonURL,
+		envoyURL:          opts.EnvoyURL,
+		natsURLs:          opts.NatsURLs,
+		dispatchURL:       opts.DispatchURL,
+		dispatchToken:     opts.DispatchTokenFile,
+		gitHubCredential:  opts.GitHubCredential,
+		gh:                opts.GH,
+		repositoryOwner:   opts.RepositoryOwner,
+		launchers:         opts.Launchers,
+		markers:           markers,
+		agents:            agents,
+		stopGrace:         opts.StopGrace,
+		probeInterval:     opts.ProbeInterval,
+		adoptTimeout:      opts.AdoptTimeout,
+		commandTimeout:    opts.CommandTimeout,
+		conns:             opts.Conns,
+		paneEnv:           paneEnv,
+		tmuxPath:          tmuxPath,
+		legion:            legion,
+		now:               opts.Now,
+		log:               opts.Log,
+		providerEnvDir:    opts.ProviderEnvDir,
+		providerKeys:      providerKeys,
+		operatorEnv:       opts.PaneEnv,
+		piConfigFiles:     opts.PiConfigFiles,
+		roleConfigFiles:   opts.RoleConfigFiles,
+		memoryConfigFiles: opts.MemoryConfigFiles,
+		takeOver:          takeOver,
+		readProc:          os.ReadFile,
+		tracked:           map[string]*trackedProcess{},
+		displaced:         map[claim.Token]runtime.Locator{},
 	}
 	if r.commandTimeout == 0 {
 		r.commandTimeout = defaultCommandTimeout

@@ -26,6 +26,7 @@ import {
   selfOwner,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
+import { forgetBrokerSession } from "@legion/envoy-client/broker-credential";
 import {
   type ConsumerDelivery,
   type ConsumerFrame,
@@ -116,6 +117,7 @@ import {
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
 import {
   dropInjectedUserTurn,
   endInjectedUserTurns,
@@ -569,7 +571,8 @@ if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
  * effect without a reload. Undefined when the session has no Dispatch configuration.
  */
 const timedDispatchClient = (ms: number) =>
-  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms))?.client;
+  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms), currentSessionID)
+    ?.client;
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -583,11 +586,15 @@ export default function envoyExtension(pi: PiApi): void {
   // (`currentDispatchConfig`), so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
   // takes effect without /reload-plugins, and a file that has since broken fails with its own
   // error instead of quietly using the stale endpoint.
-  const atStart = sessionSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
+  const atStart = sessionSettings(CONFIG_FILE, process.env, {
+    cwd: process.cwd(),
+    session: currentSessionID,
+  });
   const { envoy } = atStart;
   const currentDispatchConfig = (): ActiveDispatchConfig => {
     const resolution = sessionDispatchSettings(CONFIG_FILE, process.env, {
       cwd: process.cwd(),
+      session: currentSessionID,
     }).dispatch;
     const config = activeDispatchSettings(resolution);
     if (config === null) {
@@ -665,7 +672,7 @@ export default function envoyExtension(pi: PiApi): void {
         client: createEnvoyClient({
           baseUrl: envoy.url,
           fetch: serverClock.observing(fetch),
-          token: envoy.token,
+          credential: envoy.credential,
         }),
       }
     : undefined;
@@ -2927,12 +2934,23 @@ export default function envoyExtension(pi: PiApi): void {
         continues.set(host, from);
       }
       knownSessions.add(from);
+      leftSessions.add(from);
     }
     knownSessions.add(host);
   };
 
   // Every session id this process has been on: a move with no word back to one is a rollback.
   const knownSessions = new Set<string>();
+
+  // The sessions this process has left and still holds a broker client for: a key pair and the
+  // token last traded for it (`CLIENTS`, @legion/envoy-client/broker-credential). A session goes
+  // in when the host leaves it (`noteMove`, and the pass that closes its agent subject) and out
+  // once the pass has run its role move (`settleRole`), the last call that presents that
+  // session's own credential — whether or not that move decided anything — so a process that
+  // moves between sessions all day holds one client rather than one per session it ever bound.
+  // Only a pass fenced before that point leaves its entries here for the next; a later hand-back
+  // for a session already forgotten trades again under that session's name.
+  const leftSessions = new Set<string>();
 
   interface PassCause {
     // A heartbeat tick, which also checks the listener still resolves a held role.
@@ -2979,6 +2997,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     for (const other of handle.forgetOtherAgentSessions(host)) {
       closeIntentionally(agentSubject(other));
+      leftSessions.add(other);
     }
     // Another session's relay: its unsettled frames go back to the listener (`nak`).
     if (relay !== undefined && relay.sessionID !== host) closeRelay();
@@ -3049,6 +3068,13 @@ export default function envoyExtension(pi: PiApi): void {
         settleRole(context, host, cause, registration === undefined, move)
       )) ?? false;
     handle.check();
+    // The role move above was the last call for every session this process has left, so each
+    // one's key pair and token go now (`leftSessions`), whether or not the move decided. The
+    // session running now is never one of them: a rollback to a session this pass left behind
+    // keeps trading under it.
+    leftSessions.delete(host);
+    for (const other of leftSessions) forgetBrokerSession(other);
+    leftSessions.clear();
     if (registration !== undefined) {
       throw new RegistrationError(messageFor(registration.error), { cause: registration.error });
     }
@@ -3521,6 +3547,7 @@ export default function envoyExtension(pi: PiApi): void {
         dispatch: sessionDispatchSettings(CONFIG_FILE, process.env, {
           cwd: process.cwd(),
           commands: "kept",
+          session: currentSessionID,
         }).dispatch,
         env: process.env,
       });
@@ -3905,6 +3932,7 @@ export default function envoyExtension(pi: PiApi): void {
       configFile: gateFile,
       logger: gateLogger,
       runtimeLogger: logger,
+      session: currentSessionID,
     });
     askgateRecorder = registration;
     askgateLoad = registration.loaded.catch((error: unknown) => {

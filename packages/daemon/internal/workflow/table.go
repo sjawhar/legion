@@ -31,7 +31,6 @@ const (
 type EffectKind string
 
 const (
-	EffectStatus  EffectKind = "status"
 	EffectSuspend EffectKind = "suspend"
 	EffectStart   EffectKind = "start"
 	EffectNotice  EffectKind = "notice"
@@ -54,74 +53,82 @@ type Row struct {
 	Trigger TriggerKind
 	Guard   func(Snapshot) bool
 	To      phase.Phase
-	Status  string
 	Effects []EffectKind
 }
 
 func allow(Snapshot) bool { return true }
 
-// PhaseStatus is the Dispatch status an issue standing in to shows: what a row that moves an issue
-// into to writes, and what the boot writes for an issue whose status is not its phase's
-// (Engine.correctStatuses). An issue in planning or implementing is in_progress, which is where a
-// child first shows that Legion works it (dispatch://INFRA-714/spec R4); merging keeps retro,
-// which the row into it writes none over. Phases where an issue waits rather than works — admitted
-// before its first phase, held, and awaiting_person, where the root keeps the status of the phase
-// it waits in — have no status of their own, and neither has a phase outside the workflow but done.
-func PhaseStatus(to phase.Phase) string {
-	switch to {
-	case phase.Planning, phase.Implementing:
-		return "in_progress"
-	case phase.Testing:
-		return "testing"
-	case phase.Reviewing, phase.Accepting:
-		return "needs_review"
-	case phase.Retro, phase.Merging:
-		return "retro"
-	case phase.Done:
-		return "done"
-	}
-	return ""
-}
-
 // Table is the complete workflow transition table. Rows, not switch-case scheduling, define every
 // phase change. Backward rows exist for every allowed target so coverage detects a deleted edge.
-// Every status a row writes is its target phase's (PhaseStatus).
+// No row carries a status of its own: every status a row writes is its target phase's, which
+// PhaseStatus holds.
 var Table = append([]Row{
-	{From: phase.Admitted, Trigger: TriggerGateOpened, Guard: allow, To: phase.Planning, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Admitted, Trigger: TriggerGateOpened, Guard: allow, To: phase.Planning, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.Planning, Trigger: TriggerPlannerCompleted, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
-	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasOpenOrMergedPR }, To: phase.Testing, Status: "testing", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Testing, Trigger: TriggerTesterPassed, Guard: allow, To: phase.Reviewing, Status: "needs_review", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Testing, Trigger: TriggerTesterFailed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasOpenOrMergedPR }, To: phase.Testing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerTesterPassed, Guard: allow, To: phase.Reviewing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerTesterFailed, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.Reviewing, Trigger: TriggerReviewApproved, Guard: allow, To: phase.Accepting, Effects: []EffectKind{EffectNotice}},
-	{From: phase.Accepting, Trigger: TriggerSignOff, Guard: allow, To: phase.Retro, Status: "retro", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Accepting, Trigger: TriggerSignOff, Guard: allow, To: phase.Retro, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectStart, EffectNotice}},
 	// A head that conflicts with its base goes back to implementing from every phase after the
 	// implementer's own (transition). It is one trigger for all of them so that the role's
 	// phase-ended message (phaseEnded) and the architect's notice (noticeFor) have a single name to
 	// key on, and so that the architect's own backward move stays the separate thing it is.
-	{From: phase.Testing, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Reviewing, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Accepting, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Retro, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
-	{From: phase.Merging, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Reviewing, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Accepting, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Retro, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Merging, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
 	// The merger merges, and the merge is what ends merging: the daemon submits none and reads
 	// GitHub's merge of the pull request as the phase's own terminating fact.
-	{From: phase.Merging, Trigger: TriggerPullRequestMerged, Guard: allow, To: phase.Done, Status: "done", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectNotice, EffectLinger}},
+	{From: phase.Merging, Trigger: TriggerPullRequestMerged, Guard: allow, To: phase.Done, Effects: []EffectKind{EffectSuspend, EffectNotice, EffectLinger}},
 }, backwardRows()...)
 
-// backwardRows is one row for every move back from a phase to an earlier one. Each writes the
-// status of the phase it moves into, as every other row does (PhaseStatus): a move back into
-// planning writes in_progress, the status an issue shows while Legion works it
-// (dispatch://INFRA-714/spec R4), rather than leaving Dispatch showing the phase it left.
+// backwardRows is the edge from every phase back to each phase before it. Like every other row,
+// each writes the status of the phase it enters, so a move back into planning writes in_progress,
+// the status an issue shows while Legion works it, rather than leaving Dispatch showing the phase
+// the issue left.
 func backwardRows() []Row {
 	ordered := []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging}
 	rows := make([]Row, 0, len(ordered)*(len(ordered)-1)/2)
 	for fromIndex, from := range ordered {
 		for _, to := range ordered[:fromIndex] {
-			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: PhaseStatus(to),
-				Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}})
+			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to,
+				Effects: []EffectKind{EffectStart, EffectNotice}})
 		}
 	}
 	return rows
+}
+
+// PhaseStatus is the Dispatch status an issue standing in to shows: what a row that moves an issue
+// into to writes, and what the status repair writes for an issue whose status is not its phase's.
+// An issue in planning or implementing is in_progress, which is where a child first shows that
+// Legion works it, and merging keeps the retro that the phase before it wrote. The phases where an
+// issue waits rather than works have no status of their own: the issue keeps the one it already
+// shows, which is what the empty status does, since no write is enqueued for one (Engine.status).
+func PhaseStatus(to phase.Phase) string {
+	return phaseStatus[to]
+}
+
+// phaseStatus holds an entry for every phase of phase.All, which TestEveryPhaseHasAStatusEntry
+// holds it to. A phase missing from it would write no status at all, which is a wrong status
+// shown for as long as the issue stands there, not a failure anything would report.
+var phaseStatus = map[phase.Phase]string{
+	// The issue waits before its first phase, and a status written here would take a root waiting
+	// in the admission line out of that line.
+	phase.Admitted: "",
+	// The root keeps the status of the phase it waits in.
+	phase.AwaitingPerson: "",
+	phase.Planning:       "in_progress",
+	phase.Implementing:   "in_progress",
+	phase.Testing:        "testing",
+	phase.Reviewing:      "needs_review",
+	phase.Accepting:      "needs_review",
+	phase.Retro:          "retro",
+	phase.Merging:        "retro",
+	phase.Done:           "done",
+	// The issue waits on an unfinished Dispatch issue and runs nothing.
+	phase.Held: "",
 }

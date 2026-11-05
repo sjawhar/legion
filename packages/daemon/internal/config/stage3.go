@@ -58,6 +58,9 @@ type Project struct {
 	// Deploys are `deploys`, the workflows that deploy the project's repositories, in the file's
 	// order; nil when the file names none.
 	Deploys []Deploy
+	// Memory is `memory`, the project's per-tree memory setting; its zero value is off, which a
+	// file that names no block leaves.
+	Memory Memory
 }
 
 // Deploy is one `projects.<KEY>.deploys` entry: Workflow, a workflow file of Repo (its path, as
@@ -146,7 +149,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "deploys", "slack_channels")
+	fields, err := members(value, key, "deploys", "memory", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		if unknown.name == "repo" {
@@ -166,6 +169,11 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	}
 	if deploys := fields["deploys"]; deploys != nil {
 		if project.Deploys, err = readDeploys(deploys, key+".deploys"); err != nil {
+			return Project{}, err
+		}
+	}
+	if memory := fields["memory"]; memory != nil {
+		if project.Memory, err = readMemory(memory, key+".memory"); err != nil {
 			return Project{}, err
 		}
 	}

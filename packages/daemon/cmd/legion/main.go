@@ -548,6 +548,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
+	fmt.Fprintln(stdout, memorySummary(state.Issues))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, roundsSummary(state.Issues))
@@ -590,6 +591,44 @@ func blockedSummary(blocked []api.BlockedIssue) string {
 		waits[i] = issue.Issue + " waits on " + strings.Join(issue.BlockedBy, ", ")
 	}
 	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
+}
+
+// memorySummary is the one line an operator reads for the memory groups the project's work was
+// drawn into: how many issues carry a draw at all, and how many of those under each group and
+// mode, in group and then mode order, so two runs over one state print one line.
+//
+// It counts issues, and not the trees the draw is made for, because the state carries no tree: a
+// draw would have to stand for its tree, and it cannot. Every issue of a tree carries its root's
+// draw, and a tree handed over as one of its own carries its old tree's draw verbatim — the
+// group, the mode and the instant alike — so two trees share one draw and no draw is a tree's
+// name. It names no issue either: the per-issue values are in `legion state --json`, where a line
+// per issue would print hundreds on a live deployment.
+func memorySummary(issues map[string]api.Issue) string {
+	type groupMode struct{ group, mode string }
+	counts := map[groupMode]int{}
+	drawn := 0
+	for _, issue := range issues {
+		if issue.MemoryGroup == "" {
+			continue
+		}
+		drawn++
+		counts[groupMode{group: issue.MemoryGroup, mode: issue.MemoryDrawMode}]++
+	}
+	if drawn == 0 {
+		return "memory: none"
+	}
+	kinds := slices.SortedFunc(maps.Keys(counts), func(a, b groupMode) int {
+		return cmp.Or(cmp.Compare(a.group, b.group), cmp.Compare(a.mode, b.mode))
+	})
+	named := make([]string, len(kinds))
+	for i, kind := range kinds {
+		named[i] = fmt.Sprintf("%d %s (%s)", counts[kind], kind.group, kind.mode)
+	}
+	noun := "issues"
+	if drawn == 1 {
+		noun = "issue"
+	}
+	return fmt.Sprintf("memory: %d %s — %s", drawn, noun, strings.Join(named, ", "))
 }
 
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot
@@ -798,8 +837,9 @@ func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) str
 }
 
 // strandedSuspenders is who suspended each stranded claim, which the state body does not carry:
-// every plugin parses that body with the strict schema of its own contract, so a key added to it
-// refuses the whole state in a session the daemon has not relaunched (api.StrandedClaim). The
+// every plugin parses that body with the schema of its own contract, so a key added to it refuses
+// the whole state in a session whose plugin predates INFRA-1048 and that the daemon has not
+// relaunched, and is dropped by every plugin after it (api.StrandedClaim). The
 // operator claim routes serve it, and this reads them with the bearer --operator-token-file
 // names, on the daemon op already names. Without that flag, and when the daemon refuses the
 // bearer or answers nothing, the lookup is empty and every stranded claim reads as the plain

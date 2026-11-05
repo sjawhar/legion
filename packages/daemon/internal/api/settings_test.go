@@ -137,6 +137,10 @@ var settingsEmitted = map[string]string{
 	"ProviderKey.Env":                                "provider_keys[]",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
 	"Project.Deploys":                                "projects.<KEY>.deploys",
+	"Project.Memory":                                 "projects.<KEY>.memory",
+	"Memory.Mode":                                    "projects.<KEY>.memory.mode",
+	"Memory.ConfigFiles":                             "projects.<KEY>.memory.config_files",
+	"Memory.InstructionsPath":                        "projects.<KEY>.memory.instructions",
 	"Deploy.Repo":                                    "projects.<KEY>.deploys[].repo",
 	"Deploy.Workflow":                                "projects.<KEY>.deploys[].workflow",
 	"Deploy.Step":                                    "projects.<KEY>.deploys[].step",
@@ -315,7 +319,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		}
 	}
 
-	// (d) No null anywhere: the plugin's strict reader refuses one.
+	// (d) No null anywhere: the plugin's reader refuses one.
 	if bytes.Contains(encoded, []byte("null")) {
 		t.Errorf("settings carry null: %s", encoded)
 	}

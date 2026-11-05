@@ -111,8 +111,8 @@ func TestAChildReleasedWhileABlockerIsUnfinishedStaysAdmitted(t *testing.T) {
 	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice"})
 }
 
-// The close of the last issue a held child waited on starts it: its branch row, the write that
-// shows it in_progress from its first phase, its planner's start behind that row, and one
+// The close of the last issue a held child waited on starts it: its branch row, the in_progress
+// its entry into planning writes to Dispatch, its planner's start behind the branch row, and one
 // child-status notice to the tree's architect naming the issues it waited on.
 func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 	pool := migratedPool(t)

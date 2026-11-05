@@ -739,10 +739,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// The broker-token settings are read here, beside the other two credentials, so a
+	// half-configured one refuses the start before anything is bound. Its verifier is built
+	// later, once JetStream is open: the spent-proof bucket it records a proof in lives there
+	// (brokerTokens.open).
+	brokerConfig, err := resolveListenerBrokerConfig(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	brokerTokenAuth := newBrokerTokens(brokerConfig)
 	if err := validateListenerAPIAuth(cfg, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)
 	}
-	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
+	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer, brokerTokenAuth))
 	logger.Info("listener API hosts: " + describeListenerAPIHosts(apiToken, apiVerifier, cfg.AllowedHosts))
 
 	// Load webhook config (fast — env var reads only).
@@ -828,7 +837,7 @@ func main() {
 		mux.Handle(hook.path, webhookGate)
 	}
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, cfg.AllowedHosts, logger, v1Gate)
+	v1Handler := apiAuth(apiToken, apiVerifier, brokerTokenAuth, cfg.AllowedHosts, logger, v1Gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -850,6 +859,12 @@ func main() {
 	// deployment's replica count and byte limit (listenerStreamOptions).
 	client, err := bus.ConnectOwningStream(cfg.NATSURLs, listenerStreamOptions(cfg)...)
 	if err != nil {
+		log.Fatal(err)
+	}
+	// The spent-proof bucket, before anything of /v1 can be served: a listener configured to take
+	// broker access tokens on a bus that cannot open it refuses to start, naming the setting,
+	// rather than recording spent proofs where its own replicas cannot see them.
+	if err := brokerTokenAuth.open(client.Conn, cfg.NATSReplicas); err != nil {
 		log.Fatal(err)
 	}
 	consumer := bus.ListenerDurable(cfg.MachineID)

@@ -36,7 +36,7 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.last_death_cause, c.last_start_failure, c.last_ready, c.turn_outcomes, c.abandoned_session,
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at, c.update_left_round,
-	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.prompted,
+	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.prompted, d.out_of_memory,
 	d.kept_decisions
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -366,16 +366,16 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, prompted, kept_decisions)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '{}'::jsonb))
+		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, prompted, out_of_memory, kept_decisions)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, coalesce($14::jsonb, '{}'::jsonb))
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		assignment = excluded.assignment, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
 		interrupted = excluded.interrupted, prompted = excluded.prompted,
-		kept_decisions = excluded.kept_decisions`,
+		out_of_memory = excluded.out_of_memory, kept_decisions = excluded.kept_decisions`,
 		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment, d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
-		instant(d.ConfirmedAt), d.Interrupted, d.Prompted, keptDecisions(d.Kept),
+		instant(d.ConfirmedAt), d.Interrupted, d.Prompted, d.OutOfMemory, keptDecisions(d.Kept),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -442,6 +442,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		queuedAt, delivered         *time.Time
 		confirmed                   *time.Time
 		interrupted, prompted       *bool
+		outOfMemory                 *bool
 		turnStart, turnEnd          *time.Time
 		lastReady                   *time.Time
 		outcomes                    []byte
@@ -459,7 +460,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.LastDeathCause, &c.LastStartFailure, &lastReady, &outcomes, &abandoned,
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateLeftRound,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &prompted, &kept)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &prompted, &outOfMemory, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -517,6 +518,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
 			Prompted:    orFalse(prompted),
+			OutOfMemory: orFalse(outOfMemory),
 			Kept:        keptDecisions(kept),
 		}
 	}

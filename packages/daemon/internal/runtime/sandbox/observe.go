@@ -147,7 +147,8 @@ func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error
 
 // observation is one verdict of the mapping: the runtime.Observation the caller receives, beside
 // the one classification only this package acts on. No runtime consumer reads it — the supervisor
-// reads Kind and Displaced alone — so it stays here rather than on the cross-runtime contract.
+// reads Kind, Displaced and OutOfMemory alone — so it stays here rather than on the cross-runtime
+// contract.
 type observation struct {
 	runtime.Observation
 	// initFailed is a Gone whose process never started because an init container of its pod ended
@@ -235,8 +236,10 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 	pod := v.pod
 	initName, initExit := failedInit(pod)
 	if terminal(pod) || initExit != nil {
-		ended := observe(runtime.Gone, "%s", r.ended(ctx, v, container, role, initName, initExit))
+		detail, ranOutOfMemory := r.ended(ctx, v, container, role, initName, initExit)
+		ended := observe(runtime.Gone, "%s", detail)
 		ended.initFailed = initExit != nil && pod.DeletionTimestamp == nil
+		ended.OutOfMemory = ranOutOfMemory
 		return ended
 	}
 	if scheduled := podCondition(pod, corev1.PodScheduled); pod.Status.Phase == corev1.PodPending && scheduled != nil &&
@@ -286,8 +289,10 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 		return observe(runtime.Alive, "pod %s (uid %s) role %s runs generation %d", name, pod.UID, role, state.Child.Generation)
 	}
 	if ended := status.State.Terminated; ended != nil {
-		return observe(runtime.Gone, "pod %s (uid %s) container %s terminated (%s, exit code %d); last lines of %s:\n%s",
+		gone := observe(runtime.Gone, "pod %s (uid %s) container %s terminated (%s, exit code %d); last lines of %s:\n%s",
 			name, pod.UID, container, ended.Reason, ended.ExitCode, role, r.roleLog(ctx, name, container, role))
+		gone.OutOfMemory = outOfMemory(container, ended)
+		return gone
 	}
 	if !connected {
 		return observe(runtime.Uncertain, "pod %s (uid %s) role %s's launcher is disconnected%s", name, pod.UID, role, containerRestarts(status))
@@ -306,7 +311,19 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role %s last exited generation %d, not the recorded %d",
 			name, pod.UID, role, state.LastExit.Generation, loc.Sandbox.Generation)
 	default:
-		return observe(runtime.Gone, "pod %s (uid %s) role %s's launcher reports no child", name, pod.UID, role)
+		// A launcher that reports no child has no record of any generation, so it is one the
+		// kubelet started with the container, and the recorded generation died with the container
+		// instance LastTerminationState describes: that instance's end is what ended this role's
+		// turn, and an out-of-memory one is the role's to be told about. The two branches above,
+		// where the launcher reports the recorded generation's own exit, read the other way and
+		// carry no such mark however stale LastTerminationState is: a launcher holding that
+		// generation's exit has been running since before the generation started — it keeps its
+		// last exit in memory (internal/launcher/launcher.go) and this side makes a fresh, empty
+		// state for each connection (accept) — so the container did not end under it, and the
+		// role's process ended on its own.
+		gone := observe(runtime.Gone, "pod %s (uid %s) role %s's launcher reports no child%s", name, pod.UID, role, containerRestarts(status))
+		gone.OutOfMemory = outOfMemory(container, status.LastTerminationState.Terminated)
+		return gone
 	}
 }
 
@@ -354,8 +371,11 @@ func podAbsent(v view) string {
 // pod's one container, container, is what ended, and with it every role it ran. The quote is the
 // init container's log, or role's own lines of the container's (roleLog). A pod of the layout
 // before one container (movedLayout) that ended before this daemon replaced it has no `roles`
-// container: role's own container there is what ended, and its log is role's alone.
-func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) string {
+// container: role's own container there is what ended, and its log is role's alone. It reports,
+// beside the detail, whether the end it resolved is one the out-of-memory note is for
+// (outOfMemory), which it decides from the container it resolved: an init container's end and an
+// old-layout container's are neither.
+func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) (string, bool) {
 	pod := v.pod
 	kind, state := "container", initExit
 	if initExit != nil {
@@ -387,7 +407,22 @@ func (r *Runtime) ended(ctx context.Context, v view, container string, role clai
 	} else {
 		fmt.Fprintf(&detail, "; last lines of %s:\n%s", role, r.roleLog(ctx, pod.Name, container, role))
 	}
-	return detail.String()
+	return detail.String(), outOfMemory(container, state)
+}
+
+// outOfMemory reports whether container's instance was ended by the kubelet for running out of
+// memory, and whether that end is one the note is for. The reason is what says the end was an
+// out-of-memory one and the exit code never does: a pod can show OOMKilled with exit code 128 as
+// well as 137, and plenty of other ends carry those codes too. A nil state is no end at all, so it
+// is no out-of-memory one.
+// The container decides whose end it is, and only the issue pod's one container (every role of
+// the issue runs in it) counts: an init container's end cut no turn off, since it ran before any
+// role's process started; the controller's own pod runs the controller alone, which shares its
+// memory with nobody and reads no worker guide; and a pod of the layout before one container ran
+// the role in a container of its own. Those three reach this through the container they resolved
+// to, so the rule holds wherever the mark is set.
+func outOfMemory(container string, state *corev1.ContainerStateTerminated) bool {
+	return container == runtime.IssuePodContainer && state != nil && state.Reason == "OOMKilled"
 }
 
 // fetchCacheState is what a failed workspace-fetch's detail says of the repository cache it fills

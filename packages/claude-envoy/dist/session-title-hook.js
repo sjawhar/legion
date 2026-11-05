@@ -16,8 +16,11 @@ import { dirname, join } from "path";
 function configuredValue(value) {
   return value !== undefined && value.trim().length > 0 ? value : undefined;
 }
+function configuredSessionId(environment) {
+  return configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
+}
 function claudeSessionId(environment) {
-  const id = configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
+  const id = configuredSessionId(environment);
   if (id !== undefined)
     return id;
   throw new Error("Envoy channel requires ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID; Claude Code did not provide a session identity");

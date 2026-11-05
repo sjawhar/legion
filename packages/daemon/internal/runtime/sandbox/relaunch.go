@@ -283,13 +283,14 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 
 // keptBy is what the live pod of the Sandbox read as s was built with, for the role l starts in
 // it: the enrollment decision for that role in that pod (enrollsIn, which reads the broker's
-// volumes the pod carries), which of the role's own overlays its container holds
-// (heldRoleOverlays), and the session store it was built under (heldSessionStore, the URL file
-// its generation is pointed at). A launch that keeps such a pod builds its start command from
-// these rather than from the configuration as it now reads, so the role is started as its pod was
-// built (launcherCommand, roleOperatorEnv, mainEnvironment) and runs degraded until the update
-// round replaces the pod — able to push its work and answer that round, where a start naming what
-// its pod cannot carry would refuse to run at all (keptPod, INFRA-484).
+// volumes the pod carries), which of the role's own overlays and of the project's memory overlays
+// its container holds (heldRoleOverlays), and the session store it was built under
+// (heldSessionStore, the URL file its generation is pointed at). A launch that keeps such a pod
+// builds its start command from these rather than from the configuration as it now reads, so the
+// role is started as its pod was built (launcherCommand, roleOperatorEnv, mainEnvironment) and
+// runs degraded until the update round replaces the pod — able to push its work and answer that
+// round, where a start naming what its pod cannot carry would refuse to run at all (keptPod,
+// INFRA-484).
 // The same enrollment decision writes the generation's address record (recordAddresses), so the
 // record says what the start said.
 //
@@ -301,12 +302,12 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 // the daemon then cannot tell what the pod carries, and relaunch replaces the pod.
 func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
 	spec := s.Spec.PodTemplate.Spec
-	overlays, readable := r.heldRoleOverlays(spec, l.spec.Role)
+	overlays, memory, readable := r.heldRoleOverlays(spec, l.spec.Role)
 	if !readable {
 		return keptPod{}, false
 	}
 	kind, _, _ := heldSessionStore(spec)
-	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, store: kind}, true
+	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, memory: memory, store: kind}, true
 }
 
 // stopIssuedChild stops generation of token's launcher in podUID after its Start returned startErr,

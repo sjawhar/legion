@@ -16,8 +16,10 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -33,6 +35,12 @@ type Admission struct {
 	project string
 	log     *slog.Logger
 	now     func() time.Time
+	// memory is the project's `memory` block (UseMemory), whose mode each tree this admission
+	// opens is drawn under; the zero block is a project that names none, which draws every tree
+	// `none`. coin is the fair coin the `random` mode is drawn with, memorygroup.CryptoCoin in
+	// production and a pinned one in a test, injected as now is.
+	memory config.Memory
+	coin   func() (bool, error)
 
 	// mu guards pending, target and catchingUp, the only Admission state a caller outside its own
 	// transactions touches: the daemon's boot-owned poll calls Held on every tick, outside any
@@ -77,6 +85,15 @@ func (a *Admission) ReportCapabilities(open func() []string) {
 	a.openCapabilities = open
 }
 
+// UseMemory registers the project's `memory` block, under whose mode every tree this admission
+// opens for the first time is drawn (memorygroup.DrawAndRecord, promoteHolds). A project whose
+// file names no block leaves the zero value, which draws every tree `none`. It is a setter rather
+// than a parameter of New for the reason ReportCapabilities is: every test that admits anything
+// builds an admission, and none of them configures memory.
+func (a *Admission) UseMemory(memory config.Memory) {
+	a.memory = memory
+}
+
 var _ intake.Handler = (*Admission)(nil)
 
 // New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
@@ -86,7 +103,8 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
+	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now,
+		coin: memorygroup.CryptoCoin, pending: make(map[string]intake.DispatchIssue)}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
@@ -961,8 +979,22 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
 	// it would read a later daemon todo of this root (a controller's reopen) as the stale hand-over.
+	// The hand-over settles its memory too, here and not at its own first open: it takes the answer
+	// of the tree it leaves, that tree's draw verbatim with the time it was drawn where it had one,
+	// so the work goes on running under the group it has been running under, and no draw at all
+	// where that tree had been opened with none — a tree first opened before this release, which
+	// nothing draws for. A child out of a tree nothing ever opened has run under nothing, so the
+	// carry writes it nothing and its own first promotion draws it. tree_lifecycles is keyed by
+	// the normalized project token, so the carry is handed that token, as promoteHolds reads it.
 	if oldTree != stored.Key {
 		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
+			return err
+		}
+		project, err := claim.ProjectToken(a.project)
+		if err != nil {
+			return fmt.Errorf("carry the memory of re-admitted %s: %w", stored.Key, err)
+		}
+		if _, err := a.store.CarryMemory(ctx, tx, project, stored.Key, oldTree); err != nil {
 			return err
 		}
 	}
@@ -1212,7 +1244,8 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err != nil {
 				return admitted, returned, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
 			}
-			if _, err := a.store.OpenTreeLifecycle(ctx, tx, project, candidate.Tree, treelifecycle.AuthorityWorkflow); err != nil {
+			lifecycle, err := a.store.OpenTreeLifecycle(ctx, tx, project, candidate.Tree, treelifecycle.AuthorityWorkflow)
+			if err != nil {
 				if errors.Is(err, treelifecycle.ErrCleanupReserved) {
 					a.log.Info("admission waits for tree cleanup", "issue", candidate.Key, "tree", candidate.Tree)
 					continue
@@ -1224,6 +1257,16 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 					continue
 				}
 				return admitted, returned, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
+			}
+			// The tree's row was created by this call, so this is the one moment its memory group
+			// is drawn, in the fact's own transaction: a crash before the commit leaves neither the
+			// lifecycle nor the draw. Every later open of the tree — its next epoch after a
+			// cleanup, and every re-admission — creates nothing and draws nothing, and the draw
+			// itself is written once (record.Store.DrawMemory).
+			if lifecycle.Created {
+				if err := memorygroup.DrawAndRecord(ctx, tx, a.store, candidate.Tree, a.memory, a.coin, a.now()); err != nil {
+					return admitted, returned, err
+				}
 			}
 		}
 		now := a.now()

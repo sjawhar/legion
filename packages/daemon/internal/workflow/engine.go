@@ -232,6 +232,8 @@ func (e *Engine) apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.listenerWake(ctx, tx, fact)
 	case intake.PodBackstopDue:
 		return e.podBackstopDue(ctx, tx, fact)
+	case intake.ControllerTick:
+		return e.statusRepairTick(ctx, tx)
 	default:
 		return intake.Result{}, nil
 	}
@@ -1044,7 +1046,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 			return err
 		}
 	}
-	if err := e.status(ctx, tx, issue, row.Status); err != nil {
+	status := PhaseStatus(row.To)
+	if err := e.status(ctx, tx, issue, status); err != nil {
 		return err
 	}
 	from := issue.Phase
@@ -1061,8 +1064,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if issue.CarriesRun() {
 		issue.TakenBack = true
 	}
-	if row.Status != "" {
-		issue.Status = row.Status
+	if status != "" {
+		issue.Status = status
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err

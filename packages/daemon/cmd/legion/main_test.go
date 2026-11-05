@@ -1579,12 +1579,77 @@ func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told how many issues carry a memory draw and under
+// which group and mode, on one line however many issues the state carries. It counts issues
+// rather than trees because the state names no tree: every issue of a tree carries its root's
+// draw, and a tree handed over as one of its own carries its old tree's draw verbatim, so one
+// draw is two trees' and no draw is a tree's name. The line names no issue: the keys stay in
+// `--json`, where a line per issue would print hundreds on a live deployment.
+func TestPlainStateCountsTheIssuesDrawnIntoAMemoryGroup(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
+	// A drawn root and a child of its tree, which carries the same draw.
+	root := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
+	child := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"admitted","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
+	// A tree of its own, handed over from that one: its draw is the old tree's verbatim, the
+	// instant included, so it counts as one more issue under the same group and mode.
+	handedOver := `"LEGION-210":{"key":"LEGION-210","generation":1,"phase":"planning","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
+	// A second tree the same mode drew the other way, and a third an earlier mode drew.
+	second := `"LEGION-300":{"key":"LEGION-300","generation":1,"phase":"done","status":"done",` +
+		`"memoryGroup":"none","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T11:00:00Z"}`
+	third := `"LEGION-400":{"key":"LEGION-400","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"on","memoryDrawnAt":"2026-10-26T09:00:00Z"}`
+	// A tree first opened before the setting existed carries no draw and is counted in nothing.
+	undrawn := `"LEGION-500":{"key":"LEGION-500","generation":1,"phase":"implementing","status":"in_progress"}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "four trees under two modes, one of them handed over",
+			issues: `{` + root + `,` + child + `,` + handedOver + `,` + second + `,` + third + `,` + undrawn + `}`,
+			want:   "memory: 5 issues — 1 memory (on), 3 memory (random), 1 none (random)\n",
+		},
+		{
+			name:   "one tree, root and child",
+			issues: `{` + root + `,` + child + `}`,
+			want:   "memory: 2 issues — 2 memory (random)\n",
+		},
+		{name: "one issue", issues: `{` + third + `}`, want: "memory: 1 issue — 1 memory (on)\n"},
+		{name: "nothing drawn", issues: `{` + undrawn + `}`, want: "memory: none\n"},
+		{name: "no issues", issues: `{}`, want: "memory: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.
 //
-// The state body names no claim's suspender — every plugin parses it with the strict schema of
-// its own contract — so the command reads that from the operator claim list, with the bearer
+// The state body names no claim's suspender — every plugin parses it with the schema of its own
+// contract, and one whose answer side predates INFRA-1048 refuses a key it does not know — so the
+// command reads that from the operator claim list, with the bearer
 // --operator-token-file names (strandedSuspenders). Read without that flag, as a pane reads,
 // there is no bearer and a released claim reads as the suspended worker it is.
 func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {

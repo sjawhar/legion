@@ -1,7 +1,7 @@
 package api
 
 // DaemonAPIVersion is the contract this daemon speaks with the Legion plugin (@sjawhar/pi-legion):
-// the claim, credential, workflow, controller and state shapes the plugin's client parses strictly
+// the claim, credential, workflow, controller and state shapes the plugin's client parses
 // (`packages/pi-shared/src/daemon-client.ts`, through
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
@@ -525,7 +525,26 @@ package api
 // then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
 // branch takes the number above them, as the collision note says.)
 //
-// 49: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
+// 49: INFRA-1101 -- the memory group of an issue's tree on `GET /legion/v1/state`. Every issue
+// record of the state gains `memoryGroup` (`memory` or `none`), `memoryDrawMode` (the project's
+// `projects.<KEY>.memory.mode` in force at the draw) and `memoryDrawnAt`, the three absent
+// together while nothing has drawn for the issue's tree; the draw is made once on the tree's root
+// record, and every issue of the tree is shown its root's (api.Issue, filled by
+// internal/projection). `packages/contracts/src/legion-api.ts` mirrors them on `legionIssue`,
+// which is a `z.strictObject`, so a reader before 49 refuses a whole state carrying any of the
+// three — and every worker's `read_record` parses the state through it. `GET /legion/v1/state`
+// authenticates nobody, so a caller from a pod whose claims record a contract below 49 is served
+// the state without them (api's stateFor, withoutMemory), as a caller below 46 is served it
+// without the claim views' update rounds; a caller below both is served it without either. The
+// settings carry the project's `memory` block (mode, config files, instructions), which every
+// plugin reads loosely and which changes no strictly parsed shape. This change adds no store
+// migration of its own: the three columns are the issue record's
+// (20261104073148_issue_memory_group), and the hand-over's answer beside them is too
+// (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
+// was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
+// note says.)
+//
+// 50: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
 // shapes change with it. The phase enum loses `awaiting_merge` (both places it is spelled: the
 // issue's phase and a backward move's target), since the merger merges in `merging` and the daemon
 // closes the issue when it reads that merge. `api.PullRequestView` loses `checksVerdict` and
@@ -545,11 +564,12 @@ package api
 // mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
 // main landed the background-task contract at 44 and the Dispatch handoff records at 45, and
 // INFRA-484's sjawhar/legion#2538 takes 46, this branch then took 47, and main's #2642 landed
-// the idle release at 48, so this branch takes the number above main's, as
+// the idle release at 48 and INFRA-1101's memory group at 49, so this branch takes the number
+// above main's, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// Also at 49: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
+// Also at 50: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
 // that ended it, over `POST /legion/v1/claims/turn-outcome`: `{claimToken, sessionId, secret,
 // generation, sequence, outcome, message}`, authenticated by the registration's secret as the
 // ready and the exit are, answering `{refusedRun, failed}`. `sequence` is the producer's own count
@@ -558,12 +578,12 @@ package api
 // keyed by (generation, sequence), derives the trailing run of refused turns from them on every
 // report, and fails the claim once that run reaches `launch_failure_limit` — the fault that left an
 // implementer's every turn refused by its provider with its claim never failing. A plugin built
-// before 49 reports no turn, so its session's refusals are counted by nobody, and a plugin from
-// this contract posting to a daemon before 49 is answered "no route" for every turn it ends; the
+// before 50 reports no turn, so its session's refusals are counted by nobody, and a plugin from
+// this contract posting to a daemon before 50 is answered "no route" for every turn it ends; the
 // boot gate and `legion probe-image` refuse the mixed pair. `legion claims retry` gains the
 // optional body `{freshSession}` (`--fresh-session`), which starts the claim in a new session
 // rather than resuming the recorded one; a claim the provider refused out of its budget takes one
 // whoever retries it. That retry also reaches a phase worker an operator stopped, which is
 // retired: the route starts the worker's phase again — restoring a held one, as the architect's
 // retry_or_escalate does — so the session it starts, new or kept, is given that phase's task.
-const DaemonAPIVersion = 49
+const DaemonAPIVersion = 50

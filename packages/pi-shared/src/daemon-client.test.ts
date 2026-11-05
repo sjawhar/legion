@@ -4,9 +4,12 @@ import path from "node:path";
 import { LegionReadyRequest } from "@legion/contracts/legion-api";
 import {
   createLegionDaemonClient,
+  daemonUnreachable,
   LegionDaemonApiError,
+  type LegionDaemonClient,
   LegionDaemonContractError,
   type ReadyInput,
+  retryWhileDaemonRestarts,
 } from "./daemon-client";
 import { type ClaimCapability, executePhaseOp } from "./legion-phase-ops";
 
@@ -15,6 +18,11 @@ function daemonFixture(name: string): Record<string, unknown> {
   return JSON.parse(
     readFileSync(path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api", name), "utf8")
   );
+}
+
+/** `body` without `key`: what a daemon that dropped a field the contract requires would answer. */
+function without(body: Record<string, unknown>, key: string): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(body).filter(([name]) => name !== key));
 }
 
 interface Recorded {
@@ -59,12 +67,12 @@ test("registers with the claim wire's request and returns the claim the daemon i
   ]);
 });
 
-test("refuses a registration answer whose field is not the shape the contract describes, without quoting its secret", async () => {
+test("refuses a registration answer that drops a field the daemon API contract requires, without quoting its secret", async () => {
   const registered = daemonFixture("register.json");
-  const issued = { ...registered, promptAgents: "deep-worker" };
+
   const client = createLegionDaemonClient(
     "http://daemon.test",
-    daemon(() => Response.json(issued)).fetch
+    daemon(() => Response.json(without(registered, "promptAgents"))).fetch
   );
 
   const refused = client.register(registration);
@@ -159,7 +167,7 @@ test("activity posts the claim wire's report and accepts only the empty 204", as
   await expect(talkative.activity(report)).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
-test("the release records are read by a POST carrying the claim's token and secret, and strictly", async () => {
+test("the release records are read by a POST carrying the claim's token and secret, and a list the daemon left out is refused", async () => {
   const records = {
     releases: [
       {
@@ -247,7 +255,7 @@ test("a ready carrying the capability report is the daemon's golden ReadyRequest
   expect(golden.capabilities?.rows).toHaveLength(3);
 });
 
-test("reads the daemon's state, refusing a field it knows whose type is not the contract's", async () => {
+test("reads the daemon's state over a bodyless GET", async () => {
   const state = daemonFixture("state.json");
   const { fetch, requests } = daemon(() => Response.json(state));
 
@@ -257,11 +265,6 @@ test("reads the daemon's state, refusing a field it knows whose type is not the 
   expect(requests).toEqual([
     { method: "GET", url: "http://daemon.test/legion/v1/state", body: undefined },
   ]);
-
-  const malformed = daemon(() => Response.json({ ...state, capabilities: "none" })).fetch;
-  await expect(
-    createLegionDaemonClient("http://daemon.test", malformed).state()
-  ).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
 // A session runs the release before its daemon's through every roll, so the state it reads can
@@ -499,4 +502,129 @@ test("the registered controller mints its grant with the session form that names
       body: { sessionId: "ses_controller", secret: "registration-secret" },
     },
   ]);
+});
+
+test("the registration, the grant and the handoff completion are read whole when each carries a key no schema names, and the key is not in the value", async () => {
+  const registered = daemonFixture("register.json");
+  const granted = daemonFixture("grant.json");
+  const completed = daemonFixture("handoff-complete.json");
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon((url) => {
+      if (url.pathname === "/legion/v1/claims/register")
+        return Response.json({ ...registered, roleTokens: { reviewer: "t" } });
+      if (url.pathname === "/legion/v1/grants") return Response.json({ ...granted, scope: "repo" });
+      return Response.json({ ...completed, mergeQueuePosition: 2 });
+    }).fetch
+  );
+
+  const claim = await client.register(registration);
+  expect(claim).toEqual(registered as never);
+  expect(claim).not.toHaveProperty("roleTokens");
+
+  const grant = await client.grant({
+    sessionId: "ses_208",
+    secret: "claim-secret",
+    tree: "LEGION-208",
+    issue: "LEGION-209",
+  });
+  expect(grant).toEqual(granted as never);
+  expect(grant).not.toHaveProperty("scope");
+
+  const completion = await client.handoffComplete({
+    grantId: "grant-208",
+    summary: "done",
+    verdict: "",
+    commit: "abc123",
+    handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+    handoffVersion: 2,
+  });
+  expect(completion).toEqual(completed as never);
+  expect(completion).not.toHaveProperty("mergeQueuePosition");
+});
+
+test("a body that drops a required field, or carries one of a type the contract does not describe, is refused by the path of the field that is wrong", async () => {
+  const state = daemonFixture("state.json");
+  const issues = state.issues as Record<string, Record<string, unknown>>;
+
+  const dropped = await createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json(without(state, "capabilities"))).fetch
+  )
+    .state()
+    .catch((error: unknown) => error);
+  expect(dropped).toBeInstanceOf(LegionDaemonContractError);
+  expect((dropped as Error).message).toContain("capabilities");
+
+  const mistyped = await createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() =>
+      Response.json({
+        ...state,
+        issues: { ...issues, "LEGION-208": { ...issues["LEGION-208"], generation: "three" } },
+      })
+    ).fetch
+  )
+    .state()
+    .catch((error: unknown) => error);
+  expect(mistyped).toBeInstanceOf(LegionDaemonContractError);
+  expect((mistyped as Error).message).toContain("issues.LEGION-208.generation");
+});
+
+/** A daemon whose every route refuses with that status, that code, and a key no schema names. */
+function refusing(status: number, code: string): LegionDaemonClient {
+  return createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() =>
+      Response.json(
+        { code, error: "Dispatch refused the write", retryAfterSeconds: 30 },
+        { status }
+      )
+    ).fetch
+  );
+}
+
+test("a 409 refusal keeps its stable code through a key no schema names", async () => {
+  const refused = await refusing(409, "GATE_UNAPPROVED")
+    .state()
+    .catch((error: unknown) => error);
+
+  expect(refused).toBeInstanceOf(LegionDaemonApiError);
+  expect(refused).toMatchObject({
+    status: 409,
+    code: "GATE_UNAPPROVED",
+    detail: "Dispatch refused the write",
+  });
+});
+
+test("a 502 refusal keeps its stable code through a key no schema names, and is the daemon's own answer, which is handed back rather than retried for ten minutes", async () => {
+  const client = refusing(502, "DISPATCH_FAILED");
+  const refused = await client.state().catch((error: unknown) => error);
+
+  expect(refused).toBeInstanceOf(LegionDaemonApiError);
+  expect(refused).toMatchObject({ status: 502, code: "DISPATCH_FAILED" });
+  // A 502 the daemon itself coded is not a restarting daemon, so the retry hands it straight
+  // back: a worker is told why it was refused instead of waiting out the restart budget.
+  expect(daemonUnreachable(refused)).toBeUndefined();
+  let clock = 0;
+  const waits: number[] = [];
+  let attempts = 0;
+  const retried = await retryWhileDaemonRestarts(
+    "read the state",
+    async () => {
+      attempts += 1;
+      return client.state();
+    },
+    {
+      now: () => clock,
+      sleep: async (ms: number) => {
+        waits.push(ms);
+        clock += ms;
+      },
+    }
+  ).catch((error: unknown) => error);
+  expect(retried).toBeInstanceOf(LegionDaemonApiError);
+  expect(retried).toMatchObject({ status: 502, code: "DISPATCH_FAILED" });
+  expect(attempts).toBe(1);
+  expect(waits).toEqual([]);
 });
