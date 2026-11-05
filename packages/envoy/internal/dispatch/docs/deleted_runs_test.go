@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"runtime"
@@ -178,18 +179,72 @@ func TestEveryAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(t *testing.T) {
 	}
 }
 
+// fuzzHeldClient and fuzzHeldClocks are what a corpus entry writes where it means the fuzz
+// room's own client and the number of clocks the room holds of it. The room's structs are a
+// fresh document's (drainedPeerUpdateRoom, encodeDocumentTree, crdt.New), so its client is drawn
+// anew at every run and no byte a corpus entry holds could name it: without these every input
+// was a frame of clocks the room holds nothing of, and the forgeries the table above turns on -
+// a GC run over exactly the clocks the room holds, which ygo skips whole, a delete range over
+// them, which the room lists already - were out of the fuzzer's reach. Each input has them
+// rewritten to that run's own client and clocks (namingTheFuzzRoomsClocks), so an entry naming
+// them reaches the same structs at every run and a crash the fuzzer finds reproduces. Both are
+// six-byte varuints, past the 32 bits a browser's client id is drawn from (crdt.New), so no
+// honest frame carries their bytes.
+const (
+	fuzzHeldClient = 1<<40 + 101
+	fuzzHeldClocks = 1<<40 + 103
+)
+
+// fuzzRoomsOwnClocks is the one client the fuzz room holds and the clocks it holds of it. A room
+// of several clients answers for the lowest, and one of none - which the fixture never builds -
+// answers false.
+func fuzzRoomsOwnClocks(room *crdt.Doc) (uint64, uint64, bool) {
+	held := room.StateVector()
+	if len(held) == 0 {
+		return 0, 0, false
+	}
+	client := slices.Sorted(maps.Keys(held))[0]
+	return uint64(client), held[client], true
+}
+
+// namingTheFuzzRoomsClocks is update with every mention of the two sentinels rewritten to the
+// room's own client and the clocks it holds of it (fuzzHeldClient, fuzzHeldClocks). The varuints
+// it writes in are shorter than the ones it reads out, which moves every byte after them, as a
+// corpus entry's own bytes move under the fuzzer's mutations. Bytes that mention neither
+// sentinel are left exactly as the fuzzer wrote them.
+func namingTheFuzzRoomsClocks(update []byte, room *crdt.Doc) []byte {
+	client, clocks, held := fuzzRoomsOwnClocks(room)
+	if !held {
+		return update
+	}
+	update = bytes.ReplaceAll(update, varuint(fuzzHeldClient), varuint(client))
+	return bytes.ReplaceAll(update, varuint(fuzzHeldClocks), varuint(clocks))
+}
+
 // The same property over a corpus: whatever bytes a browser sends, a room that admitted and
 // applied them lists ygo's own delete set, run for run, the clocks of the frame's GC structs
-// included, which the room lists from the commit that appended them. The seeds are the crafted
-// frames of the table above; run as an ordinary test it runs them alone, and a frame the hook
+// included, which the room lists from the commit that appended them - and the delete a browser
+// sends next is charged against that list exactly as it would be against ygo's own delete set,
+// which is what the list is kept for (weighPeerUpdate). The seeds are the crafted frames of the
+// table above and the ones that name the room's own clocks through the sentinels: a GC run over
+// every clock the room holds beside one of a client it holds nothing of (the gcRunOverHeldClocks
+// shape), a delete range over those same clocks, and a frame that mixes the two with a fresh
+// client's keystroke. Run as an ordinary test it runs the seeds alone, and a frame the hook
 // refuses, or one whose apply fails, leaves the room nothing to answer for.
 func FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(f *testing.F) {
 	f.Add(rootedDeletedItem(1<<40+19, 1_000))
 	f.Add(newV1Frame(1).group(1, 1<<40+23, 0).gc(7).noDeletes())
 	f.Add(newV1Frame(0).uint(1).uint(1<<40 + 29).uint(1).uint(0).uint(4).done())
 	f.Add(newV1Frame(1).group(1, 1<<40+31, 0).rooted(byte(structString), fragmentName, "").str("a").noDeletes())
+	f.Add(newV1Frame(2).group(1, fuzzHeldClient, 0).gc(fuzzHeldClocks).group(1, gcForgeryClient, 0).gc(1).noDeletes())
+	f.Add(newV1Frame(0).uint(1).uint(fuzzHeldClient).uint(1).uint(0).uint(fuzzHeldClocks).done())
+	f.Add(newV1Frame(2).
+		group(1, fuzzHeldClient, 0).gc(fuzzHeldClocks).
+		group(1, 1<<40+37, 0).rooted(byte(structString), fragmentName, "").str("z").
+		uint(1).uint(fuzzHeldClient).uint(1).uint(0).uint(fuzzHeldClocks).done())
 	f.Fuzz(func(t *testing.T, update []byte) {
 		service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
+		update = namingTheFuzzRoomsClocks(update, room)
 		err, called := weighInto(service, room, update)
 		runtime.KeepAlive(replica)
 		if err != nil || !called {
@@ -198,6 +253,18 @@ func FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(f *testing.F) {
 		listed, held := listedRuns(charge.deletes()), roomDeletedRuns(room)
 		if !maps.EqualFunc(listed, held, slices.Equal) {
 			t.Fatalf("after the %d-byte frame the room lists %v deleted, want ygo's own delete set, %v", len(update), listed, held)
+		}
+		// The delete that follows, over the room's own clocks and past them, weighs the same
+		// against the list as against ygo's delete set: a list equal run for run charges alike.
+		client, clocks, _ := fuzzRoomsOwnClocks(room)
+		probe := everyOtherClockDeleted(client, clocks+8)
+		var truth deletedRuns
+		truth.seed(crdt.DeleteSetFromDoc(room))
+		against, fresh := weighedAgainst(t, room, charge.deletes(), probe), weighedAgainst(t, room, &truth, probe)
+		if !sameCharge(against, fresh) {
+			t.Fatalf("after the %d-byte frame a delete of every other clock weighs %d structs, %d splits, %d frame bytes and %d structure bytes against the room's list and %d, %d, %d and %d against its own delete set, want the same of each",
+				len(update), against.added(), against.splits, against.frame, against.structureHeap(),
+				fresh.added(), fresh.splits, fresh.frame, fresh.structureHeap())
 		}
 	})
 }
