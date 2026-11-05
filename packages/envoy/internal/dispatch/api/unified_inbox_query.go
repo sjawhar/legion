@@ -13,9 +13,9 @@ const unifiedInboxDelivered = `
   select g.cause, g.from_kind as kind, g.from_id as id, g.thread_id, g.session_id, g.created_at as at
   from ` + refs.PersonInboxEdgesSQL + ` g
   where g.kind = 'delivered_to' and g.to_kind = 'person' and g.to_id = $1
-    and (g.cause <> 'thread_reply' or exists (
+    and (g.cause <> 'thread_reply' or not exists (
       select 1 from user_threads u
-      where u.login = $1 and u.thread_id = g.thread_id::uuid and u.unread))
+      where u.login = $1 and u.thread_id = g.thread_id::uuid and not u.unread))
     and (g.cause <> 'direct_reply' or (
       g.created_at > coalesce(greatest(
           (select read_through from user_agent_read where login = $1 and session_id = g.session_id),

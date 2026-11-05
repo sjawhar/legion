@@ -2399,7 +2399,7 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/me/inbox?limit=&offset=&mentions=true` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   Opt-in graph read of the caller's default Inbox, unread Replies and unread direct/broadcast replies, newest first.
-  Joins `delivered_to -> person` to the existing read indexes; `user_threads` remains the thread index.
+  Reads the private current-membership `graph_inbox_edges` rows addressed `delivered_to -> person`, minus existing read state; `user_threads` remains the thread index.
   The response is `{person, rows, total, limit, offset, horizon, expansions}`; a row has `cause`, `kind`, `id`, `thread_id`, `created_at`, `body`, `author`, `href`, `subject` and `snoozed_until`.
   `limit` is 1–200 (default 50), `offset` is nonnegative, and an empty page retains `total`.
   Identity and assignee selectors are refused with `400 OWN_INBOX_ONLY`.
@@ -2409,13 +2409,16 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/me/inbox/shadow` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
-  Named production comparison read: refreshes the serialized pass and answers observation counts, not inbox content.
-  Every person who has signed in is checked, including inactive people, once a minute in the background too.
-  `mismatched`, `missing` and `unexpected` count legacy membership differences by `ask`, `thread_reply` and `direct_reply`; `errors` and `uncovered_users` prevent missing observations from looking green.
-  `users` identifies the people checked and their item/difference counts; `expansions.mention` is additional public mention membership and never a mismatch.
+  Read-only observation counts from the background comparison, not inbox content; GET never runs or writes a pass.
+  Every person who has signed in is checked, including inactive people, once a minute in the background.
+  The graph membership is compared independently with the existing routes' own SQL: the Inbox's default viewer filter, unread Replies and unread direct replies.
+  `mismatched`, `missing` and `unexpected` are global membership differences by `ask`, `thread_reply` and `direct_reply`; `errors` and `uncovered_users` prevent missing observations from looking green.
+  `users` contains only the caller's own row; every other count is a global total. `expansions.mention` is additional public mention membership and never a mismatch.
   `daily_mismatched` retains a bad observation after a later comparison returns to zero.
   `ready` requires three complete UTC days without differences or errors for every person, with full-day coverage, at least 720 samples per person-day and no gap longer than two minutes, plus a fresh clean current comparison.
-  This is a comparison gate, not an automatic cutover.
+  This gate covers asks and replies only, not pending credential requests, and does not cut over automatically.
+  Any cutover must retain the Credential requests section and its contribution to Needs you and the blocked-on-you banner.
+  The sweep exports `envoy_dispatch_inbox_shadow_duration_seconds` and `envoy_dispatch_inbox_shadow_failures_total` on `/metrics`.
   `/inbox/shadow` displays it and links to `/inbox/unified`, the opt-in view.
 
 - `/api/v1/people/{login}/nodes?limit=&offset=&since=` (GET; cookie, trusted header, or bearer; needs the `person` scope)

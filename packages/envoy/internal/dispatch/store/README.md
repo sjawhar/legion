@@ -44,7 +44,11 @@ Received nodes default to deliveries in the last 30 days; `since` (RFC3339) sele
 Role endpoints remain addressable in graph reads, including a delivery to a role alone.
 `envoy-dispatch census --deliveries` independently compares the graph's recipient sets with those records for every comment, message and ask created in the last 30 days.
 
-`graph_inbox_edges` derives delivery to people from assigned asks, the existing `user_threads` index and direct-message roots (broadcast copies included).
-Its direct reply walk stops at depth 64 and guards visited ids; read marks, Clear and per-reply reads stay in their existing tables and are subtracted by the named read.
-`inbox_shadow_control`, `inbox_shadow_latest` and `inbox_shadow_days` store observation counts only, written by the one serialized comparison function, never another copy of an inbox or relation.
-The comparison checks all signed-in people, a superset of active users.
+`graph_inbox_edges` is private current inbox membership, read only by the own-inbox query and comparison, not by `refs.AllEdgesSQL` or the references API.
+Its `delivered_to` rows mean an ask currently assigned to a person, the newest write in a participating thread, or a direct/broadcast reply; they do not record historical delivery.
+The query subtracts read state only; the reference side uses the Inbox route's own viewer-filtered predicate, `myRepliesUnread` and `unreadDirectRepliesCTE` independently.
+The direct reply walk stops at depth 64 and guards visited ids; its root index uses the same `user_threads_login` normalization as other person-keyed tables.
+Read marks, Clear and per-reply reads stay in their existing tables.
+`inbox_shadow_control`, `inbox_shadow_latest` and `inbox_shadow_days` store observation counts only, written by the serialized background sweep, never another copy of an inbox or relation.
+The comparison checks all signed-in people, a superset of active users; the HTTP read exposes only the caller's person row plus global totals.
+The gate covers asks and replies only, not pending credential requests; a cutover must preserve the Credential requests section and its contribution to Needs you.

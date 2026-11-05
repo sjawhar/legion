@@ -102,7 +102,7 @@ func TestInboxShadowCutoverRequiresEveryCompleteUTCUserDay(t *testing.T) {
  cross join (values('alice'),('bob')) people(person)`); err != nil {
 		t.Fatal(err)
 	}
-	report, err := readInboxShadowReport(ctx, database.Pool)
+	report, err := readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestInboxShadowCutoverRequiresEveryCompleteUTCUserDay(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update inbox_shadow_days set errors=1 where person='bob' and day=(statement_timestamp() at time zone 'UTC')::date-2`); err != nil {
 		t.Fatal(err)
 	}
-	report, err = readInboxShadowReport(ctx, database.Pool)
+	report, err = readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestInboxShadowCutoverRequiresEveryCompleteUTCUserDay(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update inbox_shadow_days set errors=0,max_gap_seconds=121 where person='bob'`); err != nil {
 		t.Fatal(err)
 	}
-	report, err = readInboxShadowReport(ctx, database.Pool)
+	report, err = readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -8,11 +8,20 @@ import type { InboxShadowReport } from "../../api/types";
 import { InboxShadowPage } from "./InboxShadowPage";
 
 const getShadow = spyOn(api, "getInboxShadow");
+const who = spyOn(api, "whoAmI").mockResolvedValue({
+  kind: "user",
+  login: "alice",
+  event_head: "0",
+});
 afterEach(() => getShadow.mockReset());
-afterAll(() => getShadow.mockRestore());
+afterAll(() => {
+  getShadow.mockRestore();
+  who.mockRestore();
+});
 
 function show() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["whoami"], { kind: "user", login: "alice", event_head: "0" });
   const view = render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
@@ -54,19 +63,10 @@ const clean: InboxShadowReport = {
       unexpected: {},
       expansions: {},
     },
-    {
-      person: "bob",
-      checked_items: 1,
-      mismatched: 0,
-      errors: 0,
-      missing: {},
-      unexpected: {},
-      expansions: {},
-    },
   ],
 };
 
-test("a clean latest comparison retains a bad day and lets readers inspect user coverage", async () => {
+test("a clean comparison retains a bad day and shows own counts beside global coverage", async () => {
   getShadow.mockResolvedValue(clean);
   const view = show();
   try {
@@ -78,11 +78,11 @@ test("a clean latest comparison retains a bad day and lets readers inspect user 
     expect(view.getByRole("link", { name: "Try unified inbox" }).getAttribute("href")).toBe(
       "/inbox/unified"
     );
-    fireEvent.click(view.getByText("People and coverage"));
-    fireEvent.change(view.getByLabelText("Filter people"), { target: { value: "bob" } });
-    expect(view.getByText("1 of 2 people shown")).toBeTruthy();
-    expect(view.getByText("bob")).toBeTruthy();
-    expect(view.queryByText("alice")).toBeNull();
+    expect(view.getByText("Your comparison and coverage")).toBeTruthy();
+    expect(view.getByText("alice")).toBeTruthy();
+    expect(view.queryByText("bob")).toBeNull();
+    expect(view.queryByLabelText("Filter people")).toBeNull();
+    expect(view.getByText(/Asks and replies only/)).toBeTruthy();
   } finally {
     view.close();
   }

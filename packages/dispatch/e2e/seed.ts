@@ -13,6 +13,8 @@ import { sql } from "./psql";
 // processes (server_processes, migration 0135) stays off it too: a process registers once, at
 // boot, and GET /api/v1/dashboard/builds reads the builds the live ones serve from it.
 const tables = [
+  "inbox_shadow_latest",
+  "inbox_shadow_days",
   "agent_tokens",
   "repo_projects",
   "architecture_sources",

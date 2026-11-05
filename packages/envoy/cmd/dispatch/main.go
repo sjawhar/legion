@@ -719,7 +719,7 @@ func main() {
 	// suggestion_outcome_cursor row for update, which is what keeps two processes from judging one
 	// page twice.
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, background.EventHorizon(), eventsWake)
-	go api.RunInboxShadowSweep(ctx, database.Pool, background.EventHorizon())
+	go api.RunInboxShadowSweep(ctx, database.Pool, background.EventHorizon(), met)
 	// The Idempotency-Keys past their 24 hours and the deliveries a process that died
 	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
 	// timer and not a woken loop because no commit announces either, and it starts here because

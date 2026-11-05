@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import {
   borderDefault,
@@ -22,25 +23,21 @@ const causes = [
 
 export function InboxShadowPage(): ReactNode {
   useDocumentTitle("Inbox comparison · Dispatch");
+  const login = useQuery(whoAmIQuery()).data?.login;
   const shadow = useQuery({
-    queryKey: ["inbox-shadow"],
+    queryKey: ["inbox-shadow", login],
+    enabled: login !== undefined,
     queryFn: () => api.getInboxShadow(),
     refetchInterval: 60_000,
   });
-  const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState<"person" | "checked_items" | "mismatched">("person");
-  const users = [...(shadow.data?.users ?? [])]
-    .filter((user) => user.person.toLowerCase().includes(filter.toLowerCase()))
-    .sort((a, b) =>
-      sort === "person"
-        ? a.person.localeCompare(b.person)
-        : b[sort] - a[sort] || a.person.localeCompare(b.person)
-    );
   return (
     <section aria-label="Inbox comparison">
       <h1 className="text-xl font-semibold leading-tight tracking-tight">
         Does the new inbox miss anything?
       </h1>
+      <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
+        Asks and replies only. Credential requests stay in Inbox.
+      </p>
       {shadow.isPending ? <LoadingSkeleton label="Comparing inboxes" /> : null}
       {shadow.isError ? (
         <p role="alert" className={dangerText}>
@@ -60,7 +57,7 @@ export function InboxShadowPage(): ReactNode {
               ? "All active people checked"
               : `${shadow.data.uncovered_users} people not checked recently`}
           </p>
-          <dl className="mt-3 space-y-1 text-sm">
+          <dl className="mt-3 text-sm">
             {causes.map(([cause, label]) => (
               <div className="flex flex-wrap justify-between gap-2" key={cause}>
                 <dt>{label}</dt>
@@ -99,42 +96,21 @@ export function InboxShadowPage(): ReactNode {
             )}
           </p>
           <details className="mt-1 text-sm">
-            <summary className="min-h-11 cursor-pointer py-2">People and coverage</summary>
+            <summary className="min-h-11 cursor-pointer py-2">Your comparison and coverage</summary>
             <p className={`mb-2 ${textMutedOnCanvas}`}>
-              Every person who has signed in is checked, including inactive people. Counts contain
-              no inbox content.
-            </p>
-            <label>
-              Filter people
-              <input
-                className={`ml-2 rounded border p-2 ${borderDefault}`}
-                onChange={(event) => setFilter(event.target.value)}
-                value={filter}
-              />
-            </label>
-            <p className="mt-2">
-              {users.length} of {shadow.data.users.length} people shown
+              The totals above cover everyone who has signed in, including inactive people. Only
+              your own person row is shown. Counts contain no inbox content.
             </p>
             <table className="mt-2 w-full text-left">
               <thead>
                 <tr>
-                  {(
-                    [
-                      ["person", "Person"],
-                      ["checked_items", "Items"],
-                      ["mismatched", "Differences"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <th key={key}>
-                      <button className="min-h-11" onClick={() => setSort(key)} type="button">
-                        {label}
-                      </button>
-                    </th>
-                  ))}
+                  <th>Person</th>
+                  <th>Items</th>
+                  <th>Differences</th>
                 </tr>
               </thead>
               <tbody>
-                {users.map((user) => (
+                {shadow.data.users.map((user) => (
                   <tr key={user.person}>
                     <td className="break-all py-2">{user.person}</td>
                     <td>{user.checked_items}</td>

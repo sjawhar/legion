@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -38,8 +39,8 @@ func TestInboxShadowReportsUnexpectedWrongDelivery(t *testing.T) {
 		t.Fatalf("inbox: %d %s", page.Code, page.Body.String())
 	}
 	got := decodeBody[unifiedInboxPage](t, page)
-	if got.Total != 2 {
-		t.Fatalf("wrong edges were filtered by legacy membership: total=%d want 2", got.Total)
+	if got.Total != 3 {
+		t.Fatalf("wrong edges were filtered by legacy membership: total=%d want 3", got.Total)
 	}
 	if err := observeInboxShadow(ctx, database.Pool, 0); err != nil {
 		t.Fatal(err)
@@ -49,10 +50,18 @@ func TestInboxShadowReportsUnexpectedWrongDelivery(t *testing.T) {
 		t.Fatalf("shadow: %d %s", response.Code, response.Body.String())
 	}
 	report := decodeBody[inboxShadowReport](t, response)
-	if report.Mismatched != 2 || report.Unexpected["ask"] != 1 || report.Unexpected["direct_reply"] != 1 || report.Errors != 0 {
+	if report.Mismatched != 3 || report.Unexpected["ask"] != 1 || report.Unexpected["thread_reply"] != 1 || report.Unexpected["direct_reply"] != 1 || report.Errors != 0 {
 		t.Fatalf("wrong-edge probe: %+v", report)
 	}
-	t.Logf("wrong-edge probe: bob inbox=%d mismatched=%d unexpected.ask=%d unexpected.direct_reply=%d errors=%d", got.Total, report.Mismatched, report.Unexpected["ask"], report.Unexpected["direct_reply"], report.Errors)
+	t.Logf("wrong-edge probe: bob inbox=%d mismatched=%d unexpected.ask=%d unexpected.thread_reply=%d unexpected.direct_reply=%d errors=%d", got.Total, report.Mismatched, report.Unexpected["ask"], report.Unexpected["thread_reply"], report.Unexpected["direct_reply"], report.Errors)
+	public := graphEdges(t, handler, url.Values{
+		"from": {"dispatch://CORE-1/ask/00000000-0000-0000-0000-000000000001"},
+		"kind": {"delivered_to"},
+	})
+	if len(public.Edges) != 0 {
+		t.Fatalf("public references exposed private current inbox membership: %+v", public.Edges)
+	}
+	t.Logf("public references: delivered_to=%d", len(public.Edges))
 }
 
 func TestInboxShadowReadIsOwnAndNeverWritesObservations(t *testing.T) {

@@ -7,6 +7,7 @@ import { asUser } from "./users";
 test("the shadow page checks coverage and the unified inbox is opt-in @phone", async ({
   browser,
 }, testInfo) => {
+  test.setTimeout(120_000);
   await resetDatabase();
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Unified inbox" });
@@ -19,6 +20,17 @@ test("the shadow page checks coverage and the unified inbox is opt-in @phone", a
   );
   const alice = await asUser(browser, "alice");
   try {
+    await expect
+      .poll(
+        async () => {
+          const response = await alice.request.get("/api/v1/me/inbox/shadow");
+          expect(response.ok()).toBe(true);
+          const report = await response.json();
+          return report.checked_users > 0 && report.uncovered_users === 0;
+        },
+        { timeout: 90_000, intervals: [1000] }
+      )
+      .toBe(true);
     const page = await alice.newPage();
     if (testInfo.project.name === "chromium")
       await page.setViewportSize({ width: 1280, height: 800 });
@@ -31,6 +43,7 @@ test("the shadow page checks coverage and the unified inbox is opt-in @phone", a
     await expect(page.getByTestId("inbox-shadow-mismatches")).toHaveText("0 differences");
     await expect(page.getByText("All active people checked", { exact: true })).toBeVisible();
     await expect(page.getByText("Not ready to replace your inbox", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Asks and replies only/)).toBeVisible();
     const geometry = await page.evaluate(() => ({
       width: window.innerWidth,
       height: window.innerHeight,
