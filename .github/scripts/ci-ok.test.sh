@@ -173,4 +173,17 @@ check "the posted marker's name reads back as that job's posted verdict" \
 check "the marker is no report" "$(is "$(reading 'reports($names) | length' "$posted_name")" 0)"
 check "the report is no marker" "$(is "$(reading 'posted($names) | length' "$report_name")" 0)"
 
+echo "case: the marker the report action uploads is the file ci-ok-report.sh writes"
+# The marker's path is two literals of .github/actions/ci-ok-report/action.yml: the POSTED_FILE
+# the post step hands ci-ok-report.sh, and the `path:` its upload reads. That upload carries
+# `if-no-files-found: ignore`, which is what makes a drift between them silent — no red step and
+# no artifact — where the report upload's `error` would redden every job at once. A silent drift
+# leaves every failing job's follower reading `unposted` for ever, so no merge-group run is
+# force-cancelled again and nothing in any log says why.
+action=$script_dir/../actions/ci-ok-report/action.yml
+posted_written=$(yq -r '[.runs.steps[] | select(has("env")) | .env.POSTED_FILE | select(. != null)] | unique | join(", ")' "$action")
+posted_uploaded=$(yq -r '[.runs.steps[] | select(((.uses // "") | test("actions/upload-artifact")) and ((.with.name // "") | test("ci-ok-posted"))) | .with.path] | join(", ")' "$action")
+check "the post step hands the script one marker path" "$(is "$(printf '%s' "$posted_written" | grep -c ',')" 0)"
+check "the marker's upload reads the path the script writes" "$(is "$posted_uploaded" "$posted_written")"
+
 summary "ci-ok.sh fails unless every job changes selected succeeded"
