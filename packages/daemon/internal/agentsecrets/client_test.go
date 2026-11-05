@@ -252,9 +252,13 @@ func tokenFile(t *testing.T, token string) string {
 }
 
 // eventually polls fn until it returns true or the deadline passes, failing the test otherwise.
+// The deadline is a hang guard: every caller waits for a retry schedule measured in tens of
+// milliseconds, and a loaded machine stretches an HTTP round trip far past that without the
+// schedule being wrong. Five seconds was too near the work's own duration (INFRA-985); the
+// callers whose claim is "well before a refusal's minute" still read below that minute.
 func eventually(t *testing.T, fn func() bool, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if fn() {
 			return
@@ -618,18 +622,30 @@ func TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker(t *testi
 	withLoginRetry(t, time.Minute, time.Minute)
 	withUnansweredRetry(t, 20*time.Millisecond, 100*time.Millisecond)
 	broker, server := newFakeBroker(t)
+	// The down broker is a listener this test owns that accepts each connection and closes it at
+	// once: the proxy reads EOF and answers 502, exactly as the front door answers while no broker
+	// serves. A port bound and released instead - which this row used - leaves the test depending
+	// on the OS not giving that ephemeral port to anything else (INFRA-985).
 	down, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = down.Close() })
+	go func() {
+		for {
+			conn, err := down.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
 	downAddr := down.Addr().String()
-	_ = down.Close()
 	brokerURL, err := url.Parse(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var serving atomic.Bool
-	var proxied atomic.Int32
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			if serving.Load() {
@@ -640,12 +656,7 @@ func TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker(t *testi
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if proxied.Add(1) > 3 {
-			serving.Store(true)
-		}
-		proxy.ServeHTTP(w, r)
-	}))
+	front := httptest.NewServer(proxy)
 	t.Cleanup(front.Close)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -655,6 +666,10 @@ func TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker(t *testi
 	if !errors.As(err, &api) || api.Status != http.StatusBadGateway {
 		t.Fatalf("the first login = %v, want the front door's 502", err)
 	}
+	// A broker serves again, from the test and after the 502 it asserted. Keyed to a count of the
+	// front door's requests instead, the flip lands wherever the retries and any future
+	// non-login request happen to put it.
+	serving.Store(true)
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "a login to succeed once a broker serves behind the front door, well before a refusal's minute")
 	if n := broker.loginCount(); n != 1 {
 		t.Fatalf("the broker read %d logins, want the one that succeeded", n)
