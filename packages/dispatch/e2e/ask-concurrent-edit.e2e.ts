@@ -7,6 +7,7 @@ import {
   test,
 } from "@playwright/test";
 
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import { createIssue, createProject, getArtifactText, getIssue } from "./api";
 import {
   connectedDot,
@@ -58,18 +59,25 @@ async function seedDecision() {
   return issue;
 }
 
-/** Opens the decision in one page per context, then has each add its own option list under the
- * question while neither edit reaches the server or the other page, and lets both edits through
- * at once: the merged block holds two lists. Each page's errors are collected into `errors`. */
+/** Opens the decision in one page per option, all in `context`, then has each add its own option
+ * list under the question while neither edit reaches the server or the other page, and lets both
+ * edits through at once: the merged block holds two lists. The merge is between two Yjs clients,
+ * which two pages are whoever holds them, so one signed-in context serves both and the second
+ * editor pays no sign-in and no cold cache. Every page's timers are faked before it loads, since
+ * the severed transport's reconnect waits a delay the page draws itself; a row that drives one of
+ * its own (`alicePage.clock`) inherits the same install. Each page's errors are collected into
+ * `errors`. */
 async function crossOptionLists(
   issueKey: string,
-  editors: readonly { context: BrowserContext; option: string }[],
+  context: BrowserContext,
+  options: readonly string[],
   errors: string[]
 ): Promise<Page[]> {
   const opened = [];
-  for (const { context, option } of editors) {
+  for (const option of options) {
     const page = await context.newPage();
     page.on("pageerror", (error) => errors.push(error.message));
+    await page.clock.install();
     const transport = await documentTransport(page);
     await page.goto(`/issues/${issueKey}`);
     opened.push({ option, page, transport });
@@ -82,17 +90,25 @@ async function crossOptionLists(
     transport.hold();
     await transport.sever();
   }
-  for (const { option, page } of opened) {
-    // The option first, then the `- ` input rule before it: typed into an empty item, the text
-    // lands in the question, since the block hides an empty option while it reads as malformed.
-    await placeCaret(page, "after", "Which one?");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type(option);
-    await page.keyboard.press("Home");
-    await page.keyboard.type("- ");
-    await expect(askBlock(page).getByRole("listitem")).toHaveText(option);
-  }
+  // Each page's edit is local while its transport is severed, so neither waits on the other.
+  await Promise.all(
+    opened.map(async ({ option, page }) => {
+      // The option first, then the `- ` input rule before it: inserted into an empty item, the
+      // text lands in the question, since the block hides an empty option while it reads as
+      // malformed. Only the `- ` needs real keys, which is what the rule reads.
+      await placeCaret(page, "after", "Which one?");
+      await page.keyboard.press("Enter");
+      await page.keyboard.insertText(option);
+      await page.keyboard.press("Home");
+      await page.keyboard.type("- ");
+      await expect(askBlock(page).getByRole("listitem")).toHaveText(option);
+    })
+  );
   await Promise.all(opened.map(({ transport }) => transport.release()));
+  // The provider draws its reconnect delay from [0, RECONNECT_SPREAD_MS)
+  // (`web/src/features/doc/connection.ts`), so the crossing would otherwise wait out a random
+  // second of it; the pages' own clocks spend it instead.
+  await Promise.all(opened.map(({ page }) => page.clock.runFor(RECONNECT_SPREAD_MS)));
   return opened.map(({ page }) => page);
 }
 
@@ -115,22 +131,17 @@ async function expectWordsKept(
     .toEqual([]);
 }
 
+// SLOW(>=2s): the crossing itself - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block
+// (400 INVALID_ASK_BLOCK on every write path).
 test("two editors that each add an option list to an ask while their edits cross keep the question and both options", async ({
   browser,
 }) => {
   const issue = await seedDecision();
   const alice = await asUser(browser, "alice");
-  const bob = await asUser(browser, "bob");
   const errors: string[] = [];
   try {
-    const pages = await crossOptionLists(
-      issue.key,
-      [
-        { context: alice, option: "Option A" },
-        { context: bob, option: "Option B" },
-      ],
-      errors
-    );
+    const pages = await crossOptionLists(issue.key, alice, ["Option A", "Option B"], errors);
     await expectWordsKept(pages, issue.primary_artifact_id, ["Which one?", "Option A", "Option B"]);
 
     for (const page of pages) {
@@ -164,17 +175,16 @@ test("two editors that each add an option list to an ask while their edits cross
       .toEqual(["Option A", "Option B"]);
     expect(errors).toEqual([]);
   } finally {
-    await bob.close();
     await alice.close();
   }
 });
 
-/** Opens the decision a1 in alice's and bob's pages and crosses their option lists, so the block
- * holds two lists, then runs `act` on alice's page with the two lists' options in document order
- * (the merge orders the lists by the two editors' Yjs client ids). `act` answers the words that
- * must survive it; every page and the stored markdown must keep them, the ask must stay open, and
- * no page error may escape. Page errors are checked first as well, so a keystroke that throws
- * fails on its error rather than on the words it lost. */
+/** Opens the decision a1 in two of alice's pages and crosses their option lists, so the block
+ * holds two lists, then runs `act` on the first page with the two lists' options in document
+ * order (the merge orders the lists by the two editors' Yjs client ids). `act` answers the words
+ * that must survive it; every page and the stored markdown must keep them, the ask must stay
+ * open, and no page error may escape. Page errors are checked first as well, so a keystroke that
+ * throws fails on its error rather than on the words it lost. */
 async function withTwoLists(
   browser: Browser,
   act: (input: {
@@ -187,24 +197,16 @@ async function withTwoLists(
 ): Promise<void> {
   const issue = await seedDecision();
   const alice = await asUser(browser, "alice");
-  const bob = await asUser(browser, "bob");
   const errors: string[] = [];
   try {
-    const pages = await crossOptionLists(
-      issue.key,
-      [
-        { context: alice, option: "Option A" },
-        { context: bob, option: "Option B" },
-      ],
-      errors
-    );
+    const pages = await crossOptionLists(issue.key, alice, ["Option A", "Option B"], errors);
     for (const page of pages) {
       await expect(askBlock(page)).toHaveAttribute("data-dispatch-ask-malformed", "true");
     }
     const [alicePage] = pages;
     await expect(askContent(alicePage).locator(":scope > ul")).toHaveCount(2);
-    // A list's text also holds bob's cursor label when his caret is in it, so it is matched, not
-    // compared.
+    // A list's text also holds the other editor's cursor label when its caret is in it, so it is
+    // matched, not compared.
     const firstList = (await optionList(alicePage, 0).textContent()) ?? "";
     const [first, second] = firstList.includes("Option A")
       ? ["Option A", "Option B"]
@@ -226,20 +228,21 @@ async function withTwoLists(
     expect((await getIssue(issue.key)).open_asks.map((ask) => ask.block_id)).toContain("a1");
     expect(errors).toEqual([]);
   } finally {
-    await bob.close();
     await alice.close();
   }
 }
 
-/** Gives the first list a second item, `Option C`, typed after `first`: Enter at the end of a
- * list's item opens the next item. */
+/** Gives the first list a second item, `Option C`, after `first`: Enter at the end of a list's
+ * item opens the next item, and the item's text needs no real keys. */
 async function addOptionToFirstList(page: Page, first: string): Promise<void> {
   await placeCaret(page, "after", first, optionList(page, 0));
   await page.keyboard.press("Enter");
-  await page.keyboard.type("Option C");
+  await page.keyboard.insertText("Option C");
   await expect(optionList(page, 0).getByRole("listitem")).toContainText([first, "Option C"]);
 }
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("Enter in the question of an ask holding two lists keeps every word", async ({ browser }) => {
   await withTwoLists(browser, async ({ alicePage, artifactId, pages }) => {
     await placeCaret(alicePage, "after", "Which one?", questionParagraph(alicePage));
@@ -267,6 +270,8 @@ test("Enter in the question of an ask holding two lists keeps every word", async
 // list. The editor's input guards decline the input, or apply ProseMirror's own edit in place of
 // the browser's, so no page error escapes and no word outside the input's range is lost.
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("Enter twice at the end of the second list of an ask holding two lists keeps every word", async ({
   browser,
 }) => {
@@ -278,6 +283,8 @@ test("Enter twice at the end of the second list of an ask holding two lists keep
   });
 });
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("Backspace at the start of the first list of an ask holding two lists keeps every word", async ({
   browser,
 }) => {
@@ -302,6 +309,8 @@ async function selectQuestionIntoFirstList(
   return ["Which ", first.slice("Opt".length), "Option C", second];
 }
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("Backspace over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
   browser,
 }) => {
@@ -312,6 +321,8 @@ test("Backspace over a selection from the question into the first list of an ask
   });
 });
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("typing over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
   browser,
 }) => {
@@ -322,6 +333,8 @@ test("typing over a selection from the question into the first list of an ask ho
   });
 });
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("cutting a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
   browser,
 }) => {
@@ -332,6 +345,8 @@ test("cutting a selection from the question into the first list of an ask holdin
   });
 });
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("text input without a keypress over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
   browser,
 }) => {
@@ -343,6 +358,8 @@ test("text input without a keypress over a selection from the question into the 
   });
 });
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("an input method composing over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
   browser,
 }) => {
@@ -355,6 +372,8 @@ test("an input method composing over a selection from the question into the firs
   });
 });
 
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("dragging a selection from the question into the first list of an ask holding two lists to its second list keeps every word", async ({
   browser,
 }) => {
@@ -371,7 +390,7 @@ test("dragging a selection from the question into the first list of an ask holdi
     await alicePage.mouse.move(from.x + 5, from.y + 5, { steps: 3 });
     await alicePage.mouse.move(to.x + to.width - 2, to.y + to.height / 2, { steps: 10 });
     await alicePage.mouse.up();
-    // Bob's page draws alice's caret after "Opt", inside the first option.
+    // The other page draws the acting caret after "Opt", inside the first option.
     return ["Which one?", first.slice("Opt".length), "Option C", second];
   });
 });
@@ -384,6 +403,8 @@ for (const [command, value] of [
   ["insertText", "x"],
   ["delete", undefined],
 ] as const) {
+  // SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+  // y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
   test(`document.execCommand("${command}") over a selection from the question into the first list of an ask holding two lists keeps the words outside it`, async ({
     browser,
   }) => {
@@ -400,6 +421,8 @@ for (const [command, value] of [
 
 // The read-back must not drop the second list when another block holds its text: here the first
 // list's second option reads the second list's option followed by " later".
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test(`document.execCommand("insertText") over a selection from the question into the first list of an ask holding two lists keeps a second list whose text another option holds`, async ({
   browser,
 }) => {
@@ -407,12 +430,12 @@ test(`document.execCommand("insertText") over a selection from the question into
     const later = `${second} later`;
     await placeCaret(alicePage, "after", first, optionList(alicePage, 0));
     await alicePage.keyboard.press("Enter");
-    await alicePage.keyboard.type(later);
+    await alicePage.keyboard.insertText(later);
     await expect(optionList(alicePage, 0).getByRole("listitem")).toContainText([first, later]);
     await selectTextIn(alicePage, askContent(alicePage), "one?Opt");
     await alicePage.evaluate(() => document.execCommand("insertText", false, "x"));
     for (const page of pages) {
-      // Bob's cursor label can sit in the second list, so its item is matched, not compared.
+      // The other editor's cursor label can sit in the second list, so its item is matched.
       const items = optionList(page, 1).getByRole("listitem");
       await expect(items).toHaveCount(1);
       await expect(items).toContainText(second);
@@ -439,6 +462,8 @@ function secondListText(page: Page): Promise<string> {
 
 // Undo and redo revert or redo the person's own edit wherever the caret now is: a letter typed in
 // the second list is undone, and redone, with the caret in the question, and no other word moves.
+// SLOW(>=2s): the two-list fixture below - two editor mounts, a severed transport each and the
+// y-prosemirror merge - which no write path can seed, since Dispatch refuses such a block.
 test("Ctrl+Z and Ctrl+Shift+Z with the caret in the question undo and redo a letter typed in the second list of an ask holding two lists", async ({
   browser,
 }) => {
@@ -449,8 +474,10 @@ test("Ctrl+Z and Ctrl+Shift+Z with the caret in the question undo and redo a let
       for (const page of pages) await expect.poll(() => secondListText(page)).toBe(text);
       await expect.poll(storedLines).toContain(`* ${text}`);
     };
-    // Past prosemirror-history's 500 ms group delay, so the letter is an undo step of its own.
-    await alicePage.waitForTimeout(600);
+    // Past prosemirror-history's 500 ms group delay, which it reads off `Date.now()`, so the
+    // letter is an undo step of its own: the page's clock is advanced past it rather than waited
+    // out, after the crossed edit above has landed, so nothing of it joins the letter's group.
+    await alicePage.clock.fastForward(600);
     await placeCaret(alicePage, "after", second, optionList(alicePage, 1));
     await alicePage.keyboard.press("ArrowLeft");
     await alicePage.keyboard.type("x");

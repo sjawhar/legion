@@ -18,13 +18,23 @@ related_issues:
 
 Extends docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-and-the-rig-needs-contracts-built-and-three-engines-it-cannot-start-INFRA-92.md.
 
-- An issue pod has two CPUs. Two or three whole-project Playwright runs side by side, each on its own
-  harness lane, overrun the 30 s test timeout in the heaviest rows (the collaborative margin, the
-  board's touch rows, document anchors), and fail them.
+**Update (2026-11-01, INFRA-317): the suite can now run its workers in parallel, and CI does.**
+`DISPATCH_E2E_WORKERS` is how many Playwright workers a run has, unset or empty being one, and
+`packages/dispatch/e2e/run.ts` starts one lane per worker before Playwright: a whole harness —
+server, the three fakes, the plain-HTTP proxy, a bucket, ports the OS chose — and a Postgres of
+its own, found by the worker through `TEST_PARALLEL_INDEX`. In a pod the Postgres comes from
+`DISPATCH_E2E_PG_BIN`, a directory holding `initdb` and `pg_ctl`. The `dispatch` CI job runs the
+whole suite that way. None of that changes the rule below: a pod has two CPUs, so a role there
+runs the files it is working on, one project at a time, at one worker.
+`packages/dispatch/AGENTS.md`'s end-to-end section has the model.
+
+- An issue pod has two CPUs. Two or three whole-project Playwright runs side by side, each on a
+  harness of its own, overrun the 30 s test timeout in the heaviest rows (the collaborative
+  margin, the board's touch rows, document anchors), and fail them.
 - For proof, run one whole project at a time. When runs did share the pod, re-run every failure
   alone before you count it. Report it as a load failure that passed alone, and show the base
   failing the same way under the same load.
-- A long-running harness lane is a background job under `setsid nohup`. Wait on its PID with
+- A long-running harness is a background job under `setsid nohup`. Wait on its PID with
   `tail --pid=<pid> -f /dev/null` in a named service, not with a sleep loop.
 
 ## Evidence

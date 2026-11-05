@@ -53,8 +53,8 @@ func IssueAncestors(ctx context.Context, q Queryer, key string) ([]string, error
 // above, so the query terminates even if a raced reparent ever commits a cycle. The key itself is
 // not in the answer. An issue with no child, an issue no row has, and the empty key answer [].
 // This is the server's one recursive descendant walk over whole subtrees: api's coverage read is
-// this query. api's loadChildren is a different read — one row per direct child, with a rollup
-// over that child's own subtree — and stays its own.
+// this query. api's issueChildrenStatement is a different read — one row per direct child, with
+// a rollup over that child's own subtree — and stays its own.
 func IssueDescendants(ctx context.Context, q Queryer, key string) ([]string, error) {
 	descendants := []string{}
 	if key == "" {
@@ -125,7 +125,7 @@ const IssueRepoJoin = `left join repo on repo.key = i.key
 const IssueRepoColumns = `i.repo, coalesce(repo.owned, repo_default.repo), coalesce(repo.too_deep, false)`
 
 // issueRepositoryQuery is IssueRepoTerms over a subjects term of one key, the shape api's
-// issueWithProgressQuery gives the issue page's single-key read. The text is built once, at
+// issueRowStatement gives the issue page's single-key read. The text is built once, at
 // start, rather than on every read: the concatenation is work a request would repeat for a
 // statement that never differs, and pgx caches a prepared plan per statement text.
 var issueRepositoryQuery = `

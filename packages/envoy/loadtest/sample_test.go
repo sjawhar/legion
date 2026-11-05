@@ -229,6 +229,90 @@ func TestHeapLiveSumsTheBinaryProfilesInuse(t *testing.T) {
 	}
 }
 
+// samplerRun runs a sampler for d against a Dispatch that serves its goroutine profile and its
+// binary heap profile, with the periodic heap read on or off, and returns the request URIs
+// Dispatch was asked for and the samples the run took.
+func samplerRun(t *testing.T, heapSamples bool, d time.Duration) ([]string, []sample) {
+	t.Helper()
+	heapBody := heapProfileBody(t)
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.RequestURI())
+		mu.Unlock()
+		switch {
+		case r.URL.Path == "/debug/pprof/heap" && r.URL.RawQuery == "":
+			w.Write(heapBody)
+		case strings.HasPrefix(r.URL.Path, "/debug/pprof/goroutine"):
+			fmt.Fprint(w, "goroutine profile: total 7\n")
+		default:
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+
+	s := newSampler(endpoints{pprof: srv.URL, natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}})
+	s.heapSamples = heapSamples
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	now := time.Now()
+	s.loop(ctx, now, now.Add(time.Minute), log.New(io.Discard, "", 0))
+
+	mu.Lock()
+	defer mu.Unlock()
+	return slices.Clone(asked), s.all()
+}
+
+// TestSamplerAsksDispatchForNoHeapProfile: Dispatch writes any heap profile itself, so a heap read
+// in the window is charged to the CPU the harness measures for Dispatch - the text form this
+// sampler once read was about half of it (46-51% over six runs) - and measures the harness's own
+// sampling (README.md, "Why the harness reads no heap profile in the window"). Without
+// -heap-samples the sampler must ask Dispatch for its goroutine profile and for no form of
+// /debug/pprof/heap. Only the sampler is driven here: the binary profiles at the window's edges
+// (heap-start.pprof and heap-end.pprof in runReplay, heap.pprof and heap.txt in step.profile)
+// stay, and driving them needs a whole run.
+func TestSamplerAsksDispatchForNoHeapProfile(t *testing.T) {
+	asked, _ := samplerRun(t, false, 3*time.Second)
+	goroutines := 0
+	for _, uri := range asked {
+		if strings.HasPrefix(uri, "/debug/pprof/heap") {
+			t.Errorf("the sampler asked Dispatch for %q; without -heap-samples its window must hold no heap read", uri)
+		}
+		if strings.HasPrefix(uri, "/debug/pprof/goroutine") {
+			goroutines++
+		}
+	}
+	if goroutines == 0 {
+		t.Fatalf("the sampler read no goroutine profile (it asked for %v), so it proves nothing about the heap", asked)
+	}
+}
+
+// TestSamplerUnderHeapSamplesReadsTheBinaryHeapProfile: with -heap-samples on, the sampler does
+// read Dispatch's heap, and reads the binary profile alone, never ?debug=1, the text form no
+// sampler reads now. The read lands in a sample, as heap_live_bytes and heap_live_objects.
+func TestSamplerUnderHeapSamplesReadsTheBinaryHeapProfile(t *testing.T) {
+	asked, samples := samplerRun(t, true, 7*time.Second)
+	heaps := 0
+	for _, uri := range asked {
+		switch {
+		case uri == "/debug/pprof/heap":
+			heaps++
+		case strings.HasPrefix(uri, "/debug/pprof/heap"):
+			t.Errorf("the sampler asked Dispatch for %q, want the binary profile alone", uri)
+		}
+	}
+	if heaps == 0 {
+		t.Fatalf("the sampler read no heap profile under -heap-samples; it asked Dispatch for %v", asked)
+	}
+	carries := slices.ContainsFunc(samples, func(s sample) bool {
+		return s.HeapLiveBytes == 4*mib1 && s.HeapLiveObjects == 7 && s.HeapInWindow
+	})
+	if !carries {
+		t.Fatalf("no sample carries the heap read (the profile's 4 MiB in 7 objects): %+v", samples)
+	}
+}
+
 // natsSample is fakeSample at second at with the NATS /varz counts in and out, or, when ok is
 // false, with its NATS read marked as failed.
 func natsSample(at int, in, out float64, ok bool) sample {
@@ -271,14 +355,16 @@ func TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked(t *testing.T) {
 
 // TestSamplerMarksNoReadThatFailedOnceTheStepEnded: a read that fails while the step runs is
 // marked in its sample and logged; a sample taken once ctx has ended is not kept at all, and its
-// failed reads are neither counted nor logged, as poll does. The heap read runs on its own, so its
-// failure lands in the first or the second sample.
+// failed reads are neither counted nor logged, as poll does. The heap read runs on its own (under
+// -heap-samples, which this sampler is given), so its failure lands in the first or the second
+// sample.
 func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	down := endpoints{pprof: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
 	now := time.Now()
 
 	var logged bytes.Buffer
 	running := newSampler(down)
+	running.heapSamples = true
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 	running.loop(ctx, now, now.Add(time.Minute), log.New(&logged, "", 0))
@@ -313,10 +399,10 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	}
 }
 
-// TestSamplerHeapReadDelaysNoSample: Dispatch's heap endpoint answers 7 s after it is asked, past
-// the 5 s sample interval, and the goroutine reads keep their 5 s cadence meanwhile. The heap read
-// lands in the first sample after it ended, with its own end time, and no second heap read starts
-// before the next 15 s slot.
+// TestSamplerHeapReadDelaysNoSample: under -heap-samples, Dispatch's heap endpoint answers 7 s
+// after it is asked, past the 5 s sample interval, and the goroutine reads keep their 5 s cadence
+// meanwhile. The heap read lands in the first sample after it ended, with its own end time, and no
+// second heap read starts before the next 15 s slot.
 func TestSamplerHeapReadDelaysNoSample(t *testing.T) {
 	const heapDelay = 7 * time.Second
 	heapBody := heapProfileBody(t)
@@ -349,6 +435,7 @@ func TestSamplerHeapReadDelaysNoSample(t *testing.T) {
 
 	start := time.Now()
 	s := newSampler(endpoints{pprof: srv.URL, natsMon: srv.URL, pg: unreachablePG, pids: map[string]int{}})
+	s.heapSamples = true
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	s.loop(ctx, start, start.Add(time.Minute), log.New(io.Discard, "", 0))
