@@ -448,6 +448,37 @@ func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
 	}
 }
 
+// An id written in RFC 4122's URN form is a whole uuid to Go's uuid.Parse, so requireUUIDPath
+// lets it through and the prefix layer leaves it as written (text.IsIDPrefix refuses the colons).
+// What the route must not do is send those characters to Postgres, which refuses them
+// ("invalid input syntax for type uuid", SQLSTATE 22P02) and makes the read answer 500. The same
+// defect was fixed for a document's reference key in this change by sending the canonical uuid;
+// an ask's, a comment's and a message's own routes must answer as the canonical id answers — the
+// item when it exists, and that route's own 404 when nothing carries it.
+func TestTargetedReadsReadAUrnUuidIDAsTheCanonicalID(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "URN ids", "A spec")
+	askID := createIssueAsk(t, handler, issue.Key, "Which store do we use?")
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "A message to read by its id.", "actor": sessionActor(),
+	}, "alice")
+	const unknown = "00000000-0000-4000-8000-000000000000"
+	for _, test := range []struct {
+		target string
+		want   int
+	}{
+		{target: "/api/v1/asks/urn:uuid:" + askID, want: http.StatusOK},
+		{target: "/api/v1/messages/urn:uuid:" + message.ID, want: http.StatusOK},
+		{target: "/api/v1/asks/urn:uuid:" + unknown, want: http.StatusNotFound},
+		{target: "/api/v1/comments/urn:uuid:" + unknown, want: http.StatusNotFound},
+	} {
+		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
+		if response.Code != test.want {
+			t.Errorf("%s: status=%d body=%s, want %d", test.target, response.Code, response.Body.String(), test.want)
+		}
+	}
+}
+
 func TestResolveAskRejectsNumberedIDWithClientGuidance(t *testing.T) {
 	handler := newTestHandler(t)
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/3/resolve", map[string]any{
