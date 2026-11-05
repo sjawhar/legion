@@ -71,6 +71,7 @@ export async function bootLegionClaim(host: LegionClaimHost): Promise<void> {
       issue: claim.issue,
       role: claim.role,
       secret: claim.secret,
+      promptAgents: claim.promptAgents,
     });
     await host.claimRole(claim.claimToken);
     const ready: ReadyInput = {

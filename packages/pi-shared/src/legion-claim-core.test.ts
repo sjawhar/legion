@@ -97,6 +97,7 @@ test("registers, runs afterRegister, records the capability, claims the role, th
       issue: String(registered.issue),
       role: registered.role as never,
       secret: String(registered.secret),
+      promptAgents: registered.promptAgents as never,
     },
   ]);
 
