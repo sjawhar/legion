@@ -1502,6 +1502,11 @@ export interface Comment extends AnchorPosition {
   readonly body: string;
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
+  /** The comment this reply answers: the one the write named, where `reply_to` is the head of
+   *  the thread the write climbed to. The two are the same on a reply to a thread's root; a
+   *  reply that names an ask alone carries neither, as no comment that is not a reply does.
+   *  Absent from a Dispatch older than the field. A conversation nests a reply under it. */
+  readonly answers?: string | null;
   readonly ask_id: string | null;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
    *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
@@ -2331,6 +2336,7 @@ export type GraphEdgeKind =
   | "anchored_to"
   | "owned_by"
   | "replies_to"
+  | "answers"
   | "followed_by"
   | "part_of"
   | "depends_on"

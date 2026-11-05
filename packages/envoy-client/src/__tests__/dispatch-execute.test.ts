@@ -10695,6 +10695,48 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  test("a comment read names the comment each nested reply answers", async () => {
+    const root = "11111111-1111-4111-8111-111111111111";
+    const middle = "22222222-2222-4222-8222-222222222222";
+    const leaf = "33333333-3333-4333-8333-333333333333";
+    const comment = (id: string, body: string, answers: string | null) => ({
+      id,
+      issue_key: "DSP-1",
+      author: { kind: "user", id: "alice" },
+      body,
+      anchor: null,
+      reply_to: id === root ? null : root,
+      answers,
+      resolved: false,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === `/api/v1/comments/${root}`) {
+        return response({
+          comment: comment(root, "Root.", null),
+          replies: [comment(middle, "Middle.", root), comment(leaf, "Leaf.", middle)],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: `dispatch://DSP-1/comment/${root}` },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    expect(result.text).toContain(`${leaf} · user alice\nAnswers: ${middle}\nBody: Leaf.`);
+    expect(result.text).toContain(`${middle} · user alice\nBody: Middle.`);
+    expect(result.text).not.toContain(`Answers: ${root}`);
+  });
+
   test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

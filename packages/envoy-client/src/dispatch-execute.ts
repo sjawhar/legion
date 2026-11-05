@@ -2879,6 +2879,7 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     `${reply.id} · ${actorText(reply.author)}`,
     ...anchorLines(reply),
     ...replyBlockLines(reply),
+    ...(reply.answers != null && reply.answers !== comment.id ? [`Answers: ${reply.answers}`] : []),
     `Body: ${reply.body}`,
   ]);
   return [
