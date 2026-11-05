@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -106,7 +107,7 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 			// The wanted row by kind and id, not the page's first: an issue carries its primary
 			// document's words in its own vector (20261105145242), so a word only the spec holds
 			// answers with the issue as well as the document, and the fusion lists the issue
-			// first. Which kind leads is TestSearchFusesKindsRoundRobin's subject.
+			// first. Which hit leads is TestSearchScoresEveryKindOnOneList's subject.
 			result := searchResultOf(body, test.kind, test.id)
 			if result == nil {
 				t.Fatalf("results = %#v, want kind=%q id=%q", body.Results, test.kind, test.id)
@@ -322,40 +323,67 @@ func createSearchIssue(t *testing.T, handler http.Handler, project, title, spec 
 	return decodeBody[model.Issue](t, response).Key
 }
 
-// Each kind of content is ranked on its own list and the lists are merged by reciprocal rank
-// fusion, so a term every kind holds lists one row of each kind before a second of any, and rows
-// that score alike are ordered issue, document, ask, comment, message.
-func TestSearchFusesKindsRoundRobin(t *testing.T) {
+// One list, scored across every kind: a hit's place on the page is its own score and never its
+// kind. Three issues hold the term in their titles, the strongest hit there is, and one comment
+// holds it once in a body of filler, the weakest - and that comment has its kind to itself. All
+// three issues list before it. Merging five per-kind lists by position put the comment second,
+// ahead of two of them, because it led a list of its own and a tie went to the kind named first.
+// The scores say the order is the score's: a title hit ranks 1 before normalisation and
+// searchKeywordWeight * 0.5 / (searchFusionK + 1) after it, a one-word body hit a fifth of that.
+func TestSearchScoresEveryKindOnOneList(t *testing.T) {
 	handler := newTestHandler(t)
-	const spec = "The astrolabe measures altitude.\n"
-	keys := []string{
-		createInteractionIssue(t, handler, "SRCH", "Astrolabe survey", spec).Key,
-		createSearchIssue(t, handler, "SRCH", "Astrolabe survey", spec),
+	// No spec holds the term, so no document and no ask answers and the two kinds in play are the
+	// crowded one and the lonely one.
+	const quiet = "Nothing of note.\n"
+	crowded := []string{createInteractionIssue(t, handler, "SRCH", "Astrolabe survey", quiet).Key}
+	for range 2 {
+		crowded = append(crowded, createSearchIssue(t, handler, "SRCH", "Astrolabe survey", quiet))
 	}
-	for _, key := range keys {
-		for path, body := range map[string]map[string]any{
-			"comments": {"body": "The astrolabe needs a new rete."},
-			"asks":     {"question": "Which astrolabe do we keep?", "options": []map[string]string{{"label": "Brass"}}},
-			"messages": {"body": "Astrolabe calibrated."},
-		} {
-			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/"+path, body, "alice")
-			if response.Code != http.StatusCreated {
-				t.Fatalf("create %s: status=%d body=%s", path, response.Code, response.Body.String())
-			}
-		}
+	host := createSearchIssue(t, handler, "SRCH", "Harbour logbook", quiet)
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+host+"/comments", map[string]any{
+		"body": strings.Repeat("Filler sentence. ", 40) + "The astrolabe needs a new rete.",
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("create the comment: status=%d body=%s", comment.Code, comment.Body.String())
 	}
+	commentID := decodeBody[model.Comment](t, comment).ID
 
 	body := searchResponse(t, handler, "q=astrolabe")
 	kinds := make([]string, 0, len(body.Results))
 	for _, result := range body.Results {
 		kinds = append(kinds, result.Kind)
 	}
-	want := []string{"issue", "document", "ask", "comment", "message", "issue", "document", "ask", "comment", "message"}
-	if !slices.Equal(kinds, want) {
-		t.Fatalf("kinds = %v, want %v", kinds, want)
+	if want := []string{"issue", "issue", "issue", "comment"}; !slices.Equal(kinds, want) {
+		t.Fatalf("kinds = %v, want %v: the weak comment must not outrank a strong issue for having its kind to itself (results %#v)",
+			kinds, want, body.Results)
 	}
-	if body.Total != 10 || body.Reachable != 10 {
-		t.Fatalf("total=%d reachable=%d, want 10 and 10", body.Total, body.Reachable)
+	if keys := searchIssueKeys(body); !slices.Equal(slices.Sorted(slices.Values(keys)), slices.Sorted(slices.Values(crowded))) {
+		t.Fatalf("issue results = %v, want the three title hits %v", keys, crowded)
+	}
+	if body.Total != 4 || body.Reachable != 4 {
+		t.Fatalf("total=%d reachable=%d, want 4 and 4", body.Total, body.Reachable)
+	}
+	// 0.5 is ts_rank_cd's length-normalised rank of a lexeme at weight A (raw 1, divided by
+	// itself plus one); 0.1/1.1 is the same for one at weight D, which a comment's body carries.
+	wantIssue := searchKeywordWeight * 0.5 / (searchFusionK + 1)
+	wantComment := searchKeywordWeight * (0.1 / 1.1) / (searchFusionK + 1)
+	for _, result := range body.Results {
+		want := wantIssue
+		if result.Kind == "comment" {
+			want = wantComment
+		}
+		if math.Abs(result.Rank-want) > 1e-6 {
+			t.Errorf("%s %s scored %v, want %v", result.Kind, result.ID, result.Rank, want)
+		}
+	}
+	hit := searchResultOf(body, "comment", commentID)
+	if hit == nil {
+		t.Fatalf("results = %#v, want the comment %s among them, or the comparison above decided nothing", body.Results, commentID)
+	}
+	for _, result := range body.Results[:3] {
+		if result.Rank <= hit.Rank {
+			t.Errorf("issue %s scored %v, want it above the one-word comment hit's %v", result.ID, result.Rank, hit.Rank)
+		}
 	}
 }
 

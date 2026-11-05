@@ -1953,12 +1953,13 @@ search finds by meaning only what the new identity has embedded, and the coverag
 a new place that cannot embed leaves the old vectors in the database, unused by search, until it can.
 A model change on Azure takes a new deployment name, since the identity names the deployment, not the model behind it.
 
-Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and the five lists are merged by reciprocal rank fusion:
-a hit at position p of its list scores 1/(60 + p), which is its `rank`.
-The page therefore takes each kind's best in turn, the best issue, document, ask, comment and message first, rather than a run of long documents that repeat the query's words.
-Hits that score alike are ordered issue, document, ask, comment, message, then by recency and id, so the order is total and consecutive `offset`s walk it once while the corpus holds still.
-An issue whose key is the whole query heads the issue list.
-Each list keeps its best `contracts.SearchKindDepth` (100) hits:
+Every match is ranked on one list across the kinds, by one score, rather than on a list of its own merged with the others by the position it holds there.
+Each leg contributes its own score — the keyword leg's `ts_rank_cd` with length normalisation (flag 32), the meaning leg's cosine similarity — weighted onto the one scale the two can be added on (`searchKeywordWeight` 1, `searchMeaningWeight` 0.4), and the sum is divided by 61, the score reciprocal rank fusion gave the first row of a list, which is the scale `rank` has been published on since LEGION-386.
+A row both legs find scores the sum of both, which is above what either leg alone gives it.
+No kind is ranked ahead of another, in the legs or in the page: a kind leads only by scoring highest.
+Hits that score alike are ordered by recency and id, so the order is total and consecutive `offset`s walk it once while the corpus holds still.
+An issue whose key is the whole query leads the page by `searchOwnKeyLead`, which is above every score the legs can reach together.
+Each leg keeps its best `contracts.SearchKindDepth` (100) hits:
 the answer's `total` counts every match of every kind, and `reachable` the hits the pages can return, so an `offset` at or past `reachable` answers no hits with both counts.
 
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches.
@@ -2512,9 +2513,9 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/search?q=&project=&limit=&offset=` (GET; cookie, trusted header, or bearer)
 
   Full-text search over issue titles, latest document text, comments, asks, and messages;
-  each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s.
+  every match ranked on one list across the kinds by one score (above), with `<mark>` snippets and SPA `href`s.
   One page `{results, total, reachable, limit, offset, took_ms}`:
-  `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100).
+  `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each leg's best 100).
   Every `ask` hit carries `ask`, where the ask stands when the search ran:
   `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or `{state: "resolved", resolution, answer?}` with the last answer it had, absent when nobody answered;
   its excerpt is cut from the ask's indexed text ([Search](#search)).

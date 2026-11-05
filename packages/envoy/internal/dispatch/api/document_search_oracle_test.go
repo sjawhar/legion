@@ -8,13 +8,16 @@ import "fmt"
 // tests in document_search_test.go, which run each statement beside the package's own and
 // compare the rows.
 //
-// Every piece is a literal copy, including the pieces this change does not touch
-// (searchPageAndTailSQL, the meaning CTEs, relatedCoordinationRank) and the two expressions the
-// package builds in Go (store.CastableUUID's cast and askBlockNodeSQL), so that nothing of the
-// oracle is built from the package's own helpers: an oracle sharing a helper with the statement
-// under test changes with it, and the comparison then holds nothing. The cost is that an edit to
-// a part of these statements this change leaves alone has to be copied here too, which is what
-// the equality tests report when it is not.
+// Every piece is a literal copy, including the pieces this change does not touch (the fused
+// score, searchPageAndTailSQL, the meaning CTEs, relatedCoordinationRank) and the two expressions
+// the package builds in Go (store.CastableUUID's cast and askBlockNodeSQL), so that nothing of
+// the oracle is built from the package's own helpers: an oracle sharing a helper with the
+// statement under test changes with it, and the comparison then holds nothing. The cost is that
+// an edit to a part of these statements this change leaves alone has to be copied here too,
+// which is what the equality tests report when it is not - INFRA-1042's one scored list across
+// the kinds (searchFusedSQL, ts_rank_cd's normalisation flag, a page that names no kind) is
+// copied below for exactly that reason, so the only thing these statements still answer
+// differently by is their document arm.
 
 // mainSearchKeywordLegs is main's searchKeywordLegs: the five-kind keyword union whose document
 // arm this change moves to document_search. That arm is a named piece of its own
@@ -73,9 +76,10 @@ func mainDocumentKeywordLeg(rank func(searchColumn string) string) string {
    where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)`
 }
 
-// mainSearchKeywordLegsSQL is main's searchKeywordLegsSQL, those legs ranked by ts_rank_cd.
+// mainSearchKeywordLegsSQL is main's searchKeywordLegsSQL, those legs ranked by ts_rank_cd with
+// INFRA-1042's length normalisation (32).
 var mainSearchKeywordLegsSQL = mainSearchKeywordLegs(func(searchColumn string) string {
-	return "ts_rank_cd(" + searchColumn + ", q.tsq)"
+	return "ts_rank_cd(" + searchColumn + ", q.tsq, 32)"
 })
 
 // mainSearchPageAndTailSQL is main's searchPageAndTailSQL, which this change leaves as it is: its
@@ -83,9 +87,9 @@ var mainSearchKeywordLegsSQL = mainSearchKeywordLegs(func(searchColumn string) s
 // tests no tsquery.
 func mainSearchPageAndTailSQL(legsSource string) string {
 	return fmt.Sprintf(`page as (
-  select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
+  select l.*, f.score
     from %s l join fused f using (kind, id)
-   order by f.score desc, kind_order, l.updated_at desc, l.id
+   order by f.score desc, l.updated_at desc, l.id
    limit $3 offset $6
 )
 select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
@@ -113,7 +117,7 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
     end as text
   ) txt on true
- order by r.score desc, r.kind_order, r.updated_at desc, r.id
+ order by r.score desc, r.updated_at desc, r.id
 `, legsSource)
 }
 
@@ -134,7 +138,12 @@ ranked as (
 legs as (
   select * from ranked where pos <= $7
 ),
-fused as (select kind, id, 1.0 / ($8 + pos) as score from legs), -- (kind, id) is unique per row today (each kind's own PK or key); a list that stops being unique here would silently multiply rows instead of summing their score.
+fused as (
+  select kind, id,
+         sum(case list when 'keyword' then 1 * r else 0.4 * r end) / ($8 + 1)
+           + case when bool_or(own) then 1 else 0 end as score
+    from legs group by kind, id
+),
 totals as (
   select (select coalesce(sum(matches), 0) from (select max(matches) as matches from legs group by kind) each_kind) as total,
          (select count(*) from fused) as reachable
@@ -247,7 +256,12 @@ ranked as (
 legs as (
   select * from ranked where pos <= $7
 ),
-fused as (select kind, id, sum(1.0 / ($8 + pos)) as score from legs group by kind, id),
+fused as (
+  select kind, id,
+         sum(case list when 'keyword' then 1 * r else 0.4 * r end) / ($8 + 1)
+           + case when bool_or(own) then 1 else 0 end as score
+    from legs group by kind, id
+),
 legs_unique as (
   select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at
