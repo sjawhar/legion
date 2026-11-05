@@ -845,6 +845,72 @@ test.describe("inbox search", () => {
       await alice.close();
     }
   });
+
+  // A step taken inside a column held open over a hidden row can move nothing at all: the
+  // question the column keeps stood above every row the text left, so `k` has no row to step
+  // to and none to take the focus. The reader is still in the column, and the row `l` recorded
+  // is the only way out it has, so a key that did nothing visible must not take that away:
+  // Escape after it is still one level out, to the row `l` was pressed on.
+  //
+  // Its own three rows, not the file's eight: this needs the kept question to stand first with
+  // the rows the text leaves below it, which the grouped seed above does not give.
+  test("a step that moves nothing inside a held column leaves Escape its way back", async ({
+    browser,
+  }) => {
+    // The list heads its band with the newest ask, so the question the column will keep is
+    // written last: it stands above both rows the text leaves, which is what gives `k` nowhere
+    // to step.
+    await createProject({ key: "STEP", name: "Step service" });
+    const replayIssue = await createIssue({ project: "STEP", title: "Cold replay" });
+    await createAsk(replayIssue.key, { question: "Does a cold start need a second pass?" }, PLANNER);
+    const leaseIssue = await createIssue({ project: "STEP", title: "Cold lease handover" });
+    await createAsk(leaseIssue.key, { question: "Who holds the cold lease?" }, PLANNER);
+    const topIssue = await createIssue({ project: "STEP", title: "Ledger clock drift" });
+    const top = await createAsk(
+      topIssue.key,
+      { question: "Which source of truth does the ledger read at startup?" },
+      PLANNER
+    );
+
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      await page.goto(INBOX);
+      await expect(rows(page)).toHaveCount(3);
+      await expect(rows(page).first()).toHaveAttribute("data-inbox-row", top.id);
+
+      // The unsent answer is what keeps the question in the column once the text hides its row.
+      const typed = "The ledger, once the lease settles.";
+      await selectRow(page, top.id);
+      const answer = page.locator("[data-ask-answer]");
+      await expect(answer).toHaveCount(1);
+      await answer.fill(typed);
+
+      await searchInbox(page, "cold");
+      await expect(rows(page)).toHaveCount(2);
+      await expect(inboxRow(page, top.id)).toHaveCount(0);
+      await expect(selectedRow(page)).toHaveCount(0);
+
+      // Escape out of the box lands on the list's first row, and `l` from there records it.
+      await page.keyboard.press("Escape");
+      const landedId = await rows(page).first().getAttribute("data-inbox-row");
+      const landed = inboxRow(page, landedId ?? "");
+      await expect(landed).toBeFocused();
+      await page.keyboard.press("l");
+      await expect(paneScroller(page)).toBeFocused();
+
+      // The step moves neither the selection nor the focus.
+      await page.keyboard.press("k");
+      await expect(paneScroller(page)).toBeFocused();
+      await expect(selectedRow(page)).toHaveCount(0);
+
+      await page.keyboard.press("Escape");
+      await expect(landed).toBeFocused();
+      await expect(answer).toHaveValue(typed);
+    } finally {
+      await alice.close();
+    }
+  });
 });
 
 test.describe("inbox search without a reading column @phone", () => {
