@@ -1074,4 +1074,61 @@ PY
 check "no filter gates a job that compiles or reads files it does not select" \
   "$(is "$uncovered" "")"
 
+# Rule 14 reads the root manifest as check-bun-workspace-manifests.sh reads it, at every shape:
+# a list it cannot read is named rather than taken for an empty one, which would hold WORKSPACES
+# to nothing, and the two spellings of a workspace are one workspace.
+echo "case: a root manifest rule 14 cannot read"
+root=$(fixture workspace-manifest-gone)
+rm "$root/package.json"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names what the table is then held to" \
+  "$(contains "$out" "::error file=package.json::the root manifest is missing, so .github/scripts/ci_job_reads.py's WORKSPACES is held to nothing")"
+
+echo "case: a root manifest that is not valid JSON"
+root=$(fixture workspace-manifest-unreadable)
+replace "$root/package.json" '"workspaces": ["packages/widget"]' '"workspaces": ["packages/widget",'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the manifest and what it could not read" \
+  "$(contains "$out" "::error file=package.json::the root manifest is not valid JSON (")"
+
+echo "case: a workspaces that is not a list"
+root=$(fixture workspace-not-a-list)
+replace "$root/package.json" '"workspaces": ["packages/widget"]' '"workspaces": "packages/widget"'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names what workspaces must be for the table to be held to it" \
+  "$(contains "$out" "::error file=package.json::workspaces must be an array of workspace paths for .github/scripts/ci_job_reads.py's WORKSPACES to be held to it")"
+
+echo "case: a workspaces holding an entry that is no workspace path"
+root=$(fixture workspace-entry-unreadable)
+replace "$root/package.json" '["packages/widget"]' '["packages/widget", 7]'
+run_check "$root"
+check "fails on a non-string entry" "$(is "$status" 1)"
+check "names what workspaces must be" \
+  "$(contains "$out" "::error file=package.json::workspaces must be an array of workspace paths")"
+replace "$root/package.json" '["packages/widget", 7]' '["packages/widget", ""]'
+run_check "$root"
+check "fails on an empty entry too" "$(is "$status" 1)"
+check "and names the same thing" \
+  "$(contains "$out" "::error file=package.json::workspaces must be an array of workspace paths")"
+
+echo "case: an empty workspaces array against a table that names none"
+root=$(fixture workspace-none)
+replace "$root/package.json" '["packages/widget"]' '[]'
+replace "$root/.github/scripts/ci_job_reads.py" 'WORKSPACES = ["packages/widget"]' 'WORKSPACES = []'
+run_check "$root"
+check "passes: a root declaring no workspace agrees with a table naming none" "$(is "$status" 0)"
+
+echo "case: a trailing slash on either side names the same workspace"
+root=$(fixture workspace-trailing-slash)
+replace "$root/package.json" '["packages/widget"]' '["packages/widget/"]'
+run_check "$root"
+check "passes with the slash in the manifest" "$(is "$status" 0)"
+replace "$root/package.json" '["packages/widget/"]' '["packages/widget"]'
+replace "$root/.github/scripts/ci_job_reads.py" 'WORKSPACES = ["packages/widget"]' 'WORKSPACES = ["packages/widget/"]'
+run_check "$root"
+check "and with it in the table" "$(is "$status" 0)"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

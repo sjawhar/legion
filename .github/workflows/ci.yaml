@@ -641,11 +641,14 @@ jobs:
               - 'packages/envoy-client/src/**'
               # Its src/broker-credential.ts:21-22 imports @legion/broker-client, whose exports
               # map every entry to ./src/<module>.ts, so this job compiles that package's seven
-              # sources with envoy-client's. Every filter whose job does is held to this pattern
-              # by check-ci-filters.test.sh; ci_job_reads.py's envoy_client_dep is the one place
-              # that declares the pair.
+              # sources with envoy-client's. check-ci-filters.test.sh holds a hand-written list of
+              # such pairs to this pattern, and ci_job_reads.py's envoy_client_dep is the one
+              # place that declares the pair, which check-ci-filters.sh then holds to the filter.
               - 'packages/broker-client/**'
               - 'packages/envoy-client/bin/dispatch.ts'
+              # tests/envoy-channel-stall.test.ts:9-11 imports three modules of envoy-client's
+              # test directory, and tsc puts four of its files in this job's program.
+              - 'packages/envoy-client/test/**'
               - 'packages/pi-shared/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
               # the prepack script stages for it, and :16 writes dist/THIRD_PARTY_NOTICES.
@@ -790,6 +793,11 @@ jobs:
               # of, so a change to it is a change to what this job generates for.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
+              # src/dispatch-block-ref.test.ts:98-102 reads this table of the same directory and
+              # asserts set equality against it, so the two halves are one corpus.
+              - 'packages/envoy/internal/dispatch/text/testdata/dispatch-block-id-encodings.json'
+              # src/dispatch-api.test.ts:293-300 reads the daemon's own intake fixture.
+              - 'packages/daemon/internal/intake/testdata/dispatch/server-started.json'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json'
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
@@ -899,10 +907,12 @@ jobs:
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/contracts/fixtures/capability-redaction.json'
               - 'packages/contracts/fixtures/capability-redaction-plugin-report.json'
-              # The Dispatch e2e client scripts/skill-scenarios/seed.ts:87 imports, which the
-              # typecheck compiles.
-              - 'packages/dispatch/e2e/api.ts'
-              - 'packages/dispatch/e2e/harness-ports.ts'
+              # The Dispatch e2e client scripts/skill-scenarios/seed.ts:96 imports, which the
+              # typecheck compiles: that program holds six modules of this directory (api.ts,
+              # harness-ports.ts, harness-broker.ts, harness-processes.ts, harness-real-broker.ts
+              # and harness-signin.ts), so the directory is named rather than the two it reached
+              # when this entry was written.
+              - 'packages/dispatch/e2e/**'
               - 'packages/dispatch/web/src/api/types.ts'
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
@@ -993,8 +1003,11 @@ jobs:
               # web/src/features/doc/decision-blocks.test.ts:10.
               - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
-              # The block schema web/src/__tests__/setup.ts:7 and features/refs/markdown-engine.test.ts:3 read.
-              - 'packages/envoy/internal/dispatch/pmdoc/schema/blocks.json'
+              # The block schema directory: web/src/__tests__/setup.ts:7 and
+              # features/refs/markdown-engine.test.ts:3 read blocks.json, and
+              # packages/proof-editor/tests/ask-concurrent-edit.test.ts:269-275, which this job
+              # runs, reads block-node-types.json beside it.
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
@@ -1373,8 +1386,10 @@ jobs:
               - 'packages/envoy/scripts/fixtures/github/**'
               # e2e-local.sh:445-450 renders with @legion/envoy-client/delivery.
               - 'packages/envoy-client/src/**'
-              # And @legion/broker-client with it, which delivery.ts and transport.ts pull in
-              # (ci_job_reads.py's envoy_client_dep).
+              # And @legion/broker-client with it: the tsc program of envoy-client holds all seven
+              # of its modules, and at runtime, which is what this job's bun scripts do,
+              # transport.ts's own closure holds two of them (delivery.ts's holds none), so the
+              # pattern is needed through transport.ts (ci_job_reads.py's envoy_client_dep).
               - 'packages/broker-client/**'
               - 'packages/contracts/src/**'
               # e2e-local.sh:148-149 builds ./cmd/listener and ./internal/testnats/cmd/natsd.
@@ -1393,6 +1408,10 @@ jobs:
               - 'packages/claude-envoy/**'
               - 'packages/pi-shared/**'
               - 'packages/contracts/**'
+              # The stall test of claude-envoy runs its bin/envoy-channel.ts, whose bun build
+              # loads six of @legion/broker-client's seven modules through envoy-client's
+              # src/broker-credential.ts:21-22.
+              - 'packages/broker-client/**'
             # Every file packages/daemon/docker/worker.Dockerfile builds from, for the worker-image
             # job (.github/workflows/worker-image.yaml, which the build reads too): the root
             # manifest, lockfile, patches and every workspace manifest the plugin stage's frozen
@@ -1686,6 +1705,14 @@ jobs:
       # would rewrite fails here instead of on the next person who runs it.
       - name: Check the whole tree with Biome
         run: bunx biome check .
+
+      # After the install, which is what gives it node_modules: it lists each Bun gate's tsc
+      # program with `bunx tsc --listFilesOnly` and holds every file of it to that gate's filter,
+      # so the TypeScript half of what those filters must select is derived rather than
+      # hand-kept. In this job because the ci-filters job has neither Bun nor node_modules, and
+      # because this one is gated by no `changes` output, so a change anywhere can start it.
+      - name: Check every Bun gate's filter selects the files its typecheck compiles
+        run: .github/scripts/check-ts-filters.sh
 
       # The notices step below builds go-licenses and loads every release binary's modules. It
       # keeps them in a cache family of its own, go-notices: one entry, read on every run, so never
@@ -2012,6 +2039,11 @@ jobs:
       - name: Test the CI filter check
         run: .github/scripts/check-ci-filters.test.sh
 
+      # Beside the check above, and needing no Go and no Bun of its own: its fixtures list each
+      # program with a stand-in bunx.
+      - name: Test the TypeScript filter check
+        run: .github/scripts/check-ts-filters.test.sh
+
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.
       - name: Install tmux
@@ -2187,9 +2219,11 @@ jobs:
         working-directory: packages/envoy-client
       # packages/envoy-client/src/broker-credential.ts:21-22 imports
       # @legion/broker-client/environment and @legion/broker-client/token-client, so this job
-      # already stands on that package; its own lint, typecheck and tests run in no other job.
-      # They sit before the NATS pull because they need no image and no server: the five test
-      # files import only bun:test, jose, node: and the package's own modules.
+      # already stands on that package; its typecheck and its tests run in no other job, and its
+      # own lint script runs nowhere else either, though the lint job's whole-tree Biome pass
+      # does lint its 13 files under the same root config. They sit before the NATS pull because
+      # they need no image and no server: the five test files import only bun:test, jose, node:
+      # and the package's own modules.
       - name: Lint broker client
         run: bun run lint
         working-directory: packages/broker-client

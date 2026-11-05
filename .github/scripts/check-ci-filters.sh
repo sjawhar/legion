@@ -28,7 +28,12 @@
 # them.
 #
 # The table cannot drift from ci.yaml silently. Fails on:
-#   1. a file a gate reads that its filter does not match (up to 20 named per gate, with why),
+#   1. a file a gate reads that its filter does not match (up to 20 named per gate, with why).
+#      For a Bun gate those reads are hand-kept, and the TypeScript half of them is no longer:
+#      .github/scripts/check-ts-filters.sh lists each such job's own tsc program with
+#      `bunx tsc --listFilesOnly` and holds every file of it to that gate's filter, in ci.yaml's
+#      lint job, since this one's has no Bun. A file a test reads by relative path is part of no
+#      tsc program, so it stays hand-kept here,
 #   2. a gate whose filter the changes job lacks, or whose job's (or step's) if: does not test it,
 #   3. a job or step gated on a filter the table neither lists in GATES nor EXCLUDES,
 #   4. a run: line of a ci.yaml job that starts a go command (test, vet, build, run, list,
@@ -115,10 +120,12 @@
 #      from the day it was added, and its own typecheck and tests ran in no job for a second
 #      reason no rule reads, that no step ran them. The other way round is a read every Bun job
 #      declares of a manifest no install reads. The manifest is read as
-#      .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it: a package.json that is
-#      missing or is not valid JSON, and a `workspaces` that is not a non-empty array of
-#      non-empty strings, are named rather than taken for an empty list, and a trailing slash is
-#      stripped, since `packages/x/` and `packages/x` are one workspace to bun. A workspace's
+#      .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it, at every shape: a
+#      package.json that is missing or is not valid JSON, and a `workspaces` that is not a list
+#      or holds anything but non-empty strings, are named rather than taken for an empty list; an
+#      empty array is accepted, as that script accepts it, since a root declaring no workspace
+#      agrees with a table naming none; and a trailing slash is stripped on both sides, since
+#      `packages/x/` and `packages/x` are one workspace to bun. A workspace's
 #      sources are another matter, which this rule says nothing about either: a job can compile a
 #      package whose filter never selects it, which is why ci_job_reads.py's envoy_client_dep
 #      declares, in one place for every gate whose job compiles @legion/envoy-client, that it

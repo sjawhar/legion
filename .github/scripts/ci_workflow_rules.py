@@ -252,14 +252,17 @@ def check_workspace_table(workspaces: list, problems: list) -> None:
     module takes.
 
     The manifest is read as .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it,
-    since the two checks are about the same list and a list one of them cannot read is not a list
-    the other may pass over: a root manifest that is missing or is not valid JSON, and a
-    `workspaces` that is not a non-empty array of non-empty strings, are named rather than taken
-    for an empty list, which would hold the table to nothing - and would do it exactly where
-    every read WORKSPACES feeds is wrong anyway, since a tree with no root manifest runs no
-    `bun install` the table could describe. A trailing slash is stripped as that script strips
-    it, since `packages/x/` and `packages/x` are one workspace to bun and only one of the two
-    spellings could equal a table entry."""
+    at every shape, since the two checks are about the same list and a list one of them cannot
+    read is not a list the other may pass over: a root manifest that is missing or is not valid
+    JSON, and a `workspaces` that is not a list or holds anything but non-empty strings, are
+    named rather than taken for an empty list, which would hold the table to nothing - and would
+    do it exactly where every read WORKSPACES feeds is wrong anyway, since a tree with no root
+    manifest runs no `bun install` the table could describe. An empty array is accepted, as that
+    script accepts it: a root that declares no workspace is consistent with a table that names
+    none, and a table that names one is caught below as an entry the manifest does not list. A
+    trailing slash is stripped on both sides, since `packages/x/` and `packages/x` are one
+    workspace to bun, and a rule that stripped it on one side alone would report the table as
+    missing a workspace it names in the other spelling."""
     if not (REPO / MANIFEST).is_file():
         problems.append(f"::error file={MANIFEST}::the root manifest is missing, so {TABLE}'s WORKSPACES is held to "
                         f"nothing while every read it gives each Bun job names a manifest this tree does not have")
@@ -271,18 +274,19 @@ def check_workspace_table(workspaces: list, problems: list) -> None:
                         f"{error.lineno}), so its workspaces cannot be held to {TABLE}'s WORKSPACES")
         return
     found = manifest.get("workspaces") if isinstance(manifest, dict) else None
-    if not isinstance(found, list) or not found or not all(isinstance(w, str) and w for w in found):
-        problems.append(f"::error file={MANIFEST}::workspaces must be a non-empty array of workspace paths for "
-                        f"{TABLE}'s WORKSPACES to be held to it; a bun workspace root has one")
+    if not isinstance(found, list) or not all(isinstance(w, str) and w for w in found):
+        problems.append(f"::error file={MANIFEST}::workspaces must be an array of workspace paths for "
+                        f"{TABLE}'s WORKSPACES to be held to it")
         return
     declared = [workspace.removesuffix("/") for workspace in found]
+    table = [workspace.removesuffix("/") for workspace in workspaces]
     for workspace in declared:
-        if workspace in workspaces:
+        if workspace in table:
             continue
         problems.append(f"::error file={MANIFEST}::workspaces names {workspace}, which {TABLE}'s WORKSPACES does "
                         f"not: a frozen `bun install` reads that manifest in every Bun job, so until the table "
                         f"names it no filter has to select it, and a change to the package starts no job at all")
-    for workspace in workspaces:
+    for workspace in table:
         if workspace in declared:
             continue
         problems.append(f"::error file={TABLE}::WORKSPACES names {workspace}, which the root manifest's workspaces "
