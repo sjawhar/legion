@@ -99,6 +99,8 @@ var settings = []setting{
 		Description: "GitHub App private key, as a PEM or the base64 of a PEM, which signs every App call: the web app's GitHub reads, the architecture import and webhook redelivery are off without one."},
 	{Name: "DISPATCH_APP_ID", Required: "no",
 		Description: "The GitHub App's numeric ID."},
+	{Name: "DISPATCH_REVIEWER_APP_ID", Required: "no",
+		Description: "The review App's numeric ID, the App that posts the `tester` and `architect` verdict check runs, which the CI reconcile pass compares a check run's `app.id` against; unset, the pass records no verdict check run."},
 	{Name: "DISPATCH_APP_SLUG", Required: "no",
 		Description: "The GitHub App's slug."},
 	{Name: "DISPATCH_APP_NAME", Required: "no",
@@ -151,6 +153,8 @@ var settings = []setting{
 		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_RECONCILE_AT_START", Required: "no",
 		Description: "Set to `1` so a test process runs the delivery reconcile's first pass as it starts, rather than at a random moment within its first 5 minutes, for an end-to-end test that must see a pass inside its window. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_CI_RECONCILE_INTERVAL", Default: "`5m`", Required: "no",
+		Description: "How often a test process's CI reconcile pass runs, in place of the five minutes a deployment runs it at; a positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

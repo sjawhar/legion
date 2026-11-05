@@ -875,6 +875,12 @@ A process that finds it held tries again
   Each waits the interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period, so two processes' passes drift apart rather than ticking in step.
   GitHub has no feed of what these three would miss.
 
+- The CI reconcile pass (`cireconcile.Interval`, lease `ci-reconcile`) runs every 5 minutes through `duty.RunLeased`, its first pass one interval after the start, and reads each open pull request's head of every repository `repo_projects` maps, recording every completed check run and completed check suite Envoy's listener record of that head lacks.
+  A webhook GitHub never delivered leaves a head short of a check, and a head short of a check never settles, which no notification announces either.
+  It needs NATS, whose `envoy_ci_state` bucket it binds and never creates, and the App private key; without either it is off and says so at start.
+  The pass compares a `tester` or `architect` check run's `app.id` against `DISPATCH_REVIEWER_APP_ID`, and with that variable unset records no verdict check at all.
+  Its tick records its period in `duty_passes`, so one process serves each period however many run, and `DISPATCH_TEST_CI_RECONCILE_INTERVAL` replaces the 5 minutes for an end-to-end test.
+
 - The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`, `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then sends every delivery a process that died left owed (Keyed writes, below), once a minute across the processes:
   its pass records its period in `duty_passes` like the timers above, so the other process's tick inside a period already served skips.
   No notification replaces this timer, which is why it is the one piece of maintenance that stayed one:
