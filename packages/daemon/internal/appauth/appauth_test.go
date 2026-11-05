@@ -428,7 +428,9 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := []string{`{"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`, ""}
+	// json.Marshal of a map sorts its keys, so the body is this exact text: the four read
+	// permissions a narrowed lease carries, actions among them, and nothing writable.
+	want := []string{`{"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`, ""}
 	if len(bodies) != len(want) || bodies[0] != want[0] || bodies[1] != want[1] {
 		t.Fatalf("exchange bodies = %q, want %q", bodies, want)
 	}

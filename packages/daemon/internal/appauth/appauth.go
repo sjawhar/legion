@@ -97,17 +97,36 @@ func readBody(response *http.Response, what string) ([]byte, error) {
 type Tokens interface {
 	Token(ctx context.Context, role AppRole, owner string) (Lease, error)
 	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
-	// requests and metadata read. A pane holds one for every owner of the project but its issue's.
-	// An App on token_command gets what its command's read-only release holds instead: the secrets
-	// broker's is the same three permissions.
+	// requests, Actions and metadata read. A pane holds one for every owner of the project but
+	// the one its issue's repository is under (a configured rename's two owners count as that
+	// one, GitHubCredential), and a controller holds one for every owner it has. An App on
+	// token_command gets what its command's read-only release holds instead, which the command
+	// decides: the secrets broker's is contents, metadata and pull requests read (its
+	// readOnlyPermissions), so that lease reads no Actions.
 	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
 
 // readPermissions narrows an installation token to reading a repository's contents, its pull
-// requests and its metadata: what a role needs of every repository of the project but its own
-// issue's. GitHub mints a token with the permissions a request names, each at most what the
-// installation holds.
-var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "metadata": "read"}
+// requests, its Actions runs and its metadata: what a role needs of every repository of the
+// project but its own issue's, and what a controller needs of every one of them. GitHub mints a
+// token with the permissions a request names, each at most what the installation holds.
+//
+// actions:read is here because reading a repository includes reading what its merges did: a
+// deployment check of a merge reads the push run that carries it, that run's jobs and a job's
+// log, and a role that cannot read them cannot tell a deploy that applied from one that was
+// skipped. Measured on 2026-11-04 against a private repository whose installation holds
+// actions:write: unnarrowed, actions/runs and actions/runs/{id}/jobs answered 200 and
+// actions/jobs/{id}/logs answered 302 to a signed URL that answered 200; narrowed to contents,
+// pull requests and metadata, all three answered 403 "Resource not accessible by integration".
+// The narrowing was the whole refusal, and no App
+// or installation setting was missing. It stays a read: actions:read cannot cancel, re-run or
+// dispatch a workflow, and reaches no Actions secret or variable, which are permissions of their
+// own.
+//
+// The set is the token's whole breadth and not one repository's: exchange sends permissions
+// alone, never repositories or repository_ids, so a narrowed token reaches every repository its
+// installation reaches on that owner, as its contents and pull request reads already did.
+var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "actions": "read", "metadata": "read"}
 
 // Options makes a token manager testable. The zero value uses api.github.com, http.DefaultClient,
 // the wall clock, and the daemon's own stderr for what a token_command writes there.
@@ -204,8 +223,10 @@ func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease,
 
 // ReadToken is Token for a token narrowed to readPermissions, cached under a key of its own, so an
 // owner's write and read tokens never stand in for each other. In token mode it is the command's
-// read-only release (TokenCommandReadOnly), which for the secrets broker holds contents,
-// metadata and pull requests read, as readPermissions does.
+// read-only release (TokenCommandReadOnly) instead, which for the secrets broker holds contents,
+// metadata and pull requests read: one permission short of readPermissions, so that read-only
+// lease reads no Actions. The role's own owner's lease is unaffected either way, since Token
+// asks the command for no narrowing at all.
 func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
 	return m.lease(ctx, role, owner, "read:", readPermissions)
 }

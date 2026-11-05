@@ -86,7 +86,8 @@ a set of files that binary reads, one directory per GitHub owner of the project:
 gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
 `<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
 token for the issue's repository's owner, and that App's token narrowed to reading contents, pull
-requests and metadata for every other owner — names the issue owner's directory as `GH_CONFIG_DIR`
+requests, Actions and metadata for every other owner — names the issue owner's directory as
+`GH_CONFIG_DIR`
 and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
 empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
 from its cached leases (the log lines `tmux runtime: github credential written` and `github

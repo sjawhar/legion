@@ -2575,7 +2575,7 @@ The kubelet makes the directory on first use.
 Each role's Secret, `<sandbox>-<role>-boot`, holds that role's launcher token and its gh bundle:
 for every GitHub owner of the project, `github-hosts-<owner>`, gh's `hosts.yml` carrying a GitHub App installation token under user `x-access-token`, and `github-config-<owner>`, a `config.yml` of `version: "1"`, and `github-default`, the owner of the issue's repository.
 The token for that owner is the role's App's (the implement App's for the implementer and the merger, the review App's for every other role);
-every other owner's is the same App's narrowed to reading contents, pull requests and metadata.
+every other owner's is the same App's narrowed to reading contents, pull requests, Actions and metadata.
 
 The `roles` container mounts each role `<r>`'s own volumes under its directory of `/var/run/legion/roles`:
 `/var/run/legion/roles/<r>/launcher` (volume `launcher-<r>`, read-only:
