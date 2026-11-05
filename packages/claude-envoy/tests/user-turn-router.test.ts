@@ -115,7 +115,13 @@ interface Harness {
   readonly state: UserTurnState
   readonly stateFile: string
   readonly directory: string
-  readonly replies: { readonly delivery: DispatchDelivery; readonly body?: string }[]
+  readonly replies: {
+    readonly delivery: DispatchDelivery
+    readonly body?: string
+    /** Whether the answer asked Dispatch to post it although the attempt is already answered
+     *  (`?follow_up=true`), which every answer after the first needs. */
+    readonly followUp?: boolean
+  }[]
   /** Every pick handed to the live view, every reply posted and every settings refresh, in the
    *  order they happened. */
   readonly order: string[]
@@ -156,7 +162,14 @@ async function harness(input: {
     refreshSettings: () => order.push("refresh"),
     reply: async (delivery, result) => {
       order.push(`reply:${result.body ?? result.error ?? ""}`)
-      replies.push({ delivery, ...(result.body === undefined ? {} : { body: result.body }) })
+      // `followUp` is the field an answer after the first needs; until the router carries one
+      // the read is simply absent, which is what the test below pins.
+      const asked = "followUp" in result ? result.followUp : undefined
+      replies.push({
+        delivery,
+        ...(result.body === undefined ? {} : { body: result.body }),
+        ...(asked === undefined ? {} : { followUp: asked }),
+      })
     },
     session,
     sessionId: () => SESSION,
@@ -523,6 +536,43 @@ test("a command that has not ended in time is answered that it is waiting, and i
       expect.stringContaining("/clear is still running"),
       "done at the terminal",
     ])
+  } finally {
+    held.resolve()
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// Dispatch settles a delivery attempt with the first reply it takes, and answers a second POST to
+// the same attempt by handing the stored reply back and posting nothing, unless the request asks
+// for a follow-up (`?follow_up=true`; `packages/envoy/internal/dispatch/api/message_delivery.go`,
+// and `DispatchClient.messageReply`'s own `followUp` option). So the answer that carries a slow
+// command's output - the one the waiting reply promised "follows in another reply" - has to ask
+// for it, or the person is left with the waiting reply and never gets the output. Driven live on
+// a Claude Code 2.1.310 pane: `/context` inside a turn got the waiting reply, the mod's POST of
+// the table was answered 200 with nothing inserted, and the conversation holds one reply
+// (INFRA-1026).
+test("the answer that follows a waiting reply asks Dispatch to post it", async () => {
+  const held = Promise.withResolvers<void>()
+  const mod = fakeMod({
+    "command.run": async () => {
+      await held.promise
+      return { text: "done at the terminal" }
+    },
+  })
+  const session = await harness({
+    link: mod.link,
+    accept: () => accepted("/clear"),
+    commandWaitingMs: 10,
+  })
+  try {
+    await session.router.route(frame(personSends("/clear")))
+    await waitFor(async () => session.replies.length === 1, "the waiting reply")
+    held.resolve()
+    await waitFor(async () => session.replies.length === 2, "the command's output")
+
+    // The first answer settles the attempt, so it asks for nothing; the second is the one
+    // Dispatch drops without the ask.
+    expect(session.replies.map((posted) => posted.followUp === true)).toEqual([false, true])
   } finally {
     held.resolve()
     await rm(session.directory, { recursive: true, force: true })
