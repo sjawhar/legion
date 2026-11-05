@@ -394,5 +394,5 @@ export function sessionDispatch(): DispatchClient {
   if (config === null) {
     throw new Error(`Dispatch is not configured: ${dispatch.enabled ? "" : dispatch.notice}`);
   }
-  return new DispatchClient(config.url, config.token, fetch);
+  return new DispatchClient(config.url, config.credential, fetch);
 }

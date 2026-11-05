@@ -1,0 +1,16 @@
+kind: Fixed
+body: |
+  The Go half of the broker token client drops every slash an address ends in, as the TypeScript
+  half already did, so one wire contract is read by one rule. `AGENT_SECRETS_URL` is typed by hand
+  into a unit file, a pod's environment or a shell, and one extra slash used to leave this half
+  posting `//v1/oauth/token` where the other half posts `/v1/oauth/token`: a DPoP proof's `htu` is
+  the URL the caller built, so the path the broker's own mux then cleans no longer matched the
+  proof and the trade was refused naming the credential rather than the URL an operator could fix.
+  `agent-secrets` reads `AGENT_SECRETS_URL` and `AGENT_SECRETS_APPROVE_URL` through the same one
+  helper (`brokerclient.WithoutTrailingSlashes`) that `brokerclient.New` reads its broker URL by,
+  and an address that is nothing but slashes now counts as no address at all: `brokerclient.New`
+  refuses it as "no broker URL", and every `agent-secrets` form refuses it with the message it
+  gives when the variable is unset.
+time: 2026-11-04T05:00:00.000000000Z
+custom:
+  Issue: pr2636

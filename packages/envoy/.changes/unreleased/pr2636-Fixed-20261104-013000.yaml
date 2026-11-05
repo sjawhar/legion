@@ -1,0 +1,32 @@
+kind: Fixed
+body: |
+  A person's sign-in may no longer decline the launcher credential it holds: a trade of
+  `SubjectTokenTypePerson` sending `launcher_credential=false` is refused `400 invalid_request`,
+  "A sign-in holds its credential", and nothing is recorded for it. `agent-secrets login`, its
+  only caller, reads the credential id out of the answer and refuses one without it, and the
+  sessions a sign-in enrols read that person's secrets under that credential, so a sign-in
+  holding none was a sign-in that could do nothing. A machine's own trade declines as before.
+  The revoke of a sign-in ends a token in one of two ways: `store.RevokePersonSignInTx` ends
+  every access token the person and the box key had minted when its statement began, and the
+  revoke's next statement ends, through the sign-in's credential, a token from a trade that
+  committed while the revoke waited. A declined trade's token held no credential, so the second
+  way missed it; every person's token now holds one. A test holds the first way: a revoke after
+  a sign-in's trade leaves its token `active: false`.
+
+  `legion controller start`'s one check that the controller's machine can hold a Dispatch
+  credential now declines the launcher credential (`launcher_credential=false`) and names its
+  own session directly. The check enrols no session, reads no secret, and makes a key that dies
+  with the call, so the `launcher_credentials` row and the `launcher_credential.token_login`
+  audit row it used to leave behind put a machine login on the operator's list, keyed by a
+  thumbprint nothing held afterwards, at every start.
+
+  The operate page and the revoke guide now say what a machine-login revoke does not cut off.
+  A box that proves its own identity keeps its key across restarts
+  (`~/.config/agent-secrets/identity-key.pem`), and the broker's upsert conflicts only with a
+  live row, so the box's next trade mints a new live credential bound to that same key and a
+  copy of the key file signs launcher proofs again. Cutting such a box off is three steps in one
+  order: remove the key file, restart the helper so its next trade holds a credential of a
+  subject of its own, then revoke the old login.
+time: 2026-11-04T01:30:00.000000000Z
+custom:
+  Issue: pr2636

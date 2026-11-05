@@ -6,6 +6,7 @@ import {
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
 } from "@legion/contracts"
+import { forgetBrokerSession } from "@legion/envoy-client/broker-credential"
 import {
   type ConsumerDelivery,
   type ConsumerDeliverySnapshot,
@@ -401,6 +402,7 @@ async function postDispatchReply(
 ): Promise<void> {
   const config = sessionDispatchSettings(configFile, process.env, {
     cwd: identity.directory,
+    session: () => identity.id,
   }).dispatch
   if (!config.enabled) throw new Error(config.error ?? config.notice)
   await postDeliveryReply(config, identity.id, delivery, result)
@@ -1214,6 +1216,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       throw error
     }
     identity.set(next)
+    // The last call for the old id has been made (its deregistration above; the role moves to
+    // the new id under the new id's own credential, `restoreRole`), so the key pair and
+    // renewing token it traded under go with it rather than renewing for the life of this
+    // process, which `/clear` would otherwise add one of per session.
+    forgetBrokerSession(previous)
     directSubject = nextSubject
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
@@ -1677,7 +1684,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
   // use, so a file that moved its server takes effect without a restart.
   const configFile = sessionConfigFile("claude", process.env)
-  const { dispatch, envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
+  // The session this server drives, read at every broker trade: Claude Code mints a new id on
+  // /clear and `identity` is set to it, so a token this session presents names this session.
+  const currentSessionId = (): string => identity.id
+  const { dispatch, envoy, notice } = sessionSettings(configFile, process.env, {
+    cwd: directory,
+    session: currentSessionId,
+  })
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
@@ -1778,7 +1791,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const client = createEnvoyClient({
     baseUrl: envoy.url,
     fetch: globalThis.fetch,
-    token: envoy.token,
+    credential: envoy.credential,
   })
   // INFRA-404: this process, as the listener knows it. Minted once here and sent on every
   // registration and every deregistration, so the listener can tell the entry this process made
@@ -1833,7 +1846,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         claim: () => claim?.capability(),
         // The pane's own environment and PATH's jj, and the Dispatch this session's envoy.json
         // names, which the pane's `dispatch handoff-write` wrote the record to.
-        handoffReport: paneHandoffReport(configFile, process.env, directory),
+        handoffReport: paneHandoffReport(configFile, process.env, directory, identity.id),
         branchHead: () => findPushedBranchHead({ env: process.env }),
       }
       // The request's signal aborts on the client's notifications/cancelled, which ends a wait

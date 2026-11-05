@@ -1,5 +1,11 @@
 # Changelog
 
+## [29.8.0] - 2026-11-05
+
+### Added
+
+- agent-secrets names a released secret whose value ends in a line ending, in one line on standard error before the command runs, with no part of any value in it. The value is still injected exactly as it is stored, line endings and all, because a stored secret may be several lines; but a one-line credential that ends in one is nearly always the trailing newline of whatever seeded it, and it is invisible where it is written and expensive where it is read: a caller that puts such a value straight into an HTTP header gets a rejected header, and the error reporting that can quote the whole secret. The line says to keep an ending the value is meant to have, and otherwise to store the value again with agent-secrets secret set, piping it with the ending already removed, since that form drops one final LF and no carriage return.
+
 ## [29.7.0] - 2026-11-05
 
 ### Added
