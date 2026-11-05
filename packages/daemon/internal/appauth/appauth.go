@@ -99,18 +99,24 @@ type Tokens interface {
 	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
 	// requests, Actions and metadata read. A pane holds one for every owner of the project but
 	// the one its issue's repository is under (a configured rename's two owners count as that
-	// one, GitHubCredential), and a controller holds one for every owner it has. An App on
-	// token_command gets what its command's read-only release holds instead, which the command
-	// decides: the secrets broker's is the same four (its readOnlyPermissions). Either way an
-	// installation whose account has not granted the App Actions gets the other three rather
-	// than nothing (optionalReadPermission).
+	// one, GitHubCredential), a controller holds one for every owner it has, and the Kubernetes
+	// runtime's provisioning token is one of the implement App for the issue's own owner, which
+	// every issue pod's workspace-fetch and every repository cache clones with (implementTokens,
+	// internal/daemon); there alone an installation that refuses the narrowing is served the
+	// owner's own token instead (ErrPermissionsRefused). An App on token_command gets what its
+	// command's read-only release holds instead, which the command decides: the secrets broker's
+	// is the same four (its readOnlyPermissions). Either way an installation whose account has
+	// not granted the App Actions gets the other three rather than nothing
+	// (optionalReadPermission).
 	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
 
 // readPermissions narrows an installation token to reading a repository's contents, its pull
 // requests, its Actions runs and its metadata: what a role needs of every repository of the
-// project but its own issue's, and what a controller needs of every one of them. GitHub mints a
-// token with the permissions a request names, each at most what the installation holds.
+// project but its own issue's, what a controller needs of every one of them, and what the
+// provisioning token takes of the issue's own repository, which a clone, a fetch and a repository
+// cache only read (implementTokens, internal/daemon). GitHub mints a token with the permissions a
+// request names, each at most what the installation holds.
 //
 // actions:read is here because reading a repository includes reading what its merges did: a
 // deployment check of a merge reads the push run that carries it, that run's jobs and a job's

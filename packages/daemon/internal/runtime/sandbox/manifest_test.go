@@ -1039,11 +1039,12 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // its containers reaches the token at all.
 //
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
-// an implement role now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
-// review App's. What the fetch container's boundary still keeps is that no review role ever holds
-// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
-// from the App that made it.
+// an implement role now holds the implement App's token — for the issue's owner the App's own
+// installation token, which writes, where the provisioning token is that same App narrowed to
+// reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
+// (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
+// keeps is that no review role ever holds the implement App's token, which is what lets the
+// daemon's fix-attempt counting read a push's App from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
