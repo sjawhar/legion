@@ -1391,7 +1391,7 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
 	m.sessionGone()
-	if err := m.interrupted(ctx, "the process died in the task's turn"); err != nil {
+	if err := m.interrupted(ctx, "the process died in the task's turn", observation.OutOfMemory); err != nil {
 		return err
 	}
 	if m.held != nil {

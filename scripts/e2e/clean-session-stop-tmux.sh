@@ -502,6 +502,30 @@ daemon_said() {
 }
 daemon_said_at_least() { [ "$(daemon_said "$1")" -ge "$2" ]; }
 
+# clean_stop_recorded SESSION reports whether the daemon acted on SESSION's death, by either of the
+# two lines its clean stop can end in, and leaves the one it found in stop_record.
+#
+# The first is the stop it made. The second is the stop the listener refused because the
+# registration was written after it: a heartbeat that landed under a second before the probe judged
+# the process gone, inside cleanSessionStopSkewAllowance, after which the session's own plugin
+# deregisters it instead. Both are triggered by the one kill, so which of them wins is a race this
+# change admits rather than a fact it promises, and a check that pins either is a coin flip. What
+# the clause claims is that the session is gone well inside the horizon, and gone_within above is
+# what measures that; this asks only that the daemon saw the death and acted on it, which is what
+# keeps the measurement from passing on the reaper (dispatch://INFRA-392).
+stop_record=
+clean_stop_recorded() {
+  local session=$1 line
+  for line in "the Envoy session of a role whose process is gone was stopped" \
+    "it was written after the stop"; do
+    if grep -F -- "$line" "$evidence/logs/daemon.log" 2>/dev/null | grep -qF -- "$session"; then
+      stop_record=$line
+      return 0
+    fi
+  done
+  return 1
+}
+
 # spawn_claim ISSUE ROLE launches one claim of the run's tree and prints its token.
 spawn_claim() {
   local spawned
@@ -811,14 +835,11 @@ check_clean_stop_of_an_omp_role() {
     refuse "the architect pane runs no omp under a worker shim (its ancestry is above)" || return 1
   note "SIGKILLed the pane's omp process at $killed"
   gone_within "$session" "$killed" "$clean_stop_limit_seconds" || return 1
-  # The daemon says it was its own stop, not the horizon: the listener's reaper could not have run
-  # inside ten seconds of a record whose horizon is ninety.
-  wait_until 30 "the daemon to log the clean stop it made" \
-    daemon_said_at_least '"the Envoy session of a role whose process is gone was stopped"' 1 || return 1
-  grep -F '"the Envoy session of a role whose process is gone was stopped"' "$evidence/logs/daemon.log" |
-    grep -qF "$session" ||
-    refuse "the daemon logged a clean stop, but not for $session" || return 1
-  note "the daemon logged the clean stop of $session"
+  # The daemon acted on this death, so the ten seconds above are its stop and not the horizon: the
+  # listener's reaper could not have run inside ten seconds of a record whose horizon is ninety.
+  wait_until 30 "the daemon to record its clean stop of $session" \
+    clean_stop_recorded "$session" || return 1
+  note "the daemon recorded the clean stop of $session: $stop_record"
 }
 
 # ---- 2. a Claude Code role, killed under its bridge ------------------------------------------------------
@@ -844,10 +865,9 @@ check_clean_stop_of_a_claude_role() {
     refuse "the implementer pane runs no claude under a worker shim (its ancestry is above)" || return 1
   note "SIGKILLed the pane's claude process at $killed"
   gone_within "$session" "$killed" "$clean_stop_limit_seconds" || return 1
-  grep -F '"the Envoy session of a role whose process is gone was stopped"' "$evidence/logs/daemon.log" |
-    grep -qF "$session" ||
-    refuse "the daemon logged no clean stop for the Claude Code session $session" || return 1
-  note "the daemon logged the clean stop of $session"
+  wait_until 30 "the daemon to record its clean stop of $session" \
+    clean_stop_recorded "$session" || return 1
+  note "the daemon recorded the clean stop of $session: $stop_record"
 }
 
 # ---- 3. the control: a kill the daemon never sees --------------------------------------------------------
