@@ -74,6 +74,9 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 // A refusing holder's query text keeps the statement's shape and names and loses every value a
 // row could have put there: literals of every quoting, numbers with what follows them unspaced,
 // and comments. A parameter's number stays, and a text cut off inside a literal loses the rest.
+// The holder session owns standard_conforming_strings, so a literal whose backslash that setting
+// lets escape the quote after it is taken as far as either reading of it runs: with the setting
+// off Postgres read the longer literal, and no part of that value may survive.
 func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 	for in, want := range map[string]string{
 		"select id from asks where id = $1 for no key update":                   "select id from asks where id = $1 for no key update",
@@ -82,6 +85,13 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		"select 1.5e3, 0x1F, -7 -- ghp_COMMENT\n/* ghp_BLOCK */ from t":         "select ?, ?, -? from t",
 		"insert into asks (body) values ('cut off by track_activity_quer":       "insert into asks (body) values (?",
 		"  select\n\t  1  ": "select ?",
+		// A backslash before the closing quote: with standard_conforming_strings off the literal
+		// runs on to the next quote, and the redaction covers it either way, shape and all. Two
+		// backslashes escape each other under that reading too, so the literal ends where it
+		// reads as ending with the setting on, and the row after it is a value of its own.
+		"update asks set body = 'a\\' , ghp_SECRET , '  where id = 1":      "update asks set body = ? where id = ?",
+		"update asks set body = 'a\\\\', note = 'ghp_SECOND' where id = 7": "update asks set body = ?, note = ? where id = ?",
+		"select n'a\\' , ghp_NCHAR , ' from t":                             "select ? from t",
 	} {
 		if got := redactedQuery(in); got != want {
 			t.Errorf("redactedQuery(%q) = %q, want %q", in, got, want)
