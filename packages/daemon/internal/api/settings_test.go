@@ -321,7 +321,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		}
 	}
 
-	// (d) No null anywhere: the plugin's strict reader refuses one.
+	// (d) No null anywhere: the plugin's reader refuses one.
 	if bytes.Contains(encoded, []byte("null")) {
 		t.Errorf("settings carry null: %s", encoded)
 	}

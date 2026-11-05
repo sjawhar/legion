@@ -519,8 +519,9 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 
 // stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
 // the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
-// record the plugin contract each registration declared. A plugin reads the state with a strict
-// schema and refuses the whole body for one key it does not know, and an update round serves a
+// record the plugin contract each registration declared. A plugin older than INFRA-1048 — which is
+// who this function is kept for — reads the state with a strict schema and refuses the whole body
+// for one key it does not know, where today's plugin strips one; and an update round serves a
 // claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
 // whose claims record a contract below supervise.PodUpdateContract, the contract that added
 // `updateRound` and `updateHead` to the claim views, is served the state without them

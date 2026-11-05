@@ -798,8 +798,9 @@ func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) str
 }
 
 // strandedSuspenders is who suspended each stranded claim, which the state body does not carry:
-// every plugin parses that body with the strict schema of its own contract, so a key added to it
-// refuses the whole state in a session the daemon has not relaunched (api.StrandedClaim). The
+// every plugin parses that body with the schema of its own contract, so a key added to it refuses
+// the whole state in a session whose plugin predates INFRA-1048 and that the daemon has not
+// relaunched, and is dropped by every plugin after it (api.StrandedClaim). The
 // operator claim routes serve it, and this reads them with the bearer --operator-token-file
 // names, on the daemon op already names. Without that flag, and when the daemon refuses the
 // bearer or answers nothing, the lookup is empty and every stranded claim reads as the plain

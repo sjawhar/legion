@@ -18,13 +18,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
 
 // goldenPath is the cross-language pin: Go writes the wire shape, and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict zod schema the
-// plugin reads with. Go is the source of truth; the fixture is how the schema is held to it.
+// `packages/contracts/src/legion-api.test.ts` parses it through the zod schema the plugin reads
+// with and holds the parse equal to the file, so a Go field with no zod line is named there. Go
+// is the source of truth; the fixture is how the schema is held to it.
 func goldenPath(name string) string {
 	return filepath.Join("..", "..", "..", "contracts", "fixtures", "daemon-api", name)
 }
@@ -434,12 +436,14 @@ func TestStateGolden(t *testing.T) {
 	golden(t, "state.json", populatedState(t))
 }
 
-// Every plugin parses the state with one strict schema of its own contract, and a Kubernetes
-// deployment relaunches no stale session (INFRA-945 spec R10), so a session on the contract
-// before this one reads this daemon's state for as long as its pod lives: a key added to a
-// session-facing body refuses the whole of it. `suspendedBy` is the key this change was tempted
-// to add, and it belongs to the operator claim routes alone; the guard beside
-// `legion-api.test.ts`'s schema tests holds the same property on the schema side.
+// Every plugin parses the state with the schema of the contract it was built at, and a
+// Kubernetes deployment relaunches no stale session (INFRA-945 spec R10), so a session on the
+// contract before this one reads this daemon's state for as long as its pod lives: a key added
+// to a session-facing body refuses the whole of it at every plugin whose answer side predates
+// INFRA-1048, and is dropped at every plugin after it, which loses the field rather than the
+// state. `suspendedBy` is the key this change was tempted to add, and it belongs to the
+// operator claim routes alone; the guard beside `legion-api.test.ts`'s schema tests holds the
+// same property on the schema side.
 func TestNoSessionFacingBodyCarriesSuspendedBy(t *testing.T) {
 	// The body where the key does live, so a guard over nothing cannot pass for a clean one.
 	operator, err := json.Marshal(OperatorClaims{Claims: []OperatorClaim{
@@ -493,9 +497,9 @@ func TestStateStage3Golden(t *testing.T) {
 }
 
 // An operator's claim on an issue the workflow does not record is listed for the claim's sake,
-// and says so rather than leaving its phase and status empty: an empty phase refused the whole
-// document at every strict client, over a row that is a legitimate state. internal/projection's
-// own test holds the producer to these values.
+// and says so rather than leaving its phase and status empty: an empty phase is no value of the
+// phase enum, so it refuses the whole document, over a row that is a legitimate state.
+// internal/projection's own test holds the producer to these values.
 func TestStateOperatorClaimGolden(t *testing.T) {
 	golden(t, "state-operator-claim.json", State{
 		Daemon: DaemonInfo{
@@ -530,8 +534,8 @@ func TestStateOperatorClaimGolden(t *testing.T) {
 }
 
 // golden pins one response's wire shape: Go writes it (`-update`), and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema of the
-// response it is. A fixture that differs from what Go now writes is stale.
+// `packages/contracts/src/legion-api.test.ts` parses it through the schema of the response it is
+// and holds the parse equal to the file. A fixture that differs from what Go now writes is stale.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()
 	encoded, err := json.MarshalIndent(value, "", "  ")
@@ -610,9 +614,51 @@ func TestReadyForUpdateRequestGolden(t *testing.T) {
 	})
 }
 
+// The release records a pod reads of its deployment's idle release, built through
+// releaseRecordsBody from the store's own rows, so the fixture is what the route writes rather
+// than a literal. The store's `Project` is no field of the wire — the route answers one
+// project's records — so the rows carry only what is served.
+//
+// Two rows of each list, because one row of each pins less than the shape:
+//   - the releases are a release that suspended two roles and saved a bundle, and one whose
+//     stops suspended no claim and whose workspace held nothing unpushed (recordPodRelease
+//     counts only the claims this release's own stops suspended, and the store reads an empty
+//     `roles` column back as none): `roles` is `[]` and never `null`, and `bundleBytes` is 0
+//     rather than absent;
+//   - the resumes are a wake whose pod was Ready and whose role took its first turn, which is
+//     the row that fills both optional stamps, and a wake of a pod with no release row recorded
+//     for it (`release` is 0) that went ten minutes with no turn, so it is `stuck` and its
+//     `firstTurnAt` is left out until something observes it;
+//   - the holds are a background-work streak over eleven passes with the kinds its session
+//     reported in `detail`, and a teardown's overtaken hold, which reads a hold and not the view
+//     behind it and so carries no detail at all (outbox.recordPodHold).
+func TestReleaseRecordsResponseGolden(t *testing.T) {
+	released := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	golden(t, "release-records.json", releaseRecordsBody(store.PodReleaseRecords{
+		Releases: []store.PodRelease{
+			{ID: 101, Issue: "LEGION-208", Generation: 3, Roles: []string{"implementer", "tester"},
+				At: released, BundleBytes: 4096},
+			{ID: 102, Issue: "LEGION-209", Generation: 1, At: released.Add(15 * time.Minute)},
+		},
+		Resumes: []store.PodResume{
+			{ID: 201, Release: 101, Issue: "LEGION-208", Role: "implementer", Kind: "delivery",
+				At: released.Add(30 * time.Minute), PodReadyAt: released.Add(31 * time.Minute),
+				FirstTurnAt: released.Add(32 * time.Minute)},
+			{ID: 202, Issue: "LEGION-207", Role: "architect", Kind: "backstop",
+				At: released.Add(45 * time.Minute), PodReadyAt: released.Add(46 * time.Minute), Stuck: true},
+		},
+		Holds: []store.PodHold{
+			{ID: 301, Issue: "LEGION-210", Reason: "background_work", Detail: "subagent,async-job",
+				FirstAt: released.Add(time.Hour), At: released.Add(70 * time.Minute), Passes: 11},
+			{ID: 302, Issue: "LEGION-211", Reason: "overtaken",
+				FirstAt: released.Add(65 * time.Minute), At: released.Add(65 * time.Minute), Passes: 1},
+		},
+	}))
+}
+
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
-// proved every row has `"open": []`, not `null`, under the plugin's strict reader.
+// proved every row has `"open": []`, not `null`, under the plugin's reader.
 func TestCapabilityReportViewPartitionsTheRowsAndNeverMarshalsNull(t *testing.T) {
 	measured := time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC)
 	report := capabilities.Report{
@@ -766,7 +812,7 @@ func TestOperatorClaimsGolden(t *testing.T) {
 }
 
 // An issue the daemon has admitted but not yet given a worker still has to answer the plugin's
-// strict reader: `workers` is an object, never `null`.
+// reader: `workers` is an object, never `null`.
 func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
 	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: phase.Held})
 	if err != nil {

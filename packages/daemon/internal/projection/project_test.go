@@ -177,8 +177,9 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 		t.Fatalf("operator-spawned implementer = %#v, want %#v", got, want)
 	}
 	// The row is listed for the claim's sake and says the workflow does not record its issue.
-	// Empty strings here refused the whole state document at every strict client — the contract's
-	// own parse of that document is packages/contracts' state-operator-claim fixture.
+	// Empty strings here refuse the whole state document at every client — no phase enum value is
+	// empty — and the contract's own parse of that document is packages/contracts'
+	// state-operator-claim fixture.
 	if view.Phase != api.Unrecorded || view.Status != string(api.Unrecorded) {
 		t.Fatalf("operator-spawned issue = phase %q status %q, want both %q", view.Phase, view.Status, api.Unrecorded)
 	}
