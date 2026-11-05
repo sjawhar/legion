@@ -494,14 +494,26 @@ func TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			g := newRig(t, nil)
+			// Two bounds decide this row, and both were too near its own work. The replacement
+			// runs in a goroutine while the row reads, and each of its waits (awaitPodGone, then
+			// awaitNewPod) is bounded by BootTimeout, which the rig and testOptions both set to
+			// two seconds: the row's reading has to finish inside that or the wait it must end
+			// gives up first. Bounded by the test's own deadline instead, as suspendDelay below
+			// already is, those waits end on their events and only a hang reaches the bound
+			// (INFRA-985). Both runtimes get it: the replacement runs on the second one, which
+			// builds its own Options.
+			longBoot := func(o *Options) { o.BootTimeout = time.Minute }
+			g := newRig(t, nil, withOptions(longBoot))
 			// The pod stays terminating until this test ends it, which is the window the reading
 			// is taken in: the suspension has landed and the pod has not ended.
 			g.suspendDelay = time.Minute
 			spec := workerSpec(t)
 			loc := g.spawn(spec)
 			sandboxName := loc.Sandbox.Name
-			r2 := secondRuntime(t, g, tc.moved)()
+			r2 := secondRuntime(t, g, func(o *Options) {
+				tc.moved(o)
+				longBoot(o)
+			})()
 			g.connectRunning(spec.Claim, loc.Sandbox.Generation)
 			g.eventually("the role's launcher to report its child to the restarted daemon", func() bool {
 				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)

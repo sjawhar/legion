@@ -653,15 +653,24 @@ func (g *rig) control() {
 			pod := g.pod(s.Name)
 			owned := ownedBy(pod, s.UID)
 			switch {
+			case owned && pod.DeletionTimestamp != nil:
+				// A pod the cluster is terminating goes once its grace has passed, whatever its
+				// Sandbox says by then. Only the suspended branch below used to remove one, so a
+				// pod still terminating when its Sandbox came back to Running was in a state this
+				// controller could not leave: it neither removed that pod nor made a replacement,
+				// since a replacement needs none to be there. A launch whose own wait for the pod
+				// to go accepts a terminating one - which production's does, because in a cluster
+				// such a pod is on its way out - then waited for a pod this controller was never
+				// going to create. That is what red this package's pod-drift row about 4 times in
+				// 100 under load, at every bound it was given, with the controller reading
+				// `generation 3, Running, pod uid-pod-13 terminating` for ever (INFRA-985).
+				if started, ok := terminating[pod.UID]; ok && time.Since(started) >= g.suspendDelay {
+					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
+				}
 			case s.mode() == modeSuspended && owned:
-				started, ok := terminating[pod.UID]
-				if !ok {
+				if _, ok := terminating[pod.UID]; !ok {
 					terminating[pod.UID] = time.Now()
 					g.update(pod, func(p *corev1.Pod) { now := metav1.Now(); p.DeletionTimestamp = &now })
-					continue
-				}
-				if time.Since(started) >= g.suspendDelay {
-					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
 				}
 			case s.mode() == modeRunning && pod == nil && !g.hold.Load():
 				g.createPod(s)
