@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,6 +125,94 @@ func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
 	var missing *missingForeignFlagError
 	if !errors.As(err, &missing) || missing.Flag != "-listener" {
 		t.Fatalf("refusal %v, want -listener named", err)
+	}
+}
+
+// credentialFiles is every endpoint flag of a foreign run, with the three that carry a secret
+// given as files alone. Each file's content ends in white space, as a file written with printf
+// does (vm/vm.sh writes these on the machine the load runs from).
+func credentialFiles(t *testing.T) endpointFlags {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	f := foreignFlags()
+	f.token, f.listenerToken, f.pg = "", "", ""
+	f.tokenFile = write("token", "cluster-agent-token\n")
+	f.listenerTokenFile = write("listener-token", "cluster-listener-token \t\n")
+	f.pgFile = write("pg", "postgres://postgres:pw@db.example:5432/dispatch\n\n")
+	return f
+}
+
+// TestGuardReadsCredentialFiles: each credential that carries a secret is the content of the
+// file its -…-file flag names, trailing white space trimmed, and the file form alone satisfies
+// -allow-foreign, so a caller gives the three on no command line at all.
+func TestGuardReadsCredentialFiles(t *testing.T) {
+	isolatePG(t)
+	e, err := resolveEndpoints(credentialFiles(t), testStack())
+	if err != nil {
+		t.Fatalf("a foreign run given its three credentials as files was refused: %v", err)
+	}
+	if e.token != "cluster-agent-token" || e.listenerToken != "cluster-listener-token" ||
+		e.pg != "postgres://postgres:pw@db.example:5432/dispatch" {
+		t.Fatalf("endpoints %+v: want each credential its file's content, trailing white space trimmed", e)
+	}
+}
+
+func TestGuardRefusesBothCredentialForms(t *testing.T) {
+	isolatePG(t)
+	setters := map[string]func(*endpointFlags){
+		"-token":          func(f *endpointFlags) { f.token = "cluster-agent-token" },
+		"-listener-token": func(f *endpointFlags) { f.listenerToken = "cluster-listener-token" },
+		"-pg":             func(f *endpointFlags) { f.pg = "postgres://postgres:pw@db.example:5432/dispatch" },
+	}
+	for flag, set := range setters {
+		flags := credentialFiles(t)
+		set(&flags)
+		_, err := resolveEndpoints(flags, testStack())
+		var both *bothCredentialFormsError
+		if !errors.As(err, &both) {
+			t.Fatalf("%s given with its file too: not refused as one credential in two forms: %v", flag, err)
+		}
+		if both.Flag != flag || both.FileFlag != flag+"-file" {
+			t.Errorf("refusal names %s and %s, want %s and %s-file", both.Flag, both.FileFlag, flag, flag)
+		}
+	}
+}
+
+func TestGuardRefusesAnUnusableCredentialFile(t *testing.T) {
+	isolatePG(t)
+	absent := filepath.Join(t.TempDir(), "absent-credential")
+	setters := map[string]func(*endpointFlags){
+		"-token-file":          func(f *endpointFlags) { f.tokenFile = absent },
+		"-listener-token-file": func(f *endpointFlags) { f.listenerTokenFile = absent },
+		"-pg-file":             func(f *endpointFlags) { f.pgFile = absent },
+	}
+	for flag, set := range setters {
+		flags := credentialFiles(t)
+		set(&flags)
+		_, err := resolveEndpoints(flags, testStack())
+		if err == nil || !strings.Contains(err.Error(), flag) || !strings.Contains(err.Error(), absent) {
+			t.Errorf("%s naming a file that is not there: refusal %v, want one naming the flag and the path", flag, err)
+		}
+	}
+	// A file of white space holds no credential. It is refused by name here rather than left to
+	// -allow-foreign, which would report the flag as one nobody gave.
+	empty := filepath.Join(t.TempDir(), "empty-credential")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flags := credentialFiles(t)
+	flags.tokenFile = empty
+	_, err := resolveEndpoints(flags, testStack())
+	if err == nil || !strings.Contains(err.Error(), "-token-file") || !strings.Contains(err.Error(), empty) {
+		t.Errorf("an empty -token-file: refusal %v, want one naming the flag and the path", err)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -111,13 +112,16 @@ type endpoints struct {
 
 // endpointFlags are the endpoint flags seed and run share. Each defaults empty, so the stack's
 // value applies; one that differs from it is refused unless allowForeign is set, and then every
-// one is required.
+// one is required -- by its own flag or, for the three that carry a secret, by the -…-file form
+// of it (readCredentialFiles).
 type endpointFlags struct {
 	stack                                   string
 	url, listener, nats, natsMon, pprof, pg string
 	token, listenerToken                    string
-	natsServerName                          string
-	allowForeign                            bool
+	// The file forms of the three credential flags: the file's content is the value.
+	tokenFile, listenerTokenFile, pgFile string
+	natsServerName                       string
+	allowForeign                         bool
 }
 
 func (f *endpointFlags) register(fs *flag.FlagSet) {
@@ -130,8 +134,61 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.pg, "pg", "", "direct Postgres URL of the dispatch database (default: the stack's)")
 	fs.StringVar(&f.token, "token", "", "Dispatch agent bearer (default: the stack's)")
 	fs.StringVar(&f.listenerToken, "listener-token", "", "listener bearer (default: the stack's)")
+	fs.StringVar(&f.pgFile, "pg-file", "", "file holding the -pg value, so no password reaches the command line")
+	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the -token value, so no token reaches the command line")
+	fs.StringVar(&f.listenerTokenFile, "listener-token-file", "", "file holding the -listener-token value, so no token reaches the command line")
 	fs.StringVar(&f.natsServerName, "nats-server-name", "", "with -allow-foreign: the NATS server_name to expect (empty skips the check)")
 	fs.BoolVar(&f.allowForeign, "allow-foreign", false, "allow endpoint flags that differ from stack.json (another stack, such as a cluster copy)")
+}
+
+// readCredentialFiles replaces each credential flag's value with its file's content, trailing
+// white space trimmed, so that a file written with a final newline holds what the credential is.
+// The three credential flags are the ones that carry a secret: the Dispatch agent token, the
+// listener token and the Postgres URL with its password. Every argument of every process is
+// readable by anything that can list processes (`ps -eo args`), here and on any machine an ssh
+// carries the command to, so a caller that can write a file of its own gives the file form:
+// vm/vm.sh writes one of mode 600 on the machine the load runs from, as it writes every
+// container's settings.
+//
+// A credential given in both forms is refused: which was meant cannot be known, and the two may
+// name different things. A file that cannot be read, or that holds nothing, is refused by its
+// flag and its path, before the first connection, as every other input of this package is.
+func (f *endpointFlags) readCredentialFiles() error {
+	for _, c := range []struct {
+		flag, fileFlag, path string
+		value                *string
+	}{
+		{"-token", "-token-file", f.tokenFile, &f.token},
+		{"-listener-token", "-listener-token-file", f.listenerTokenFile, &f.listenerToken},
+		{"-pg", "-pg-file", f.pgFile, &f.pg},
+	} {
+		if c.path == "" {
+			continue
+		}
+		if *c.value != "" {
+			return &bothCredentialFormsError{Flag: c.flag, FileFlag: c.fileFlag}
+		}
+		b, err := os.ReadFile(c.path)
+		if err != nil {
+			// The error names the path alone; nothing of a file that was read is in it.
+			return fmt.Errorf("%s: %w", c.fileFlag, err)
+		}
+		v := strings.TrimRightFunc(string(b), unicode.IsSpace)
+		if v == "" {
+			return fmt.Errorf("%s %s holds no credential: the file is empty", c.fileFlag, c.path)
+		}
+		*c.value = v
+	}
+	return nil
+}
+
+// bothCredentialFormsError refuses a credential given as a value and as a file at once.
+type bothCredentialFormsError struct {
+	Flag, FileFlag string
+}
+
+func (e *bothCredentialFormsError) Error() string {
+	return fmt.Sprintf("%s and %s both give the same credential; pass one of them", e.Flag, e.FileFlag)
 }
 
 // tokenFlags are the endpoint flags whose values are bearer tokens, and urlFlags those whose values
@@ -298,10 +355,14 @@ func (f endpointFlags) resolve() (endpoints, error) {
 
 // resolveEndpoints takes every endpoint from st, refusing a flag that differs from it, unless
 // f.allowForeign: then every endpoint flag is required, none falls back to st, and pids stay
-// empty.
+// empty. A credential given as a file is read first (readCredentialFiles), so the three flags
+// that carry a secret are each given by one form or the other.
 func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	if st == nil && !f.allowForeign {
 		return endpoints{}, fmt.Errorf("no stack.json, and -allow-foreign is not set")
+	}
+	if err := f.readCredentialFiles(); err != nil {
+		return endpoints{}, err
 	}
 	var e endpoints
 	// Under -allow-foreign without stack.json, the stack values below are never used.
@@ -312,7 +373,8 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	}
 	local := func(scheme string, port int) string { return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port) }
 	// The endpoint and token flags, in the order the guard checks them: each one's name, the value
-	// given, the stack's value and the endpoint it sets.
+	// given (a credential's, from its file when it was given as one), the stack's value and the
+	// endpoint it sets.
 	fields := []struct {
 		flag, given, stack string
 		dst                *string

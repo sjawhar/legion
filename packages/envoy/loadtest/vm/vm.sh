@@ -109,6 +109,20 @@
 # can list and no file the run collects. .vms.<name> therefore names an address and a Compute
 # instance alone: the user is OS Login's and no file names it.
 #
+# No credential of the deployment is an argument either, for the same reason: `ps -eo args` on
+# this pod, and on any machine an ssh carries a command to, lists every argument of every
+# process. Every container's settings go in an environment file of mode 600 on its own machine
+# (container_write_env); loadgen's three that carry a secret -- the agent token, the listener
+# token and the Postgres URL with its password -- go in files of mode 600 under the run's own
+# directory on the load machine and are given as -token-file, -listener-token-file and -pg-file
+# (endpoints, remote_secret, guard.go); psql takes the instance's password in a passfile of its
+# own (psql_at). Each of those files is written over ssh's standard input (put_file).
+#
+# Two credentials are arguments all the same, both for want of a file form of the command that
+# takes them: loadgen stub-embed takes the embedder's api-key as -key (stub_embed_start), and
+# the seed phases that run on this pod -- loop-seed-check, loop-seed-export and seed-finish --
+# take -pg, and seed-finish -token, which are flags of their own commands and not the guard's.
+#
 # Dispatch's identity is DISPATCH_IDENTITY=header:X-Dispatch-User with
 # DISPATCH_IDENTITY_HEADER_TRUSTED=1 and a shared agent token, as stack.sh's start_dispatch sets
 # them: the deployment has no front door, no Tailscale and no OAuth, and the report says so. Its
@@ -482,11 +496,21 @@ cert_path() { cfg_valid path .paths.cert "$(remote_root)/stub-embed.pem"; }
 remote_loadgen() { cfg_valid path .paths.remote_loadgen "$(remote_root)/loadgen"; }
 remote_work() { cfg_valid path .paths.remote_work "$(remote_root)/work"; }
 
-# pg_url DATABASE: the direct Postgres URL of one database on the instance, which loadgen takes
-# as -pg and psql as its connection string.
+# pg_url DATABASE: the direct Postgres URL of one database on the instance, its password in it.
+# It is what loadgen reads out of its -pg-file, and it reaches no command line (endpoints).
 pg_url() {
-  printf 'postgres://%s:%s@%s:%s/%s?sslmode=%s\n' \
-    "$(cfg .cloudsql.user)" "$(cfg .cloudsql.password)" "$(cfg_valid host .cloudsql.host)" \
+  printf 'postgres://%s:%s@%s\n' "$(cfg .cloudsql.user)" "$(cfg .cloudsql.password)" "$(pg_url_tail "$1")"
+}
+
+# pg_url_bare DATABASE: the same URL with no password in it, which is what psql is given on its
+# command line; the password reaches psql in a passfile of its own (psql_at).
+pg_url_bare() {
+  printf 'postgres://%s@%s\n' "$(cfg .cloudsql.user)" "$(pg_url_tail "$1")"
+}
+
+# pg_url_tail DATABASE: what both forms share, the host, the port, the database and the mode.
+pg_url_tail() {
+  printf '%s:%s/%s?sslmode=%s\n' "$(cfg_valid host .cloudsql.host)" \
     "$(cfg_valid port .cloudsql.port 5432)" "$1" "$(cfg .cloudsql.sslmode require)"
 }
 
@@ -924,9 +948,34 @@ stub_embed_stop() {
 
 # ---- Postgres -----------------------------------------------------------------------------------
 
-# psql_at DATABASE SQL: one statement on the instance, its result bare on standard output.
+# psql_at DATABASE SQL: one statement on the instance, its result bare on standard output. The
+# URL it is given holds no password: libpq reads that out of the passfile below, which lives for
+# this one call, so the instance's password is on no command line of this pod.
 psql_at() {
-  psql "$(pg_url "$1")" -v ON_ERROR_STOP=1 -Atq -c "$2"
+  local passfile rc=0
+  passfile=$(pg_passfile)
+  PGPASSFILE=$passfile psql "$(pg_url_bare "$1")" -v ON_ERROR_STOP=1 -Atq -c "$2" || rc=$?
+  rm -f -- "$passfile"
+  return "$rc"
+}
+
+# pg_passfile: a passfile of this moment holding the instance's password, its path printed. It
+# is libpq's own format, hostname:port:database:username:password with * for any of the first
+# four, and a ':' or a '\' of the user or the password is escaped as that format requires. It is
+# mode 600 because libpq reads no passfile that anyone but its owner can.
+pg_passfile() {
+  local user password path
+  user=$(pg_passfile_field "$(cfg .cloudsql.user)")
+  password=$(pg_passfile_field "$(cfg .cloudsql.password)")
+  path=$(mktemp "$RUN_DIR/.pgpass.XXXXXX") || die "making a passfile in $RUN_DIR failed"
+  printf '*:*:*:%s:%s\n' "$user" "$password" >"$path" || die "writing the passfile $path failed"
+  printf '%s\n' "$path"
+}
+
+# pg_passfile_field VALUE: VALUE as one field of a passfile line.
+pg_passfile_field() {
+  local v=${1//\\/\\\\}
+  printf '%s\n' "${v//:/\\:}"
 }
 
 # db_exists NAME: the instance holds that database.
@@ -1020,14 +1069,41 @@ loadgen_bin() {
 # profiling endpoint loadgen is given: the deployment file's own by default, and a step's tunnel
 # on the load machine's loopback while a step runs, since that is where loadgen run runs and the
 # profiling port answers on the loopback of Dispatch's own machine alone.
+#
+# The three endpoints that carry a secret -- the agent token, the listener token and the
+# Postgres URL with its password -- are given as files and not as values: a value would be an
+# argument of loadgen on the load machine and of the ssh that carries it there, which
+# `ps -eo args` hands to anything that can list processes on either machine
+# (dispatch://INFRA-988).
 endpoints() {
+  local token_file listener_token_file pg_file
+  token_file=$(remote_secret dispatch-token "$(cfg .secrets.dispatch_token)")
+  listener_token_file=$(remote_secret listener-token "$(cfg .secrets.listener_token)")
+  pg_file=$(remote_secret pg-url "$(pg_url "$(cfg .cloudsql.database dispatch)")")
   ENDPOINTS=(
     -allow-foreign
-    -url "$(dispatch_url)" -token "$(cfg .secrets.dispatch_token)"
-    -listener "$(listener_url)" -listener-token "$(cfg .secrets.listener_token)"
+    -url "$(dispatch_url)" -token-file "$token_file"
+    -listener "$(listener_url)" -listener-token-file "$listener_token_file"
     -nats "$(nats_url)" -nats-mon "$(nats_mon_url)"
-    -pprof "${1:-$(pprof_url)}" -pg "$(pg_url "$(cfg .cloudsql.database dispatch)")"
+    -pprof "${1:-$(pprof_url)}" -pg-file "$pg_file"
   )
+}
+
+# remote_run: the run's own directory on the load machine, where its credential files live.
+# Nothing a step copies back is under it: a step's files are <remote_work>/steps/<name>.
+remote_run() { printf '%s/runs/%s\n' "$(remote_work)" "$RUN"; }
+
+# remote_secret NAME VALUE: VALUE in NAME under the run's own directory on the load machine,
+# mode 600, its path there printed. put_file sends it over ssh's standard input, so it reaches
+# no command line on the way either, and the copy this pod writes it from is removed at once --
+# which is how every container's environment file is written (container_write_env).
+remote_secret() {
+  local name=$1 value=$2 tmp
+  tmp=$(mktemp "$RUN_DIR/.secret.XXXXXX") || die "making a credential file in $RUN_DIR failed"
+  printf '%s\n' "$value" >"$tmp" || die "writing the credential file $tmp failed"
+  put_file "$LOAD_VM" "$tmp" "$(remote_run)/$name"
+  rm -f -- "$tmp"
+  printf '%s\n' "$(remote_run)/$name"
 }
 
 # ---- the remote root programs are executed from ---------------------------------------------------

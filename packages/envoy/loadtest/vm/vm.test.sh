@@ -69,7 +69,7 @@
 # are read in that order before the first ssh, every ssh runs as the user that profile named
 # with the key the run made, a second up of one run makes no second key, a refusal of any of the
 # three refuses up by name with nothing started, and no minted token reaches a command line or
-# any file the run keeps; and (t) each of the eleven defects that driving this script against
+# any file the run keeps; (t) each of the eleven defects that driving this script against
 # the deployment itself found -- a remote argument holding a space, a quote or a pipe arriving
 # as one argument, the run's own known_hosts under accept-new, put_file's write beside the
 # target and rename onto it, a second up that stops the stub embedder the first left holding
@@ -77,7 +77,10 @@
 # ENVOY_MACHINE_ID and ENVOY_ALLOW_REMOTE_NATS in Dispatch's environment, the database up makes
 # when the instance lacks it, what wait_healthz takes for ready and when it refuses at once,
 # the run-time limit read out of the object the Compute API answers, and every production
-# address tried from every machine.
+# address tried from every machine; and (u) no credential of the deployment -- Dispatch's agent
+# token, the listener's token or the instance's password -- reaches the command line of an ssh,
+# a docker, a psql or a loadgen of an up and a step, or a file the run keeps, while each still
+# reaches loadgen in a file of mode 600 on the load machine and psql in a passfile.
 set -euo pipefail
 # Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
 # given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
@@ -318,7 +321,9 @@ EOF
 
 cat >"$bin/psql" <<'EOF'
 #!/usr/bin/env bash
-# The fake psql: records each statement and keeps a database list under FAKE_DIR/db.
+# The fake psql: records each statement and keeps a database list under FAKE_DIR/db. The whole
+# argv goes to psql.argv as well, which is where the credential case proves that the instance's
+# password reached no command line: vm.sh gives psql a URL without it and a passfile.
 set -u
 sql="" prev=""
 for a in "$@"; do
@@ -326,6 +331,10 @@ for a in "$@"; do
   prev=$a
 done
 printf 'psql\t%s\n' "$sql" >>"$FAKE_DIR/actions.log"
+printf '%s\n' "$*" >>"$FAKE_DIR/psql.argv"
+# The passfile of each call, its mode beside it: libpq takes the password from PGPASSFILE and
+# reads none that anyone but its owner can, so the credential case reads both back.
+printf '%s %s\n' "${PGPASSFILE:-none}" "$([ -f "${PGPASSFILE:-}" ] && stat -c %a "$PGPASSFILE" || echo none)" >>"$FAKE_DIR/psql.passfile"
 db=$FAKE_DIR/db
 mkdir -p "$db"
 if [[ $sql =~ ^select\ 1\ from\ pg_database\ where\ datname\ =\ \'([A-Za-z0-9_]+)\'$ ]]; then
@@ -1810,5 +1819,93 @@ grep -q 'address already in use' "$tmp/out" ||
 [ "$(grep -c 'healthz' "$fake/actions.log")" = 1 ] ||
   fail "wait_healthz read /healthz $(grep -c 'healthz' "$fake/actions.log") times before it read the container's state, rather than refusing at once"
 pass "wait_healthz returns on ok and nats, waits while NATS is not up, and refuses at once, naming the state and the log, when the container has exited"
+
+# ---- (u) no credential of the deployment reaches a command line ----------------------------
+
+# dispatch://INFRA-988. Driving this script against the deployment showed its three secrets --
+# Dispatch's agent token, the listener's token and the Postgres URL with its password -- in the
+# argv of `loadgen` on the load machine and of the ssh that carried it there, where `ps -eo args`
+# hands them to anything that can list processes on either machine. They go in files of mode 600
+# now, written over ssh's standard input (put_file) under the run's own directory on the load
+# machine, and loadgen reads them with -token-file, -listener-token-file and -pg-file (guard.go).
+# psql is given a URL with no password in it and takes the password from a passfile.
+#
+# What this case reads is every argv the fakes record: ssh.log holds each ssh whole, and what
+# follows the target is what the machine ran, so that is the machine's own process table too;
+# docker.log each docker call, psql.argv each psql call, and loadgen.log every loadgen this pod
+# or a machine ran.
+#
+# The embedder's key is the one credential an up or a step leaves on a command line: `loadgen
+# stub-embed` takes it as -key and has no file form (stubembed.go), so up's start of the stub
+# embedder carries it. (The seed phases that run on this pod take -pg the same way and for the
+# same reason; this case runs an up and a step.) The case holds the key to that one command
+# rather than passing over it, so a second place that put it on a command line fails here.
+
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the credential case"
+seeded_run
+run_vm step --config "$config" 1x 1 --duration 10m
+((RC == 0)) || fail "the step of the credential case failed: see the output above"
+
+argv_logs=("$fake/ssh.log" "$fake/docker.log" "$fake/psql.argv" "$fake/loadgen.log")
+for log in "${argv_logs[@]}"; do
+  [ -s "$log" ] || fail "no fake wrote $log, so this case proves nothing of the commands it records"
+done
+while IFS=$'\t' read -r name value; do
+  for log in "${argv_logs[@]}"; do
+    ! grep -qF -- "$value" "$log" ||
+      fail "the deployment's $name reached a command line (${log##*/}): $(grep -m1 -F -- "$value" "$log")"
+  done
+  ! grep -rqF -- "$value" "$(run_dir)" ||
+    fail "the deployment's $name reached a file the run keeps: $(grep -rlF -- "$value" "$(run_dir)" | head -n1)"
+done < <(jq -r '{"agent token": .secrets.dispatch_token, "listener token": .secrets.listener_token,
+  "database password": .cloudsql.password} | to_entries[] | "\(.key)\t\(.value)"' "$config")
+pass "no token and no password of the deployment reaches the command line of an ssh, a docker, a psql or a loadgen, or a file the run keeps"
+
+# The run works all the same: each credential reached the load machine in a file of its own, and
+# loadgen was given that file.
+run_secrets=$remote/work/runs/$(cat "$LOADTEST_VM_ROOT/current")
+line=$(tail -n1 "$fake/loadgen-run.log")
+while IFS=$'\t' read -r flag file value; do
+  [[ $line == *"$flag $run_secrets/$file"* ]] ||
+    fail "step's loadgen run has no '$flag $run_secrets/$file': $line"
+  [ -f "$run_secrets/$file" ] || fail "the run wrote no $run_secrets/$file on the load machine"
+  [ "$(cat "$run_secrets/$file")" = "$value" ] ||
+    fail "$run_secrets/$file holds '$(cat "$run_secrets/$file")', not the deployment file's own value"
+  [ "$(stat -c %a "$run_secrets/$file")" = 600 ] ||
+    fail "$run_secrets/$file is mode $(stat -c %a "$run_secrets/$file") on the load machine, not 600"
+done <<EOF
+-token-file	dispatch-token	dispatch-secret
+-listener-token-file	listener-token	listener-secret
+-pg-file	pg-url	postgres://dispatch:pg-secret@10.139.0.3:5432/dispatch?sslmode=require
+EOF
+for flag in -token -listener-token -pg; do
+  [[ " $line " != *" $flag "* ]] ||
+    fail "step's loadgen run still gives $flag as a value: $line"
+done
+pass "step gives loadgen each credential in a file of mode 600 under the run's own directory on the load machine"
+
+# psql is given the instance's password in a passfile of mode 600, and one for every call it
+# made: a call without one would reach the instance as the login's own user and fail there.
+calls=$(grep -c . "$fake/psql.argv" || true)
+((calls > 0)) || fail "the credential case ran no psql"
+[ "$(grep -c . "$fake/psql.passfile")" = "$calls" ] ||
+  fail "$calls psql calls, $(grep -c . "$fake/psql.passfile") of them with a PGPASSFILE"
+[ "$(awk '$2 != 600' "$fake/psql.passfile" | wc -l)" = 0 ] ||
+  fail "a psql call read a passfile that is not mode 600: $(awk '$2 != 600' "$fake/psql.passfile" | head -n1)"
+passfile=$(awk 'NR == 1 {print $1}' "$fake/psql.passfile")
+[ ! -e "$passfile" ] || fail "the passfile $passfile is still on this pod after the call that read it"
+pass "psql takes the instance's password from a passfile of mode 600, written for the call and removed with it"
+
+# The embedder's key, the one credential with no file form, reaches the stub embedder's own
+# start and nothing else.
+embed_key=$(jq -r '.secrets.embed_key' "$config")
+elsewhere=$(grep -hF -- "$embed_key" "${argv_logs[@]}" | grep -v 'stub-embed' || true)
+[ -z "$elsewhere" ] ||
+  fail "the embedder's key reached a command line that is not the stub embedder's own: $(head -n1 <<<"$elsewhere")"
+grep -q -- "stub-embed -key $embed_key" "$fake/loadgen.log" ||
+  fail "loadgen stub-embed no longer takes its key as an argument: it has a file form now, so vm.sh must give it and this case must stop allowing the key here"
+pass "the embedder's key reaches the stub embedder's own start alone, which is the only credential an up or a step leaves on a command line"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'
