@@ -56,6 +56,10 @@ func TestConvertDecisionsSubcommandDryRunApplyAndRetry(t *testing.T) {
 	}
 	spec := seedConversionCommandDocument(t, database, "spec", "The spec.\n", true)
 	legacy := seedConversionCommandDocument(t, database, "decisions-md", "## Keep the source\n\nOne original choice.\n", false)
+	var originalSource string
+	if err := database.Pool.QueryRow(t.Context(), `select markdown from artifact_versions where artifact_id=$1 and number=1`, legacy).Scan(&originalSource); err != nil {
+		t.Fatal(err)
+	}
 	counts := func() [4]int {
 		t.Helper()
 		var n [4]int
@@ -81,12 +85,12 @@ func TestConvertDecisionsSubcommandDryRunApplyAndRetry(t *testing.T) {
 		t.Fatalf("apply: exit=%d\n%s", code, out)
 	}
 	var nodes int
-	var name string
+	var name, slug, sourceMarkdown string
 	if err := database.Pool.QueryRow(t.Context(), `select count(*) from document_blocks where artifact_id=$1 and type='decision'`, spec).Scan(&nodes); err != nil || nodes != 1 {
 		t.Fatalf("actual decision nodes=%d err=%v", nodes, err)
 	}
-	if err := database.Pool.QueryRow(t.Context(), `select name from artifacts where id=$1`, legacy).Scan(&name); err != nil || !strings.HasPrefix(name, "decision-history-") {
-		t.Fatalf("source not retired: %q %v", name, err)
+	if err := database.Pool.QueryRow(t.Context(), `select a.name,a.slug,v.markdown from artifacts a join lateral (select markdown from artifact_versions where artifact_id=a.id order by number desc limit 1) v on true where a.id=$1`, legacy).Scan(&name, &slug, &sourceMarkdown); err != nil || name != "decisions.md" || slug != "decisions-md" || sourceMarkdown != originalSource {
+		t.Fatalf("source identity or text changed: name=%q slug=%q markdown=%q want=%q err=%v", name, slug, sourceMarkdown, originalSource, err)
 	}
 	applied := counts()
 	if code, out := run("--apply"); code != 0 || !strings.Contains(out, "documents=0 moved=0") {

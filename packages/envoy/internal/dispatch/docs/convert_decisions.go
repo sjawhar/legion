@@ -40,8 +40,8 @@ type legacyDecisionDocument struct{ id, key, spec string }
 
 // ConvertDecisionDocuments is deliberately not a boot repair. Without apply it only reads and
 // reports. Each issue is converted in one joined document transaction, so retrying never
-// appends a second node. Source versions, reviews and resolved conversations remain on the
-// retired history document. Old builds refuse documents containing decision nodes.
+// appends a second node. A system-authored source version marks completion without changing its
+// address, content, reviews or resolved conversations. Old builds refuse decision nodes.
 func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out io.Writer) (DecisionConversion, error) {
 	ctx = store.WithTransactionTracking(ctx)
 	var report DecisionConversion

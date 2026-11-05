@@ -1289,7 +1289,7 @@ The dashboard shows each shaping decision beside the passage itself; historical 
 The sum is the SHA-256 of the decision's served text; text changed since that read is `409 DECISION_CHANGED`, with nothing written, and a missing sum is `400 INVALID_KEEP`.
 Any block that is not such a decision node is `404 TARGET_NOT_FOUND`.
 The sum determines `waiting_review`, not the version; a second person's Keep updates the same `decision_keeps` row, and `decision.kept` wakes nobody.
-`envoy-dispatch convert-decisions` reports the legacy-document conversion without writing; `--apply` moves the choices into native nodes and retires each source while retaining its versions, reviews and resolved conversations (server README, "Converting legacy decisions").
+`envoy-dispatch convert-decisions` reports the legacy-document conversion without writing; `--apply` moves the choices into native nodes and records a system-authored conversion version on each source. Sources keep their names, slugs, blocks, versions, reviews and resolved conversations, so legacy reads and uploads still address them until cutover (server README, "Converting legacy decisions").
 `GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, need the `person` scope as those two do, and announce nothing.
 
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
