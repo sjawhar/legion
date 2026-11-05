@@ -88,14 +88,14 @@ func TestTheLineHoldsAnIssueUnderAnAcceptedAncestorAboveADoneParent(t *testing.T
 		if ancestor := AcceptedAncestorIn(members, root, heldAtAdmit, ""); ancestor != merging {
 			t.Fatalf("the doors read the accepted ancestor of %s as %q, want %s", heldAtAdmit, ancestor, merging)
 		}
-		if open := OpenBeneath(mergingOf(members, merging), members); len(open) != 0 {
+		if open := OpenBeneath(recordOf(members, merging), members); len(open) != 0 {
 			t.Fatalf("the issues beneath %s that are still in the workflow = %v, want none: the one the daemon holds is left out", merging, open)
 		}
 	})
 }
 
-// mergingOf is the record of key among members.
-func mergingOf(members []Issue, key string) Issue {
+// recordOf is the record of key among members.
+func recordOf(members []Issue, key string) Issue {
 	for _, member := range members {
 		if member.Key == key {
 			return member

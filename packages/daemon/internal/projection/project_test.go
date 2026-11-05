@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"slices"
 	"testing"
@@ -572,5 +573,51 @@ func TestProjectShowsTheWaitingLineInTheLinesOwnOrder(t *testing.T) {
 	}
 	if want := []string{"LEGION-12", "LEGION-10", "LEGION-20", "LEGION-11", "LEGION-30"}; !reflect.DeepEqual(got.Admission.Waiting, want) {
 		t.Fatalf("admission.waiting with the gate opened last = %#v, want %#v", got.Admission.Waiting, want)
+	}
+}
+
+// The state lists every project's issues, for the sake of a claim on an issue of another, but
+// admission is this daemon's project's alone: the cap, the waiting line and the tick judge the
+// project's own live records (record.Store.LiveIssues), so `waiting`, `trees` and `blocked` are
+// read over those and no others. On a shared database another project's queued root, its
+// answered awaiting_person root and whatever either waits on would otherwise reach this
+// project's state as work this daemon neither runs nor admits.
+func TestProjectJudgesAdmissionOverThisProjectsRecordsAlone(t *testing.T) {
+	answeredAt := projectedAt.Add(-time.Hour)
+	queuedElsewhere := lineIssue("OTHER-30", "OTHER-30", "todo", phase.Admitted, "A")
+	queuedElsewhere.Project = "OTHER"
+	answeredElsewhere := lineIssue("OTHER-40", "OTHER-40", "in_progress", phase.AwaitingPerson, "B")
+	answeredElsewhere.Project = "OTHER"
+	answeredElsewhere.Awaiting = &record.Awaiting{Ask: "ask-1", Since: record.EventMark{Seq: 9},
+		AnsweredAt: &answeredAt, AnsweredBy: record.AnsweredByReply}
+	store := projectionStore{
+		issues: []record.Issue{
+			lineIssue("LEGION-20", "LEGION-20", "todo", phase.Admitted, "Z"),
+			queuedElsewhere, answeredElsewhere,
+		},
+		mirror: []record.DispatchIssueRow{
+			{Key: "OTHER-30", Project: "OTHER", Status: "todo", Blockers: []string{"OTHER-31"}},
+		},
+	}
+
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if want := []string{"LEGION-20"}; !reflect.DeepEqual(got.Admission.Waiting, want) {
+		t.Fatalf("admission.waiting = %#v, want %#v: this project's own line, with no root of OTHER in it", got.Admission.Waiting, want)
+	}
+	if want := []string{"LEGION-20"}; !reflect.DeepEqual(got.Admission.Trees, want) {
+		t.Fatalf("admission.trees = %#v, want %#v: this project's own live trees", got.Admission.Trees, want)
+	}
+	if len(got.Admission.Blocked) != 0 {
+		t.Fatalf("admission.blocked = %#v, want none: what a root of OTHER waits on is no wait of this project's", got.Admission.Blocked)
+	}
+	// Every project's issues are still listed, which is what a claim on an issue of another
+	// project is shown against.
+	for _, key := range []string{"LEGION-20", "OTHER-30", "OTHER-40"} {
+		if _, listed := got.Issues[key]; !listed {
+			t.Fatalf("the state lists %v, want %s among them: the issue list is every project's", slices.Sorted(maps.Keys(got.Issues)), key)
+		}
 	}
 }

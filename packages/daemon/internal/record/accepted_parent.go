@@ -98,10 +98,12 @@ func OpenBeneath(issue Issue, members []Issue) []string {
 }
 
 // AcceptedAncestorOf is the issue above key, in key's own tree, that the daemon has already
-// accepted (AcceptedAncestor), and "" when none has been or key is not recorded. It is
-// what the two doors into the workflow ask before they let work in beneath such an ancestor —
-// release_children and rerun_child, which refuse CHILD_UNDER_ACCEPTED_PARENT — read over the
-// tree's records in one query.
+// accepted (AcceptedAncestor), and "" when none has been or key is not recorded. It reads the
+// tree's records in one query, and it is what the workflow asks when a child of such an ancestor
+// enters the tree (engine's enterChild), which is the one caller that holds no read of the tree
+// already. The two doors into the workflow — release_children and rerun_child, which refuse
+// CHILD_UNDER_ACCEPTED_PARENT — read the tree once for the whole request and ask
+// AcceptedAncestorIn of it instead.
 //
 // parent is the Dispatch parent the caller read for a child that has no record of its own yet,
 // which is every child release_children releases from backlog or triage: the chain starts there
@@ -116,8 +118,9 @@ func AcceptedAncestorOf(ctx context.Context, store Store, tx pgx.Tx, tree, key, 
 }
 
 // AcceptedAncestorIn is AcceptedAncestorOf over members the caller has already read: a handler
-// that answers for a whole wave of children reads the tree once and asks this of each of them,
-// rather than reading every record of the tree again per child (api's release_children).
+// that reads the tree for a request of its own asks this of each child it answers for, rather
+// than reading every record of the tree again per child (api's release_children, which answers a
+// whole wave, and its rerun_child).
 func AcceptedAncestorIn(members []Issue, tree, key, parent string) string {
 	records := byKey(members)
 	issue, recorded := records[key]

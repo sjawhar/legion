@@ -284,7 +284,7 @@ func decideAwait(v awaitView) awaitDecision {
 	switch {
 	case root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !record.InWorkflow(root):
 		return awaitDecision{Why: "it is not an admitted root of a tree in the workflow"}
-	case !record.CanWaitOnPerson(root, gateOf(v.Gate), v.Slotted):
+	case !record.CanWaitOnPerson(root, record.GateValue(v.Gate), v.Slotted):
 		return awaitDecision{Why: "it holds no admission slot for work of its own"}
 	case root.DeclaredSeq == 0:
 		return awaitDecision{Why: "its architect has handed nothing to a person since it was last given work"}
@@ -353,16 +353,6 @@ func gateArtifactOf(gate *record.DesignGate) string {
 		return ""
 	}
 	return gate.ArtifactID
-}
-
-// gateOf is the gate a root carries, the zero gate for a root with none registered, which is a
-// root whose architect has still to write its spec: the shape record.AtWork and every other
-// rule over a gate takes.
-func gateOf(gate *record.DesignGate) record.DesignGate {
-	if gate == nil {
-		return record.DesignGate{}
-	}
-	return *gate
 }
 
 // waitSubject is the wait a root starts from since on what is still with the person: the gate at

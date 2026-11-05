@@ -58,7 +58,7 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 	if err != nil {
 		return false, err
 	}
-	if !QueuedRoot(root, gateValue(gate)) {
+	if !QueuedRoot(root, GateValue(gate)) {
 		return false, nil
 	}
 	slots, err := store.Slots(ctx, tx)
@@ -66,15 +66,6 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 		return false, err
 	}
 	return !slices.ContainsFunc(slots, func(slot Slot) bool { return slot.Issue == root.Key }), nil
-}
-
-// gateValue is the gate a root carries, the zero gate for a root with none registered, which is
-// a root whose architect has still to write its spec.
-func gateValue(gate *DesignGate) DesignGate {
-	if gate == nil {
-		return DesignGate{}
-	}
-	return *gate
 }
 
 // RelayParkedDecision is the one rule for a decision made where nobody in its tree hears it, which

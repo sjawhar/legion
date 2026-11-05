@@ -188,30 +188,10 @@ func (s *server) recordedIssue(ctx context.Context, issue string) (*record.Issue
 	return recorded, tx.Commit(ctx)
 }
 
-// acceptedAncestor is the issue above key in tree whose own reviewed head the daemon has already
-// accepted, and "" when none has been (record.AcceptedAncestorOf), read in one short read-only
-// transaction. parent is the Dispatch parent of a child that has no record yet, which is every
-// child release_children releases from backlog or triage; it is empty for a recorded child,
-// whose own record names its parent.
-func (s *server) acceptedAncestor(ctx context.Context, tree, key, parent string) (string, error) {
-	if s.pool == nil || s.records == nil {
-		return "", errors.New("record dependencies are unavailable")
-	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	ancestor, err := record.AcceptedAncestorOf(ctx, s.records, tx, tree, key, parent)
-	if err != nil {
-		return "", err
-	}
-	return ancestor, tx.Commit(ctx)
-}
-
 // treeMembers is every record of tree, read in one short read-only transaction: what a handler
-// answering for a whole wave of children reads once and asks record.AcceptedAncestorIn of each
-// of them, rather than opening a transaction and reading the tree again per child.
+// that judges work against the tree it enters reads once and asks record.AcceptedAncestorIn of,
+// rather than opening a transaction and reading the tree again per child it answers for
+// (release_children over a whole wave, rerun_child over the one child and its tree's root).
 func (s *server) treeMembers(ctx context.Context, tree string) ([]record.Issue, error) {
 	if s.pool == nil || s.records == nil {
 		return nil, errors.New("record dependencies are unavailable")
@@ -1388,6 +1368,11 @@ func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 // that ancestor merge a head that does not carry it, which is the order children-first keeps.
 // The ancestor is named, and the chain is walked past a parent already done, so a grandchild
 // under a done parent is refused by whichever issue above it is still merging.
+//
+// The tree is read once (treeMembers) and both judgements are made over those records, as
+// release_children judges a whole wave over one read of them: the root whose linger stops a
+// rerun is among them, and the chain the ancestor is found on is walked over them
+// (record.AcceptedAncestorIn).
 func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 	child, ok := s.childOfTree(w, r)
 	if !ok {
@@ -1397,21 +1382,21 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "CHILD_RUNNING", fmt.Sprintf("%s is in phase %s; park_child takes it out of the workflow before rerun_child runs it again", child.Key, child.Phase))
 		return
 	}
-	root, err := s.recordedIssue(r.Context(), child.Tree)
-	if err != nil || root == nil {
-		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree root")
-		return
-	}
-	if root.Lingers() {
-		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
-		return
-	}
-	ancestor, err := s.acceptedAncestor(r.Context(), child.Tree, child.Key, "")
+	members, err := s.treeMembers(r.Context(), child.Tree)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree of the child to rerun")
 		return
 	}
-	if ancestor != "" {
+	at := slices.IndexFunc(members, func(member record.Issue) bool { return member.Key == child.Tree })
+	if at < 0 {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree root")
+		return
+	}
+	if root := members[at]; root.Lingers() {
+		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
+		return
+	}
+	if ancestor := record.AcceptedAncestorIn(members, child.Tree, child.Key, ""); ancestor != "" {
 		writeFailure(w, http.StatusConflict, "CHILD_UNDER_ACCEPTED_PARENT", childUnderAcceptedParent(child.Key, ancestor, "run it again"))
 		return
 	}

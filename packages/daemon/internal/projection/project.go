@@ -212,7 +212,21 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		projected.Issues[current.Issue] = view
 	}
 
-	facts, err := record.ReadLineFacts(ctx, tx, s, project, issues)
+	// Everything admission is judged from is judged over this project's own records. The state
+	// lists every project's issues, for the sake of a claim on an issue of another, while the
+	// cap, the waiting line and the tick read the project's own live records alone
+	// (record.Store.LiveIssues, admit's pass): another project's queued root, and its root a
+	// person has answered, would otherwise stand in this project's `admission.waiting`, and
+	// whatever either waits on in its `blocked`, as work this daemon neither runs nor admits.
+	// They reach one read at all because the issues table is one table shared by every daemon of
+	// the database (the issue slots migration, "shared by every daemon of the database").
+	own := make([]record.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Project == project {
+			own = append(own, issue)
+		}
+	}
+	facts, err := record.ReadLineFacts(ctx, tx, s, project, own)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -223,7 +237,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	// issues the line names. The deciders' own judgement (blockers.Blocked) then names exactly
 	// the roots admission skips, the issues it holds back and the parents whose children go
 	// first.
-	rows, facts, line, err := blockers.JudgeLine(ctx, tx, s, project, issues, slots, facts, nil)
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, s, project, own, slots, facts, nil)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -231,26 +245,17 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	projected.Admission.Active = active
 	// The roots of the live trees, which no slot says any more: a slot counts one issue at work,
 	// so a running tree holds none while its root waits for its children and they wait for a
-	// slot. The pass's own facts already name every lifecycle, so this costs no further read.
-	//
-	// It is read over this project's records alone. The state lists every project's issues, for
-	// the sake of a claim on an issue of another, but a lifecycle is keyed by the project token
-	// (record.ReadLifecycles) and this pass reads them all under this daemon's: another
-	// project's root would be judged against a lifecycle that is not its own, and would reach
-	// this list as a queued or awaiting root of a tree this daemon neither runs nor admits.
-	own := make([]record.Issue, 0, len(issues))
-	for _, issue := range issues {
-		if issue.Project == project {
-			own = append(own, issue)
-		}
-	}
+	// slot. The pass's own facts already name every lifecycle, so this costs no further read. A
+	// lifecycle is keyed by the project token (record.ReadLifecycles) and this pass reads them
+	// all under this daemon's, so another project's root would be judged against a lifecycle
+	// that is not its own.
 	trees := record.LiveRoots(own, facts)
 	projected.Admission.Trees = slices.Sorted(maps.Keys(trees))
 	projected.Admission.Waiting = make([]string, len(waiting))
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
-	projected.Admission.Blocked = blockers.Blocked(rows, issues, line, record.ChildWaitRows(facts.ChildWaits))
+	projected.Admission.Blocked = blockers.Blocked(rows, own, line, record.ChildWaitRows(facts.ChildWaits))
 	projected.PendingStatusWrites = make([]api.PendingStatusWrite, 0, len(pending))
 	for _, row := range pending {
 		if _, known := knownIssues[row.Issue]; !known {

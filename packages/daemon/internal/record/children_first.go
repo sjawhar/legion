@@ -2,7 +2,6 @@ package record
 
 import (
 	"context"
-	"maps"
 	"slices"
 	"strings"
 
@@ -119,15 +118,14 @@ func ChildOpen(child DispatchIssueRow, recorded *Issue) bool {
 // the first boot listing after the child exists.
 //
 // above is the records of the issues over the pass's own that it leaves out (LineFacts.Parents),
-// so that the cycle's own walk of the parent chain crosses an ancestor already done.
+// so that the cycle's own walk of the parent chain crosses an ancestor already done: it is the
+// one chain of the pass, read here exactly as the line reads it (chainOf).
 func ChildWaits(issues []Issue, children map[string][]DispatchIssueRow, records, above map[string]Issue) map[string]ChildWait {
 	byKey := make(map[string]Issue, len(issues))
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
 	}
-	chain := make(map[string]Issue, len(byKey)+len(above))
-	maps.Copy(chain, byKey)
-	maps.Copy(chain, above)
+	chain := chainOf(byKey, above)
 	waits := make(map[string]ChildWait, len(children))
 	for key, rows := range children {
 		parent, recorded := byKey[key]
