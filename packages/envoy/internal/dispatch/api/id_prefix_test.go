@@ -351,6 +351,38 @@ func TestABlockIDPrefixIsMatchedWithinTheDocumentItsRouteNames(t *testing.T) {
 	}
 }
 
+// TestABlockPrefixUnderAUUIDSpellingTheRouteReadsIsResolvedToo: the {id} of
+// /api/v1/artifacts/{id}/blocks/{block_id} is read with uuid.Parse (parseArtifactID), which
+// reads `urn:uuid:<uuid>` as the document it names, so the document a block prefix is matched
+// within is read the same way: that spelling answers exactly what the plain id answers - the 409
+// of a prefix two of its blocks carry and the route's own 404 for the one block the live
+// document does not hold - and never the 500 of a value Postgres refuses as a uuid.
+func TestABlockPrefixUnderAUUIDSpellingTheRouteReadsIsResolvedToo(t *testing.T) {
+	fixture := newIDPrefixFixture(t)
+	document := chosenID("f0000001", 1)
+	for _, blockID := range []string{"ab12cd34ef", "ab12cd34ff"} {
+		seedExec(t, fixture.database, "an indexed block", `
+			insert into document_blocks (artifact_id, block_id, node_id, type, text_sha256, excerpt, changed_version, changed_at)
+			values ($1::uuid, $2, $1::text || '#' || $2, 'paragraph', '', $3, 1, now())
+		`, document, blockID, "The block "+blockID+".")
+	}
+
+	path := func(document, block string) string {
+		return "/api/v1/artifacts/" + document + "/blocks/" + block
+	}
+	for _, prefix := range []string{"ab12cd34", "ab12cd34e"} {
+		plain := dispatchRequest(t, fixture.handler, http.MethodGet, path(document, prefix), nil, "alice")
+		urn := dispatchRequest(t, fixture.handler, http.MethodGet, path("urn:uuid:"+document, prefix), nil, "alice")
+		if urn.Code == http.StatusInternalServerError {
+			t.Fatalf("the urn spelling with the block prefix %q: status=500 body=%s", prefix, urn.Body.String())
+		}
+		if urn.Code != plain.Code || urn.Body.String() != plain.Body.String() {
+			t.Fatalf("the urn spelling with the block prefix %q = status=%d body=%s, want the plain id's status=%d body=%s",
+				prefix, urn.Code, urn.Body.String(), plain.Code, plain.Body.String())
+		}
+	}
+}
+
 // TestAWriteRouteThatParsesNoIDActsOnTheResolvedItem: POST /api/v1/comments/{id}/resolve reads
 // its id out of the path and parses none of it, so the whole id the layer left there is the
 // comment it resolves.

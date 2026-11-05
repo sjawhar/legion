@@ -115,8 +115,12 @@ type Scope struct {
 // and hyphens an id's lowercase text form is written with, compared without case, and never a
 // whole id, since an exact id needs no resolving and always wins. A value IsIDPrefix refuses is a
 // programming error at the call site - every caller reads the id out of a reference the same
-// grammar parsed - and is answered as no match without a query. Among the matches an id equal to
-// the prefix still wins, which is what a whole block id that is another block's prefix needs.
+// grammar parsed - and is answered as no match without a query. Among the matches the id written
+// exactly as the prefix wins, which is what a whole block id that is another block's prefix
+// needs; where the id is a uuid, one that differs from the prefix in case alone wins after it,
+// since a uuid's text form is lowercase hex and the prefix is read without case. A block id is
+// text its author wrote, so `Deadbeef` and `deadbeef` are two blocks and the prefix names the one
+// it is written as.
 //
 // An item's prefix is read as a range on its table's uuid primary key, the prefix with its
 // hyphens where a uuid has them and the rest filled with `0` and with `f`, which that key's btree
@@ -143,8 +147,15 @@ func ResolvePrefix(ctx context.Context, q Queryer, kind string, scope Scope, pre
 		return Candidate{}, err
 	}
 	for _, candidate := range found {
-		if strings.EqualFold(candidate.ID, prefix) {
+		if candidate.ID == prefix {
 			return candidate, nil
+		}
+	}
+	if kind != "block" {
+		for _, candidate := range found {
+			if strings.EqualFold(candidate.ID, prefix) {
+				return candidate, nil
+			}
 		}
 	}
 	switch len(found) {

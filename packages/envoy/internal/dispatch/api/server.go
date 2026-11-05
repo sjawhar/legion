@@ -1115,12 +1115,18 @@ func itemNotFound(notFound, prefix string) string {
 // documentRefKey is the ref_key of the document id names, the address refs.Scope holds a
 // document under; "" for an id that is no uuid or that no document has, which is an id the
 // route behind this is about to refuse anyway.
+//
+// The id is parsed and sent in its canonical form, as parseArtifactID sends it: uuid.Parse reads
+// the `urn:uuid:<uuid>` and braced spellings of an id beside the plain one, which the routes
+// behind this read as the document they name, and Postgres's `::uuid` refuses both, so the raw
+// value would answer 500 for an address the route itself answers.
 func (s *server) documentRefKey(ctx context.Context, id string) (string, error) {
-	if uuid.Validate(id) != nil {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
 		return "", nil
 	}
 	var refKey string
-	if err := s.deps.Store.Pool.QueryRow(ctx, `select ref_key from artifacts where id = $1::uuid`, id).Scan(&refKey); err != nil {
+	if err := s.deps.Store.Pool.QueryRow(ctx, `select ref_key from artifacts where id = $1::uuid`, parsed.String()).Scan(&refKey); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil
 		}

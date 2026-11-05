@@ -400,11 +400,29 @@ func ReindexOwedSource(ctx context.Context, pool Pool, source OwedSource, server
 
 // ReindexScopeSource re-indexes one comment, ask or issue message whose text belongs to a document
 // whose question blocks moved (ScopeSources), so that a `#id` it wrote before its question settled
-// is stored as an edge to that ask now. It reads the source's text once, under the source's row,
-// and writes nothing for a text that holds no `#id` candidate at all (HoldsQuestionCandidate),
-// which is what most of a document's scope is. It reports whether it re-indexed the source, and
-// the source's own owed row, if it has one, is settled by that re-index (replaceRefs).
+// is stored as an edge to that ask now. It writes nothing for a text that holds no `#id` candidate
+// at all (HoldsQuestionCandidate), which is what most of a document's scope is - for a spec, every
+// message, ask and comment of its issue. It reports whether it re-indexed the source, and the
+// source's own owed row, if it has one, is settled by that re-index (replaceRefs).
+//
+// The text is read twice: once with no lock (SourceText), which decides only whether this source
+// is worth a transaction, and again inside the transaction under the row's `for no key update`
+// (sourceText, forUpdate), which is the text the index is written from. Locking first would take
+// the lock an edit of that text takes on every source of the scope before throwing most of them
+// away, and a concurrent edit of each such row would wait behind it; the artifact branch of
+// docs.Service.reindexScope already reads first and owes the work after.
+//
+// A text that gains a `#id` between the two reads is indexed by the write that gave it one: a
+// write of this build re-indexes the text it wrote in its own transaction (replaceRefs), reading
+// the question map as it stands after the settlement this scope row was enqueued by, and a write
+// of an older build owes the source its own row (20261103205038-20261103205040), which the drain
+// takes in a later tick. One that loses its `#id` between them is left alone by the locked read,
+// which is what the write that removed it already indexed.
 func ReindexScopeSource(ctx context.Context, pool Pool, kind, id, serverURL string) (bool, error) {
+	unlocked, _, found, err := SourceText(ctx, pool, kind, id)
+	if err != nil || !found || !HoldsQuestionCandidate(unlocked, serverURL) {
+		return false, err
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err

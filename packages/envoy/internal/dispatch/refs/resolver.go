@@ -22,9 +22,11 @@ import (
 // mention keeps its byte offset, so a caller that places mentions in blocks passes the result
 // through unchanged.
 //
-// A write never fails because of what its body cites: a resolver that cannot reach the database
-// answers "nothing resolved" for that kind and the text is stored as it is written, the way a
-// mention of a target that does not exist is (CountedChanges).
+// A lookup that fails is not a mention that fails: the resolver answers "nothing resolved" for
+// that kind, and the text is indexed as it is written, the way a mention of a target that does
+// not exist is (CountedChanges). What it does not do is save a write: a query that fails inside
+// the write's own transaction aborts that transaction, so the write fails at its next statement
+// whatever this answers.
 func Mentions(ctx context.Context, q Queryer, fromKind, fromID, body, serverURL string) []text.Located {
 	return newResolver(ctx, q, fromKind, fromID, serverURL).mentions(body)
 }

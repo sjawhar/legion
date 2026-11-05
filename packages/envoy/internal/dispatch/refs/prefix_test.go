@@ -317,6 +317,39 @@ func TestResolvePrefixReadsTheBlocksOfTheDocumentVersionNamed(t *testing.T) {
 	requireNoPrefixMatch(t, tx, "block", Scope{}, "cccc1111", Viewer{Human: true})
 }
 
+// A block id is text its author wrote, not a uuid: `Deadbeef` and `deadbeef` are two blocks of
+// one document, and the id written exactly as the prefix is the one it names, whichever of the
+// two the block id order puts first. A prefix neither is written as names both, which is two
+// blocks and no match. The case-insensitive reading stays where an id is a uuid, whose text form
+// is lowercase hex (the comment prefixes above).
+func TestResolvePrefixNamesTheBlockWrittenExactlyAsThePrefix(t *testing.T) {
+	tx := prefixFixture(t)
+	issueKey := "CORE-1"
+	const specID = "8a000000-0000-4000-8000-000000000021"
+	spec := insertPrefixDocument(t, tx, specID, &issueKey, "CORE", "spec", "Spec", true)
+	insertPrefixBlock(t, tx, specID, spec, "deadbeef", "The lowercase block.", 1)
+	insertPrefixBlock(t, tx, specID, spec, "Deadbeef", "The capitalised block.", 1)
+	for _, want := range []Candidate{
+		{
+			Kind: "block", ID: "deadbeef", Ref: "dispatch://CORE-1/spec#b-deadbeef",
+			IssueKey: "CORE-1", FirstLine: "The lowercase block.",
+		},
+		{
+			Kind: "block", ID: "Deadbeef", Ref: "dispatch://CORE-1/spec#b-Deadbeef",
+			IssueKey: "CORE-1", FirstLine: "The capitalised block.",
+		},
+	} {
+		if got := resolvedPrefix(t, tx, "block", Scope{Document: spec}, want.ID, Viewer{Human: true}); !reflect.DeepEqual(got, want) {
+			t.Fatalf("the block %q names = %#v, want %#v", want.ID, got, want)
+		}
+	}
+	var ambiguous *ErrPrefixAmbiguous
+	candidate, err := ResolvePrefix(context.Background(), tx, "block", Scope{Document: spec}, "DEADbeef", Viewer{Human: true})
+	if !errors.As(err, &ambiguous) || len(ambiguous.Candidates) != 2 {
+		t.Fatalf("the block prefix %q = %#v, %v; want both blocks listed", "DEADbeef", candidate, err)
+	}
+}
+
 // A direct message's first line is answered to a human and to a session in the conversation - the
 // one its root targets, or one that has replied in it - and left out for any other session and
 // for the index-time resolver. An issue message's is answered to all of them.

@@ -161,7 +161,8 @@ func TestTheRefsGrammarSeedKeepsWhatATriggerAlreadyOwed(t *testing.T) {
 // id. A comment, an ask and an issue message are owed on insert and on an edit of the text or of
 // the columns that say which document a `#id` in it resolves against; a document version owes its
 // document and its scope; an ask that gains a question block owes that document's scope; and an
-// image's version, a direct message and an update of a column the index does not read owe nothing.
+// image's version, a direct message, an update of a column the index does not read and a write
+// that leaves every column it does read as it found it - an anchor refresh - owe nothing.
 func TestTheRefsGrammarTriggersOweWhatAnyBuildWrites(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -211,6 +212,66 @@ func TestTheRefsGrammarTriggersOweWhatAnyBuildWrites(t *testing.T) {
 	if at := readOwedSources(t, store)[comment]; !at.After(past) {
 		t.Fatalf("an edited owed comment kept enqueued_at %v, want it moved past %v", at, past)
 	}
+
+	// A write of a column the index reads owes the row only where it changes that column: the
+	// anchor refreshes a settlement makes move no edge, since a `#id` resolves against the
+	// document the anchor's artifact_id names and nothing else of the anchor
+	// (refs.ScopeOf) - docs/marks.go rewrites anchor.quote and anchor.orphaned as a quote moves,
+	// and docs/anchor_blocks.go writes anchor.block_id - and neither settles the row it would
+	// otherwise owe, so the drain would re-index a text that had not changed on every one.
+	write := func(what, query string, args ...any) {
+		t.Helper()
+		if _, err := store.Pool.Exec(ctx, query, args...); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	notes := insertReturningID(t, store, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ('CORE-1', 'CORE', 'notes', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text`)
+	for _, item := range []struct {
+		table string
+		id    string
+		owed  owedSource
+	}{{"comments", fixture.comment, comment}, {"asks", fixture.ask, ask}} {
+		write("drain the queue", `delete from refs_grammar_owed`)
+		write("anchor the "+item.owed.kind, `update `+item.table+`
+			set anchor = jsonb_build_object('artifact_id', $2::text, 'quote', 'Blocked')
+			where id = $1`, item.id, fixture.document)
+		assertOwedSources(t, store, item.owed)
+
+		write("drain the queue", `delete from refs_grammar_owed`)
+		write("move the "+item.owed.kind+"'s quote", `update `+item.table+`
+			set anchor = jsonb_set(jsonb_set(anchor, '{quote}', to_jsonb('Moved'::text)), '{orphaned}', to_jsonb(true))
+			where id = $1`, item.id)
+		write("record the "+item.owed.kind+"'s anchor block", `update `+item.table+`
+			set anchor = jsonb_set(anchor, '{block_id}', to_jsonb('b2'::text), true)
+			where id = $1`, item.id)
+		assertOwedSources(t, store)
+
+		// The document the anchor names is the one a `#id` in the text resolves against, so
+		// moving it owes the row.
+		write("anchor the "+item.owed.kind+" to another document", `update `+item.table+`
+			set anchor = jsonb_set(anchor, '{artifact_id}', to_jsonb($2::text))
+			where id = $1`, item.id, notes)
+		assertOwedSources(t, store, item.owed)
+	}
+	// The ask's text is its question, as the comment's and the message's is their body.
+	write("drain the queue", `delete from refs_grammar_owed`)
+	write("edit the ask's question", `update asks set question = question || ' And CORE-1.' where id = $1`, fixture.ask)
+	assertOwedSources(t, store, ask)
+
+	// A body written back as it stands cites what it cited; the comment a comment replies to
+	// says which document its `#id` resolves against where it names none of its own.
+	write("drain the queue", `delete from refs_grammar_owed`)
+	write("rewrite the comment's body as it stands", `update comments set body = body where id = $1`, fixture.comment)
+	assertOwedSources(t, store)
+	reply := insertReturningID(t, store, `
+		insert into comments (issue_key, author, body) values ('CORE-1', '{"kind":"user","id":"alice"}', 'A reply.')
+		returning id::text`)
+	write("drain the queue", `delete from refs_grammar_owed`)
+	write("make the comment a reply", `update comments set reply_to = $2 where id = $1`, fixture.comment, reply)
+	assertOwedSources(t, store, comment)
 
 	// A version of a document owes the document and its scope; an image's version owes neither.
 	if _, err := store.Pool.Exec(ctx, `delete from refs_grammar_owed`); err != nil {

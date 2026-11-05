@@ -178,3 +178,49 @@ func TestAMovedOwedRowStaysOwedAndIsNotIndexed(t *testing.T) {
 		t.Fatalf("the comment holds %d edges to CORE-1 after its re-index, want the bare key's one", edges)
 	}
 }
+
+// The scope drain reads a source before it locks one. Every markdown version enqueues a `scope`
+// row, and draining it walks every source whose text belongs to that document - for a spec, every
+// message, ask and comment of its issue - where a text that writes no `#id` has nothing the
+// re-index would move. So the text is read with no lock first and only a text that holds a
+// candidate has its row taken `for no key update`, the lock an edit of that text holds: a source
+// one holds is passed over at once rather than waited for.
+func TestTheScopeDrainReadsASourceBeforeItLocksIt(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	seedRefsGrammarIssue(t, database)
+	write := func(body string) string {
+		t.Helper()
+		var id string
+		if err := database.Pool.QueryRow(ctx, `
+			insert into comments (issue_key, author, body)
+			values ('CORE-1', '{"kind":"user","id":"alice"}', $1)
+			returning id::text
+		`, body).Scan(&id); err != nil {
+			t.Fatalf("write the comment %q: %v", body, err)
+		}
+		return id
+	}
+	quiet, citing := write("Blocked on CORE-1."), write("See #q1.")
+	edit, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the edit: %v", err)
+	}
+	defer edit.Rollback(ctx)
+	if _, err := edit.Exec(ctx, `select 1 from comments where id = $1 for no key update`, quiet); err != nil {
+		t.Fatalf("hold the comment's row as an edit does: %v", err)
+	}
+
+	bounded, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	indexed, err := ReindexScopeSource(bounded, database.Pool, "comment", quiet, refsGrammarServer)
+
+	if err != nil || indexed {
+		t.Fatalf("the scope drain of a comment an edit holds = %v (%v), want it passed over without waiting", indexed, err)
+	}
+	// A text that writes a `#id` is still read under its own row and re-indexed from what that
+	// read answers: the unlocked read decides only whether to open the transaction.
+	if indexed, err := ReindexScopeSource(ctx, database.Pool, "comment", citing, refsGrammarServer); err != nil || !indexed {
+		t.Fatalf("the scope drain of a comment that writes a `#id` = %v (%v), want it re-indexed", indexed, err)
+	}
+}
