@@ -1,0 +1,166 @@
+package shim_test
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
+)
+
+// A release carries at most 40 MiB, and a workspace whose unpushed work is larger stops the
+// release rather than sending it. The shim measures the bundle before it sends anything and
+// answers the size it refused, which is the reason the daemon records.
+func TestABundleOverTheReleasesBoundIsRefusedWithItsSize(t *testing.T) {
+	testbin.RequireJJFilters(t)
+	workspace, home := bundledWorkspace(t)
+
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t)
+	cfg := config(t, path, child)
+	cfg.Env = append(fixtureenv.Isolated(home), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+		"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "JJ_USER=tester", "JJ_EMAIL=tester@example.test")
+	run(t, cfg, newClock())
+	p := daemon.accept(t)
+	p.open(t)
+
+	// What this workspace bundles to, under a bound it fits: the save itself.
+	p.send(t, shimwire.BundleWorkspace{ID: "bundle-1", Issue: "INFRA-945", MaxBytes: 40 << 20, TimeoutMs: 120_000})
+	got, ok := p.next(t).(shimwire.BundleWorkspaceResult)
+	if !ok || !got.OK {
+		t.Fatalf("the shim answered %#v", got)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	size := got.SizeBytes
+	if size == 0 || len(got.Bundle) != size || got.Head == "" || len(got.Tips) == 0 {
+		t.Fatalf("the save is %d bytes saying %d, on %s with heads %v", len(got.Bundle), size, got.Head, got.Tips)
+	}
+
+	// One byte under it: the save is built and then refused, with the size the daemon records.
+	p.send(t, shimwire.BundleWorkspace{ID: "bundle-2", Issue: "INFRA-945", MaxBytes: size - 1, TimeoutMs: 120_000})
+	got, ok = p.next(t).(shimwire.BundleWorkspaceResult)
+	if !ok {
+		t.Fatalf("the shim answered %#v", got)
+	}
+	if got.OK || len(got.Bundle) != 0 {
+		t.Fatalf("the shim sent a bundle over the bound: ok=%v, %d bytes", got.OK, len(got.Bundle))
+	}
+	if got.SizeBytes != size {
+		t.Fatalf("the refusal names %d bytes and reads %q, want the %d the bundle is", got.SizeBytes, got.Error, size)
+	}
+	if !strings.Contains(got.Error, strconv.Itoa(size)) || !strings.Contains(got.Error, strconv.Itoa(size-1)) {
+		t.Fatalf("the refusal reads %q, want it to name the size and the bound", got.Error)
+	}
+	// Nothing of the save is left in the workspace: the bundle is built under the temporary
+	// directory, and the refs it needed are gone.
+	entries, err := os.ReadDir(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".bundle") {
+			t.Fatalf("the save left %s in the workspace", entry.Name())
+		}
+	}
+	if refs := jjGit(t, home, workspace, "for-each-ref", "--format=%(refname)", "refs/legion-bundle/"); refs != "" {
+		t.Fatalf("the save left its temporary refs behind:\n%s", refs)
+	}
+}
+
+// A shim with no workspace to bundle refuses by name rather than answering an empty bundle.
+func TestABundleOfNoWorkspaceIsRefusedByName(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t)
+	cfg := config(t, path, child)
+	cfg.Env = append(fixtureenv.Isolated(t.TempDir()), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker, "FAKE_OMP_LOG="+child.log)
+	run(t, cfg, newClock())
+	p := daemon.accept(t)
+	p.open(t)
+	p.send(t, shimwire.BundleWorkspace{ID: "bundle-3", Issue: "INFRA-945", MaxBytes: 40 << 20, TimeoutMs: 10_000})
+	got, ok := p.next(t).(shimwire.BundleWorkspaceResult)
+	if !ok || got.OK || !strings.Contains(got.Error, "LEGION_WORKSPACE") {
+		t.Fatalf("the shim answered %#v, want a refusal naming LEGION_WORKSPACE", got)
+	}
+}
+
+// bundledWorkspace is a colocated jj workspace with one unpushed commit and a working-copy change
+// of its own: what a released pod's workspace holds, in miniature. It answers the workspace and
+// the home every command of the fixture runs under, which is the home the shim under test is
+// given too (docs/testing.md, and shim_test.go's jjAs): the fixture and the code it exercises
+// read one configuration, and it is outside the workspace, whose every file this fixture bundles
+// and asserts on.
+func bundledWorkspace(t *testing.T) (workspace, home string) {
+	t.Helper()
+	for _, tool := range []string{"jj", "git"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is required: %v", tool, err)
+		}
+	}
+	root := t.TempDir()
+	home = filepath.Join(root, "home")
+	workspace = filepath.Join(root, "ws")
+	for _, dir := range []string{home, workspace} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jjGit(t, home, workspace, "init", "--quiet", "-b", "main", workspace)
+	if err := os.WriteFile(filepath.Join(workspace, "f.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jjGit(t, home, workspace, "add", "-A")
+	jjGit(t, home, workspace, "-c", "user.name=tester", "-c", "user.email=tester@example.test", "commit", "--quiet", "-m", "one")
+	jjRun(t, home, workspace, "git", "init", "--colocate", workspace)
+	jjRun(t, home, workspace, "new", "-R", workspace, "-m", "unpushed")
+	if err := os.WriteFile(filepath.Join(workspace, "wip.txt"), []byte(strings.Repeat("work\n", 4096)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workspace, home
+}
+
+// jjRun runs one jj command in the workspace it reads, as every jj a test starts must
+// (docs/testing.md).
+func jjRun(t *testing.T, home, dir string, args ...string) string {
+	t.Helper()
+	return workspaceCommand(t, home, dir, append([]string{"jj"}, args...))
+}
+
+func jjGit(t *testing.T, home, dir string, args ...string) string {
+	t.Helper()
+	return workspaceCommand(t, home, dir, append([]string{"git"}, args...))
+}
+
+// workspaceCommand runs one jj or git of a fixture's workspace under the isolated environment
+// this package's fixtures use (fixtureenv.Isolated, as shim_test.go's jjAs does), so no command
+// of a test reads the git or jj configuration, the credentials or the LEGION_ variables of
+// whoever runs the tests — in a pod, of the role whose live workspace this binary stands in.
+// Isolated's own JJ_CONFIG names a file that does not exist, which is what keeps the host's jj
+// configuration out; the fixture writes none of its own.
+//
+// home is the fixture's, and the shim under test is given the same one, so the two read one
+// configuration (docs/testing.md). It is outside the workspace: this fixture bundles that
+// workspace's unpushed work and asserts on what the bundle holds, and a home under it would put
+// jj's and git's own files into the very change under test.
+func workspaceCommand(t *testing.T, home, dir string, args []string) string {
+	t.Helper()
+	command := exec.Command(args[0], args[1:]...)
+	command.Dir = dir
+	command.Env = append(fixtureenv.Isolated(home),
+		"JJ_USER=tester", "JJ_EMAIL=tester@example.test",
+		"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.test",
+		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s in %s: %v\n%s", strings.Join(args, " "), dir, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}

@@ -44,6 +44,22 @@ any session. `agent-secrets enroll --helper` is open to any process of the user,
 can also enroll a box and read the operator's agent secrets. `agent-secrets --help` lists every
 form, and each form answers `-h`.
 
+A value is injected exactly as it is stored, line endings and all: a stored secret may
+legitimately be several lines, a PEM document among them. A one-line credential that ends in a
+line ending, though, is nearly always a seeding mistake — the trailing newline of whatever
+produced it, kept by a `gcloud secrets versions add --data-file=-` or an `aws secretsmanager
+put-secret-value` where a single trailing LF is what `secret set` would have removed. It is
+invisible where it is written
+and expensive where it is read: a caller that puts such a value straight into an HTTP header gets
+a rejected header, and the error reporting that can quote the whole secret into a log or a saved
+session (dispatch://INFRA-1042). So the exec form writes one more line to standard error before
+the command runs, naming each released secret whose value ends in a line ending and never any
+part of a value. Keep the ending where the value is meant to end that way; where it is not,
+store the value again with `agent-secrets secret set`, piping it with the ending already
+removed, because that form drops one final LF from its standard input and no carriage return —
+a value re-piped as it stands keeps the CR of a CRLF, keeps a lone CR, and keeps every LF but
+the last.
+
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.

@@ -57,6 +57,19 @@ notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is
 `notifications.github.acme.site_io`. A redelivered webhook is recognised and stored once.
 
+When a repository has been renamed, the listener publishes each of its events a second time under
+the former name, for every pair `ENVOY_GITHUB_REPOSITORY_RENAMES` configures as
+`<former owner>/<name>=<current owner>/<name>`. The copy differs from the first publish only in
+its topic: the same `event_id`, the same `dedupe_key`, the same payload. A client drops the copy
+by `event_id`, so a session subscribed under both names sees the event once. It goes one way
+only: the events of the current name are published under the former name, never the reverse.
+
+The current name of a pair is matched without case, but the former name is written into the
+subject exactly as the value spells it, so spell it as GitHub spelled that repository, capitals
+included: a NATS subject is compared with case, and another spelling sends every copy to a
+subject nothing subscribes to. The listener names each pair's copy subject prefix in its
+start-up log.
+
 ## How Slack mentions arrive, and how an agent replies
 
 A Slack app sends its events to the listener's public route `/webhook/slack`, which the listener

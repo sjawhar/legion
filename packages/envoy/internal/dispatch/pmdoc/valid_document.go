@@ -10,11 +10,12 @@ import "fmt"
 // Most of what this type answers has no other form: a caller holding a plain tree validates it
 // first (ValidateDocument) and reads it through the value that gives. Where an exported function
 // still takes a plain tree beside a twin here (BlockPathsAndTableRows, TableRows,
-// TableDescendantIDs, RenderWithBlockOffsets, EncodeTokenJSON, DeleteBlock, FindQuote and
-// NewQuoteFinder, and Update, whose twin UpdateDocument takes this value rather than being a method
-// on it), it is that validation in front of the same core, so the two answer alike. An exported
-// function with no twin here (MoveBlock, FindHeading, the table edits) validates the tree for
-// itself.
+// TableDescendantIDs, RenderWithBlockOffsets, EncodeTokenJSON, DeleteBlock, MoveBlock,
+// FindHeading, DeleteTableRow, DeleteTableColumn, TableRowMarks, TableColumnMarks, FindQuote and
+// NewQuoteFinder, and Update, whose twin UpdateDocument takes this value rather than being a
+// method on it), it is that validation in front of the same core, so the two answer alike;
+// FindHeading's validates the tree rather than the document, as it always did. An exported
+// function with no twin here (TableIndexErrorFor) validates the tree for itself.
 //
 // The zero ValidDocument holds no tree, and Node returns nil. Splice refuses it with the
 // invalid-splice error spliceShape gives, which it reads before any tree. A method with a plain twin
