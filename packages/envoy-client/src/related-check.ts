@@ -68,15 +68,16 @@ export function relatedCheckLines(
         "Read it. If it is the same work, fold this issue into it by the duplicate rule of skill://dispatch-first."
       );
     }
+    if (suggestions.near_copy_check !== undefined && suggestions.near_copy_check !== "") {
+      lines.push(`No near-copy check was made: ${suggestions.near_copy_check}.`);
+    }
     for (const match of suggestions.title_matches ?? []) {
       lines.push(
         `Near copy you forced past: ${match.key} [${match.status}] ${match.title} → ${absoluteHref(match.href, context.configUrl)}`
       );
     }
   } catch (error) {
-    lines.push(
-      `The check's past decision or title overlaps could not be shown: ${messageFor(error)}`
-    );
+    lines.push(`The check's past decision or near copies could not be shown: ${messageFor(error)}`);
   }
   return lines;
 }

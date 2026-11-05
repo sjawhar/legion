@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  `skill://dispatch-first` tells a filer whose create names a likely duplicate to read that issue
+  and fold it by the skill's own duplicate rule.

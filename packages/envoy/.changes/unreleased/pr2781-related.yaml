@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  The related items put up to three open issues before any item of another kind, and everything a
+  done issue owns last. The no-write related route takes `exclude_issues`, a list of at most 50
+  issues of the project left out of the results alone, beside its single `exclude_issue`.

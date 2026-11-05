@@ -273,8 +273,10 @@ func TestIssueProgressReconciliationDrainsMoreThanOneBatch(t *testing.T) {
 	}
 	keys := make([]string, 0, issues)
 	for index := range issues {
-		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			// One spec for every issue of the batch, so each is a near copy of the one before it.
 			"project": "MANY", "title": fmt.Sprintf("Issue %d", index), "spec": "- [x] one\n- [ ] two\n",
+			"force": true,
 		}, "alice")
 		if response.Code != http.StatusCreated {
 			t.Fatalf("create issue %d: status=%d body=%s", index, response.Code, response.Body.String())

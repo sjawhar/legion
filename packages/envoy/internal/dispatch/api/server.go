@@ -329,7 +329,7 @@ type server struct {
 	// rather than its machine's speed.
 	suggestionTimeout time.Duration
 	// duplicateBound overrides the bound the near-copy gate's read runs under; zero, which every
-	// server the deployment builds leaves it, means forcedTitleMatchTimeout. Only a test sets it
+	// server the deployment builds leaves it, means duplicateGateTimeout. Only a test sets it
 	// (the forced create whose check does not answer), so a case's outcome is its own choice
 	// rather than its machine's speed.
 	duplicateBound time.Duration

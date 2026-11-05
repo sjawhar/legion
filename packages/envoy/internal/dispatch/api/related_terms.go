@@ -460,6 +460,13 @@ type relatedTerm struct {
 	// rank (relatedCoordinationRank); Score is the text's tf of it times IDF.
 	IDF   float64
 	Score float64
+	// Quoted is the lexeme as quote_literal writes it, which relatedTerms.TSQuery joins.
+	Quoted string
+	// Unpriced marks a lexeme the project's statistics do not hold, which priceUnknownTerms took
+	// at the rarest priced document frequency. Only the near-copy gate picks such a term, where
+	// it belongs in the denominator; a search over it matches nothing, so a caller handing these
+	// terms to the related-item check leaves them out (duplicateGateResult.pickedTerms).
+	Unpriced bool
 }
 
 // relatedTerms is what pickRelatedTerms chose for a text.
@@ -655,8 +662,21 @@ type relatedCandidate struct {
 // frequent in the text, and a hit counts as df 1. A project with no statistics starts their
 // refresh (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as
 // 0. Each chosen term's surface is read from title alone (relatedTermsSQL).
+// probeUnknownTerms and priceUnknownTerms are pickRelatedTerms's two ways with a lexeme the
+// project's statistics do not hold. The related-item check probes: a live exists per kind, up to
+// relatedProbeLimit of them, which costs a text of many unseen words hundreds of milliseconds.
+// The near-copy gate, which a create waits on before it is written, prices instead: such a
+// lexeme is taken at document frequency 1, the highest idf the project's statistics can carry,
+// because a word the statistics have not seen is almost always rare or new since the last
+// refresh. Zero weight would be wrong there: a copy filed seconds after its original would lose
+// exactly the words that make it a copy.
+const (
+	probeUnknownTerms = true
+	priceUnknownTerms = false
+)
+
 func (s *server) pickRelatedTerms(
-	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion,
+	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion, probe bool,
 ) (relatedTerms, error) {
 	var artifactID *string
 	if exclude.artifactID != "" {
@@ -696,8 +716,31 @@ func (s *server) pickRelatedTerms(
 	candidates = slices.DeleteFunc(candidates, func(candidate relatedCandidate) bool {
 		return relatedNoise(candidate.Lexeme)
 	})
-	if err := probeRelatedCandidates(ctx, q, project, exclude.issueKey, artifactID, candidates); err != nil {
-		return relatedTerms{}, err
+	if probe {
+		if err := probeRelatedCandidates(ctx, q, project, exclude.issueKey, artifactID, candidates); err != nil {
+			return relatedTerms{}, err
+		}
+	} else {
+		// The rarest document frequency the statistics did price, which is the highest idf they
+		// hold: an unpriced lexeme is taken at that, never below it, so a word the statistics
+		// have not seen weighs as much as the rarest word they have and no more. Giving it df 1
+		// outright would rank it above every priced word and reorder the pick; weight zero would
+		// lose a copy filed seconds after its original exactly the words that make it a copy.
+		rarest := 0
+		for _, candidate := range candidates {
+			if candidate.known && candidate.DF > 0 && (rarest == 0 || candidate.DF < rarest) {
+				rarest = candidate.DF
+			}
+		}
+		if rarest == 0 {
+			rarest = 1
+		}
+		for index := range candidates {
+			if !candidates[index].known {
+				candidates[index].DF, candidates[index].known = rarest, true
+				candidates[index].Unpriced = true
+			}
+		}
 	}
 
 	commonAbove := max(float64(relatedCommonFloor), float64(picked.Items)/10)
@@ -727,6 +770,7 @@ func (s *server) pickRelatedTerms(
 			continue
 		}
 		matches += candidate.DF
+		candidate.relatedTerm.Quoted = candidate.quoted
 		picked.Terms = append(picked.Terms, candidate.relatedTerm)
 		quoted = append(quoted, candidate.quoted)
 	}

@@ -157,6 +157,9 @@ func issueNumber(t *testing.T, key string) int {
 // keys (a text naming an issue key matches that issue, as on the server it came from), each with
 // its latest title and spec and its server's creation and update times, and each done issue
 // closed as the server holds it, so a target that is done ranks where a reader would find it.
+// DISPATCH_RECALL_LOAD_OPEN=1 loads every issue open instead, as this harness did before the
+// close times were copied: that is how a run of it at main loads the same corpus, so the two
+// runs compared on the "every pair" line differ in the ranking alone.
 // recallStagePair sets a pair's two issues as they stood at its query's filing. Then it
 // refreshes the project's term statistics, as the leased pass would have, and answers how long
 // that took.
@@ -192,7 +195,7 @@ func loadRecallCorpus(t *testing.T, corpus recallCorpus) (*server, *store.Store,
 			key, issue.CreatedAt, issue.UpdatedAt); err != nil {
 			t.Fatalf("date %s: %v", key, err)
 		}
-		if issue.Status == "done" {
+		if issue.Status == "done" && os.Getenv("DISPATCH_RECALL_LOAD_OPEN") != "1" {
 			closedAt := issue.UpdatedAt
 			if issue.ClosedAt != nil {
 				closedAt = *issue.ClosedAt
@@ -308,7 +311,7 @@ func recallOldSearch(ctx context.Context, srv *server, project, text string) ([]
 
 // recallPick is the check's term selection (runRelatedCheck's stage 1): the text's rarest words.
 func recallPick(ctx context.Context, srv *server, project, text, title, exclude string) (relatedTerms, error) {
-	return srv.pickRelatedTerms(ctx, srv.deps.Store.Pool, project, text, title, relatedExclusion{issueKey: exclude})
+	return srv.pickRelatedTerms(ctx, srv.deps.Store.Pool, project, text, title, relatedExclusion{issueKey: exclude}, probeUnknownTerms)
 }
 
 // recallNewSearch runs the check's keyword query (relatedKeywordQuery) over the picked terms;
@@ -388,10 +391,14 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 	ctx := context.Background()
 
 	rankings := []string{"old 40-word OR query", "the check's keyword query"}
-	// listed[wording][ranking] counts the pairs whose target that ranking's search listed; pairs
-	// counts each wording's pairs.
+	// listed[wording][ranking] counts the pairs whose target that ranking's search listed, over
+	// the pairs R1 counts (the target open); pairs counts each wording's such pairs. everyPair
+	// counts the same over every pair whatever its target's status, which is the number a run of
+	// this harness at main answers, where every corpus issue is loaded open: the two runs are
+	// compared on that line and on no other.
 	listed := map[string][]int{}
 	pairs := map[string]int{}
+	everyPair := make([]int, 2)
 	// done counts the replayed pairs R1 leaves out: those whose target is already closed.
 	done := 0
 	for _, pair := range corpus.pairs {
@@ -429,6 +436,7 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 			position := slices.IndexFunc(items, func(item recallItem) bool { return item.owner == pair.Target })
 			if position >= 0 {
 				shown = fmt.Sprintf("listed %d of %d", position+1, len(items))
+				everyPair[index]++
 				if counted {
 					listed[pair.Wording][index]++
 				}
@@ -465,6 +473,7 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 	}
 	counted := len(corpus.pairs) - done
 	totals("every pair whose target is open", total, counted)
+	totals("every pair, as a run at main counts them", everyPair, len(corpus.pairs))
 	t.Logf("pairs replayed: %d; counted (target open): %d; left out (target done): %d",
 		len(corpus.pairs), counted, done)
 	if os.Getenv("DISPATCH_RECALL_REQUIRE_NO_LOSS") == "1" && total[1] < total[0] {

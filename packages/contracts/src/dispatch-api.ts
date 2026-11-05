@@ -2075,7 +2075,9 @@ export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
  * refusal named when the create was forced past it. `likely_duplicate` is the closest open issue
  * of an unforced create whose near-copy score reached the nudge bar but not the refusal's: a
  * field of its own, because every released client prints each `title_matches` entry as something
- * the filer forced past. Mirrors `model.Suggestions`.
+ * the filer forced past. `near_copy_check` is set, to why, exactly when the near-copy check
+ * before an issue create did not answer, so a filer knows the create went in unchecked. Mirrors
+ * `model.Suggestions`.
  */
 export interface Suggestions {
   readonly outcome?: RelatedCheckOutcome;
@@ -2087,6 +2089,7 @@ export interface Suggestions {
   readonly missing?: string;
   readonly title_matches?: DuplicateCandidate[];
   readonly likely_duplicate?: DuplicateCandidate;
+  readonly near_copy_check?: string;
 }
 
 /** One new decision block's related-item check in a document edit's advice

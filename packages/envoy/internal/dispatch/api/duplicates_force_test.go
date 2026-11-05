@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -208,6 +207,49 @@ func TestCreateIssueForcedWithNoAnswerRecordsAnEmptyList(t *testing.T) {
 	}
 }
 
+// An unforced create the gate could not check is written, not refused, and the filer is told
+// that no near-copy check was made. Refusing it would turn one slow read into a project nobody
+// can write to.
+func TestCreateIssueNudgeIsAbsentWhenTheGateDoesNotAnswer(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	createDuplicateTestProject(t, handler, "NUDGE")
+	requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+		"project": "NUDGE", "title": "Astrolabe calibration drifts after a reseat",
+		"spec": duplicateSpecAstrolabe,
+	}))
+
+	served.duplicateBound = 200 * time.Millisecond
+	lockTx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin the lock transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(context.Background(), "lock table search_term_stats in access exclusive mode"); err != nil {
+		t.Fatalf("lock search_term_stats: %v", err)
+	}
+
+	response := createIssueRequest(t, handler, map[string]any{
+		"project": "NUDGE", "title": "Astrolabe calibration drifts after a reseat",
+		"spec": duplicateSpecAstrolabe,
+	})
+	created := requireCreatedIssue(t, response)
+	suggestions := decodeBody[struct {
+		Advice struct {
+			Suggestions model.Suggestions `json:"suggestions"`
+		} `json:"advice"`
+	}](t, response).Advice.Suggestions
+	if suggestions.NearCopyCheck == "" {
+		t.Fatalf("create %s says nothing about the check that did not answer: %s", created.Key, response.Body.String())
+	}
+	if suggestions.LikelyDuplicate != nil || len(suggestions.TitleMatches) != 0 {
+		t.Fatalf("a create the gate could not check named issues: %#v %#v",
+			suggestions.LikelyDuplicate, suggestions.TitleMatches)
+	}
+	if _, ok := rawCreatedPayload(t, handler, created.Key)["forced"]; ok {
+		t.Fatalf("an unforced create carries a forced record")
+	}
+}
+
 func TestCreateIssueNudgesTheClosestOpenIssueBelowTheRefusal(t *testing.T) {
 	handler := newTestHandler(t)
 	// Midway between the two bars, so the case holds for any pair with
@@ -297,5 +339,4 @@ func TestDuplicateGateBarsAreOrderedFractions(t *testing.T) {
 		t.Fatalf("the fixture vocabulary holds %d words, under duplicateMinTerms %d",
 			len(duplicateWords), duplicateMinTerms)
 	}
-	_ = fmt.Sprint(duplicateCandidateLimit)
 }

@@ -646,17 +646,17 @@ func TestRelatedCheckBoundsBlankTextIsNotMade(t *testing.T) {
 // A forced create is told the near copies it forced past even when the check behind it cannot
 // run, and the issue is created.
 //
-// The check is stopped by its own allowance rather than by a lock: the near-copy gate picks the
-// text's terms with the check's own picker, so a lock on a table the picker probes stops both,
-// and R3 records that case as a check that did not answer
-// (TestCreateIssueForcedWithNoAnswerRecordsAnEmptyList).
+// The check is stopped by its own allowance, which the near-copy gate does not share: the gate
+// runs before the write under a bound of its own, the check after it. A lock would stop both,
+// since the gate prices the text's words through the check's own picker, and that case is the
+// third state of R3's record (TestCreateIssueForcedWithNoAnswerRecordsAnEmptyList).
 func TestCreateIssueForceNamesTitleMatchesWhenTheSearchFails(t *testing.T) {
 	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "FORCE")
 	const title = "Archive search drops rows past offset fifty"
 	existing := createSuggestionIssue(t, handler, map[string]any{"project": "FORCE", "title": title})
 
-	served.suggestionTimeout = time.Millisecond
+	served.suggestionTimeout = time.Nanosecond
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
 		"project": "FORCE", "title": title, "force": true,
 	}, "alice")

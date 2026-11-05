@@ -474,8 +474,10 @@ type WriteSuggestion struct {
 // by hand. TitleMatches is the issues the near-copy refusal named when the create was forced past
 // it. LikelyDuplicate is the closest open issue of an unforced create whose near-copy score
 // reached the nudge bar but not the refusal's: a field of its own, because every released client
-// prints each TitleMatches entry as something the filer forced past. Related is always an array,
-// never null.
+// prints each TitleMatches entry as something the filer forced past. NearCopyCheck is set, to
+// why, exactly when the near-copy check before the create did not answer, so a filer knows the
+// create went in unchecked; it is absent on every other write, which runs no such check.
+// Related is always an array, never null.
 type Suggestions struct {
 	Outcome         string               `json:"outcome"`
 	Search          string               `json:"search,omitempty"`
@@ -486,6 +488,7 @@ type Suggestions struct {
 	Missing         string               `json:"missing,omitempty"`
 	TitleMatches    []DuplicateCandidate `json:"title_matches,omitempty"`
 	LikelyDuplicate *DuplicateCandidate  `json:"likely_duplicate,omitempty"`
+	NearCopyCheck   string               `json:"near_copy_check,omitempty"`
 }
 
 // RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in

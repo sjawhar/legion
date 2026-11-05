@@ -43,7 +43,7 @@ func awaitTermStatsRefresh(t *testing.T, srv *server, project string) {
 // pickTerms picks from text as an ask's question is picked: the whole text is its title.
 func pickTerms(t *testing.T, srv *server, project, text string, exclude relatedExclusion) relatedTerms {
 	t.Helper()
-	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, project, text, text, exclude)
+	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, project, text, text, exclude, probeUnknownTerms)
 	if err != nil {
 		t.Fatalf("pick related terms: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestRelatedTermsSurfacesComeFromTheTitleAlone(t *testing.T) {
 
 	title := "Walruses on the move"
 	text := title + "\nThey cross the tundra each spring."
-	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, "SURF", text, title, relatedExclusion{})
+	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, "SURF", text, title, relatedExclusion{}, probeUnknownTerms)
 	if err != nil {
 		t.Fatalf("pick related terms: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestRelatedTermsSurfacesComeFromTheTitleAlone(t *testing.T) {
 	if !pickedWalrus || !pickedTundra || walrus.Surface != "Walruses" || tundra.Surface != "" {
 		t.Fatalf("terms %+v, want walrus written 'Walruses' as the title has it and tundra, only in the spec, with no surface", picked.Terms)
 	}
-	untitled, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, "SURF", text, "", relatedExclusion{})
+	untitled, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, "SURF", text, "", relatedExclusion{}, probeUnknownTerms)
 	if err != nil {
 		t.Fatalf("pick related terms with no title: %v", err)
 	}

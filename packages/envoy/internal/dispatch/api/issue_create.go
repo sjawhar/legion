@@ -199,15 +199,16 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// The near-copy gate, run once for every create whatever `force` says: a forced create's
 	// record of what it went past must be the refusal an unforced create would have met, and two
-	// reads would drift. The gate bounds and logs its own read (duplicateGate); an unforced
-	// create is refused with that read's error, as this handler has always answered a failed
-	// check, while a forced one goes in with the gate's answer marked absent.
+	// reads would drift. The gate bounds and logs its own read (duplicateGate), and a read that
+	// does not answer refuses nothing: the create goes in, a forced one recording that it was
+	// forced with no issues named and an unforced one told that no near-copy check was made.
 	//
 	// The gate's candidate set leaves out the new issue's whole ancestor chain, which is read
 	// here, before the transaction. A parent that does not exist or sits in another project
 	// yields an empty chain and still gets its own refusal inside the transaction, so no error
 	// changes order.
 	var gate duplicateGateResult
+	var refusals []model.DuplicateCandidate
 	if input.External == "" {
 		ancestors := []string{}
 		if parentKey != "" {
@@ -222,22 +223,16 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		if input.Spec != nil {
 			spec = *input.Spec
 		}
-		result, err := s.duplicateGate(r.Context(), input.Project, input.Title, spec, ancestors)
-		if !input.Force {
-			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if refusals := result.refusals(); len(refusals) > 0 {
-				WriteJSON(w, http.StatusConflict, map[string]any{
-					"error":      fmt.Sprintf("possible duplicate of %s: %s", refusals[0].Key, refusals[0].Title),
-					"code":       "POSSIBLE_DUPLICATE",
-					"candidates": refusals,
-				})
-				return
-			}
+		gate = s.duplicateGate(r.Context(), input.Project, input.Title, spec, ancestors)
+		refusals = gate.refusals()
+		if !input.Force && gate.Answered && len(refusals) > 0 {
+			WriteJSON(w, http.StatusConflict, map[string]any{
+				"error":      fmt.Sprintf("possible duplicate of %s: %s", refusals[0].Key, refusals[0].Title),
+				"code":       "POSSIBLE_DUPLICATE",
+				"candidates": refusals,
+			})
+			return
 		}
-		gate = result
 	}
 
 	tx, err := s.begin(r.Context())
@@ -432,7 +427,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	payload.Forced = forcedCreateRecord(input.Force, gate)
+	payload.Forced = forcedCreateRecord(input.Force, gate.Answered, refusals)
 	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event("issue.created", actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -467,16 +462,22 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		source:  suggestionSource{kind: "issue", issueKey: key, actor: actor},
 		record:  true,
 	})
-	suggestions.TitleMatches = gateTitleMatches(input.Force, gate)
+	suggestions.TitleMatches = gateTitleMatches(input.Force, refusals)
 	if !input.Force {
 		suggestions.LikelyDuplicate = gate.nudge()
+	}
+	if input.External == "" && !gate.Answered {
+		suggestions.NearCopyCheck = nearCopyCheckNotMade
 	}
 	WriteJSON(w, http.StatusCreated, withSuggestions(issue, advice, suggestions))
 }
 
-// forcedTitleMatchTimeout bounds the near-copy gate's read: a create waits on it, and a forced
-// create, which is not refused on it, must not wait long on it either.
-const forcedTitleMatchTimeout = time.Second
+// duplicateGateTimeout bounds the near-copy gate's whole read, on the context and as the read
+// transaction's own statement_timeout. Every create waits on it before it is written, so it is
+// held well under the second the title rule it replaces was given: past it the create goes in
+// and is told that no near-copy check was made, which is what a slow read must cost rather than
+// a project nobody can write to.
+const duplicateGateTimeout = 500 * time.Millisecond
 
 // forcedCreateRecord is what the issue.created event stores about a create that went in with
 // `force`, in the three states dispatch://INFRA-1160/spec#b-r3 names:
@@ -486,38 +487,34 @@ const forcedTitleMatchTimeout = time.Second
 //	the refusal would not have stopped it, or no force   nothing
 //
 // Past carries no omitempty, so the empty list survives the write and a reader can tell the
-// second state from the third. The weekly count reads it from the event.
-func forcedCreateRecord(force bool, gate duplicateGateResult) *model.ForcedCreate {
-	if !force {
+// second state from the third. The weekly count reads it from the event. refusals is what the
+// gate named, which the create reads once and this and gateTitleMatches both take.
+func forcedCreateRecord(force bool, answered bool, refusals []model.DuplicateCandidate) *model.ForcedCreate {
+	switch {
+	case !force:
 		return nil
-	}
-	if !gate.Answered {
+	case !answered:
 		return &model.ForcedCreate{Past: []string{}}
-	}
-	past := []string{}
-	for _, candidate := range gate.refusals() {
-		past = append(past, candidate.Key)
-	}
-	if len(past) == 0 {
+	case len(refusals) == 0:
 		return nil
+	}
+	past := make([]string, 0, len(refusals))
+	for _, candidate := range refusals {
+		past = append(past, candidate.Key)
 	}
 	return &model.ForcedCreate{Past: past}
 }
 
 // gateTitleMatches is advice.suggestions.title_matches: the issues a forced create went past,
-// which every released client prints as "Title overlaps you forced past". An unforced create
-// never fills it, whatever the gate found - its nudge rides in likely_duplicate, a field of its
-// own, because Dispatch deploys before the CLI reaches agents and a nudge carried here would
-// tell every nudged filer it forced past something it did not.
-func gateTitleMatches(force bool, gate duplicateGateResult) []model.DuplicateCandidate {
-	if !force || !gate.Answered {
+// which every released client prints as a near copy it forced past. An unforced create never
+// fills it, whatever the gate found - its nudge rides in likely_duplicate, a field of its own,
+// because Dispatch deploys before the CLI reaches agents and a nudge carried here would tell
+// every nudged filer it forced past something it did not.
+func gateTitleMatches(force bool, refusals []model.DuplicateCandidate) []model.DuplicateCandidate {
+	if !force || len(refusals) == 0 {
 		return nil
 	}
-	matches := gate.refusals()
-	if len(matches) == 0 {
-		return nil
-	}
-	return matches
+	return refusals
 }
 
 // respondWithExistingExternalIssue answers a create naming a GitHub issue Dispatch already holds

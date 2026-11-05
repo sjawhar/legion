@@ -466,7 +466,7 @@ func (s *server) runRelatedCheck(
 	pick := &relatedPick{ready: make(chan struct{})}
 	keyword := make(chan relatedStage, 1)
 	go func() {
-		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, input.title, exclusion)
+		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, input.title, exclusion, probeUnknownTerms)
 		close(pick.ready)
 		stage := relatedStage{err: pick.err}
 		switch {
@@ -764,17 +764,25 @@ func (s *server) resolveSuggestionProject(ctx context.Context, source suggestion
 // relatedItemRank orders the check's related items: up to three open issues come before any item
 // of another kind, and everything a done issue owns comes last.
 //
-// An issue is what a filer can act on - fold into it, comment on it, file under it - where an
-// answered ask with a long answer or a project document can only be read, and the check has three
-// places to give. Keyword search ranks an issue already closed as a duplicate above the open
-// issue it was closed into whenever its words are closer to the new filing's, which they often
-// are (a duplicate restates the bug the way the next duplicate will); the open issue is the one
-// an agent can act on, so done comes last whatever its kind.
+// The rank is the item's owner, not the item's own kind. An open issue is what a filer can act
+// on - fold into it, comment on it, file under it - and it is that issue whether the text
+// matched its title, its spec or a comment on it, since each fills the same one place and the
+// reader is given the issue's key either way. What takes a place an issue needs is an item on a
+// project document: a project-level document or an answered ask on one, which a filer can read
+// and nothing more (dispatch://INFRA-1160/spec, "Problem"). Ranking by the item's own kind
+// instead costs recall, measured: over the 71 known duplicate pairs of INFRA it listed the
+// earlier issue for 17, against 25 for the order this replaces, because a target matched
+// through its spec fell below weaker matches on another issue's title.
+//
+// Keyword search ranks an issue already closed as a duplicate above the open issue it was closed
+// into whenever its words are closer to the new filing's, which they often are (a duplicate
+// restates the bug the way the next duplicate will); the open issue is the one an agent can act
+// on, so done comes last whatever the item is.
 func relatedItemRank(result model.SearchResult) int {
 	switch {
 	case closedOwner(result):
 		return 2
-	case result.Kind == "issue":
+	case result.Owner.Kind == "issue":
 		return 0
 	default:
 		return 1

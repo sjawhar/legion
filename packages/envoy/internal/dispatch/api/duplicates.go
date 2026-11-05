@@ -26,25 +26,31 @@ const duplicateCandidateLimit = 5
 // TestNearCopyRefusalReplay sets them: it replays every create of INFRA from 2026-10-20 to
 // 2026-11-04 against the project as it stood at each create, over the corpus
 // `near-copy-corpus.jsonl` attached to dispatch://INFRA-1160, and reports the false-refusal and
-// nudge rates at each bar. The test asserts that these constants equal the bars its report names,
-// so a later drift fails it. A change to the term picker, to the project's term statistics or to
-// the scoring statement invalidates the calibration: run the replay again.
+// nudge rates at each bar. The test asserts that these constants hold the rates the report
+// names, so a later drift fails it. A change to the term picker, to the project's term
+// statistics or to the scoring statement invalidates the calibration: run the replay again.
 const (
 	// duplicateRefuseScore is the score at or above which a create is refused 409
 	// POSSIBLE_DUPLICATE. At most 5% of the creates the replay judges not duplicates may reach it
-	// (dispatch://INFRA-1160/spec#b-r2).
-	duplicateRefuseScore = 0.70
+	// (dispatch://INFRA-1160/spec#b-r2). Measured on 2026-11-05 over 1,159 INFRA creates: 64
+	// refused, 49 of them not duplicates, 4.28% of the 1,144 creates not marked. It is the
+	// lowest bar under that ceiling, so it stops the most near copies the ceiling allows: the
+	// next bar down, 0.70, refuses 75 that are not duplicates, 6.55%.
+	duplicateRefuseScore = 0.75
 	// duplicateNudgeScore is the score at or above which the closest open issue is named to the
 	// filer as a likely duplicate, without refusing the create. At most 15% of the replay's
-	// creates may reach it (dispatch://INFRA-1160/spec#b-r4).
-	duplicateNudgeScore = 0.50
+	// creates may reach it (dispatch://INFRA-1160/spec#b-r4). Measured on the same replay: 114
+	// creates nudged, 9.8%. The next bar down, 0.55, nudges 163, 14.1%, which is under the
+	// ceiling by less than one create in a hundred and so is not where a bar belongs.
+	duplicateNudgeScore = 0.60
 	// duplicateMinTerms is how many terms the new text must carry before the gate judges it at
 	// all. The score is a share of the picked terms, and pickRelatedTerms keeps only a term some
 	// other item of the project holds (a term no other item holds has df 0 and is dropped). So a
 	// text that yields one or two terms scores 1.0 against any issue that holds them, and a
 	// two-word title would be refused as a near copy of an issue it shares one word with. Three
-	// is what the title rule this replaces asked for as well (`shared >= 3`): below it there is
-	// not enough of the text to judge, so the gate names nothing, neither a refusal nor a nudge.
+	// is what the title rule this replaces asked for as well (`shared >= 3`), and it is as high
+	// as it can go: one near-copy pair the replay must refuse, INFRA-432 against INFRA-431, is
+	// two issues with one title and no spec at all, and it carries three terms.
 	duplicateMinTerms = 3
 )
 
@@ -152,9 +158,10 @@ type scoredDuplicate struct {
 
 // duplicateGateResult is what the near-copy gate answered for one create.
 type duplicateGateResult struct {
-	// Answered is false when the gate's read failed or ran out of its bound. A forced create
-	// records that it was forced with no issues named; an unforced one is refused with the read's
-	// own error.
+	// Answered is false when the gate's read failed or ran out of its bound. The create goes in
+	// either way: a forced one records that it was forced with no issues named, an unforced one
+	// is told that no near-copy check was made. Refusing a create because the gate was slow
+	// would turn one slow read into a project that cannot be written to.
 	Answered bool
 	// Candidates are the project's open non-ancestor issues whose score reaches
 	// duplicateNudgeScore, best score first, at most duplicateCandidateLimit.
@@ -190,10 +197,10 @@ func (result duplicateGateResult) nudge() *model.DuplicateCandidate {
 
 // duplicateGateBound is how long the gate's read may take, both when it refuses a create and when
 // it only names what a forced create went past: whatever the server was built with, else
-// forcedTitleMatchTimeout. Only a test sets the field, so a case's outcome is its own choice
+// duplicateGateTimeout. Only a test sets the field, so a case's outcome is its own choice
 // rather than its machine's speed.
 func (s *server) duplicateGateBound() time.Duration {
-	return cmp.Or(s.duplicateBound, forcedTitleMatchTimeout)
+	return cmp.Or(s.duplicateBound, duplicateGateTimeout)
 }
 
 // duplicateGateText is what the gate reads for a new issue: its title and its spec, joined as
@@ -218,22 +225,24 @@ func duplicateGateText(title, spec string) string {
 // answered a failed check; a forced one goes on with Answered false.
 func (s *server) duplicateGate(
 	ctx context.Context, project, title, spec string, ancestors []string,
-) (duplicateGateResult, error) {
+) duplicateGateResult {
 	bound := s.duplicateGateBound()
 	gateCtx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
-	candidates, err := s.readDuplicateCandidates(gateCtx, project, title, spec, ancestors, bound)
+	candidates, err := s.readDuplicateCandidates(gateCtx, project, title, spec, ancestors, bound, duplicateNudgeScore)
 	if err != nil {
 		slog.Warn("dispatch: the near-copy check did not answer", "project", project, "error", err)
-		return duplicateGateResult{}, err
+		return duplicateGateResult{}
 	}
-	return duplicateGateResult{Answered: true, Candidates: candidates}, nil
+	return duplicateGateResult{Answered: true, Candidates: candidates}
 }
 
 // readDuplicateCandidates picks the new text's rarest words and scores the project's open issues
-// against them, in one read transaction.
+// against them, in one read transaction, answering those at or above floor, best score first.
+// The gate's floor is duplicateNudgeScore, the lowest score it ever names; the replay that sets
+// the two bars reads from zero, so the whole distribution is visible to it.
 func (s *server) readDuplicateCandidates(
-	ctx context.Context, project, title, spec string, ancestors []string, bound time.Duration,
+	ctx context.Context, project, title, spec string, ancestors []string, bound time.Duration, floor float64,
 ) ([]scoredDuplicate, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -244,7 +253,7 @@ func (s *server) readDuplicateCandidates(
 		return nil, err
 	}
 	// The new issue does not exist yet, so nothing of it is left out of the word statistics.
-	picked, err := s.pickRelatedTerms(ctx, tx, project, duplicateGateText(title, spec), title, relatedExclusion{})
+	picked, err := s.pickRelatedTerms(ctx, tx, project, duplicateGateText(title, spec), title, relatedExclusion{}, priceUnknownTerms)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +277,7 @@ func (s *server) readDuplicateCandidates(
 		ancestors = []string{}
 	}
 	rows, err := tx.Query(ctx, duplicateScoreQuery,
-		project, lexemes, weights, ancestors, duplicateNudgeScore, duplicateHeadlineOptions)
+		project, lexemes, weights, ancestors, floor, duplicateHeadlineOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -297,3 +306,8 @@ func scanDuplicateCandidates(rows pgx.Rows) ([]scoredDuplicate, error) {
 	}
 	return candidates, nil
 }
+
+// nearCopyCheckNotMade is model.Suggestions.NearCopyCheck when the gate's read did not answer:
+// the create went in without the near-copy check an unforced create otherwise meets.
+const nearCopyCheckNotMade = "the near-copy check before this create did not answer in " +
+	"500ms, so the create was not checked against the project's open issues"

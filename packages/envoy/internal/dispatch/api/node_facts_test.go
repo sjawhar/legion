@@ -211,6 +211,9 @@ func createChildIssue(t *testing.T, handler http.Handler, project, parent, spec 
 	t.Helper()
 	child := decodeBody[model.Issue](t, created(t, "create the child issue", createIssueRequest(t, handler, map[string]any{
 		"project": project, "title": "Child", "spec": spec, "parent": parent,
+		// Every child this helper makes carries one title and one spec, so the second one is a
+		// near copy of the first and the create gate would refuse it.
+		"force": true,
 	})))
 	succeeded(t, "rename the child issue as bob", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]any{"title": "Renamed child"}, "bob"))
 	return child

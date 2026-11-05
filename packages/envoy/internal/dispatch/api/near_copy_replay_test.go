@@ -2,9 +2,9 @@ package api
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"slices"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -198,14 +199,38 @@ func nearCopyTimeline(corpus nearCopyCorpus) []nearCopyEvent {
 	return events
 }
 
-// nearCopyScore is what the gate answered for one replayed create.
+// nearCopyScore is what the gate answered for one replayed create, and how long it took. The
+// time is what the gate costs on a project of this size, which is the other number this replay
+// is run for.
 type nearCopyScore struct {
-	key       string
-	candidate string
-	score     float64
-	shared    int
-	terms     int
-	answered  bool
+	key            string
+	candidate      string
+	candidateTitle string
+	score          float64
+	shared         int
+	answered       bool
+	took           time.Duration
+}
+
+// nearCopyGateBound is the bound the replay runs the gate under. Production's is one second
+// (duplicateGateTimeout), which this replay must not be held to: it measures the score, and a
+// cold project with no term statistics probes every lexeme live, so an early create can take far
+// longer than a warm server ever does. What the gate costs is reported rather than enforced.
+const nearCopyGateBound = time.Minute
+
+// nearCopyMarkedDuplicates are the replayed creates the implementer read and marked real
+// duplicates of the issue the gate named, on 2026-11-05 over the INFRA corpus. k4's 5% ceiling
+// is of the creates that are not duplicates, so these are left out of it, and
+// dispatch://INFRA-1160/artifact/near-copy-replay-md carries the reason for each. The four
+// pairs the corpus names are marked by their own record and are not repeated here.
+//
+// Each is a create whose text restates an open issue's work, judged by reading both titles and
+// both specs: an identical title (INFRA-782, INFRA-375, INFRA-452, INFRA-451, INFRA-756,
+// INFRA-454, INFRA-453), or the same defect in other words (INFRA-806, INFRA-442, INFRA-757,
+// INFRA-70).
+var nearCopyMarkedDuplicates = []string{
+	"INFRA-806", "INFRA-782", "INFRA-375", "INFRA-452", "INFRA-442",
+	"INFRA-451", "INFRA-756", "INFRA-454", "INFRA-757", "INFRA-70", "INFRA-453",
 }
 
 func TestNearCopyRefusalReplay(t *testing.T) {
@@ -226,6 +251,9 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 	for _, pair := range corpus.pairs {
 		marked[pair.Query] = true
 	}
+	for _, key := range nearCopyMarkedDuplicates {
+		marked[key] = true
+	}
 	for _, key := range strings.Split(os.Getenv("DISPATCH_NEARCOPY_DUPLICATES"), ",") {
 		if key = strings.TrimSpace(key); key != "" {
 			marked[key] = true
@@ -237,7 +265,9 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 	// The related-item check is not what is being measured, and it runs on every create: give it
 	// no time, so each create answers that it was not made and the replay pays only for the gate.
 	served.suggestionTimeout = time.Millisecond
+	served.duplicateBound = nearCopyGateBound
 	srv := directServer(deps)
+	srv.duplicateBound = nearCopyGateBound
 	createSuggestionProject(t, handler, corpus.project)
 
 	queries := map[string]bool{}
@@ -245,6 +275,7 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 		queries[key] = true
 	}
 	scores := make([]nearCopyScore, 0, len(corpus.queries))
+	present := map[string]bool{}
 	created := 0
 	started := time.Now()
 	for _, event := range nearCopyTimeline(corpus) {
@@ -253,7 +284,8 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 			if queries[event.key] {
 				scores = append(scores, replayNearCopyGate(t, srv, corpus, event.key))
 			}
-			insertNearCopyIssue(t, ctx, database, handler, corpus, event)
+			insertNearCopyIssue(t, ctx, database, handler, corpus, event, present)
+			present[event.key] = true
 			created++
 			if created%refreshEvery == 0 {
 				refreshNearCopyStats(t, ctx, database, corpus.project)
@@ -270,8 +302,10 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 				`update issues set status = $2, closed_at = $3, updated_at = $4 where key = $1`,
 				event.key, event.status, closedAt, event.at)
 		case "parent":
-			execNearCopy(t, ctx, database, `update issues set parent_key = $2 where key = $1`,
-				event.key, event.parent)
+			if event.parent == nil || present[*event.parent] {
+				execNearCopy(t, ctx, database, `update issues set parent_key = $2 where key = $1`,
+					event.key, event.parent)
+			}
 		case "spec":
 			insertNearCopySpec(t, ctx, database, event.key, event.version)
 		}
@@ -280,7 +314,125 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 	t.Logf("replayed %d creates over %d issues in %v (term statistics refreshed every %d creates)",
 		len(scores), len(corpus.issues), time.Since(started).Round(time.Second), refreshEvery)
 
+	measureNearCopyGate(t, ctx, srv, database, corpus)
 	reportNearCopyReplay(t, corpus, scores, marked, refreshEvery)
+}
+
+// measureNearCopyGate times the gate on the loaded project, which holds the whole history the
+// corpus carries and so is the production-like surface this measurement needs. It times the
+// three parts the gate is made of beside the whole of it, for an ordinary text and for a very
+// long spec, and prints the scoring statement's plan.
+func measureNearCopyGate(
+	t *testing.T, ctx context.Context, srv *server, database *store.Store, corpus nearCopyCorpus,
+) {
+	t.Helper()
+	const runs = 20
+	// An ordinary text: the longest-specced create of the replay, and a very long one built from
+	// the corpus's own words, as a 10,000-word spec would be.
+	ordinary, longest := "", 0
+	words := make([]string, 0, 16384)
+	for key := range corpus.issues {
+		spec := corpus.firstSpec(key)
+		if len(spec) > longest {
+			ordinary, longest = corpus.firstTitle(key)+"\n"+spec, len(spec)
+		}
+		if len(words) < 10000 {
+			words = append(words, strings.Fields(spec)...)
+		}
+	}
+	if len(words) > 10000 {
+		words = words[:10000]
+	}
+	texts := map[string]string{"an ordinary text": ordinary, "a 10,000-word spec": strings.Join(words, " ")}
+
+	for name, text := range texts {
+		title, _, _ := strings.Cut(text, "\n")
+		whole := make([]time.Duration, 0, runs)
+		ancestors := make([]time.Duration, 0, runs)
+		picks := make([]time.Duration, 0, runs)
+		scoring := make([]time.Duration, 0, runs)
+		for run := range runs + 1 {
+			started := time.Now()
+			if _, err := srv.readDuplicateCandidates(ctx, corpus.project, title, text, nil, nearCopyGateBound, duplicateNudgeScore); err != nil {
+				t.Fatalf("the gate did not answer for %s: %v", name, err)
+			}
+			gate := time.Since(started)
+
+			started = time.Now()
+			if _, err := refs.IssueAncestors(ctx, database.Pool, corpus.queries[len(corpus.queries)-1]); err != nil {
+				t.Fatalf("read the ancestors: %v", err)
+			}
+			ancestor := time.Since(started)
+
+			started = time.Now()
+			picked, err := srv.pickRelatedTerms(ctx, database.Pool, corpus.project, text, title, relatedExclusion{}, priceUnknownTerms)
+			if err != nil {
+				t.Fatalf("pick the terms for %s: %v", name, err)
+			}
+			pick := time.Since(started)
+
+			lexemes, weights := nearCopyTermArrays(picked)
+			started = time.Now()
+			rows, err := database.Pool.Query(ctx, duplicateScoreQuery,
+				corpus.project, lexemes, weights, []string{}, duplicateNudgeScore, duplicateHeadlineOptions)
+			if err != nil {
+				t.Fatalf("score for %s: %v", name, err)
+			}
+			if _, err := scanDuplicateCandidates(rows); err != nil {
+				t.Fatalf("read the scores for %s: %v", name, err)
+			}
+			score := time.Since(started)
+
+			if run == 0 {
+				continue // the first run warms the plans and the cache
+			}
+			whole = append(whole, gate)
+			ancestors = append(ancestors, ancestor)
+			picks = append(picks, pick)
+			scoring = append(scoring, score)
+		}
+		for label, times := range map[string][]time.Duration{
+			"the whole gate": whole, "the ancestor read": ancestors,
+			"the term pick": picks, "the scoring statement": scoring,
+		} {
+			slices.Sort(times)
+			t.Logf("latency, %s, %s over %d runs: p50 %v, p95 %v, max %v", name, label, len(times),
+				times[len(times)/2].Round(time.Millisecond),
+				times[min(int(0.95*float64(len(times))), len(times)-1)].Round(time.Millisecond),
+				times[len(times)-1].Round(time.Millisecond))
+		}
+	}
+
+	title, _, _ := strings.Cut(ordinary, "\n")
+	picked, err := srv.pickRelatedTerms(ctx, database.Pool, corpus.project, ordinary, title, relatedExclusion{}, priceUnknownTerms)
+	if err != nil {
+		t.Fatalf("pick the terms for the plan: %v", err)
+	}
+	lexemes, weights := nearCopyTermArrays(picked)
+	plan, err := database.Pool.Query(ctx, "explain (analyze, buffers) "+duplicateScoreQuery,
+		corpus.project, lexemes, weights, []string{}, duplicateNudgeScore, duplicateHeadlineOptions)
+	if err != nil {
+		t.Fatalf("explain the scoring statement: %v", err)
+	}
+	defer plan.Close()
+	for plan.Next() {
+		var line string
+		if err := plan.Scan(&line); err != nil {
+			t.Fatalf("read the plan: %v", err)
+		}
+		t.Logf("plan: %s", line)
+	}
+}
+
+// nearCopyTermArrays is the scoring statement's two parameters, as the gate builds them.
+func nearCopyTermArrays(picked relatedTerms) ([]string, []float64) {
+	lexemes := make([]string, 0, len(picked.Terms))
+	weights := make([]float64, 0, len(picked.Terms))
+	for _, term := range picked.Terms {
+		lexemes = append(lexemes, term.Lexeme)
+		weights = append(weights, term.IDF)
+	}
+	return lexemes, weights
 }
 
 // replayNearCopyGate runs the real gate for one create, against the project as the walk has left
@@ -288,15 +440,19 @@ func TestNearCopyRefusalReplay(t *testing.T) {
 func replayNearCopyGate(t *testing.T, srv *server, corpus nearCopyCorpus, key string) nearCopyScore {
 	t.Helper()
 	issue := corpus.issues[key]
-	result, err := srv.duplicateGate(context.Background(), corpus.project,
-		corpus.firstTitle(key), corpus.firstSpec(key), issue.Ancestors)
-	score := nearCopyScore{key: key, answered: err == nil}
+	started := time.Now()
+	// From zero, not from the gate's own floor: the replay must see the whole distribution to
+	// report the rate at a bar below today's.
+	candidates, err := srv.readDuplicateCandidates(context.Background(), corpus.project,
+		corpus.firstTitle(key), corpus.firstSpec(key), issue.Ancestors, nearCopyGateBound, 0)
+	score := nearCopyScore{key: key, answered: err == nil, took: time.Since(started)}
 	if err != nil {
 		t.Fatalf("the gate did not answer for %s: %v", key, err)
 	}
-	if len(result.Candidates) > 0 {
-		closest := result.Candidates[0]
+	if len(candidates) > 0 {
+		closest := candidates[0]
 		score.candidate, score.score, score.shared = closest.Key, closest.Score, closest.SharedTerms
+		score.candidateTitle = closest.Title
 	}
 	return score
 }
@@ -321,7 +477,7 @@ func refreshNearCopyStats(t *testing.T, ctx context.Context, database *store.Sto
 // of going through the real write path.
 func insertNearCopyIssue(
 	t *testing.T, ctx context.Context, database *store.Store, handler http.Handler,
-	corpus nearCopyCorpus, event nearCopyEvent,
+	corpus nearCopyCorpus, event nearCopyEvent, present map[string]bool,
 ) {
 	t.Helper()
 	number := nearCopyNumber(t, event.key)
@@ -330,10 +486,12 @@ func insertNearCopyIssue(
 		"project": corpus.project, "title": event.title,
 		"spec": corpus.firstSpec(event.key), "force": true,
 	}
-	if event.parent != nil && *event.parent != "" {
-		if _, known := corpus.issues[*event.parent]; known {
-			body["parent"] = *event.parent
-		}
+	// A parent the walk has not reached yet is left off: an event log that lost its issue.created
+	// gives the parent a later update set, and the create would be refused for an issue that does
+	// not exist. No read of the gate's is on issues.parent_key - the ancestors it leaves out come
+	// from the corpus - so the link only has to be right where the history has it.
+	if event.parent != nil && present[*event.parent] {
+		body["parent"] = *event.parent
 	}
 	response := createIssueRequest(t, handler, body)
 	if response.Code != http.StatusCreated {
@@ -381,8 +539,19 @@ func reportNearCopyReplay(
 ) {
 	t.Helper()
 	byKey := map[string]nearCopyScore{}
+	took := make([]time.Duration, 0, len(scores))
 	for _, score := range scores {
 		byKey[score.key] = score
+		took = append(took, score.took)
+	}
+	slices.Sort(took)
+	if len(took) > 0 {
+		at := func(share float64) time.Duration {
+			return took[min(int(share*float64(len(took))), len(took)-1)]
+		}
+		t.Logf("the gate's own time over %d creates: p50 %v, p95 %v, max %v",
+			len(took), at(0.5).Round(time.Millisecond), at(0.95).Round(time.Millisecond),
+			took[len(took)-1].Round(time.Millisecond))
 	}
 	for _, pair := range corpus.pairs {
 		score := byKey[pair.Query]
@@ -394,13 +563,30 @@ func reportNearCopyReplay(
 			pair.Query, pair.Target, score.candidate, score.score, score.shared, verdict)
 	}
 
-	buckets := make([]int, 11)
+	buckets := make([]int, 21)
 	for _, score := range scores {
-		bucket := int(score.score * 10)
-		buckets[min(max(bucket, 0), 10)]++
+		bucket := int(score.score * 20)
+		buckets[min(max(bucket, 0), 20)]++
 	}
 	for bucket, count := range buckets {
-		t.Logf("histogram: score in [%.1f, %.1f): %d creates", float64(bucket)/10, float64(bucket+1)/10, count)
+		if count > 0 {
+			t.Logf("histogram: score in [%.2f, %.2f): %d creates", float64(bucket)/20, float64(bucket+1)/20, count)
+		}
+	}
+
+	// Every create the gate would name, for the implementer to mark a duplicate or not. The
+	// report artifact carries the markings, and every create not marked counts against the 5%
+	// ceiling.
+	named := make([]nearCopyScore, 0, len(scores))
+	for _, score := range scores {
+		if score.score >= duplicateNudgeScore {
+			named = append(named, score)
+		}
+	}
+	slices.SortFunc(named, func(a, b nearCopyScore) int { return cmp.Compare(b.score, a.score) })
+	for _, score := range named {
+		t.Logf("named: %.3f %s %q -> %s %q (%d shared terms)",
+			score.score, score.key, corpus.firstTitle(score.key), score.candidate, score.candidateTitle, score.shared)
 	}
 
 	rateAt := func(bar float64) (int, int) {
@@ -432,17 +618,15 @@ func reportNearCopyReplay(
 			notDuplicates++
 		}
 	}
-	for _, delta := range []float64{-0.05, 0, 0.05} {
-		bar := duplicateRefuseScore + delta
+	for bar := 0.50; bar <= 0.96; bar += 0.05 {
 		refused, false_ := rateAt(bar)
 		t.Logf("refuse bar %.2f: %d refused, %d of them not marked duplicates (%.2f%% of the %d creates not marked)",
 			bar, refused, false_, 100*float64(false_)/float64(notDuplicates), notDuplicates)
 	}
-	for _, delta := range []float64{-0.05, 0, 0.05} {
-		bar := duplicateNudgeScore + delta
+	for bar := 0.30; bar < duplicateRefuseScore+0.001; bar += 0.05 {
 		nudged := nudgedAt(bar, duplicateRefuseScore)
-		t.Logf("nudge bar %.2f: %d nudged (%.2f%% of %d creates)",
-			bar, nudged, 100*float64(nudged)/float64(total), total)
+		t.Logf("nudge bar %.2f (refuse %.2f): %d nudged (%.2f%% of %d creates)",
+			bar, duplicateRefuseScore, nudged, 100*float64(nudged)/float64(total), total)
 	}
 	t.Logf("corpus: %s; creates replayed: %d; marked duplicates: %d; refresh every %d creates",
 		os.Getenv("DISPATCH_NEARCOPY_CORPUS"), total, len(marked), refreshEvery)
@@ -468,5 +652,4 @@ func reportNearCopyReplay(
 		t.Errorf("the nudge bar %.2f nudges %.2f%% of the creates, over the 15%% ceiling",
 			duplicateNudgeScore, 100*share)
 	}
-	_ = fmt.Sprint(duplicateCandidateLimit)
 }

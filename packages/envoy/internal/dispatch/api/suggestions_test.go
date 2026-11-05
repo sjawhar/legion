@@ -82,7 +82,7 @@ func TestCreateIssueSuggestsSimilarOpenIssue(t *testing.T) {
 	}
 	existingIssue := decodeBody[testIssueWithSuggestions](t, existing)
 
-	// force bypasses the create-time title near-duplicate gate (duplicates.go), which this test
+	// force bypasses the create-time near-copy gate (duplicates.go), which this test
 	// does not exercise: LEGION-550's suggestions are a separate, non-blocking signal that
 	// coexists with it.
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
