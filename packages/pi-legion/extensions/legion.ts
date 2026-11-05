@@ -44,10 +44,12 @@ import { clearStartupTurn } from "@legion/pi-shared/startup-turn";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+  type CapabilityBudgets,
   type CapabilityHost,
   measureCapabilities,
   ompCapabilityHost,
 } from "../src/capability-report";
+import { type CapabilitySchedule, createCapabilitySchedule } from "../src/capability-schedule";
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
@@ -76,6 +78,15 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
 let capabilityHost: () => CapabilityHost = ompCapabilityHost;
 export function setLegionCapabilityHostForTests(host: () => CapabilityHost): void {
   capabilityHost = host;
+}
+
+// The budgets the capability measurement runs under. Production never sets this, so
+// `measureCapabilities` keeps its own 8 s per check and 10 s per report; a test sets a short pair,
+// since one row that fails on its own budget would otherwise cost 8 s, past Bun's 5 s default for
+// a single test.
+let capabilityBudgets: CapabilityBudgets | undefined;
+export function setLegionCapabilityBudgetsForTests(budgets: CapabilityBudgets | undefined): void {
+  capabilityBudgets = budgets;
 }
 
 async function persistedTranscript(
@@ -349,6 +360,47 @@ export default function legionExtension(pi: PiApi): void {
       // started meanwhile, which is exactly the case to drop — the daemon re-sending an
       // interrupted task arrives as a prompt.
       if (phaseWorkerSession(context)) phaseReminder.armResumeReminder();
+      /**
+       * INFRA-927: the session measures its six capability rows on this interval, while it is
+       * idle, up to three times, until every row is present — a check that lost the boot-time
+       * race stayed reported open for the session's whole life, since the boot measured once and
+       * never again. The architect measures first at the sixth tick as every other role does
+       * (`CAPABILITY_FIRST_DUE_TICK` plus its index in `LEGION_ROLES`); its extra readies make
+       * its waiting notices due at once, which is the same release a relaunched architect's ready
+       * already makes.
+       *
+       * The measurement's input is snapshotted here, since the host's accessors answer only from
+       * a handler and throw at factory time, and it is read before `registerLegionTool()` below,
+       * so the rows see the tool surface the boot's measurement saw.
+       */
+      const capabilityClaim = claimSession.capability(context.sessionManager.getSessionId());
+      let capabilitySchedule: CapabilitySchedule | undefined;
+      if (capabilityClaim !== undefined) {
+        const capabilityInput = {
+          cwd: context.cwd,
+          sessionId: context.sessionManager.getSessionId(),
+          issue: capabilityClaim.issue,
+          promptAgents: capabilityClaim.promptAgents ?? [],
+          activeTools: pi.getActiveTools(),
+          agentsExposed: pi.agents !== undefined,
+        };
+        capabilitySchedule = createCapabilitySchedule({
+          claim: capabilityClaim,
+          measure: () => measureCapabilities(capabilityHost(), capabilityInput, capabilityBudgets),
+          send: (report) =>
+            roleDaemon().ready({
+              claimToken: capabilityClaim.claimToken,
+              sessionId: capabilityClaim.sessionID,
+              secret: capabilityClaim.secret,
+              generation: capabilityClaim.generation,
+              capabilities: report,
+            }),
+          // Live, as the activity report reads it: a context captured once would answer for the
+          // session as it was at its start.
+          isIdle: () => paneContext?.isIdle?.(),
+          log: (message, fields) => logger.warn(message, fields),
+        });
+      }
       // Between turns, the host's own managed interval is the only sight of this session's
       // background work; it sends nothing unless what it reads has changed. Every claimed
       // session reports, an architect's as much as a phase worker's: the daemon releases a pod
@@ -357,6 +409,9 @@ export default function legionExtension(pi: PiApi): void {
         if (paneContext !== undefined) {
           void reportActivity(paneContext, { onlyWhenChanged: true });
         }
+        // Neither call is awaited: a measurement that runs for up to 10 s never delays the
+        // activity report the daemon reads to decide whether the pod may be released.
+        void capabilitySchedule?.tick();
       }, SESSION_ACTIVITY_PERIOD_MS);
     }
     registerLegionTool();
