@@ -31,8 +31,12 @@ const (
 )
 
 // idleRigSubscribedTopic is the topic the subscribed pod's session takes with envoy_subscribe: a
-// notification topic of its own, which is neither a role topic nor an agent subject.
-const idleRigSubscribedTopic = "notifications.idlerig.watched"
+// team topic, which is neither a role topic nor an agent subject. It is a team topic because the
+// team namespace is the one an agent names a topic of its own under that the notification stream
+// captures, and a session is delivered only what its own consumer holds (dispatch://INFRA-771):
+// the listener refuses a publish to a notification topic no stream subject captures, by name, so
+// a topic of this test's own invention would answer 400 here rather than reach the session.
+const idleRigSubscribedTopic = "notifications.team.idlerig-watched"
 
 // idleRigSender is the session every message of this test is sent from.
 const idleRigSender = "idle-rig-sender"
