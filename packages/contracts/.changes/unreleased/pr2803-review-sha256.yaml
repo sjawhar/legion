@@ -1,0 +1,8 @@
+kind: Added
+body: >-
+  Review and approval contracts expose approved content hashes and their provenance;
+  runtime review-event validation preserves both fields. Document-version reads can
+  report the SHA-256 of their stored UTF-8 bytes.
+time: 2026-11-05T10:42:29Z
+custom:
+  Issue: pr2803

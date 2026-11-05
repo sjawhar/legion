@@ -1,0 +1,8 @@
+kind: Added
+body: >-
+  Document reads print the version's content SHA-256 and the approval's pinned hash.
+  Approvals hashed after they were recorded are labeled as such; older servers keep
+  the existing output when they do not report hashes.
+time: 2026-11-05T10:42:29Z
+custom:
+  Issue: pr2803
