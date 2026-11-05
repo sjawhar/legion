@@ -1584,11 +1584,11 @@ type recordedClasses struct {
 }
 
 // recordedClass is what the room recorded for one update, kept as the six facts its readers
-// decide on: origin, a label for the origin the room applied the update with - "a published
-// write" for a *liveWriteOrigin, the string itself for a string origin, and the origin's type
-// otherwise; marginOnly, that *liveWriteOrigin's own tag (false for every other origin); found,
-// false when the room recorded no class for the update; and contentChanged, durable and credited
-// (class.credit != nil) from the class it recorded.
+// decide on: origin, a label for the origin the room applied the update with -
+// publishedWriteClass for a *liveWriteOrigin, the string itself for a string origin, and the
+// origin's type otherwise; marginOnly, that *liveWriteOrigin's own tag (false for every other
+// origin); found, false when the room recorded no class for the update; and contentChanged,
+// durable and credited (class.credit != nil) from the class it recorded.
 //
 // The record keeps no pointer into the write or the room. An origin kept would keep the write's
 // forked document (liveWriteOrigin.shadow.doc), and a documentUpdateClass kept would keep two
@@ -1603,6 +1603,14 @@ type recordedClass struct {
 	durable        bool
 	credited       bool
 }
+
+// publishedWriteClass is the label recordedClass.origin carries for a *liveWriteOrigin, written
+// by the recorder and read by every matcher that asks for a published write, so a rewording moves
+// all of them at once. It is this wording rather than describeOrigin's "live write"
+// (nil_origin_credit_test.go) because margin_equivalence_compare_test.go builds each class's text
+// from recordedClass.origin, and that text is compared against fixtures this change leaves byte
+// for byte unchanged.
+const publishedWriteClass = "a published write"
 
 // recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
 // have loaded before the recorder was there, so the room it returns is read.
@@ -1619,7 +1627,7 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 			var read recordedClass
 			switch published := origin.(type) {
 			case *liveWriteOrigin:
-				read.origin, read.marginOnly = "a published write", published.marginOnly
+				read.origin, read.marginOnly = publishedWriteClass, published.marginOnly
 			case string:
 				read.origin = published
 			default:
@@ -1745,7 +1753,7 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 	}
 
 	published := classes.latest(t, "the published margin write", func(c recordedClass) bool {
-		return c.origin == "a published write"
+		return c.origin == publishedWriteClass
 	})
 	if published.contentChanged {
 		t.Error("the room recorded the margin write's publish as a content change, though it changed no text in the room")
@@ -1834,13 +1842,13 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
 	}
 	margin := classes.latest(t, "the margin write's publish", func(c recordedClass) bool {
-		return c.origin == "a published write" && c.marginOnly
+		return c.origin == publishedWriteClass && c.marginOnly
 	})
 	if margin.contentChanged {
 		t.Error("the room recorded the margin write's publish as a content change")
 	}
 	edit := classes.latest(t, "the text edit's publish", func(c recordedClass) bool {
-		return c.origin == "a published write" && !c.marginOnly
+		return c.origin == publishedWriteClass && !c.marginOnly
 	})
 	if !edit.contentChanged {
 		t.Error("the room recorded the text edit's publish, which deleted \"Second.\", as no content change")

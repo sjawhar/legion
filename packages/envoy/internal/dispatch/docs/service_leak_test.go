@@ -81,12 +81,13 @@ func liveServices() (built int, live []string) {
 }
 
 // reportLeakedServices forces collections until no service the tests built is still reachable, or
-// until the budget runs out, and prints what it found to stderr. It never fails the run: it
-// reports, and the exit code stays the one the test run earned. A non-zero count of live services
-// means a test built a service and never shut it down, so that service, its rooms and their
-// documents stayed in memory for the rest of the binary's life; the lines after the count name the
-// tests to give a t.Cleanup that shuts their service down.
-func reportLeakedServices() {
+// until the budget runs out, prints what it found to stderr, and reports whether a service is
+// still alive. It fails the run for one: TestMain (persistence_test.go) turns a true here into a
+// non-zero exit code when the tests themselves passed. A non-zero count of live services means a
+// test built a service and never shut it down, so that service, its rooms and their documents
+// stayed in memory for the rest of the binary's life; the lines after the count name the tests to
+// fix, each by a t.Cleanup that shuts the service it built down.
+func reportLeakedServices() bool {
 	start := time.Now()
 	deadline := start.Add(leakWaitBudget)
 	var built int
@@ -106,4 +107,9 @@ func reportLeakedServices() {
 	for _, test := range live {
 		fmt.Fprintf(os.Stderr, "docs: a service built by %s is still alive\n", test)
 	}
+	if len(live) == 0 {
+		return false
+	}
+	fmt.Fprintln(os.Stderr, "docs: a service still alive fails this run")
+	return true
 }
