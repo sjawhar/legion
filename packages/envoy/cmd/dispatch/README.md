@@ -1601,7 +1601,8 @@ A new table: nothing existing is read, locked or rewritten, the previous release
 
 Migration `20261102122300_pull_request_heads` creates `pull_request_heads`, the current head of every pull request Dispatch has seen an event for, so a recorded result can say whether it ran at the commit the work stands at.
 This is not `delivery_pull_requests`, which keeps the merged pull requests of the delivery population and no head commit: this table holds open ones too, by any author and in any repository, one row per pull request.
-A row names the `repo` and `number`, the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile last read it through the App.
+A row names the `repo` and `number`, the repository under the canonical name it is called today (`refs.CanonicalRepo`), so one repository stored under two names keeps one row and one attribution (`20261105075455_repo_projects_renamed_to`, below);
+then the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile or a read-through last read it through the App.
 That key is the first issue the five sources name that resolves to the repository the pull request is in, not the first key they name (`attributionCandidates`, `attributionHeld` in `delivery/attribution.go`):
 a pull request titled after another repository's issue therefore keeps its own, and one no candidate of which resolves to its repository is attributed to nobody, with the source `none`, as is one whose head branch is in another repository (`headInOwnRepository`).
 The hold is the server's own repository-resolution rule spliced into the statement that reads the candidates (`refs.IssueRepoTerms`, `attributionCandidatesQuery`), so the attribution and the issue page cannot disagree, and a pull request's best 25 candidates are the ones read (`attributionCandidateBound`).
@@ -1610,14 +1611,29 @@ An older event arriving after a newer one leaves the row as it is, and the recon
 That head pass runs whether or not the deployment has delivery settings, and before the deploy repository's permission check (`Reconcile.runOnce`):
 the currency of a recorded result is read in every deployment, and behind the settings the pass never ran in one that had none, so a result recorded at a head a later push replaced read `current` for ever.
 A failed head pass is logged, and named in `delivery_settings.last_error` beside the other steps' failures when the pass reached them.
-The head pass also reads, once each, the merged rows no read of GitHub has ever reached that are attributed to nobody: a `pull_request` envelope naming no head repository attributes nobody, and nothing else looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
-`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread` its merged arm.
+The head pass also takes every merged row credited to nobody that the rule the running build judges by has not judged — one no read of GitHub has reached, and one an older rule judged — and offers such a row once per rule version (`delivery.AttributionRuleVersion`, `20261105070440_pull_request_heads_attribution_rule` below):
+a `pull_request` envelope naming no head repository attributes nobody, a pull request merged under an older rule keeps whatever that rule concluded, and nothing else ever looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
+The row is written outside the reconcile by the `pull_request` envelope, and by the read-through made for a commit that heads no pull request Dispatch knows (`delivery.ReadThroughCommitPulls`):
+a recorded result makes one, and so does the read of an issue's results, which spends at most one such read per repository and commit every `delivery.CommitPullReadStaleAfter` (`GET /api/v1/issues/{key}/results`, Routes below).
+`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread`, partial on `state` and `issue_key` since `20261105070440` dropped its `checked_at` half, its merged arm.
 A new table, as above; its census answers `0`.
 
 Migration `20261102122400_default_branch_commits` creates `default_branch_commits`, what Dispatch's GitHub App answered about one commit of one repository: whether the repository's default branch carries it.
 A result for an `after_merge` or `default_branch` check is current only at such a commit, and the answer is read when the results are read, never written by a push, so this cache keeps those reads off GitHub.
 A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
 A new table, as above; its census answers `0`.
+
+Migration `20261105070440_pull_request_heads_attribution_rule` gives `pull_request_heads` a not-null `attribution_rule` defaulted `0`, the rule that last judged that row's `issue_key` and `attribution_source`, as `delivery.AttributionRuleVersion` numbers it.
+`0` is what every row written before the column has: the rule that took the first candidate the five sources named outright, whatever repository that issue resolved to.
+A merged row is the one row nothing revisits: an open row comes round every five minutes, but the merged arm took a merged row only while no read of GitHub had reached it, a merge envelope that names a head repository stamps `checked_at` as such a read, and a read-through runs only for a commit that heads no pull request Dispatch knows.
+So a pull request merged under an older rule kept for good whatever that rule concluded, and one that rule credited to nobody left every `before_merge` result at its merged head reading `older` for ever.
+The column bounds the repair: the reconcile's merged arm takes a merged row credited to nobody that this build's rule has not judged, and the read stamps the row at that rule whether or not it could attribute it, so every such row stored before the deploy is judged once more and then left alone, and a later change to the attribution reaches the merged rows already stored by raising that constant by one.
+The migration replaces `pull_request_heads_merged_unread` to follow the arm it serves: `20261102122300` made it partial on `state = 'merged' and issue_key is null and checked_at is null`, and it is now partial on the first two of those alone.
+The release before this one keeps working across that drop: its query is partial on all three columns, so every row that query wants is in the new index, which serves it with the one test on `checked_at` left to the recheck, and an index decides a plan and never an answer, so that release answers the query correctly from a sequential scan too.
+Adding a column with a constant default writes the catalog alone, so the statement holds `pull_request_heads` in `ACCESS EXCLUSIVE` for milliseconds and rewrites no row, `not null` included;
+that release neither reads nor writes the column and names its columns in every insert, so it keeps writing heads while it still serves.
+`drop index` holds `ACCESS EXCLUSIVE` for the instant it unlinks the index and `create index` `SHARE` while it builds, both inside the runner's one transaction, over a table that holds a row per pull request Dispatch has seen an event for.
+Its census answers `0`.
 
 Migration `20261105075455_repo_projects_renamed_to` gives `repo_projects` a nullable `renamed_to`, the full `owner/name` that mapping's repository is called today, null for one that was never renamed, which is every row the migration leaves.
 One GitHub repository under two names was two repositories to Dispatch:
@@ -2771,6 +2787,10 @@ Each item below names a path with its method and identity, then its purpose.
   It is `unknown` whenever Dispatch cannot see the repository the check's issue resolves to — it resolves to none, or the App cannot read it — whatever the check's `when`, and whenever a read of Dispatch's own fails:
   a commit there may head a pull request Dispatch was never able to learn, so it is marked neither current nor older.
   A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue, and the check's words are the ones it proved.
+  Where the App can read that repository, a `before_merge` result whose commit heads no such pull request is read through GitHub itself before the answer is given:
+  one `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, and every head GitHub names is written (`delivery.ReadThroughCommitPulls`), so a result recorded before its own pull request opened reads `current` once that pull request opens at its commit.
+  Without that read it would read `older` for ever: the read-through the record itself makes runs once, while no pull request carries the commit, and a deployment holding no delivery settings binds no intake durable and so consumes no `pull_request` event at all (`delivery.Intake.Run`).
+  One repository and commit costs at most one such read every `delivery.CommitPullReadStaleAfter` (five minutes), however often the Verification tab refetches.
   The issue a result was recorded on is read for nothing here, so a child's pull request never makes a result against a check above it current.
   An `after_merge` or `default_branch` result is current while its commit is on the default branch of that repository.
   Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
