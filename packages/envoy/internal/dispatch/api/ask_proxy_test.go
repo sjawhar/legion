@@ -2,7 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // proxyPerson is the one person askProxySkills names, read from the table so the test follows it
@@ -115,5 +118,58 @@ func TestCreateAskLeavesTheProxyAdvisoryOffForEveryoneElse(t *testing.T) {
 	}
 	if suggestions.Outcome == "" {
 		t.Fatalf("advice.suggestions = %+v, want the related-item check's own result", suggestions)
+	}
+}
+
+// The table names the one person it is there for, with the skill that holds their advice. A test
+// that read the table for both halves would pass with either half replaced, so this pins them.
+func TestAskProxySkillsNamesTheOnePersonItIsFor(t *testing.T) {
+	if skill := askProxySkills["sami@theorem.dev"]; skill != "skill://sami-proxy" {
+		t.Fatalf("askProxySkills[\"sami@theorem.dev\"] = %q, want skill://sami-proxy", skill)
+	}
+	if len(askProxySkills) != 1 {
+		t.Fatalf("askProxySkills = %v, want the one person; add a new one to this row too", askProxySkills)
+	}
+}
+
+// Two answers of the same second, one with a fraction and one without, are ordered as instants
+// and not as the text that spells them: Go writes a whole second with no fraction, and
+// "12:00:00Z" reads above "12:00:00.1Z" as text, since "Z" is above ".", and below it as a
+// time. A line longer than one screen is cut with an ellipsis, so five answers cannot make this
+// response larger than the most a keyed write's answer may be kept at.
+func TestAskProxyAdviceOrdersAnswersAsInstantsAndCutsALongLine(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "PXT")
+	person, _ := proxyPerson(t)
+	issue := createProxyIssue(t, handler, "PXT", "Hold the export's ordering", "", person)
+
+	older, _ := openProxyAsk(t, handler, issue, "Does the export keep its own ordering?", "alice")
+	answerProxyAsk(t, handler, older, strings.Repeat("word ", 400), person)
+	newer, _ := openProxyAsk(t, handler, issue, "Does the export keep its own retries?", "alice")
+	answerProxyAsk(t, handler, newer, "It keeps them.", person)
+
+	// The newer answer carries the fraction: compared as text it would sink below the older one.
+	setAnswerTime(t, database, newer, "2026-11-05T12:00:00.1Z")
+	setAnswerTime(t, database, older, "2026-11-05T12:00:00Z")
+
+	advice := directServer(deps).askProxyAdvice(t.Context(), issue)
+	if advice == nil || len(advice.Answers) != 2 {
+		t.Fatalf("advice = %+v, want both answers", advice)
+	}
+	if advice.Answers[0].Ref != "dispatch://"+issue+"/ask/"+newer {
+		t.Fatalf("first answer = %+v, want the newer ask %s", advice.Answers[0], newer)
+	}
+	cut := advice.Answers[1].Line
+	if len([]rune(cut)) != askProxyLineMax+1 || !strings.HasSuffix(cut, "…") {
+		t.Fatalf("the long answer's line is %d runes (%q), want %d and an ellipsis", len([]rune(cut)), cut, askProxyLineMax+1)
+	}
+}
+
+// setAnswerTime rewrites when one answered ask was answered, which no route lets a test choose.
+func setAnswerTime(t *testing.T, database *store.Store, askID, at string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(t.Context(),
+		`update asks set answer = jsonb_set(answer, '{at}', to_jsonb($2::text)) where id = $1::uuid`, askID, at); err != nil {
+		t.Fatalf("set the answer time of %s: %v", askID, err)
 	}
 }

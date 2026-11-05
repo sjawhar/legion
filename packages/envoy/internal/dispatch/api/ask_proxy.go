@@ -26,6 +26,12 @@ const (
 	// to show the issue's decided ground, few enough that the three related items stay on the
 	// same screen. `dispatch answers` prints each of them whole.
 	askProxyAnswerLimit = 5
+	// askProxyLineMax bounds one listed line, in runes, with an ellipsis where it cut. An answer
+	// has no length of its own worth trusting here: a one-line answer of a few hundred thousand
+	// characters is a legal ask answer, and five of them would make this response larger than the
+	// most a keyed write's answer may be kept at (maxKeptAnswerBytes), so a repeat under the same
+	// key could not be replayed from it. A line is a pointer to the answer, not the answer.
+	askProxyLineMax = 200
 	// askProxyTimeout bounds the two indexed reads the advisory makes. They run after the ask is
 	// committed and answered to nobody but this response, so a slow database costs the advisory
 	// and never the ask.
@@ -38,7 +44,8 @@ const askProxyAssignee = `select coalesce(assignee, '') from issues where key = 
 
 // askProxyAnswers reads what one person has already answered on an issue and on that issue's
 // parent: each answered ask of the two, newest answer first. The answer's `at` is an RFC 3339
-// string in the row's jsonb, which sorts in the same order as the instants it spells.
+// string in the row's jsonb and is compared as an instant, not as text: Go writes a whole second
+// without a fraction, so "12:00:00Z" sorts above "12:00:00.1Z" as text and below it as a time.
 const askProxyAnswers = `
 with scope as (
 	select i.key from issues i where i.key = $1
@@ -48,13 +55,14 @@ with scope as (
 select a.issue_key, a.id::text, coalesce(a.answer->>'text', '')
   from asks a join scope on scope.key = a.issue_key
  where a.state = 'answered' and lower(a.answer->>'user') = $2
- order by a.answer->>'at' desc, a.id desc
+ order by (a.answer->>'at')::timestamptz desc nulls last, a.id desc
  limit $3`
 
 // askProxyAdvice is the advisory a new ask on issueKey carries when the person it reaches has a
-// proxy skill, and nil when they do not, when the issue has no assignee, or when either read
-// fails. A failed read is logged and costs the advisory alone: the ask is written and answered
-// either way.
+// proxy skill, and nil when they do not, when the issue has no assignee, or when the assignee
+// could not be read. A failed answer read leaves the advisory with the answers it had, since the
+// skill is worth naming on its own. Every failure is logged and costs the advisory alone: the ask
+// is written and answered either way.
 func (s *server) askProxyAdvice(ctx context.Context, issueKey string) *model.AskProxy {
 	ctx, cancel := context.WithTimeout(ctx, askProxyTimeout)
 	defer cancel()
@@ -92,13 +100,19 @@ func (s *server) askProxyAdvice(ctx context.Context, issueKey string) *model.Ask
 	return advice
 }
 
-// askProxyFirstLine is an answer's first line with no blank line in front of it, as the advisory
-// lists it; an answer that chose options and wrote no words has none.
+// askProxyFirstLine is an answer's first line with no blank line in front of it, cut at
+// askProxyLineMax runes with an ellipsis, as the advisory lists it; an answer that chose options
+// and wrote no words has none.
 func askProxyFirstLine(text string) string {
 	for line := range strings.Lines(text) {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			return trimmed
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
 		}
+		if runes := []rune(trimmed); len(runes) > askProxyLineMax {
+			return string(runes[:askProxyLineMax]) + "…"
+		}
+		return trimmed
 	}
 	return ""
 }
