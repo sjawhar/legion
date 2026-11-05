@@ -2529,7 +2529,19 @@ jobs:
           # Download only, so an attempt the timeout kills holds no dpkg lock and the retry is
           # free to start. It prints what it fetched, which is this step's own byte record.
           # $packages is left unquoted on purpose, to split into words.
-          twice "the package download" sudo timeout 90 apt-get install -y --no-install-recommends -d $packages
+          # Scratch control: the first attempt is pointed at 127.0.0.1:1, which refuses at once.
+          first_attempt=1
+          download() {
+            if [ "$first_attempt" = 1 ]; then
+              first_attempt=0
+              sudo timeout 90 apt-get -o Acquire::http::Proxy=http://127.0.0.1:1 \
+                -o Acquire::https::Proxy=http://127.0.0.1:1 \
+                install -y --no-install-recommends -d $packages
+            else
+              sudo timeout 90 apt-get install -y --no-install-recommends -d $packages
+            fi
+          }
+          twice "the package download" download
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
           # The browsers alone. Named, because with no argument Playwright resolves its own
