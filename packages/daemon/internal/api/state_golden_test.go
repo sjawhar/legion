@@ -784,6 +784,20 @@ func TestErrorResponseGolden(t *testing.T) {
 	golden(t, "error.json", claim.SameAgentRefusal)
 }
 
+// What `PUT /legion/v1/operator/settings` answers, and what Dispatch relays unchanged: one
+// verdict per dotted path the request named, under `settings`. Every kind of verdict is here —
+// a value read at the next decision, one a holder was rebuilt for, one a launch reads, a change
+// the daemon was already running on, and a path refused by name.
+func TestSettingsChangeResponseGolden(t *testing.T) {
+	golden(t, "settings-change.json", SettingsChangeResponse{Settings: map[string]SettingResult{
+		"admission_cap":            {Applied: string(config.OutcomeAtOnce), Old: "4", New: "6"},
+		"envoy_url":                {Applied: string(config.OutcomeRebuilt), Holder: config.HolderEnvoyPublisher, Old: "http://envoy.internal:9020", New: "http://envoy.internal:9021"},
+		"runtime.kubernetes.image": {Applied: string(config.OutcomeNextLaunch), Holder: config.HolderRuntime, Old: "(unset)", New: "ghcr.io/example/worker@sha256:placeholder"},
+		"review_round_cap":         {Applied: string(config.OutcomeAtOnce), Old: "3", New: "3", Unchanged: true},
+		"postgres_dsn":             {Refused: "the store's pool is connected at boot and holds every record the daemon is working from"},
+	}})
+}
+
 // operatorClaim carries every optional an operator's view of a claim has.
 func operatorClaim() OperatorClaim {
 	delivered := time.Date(2026, 9, 22, 9, 31, 4, 0, time.UTC)

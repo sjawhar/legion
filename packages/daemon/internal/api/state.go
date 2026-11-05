@@ -80,6 +80,11 @@ type State struct {
 	// source of one and the path of a file holding one each carry their provenance here with no
 	// value anywhere, which is how a rotation is visible without the credential. Never null.
 	SettingSources map[string]SettingSource `json:"settingSources"`
+	// withheldBelowFifty is set on the copy served to a caller whose pod records a plugin
+	// contract below settingSourcesContract: the three fields that contract added are left off
+	// the wire entirely (MarshalJSON, api's withoutSettingSources). It is this struct's own and
+	// never read from the wire, so a state decoded from JSON carries it false.
+	withheldBelowFifty bool
 	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
@@ -260,6 +265,13 @@ type AgentSecretsLoginView struct {
 // MarshalJSON keeps `issues` and `settingSources` objects and `pendingStatusWrites`,
 // `heldOutboxRows`, `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go
 // map or slice is `null`, which the plugin's reader refuses.
+//
+// A withheld state (withheldBelowFifty) is the same body with the three fields contract 50 added
+// taken off it: `settingSources`, the `daemon` block's `commit`, and each pull request's
+// `requiresChecks`. They are dropped here rather than zeroed because each of the three is a
+// value a reader of this contract may read as it stands — an empty object, an unreleased build's
+// empty commit, a base that requires no check — so absence is the only way to say the daemon
+// does not report them to this caller.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -284,7 +296,70 @@ func (s State) MarshalJSON() ([]byte, error) {
 	if out.Consumers == nil {
 		out.Consumers = []ConsumerLagView{}
 	}
-	return json.Marshal(out)
+	encoded, err := json.Marshal(out)
+	if err != nil || !s.withheldBelowFifty {
+		return encoded, err
+	}
+	return withheldState(encoded)
+}
+
+// withheldState is an encoded state with the three fields contract 50 added removed from it: the
+// body a plugin of the contract before it describes. It works on the encoded body rather than on
+// the struct because each of the three fields is written whatever its value, which is what the
+// contract above 50 asks for.
+func withheldState(encoded []byte) ([]byte, error) {
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		return nil, err
+	}
+	delete(body, "settingSources")
+	if err := withoutKey(body, "daemon", "commit"); err != nil {
+		return nil, err
+	}
+	var issues map[string]json.RawMessage
+	if err := json.Unmarshal(body["issues"], &issues); err != nil {
+		return nil, err
+	}
+	for key, encodedIssue := range issues {
+		var issue map[string]json.RawMessage
+		if err := json.Unmarshal(encodedIssue, &issue); err != nil {
+			return nil, err
+		}
+		if err := withoutKey(issue, "pullRequest", "requiresChecks"); err != nil {
+			return nil, err
+		}
+		rewrittenIssue, err := json.Marshal(issue)
+		if err != nil {
+			return nil, err
+		}
+		issues[key] = rewrittenIssue
+	}
+	rewritten, err := json.Marshal(issues)
+	if err != nil {
+		return nil, err
+	}
+	body["issues"] = rewritten
+	return json.Marshal(body)
+}
+
+// withoutKey removes inner from the object body holds under outer, leaving body as it is when it
+// holds no such object.
+func withoutKey(body map[string]json.RawMessage, outer, inner string) error {
+	encoded, held := body[outer]
+	if !held || string(encoded) == "null" {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return err
+	}
+	delete(fields, inner)
+	rewritten, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	body[outer] = rewritten
+	return nil
 }
 
 // DaemonInfo is the running daemon itself: which project it coordinates, the commit it was built

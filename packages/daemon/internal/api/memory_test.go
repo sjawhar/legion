@@ -123,9 +123,15 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 			}
 
 			// Nothing else of the body differs: it is the full state with the stripped keys gone.
+			// A pod below memoryContract is below settingSourcesContract too, so the three fields
+			// that contract added are off its body as well (withoutSettingSources).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
+			}
+			if !tc.memory {
+				delete(want, "settingSources")
+				delete(want["daemon"].(map[string]any), "commit")
 			}
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
@@ -133,6 +139,9 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 					delete(issue, "memoryGroup")
 					delete(issue, "memoryDrawMode")
 					delete(issue, "memoryDrawnAt")
+					if pullRequest, held := issue["pullRequest"].(map[string]any); held {
+						delete(pullRequest, "requiresChecks")
+					}
 				}
 				if tc.rounds {
 					continue

@@ -34,7 +34,6 @@ import {
   LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSessionActivity,
-  LegionSettingResult,
   LegionSettingsChangeResponse,
   LegionSignOffRequest,
   LegionStateResponse,
@@ -68,6 +67,9 @@ const schemas: Record<string, z.ZodType> = {
   "controller-secret.json": LegionControllerSecretResponse,
   "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
+  // What `PUT /legion/v1/operator/settings` answers, which Dispatch relays unchanged to its own
+  // web client (`api.SettingsChangeResponse`): one verdict per dotted path the request named.
+  "settings-change.json": LegionSettingsChangeResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-forget-session.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
@@ -1524,13 +1526,21 @@ test("the state golden names where each setting came from, beside settings", () 
   unknownSource.settingSources.admission_cap = { source: "guess", at: "2026-09-22T09:40:18Z" };
   expect(LegionStateResponse.safeParse(unknownSource).success).toBeFalse();
 
+  // A key the daemon adds to a provenance later is dropped rather than refused, as every answer
+  // of this module reads one (INFRA-1048): what the reader holds is the source, the person and
+  // the instant, and a later daemon's extra key is no reason to refuse the whole state.
   const extra = fixture("state.json") as { settingSources: Record<string, unknown> };
   extra.settingSources.admission_cap = {
     source: "route",
     at: "2026-09-22T09:40:18Z",
     why: "unknown to this schema",
   };
-  expect(LegionStateResponse.safeParse(extra).success).toBeFalse();
+  const read = LegionStateResponse.safeParse(extra);
+  expect(read.success).toBeTrue();
+  expect(read.success && read.data.settingSources.admission_cap).toEqual({
+    source: "route",
+    at: "2026-09-22T09:40:18Z",
+  });
 });
 
 // The commit the daemon was built from (R7), so a reader can tell which release runs, and
@@ -1702,7 +1712,8 @@ test("a settings change answer is the daemon's own, keyed by path under settings
   };
 
   expect(LegionSettingsChangeResponse.safeParse(answered).success).toBeTrue();
-  expect(LegionSettingResult.safeParse(answered.settings.admission_cap).success).toBeTrue();
+  const read = LegionSettingsChangeResponse.parse(answered);
+  expect(read.settings.admission_cap).toEqual({ applied: "at-once", old: "4", new: "6" });
   // A daemon that applied nothing still answers the block, empty.
   expect(LegionSettingsChangeResponse.safeParse({ settings: {} }).success).toBeTrue();
 });
@@ -1711,20 +1722,27 @@ test("a flat map of paths is no settings change answer", () => {
   const flat = { admission_cap: { applied: "at-once" } };
 
   expect(LegionSettingsChangeResponse.safeParse(flat).success).toBeFalse();
-  // Nor is a body with the block and anything else beside it, or one with no block at all.
-  expect(
-    LegionSettingsChangeResponse.safeParse({ settings: {}, applied: "at-once" }).success
-  ).toBeFalse();
+  // Nor is a body with no block at all.
   expect(LegionSettingsChangeResponse.safeParse({}).success).toBeFalse();
+  // A key beside the block is read and dropped, as every answer of this module reads one the
+  // daemon added after it (INFRA-1048): the verdicts are what the caller reads, and a later
+  // daemon's extra key is no reason to refuse the whole answer.
+  const beside = LegionSettingsChangeResponse.safeParse({ settings: {}, applied: "at-once" });
+  expect(beside.success).toBeTrue();
+  expect(beside.success && beside.data).toEqual({ settings: {} });
 });
 
-test("a verdict carries the daemon's own fields and nothing else", () => {
-  expect(
-    LegionSettingResult.safeParse({ applied: "rebuilt", holder: "the NATS client" }).success
-  ).toBeTrue();
-  expect(LegionSettingResult.safeParse({ refused: "no such setting" }).success).toBeTrue();
-  expect(LegionSettingResult.safeParse({}).success).toBeTrue();
-  expect(LegionSettingResult.safeParse({ applied: "" }).success).toBeFalse();
-  expect(LegionSettingResult.safeParse({ applied: "at-once", reason: "why" }).success).toBeFalse();
-  expect(LegionSettingResult.safeParse({ unchanged: "true" }).success).toBeFalse();
+test("a verdict carries the daemon's own fields, and a key it adds later is dropped", () => {
+  const verdicts = (result: unknown) =>
+    LegionSettingsChangeResponse.safeParse({ settings: { admission_cap: result } });
+
+  expect(verdicts({ applied: "rebuilt", holder: "the NATS client" }).success).toBeTrue();
+  expect(verdicts({ refused: "no such setting" }).success).toBeTrue();
+  expect(verdicts({}).success).toBeTrue();
+  // An empty string is no verdict, and a boolean field is no string: those are this shape's own.
+  expect(verdicts({ applied: "" }).success).toBeFalse();
+  expect(verdicts({ unchanged: "true" }).success).toBeFalse();
+  const later = verdicts({ applied: "at-once", reason: "why" });
+  expect(later.success).toBeTrue();
+  expect(later.success && later.data.settings.admission_cap).toEqual({ applied: "at-once" });
 });

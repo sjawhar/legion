@@ -652,14 +652,21 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
 // whose claims record a contract below supervise.PodUpdateContract, the contract that added
 // `updateRound` and `updateHead` to the claim views, is served the state without them
-// (withoutUpdateRounds), which is the body that contract's schema describes; and a caller below
+// (withoutUpdateRounds), which is the body that contract's schema describes; a caller below
 // memoryContract, the contract that added the issues' memory group, is served it without those
-// three fields (withoutMemory). The two compose: each is applied when the state carries something
-// of its own, so a caller below both — a pod below supervise.PodUpdateContract — is served a body
-// without either. Every later reader takes all five as optional, so the body this serves when the
-// claims cannot be read is the one every reader from 45 on takes. Any other caller — a pod at this
-// contract, the operator's `legion state`, a tmux pane — is served the state as this contract
-// writes it.
+// three fields (withoutMemory); and a caller below settingSourcesContract is served it without
+// the three that contract added (withoutSettingSources). The three compose: each is applied when
+// the state carries something of its own, so a caller below all three — a pod below
+// supervise.PodUpdateContract — is served a body without any of them. Every later reader takes
+// all eight as optional, so the body this serves when the claims cannot be read is the one every
+// reader from 45 on takes. Any other caller — a pod at this contract, the operator's
+// `legion state`, a tmux pane — is served the state as this contract writes it.
+//
+// The claims are read for every request from a pod, because the three fields
+// settingSourcesContract added are on every state: `settingSources` is written for every settable
+// path, and `commit` and `requiresChecks` for every daemon and every recorded pull request. Before
+// that contract the read was skipped for a state carrying no update round and no memory draw,
+// which was most of them.
 func (s *server) stateFor(r *http.Request, state State) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
@@ -667,13 +674,7 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	if s.callerPod == nil || s.supervisor == nil {
 		return state
 	}
-	// A state with no update round on any claim view and no memory group on any issue is the body
-	// every contract reads, so it is served as it is with no read of the claims: outside a roll of
-	// a project with no memory, that is every request.
 	rounds, memory := carriesUpdateRounds(state), carriesMemory(state)
-	if !rounds && !memory {
-		return state
-	}
 	caller, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return state
@@ -684,9 +685,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	}
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round and memory fields, which every plugin contract since 45 reads",
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory and setting-source fields, which every plugin contract since 45 reads",
 			"pod", pod, "error", err)
-		return withoutMemory(withoutUpdateRounds(state))
+		return withoutSettingSources(withoutMemory(withoutUpdateRounds(state)))
 	}
 	contract := podContract(claims, pod)
 	if contract == 0 {
@@ -698,6 +699,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	if memory && contract < memoryContract {
 		state = withoutMemory(state)
 	}
+	if contract < settingSourcesContract {
+		state = withoutSettingSources(state)
+	}
 	return state
 }
 
@@ -705,6 +709,13 @@ func (s *server) stateFor(r *http.Request, state State) State {
 // (version.go's 49): a plugin before it reads the state with a strict schema that knows none of
 // `memoryGroup`, `memoryDrawMode` and `memoryDrawnAt` and refuses the whole body for one of them.
 const memoryContract = 49
+
+// settingSourcesContract is the daemon contract that added `settingSources`, the `daemon` block's
+// `commit` and each pull request's `requiresChecks` to the state (version.go's 50): a plugin
+// before it reads the state with a strict schema that knows none of the three — every schema of
+// `packages/contracts/src/legion-api.ts` was strict until INFRA-1048 — and refuses the whole body
+// for one of them.
+const settingSourcesContract = 50
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -785,6 +796,17 @@ func withoutMemory(state State) State {
 		issues[key] = issue
 	}
 	state.Issues = issues
+	return state
+}
+
+// withoutSettingSources is state as a plugin below settingSourcesContract reads it: `settingSources`,
+// the `daemon` block's `commit` and each pull request's `requiresChecks` are left off the wire.
+// The three are dropped as the state is marshalled (State.MarshalJSON, withheldState) rather than
+// zeroed here, because each of them is a value this contract writes whatever it holds — an empty
+// object, an unreleased build's empty commit, a base that requires no check — so only absence
+// says the daemon does not report them to this caller.
+func withoutSettingSources(state State) State {
+	state.withheldBelowFifty = true
 	return state
 }
 

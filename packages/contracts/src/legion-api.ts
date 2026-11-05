@@ -447,7 +447,7 @@ const legionSettings = z.looseObject({
 /** `api.SettingSource` — where one setting's value came from: the configuration file the daemon
  * read, or the settings route, with whoever asked for it (`by`, absent for the file) and when the
  * daemon took that value. */
-const legionSettingSource = z.strictObject({
+const legionSettingSource = z.object({
   source: z.enum(["file", "route"]),
   by: nonEmptyString.optional(),
   at: timestamp,
@@ -563,7 +563,9 @@ export type LegionIssue = LegionState["issues"][string];
  * carry. `unchanged` says the daemon was already running on that value: the path is the route's
  * from now on, and nothing moved. `refused` is why the daemon will not change the path — a path
  * fixed for the process, or one its class table does not hold. */
-export const LegionSettingResult = z.strictObject({
+// It is not exported: the exported rosters are the request and answer bodies, and this is a node
+// of one of them (`LegionSettingsChangeResponse`), read through it. Only its type leaves here.
+const legionSettingResult = z.object({
   applied: nonEmptyString.optional(),
   refused: nonEmptyString.optional(),
   holder: nonEmptyString.optional(),
@@ -572,15 +574,15 @@ export const LegionSettingResult = z.strictObject({
   unchanged: z.boolean().optional(),
 });
 
-export type LegionSettingVerdict = z.output<typeof LegionSettingResult>;
+export type LegionSettingVerdict = z.output<typeof legionSettingResult>;
 
 /** `api.SettingsChangeResponse`, the body of `PUT /legion/v1/operator/settings`: one result per
  * dotted `legion.yaml` path the request named, keyed as the request keyed it, under `settings`.
  * Dispatch relays this body unchanged (`PUT /api/v1/legion/{project}/settings`,
  * packages/envoy/internal/dispatch/api/settings_legion.go), so a reader of either route reads
  * this one shape: a verdict is `answer.settings[path]`, never `answer[path]`. */
-export const LegionSettingsChangeResponse = z.strictObject({
-  settings: z.record(z.string(), LegionSettingResult),
+export const LegionSettingsChangeResponse = z.object({
+  settings: z.record(z.string(), legionSettingResult),
 });
 
 export type LegionSettingsChange = z.output<typeof LegionSettingsChangeResponse>;

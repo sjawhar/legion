@@ -554,7 +554,12 @@ package api
 // from — the file the daemon read or the settings route, with who asked and when — keyed by the
 // dotted `legion.yaml` path the daemon's class table writes, every settable path included, the
 // ones `settings` withholds among them, so a rotated credential is visible without the
-// credential. `settings` itself is untouched, and stays the loose object it was. (This branch
+// credential. `settings` itself is untouched, and stays the loose object it was. `GET
+// /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a contract
+// below 50 is served the state without all three (api's stateFor, withoutSettingSources), as a
+// caller below 49 is served it without the memory group and one below 46 without the claim
+// views' update rounds: every schema of `packages/contracts/src/legion-api.ts` was strict until
+// INFRA-1048, so such a plugin refuses a whole state for one key it does not know. (This branch
 // took 47 while main's idle release and memory group were unmerged; main landed them as 48 and
 // 49, so this branch takes the number above them, as the collision note says.)
 const DaemonAPIVersion = 50
