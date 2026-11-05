@@ -2796,7 +2796,10 @@ export function conversationOrder(
       .filter((at): at is string => typeof at === "string" && at !== "")
       .map((at) => parseInstant(at))
       .filter((at): at is bigint => at !== undefined)
-      .reduce<bigint | undefined>((best, at) => (best === undefined || at < best ? at : best), undefined);
+      .reduce<bigint | undefined>(
+        (best, at) => (best === undefined || at < best ? at : best),
+        undefined
+      );
   const firstAsk = earliest(asks.map((ask) => ask.created_at));
   const firstAnswer = earliest(asks.map((ask) => ask.answer?.at));
   const design = versions.find((version) => {

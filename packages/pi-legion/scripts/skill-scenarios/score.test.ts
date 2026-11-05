@@ -3997,7 +3997,9 @@ test("statesDesign: a design is found by what the version holds, not by three li
   expect(statesDesign(`## Summary\n\n${design}`)).toBe(true);
   // An empty section states nothing: the old definition failed a run for writing the headings.
   expect(statesDesign(`## Requirements\n\n## Design\n\n## Acceptance\n`)).toBe(false);
-  expect(statesDesign(`## Summary\n\nNotices are lost today.\n\n## Problem\n\nThey are.\n`)).toBe(false);
+  expect(statesDesign(`## Summary\n\nNotices are lost today.\n\n## Problem\n\nThey are.\n`)).toBe(
+    false
+  );
   // A heading or a requirement inside a fenced example belongs to the example.
   expect(statesDesign("## Summary\n\n```md\n## Design\n\nOne table.\n```\n")).toBe(false);
 });
