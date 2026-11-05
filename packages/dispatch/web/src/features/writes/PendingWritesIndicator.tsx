@@ -9,7 +9,13 @@ import {
   secondaryButtonCompact,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { SendInterruptedError, SendStoppedError, sameKeyRetryNote } from "./keyed-write";
+import {
+  expiredRetryNote,
+  SendExpiredError,
+  SendInterruptedError,
+  SendStoppedError,
+  sameKeyRetryNote,
+} from "./keyed-write";
 import { StopTrying } from "./StopTrying";
 import { useWriteSelection, useWrites, type Write } from "./write-store";
 
@@ -17,6 +23,9 @@ import { useWriteSelection, useWrites, type Write } from "./write-store";
 function refusalReason(refusal: Error): string {
   if (refusal instanceof SendInterruptedError) {
     return `this page was closed before Dispatch confirmed it. ${sameKeyRetryNote("saved")}`;
+  }
+  if (refusal instanceof SendExpiredError) {
+    return `Dispatch has not confirmed it. ${expiredRetryNote("saved")}`;
   }
   if (refusal instanceof SendStoppedError) {
     return `Dispatch has not confirmed it. ${sameKeyRetryNote("saved")}`;

@@ -134,20 +134,25 @@ test("a kept refusal is rebuilt as the error it was", () => {
   });
 });
 
-// The key's lifetime runs while a refusal is kept: a write the reader stopped at hour 1 and a
-// page loads at hour 25 comes back expired, since Dispatch has forgotten its key meanwhile and a
-// Retry of it is a new write. Nothing of that is in the entry - the kind kept is still `stopped`,
-// so an older release reads every entry this one writes - it is read from the key.
-test("a write kept as stopped comes back expired once its key has run out", () => {
-  const stopped = keptRefusal(new SendStoppedError());
-  const spent = refusalFrom(stopped, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS);
-  expect(spent).toBeInstanceOf(SendExpiredError);
-  expect(spent.message).toBe(
-    "Dispatch has not confirmed this message. Its key is more than 24 hours old, so Dispatch no longer holds it: a Retry is a new write, which can be delivered a second time if the first one was."
-  );
-  expect(refusalFrom(stopped, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS - 1)).not.toBeInstanceOf(
-    SendExpiredError
-  );
+// The key's lifetime runs while a refusal is kept: a write the reader stopped at hour 1, or one a
+// reload interrupted then, and a page loads at hour 25 comes back expired, since Dispatch has
+// forgotten its key meanwhile and a Retry of it is a new write. Nothing of that is in the entry -
+// the kind kept is still `stopped` or `interrupted`, so an older release reads every entry this
+// one writes - it is read from the key.
+test("a write kept without a verdict comes back expired once its key has run out", () => {
+  for (const kept of [
+    keptRefusal(new SendStoppedError()),
+    keptRefusal(new SendInterruptedError()),
+  ]) {
+    const spent = refusalFrom(kept, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS);
+    expect(spent).toBeInstanceOf(SendExpiredError);
+    expect(spent.message).toBe(
+      "Dispatch has not confirmed this message. Its key is more than 24 hours old, so Dispatch no longer holds it: a Retry is a new write, which can be delivered a second time if the first one was."
+    );
+    expect(refusalFrom(kept, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS - 1)).not.toBeInstanceOf(
+      SendExpiredError
+    );
+  }
 });
 
 // W7. A write kept for longer than five minutes is not made again on its own: the reader who made

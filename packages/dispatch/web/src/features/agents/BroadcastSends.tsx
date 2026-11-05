@@ -17,7 +17,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
-import { SendInterruptedError, SendStoppedError } from "../writes/keyed-write";
+import { SendExpiredError, SendInterruptedError, SendStoppedError } from "../writes/keyed-write";
 import { StopTrying } from "../writes/StopTrying";
 import { useWriteSelection, useWrites } from "../writes/write-store";
 import {
@@ -118,7 +118,9 @@ function agentCount(count: number): string {
  * while any recipient's is still on its way, from the live feed, then delivered), or refused with
  * the server's reason - or stopped - with Retry and Restore draft. One a reload interrupted too
  * long ago to be sent on its own (`SendInterruptedError`) says so in the error's own words and
- * offers Discard beside them. A retried send keeps its row's place. The strip sits above the
+ * offers Discard beside them. One whose key Dispatch no longer holds (`SendExpiredError`) reads
+ * `Sending to N agents ended:` with the error's own words, which say a Retry of it is a new
+ * write, and offers Discard too. A retried send keeps its row's place. The strip sits above the
  * composer, outside it, because the composer goes whenever the selection empties - at every press
  * - and a send outlives it. Restore draft refuses, and says why under its row, while the host says
  * putting a draft back would replace one (`restoreRefusal`).
@@ -169,6 +171,8 @@ export function BroadcastSends({
                 ) : row.status === "failed" ? (
                   row.error instanceof SendInterruptedError ? (
                     row.error.message
+                  ) : row.error instanceof SendExpiredError ? (
+                    `Sending to ${count} ended: ${row.error.message}`
                   ) : row.error instanceof SendStoppedError ? (
                     `Stopped sending to ${count}: ${row.error.message}`
                   ) : (
@@ -214,7 +218,8 @@ export function BroadcastSends({
                   >
                     Restore draft
                   </RefusableButton>
-                  {row.error instanceof SendInterruptedError ? (
+                  {row.error instanceof SendInterruptedError ||
+                  row.error instanceof SendExpiredError ? (
                     <button
                       className={secondaryButtonCompact}
                       onClick={() => onDiscard(row)}

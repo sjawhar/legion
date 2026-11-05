@@ -205,13 +205,13 @@ export function keptRefusal(error: Error): KeptRefusal {
 }
 
 /** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
- *  the write it refused and `now` the time it is read back: a write the reader stopped under a
- *  key Dispatch has forgotten since (`keyExpired`) comes back expired, since a Retry of it is now
- *  a new write rather than the same one asked again. */
+ *  the write it refused and `now` the time it is read back: a write that ended without Dispatch's
+ *  verdict under a key Dispatch has forgotten since (`keyExpired`) comes back expired, since a
+ *  Retry of it is now a new write rather than the same one asked again. */
 export function refusalFrom(kept: KeptRefusal, key: string, now: number): Error {
   switch (kept.kind) {
     case "interrupted":
-      return new SendInterruptedError();
+      return keyExpired(key, now) ? new SendExpiredError() : new SendInterruptedError();
     case "stopped":
       return keyExpired(key, now) ? new SendExpiredError() : new SendStoppedError();
     case "api":

@@ -1,4 +1,5 @@
 import { expect, jest, type Mock, spyOn, test } from "bun:test";
+import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
@@ -7,7 +8,12 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
-import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
+import {
+  KEYED_SEND_ATTEMPT_MS,
+  SEND_DEADLINE_MS,
+  SendExpiredError,
+  SendStoppedError,
+} from "../writes/keyed-write";
 import type { ComposerOwner, ReplyTarget } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
 import { KEYED_SEND_LATE_TEXT } from "./send-request";
@@ -2203,6 +2209,48 @@ test("a send kept failing shows Stop trying once late, which stops it for Retry 
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     await tick(30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(tried);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+// A stopped send waits for the reader, and a day later Dispatch has forgotten its key: the Retry
+// sends nothing under that key. The composer says what happened in the refusal's own words - a
+// Retry is a new message, delivered a second time if the first one was - and keeps the draft,
+// Retry and Discard draft.
+test("a stopped send the reader comes back to a day later says its key has run out", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  jest.useFakeTimers();
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await failToTheDeadline();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    const tried = createAgentMessage.mock.calls.length;
+
+    await tick(IDEMPOTENCY_KEY_TTL_MS);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(createAgentMessage).toHaveBeenCalledTimes(tried);
+    expect(screen.getByText(new SendExpiredError().message)).toBeTruthy();
+    expect(field.value).toBe("Status please");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Discard draft" })).toBeTruthy();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();

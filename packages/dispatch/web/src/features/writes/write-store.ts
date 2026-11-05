@@ -722,10 +722,11 @@ export class Writes {
       this.#join(entry, resumedFrom(kept.state));
       return;
     }
-    const refusal =
-      kept.state.status === "refused"
-        ? refusalFrom(kept.state.refusal, kept.key, now)
-        : new SendInterruptedError();
+    const refusal = refusalFrom(
+      kept.state.status === "refused" ? kept.state.refusal : { kind: "interrupted" },
+      kept.key,
+      now
+    );
     this.#entries.set(entry.write.id, entry);
     this.#update(entry, { ...entry.write, refusal, status: "refused" });
   }

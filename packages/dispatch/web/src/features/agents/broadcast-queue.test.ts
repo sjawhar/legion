@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
@@ -12,6 +13,7 @@ import type {
   Message,
   MessageDelivery,
 } from "../../api/types";
+import { SendExpiredError } from "../writes/keyed-write";
 import { Writes } from "../writes/write-store";
 import { BroadcastSends } from "./BroadcastSends";
 import { type BroadcastSend, broadcastRows, enqueueBroadcast } from "./broadcast-queue";
@@ -278,6 +280,59 @@ test("a broadcast held for a sign-out in another tab says so, and goes on once r
     await waitFor(() =>
       expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["sent", "sent"])
     );
+  } finally {
+    createBroadcast.mockRestore();
+  }
+});
+
+/** A key as `newSendKey` mints one, its first six bytes the millisecond `at`. */
+function keyMinted(at: number): string {
+  const hex = at.toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
+}
+
+// A broadcast whose key Dispatch has forgotten is never asked under it: the row says the sending
+// ended and, in the refusal's own words, that a Retry is a new broadcast which can be delivered a
+// second time, and it offers Retry and Discard as a stopped row does.
+test("a broadcast whose key has run out says so, with Retry and Discard", async () => {
+  const client = signedIn();
+  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation(async (input) =>
+    created(input)
+  );
+  const writes = new Writes(client, keptTab().page(), memoryFiles());
+  try {
+    enqueueBroadcast(writes, press("Ship it.", keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS)));
+    await waitFor(() =>
+      expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["failed"])
+    );
+    expect(createBroadcast).not.toHaveBeenCalled();
+    const view = render(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(
+          MemoryRouter,
+          null,
+          createElement(BroadcastSends, {
+            onDiscard: () => {},
+            onRestore: () => {},
+            onRetry: () => {},
+            onStop: () => {},
+            restoreRefusal: null,
+            rows: broadcastRows(writes.rows()),
+          })
+        )
+      )
+    );
+    try {
+      expect(screen.getByRole("status").textContent).toBe(
+        `Sending to 1 agent ended: ${new SendExpiredError().message}`
+      );
+      expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Discard" })).toBeTruthy();
+    } finally {
+      view.unmount();
+    }
   } finally {
     createBroadcast.mockRestore();
   }

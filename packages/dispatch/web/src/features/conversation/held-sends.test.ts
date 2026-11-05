@@ -1,4 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import {
   type MutationKey,
   onlineManager,
@@ -19,7 +20,7 @@ import { ApiError, api, NetworkError } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { Comment, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
-import { SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
+import { SEND_DEADLINE_MS, SendExpiredError, SendStoppedError } from "../writes/keyed-write";
 import { KEPT_SEND_RESUME_MS } from "../writes/write-storage";
 import { Writes } from "../writes/write-store";
 import { type HeldSend, HeldSends, heldSends, stoppable } from "./held-sends";
@@ -577,4 +578,37 @@ test("a send held for a sign-out in another tab says so, and goes on once releas
       createAgentMessage.mockRestore();
     }
   });
+});
+
+/** A key as `newSendKey` mints one, its first six bytes the millisecond `at`. */
+function keyMinted(at: number): string {
+  const hex = at.toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
+}
+
+// A message under a key Dispatch has forgotten is never sent under it: its pending turn says so
+// in the refusal's own words - a Retry of it is a new message, which can be delivered a second
+// time - and offers Retry and Discard, as a stopped send's turn does.
+test("a send whose key has run out says so on its turn, with Retry and Discard", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(sentMessage);
+  const { held } = heldOf();
+  const sends = { discard: () => {}, retry: () => {}, stop: () => {} };
+  try {
+    held.send(agentKey, { ...agentSend, sendKey: keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS) });
+    await waitFor(() => expect(held.get(agentKey)?.status).toBe("refused"));
+    expect(createAgentMessage).not.toHaveBeenCalled();
+    const spent = held.get(agentKey);
+    expect(spent?.status === "refused" && spent.refusal).toBeInstanceOf(SendExpiredError);
+
+    const turn = render(createElement(PendingSendTurn, { held: spent as HeldSend, sends }));
+    try {
+      expect(turn.getByTestId("agent-send-error").textContent).toBe(new SendExpiredError().message);
+      expect(turn.getByRole("button", { name: "Retry" })).toBeTruthy();
+      expect(turn.getByRole("button", { name: "Discard" })).toBeTruthy();
+    } finally {
+      turn.unmount();
+    }
+  } finally {
+    createAgentMessage.mockRestore();
+  }
 });
