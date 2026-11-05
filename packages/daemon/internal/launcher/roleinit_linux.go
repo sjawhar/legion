@@ -624,8 +624,8 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 	// read opens the component named name and reads the handle it opened. The open is O_PATH,
 	// so it opens the entry itself whatever that entry is, a symlink included, and then
 	// the kind comes from fstat of the handle, not from a flag of the open. It reads parent
-	// at each call, which the loop below moves to the component it descends from.
-	read := func(name, path string) (int, unix.Stat_t, error) {
+	// and path at each call, which the loop below moves to the component it descends from.
+	read := func(name string) (int, unix.Stat_t, error) {
 		var stat unix.Stat_t
 		fd, err := unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
@@ -640,7 +640,7 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 	for index, name := range names {
 		path = filepath.Join(path, name)
 		file := !dir && index == len(names)-1
-		entry, stat, err := read(name, path)
+		entry, stat, err := read(name)
 		if err == nil && stat.Mode&unix.S_IFMT == unix.S_IFLNK {
 			_ = unix.Close(entry)
 			if err := unix.Unlinkat(parent, name, 0); err != nil {
@@ -662,33 +662,31 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 			if err := unix.Mkdirat(parent, name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
 				return fmt.Errorf("make %s: %w", path, err)
 			}
-			entry, stat, err = read(name, path)
+			entry, stat, err = read(name)
 			if err != nil {
 				return err
 			}
-			if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+			if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
 				_ = unix.Close(entry)
-				return refuseKind(path, stat.Mode)
+				return fmt.Errorf("%s became a link under the walk, where a mount point's directory goes", path)
 			}
 		case err != nil:
 			return err
 		case file:
 			_ = unix.Close(entry)
 			return nil
-		case stat.Mode&unix.S_IFMT != unix.S_IFDIR:
+		}
+		// Whether the walk found this component or made it, it descends only from a directory.
+		// No link reaches here: the branch above took the one the first read saw, and the one a
+		// link that appeared under the walk would leave is refused where that read decides it.
+		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 			_ = unix.Close(entry)
-			return refuseKind(path, stat.Mode)
+			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes (kind %#o)", path, stat.Mode&unix.S_IFMT)
 		}
 		_ = unix.Close(parent)
 		parent = entry
 	}
 	return nil
-}
-
-// refuseKind refuses an entry in the way of a mount point's directory, naming the path and the
-// kind fstat of the entry's handle reported.
-func refuseKind(path string, mode uint32) error {
-	return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes (kind %#o)", path, mode&unix.S_IFMT)
 }
 
 // privateMounts holds every mount this namespace makes or drops to itself, so nothing it does
