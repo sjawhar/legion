@@ -322,7 +322,10 @@ func pointerPairs(nodes []model.ArtifactBlock, pointers []Pointer) ([]blockPair,
 
 // replaceBlockRefs reconciles the document's block_refs with pairs, matching on the five columns
 // of its key, and returns the targets of the pairs it deleted and inserted, and of those whose
-// to_types it changed.
+// to_types it changed. A pair naming a person, a session or a role is reconciled in
+// identity_mentions instead (replaceIdentityMentions): this statement's delete is scoped by the
+// artifact alone, so a build that does not know identity mentions would drop them from block_refs
+// whatever kind they wore.
 func replaceBlockRefs(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -339,12 +342,25 @@ func replaceBlockRefs(
 	// A pair's to_types travel as one space-joined text, null for no limit: a block type's name is
 	// a directive name (pmdoc), which holds no space.
 	toTypes := make([]*string, len(pairs))
-	for i, pair := range pairs {
-		blockIDs[i], kinds[i], toKinds[i], toIDs[i] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
+	identity := []identityRow{}
+	kept := 0
+	for _, pair := range pairs {
+		if IsIdentity(pair.target.Kind) {
+			identity = append(identity, identityRow{fromID: pair.blockID, target: pair.target})
+			continue
+		}
+		blockIDs[kept], kinds[kept], toKinds[kept], toIDs[kept] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
 		if len(pair.toTypes) > 0 {
 			joined := strings.Join(pair.toTypes, " ")
-			toTypes[i] = &joined
+			toTypes[kept] = &joined
 		}
+		kept++
+	}
+	pairs, blockIDs, kinds = pairs[:kept], blockIDs[:kept], kinds[:kept]
+	toKinds, toIDs, toTypes = toKinds[:kept], toIDs[:kept], toTypes[:kept]
+	mentions, err := replaceDocumentIdentityMentions(ctx, tx, artifactID, versionAt, firstIndexing, identity)
+	if err != nil {
+		return nil, err
 	}
 	moved, err := scanTargets(tx.Query(ctx, `
 		delete from block_refs r
@@ -356,6 +372,7 @@ func replaceBlockRefs(
 	if err != nil {
 		return nil, fmt.Errorf("delete the block mentions version %d of %s dropped: %w", version, artifactID, err)
 	}
+	moved = append(mentions, moved...)
 	if len(pairs) == 0 {
 		return moved, nil
 	}

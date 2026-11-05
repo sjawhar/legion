@@ -17,7 +17,7 @@ func TestMentionCensusCommandRefusesEmptyAndDetectsCorruptionWithoutMigrating(t 
 	if code := runCensus(ctx, []string{"--mentions"}, url, &out, &errOut); code != 1 {
 		t.Fatalf("empty = %d %s %s", code, &out, &errOut)
 	}
-	if _, err := database.Pool.Exec(ctx, `insert into messages(author,body,target) values ('{"kind":"user","id":"alice"}','Mention','session:reader')`); err != nil {
+	if _, err := database.Pool.Exec(ctx, `with written as (insert into messages(author,body,target) values ('{"kind":"user","id":"bob"}','Mention dispatch://people/alice','session:reader') returning id) insert into identity_mentions(owner_kind,owner_id,from_kind,from_id,to_kind,to_id) select 'message',id::text,'message',id::text,'person','alice' from written`); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()

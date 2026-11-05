@@ -51,9 +51,6 @@ func TestMentionGraphUsesRecordedTargetsAndResolvedSessions(t *testing.T) {
 		"comment:00000000-0000-0000-0000-000000000001->role:reviewer",
 		"comment:00000000-0000-0000-0000-000000000001->session:missing",
 		"comment:00000000-0000-0000-0000-000000000001->session:reader",
-		"message:00000000-0000-0000-0000-000000000003->person:alice",
-		"message:00000000-0000-0000-0000-000000000003->role:reviewer",
-		"message:00000000-0000-0000-0000-000000000003->session:reader",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mentions = %v; want %v", got, want)

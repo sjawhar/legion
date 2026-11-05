@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestBodyIdentityMentionsAreIndexedOnceAndRestoredAfterOldRule(t *testing.T) {
+func TestBodyIdentityMentionsSurviveOldReconciliationWithProvenance(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
 	_, err := database.Pool.Exec(ctx, `insert into projects(key,name) values ('CORE','Core');
@@ -25,6 +25,9 @@ func TestBodyIdentityMentionsAreIndexedOnceAndRestoredAfterOldRule(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := ReplaceCountedItem(ctx, tx, ItemComment, id, "See dispatch://people/ALICE and dispatch://sessions/reader and dispatch://roles/reviewer", "https://dispatch.test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Stamp(ctx, tx, "comment", id, 42); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -60,19 +63,23 @@ func TestBodyIdentityMentionsAreIndexedOnceAndRestoredAfterOldRule(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replaceRefs(ctx, tx, "comment", id, nil, nil); err != nil {
+	if _, err := tx.Exec(ctx, `delete from refs where from_kind='comment' and from_id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(); len(got) != 0 {
-		t.Fatalf("old rule kept %v", got)
+	if got := read(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("old reconciliation lost identity mentions: %v", got)
 	}
 	if _, err := RebuildAll(ctx, database.Pool, "https://dispatch.test"); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("rebuild restored %v, want %v", got, want)
+	}
+	var unstamped int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from identity_mentions where owner_kind='comment' and owner_id=$1 and source_seq is distinct from 42`, id).Scan(&unstamped); err != nil || unstamped != 0 {
+		t.Fatalf("old reconciliation/rebuild lost provenance: %d, %v", unstamped, err)
 	}
 }

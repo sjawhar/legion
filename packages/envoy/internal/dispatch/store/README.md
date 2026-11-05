@@ -23,8 +23,8 @@ A migration that cannot be written that way is a stop-the-world migration, deplo
 ## Derived graph
 
 The complete graph uses `refs.AllEdgesSQL`: citation and structural `graph_edges`, identity and recorded-delivery `graph_person_edges`, indexed-inbox `graph_inbox_edges`, and identity-mention `graph_mention_edges`.
-`graph_edges` keeps its definition and existing builds' result sets; identity references are indexed under unknown storage target kinds `person_mention`, `session_mention` and `role_mention` that old readers skip.
-The complete union filters those storage kinds from its compatibility arm and maps them only through `graph_mention_edges`; none of these views stores or writes an edge.
+`graph_edges` keeps its definition and existing builds' result sets; identity references live in `identity_mentions`, which older writers never reconcile.
+`graph_mention_edges` derives identity mentions from that table and explicit comment mention records; none of these views stores or writes an edge.
 `person_aliases(person, alias_kind, alias)` derives canonical logins with `user_threads_login`, raw user actor ids, and session ids only where a stored session actor's server-verified `owner` identifies the person.
 Routes, claims and role holders do not prove person ownership, so there is no role alias.
 Delivery reads the four word-carrying event types used by `sessionanswers`, their `published_destinations`, and sent message/comment delivery attempts; a recorded role topic identifies the role, not a session or a person.
@@ -37,7 +37,9 @@ The comparison checks all signed-in people, a superset of active users.
 
 Identity addresses are `dispatch://people/<login>`, `dispatch://sessions/<id>` and `dispatch://roles/<name>`; session and role ids follow the existing delivery route grammar.
 The existing reference indexer records their resolved target from the same extraction it uses for citations; people use `model.CanonicalLogin`, the same canonical identity `person_aliases` names.
-The mention view also reads explicit comment mentions, message targets and recorded delivery resolutions, expanding a session to a person only through a verified session alias.
-`envoy-dispatch census --mentions` independently compares source sets created, edited or resolved in the last 30 days in one read-only snapshot; exit 1 includes an empty recorded-mention set.
-An old build re-indexing identity-address text drops these unknown records; unchanged bodies are not automatically revisited by the owed sweep.
-After returning to the new build, run `envoy-dispatch rebuild-refs`, let the existing block-index reconciliation drain, then run the mention census.
+The mention view also reads explicit comment mentions and their recorded resolutions, expanding a session to a person only through a verified session alias.
+A direct-message destination or broadcast copy is a delivery, not a mention; its body can still name an identity.
+`envoy-dispatch census --mentions` reparses source bodies and current document content independently of reference rows, then compares complete source sets created, edited or resolved in the last 30 days in one read-only snapshot; exit 1 includes an empty recorded-mention set.
+Reconciliation preserves a surviving mention's date and source event, so editing its block does not move an old mention up the person's page.
+The outbox reads a comment creation event's own body for recipients and leaves pending, possibly delivered and refused attempts to the explicit delivery path.
+Only an absent attempt or a known transport failure permits a mention fallback; a role forward to the same session takes precedence over that fallback.

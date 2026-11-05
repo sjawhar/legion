@@ -15,7 +15,6 @@ const MentionEdgesSQL = "graph_mention_edges"
 // so existing builds retain their result sets and query plans during rollout and rollback.
 const AllEdgesSQL = `(
 	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from graph_edges
-	where to_kind not in ('person_mention', 'session_mention', 'role_mention')
 	union all
 	select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from graph_person_edges
 	union all

@@ -80,12 +80,12 @@ func editedHeadTargets(previous, body string, found []text.Ref) []Target {
 	if text.HeadRunes(previous, excerptRunes) == text.HeadRunes(body, excerptRunes) {
 		return nil
 	}
-	kinds, ids := refTargets(found)
-	targets := make([]Target, len(kinds))
+	kinds, ids, identity := refTargets(found)
+	targets := make([]Target, 0, len(kinds)+len(identity))
 	for index := range kinds {
-		targets[index] = Target{Kind: kinds[index], ID: ids[index]}
+		targets = append(targets, Target{Kind: kinds[index], ID: ids[index]})
 	}
-	return targets
+	return append(targets, identity...)
 }
 
 // ReplaceDocumentCounted is ReplaceCounted for a document's version, written at versionAt, whose
@@ -126,11 +126,13 @@ func ReplaceDocumentCounted(
 
 // replaceRefs reconciles the Dispatch references written by one source with found: targets no
 // longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
-// an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
-// edges moved — deleted or inserted, oldest state first — so ReplaceCounted and its variants can
+// an edge that persists keeps its created_at and source_seq. Identity mentions - a person, a
+// session or a role - are reconciled the same way in identity_mentions, which no build that
+// predates them touches (replaceIdentityMentions). It returns the targets whose inbound edges
+// moved — deleted or inserted, oldest state first — so ReplaceCounted and its variants can
 // resolve the ones a reader refreshes by name (CountedChanges).
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
-	kinds, ids := refTargets(found)
+	kinds, ids, identity := refTargets(found)
 	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
@@ -143,20 +145,24 @@ func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found 
 	if err != nil {
 		return nil, fmt.Errorf("clear references: %w", err)
 	}
-	if len(kinds) == 0 {
-		return changed, nil
+	if len(kinds) > 0 {
+		added, err := scanTargets(tx.Query(ctx, `
+			insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+			select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+			from unnest($3::text[], $4::text[]) as target(kind, id)
+			on conflict (from_kind, from_id, to_kind, to_id) do nothing
+			returning to_kind, to_id
+		`, fromKind, fromID, kinds, ids, insertedAt))
+		if err != nil {
+			return nil, fmt.Errorf("write reference: %w", err)
+		}
+		changed = append(changed, added...)
 	}
-	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
-		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
-		from unnest($3::text[], $4::text[]) as target(kind, id)
-		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids, insertedAt))
+	mentions, err := replaceIdentityMentions(ctx, tx, fromKind, fromID, fromKind, identityRows(fromID, identity), insertedAt, "")
 	if err != nil {
-		return nil, fmt.Errorf("write reference: %w", err)
+		return nil, err
 	}
-	return append(changed, added...), nil
+	return append(changed, mentions...), nil
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
@@ -175,31 +181,29 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 	return changed, rows.Err()
 }
 
-// TargetOf is the graph target a parsed reference names, the kind and id refs and graph_edges
-// store an edge to it under; an external URL names none. A block of a comment, of a message or
+// TargetOf is the graph target a parsed reference names, the kind and id the graph stores an edge
+// to it under; an external URL names none. A block of a comment, of a message or
 // of an ask — a part of its question, its options and its answer — is stored under its item's
 // block kind, comment_block, message_block or ask_block (ItemKind.BlockKind), not block: a build
 // that predates item blocks skips a kind it does not know (resolveNodes), where it would count a
-// block row and resolve it through document_blocks.
+// block row and resolve it through document_blocks. A person, a session and a role keep their own
+// kind here and are stored in identity_mentions rather than in refs (IsIdentity).
 func TargetOf(ref text.Ref) (Target, bool) {
 	if ref.Kind == "url" {
 		return Target{}, false
 	}
 	kind := ref.Kind
-	// Older builds already resolve session nodes, so identity mentions use unknown storage
-	// kinds until graph_mention_edges maps them into the complete graph.
-	if kind == "person" || kind == "session" || kind == "role" {
-		kind += "_mention"
-	}
 	if kind == "block" && ref.Item != "" {
 		kind = ItemKind(ref.Item).BlockKind()
 	}
 	return Target{Kind: kind, ID: text.TargetID(ref)}, true
 }
 
-// refTargets is the deduplicated (to_kind, to_id) set found names, as parallel arrays.
-func refTargets(found []text.Ref) ([]string, []string) {
-	kinds, ids := []string{}, []string{}
+// refTargets is the deduplicated set found names: the (to_kind, to_id) of its ordinary targets as
+// the parallel arrays refs stores, and its identity targets - person, session and role - apart,
+// since those are stored in identity_mentions (IsIdentity).
+func refTargets(found []text.Ref) ([]string, []string, []Target) {
+	kinds, ids, identity := []string{}, []string{}, []Target{}
 	seen := make(map[Target]struct{})
 	for _, ref := range found {
 		target, ok := TargetOf(ref)
@@ -210,22 +214,35 @@ func refTargets(found []text.Ref) ([]string, []string) {
 			continue
 		}
 		seen[target] = struct{}{}
+		if IsIdentity(target.Kind) {
+			identity = append(identity, target)
+			continue
+		}
 		kinds = append(kinds, target.Kind)
 		ids = append(ids, target.ID)
 	}
-	return kinds, ids
+	return kinds, ids, identity
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
-// provenance yet: the source's own refs and, for a document, a comment, a message or an ask, the
-// mentions its blocks hold, an ask's parts included. It runs after the source's event is
-// appended, in the same transaction, and leaves edges that survived a reconcile untouched.
+// provenance yet: the source's own refs and identity mentions and, for a document, a comment, a
+// message or an ask, the mentions its blocks hold, an ask's parts included. It runs after the
+// source's event is appended, in the same transaction, and leaves edges that survived a
+// reconcile untouched.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
 	if _, err := tx.Exec(ctx, `
 		update refs set source_seq = $3
 		where from_kind = $1 and from_id = $2 and source_seq is null
 	`, fromKind, fromID, eventID); err != nil {
 		return fmt.Errorf("stamp references: %w", err)
+	}
+	// A source's own identity mentions and its blocks' are two owners of one id
+	// (blockOwnerKind), and one statement stamps both.
+	if _, err := tx.Exec(ctx, `
+		update identity_mentions set source_seq = $3
+		where owner_id = $2 and owner_kind in ($1, $1 || '_blocks') and source_seq is null
+	`, fromKind, fromID, eventID); err != nil {
+		return fmt.Errorf("stamp identity mentions: %w", err)
 	}
 	var blockRefs string
 	switch fromKind {
