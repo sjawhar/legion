@@ -10,6 +10,8 @@ import (
 	"runtime/debug"
 	"sync/atomic"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/procread"
 )
 
 // This file is the sampler's process: the HTTP server that hands a collector out of the registry,
@@ -147,6 +149,8 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("the sampler could not listen on %s: %w", opts.Listen, err)
 	}
 	s := &service{opts: opts, registry: opts.registry()}
+	// The guard's own reader, where it had to make one, is released with the run it guarded.
+	defer s.release()
 	server := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
@@ -190,16 +194,22 @@ func Run(ctx context.Context, opts Options) error {
 }
 
 // service is one Run: what it was given, the registry it serves, whether a pass has been made,
-// and the last line the guard logged, so a reading that fails every second is reported once and
-// not sixty times a minute, as the collectors report their own.
+// the reader the guard falls back to, and the last line the guard logged, so a reading that fails
+// every second is reported once and not sixty times a minute, as the collectors report their own.
 //
 // The flag is read by the HTTP handler and written by Run's own loop, which is why it is atomic;
-// the logged line belongs to the guard alone.
+// the logged line and the reader belong to the guard alone, which is Run's own loop.
 type service struct {
 	opts     Options
 	registry *Registry
 	pass     atomic.Bool
 	logged   string
+	// own is the reader the guard takes its own reading of /proc/self/smaps through, made on
+	// the first reading it has to take itself and nil until then: the collector publishes a
+	// reading every second, so the guard reads for itself only where that has stopped, and a
+	// sampler whose collector is running holds no descriptor for this. The layout is the one
+	// that keeps no cgroup file, since the only file this reads is the sampler's own smaps.
+	own *procread.Reader
 }
 
 // health is what GET /healthz answers: a small JSON body with the mode and the pass above. It is
@@ -242,9 +252,15 @@ func (s *service) handler() http.Handler {
 }
 
 // overLimit is the sampler's own memory rule: the anonymous memory its process holds now, and an
-// error that ends the run once that passes memoryExit. It reads what procread reads for every
-// other process (readAnonymous, the package var a test replaces), so a test drives the exit
-// without allocating 64 MiB of its own.
+// error that ends the run once that passes memoryExit.
+//
+// The reading is the collector's own, which it publishes every second (Registry.SelfAnonymousBytes):
+// the collector reads /proc/self/smaps on every tick, that is the costliest read the sampler
+// makes, and a guard on the same second taking its own reading of the same file of the same
+// process would double it for nothing. Where no reading has been published, or the last one is
+// older than two of this guard's intervals — a collector that has stalled or not yet run — the
+// guard reads the file itself (readAnonymous, the package var a test replaces), so no passing of
+// 64 MiB goes unseen and no test has to allocate 64 MiB to drive the exit.
 //
 // A reading it cannot take leaves the sampler running: a /proc that refuses one read of one file
 // is no reason to end a sampler that is serving a pod, and the Go heap's own limit still holds.
@@ -252,17 +268,36 @@ func (s *service) handler() http.Handler {
 // legion_sampler_read_errors_total{source="proc"}, so the guard counts nothing of its own and
 // says it once rather than once a second.
 func (s *service) overLimit() error {
-	anonymous, err := readAnonymous(s.opts.root(), selfPID())
-	if err != nil {
-		if line := "sampler: its own anonymous memory could not be read: " + err.Error(); line != s.logged {
-			s.logged = line
-			s.opts.Log(line)
+	anonymous, published := s.registry.SelfAnonymousBytes(2 * guardInterval)
+	if !published {
+		if s.own == nil {
+			s.own = procread.NewReader(s.opts.root(), procread.LayoutNone)
 		}
-		return nil
+		read, err := readAnonymous(s.own, selfPID())
+		if err != nil {
+			if line := "sampler: its own anonymous memory could not be read: " + err.Error(); line != s.logged {
+				s.logged = line
+				s.opts.Log(line)
+			}
+			return nil
+		}
+		anonymous = read
 	}
 	s.logged = ""
 	if anonymous <= memoryExit {
 		return nil
 	}
 	return fmt.Errorf("the sampler holds %d bytes of anonymous memory, past its %d-byte limit: ending so the launcher starts it again", anonymous, memoryExit)
+}
+
+// release closes the reader the guard made for itself, where it ever had to make one. The
+// collectors close their own, each when its loop ends.
+func (s *service) release() {
+	if s.own == nil {
+		return
+	}
+	if err := s.own.Close(); err != nil {
+		s.opts.Log("sampler: the file the guard had kept open could not be released: " + err.Error())
+	}
+	s.own = nil
 }

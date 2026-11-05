@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/procread"
 )
 
 // The tests below read a pod the test wrote: a root of its own holding proc/… and
@@ -86,6 +88,9 @@ func (f *podFixture) collector() *podCollector {
 	if err != nil {
 		f.t.Fatalf("the collector refused its options: %v", err)
 	}
+	// A collector driven by hand is closed where its loop would have closed it, so a test
+	// binary running every one of these holds no pod's descriptors at the end of them.
+	f.t.Cleanup(c.close)
 	return c
 }
 
@@ -246,10 +251,12 @@ func wantValue(t *testing.T, e exposition, want float64, id metricID, labels ...
 // The /proc profile is this pod's own: the totals from the cgroup v1 files at the mount root, the
 // process memory from meminfo, each role's CPU and resident memory from the process walk and its
 // anonymous memory from each process's smaps, with the sampler's own cost beside them. Every
-// series docs/sampler-metrics.md names for an issue pod is served from one pass.
+// series docs/sampler-metrics.md names for an issue pod is served from one pass of a settled
+// pod — the pass after the one that first saw its processes, which is where each of them takes
+// the kind its own command line gives (Walk.Next).
 func TestTheProcProfileServesThePodItRead(t *testing.T) {
 	f := newPodFixture(t)
-	f.writeProcesses(743092, 56, podTree()...)
+	f.writeProcesses(743092, 56, sighted(podTree())...)
 	f.writeV1Totals(268435456, 12_500_000_000)
 	f.writeSmaps(12, 1024)
 	f.writeSmaps(14, 2048)
@@ -261,7 +268,12 @@ func TestTheProcProfileServesThePodItRead(t *testing.T) {
 	}})
 	useVolumeReader(t, map[string]int64{"/var/run/legion/roles/implementer/private": 4 << 20})
 
-	f.collector().pass(0)
+	c := f.collector()
+	c.pass(0)
+	// The pod has spent what podTree holds since that first pass, and the pass that charges
+	// it is the one that has read every process's command line.
+	f.writeProcesses(743092, 56, podTree()...)
+	c.pass(10)
 	e := f.scrape()
 	page := float64(os.Getpagesize())
 
@@ -316,6 +328,12 @@ func TestTheCgroupProfileServesEachCommandsOwnCgroup(t *testing.T) {
 	f := newPodFixture(t)
 	f.writeProcesses(2097152, 524288, podTree()...)
 	f.usePodCgroup(1<<30, 9_000_000)
+
+	// The pass that first sees the pod's processes reads no command line of any of them, so
+	// the pass that reads the command cgroups is the one after it: a cgroup's kind is the
+	// kind of the first build or test process in it, and the walk is where that comes from.
+	c := f.collector()
+	c.pass(0)
 	f.writeCommandGroup(commandGroup{
 		name: "implementer-7", microseconds: 2_000_000,
 		current: 100 << 20, peak: 150 << 20, anon: 80 << 20, pids: []int{14, 15},
@@ -328,8 +346,7 @@ func TestTheCgroupProfileServesEachCommandsOwnCgroup(t *testing.T) {
 		name: "pytest-3", microseconds: 1_000_000,
 		current: 20 << 20, peak: 20 << 20, anon: 16 << 20, pids: []int{17, 18},
 	})
-
-	f.collector().pass(0)
+	c.pass(2)
 	e := f.scrape()
 
 	// The pod's totals come from the pod cgroup, and this kernel is the unified hierarchy,
@@ -376,18 +393,21 @@ func TestARemovedCgroupKeepsItsLastValues(t *testing.T) {
 	f := newPodFixture(t)
 	f.writeProcesses(2097152, 524288, podTree()...)
 	f.usePodCgroup(1<<30, 9_000_000)
+
+	c := f.collector()
+	// The pass that first sees the pod's processes reads no command line of any of them: the
+	// cgroup below is read by the pass that knows what the processes in it are doing.
+	c.pass(0)
 	f.writeCommandGroup(commandGroup{
 		name: "implementer-7", microseconds: 2_000_000,
 		current: 100 << 20, peak: 150 << 20, anon: 80 << 20, pids: []int{14, 15},
 	})
-
-	c := f.collector()
-	c.pass(0)
+	c.pass(2)
 	if err := os.RemoveAll(filepath.Join(f.cgroupRoot, "implementer-7")); err != nil {
 		t.Fatalf("could not remove the command's cgroup: %v", err)
 	}
 	f.clock.advance(2 * time.Second)
-	c.pass(2)
+	c.pass(4)
 
 	e := f.scrape()
 	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
@@ -406,13 +426,16 @@ func TestACgroupKeptForOneMoreReadReportsTheFinalNumbers(t *testing.T) {
 	f := newPodFixture(t)
 	f.writeProcesses(2097152, 524288, podTree()...)
 	f.usePodCgroup(1<<30, 9_000_000)
+
+	c := f.collector()
+	// The pass that first sees the pod's processes reads no command line of any of them: the
+	// cgroup below is read by the pass that knows what the processes in it are doing.
+	c.pass(0)
 	f.writeCommandGroup(commandGroup{
 		name: "implementer-7", microseconds: 2_000_000,
 		current: 100 << 20, peak: 150 << 20, anon: 80 << 20, pids: []int{14, 15},
 	})
-
-	c := f.collector()
-	c.pass(0)
+	c.pass(2)
 	// The build ends: its cgroup holds nobody, and the kernel's last numbers for it are the
 	// ones it finished on.
 	f.writeCommandGroup(commandGroup{
@@ -420,7 +443,7 @@ func TestACgroupKeptForOneMoreReadReportsTheFinalNumbers(t *testing.T) {
 		current: 130 << 20, peak: 160 << 20, anon: 110 << 20,
 	})
 	f.clock.advance(2 * time.Second)
-	c.pass(2)
+	c.pass(4)
 
 	e := f.scrape()
 	build := []string{podProject, podIssue, "implementer", string(KindBuild)}
@@ -535,9 +558,11 @@ func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 		}
 		// The loop reads on: what could be read is still served. With no roles file to
 		// read, every process stands in no role's subtree, which is role shared — the
-		// walk's own answer for a generation the launcher has not named.
+		// walk's own answer for a generation the launcher has not named — and the whole
+		// pod's 45 ticks are charged there, since no process has had its command line
+		// read on the pass that first saw it.
 		wantValue(t, e, 743092*1024, podProcessMemoryBytes, podProject, podIssue)
-		wantValue(t, e, 0.15, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindBuild))
+		wantValue(t, e, 0.45, cpuSecondsTotal, podProject, podIssue, RoleShared, string(KindShared))
 	}
 	if len(f.log) == 0 {
 		t.Error("nothing was logged about the reads that failed")
@@ -564,19 +589,22 @@ func budgetTree() []fakeProcess {
 // charges the sampler's own process another costTicks of CPU, written into the fixture's /proc,
 // which is where the budget reads it back from. The budget is then decidable on a shared runner,
 // where a share of the wall clock would not be.
-func useCostlyAnonymousReader(t *testing.T, costTicks, pages uint64) *[]int {
+//
+// The stat line is written where it stands, as the kernel writes it, so the collector reads the
+// charge back through the descriptor it holds on that file.
+func useCostlyAnonymousReader(t *testing.T, f *podFixture, costTicks, pages uint64) *[]int {
 	t.Helper()
 	before := readAnonymous
 	read := &[]int{}
 	spent := uint64(0)
-	readAnonymous = func(root string, pid int) (int64, error) {
+	readAnonymous = func(_ *procread.Reader, pid int) (int64, error) {
 		*read = append(*read, pid)
 		spent += costTicks
 		line := statLine(fakeProcess{
 			pid: selfPID(), parent: 1, start: 900, own: spent, pages: pages,
 			args: []string{"/opt/legion/bin/legion", "sampler"},
 		})
-		path := filepath.Join(root, "proc", strconv.Itoa(selfPID()), "stat")
+		path := filepath.Join(f.root, "proc", strconv.Itoa(selfPID()), "stat")
 		if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
 			t.Errorf("could not charge the sampler's own CPU: %v", err)
 		}
@@ -597,7 +625,7 @@ func TestTheSmapsBudgetStopsAndCarriesTheRestIntoTheNextWindow(t *testing.T) {
 	f.writeRoles(map[string]int{})
 	// Three ticks of /proc's clock is 30 ms, so four reads stand at 120 ms and the fourth is
 	// the one that passes the 100 ms budget.
-	read := useCostlyAnonymousReader(t, 3, 1200)
+	read := useCostlyAnonymousReader(t, f, 3, 1200)
 
 	c := f.collector()
 	window := func(tick int64) []int {
@@ -640,6 +668,185 @@ func TestTheSmapsBudgetStopsAndCarriesTheRestIntoTheNextWindow(t *testing.T) {
 			t.Errorf("process %d was never read in the four windows thirteen processes need", process.pid)
 		}
 	}
+}
+
+// The cap is the whole sampler's and not the smaps pass's alone: 2% of one CPU over a
+// ten-second window is 200 ms, the rest of the window's work is measured from /proc/self/stat
+// as the smaps read is, and smaps spends what that work leaves — at most the 100 ms it may
+// spend, and nothing at all where the window's other work has already spent the allowance.
+//
+// Holding the costly read alone inside a budget holds nothing. The live run of 2026-11-05 kept
+// its smaps budget to the letter and still spent 11.55 s of CPU over 319 s, 3.6% of one CPU,
+// because the per-second and per-two-second work over a pod running hundreds of build processes
+// was never budgeted at all (INFRA-1208).
+func TestTheWholeSamplersWorkIsInsideTheCapAndSmapsSpendsWhatIsLeft(t *testing.T) {
+	f := newPodFixture(t)
+	f.writeProcesses(743092, 56, budgetTree()...)
+	f.writeV1Totals(1<<28, 1_000_000_000)
+	f.writeRoles(map[string]int{})
+	// Every smaps read costs the sampler three ticks of /proc's clock, 30 ms, and so does
+	// each tick's own pass work: the sampler's anonymous memory is read through the same
+	// reader, which is the one thing here that spends CPU.
+	read := useCostlyAnonymousReader(t, f, 3, 1200)
+
+	c := f.collector()
+	window := func(tick int64) []int {
+		t.Helper()
+		before := len(*read)
+		c.pass(tick)
+		calls := (*read)[before:]
+		if len(calls) == 0 || calls[0] != samplerPID {
+			t.Fatalf("the pass read %v first, want the sampler's own smaps", calls)
+		}
+		// The pass reads the sampler's own anonymous memory before the window opens, and
+		// that read is part of the window's other work rather than of its smaps pass.
+		return calls[1:]
+	}
+
+	// A window with room spends up to the 100 ms ceiling and no more, whatever the 200 ms
+	// leaves: one tick of other work here, so the ceiling is what binds.
+	windows := map[int64][]int{0: window(0)}
+	if got, want := windows[0], []int{1, samplerPID, 100, 101}; !slices.Equal(got, want) {
+		t.Errorf("a window with room read %v, want %v", got, want)
+	}
+
+	// Ten ticks of pass work spend 300 ms, past the 200 ms the whole sampler has for one
+	// window. The window that closes on them reads no process at all and defers every one of
+	// the thirteen, which is the signal an operator reads.
+	for tick := int64(1); tick < 10; tick++ {
+		c.pass(tick)
+	}
+	windows[10] = window(10)
+	if got := windows[10]; len(got) != 0 {
+		t.Errorf("a window whose other work spent the allowance read %v, want no process at all", got)
+	}
+	wantValue(t, f.scrape(), float64(len(budgetTree())), smapsDeferred)
+
+	// A window with its allowance again takes the deferred processes up where the last window
+	// that read anything left off, so every process is still reached within the windows the
+	// remainder needs.
+	windows[20] = window(20)
+	if got, want := windows[20], []int{102, 103, 104, 105}; !slices.Equal(got, want) {
+		t.Errorf("the window after it read %v, want the processes carried first, %v", got, want)
+	}
+	windows[30], windows[40] = window(30), window(40)
+
+	reached := map[int]bool{}
+	for _, window := range windows {
+		for _, pid := range window {
+			reached[pid] = true
+		}
+	}
+	for _, process := range budgetTree() {
+		if !reached[process.pid] {
+			t.Errorf("process %d was never read in the five windows thirteen processes need", process.pid)
+		}
+	}
+}
+
+// appear writes one process into the fixture's /proc without rewriting the tree around it.
+// writeProcesses writes every stat again, the sampler's own among them, and the sampler's own
+// is where useCostlyAnonymousReader holds the CPU it has charged: a test that has charged the
+// sampler and then adds a process adds it this way.
+func (f *podFixture) appear(process fakeProcess) {
+	f.t.Helper()
+	dir := filepath.Join(f.root, "proc", strconv.Itoa(process.pid))
+	f.write(filepath.Join(dir, "cmdline"), strings.Join(process.args, "\x00")+"\x00")
+	f.write(filepath.Join(dir, "stat"), statLine(process))
+}
+
+// saturated is a fixture whose every tick spends more than a whole window's allowance: each
+// read of the sampler's own anonymous memory charges it 21 ticks of /proc's clock, 210 ms
+// against the 200 ms a ten-second window has. It answers the paths each volume pass read, which
+// is what says whether a walk tick ran at all.
+//
+// That is this pod under a build. The sampler's own reads cost 1.4% of one CPU idle and 3.0%
+// while `go build -a ./...` saturates both CPUs, because a gVisor syscall under contention
+// costs several times what it costs beside it (INFRA-1208, measured 2026-11-05).
+func saturated(t *testing.T, f *podFixture) *[]string {
+	t.Helper()
+	f.writeProcesses(743092, 56, budgetTree()...)
+	f.writeV1Totals(1<<28, 1_000_000_000)
+	f.writeRoles(map[string]int{})
+	f.writeVolumes([]Volume{{Name: "scratch", Paths: []string{"/pod/scratch"}, Medium: "memory"}})
+	volumes := useVolumeReader(t, map[string]int64{"/pod/scratch": 4 << 20})
+	useCostlyAnonymousReader(t, f, 21, 1200)
+	return volumes
+}
+
+// The cap is the whole sampler's over the whole of a window, and the walk is what a busy pod
+// costs it most: a window whose work has already spent the allowance defers the next walk pass
+// — the volumes and the pod totals with it — to the pass after that one, and counts it as
+// legion_sampler_walk_deferred.
+func TestAWindowThatSpentTheAllowanceDefersTheNextWalkPass(t *testing.T) {
+	f := newPodFixture(t)
+	volumes := saturated(t, f)
+	page := float64(os.Getpagesize())
+	shared := []string{podProject, podIssue, RoleShared, string(KindShared)}
+
+	// The first pass of the first window has the whole allowance and reads everything: the
+	// thirteen processes of the tree hold 9,100 pages between them.
+	c := f.collector()
+	c.pass(0)
+	e := f.scrape()
+	wantValue(t, e, 0, walkDeferred)
+	wantValue(t, e, 9100*page, memoryResidentBytes, shared...)
+	wantValue(t, e, 1, podCPUSecondsTotal, podProject, podIssue)
+	if want := []string{"/pod/scratch"}; !slices.Equal(*volumes, want) {
+		t.Fatalf("the first pass read the volumes at %v, want %v", *volumes, want)
+	}
+
+	// The tick between the two walks reads the totals and the sampler's own three files, and
+	// that is the window's whole allowance spent.
+	c.pass(1)
+
+	// A process appears and the pod's cgroup spends another second, and this window has
+	// already spent its 200 ms: the walk pass that would read either of them waits.
+	f.appear(fakeProcess{pid: 777, parent: 1, args: []string{"gopls"}, own: 50, start: 900, pages: 1000})
+	f.writeV1Totals(1<<28, 2_000_000_000)
+	c.pass(2)
+
+	e = f.scrape()
+	wantValue(t, e, 1, walkDeferred)
+	wantValue(t, e, 9100*page, memoryResidentBytes, shared...)
+	wantValue(t, e, 1, podCPUSecondsTotal, podProject, podIssue)
+	if want := []string{"/pod/scratch"}; !slices.Equal(*volumes, want) {
+		t.Errorf("the deferred pass read the volumes at %v, want the one read of the pass before it", *volumes)
+	}
+
+	// The pass after it reads all three, and the deferral is counted once and not again.
+	c.pass(4)
+	e = f.scrape()
+	wantValue(t, e, 1, walkDeferred)
+	wantValue(t, e, 10100*page, memoryResidentBytes, shared...)
+	wantValue(t, e, 2, podCPUSecondsTotal, podProject, podIssue)
+	if want := []string{"/pod/scratch", "/pod/scratch"}; !slices.Equal(*volumes, want) {
+		t.Errorf("the pass after the deferred one read the volumes at %v, want %v", *volumes, want)
+	}
+}
+
+// A deferral is never two walk passes in a row. Where every window is over the allowance, which
+// is a pod saturated for minutes, the walk runs on every other walk pass: a process's stat is
+// read every four seconds rather than every two, and a sampler holding its cap reports a pod
+// half as often rather than stopping.
+func TestAWalkPassIsNeverDeferredTwiceInARow(t *testing.T) {
+	f := newPodFixture(t)
+	volumes := saturated(t, f)
+
+	c := f.collector()
+	var ran []int64
+	for tick := int64(0); tick < 16; tick++ {
+		read := len(*volumes)
+		c.pass(tick)
+		if len(*volumes) > read {
+			ran = append(ran, tick)
+		}
+	}
+
+	if want := []int64{0, 4, 8, 12}; !slices.Equal(ran, want) {
+		t.Errorf("the walk ran at ticks %v, want every other walk tick, %v", ran, want)
+	}
+	wantValue(t, f.scrape(), 4, walkDeferred)
 }
 
 // The roles file is read again on every pass, so a generation that starts between two passes is

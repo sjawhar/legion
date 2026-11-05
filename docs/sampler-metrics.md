@@ -76,8 +76,22 @@ Both modes serve these, and they carry no `project` or `issue`.
 | `legion_sampler_restarts_total` | counter | — | times the launcher has started the sampler again, a count the launcher keeps and hands over |
 | `legion_sampler_series_dropped` | gauge | — | series the 200-series cap removed at the last scrape |
 | `legion_sampler_smaps_deferred` | gauge | — | processes the `smaps` budget carried into the next window |
+| `legion_sampler_walk_deferred` | gauge | — | walk passes the sampler's own cap has deferred, a count that only rises |
 
 All four sources of `legion_sampler_read_errors_total` are served from the first scrape, at zero, so a rate over one of them answers on a sampler that has never failed a read.
+
+The cap on what the sampler costs the pod it reads is 2% of one CPU, over the whole of its own work and not over one pass of it, and it is held from `/proc/self/stat` as every other reading here is read from the kernel's own counts.
+Each ten-second window has 200 ms of that allowance:
+the readings of each second and each two seconds spend what they spend, the `smaps` pass spends what is left of the window's 200 ms and never more than 100 ms, and a window whose other work has already spent the allowance reads no `smaps` at all.
+`legion_sampler_smaps_deferred` is how many processes a window carried into the next one, so a window that reached none of them says so there, and the next window takes the carried processes up first.
+
+The walk is held inside that allowance too, and it is the reading a busy pod costs the sampler most:
+a build makes thousands of short-lived processes, each one a `stat` to open, and under gVisor a syscall costs several times more while the pod's own work is saturating its CPUs.
+So a window that has already spent the 200 ms defers the next walk pass — the volumes and the pod totals with it — to the pass after that one.
+A deferral is never two in a row, so a process's `stat` is read at least every four seconds while the pod is saturated and every two seconds otherwise:
+what gives way where the allowance runs out is the resolution and never the cap.
+`legion_sampler_walk_deferred` is how many walk passes a sampler has deferred since it started, and a sampler that defers often is one whose pod is saturated:
+the series is how an operator reads that, and it is the answer to why a pod's readings arrived half as often over the minutes it was deferring.
 
 ## The two profiles
 
@@ -128,6 +142,10 @@ A node's sampler knows nothing of roles, so everything that is neither a build n
 
 A rule list decides `build` and `test` from a process's program and its arguments, and a process under a `build` or a `test` process takes that kind.
 The rules are in `packages/daemon/internal/sampler/rules.go`, and a deployment adds its own with the daemon configuration key `runtime.kubernetes.sampler_rules`.
+
+An issue pod's sampler reads a process's command line on the second pass that finds it and not the first, since a build makes thousands of processes that are gone before the next pass and reading each one costs the pod more than the kind it would give:
+a process the sampler has not read a command line for carries the kind of its nearest ancestor that has one, and takes its own from the pass that reads it.
+So the first two seconds of a command the agent started are charged to whatever started it, and a command that lived less than one pass is charged there whole.
 
 ## The peak, and what a second reader does to it
 

@@ -110,6 +110,7 @@ const (
 	restartsTotal
 	seriesDropped
 	smapsDeferred
+	walkDeferred
 	metricCount
 )
 
@@ -266,6 +267,10 @@ var metrics = [metricCount]metric{
 		name: "legion_sampler_smaps_deferred", typ: gaugeType, modes: bothModes,
 		help: "Processes the smaps budget carried into the next window",
 	},
+	walkDeferred: {
+		name: "legion_sampler_walk_deferred", typ: gaugeType, modes: bothModes,
+		help: "Walk passes the sampler's own cap has deferred",
+	},
 }
 
 // counter is a number that only rises. A reader hands it either the rise since the last pass
@@ -379,15 +384,21 @@ type Registry struct {
 	self     selfSeries
 	errors   map[ReadSource]*counter
 	restarts counter
-	deferred float64
+	// deferred is the processes the last smaps window carried, and deferredWalks the walk
+	// passes the collector's own cap has deferred since it started.
+	deferred      float64
+	deferredWalks float64
 }
 
 // selfSeries is what the sampler reports about itself. Its memory has no peak of its own: the
-// number that matters is the reading it exits on, which is the last one.
+// number that matters is the reading it exits on, which is the last one. read is when that
+// memory reading was taken, which is what lets the memory guard use it rather than reading the
+// same file of the same process again.
 type selfSeries struct {
 	cpuSeconds counter
 	anonymous  float64
 	resident   float64
+	read       time.Time
 }
 
 // NewPodRegistry is an issue pod's registry, whose series all carry this project and this issue.
@@ -576,6 +587,22 @@ func (r *Registry) SetSelfMemoryBytes(anonymous, resident int64) {
 	defer r.mu.Unlock()
 	r.self.anonymous = float64(anonymous)
 	r.self.resident = float64(resident)
+	r.self.read = r.now()
+}
+
+// SelfAnonymousBytes is the anonymous memory the last SetSelfMemoryBytes published, and whether
+// that reading was taken within the last `within`. It is what the memory guard reads instead of
+// taking a second reading of its own: both collectors read /proc/self/smaps every second, that
+// file is the costliest read the sampler makes, and reading it twice a second for one number
+// serves nobody. A reading older than the caller allows is no answer at all, so a guard whose
+// collector has stopped publishing reads the file itself rather than deciding on a stale number.
+func (r *Registry) SelfAnonymousBytes(within time.Duration) (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.self.read.IsZero() || r.now().Sub(r.self.read) > within {
+		return 0, false
+	}
+	return int64(r.self.anonymous), true
 }
 
 // AddReadError counts one read of this source that failed.
@@ -615,6 +642,15 @@ func (r *Registry) SetSmapsDeferred(count int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deferred = float64(count)
+}
+
+// SetWalkDeferred is how many walk passes the sampler's own cap has deferred, a count that only
+// rises: the collector keeps it and hands over the whole of it, as it hands over the walk's
+// read errors.
+func (r *Registry) SetWalkDeferred(count uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deferredWalks = float64(count)
 }
 
 // sample is one series of one scrape: the metric, its label values in that metric's own order,
@@ -752,6 +788,7 @@ func (r *Registry) addSelf(s *fixedSamples) {
 	s.droppedAt = len(s.samples)
 	s.add("", seriesDropped, 0)
 	s.add("", smapsDeferred, r.deferred)
+	s.add("", walkDeferred, r.deferredWalks)
 }
 
 // addTotals holds the pod totals, which the cap never drops either: an issue pod's own cgroup

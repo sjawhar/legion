@@ -17,9 +17,9 @@ import (
 
 // This file is the issue pod's collector: the loop that reads what one pod's kernel already
 // counts and hands every reading to the series registry. It owns the rates — what is read each
-// second, what every second second and what every ten — the budget the costly read is held
-// inside, and the two profiles of docs/sampler-metrics.md, the `/proc` profile of a gVisor pod
-// and the cgroup profile of a pod that runs each command in a cgroup of its own.
+// second, what every second second and what every ten — the budget every one of those reads is
+// held inside, and the two profiles of docs/sampler-metrics.md, the `/proc` profile of a gVisor
+// pod and the cgroup profile of a pod that runs each command in a cgroup of its own.
 //
 // Nothing here opens a path of its own: every read is given PodOptions.Root or a path one of the
 // launcher's two files names, so a test drives a whole pod's worth of passes over a directory it
@@ -39,11 +39,26 @@ var (
 	// smapsInterval is the window of the smaps pass, the costly read: 2.45 ms a process, so it
 	// runs rarely and inside a budget.
 	smapsInterval = 10 * time.Second
-	// smapsBudget is the sampler's own CPU one smaps window may spend. It is CPU and not wall
-	// clock on purpose: a sampler sharing a core with a build must read fewer processes, not
-	// the same number more slowly.
+	// smapsBudget is the most of the sampler's own CPU one smaps window may spend. What it
+	// may spend is the window's whole allowance less the rest of that window's work
+	// (smapsLeft), and never more than this. It is CPU and not wall clock on purpose: a
+	// sampler sharing a core with a build must read fewer processes, not the same number
+	// more slowly.
 	smapsBudget = 100 * time.Millisecond
 )
+
+// samplerShare is the whole of the sampler's own cost: 2% of one CPU
+// (dispatch://INFRA-1208/spec#b-a-rates), which is the requirement, where the rates above are
+// the means. The cap is held over the smaps window, which is the longest of them, and over
+// every pass of that window: what the window has spent decides what the smaps pass may spend
+// (smapsLeft) and whether the next walk pass runs at all (deferWalk).
+const samplerShare = 0.02
+
+// windowAllowance is the sampler's own CPU for one smaps window: samplerShare of one CPU over
+// smapsInterval, which is 200 ms of every ten seconds. It is read off the rate rather than
+// written down a second time, so a test that shortens the window shortens what the window may
+// spend with it.
+func windowAllowance() float64 { return smapsInterval.Seconds() * samplerShare }
 
 // volumeFloor is the used bytes a volume must reach before its series is served, and never again
 // after that: an `emptyDir` holds a few blocks of nothing in particular, and a series for each of
@@ -59,9 +74,10 @@ var selfPID = os.Getpid
 // readAnonymous and usedBytes are the two readings a test cannot write down: the cost of a smaps
 // read is the kernel's, and a statfs answers for the filesystem the test's own directory sits on
 // and not for the bytes the test wants to see. Both are package vars for that reason, as
-// internal/launcher's roleInitLaunch is, and both are procread's own readers everywhere else.
+// internal/launcher's roleInitLaunch is, and both are procread's own readers everywhere else —
+// the smaps read through the collector's own reader, which keeps that file's descriptor.
 var (
-	readAnonymous = procread.ReadAnonymous
+	readAnonymous = func(reader *procread.Reader, pid int) (int64, error) { return reader.Anonymous(pid) }
 	usedBytes     = procread.UsedBytes
 )
 
@@ -158,6 +174,9 @@ func RunPod(ctx context.Context, opts PodOptions) error {
 	if err != nil {
 		return err
 	}
+	// The descriptors this collector kept open are released with the loop that read through
+	// them, whatever ends it.
+	defer collector.close()
 	ticker := time.NewTicker(podInterval)
 	defer ticker.Stop()
 	// The first pass runs before the first tick, so a scrape that arrives a moment after the
@@ -182,7 +201,12 @@ type podCollector struct {
 	opts   PodOptions
 	layout procread.Layout
 	// cgroups is the cgroup profile: CgroupRoot names a directory that is there.
-	cgroups  bool
+	cgroups bool
+	// reader is every file this collector reads again and again, kept open: the pod's
+	// meminfo, the two cgroup files of its layout, and the stat and smaps of each process
+	// the walk below is holding. The walk reads its own stats through it, so one reader
+	// holds one descriptor of each file however many of this collector's readings want it.
+	reader   *procread.Reader
 	walk     *Walk
 	pageSize int64
 	// walkEvery and smapsEvery are those two rates in ticks of podInterval.
@@ -205,6 +229,19 @@ type podCollector struct {
 	processes []Process
 	carried   []int
 
+	// windowCPU is the sampler's own CPU when this smaps window began, which is the moment
+	// the window before it stopped reading, and windowMeasured whether that reading could be
+	// taken at all. What the sampler has spent since is the rest of this window's pass work,
+	// and what the smaps pass may spend is the window's allowance less that (smapsLeft).
+	windowCPU      float64
+	windowMeasured bool
+
+	// walkDeferred is how many walk passes this collector's own cap has deferred, which it
+	// serves as legion_sampler_walk_deferred, and deferredLast whether the last walk tick was
+	// one of them: a deferral is never two in a row (deferWalk).
+	walkDeferred uint64
+	deferredLast bool
+
 	// procErrors are the /proc reads this collector failed, beside the walk's own count.
 	procErrors uint64
 
@@ -217,16 +254,15 @@ type podCollector struct {
 }
 
 // groupReading is one command cgroup as the passes have read it: the pair its series are charged
-// to, the last reading of its files, the CPU total the last rise was taken from, the lifetime
-// peak that reading held, the most it is known to have held within this scrape's window, and when
-// it was last there to be read.
+// to, the last reading of its files, the most it is known to have held within this scrape's
+// window, and when it was last there to be read. The next pass's rise is taken from that last
+// reading itself — the CPU already charged is its CPUSeconds and the peak already seen its
+// MemoryPeakBytes — so neither is held a second time beside it.
 type groupReading struct {
-	pair    Pair
-	group   procread.Group
-	charged float64
-	peak    int64
-	within  int64
-	seen    time.Time
+	pair   Pair
+	group  procread.Group
+	within int64
+	seen   time.Time
 }
 
 func newPodCollector(opts PodOptions) (*podCollector, error) {
@@ -236,23 +272,38 @@ func newPodCollector(opts PodOptions) (*podCollector, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	layout := procread.DetectLayout(opts.Root)
+	reader := procread.NewReader(opts.Root, layout)
 	c := &podCollector{
 		opts:        opts,
-		layout:      procread.DetectLayout(opts.Root),
+		layout:      layout,
 		cgroups:     cgroupTreePresent(opts.CgroupRoot),
-		walk:        NewWalk(opts.Root, opts.Rules),
+		reader:      reader,
+		walk:        NewWalk(opts.Root, opts.Rules, reader),
 		pageSize:    int64(os.Getpagesize()),
-		walkEvery:   ticksPer(walkInterval),
-		smapsEvery:  ticksPer(smapsInterval),
+		walkEvery:   ticksPer(walkInterval, podInterval),
+		smapsEvery:  ticksPer(smapsInterval, podInterval),
 		roles:       Roles{},
 		volumesRead: opts.VolumesFile == "",
 		reported:    map[string]bool{},
 		groups:      map[string]*groupReading{},
 		logged:      map[ReadSource]string{},
 	}
+	// The first window begins where the collector does, so the walk and the totals of its
+	// first ten seconds stand inside the allowance as every later window's do.
+	c.windowCPU, c.windowMeasured = c.selfCPUSeconds()
 	c.opts.Log(fmt.Sprintf("sampler: %s/%s: reading %s as the %s profile, cgroup layout %s",
 		opts.Project, opts.Issue, opts.Root, c.profile(), c.layout))
 	return c, nil
+}
+
+// close releases every descriptor this collector kept open. A collector whose loop has ended
+// reads nothing more, and a reader that was not closed would hold a descriptor of each process
+// of the pod for as long as the process that made it runs.
+func (c *podCollector) close() {
+	if err := c.reader.Close(); err != nil {
+		c.opts.Log("sampler: the files it had kept open could not all be released: " + err.Error())
+	}
 }
 
 // profile is the name of the profile this collector reads, for the one log line that names it.
@@ -273,23 +324,39 @@ func cgroupTreePresent(root string) bool {
 	return err == nil && info.IsDir()
 }
 
-// ticksPer is how many ticks of the loop's own rate one of the slower rates stands for. A rate no
-// slower than the tick runs on every one of them, which is what a test that shortens one rate and
-// not another gets.
-func ticksPer(interval time.Duration) int64 {
-	if podInterval <= 0 || interval <= podInterval {
+// ticksPer is how many ticks of a loop's own rate one of its slower rates stands for. A rate no
+// slower than the tick runs on every one of them, which is what a test that shortens one rate
+// and not another gets. Both collectors count their slower rates this way, each in ticks of its
+// own loop: podInterval here and nodeInterval in node mode.
+func ticksPer(interval, tick time.Duration) int64 {
+	if tick <= 0 || interval <= tick {
 		return 1
 	}
-	return int64(interval / podInterval)
+	return int64(interval / tick)
 }
 
-// pass is one tick of the loop: always the pod's totals and the sampler's own readings, every
-// walkEvery ticks the process walk and the volumes, and every smapsEvery ticks the smaps window.
-// Tick zero runs all three, so nothing waits ten seconds for its first reading.
+// pass is one tick of the loop: always the sampler's own readings, the pod's totals unless this
+// tick's work is deferred, every walkEvery ticks the process walk and the volumes, and every
+// smapsEvery ticks the smaps window. Tick zero runs all of them, so nothing waits ten seconds
+// for its first reading.
+//
+// A walk tick whose window has already spent the sampler's allowance reads nothing but the
+// sampler itself: the walk, the volumes and the pod totals wait for the tick after it
+// (deferWalk). The sampler's own readings are not among what waits — they are two files of its
+// own, read through the descriptors it holds on them, and the first is the CPU every budget
+// here is measured against.
+//
+// The smaps window closes on its own tick whether or not that tick was deferred, since a window
+// that never closes is a window whose allowance never begins again. A window with nothing left
+// to spend reads no process there and says so (readSmaps).
 func (c *podCollector) pass(tick int64) {
-	c.readTotals()
-	c.readSelf()
-	if tick%c.walkEvery == 0 {
+	walking := tick%c.walkEvery == 0
+	deferring := walking && c.deferWalk()
+	if !deferring {
+		c.readTotals()
+	}
+	readSelf(c.reader, c.pageSize, c.opts.Registry, c.failed)
+	if walking && !deferring {
 		c.readProcesses()
 		c.readVolumes()
 	}
@@ -298,6 +365,39 @@ func (c *podCollector) pass(tick int64) {
 	if !c.cgroups && tick%c.smapsEvery == 0 {
 		c.readSmaps()
 	}
+}
+
+// deferWalk is whether this walk pass waits for the pass after it: the window's work has already
+// spent the sampler's whole allowance for a window, which is 2% of one CPU
+// (dispatch://INFRA-1208/spec#b-a-rates), measured from /proc/self/stat as every budget here is.
+//
+// The cap holds whatever the pod runs, and the walk is what a busy pod costs a sampler: a build
+// makes thousands of short-lived processes, each one a stat to open, and under gVisor a syscall
+// under contention costs several times what it costs on an idle pod. Where the readings of a
+// window have spent the allowance, the resolution is what gives way and never the cap.
+//
+// A deferral is never two in a row. So a process's stat is read at least every two walk
+// intervals — four seconds while the pod is saturated, two otherwise — and the sampler reports
+// a pod it reads half as often rather than one it has stopped reading. How often that happens is
+// legion_sampler_walk_deferred, which is where an operator reads that this pod is busy enough to
+// cost the sampler its cap.
+//
+// A sampler that cannot read its own CPU measures nothing and defers nothing: the walk is the
+// reading the pod's series are made of, and a budget that cannot be measured is no reason to
+// stop taking it.
+func (c *podCollector) deferWalk() bool {
+	if c.deferredLast {
+		c.deferredLast = false
+		return false
+	}
+	spent, measured := c.selfCPUSeconds()
+	if !measured || !c.windowMeasured || spent-c.windowCPU < windowAllowance() {
+		return false
+	}
+	c.deferredLast = true
+	c.walkDeferred++
+	c.opts.Registry.SetWalkDeferred(c.walkDeferred)
+	return true
 }
 
 // readTotals is the pod's own accounting and the memory its processes hold, which is the reading
@@ -312,14 +412,14 @@ func (c *podCollector) readTotals() {
 			c.opts.Registry.SetPodMemoryBytes(group.MemoryBytes)
 			c.opts.Registry.SetPodCPUSeconds(group.CPUSeconds)
 		}
-	} else if totals, err := procread.PodTotals(c.opts.Root, c.layout); err != nil {
+	} else if totals, err := c.reader.PodTotals(); err != nil {
 		c.failed(SourceCgroup, err)
 	} else {
 		c.opts.Registry.SetPodMemoryBytes(totals.MemoryBytes)
 		c.opts.Registry.SetPodCPUSeconds(totals.CPUSeconds)
 	}
 
-	info, err := procread.ReadMemInfo(c.opts.Root)
+	info, err := c.reader.MemInfo()
 	if err != nil {
 		c.failed(SourceProc, err)
 		return
@@ -338,22 +438,30 @@ func (c *podCollector) readTotals() {
 	c.opts.Registry.SetPodSharedMemoryBytes(info.Shmem)
 }
 
-// readSelf is what the sampler costs the pod: its own CPU, the anonymous memory its exit rule is
-// written against, and the resident memory that under gVisor counts the mapped legion binary. A
-// reading that fails leaves the last one standing rather than serving a zero.
-func (c *podCollector) readSelf() {
-	stat, err := procread.ReadStat(c.opts.Root, selfPID())
+// readSelf is what the sampler costs the pod or the node it reads: its own CPU, the anonymous
+// memory its exit rule is written against, and the resident memory that under gVisor counts the
+// mapped legion binary. Both modes serve these three series (docs/sampler-metrics.md, "The
+// series the sampler serves about itself") and both read them the same way, so this is one body
+// given each collector's own reader, page size, registry and count of what failed. A reading
+// that fails leaves the last one standing rather than serving a zero.
+//
+// It is also the one read of /proc/self/smaps the sampler makes each second: the memory guard
+// takes the reading this publishes rather than a second one of its own (service.overLimit).
+// Both files are the sampler's own, read every second of its life, so both are read through the
+// descriptors the reader keeps on them.
+func readSelf(reader *procread.Reader, pageSize int64, registry *Registry, failed func(ReadSource, error)) {
+	stat, err := reader.Stat(selfPID())
 	if err != nil {
-		c.failed(SourceProc, err)
+		failed(SourceProc, err)
 		return
 	}
-	c.opts.Registry.SetSelfCPUSeconds(seconds(stat.UserTicks + stat.SystemTicks))
-	anonymous, err := readAnonymous(c.opts.Root, selfPID())
+	registry.SetSelfCPUSeconds(seconds(stat.UserTicks + stat.SystemTicks))
+	anonymous, err := readAnonymous(reader, selfPID())
 	if err != nil {
-		c.failed(SourceProc, err)
+		failed(SourceProc, err)
 		return
 	}
-	c.opts.Registry.SetSelfMemoryBytes(anonymous, int64(stat.ResidentPages)*c.pageSize)
+	registry.SetSelfMemoryBytes(anonymous, int64(stat.ResidentPages)*pageSize)
 }
 
 // readProcesses is one pass of the process walk: the roles file as it stands now, every process's
@@ -467,25 +575,26 @@ func (c *podCollector) volumeUsed(volume Volume) (int64, error) {
 }
 
 // readSmaps is one window of the smaps pass: each process's anonymous memory, largest resident
-// process first, within smapsBudget of the sampler's own CPU. What the window did not reach is
-// carried into the next one and served as legion_sampler_smaps_deferred, and the carried
-// processes go first there, so every process is reached within the windows the remainder needs
-// rather than the largest being read again and again.
+// process first, within what this window has left of the sampler's own allowance (smapsLeft).
+// What the window did not reach is carried into the next one and served as
+// legion_sampler_smaps_deferred, and the carried processes go first there, so every process is
+// reached within the windows the remainder needs rather than the largest being read again and
+// again.
 //
 // The budget is the sampler's own CPU and never a share of the wall clock: /proc/self/stat is
 // what the pod is charged for, and a sampler that was descheduled for 300 ms spent none of it.
+//
+// The window closes here, with the reading this pass ends on: what the next window measures its
+// own work against is the CPU the sampler had spent when it stopped reading.
 func (c *podCollector) readSmaps() {
 	order := c.smapsOrder()
-	if len(order) == 0 {
-		c.carried = nil
-		c.opts.Registry.SetSmapsDeferred(0)
-		return
-	}
 	began, measured := c.selfCPUSeconds()
+	budget := c.smapsLeft(began, measured)
 	anonymous := map[Pair]int64{}
 	read := 0
-	for _, process := range order {
-		bytes, err := readAnonymous(c.opts.Root, process.PID)
+	for budget > 0 && read < len(order) {
+		process := order[read]
+		bytes, err := readAnonymous(c.reader, process.PID)
 		read++
 		switch {
 		case unreadable(err):
@@ -496,12 +605,12 @@ func (c *podCollector) readSmaps() {
 		default:
 			anonymous[process.Pair] += bytes
 		}
-		// The budget is read after the process rather than before it, so every window
-		// reaches at least one process and the pass always moves forward. A sampler that
-		// cannot read its own CPU cannot measure the budget at all, and reads one process
-		// a window rather than running unbounded.
+		// The budget is read after the process rather than before it, so a window with
+		// anything at all to spend reaches at least one process and the pass always moves
+		// forward. A sampler that cannot read its own CPU cannot measure the budget at
+		// all, and reads one process a window rather than running unbounded.
 		spent, ok := c.selfCPUSeconds()
-		if !measured || !ok || spent-began >= smapsBudget.Seconds() {
+		if !measured || !ok || spent-began >= budget {
 			break
 		}
 	}
@@ -516,6 +625,31 @@ func (c *podCollector) readSmaps() {
 		c.carried = append(c.carried, process.PID)
 	}
 	c.opts.Registry.SetSmapsDeferred(len(c.carried))
+	c.windowCPU, c.windowMeasured = c.selfCPUSeconds()
+}
+
+// smapsLeft is what this window may spend reading smaps: the sampler's whole allowance for a
+// window less the pass work the window has already spent, and never more than smapsBudget.
+//
+// The cap is the requirement and the rates are the means
+// (dispatch://INFRA-1208/spec#b-a-rates: 2% of one CPU). Holding the costly read alone inside a
+// budget holds nothing: the per-second and the per-two-second work is most of what a sampler
+// over a pod of hundreds of processes spends, and this one spent 3.6% of one CPU over a live
+// run of 319 s with its smaps budget honoured (INFRA-1208, measured 2026-11-05). So the walk
+// and the totals are measured the same way the smaps read is, from /proc/self/stat, and smaps
+// spends what they leave.
+//
+// A window whose other work spent the whole allowance reads no process at all and defers every
+// one of them, which legion_sampler_smaps_deferred reports: the operator's signal that the
+// sampler is holding its cap against a pod busy enough to cost it one.
+//
+// A sampler that cannot read its own CPU measures nothing and falls back to the ceiling, which
+// the reading loop's own rule then cuts to one process a window.
+func (c *podCollector) smapsLeft(began float64, measured bool) float64 {
+	if !measured || !c.windowMeasured {
+		return smapsBudget.Seconds()
+	}
+	return min(smapsBudget.Seconds(), windowAllowance()-(began-c.windowCPU))
 }
 
 // smapsOrder is the processes of this window: the ones the last window did not reach first, in
@@ -551,7 +685,7 @@ func (c *podCollector) smapsOrder() []Process {
 // selfCPUSeconds is the CPU the sampler's own process has spent, which is what the smaps budget
 // is measured against, and whether it could be read at all.
 func (c *podCollector) selfCPUSeconds() (float64, bool) {
-	stat, err := procread.ReadStat(c.opts.Root, selfPID())
+	stat, err := c.reader.Stat(selfPID())
 	if err != nil {
 		c.failed(SourceProc, err)
 		return 0, false
@@ -601,18 +735,16 @@ func (c *podCollector) readCgroups(pass Pass) {
 		// peak series is for; where it has not, the reading of this moment is all this
 		// window knows the cgroup to have held.
 		reading.within = group.MemoryBytes
-		if group.MemoryPeakBytes > reading.peak {
+		if group.MemoryPeakBytes > reading.group.MemoryPeakBytes {
 			reading.within = group.MemoryPeakBytes
 		}
-		reading.peak = group.MemoryPeakBytes
 		// The CPU a cgroup reports is a total since it was made, and the registry is
 		// charged the rise alone. A total below the one already charged is another cgroup
 		// wearing a name that was used before, whose own total is the rise to charge.
-		rise := group.CPUSeconds - reading.charged
-		if group.CPUSeconds < reading.charged {
+		rise := group.CPUSeconds - reading.group.CPUSeconds
+		if group.CPUSeconds < reading.group.CPUSeconds {
 			rise = group.CPUSeconds
 		}
-		reading.charged = group.CPUSeconds
 		reading.group = group
 		reading.seen = now
 		c.opts.Registry.AddCPUSeconds(reading.pair, rise)

@@ -43,7 +43,7 @@ func guardEvery(t *testing.T, every time.Duration) {
 // useAnonymous is the test hook of the sampler's own memory rule: the reader the guard and the
 // smaps pass both take their readings through. A test raises what it answers and the sampler
 // exits on a number no test had to allocate.
-func useAnonymous(t *testing.T, read func(root string, pid int) (int64, error)) {
+func useAnonymous(t *testing.T, read func(reader *procread.Reader, pid int) (int64, error)) {
 	t.Helper()
 	before := readAnonymous
 	readAnonymous = read
@@ -247,7 +247,7 @@ func TestTheSamplerEndsWhenItsOwnAnonymousMemoryPassesTheLimit(t *testing.T) {
 	holdMemoryLimit(t)
 	guardEvery(t, 5*time.Millisecond)
 	const held = 65 << 20
-	useAnonymous(t, func(string, int) (int64, error) { return held, nil })
+	useAnonymous(t, func(*procread.Reader, int) (int64, error) { return held, nil })
 
 	f := newPodFixture(t)
 	f.writeProcesses(743092, 56, podTree()...)
@@ -270,6 +270,52 @@ func TestTheSamplerEndsWhenItsOwnAnonymousMemoryPassesTheLimit(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the exit is %q, want the %s it read named", err, want)
 		}
+	}
+}
+
+// The guard decides on the reading the collector published and takes none of its own: the
+// collector reads /proc/self/smaps every second, that is the costliest read the sampler makes,
+// and two readings of the same file of the same process on the same second answer the same
+// number twice. Where nothing has been published, and where what was published is older than
+// two of the guard's intervals, it reads the file itself, so no passing of 64 MiB is missed by a
+// guard whose collector has stalled.
+func TestTheGuardReadsWhatTheCollectorPublished(t *testing.T) {
+	guardEvery(t, time.Second)
+	f := newPodFixture(t)
+	pod := f.options()
+	s := &service{opts: Options{Pod: &pod, Log: func(line string) { f.log = append(f.log, line) }}, registry: f.registry}
+
+	// Nothing published yet: the guard reads for itself, and a reading under the limit
+	// leaves the sampler running.
+	read := 0
+	useAnonymous(t, func(*procread.Reader, int) (int64, error) { read++; return 1 << 20, nil })
+	if err := s.overLimit(); err != nil {
+		t.Fatalf("the guard ended the sampler over a megabyte: %v", err)
+	}
+	if read != 1 {
+		t.Errorf("the guard took %d readings of its own with nothing published, want 1", read)
+	}
+
+	// The collector's reading stands for the guard, which takes none of its own.
+	f.registry.SetSelfMemoryBytes(65<<20, 102<<20)
+	err := s.overLimit()
+	if err == nil {
+		t.Fatal("the guard let the sampler run past its limit")
+	}
+	if !strings.Contains(err.Error(), "68157440") {
+		t.Errorf("the exit is %q, want the %d bytes the collector published", err, 65<<20)
+	}
+	if read != 1 {
+		t.Errorf("the guard took %d readings of its own, want the collector's published one", read)
+	}
+
+	// A reading older than two guard intervals is no answer: the guard reads the file.
+	f.clock.advance(3 * guardInterval)
+	if err := s.overLimit(); err != nil {
+		t.Fatalf("the guard ended the sampler over its own megabyte reading: %v", err)
+	}
+	if read != 2 {
+		t.Errorf("the guard took %d readings of its own, want one more for a stale publication", read)
 	}
 }
 
@@ -312,10 +358,12 @@ func TestTheSamplerRefusesOptionsItCouldNotRunWith(t *testing.T) {
 // none of it. So what this compares is the CPU the work took against the time that work stands
 // for, which is the ratio the live check reads off the sampler's own series in a real pod.
 //
-// The memory is read the same way, from this process's own smaps: the whole test binary's
-// anonymous memory stands above the sampler's share of it, so a reading under 64 MiB settles the
-// cap for the sampler. What this cannot measure is the kernel's own cost of a real smaps read,
-// 2.45 ms a process, since the fixture's files are the test's; that belongs to the live check.
+// The memory is the anonymous memory the passes themselves left held, read from this process's
+// own smaps before and after them: the test binary's own tens of megabytes, and whatever the
+// race detector adds to them, are no part of the sampler's share and would answer for the
+// machine the test ran on rather than for the sampler. What this cannot measure is the kernel's
+// own cost of a real smaps read, 2.45 ms a process, since the fixture's files are the test's;
+// that belongs to the live check.
 func TestTheSamplerCostsUnderTwoPercentOfOneCPUOver200Processes(t *testing.T) {
 	useMemoryFixture(t)
 	const (
@@ -344,6 +392,7 @@ func TestTheSamplerCostsUnderTwoPercentOfOneCPUOver200Processes(t *testing.T) {
 	})
 
 	collector := f.collector()
+	held := selfAnonymous(t)
 	began := selfTicks(t)
 	for tick := int64(0); tick < costPasses; tick++ {
 		collector.pass(tick)
@@ -358,12 +407,10 @@ func TestTheSamplerCostsUnderTwoPercentOfOneCPUOver200Processes(t *testing.T) {
 			100*share, costProcesses, 100*costShare)
 	}
 
-	anonymous, err := procread.ReadAnonymous("/", os.Getpid())
-	if err != nil {
-		t.Fatalf("this process's own anonymous memory could not be read: %v", err)
-	}
-	if anonymous > memoryExit {
-		t.Errorf("the passes left %d bytes of anonymous memory held, past the %d-byte cap", anonymous, memoryExit)
+	grew := selfAnonymous(t) - held
+	t.Logf("the passes left %d bytes of anonymous memory held", grew)
+	if grew > memoryExit {
+		t.Errorf("the passes left %d bytes of anonymous memory held, past the %d-byte cap", grew, memoryExit)
 	}
 
 	// The passes did the work the cost is claimed for: every process read, nothing failed.
@@ -384,6 +431,18 @@ func selfTicks(t *testing.T) uint64 {
 		t.Fatalf("this process's own /proc/<pid>/stat could not be read: %v", err)
 	}
 	return stat.UserTicks + stat.SystemTicks
+}
+
+// selfAnonymous is the anonymous memory this process holds now, read the way the sampler's own
+// exit rule reads it. The cost test takes it twice and keeps the difference: what the passes
+// held is the sampler's, where the whole reading is the test binary's.
+func selfAnonymous(t *testing.T) int64 {
+	t.Helper()
+	anonymous, err := procread.ReadAnonymous("/", os.Getpid())
+	if err != nil {
+		t.Fatalf("this process's own anonymous memory could not be read: %v", err)
+	}
+	return anonymous
 }
 
 // useMemoryFixture writes the cost fixture to a filesystem in memory where the machine has one.

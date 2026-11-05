@@ -20,6 +20,8 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/sjawhar/legion/daemon/internal/procread"
 )
 
 // The tests below read a node the test wrote: a root of its own holding proc/… and
@@ -77,6 +79,9 @@ func (f *nodeFixture) collector(opts NodeOptions) *nodeCollector {
 	if err != nil {
 		f.t.Fatalf("the collector refused its options: %v", err)
 	}
+	// A collector driven by hand is closed where its loop would have closed it, so a test
+	// binary running every one of these holds no pod's descriptors at the end of them.
+	f.t.Cleanup(c.close)
 	return c
 }
 
@@ -612,7 +617,7 @@ func useAnonymousReader(t *testing.T) *[]int {
 	t.Helper()
 	before := readAnonymous
 	read := &[]int{}
-	readAnonymous = func(_ string, pid int) (int64, error) {
+	readAnonymous = func(_ *procread.Reader, pid int) (int64, error) {
 		*read = append(*read, pid)
 		return 32 << 20, nil
 	}

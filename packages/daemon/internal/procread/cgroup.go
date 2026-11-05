@@ -2,12 +2,12 @@ package procread
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 )
@@ -214,15 +214,24 @@ func readKeys(path string, keys ...string) (map[string]int64, error) {
 	defer file.Close()
 	lines := bufio.NewScanner(file)
 	for lines.Scan() {
-		key, value, found := strings.Cut(strings.TrimSpace(lines.Text()), " ")
-		if !found || !slices.Contains(keys, key) {
+		// The line is the scanner's own bytes and no string is made of it: memory.stat is
+		// forty lines, read for every pod of a node every second, and all but two of them
+		// are passed over. A []byte compared with a string costs nothing either.
+		key, value, found := bytes.Cut(bytes.TrimSpace(lines.Bytes()), []byte(" "))
+		if !found {
 			continue
 		}
-		number, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %s is %q, no number", path, key, strings.TrimSpace(value))
+		for _, want := range keys {
+			if string(key) != want {
+				continue
+			}
+			number, err := strconv.ParseInt(string(bytes.TrimSpace(value)), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s is %q, no number", path, want, bytes.TrimSpace(value))
+			}
+			values[want] = number
+			break
 		}
-		values[key] = number
 	}
 	if err := lines.Err(); err != nil {
 		return nil, err

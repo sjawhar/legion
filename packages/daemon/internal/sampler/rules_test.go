@@ -87,6 +87,48 @@ func TestKindOfACommandLine(t *testing.T) {
 	}
 }
 
+// An argument is read as the words it holds only where a shell takes it as a command: the words
+// of a `-c` are a command line this process runs, and the words of anything else are prose that
+// happens to name a toolchain. An agent's prompt is the case this issue was opened for — the
+// harness above every process of a role carries the whole system prompt as one argument, and
+// reading it as a command charged a role's whole session to `build` (INFRA-1208, measured in
+// this issue's own pod on 2026-11-05) — and a commit message and a pull request body are the
+// same thing again.
+func TestOnlyTheCommandAShellsDashCTakesIsReadAsWords(t *testing.T) {
+	prompt := "You are Legion's implementer. Build the daemon with go build ./cmd/legion " +
+		"before you hand the work on, and read docs/sampler-metrics.md first."
+	for _, test := range []struct {
+		name string
+		args []string
+		want Kind
+	}{
+		{"a harness carrying a whole prompt", []string{
+			"/opt/omp/bin/omp", "--extension", "@sjawhar/pi-legion", "--mode", "rpc",
+			"--append-system-prompt", prompt,
+		}, ""},
+		{"a commit message", []string{"jj", "describe", "-m", "run go build ./... in CI again"}, ""},
+		{"a pull request body", []string{"gh", "pr", "create", "--body", "fixes the go build ./... failure"}, ""},
+		{"a shell's command", []string{"bash", "-c", "go build ./..."}, KindBuild},
+		{"a shell's command, test before build", []string{"bash", "-c", "go test ./... || go build ./..."}, KindTest},
+		{"a shell's command behind other options", []string{"zsh", "-lc", "make -j4"}, KindBuild},
+		{"a shell that was given no command", []string{"bash", "-l"}, ""},
+		{"a shell running a script, whose -c is the script's", []string{"sh", "release.sh", "-c", "go build ./..."}, ""},
+		{"a shell with nothing after its -c", []string{"sh", "-c"}, ""},
+		{"a shell copied to another name", []string{"./burn", "-c", "go build ./..."}, ""},
+		{"the words after a shell's command, which are arguments of their own", []string{
+			"bash", "-c", `exec "$@"`, "wrapper", "go", "build", "./...",
+		}, KindBuild},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var rules Rules
+			kind, ok := rules.Kind(test.args)
+			if ok != (test.want != "") || kind != test.want {
+				t.Errorf("Kind(%q) = %q, %t, want %q, %t", test.args, kind, ok, test.want, test.want != "")
+			}
+		})
+	}
+}
+
 // The zero Rules is the built-in list: a deployment that configures no rule of its own gets the
 // toolchains everybody runs, and no caller has to remember to ask for them.
 func TestTheZeroRulesIsTheBuiltInList(t *testing.T) {

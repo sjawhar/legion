@@ -1,9 +1,13 @@
 // Package procread is what the kernel already counts, read: the processes under /proc and the
 // accounting files of the cgroup filesystem, as plain functions over a root directory. Every
 // reader is told the root to read under — the sampler passes "/", a test passes a directory of its
-// own holding proc/… and sys/fs/cgroup/… — so nothing here reaches for a path of its own, holds
-// state between calls, or imports another Legion package. A second reader of the same files
-// (INFRA-1115) takes this package as it stands.
+// own holding proc/… and sys/fs/cgroup/… — so nothing here reaches for a path of its own or
+// imports another Legion package. A second reader of the same files (INFRA-1115) takes these
+// functions as they stand.
+//
+// The functions hold no state between calls. Beside them is one type that does: a Reader
+// (reader.go) keeps the descriptors of the files a sampler reads again and again and answers
+// the same readings through them, which under gVisor is what the reading costs (INFRA-1208).
 //
 // What a number means is the caller's. This package answers resident pages, not bytes, because
 // only the caller knows the page size of the kernel it read (os.Getpagesize), and ticks, not
@@ -19,6 +23,7 @@ package procread
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -173,18 +178,22 @@ func ReadAnonymous(root string, pid int) (int64, error) {
 		return 0, err
 	}
 	defer file.Close()
+	// Every line is read as the scanner's own bytes and never as a string of its own: the
+	// smaps of a large process runs to thousands of lines, this is the costliest read the
+	// sampler makes, and a string for each line would be an allocation for each line.
+	anonymous := []byte("Anonymous:")
 	var total int64
 	lines := bufio.NewScanner(file)
 	for lines.Scan() {
-		rest, found := strings.CutPrefix(lines.Text(), "Anonymous:")
+		rest, found := bytes.CutPrefix(lines.Bytes(), anonymous)
 		if !found {
 			continue
 		}
-		bytes, err := kilobytes(rest)
+		size, err := kilobytes(rest)
 		if err != nil {
-			return 0, fmt.Errorf("%s: malformed Anonymous line: %s", path, strings.TrimSpace(lines.Text()))
+			return 0, fmt.Errorf("%s: malformed Anonymous line: %s", path, bytes.TrimSpace(lines.Bytes()))
 		}
-		total += bytes
+		total += size
 	}
 	if err := lines.Err(); err != nil {
 		return 0, err
@@ -219,25 +228,30 @@ func ReadMemInfo(root string) (MemInfo, error) {
 	}
 	defer file.Close()
 	var info MemInfo
+	// The line a pass is on is taken once and tried against both prefixes, rather than once
+	// for each of them, and as bytes rather than as a string: node mode reads a meminfo of
+	// fifty lines for every pod of the node every second.
+	wanted := []struct {
+		into   *int64
+		prefix []byte
+	}{
+		{&info.AnonPages, []byte("AnonPages:")},
+		{&info.Shmem, []byte("Shmem:")},
+	}
 	lines := bufio.NewScanner(file)
 	for lines.Scan() {
-		for _, line := range []struct {
-			into   *int64
-			prefix string
-		}{
-			{&info.AnonPages, "AnonPages:"},
-			{&info.Shmem, "Shmem:"},
-		} {
-			rest, found := strings.CutPrefix(lines.Text(), line.prefix)
+		line := lines.Bytes()
+		for _, want := range wanted {
+			rest, found := bytes.CutPrefix(line, want.prefix)
 			if !found {
 				continue
 			}
-			bytes, err := kilobytes(rest)
+			size, err := kilobytes(rest)
 			if err != nil {
 				return MemInfo{}, fmt.Errorf("%s: malformed %s line: %s",
-					path, strings.TrimSuffix(line.prefix, ":"), strings.TrimSpace(lines.Text()))
+					path, bytes.TrimSuffix(want.prefix, []byte(":")), bytes.TrimSpace(line))
 			}
-			*line.into = bytes
+			*want.into = size
 		}
 	}
 	if err := lines.Err(); err != nil {
@@ -249,14 +263,26 @@ func ReadMemInfo(root string) (MemInfo, error) {
 // kilobytes is the bytes of a "   743092 kB" value, the shape /proc reports a size in: the first
 // field as a count of 1024-byte units. The unit itself is not read — every size /proc writes this
 // way is kB — only that a number stands where one must.
-func kilobytes(value string) (int64, error) {
-	fields := strings.Fields(value)
-	if len(fields) == 0 {
+//
+// It takes the bytes of the line and reads the digits itself rather than handing a string to
+// strconv, so that a line costs no allocation at all: its callers run over every mapping of every
+// process the sampler reads, inside a budget of 100 ms of CPU.
+func kilobytes(value []byte) (int64, error) {
+	digits := bytes.TrimLeft(value, " \t")
+	if end := bytes.IndexAny(digits, " \t"); end >= 0 {
+		digits = digits[:end]
+	}
+	// Fifteen digits of kB is a petabyte, past anything a kernel reports and short of the
+	// multiplication below overflowing an int64, which a longer run of digits could.
+	if len(digits) == 0 || len(digits) > 15 {
 		return 0, fmt.Errorf("no value")
 	}
-	kb, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil {
-		return 0, err
+	var kb int64
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return 0, fmt.Errorf("%q is no number", digits)
+		}
+		kb = kb*10 + int64(digit-'0')
 	}
 	return kb * 1024, nil
 }

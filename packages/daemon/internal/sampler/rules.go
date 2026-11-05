@@ -232,9 +232,18 @@ func NewRules(operator []Rule) (Rules, error) {
 //
 // The whole argument vector is matched and not the program alone, because the work a shell is told
 // to do is the work it does: `bash -c "go build ./..."` spends its CPU on a build, and the word
-// `bash` says nothing about that. An argument holding several words is matched as those words, so
-// the shell's `-c` argument is read as the command it holds; every other argument is one word.
-// Matching is whole word for whole word, never a substring of one.
+// `bash` says nothing about that. So one argument is read as the words it holds — the command a
+// shell's `-c` takes — and every other argument is one whole word, matched whole. Matching is
+// whole word for whole word, never a substring of one.
+//
+// Only a shell's `-c` is read that way, because that is the one argument whose words are a
+// command this process runs. An agent's prompt, a commit message and a `--help` text all hold the
+// words of a toolchain without running anything, so a sampler that split every argument holding
+// whitespace would count whole sessions as builds — which is what this issue's own pod measured
+// on 2026-11-05: every process of a role sits under a harness whose own line is
+// `omp … --append-system-prompt <the whole prompt>`, that prompt quotes `go build`, and the walk
+// handed the role's every process the `build` kind, charging that counter 802.96 s against a
+// build that spent 390.2 s while `tool` never moved at all.
 //
 // The answer is a Kind and nothing else — never the arguments it read, nor anything derived from
 // them. dispatch://INFRA-1208/spec#b-a-noargs holds that no series carries a command line, an
@@ -258,25 +267,46 @@ func (r Rules) Kind(args []string) (Kind, bool) {
 	return "", false
 }
 
-// commandWords is an argument vector as the words a rule is matched against: an argument that
-// holds several words split into them, every other argument as it stands. A shell's command is one
-// argument of the shell, so splitting is what lets the command inside it be read; and because
-// almost every argument of almost every process is one word, a vector that needs no splitting is
-// passed through and costs nothing.
+// commandWords is an argument vector as the words a rule is matched against: the command a
+// shell's -c takes split into the words the shell runs, and every other argument one whole word.
+// A vector holding no such command — which is almost every vector — is passed through and costs
+// nothing.
 func commandWords(args []string) []string {
-	split := false
-	for _, arg := range args {
-		if strings.ContainsFunc(arg, unicode.IsSpace) {
-			split = true
-			break
-		}
-	}
-	if !split {
+	command := shellCommand(args)
+	if command < 0 {
 		return args
 	}
-	words := make([]string, 0, len(args))
-	for _, arg := range args {
-		words = append(words, strings.Fields(arg)...)
+	words := make([]string, 0, len(args)+strings.Count(args[command], " "))
+	words = append(words, args[:command]...)
+	words = append(words, strings.Fields(args[command])...)
+	return append(words, args[command+1:]...)
+}
+
+// shellPrograms are the shells whose -c argument holds a command line of its own. A shell is
+// named by its last path element, as every rule's program is, so /bin/bash is among them.
+var shellPrograms = []string{"sh", "bash", "dash", "ksh", "zsh", "fish"}
+
+// shellCommand is where the argument a shell's -c takes stands in this vector, and -1 where
+// there is none: the program is no shell, or it was given no -c, or the -c is its last argument.
+// Option reading stops at the first argument that is not an option, as a shell's own does, so the
+// `-c` of `sh script.sh -c x` is the script's argument and not the shell's.
+func shellCommand(args []string) int {
+	if len(args) == 0 || !slices.Contains(shellPrograms, path.Base(args[0])) {
+		return -1
 	}
-	return words
+	for i, arg := range args[1:] {
+		switch {
+		case arg == "--" || !strings.HasPrefix(arg, "-"):
+			return -1
+		// `-c`, and a bundle of short options ending in it (`bash -lc …`): an option
+		// that takes an argument ends its bundle, so in both the next argument is the
+		// command.
+		case !strings.HasPrefix(arg, "--") && strings.HasSuffix(arg, "c"):
+			if command := i + 2; command < len(args) {
+				return command
+			}
+			return -1
+		}
+	}
+	return -1
 }

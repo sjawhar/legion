@@ -1,7 +1,6 @@
 package sampler
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -164,6 +163,9 @@ func RunNode(ctx context.Context, opts NodeOptions) error {
 	if err != nil {
 		return err
 	}
+	// The descriptors this collector kept open are released with the loop that read through
+	// them, whatever ends it.
+	defer collector.close()
 	following, stop := context.WithCancel(ctx)
 	listed, ended := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -207,6 +209,11 @@ type nodeCollector struct {
 	pageSize int64
 	// walkEvery is the process walk's rate in ticks of nodeInterval.
 	walkEvery int64
+	// reader is the files this collector reads again and again, kept open: the stat of each
+	// process it is holding a reading of, and the sampler's own two. A node's pod cgroups are
+	// not among them — which directory holds a pod's totals is read from a process's own
+	// cgroup path, and the set of them moves as the node's pods come and go.
+	reader *procread.Reader
 
 	mu     sync.Mutex
 	pods   map[types.UID]nodePod
@@ -240,6 +247,10 @@ type nodeProcess struct {
 	cgroup string
 }
 
+// nodeReading is what takes the reading out of one of this collector's processes, which is the
+// reading it holds.
+func nodeReading(process *nodeProcess) *reading { return &process.reading }
+
 func newNodeCollector(opts NodeOptions) (*nodeCollector, error) {
 	if err := opts.check(); err != nil {
 		return nil, err
@@ -250,23 +261,25 @@ func newNodeCollector(opts NodeOptions) (*nodeCollector, error) {
 	c := &nodeCollector{
 		opts:      opts,
 		pageSize:  int64(os.Getpagesize()),
-		walkEvery: nodeTicks(nodeWalkInterval),
-		pods:      map[types.UID]nodePod{},
-		logged:    map[ReadSource]string{},
-		last:      map[int]*nodeProcess{},
+		walkEvery: ticksPer(nodeWalkInterval, nodeInterval),
+		// A node's own cgroup files are no part of what this reads, so the layout it is
+		// given is the one that keeps none of them: every cgroup reading node mode takes
+		// is of a pod's own directory, which the walk learns as it goes.
+		reader: procread.NewReader(opts.Root, procread.LayoutNone),
+		pods:   map[types.UID]nodePod{},
+		logged: map[ReadSource]string{},
+		last:   map[int]*nodeProcess{},
 	}
 	c.opts.Log(fmt.Sprintf("sampler: node %s: reading %s for the pods of this node", opts.NodeName, opts.Root))
 	return c, nil
 }
 
-// nodeTicks is how many ticks of this loop's own rate one of the slower rates stands for, as
-// pod.go's ticksPer is for the issue pod's loop. A rate no slower than the tick runs on every one
-// of them, which is what a test that shortens one rate and not the other gets.
-func nodeTicks(interval time.Duration) int64 {
-	if nodeInterval <= 0 || interval <= nodeInterval {
-		return 1
+// close releases every descriptor this collector kept open, which on a node is one for the stat
+// of every process it is holding a reading of.
+func (c *nodeCollector) close() {
+	if err := c.reader.Close(); err != nil {
+		c.failed(SourceProc, err)
 	}
-	return int64(interval / nodeInterval)
 }
 
 // pass is one tick of the loop: every walkEvery ticks the process walk, then every pod's cgroup
@@ -278,7 +291,7 @@ func (c *nodeCollector) pass(tick int64) {
 		c.readProcesses(pods)
 	}
 	c.readTotals(pods)
-	c.readSelf()
+	readSelf(c.reader, c.pageSize, c.opts.Registry, c.failed)
 }
 
 // snapshot is the pod set as it stands for this pass. The pass works on a copy of its own, so the
@@ -313,7 +326,7 @@ func (c *nodeCollector) readProcesses(pods map[types.UID]nodePod) {
 	stats := make(map[int]procread.Stat, len(pids))
 	live := make([]int, 0, len(pids))
 	for _, pid := range pids {
-		stat, err := procread.ReadStat(c.opts.Root, pid)
+		stat, err := c.reader.Stat(pid)
 		switch {
 		case unreadable(err):
 			continue
@@ -324,12 +337,13 @@ func (c *nodeCollector) readProcesses(pods map[types.UID]nodePod) {
 		stats[pid] = stat
 		live = append(live, pid)
 	}
-	reaped := c.forget(stats)
+	reaped := forget(c.last, stats, nodeReading, c.reader)
 	c.seed(live, stats)
 
 	kinds := make(map[int]Kind, len(live))
 	cpu := make(map[Pair]float64, len(live))
 	resident := make(map[Pair]int64, len(live))
+	charges := ledger[*nodeProcess]{cpu: cpu, last: c.last, of: nodeReading, stats: stats}
 	for _, pid := range live {
 		process, stat := c.last[pid], stats[pid]
 		var pair Pair
@@ -340,8 +354,8 @@ func (c *nodeCollector) readProcesses(pods map[types.UID]nodePod) {
 				c.learn(process.uid, process.cgroup)
 			}
 			pair = Pair{Role: string(process.uid), Kind: c.kindOf(pid, stats, kinds)}
-			cpu[pair] += seconds(rise(stat.UserTicks+stat.SystemTicks, process.own))
-			chargeReaped(cpu, pair,
+			charges.charge(pair, rise(stat.UserTicks+stat.SystemTicks, process.own), stat.Parent)
+			charges.chargeReaped(pair, pid,
 				rise(stat.ChildUserTicks+stat.ChildSystemTicks, process.reaped), reaped[pid])
 			resident[pair] += int64(stat.ResidentPages) * c.pageSize
 		}
@@ -376,28 +390,6 @@ func (c *nodeCollector) publish(uid types.UID, write func(GradePod)) {
 	if pod, served := c.pods[uid]; served {
 		write(pod.pod)
 	}
-}
-
-// forget drops the reading of every process that is no longer there — one that ended, and one
-// whose pid the kernel has since handed to another process, which its starting moment tells — and
-// answers those readings by the parent that is reaping for them, each list in pid order so that
-// two passes over the same /proc charge the same amounts. It is Walk.forget over this mode's own
-// readings, and it bounds what the collector holds the same way.
-func (c *nodeCollector) forget(stats map[int]procread.Stat) map[int][]*reading {
-	var gone []*nodeProcess
-	for pid, process := range c.last {
-		if stat, alive := stats[pid]; alive && stat.StartTicks == process.start {
-			continue
-		}
-		gone = append(gone, process)
-		delete(c.last, pid)
-	}
-	slices.SortFunc(gone, func(a, b *nodeProcess) int { return cmp.Compare(a.pid, b.pid) })
-	reaped := make(map[int][]*reading, len(gone))
-	for _, process := range gone {
-		reaped[process.parent] = append(reaped[process.parent], &process.reading)
-	}
-	return reaped
 }
 
 // seed gives a process the passes have not read before a reading of its own: the pod its cgroup
@@ -549,26 +541,6 @@ func (c *nodeCollector) readTotals(pods map[types.UID]nodePod) {
 			c.opts.Registry.SetGradePodCPUSeconds(pod, group.CPUSeconds)
 		})
 	}
-}
-
-// readSelf is what the sampler costs the node: its own CPU, the anonymous memory its exit rule is
-// written against, and its resident memory. Both modes serve these three series
-// (docs/sampler-metrics.md, "The series the sampler serves about itself"), and this is the smaps
-// node mode does read — the sampler's own, which no permission stands in the way of. A reading
-// that fails leaves the last one standing rather than serving a zero.
-func (c *nodeCollector) readSelf() {
-	stat, err := procread.ReadStat(c.opts.Root, selfPID())
-	if err != nil {
-		c.failed(SourceProc, err)
-		return
-	}
-	c.opts.Registry.SetSelfCPUSeconds(seconds(stat.UserTicks + stat.SystemTicks))
-	anonymous, err := readAnonymous(c.opts.Root, selfPID())
-	if err != nil {
-		c.failed(SourceProc, err)
-		return
-	}
-	c.opts.Registry.SetSelfMemoryBytes(anonymous, int64(stat.ResidentPages)*c.pageSize)
 }
 
 // follow is the pod set: one list of this node's pods, then a watch from the version that list

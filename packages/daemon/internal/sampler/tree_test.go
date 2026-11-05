@@ -1,7 +1,9 @@
 package sampler
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path"
@@ -10,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/procread"
 )
 
 // fakeProcess is one process of a synthetic /proc: what the walk reads of it, and the two ways a
@@ -28,14 +32,39 @@ type fakeProcess struct {
 }
 
 // writeProc is a /proc holding exactly these processes, under a root of the test's own: one
-// directory per process with the stat line the kernel writes and the NUL-separated cmdline. It
-// clears what stood there first, so a second call is the next pass over a tree that has moved on.
+// directory per process with the stat line the kernel writes and the NUL-separated cmdline. A
+// second call is the next pass over a tree that has moved on — a process it does not name is
+// taken away, and one it names again is written where it stands.
+//
+// The files of a process that is still there are rewritten and never replaced, because that is
+// what the kernel does to them: a reader holding the descriptor of /proc/<pid>/stat reads what
+// the kernel has written into it since, and a fixture that unlinked the file and wrote another
+// in its place would hand that reader the line of a pass that is over (procread.Reader).
+//
 // No test reads the host's /proc: every number below is one the test wrote.
 func writeProc(t *testing.T, root string, processes ...fakeProcess) {
 	t.Helper()
 	dir := filepath.Join(root, "proc")
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("could not clear the fixture's /proc: %v", err)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("could not write the fixture's /proc: %v", err)
+	}
+	live := make(map[string]bool, len(processes))
+	for _, process := range processes {
+		live[strconv.Itoa(process.pid)] = true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("could not read the fixture's /proc: %v", err)
+	}
+	for _, entry := range entries {
+		// Only the processes are taken away: /proc holds meminfo beside them, which a
+		// pass of its own writes.
+		if _, numeric := strconv.Atoi(entry.Name()); numeric != nil || live[entry.Name()] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			t.Fatalf("could not take process %s away: %v", entry.Name(), err)
+		}
 	}
 	for _, process := range processes {
 		pidDir := filepath.Join(dir, strconv.Itoa(process.pid))
@@ -49,14 +78,18 @@ func writeProc(t *testing.T, root string, processes ...fakeProcess) {
 		if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte(cmdline), 0o644); err != nil {
 			t.Fatalf("could not write the cmdline of process %d: %v", process.pid, err)
 		}
+		stat := filepath.Join(pidDir, "stat")
 		if process.gone {
+			if err := os.Remove(stat); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("could not take the stat of process %d away: %v", process.pid, err)
+			}
 			continue
 		}
 		line := statLine(process)
 		if process.unparsable {
 			line = "nothing a reader of /proc can parse\n"
 		}
-		if err := os.WriteFile(filepath.Join(pidDir, "stat"), []byte(line), 0o644); err != nil {
+		if err := os.WriteFile(stat, []byte(line), 0o644); err != nil {
 			t.Fatalf("could not write the stat of process %d: %v", process.pid, err)
 		}
 	}
@@ -82,6 +115,19 @@ func statLine(process fakeProcess) string {
 	return fmt.Sprintf("%d (%s) %s\n", process.pid, comm, strings.Join(fields, " "))
 }
 
+// newWalk is a walk of the fixture's own /proc, reading through a reader of its own whose
+// descriptors the test releases when it ends — the reader a collector hands its walk.
+func newWalk(t *testing.T, root string, rules Rules) *Walk {
+	t.Helper()
+	reader := procread.NewReader(root, procread.DetectLayout(root))
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("the walk's reader could not be closed: %v", err)
+		}
+	})
+	return NewWalk(root, rules, reader)
+}
+
 // next is one pass over the fixture, which must never fail: a pass fails only where /proc itself
 // cannot be listed.
 func next(t *testing.T, walk *Walk, roles map[string]int) Pass {
@@ -91,6 +137,43 @@ func next(t *testing.T, walk *Walk, roles map[string]int) Pass {
 		t.Fatalf("the pass failed: %v", err)
 	}
 	return pass
+}
+
+// settled is the second pass over a tree that has not moved: the pass that has read every
+// process's command line, and so the one whose kinds are the kinds docs/sampler-metrics.md
+// describes. The pass that first sees a process reads no command line of it and hands it its
+// nearest ancestor's kind (Walk.Next), which the two tests below are about and the rest take as
+// read.
+func settled(t *testing.T, walk *Walk, roles map[string]int) Pass {
+	t.Helper()
+	next(t, walk, roles)
+	return next(t, walk, roles)
+}
+
+// sighted is this tree as the pass that first sees it finds it: every counter at zero. A test
+// whose numbers are a settled pod's writes this for that pass and the tree itself for the pass
+// it asserts on, which then charges the whole of each counter as the rise it is.
+func sighted(processes []fakeProcess) []fakeProcess {
+	sighting := slices.Clone(processes)
+	for i := range sighting {
+		sighting[i].own, sighting[i].reaped = 0, 0
+	}
+	return sighting
+}
+
+// cmdlineReads records the pid of every process a pass reads a command line for, in the order it
+// read them, and answers the list. It is what says that the pass which first sees a process
+// reads none of it: the kinds say what a pass decided, and this says what it cost.
+func cmdlineReads(t *testing.T) *[]int {
+	t.Helper()
+	before := readCmdline
+	read := &[]int{}
+	readCmdline = func(root string, pid int) ([]string, error) {
+		*read = append(*read, pid)
+		return before(root, pid)
+	}
+	t.Cleanup(func() { readCmdline = before })
+	return read
 }
 
 // pairOf is the role and kind the pass gave this process, and a failure where the pass did not
@@ -149,10 +232,14 @@ func rolesOf() map[string]int { return map[string]int{"implementer": 10, "review
 // sampler, the test Postgres. The kind is the role's own harness where the tree says so, the
 // first kind a rule gives walking up to the role's root otherwise, and the work a build or a test
 // started carries that work's kind however far below it the process sits.
+//
+// These are the kinds of a settled pod, which is the second pass over a tree: the pass that
+// first sees a process reads no command line of it, and the two tests below this file's rule
+// tests say what that pass gives instead.
 func TestAPassGivesEveryProcessItsRoleAndItsKind(t *testing.T) {
 	root := t.TempDir()
 	writeProc(t, root, rolesTree()...)
-	pass := next(t, NewWalk(root, Rules{}), rolesOf())
+	pass := settled(t, newWalk(t, root, Rules{}), rolesOf())
 
 	for _, test := range []struct {
 		pid  int
@@ -196,6 +283,210 @@ func TestAPassGivesEveryProcessItsRoleAndItsKind(t *testing.T) {
 	}
 }
 
+// promptTree is this issue's own pod as its /proc held it: a role whose harness is an `omp`
+// carrying the whole system prompt as one argument, and under it a shell and the Python that
+// shell started. The prompt is prose, and like every agent's prompt it names the toolchain the
+// role is told to run — which is the one thing about this tree that matters.
+func promptTree() []fakeProcess {
+	prompt := "You are Legion's implementer for INFRA-1208. Build the daemon with " +
+		"go build ./cmd/legion before you hand the work on, and read " +
+		"docs/sampler-metrics.md, which is the contract its series answer to."
+	return []fakeProcess{
+		{pid: 1, parent: 0, args: []string{"/opt/legion/bin/legion", "launcher"}},
+		{pid: 10, parent: 1, args: []string{"/opt/legion/bin/legion", "role-init", "--role", "implementer"}},
+		{pid: 12, parent: 10, own: 100, args: []string{
+			"/opt/omp/bin/omp", "--extension", "@sjawhar/pi-legion", "--mode", "rpc",
+			"--append-system-prompt", prompt,
+		}},
+		{pid: 13, parent: 12, own: 200, args: []string{"bash", "-l"}},
+		{pid: 14, parent: 13, own: 300, args: []string{"python3", "hold.py"}},
+	}
+}
+
+// An agent's own command line says nothing about the work its children do. The harness of a role
+// carries the whole system prompt as one argument, that prose names the toolchain the role is
+// told to run, and a sampler that read those words as a command counted every process of the
+// role as a build: `legion_sampler_cpu_seconds_total{kind="build"}` rose 802.96 s against a build
+// that spent 390.2 s, and `kind="tool"` never moved at all (INFRA-1208, measured in this issue's
+// own pod on 2026-11-05).
+//
+// So the prompt matches no rule, and the climb that looks for one stops at the harness without
+// taking its kind: the harness is `agent`, what it started is `tool` until a rule says otherwise
+// (dispatch://INFRA-1208/spec#b-a-kinds), and the build counter of a role that built nothing
+// stays at zero.
+func TestAHarnessPromptNamingAToolchainIsNoBuild(t *testing.T) {
+	root := t.TempDir()
+	writeProc(t, root, promptTree()...)
+	pass := next(t, newWalk(t, root, Rules{}), rolesOf())
+
+	for _, test := range []struct {
+		pid  int
+		want Pair
+		why  string
+	}{
+		{12, Pair{"implementer", KindAgent}, "the harness is the role's own machinery"},
+		{13, Pair{"implementer", KindTool}, "a shell under the harness that no rule names"},
+		{14, Pair{"implementer", KindTool}, "and what that shell started"},
+	} {
+		if got := pairOf(t, pass, test.pid); got != test.want {
+			t.Errorf("process %d is %v, want %v: %s", test.pid, got, test.want, test.why)
+		}
+	}
+	wantCPU(t, pass, Pair{"implementer", KindBuild}, 0)
+	wantCPU(t, pass, Pair{"implementer", KindTool}, 5)
+	wantCPU(t, pass, Pair{"implementer", KindAgent}, 1)
+}
+
+// A real build under the same harness is still a build, and it is the only one: the words of the
+// harness's prompt count for nothing, and the seconds the build and its compiler spend are the
+// whole of what the build counter holds.
+func TestOnlyTheRealBuildUnderAPromptingHarnessIsABuild(t *testing.T) {
+	root := t.TempDir()
+	tree := append(promptTree(),
+		fakeProcess{pid: 40, parent: 12, own: 400, args: []string{"bash", "-c", "go build ./..."}},
+		fakeProcess{pid: 41, parent: 40, own: 500, args: []string{"/usr/lib/go/pkg/tool/linux_amd64/compile", "-o", "a.out"}},
+	)
+	walk := newWalk(t, root, Rules{})
+	// The pass that first sees these processes reads no command line of any of them, so the
+	// tree it finds has spent nothing yet and the pass that reads them charges the whole of
+	// what it finds.
+	writeProc(t, root, sighted(tree)...)
+	next(t, walk, rolesOf())
+	writeProc(t, root, tree...)
+	pass := next(t, walk, rolesOf())
+
+	for _, test := range []struct {
+		pid  int
+		want Pair
+		why  string
+	}{
+		{13, Pair{"implementer", KindTool}, "the shell beside the build is no part of it"},
+		{14, Pair{"implementer", KindTool}, "nor is what that shell started"},
+		{40, Pair{"implementer", KindBuild}, "a shell told to build is a build"},
+		{41, Pair{"implementer", KindBuild}, "and so is the compiler it started"},
+	} {
+		if got := pairOf(t, pass, test.pid); got != test.want {
+			t.Errorf("process %d is %v, want %v: %s", test.pid, got, test.want, test.why)
+		}
+	}
+	wantCPU(t, pass, Pair{"implementer", KindBuild}, 9)
+	wantCPU(t, pass, Pair{"implementer", KindTool}, 5)
+}
+
+// A shell copied to another name is not a shell this engine knows, so the command its -c takes is
+// one word and no rule reads a toolchain out of it. `burn` was a copy of the pod's own shell
+// spinning on the CPU for twenty seconds, and the sampler charged every one of them to `build`
+// (INFRA-1208, measured 2026-11-05); it is a tool, which is what a child of the harness that no
+// rule names is.
+func TestAShellCopiedToAnotherNameUnderTheHarnessIsATool(t *testing.T) {
+	root := t.TempDir()
+	tree := append(promptTree(),
+		fakeProcess{pid: 30, parent: 12, own: 1940, args: []string{"./burn", "-c", "while :; do :; done"}},
+	)
+	writeProc(t, root, tree...)
+	pass := next(t, newWalk(t, root, Rules{}), rolesOf())
+
+	if got, want := pairOf(t, pass, 30), (Pair{"implementer", KindTool}); got != want {
+		t.Errorf("the burn loop is %v, want %v", got, want)
+	}
+	wantCPU(t, pass, Pair{"implementer", KindBuild}, 0)
+	wantCPU(t, pass, Pair{"implementer", KindTool}, 24.4)
+}
+
+// harnessTree is the three processes a role's work hangs under, none of them spending anything:
+// the launcher that is the container's process 1, the role's init, and the harness it runs.
+func harnessTree() []fakeProcess {
+	return []fakeProcess{
+		{pid: 1, args: []string{"/opt/legion/bin/legion", "launcher"}},
+		{pid: 10, parent: 1, args: []string{"/opt/legion/bin/legion", "role-init", "--role", "implementer"}},
+		{pid: 12, parent: 10, args: []string{"omp", "--mode", "rpc"}},
+	}
+}
+
+// A process the walk sees on one pass only is never read for its command line at all. A build
+// makes thousands of processes that are new at one pass and gone by the next, and under this
+// pod's gVisor the open of a cmdline costs what the open of the stat beside it costs: the read
+// is the sampler's largest avoidable cost over a busy pod, and for a process that will not be
+// there to charge again it buys nothing (INFRA-1208, measured 2026-11-05).
+//
+// So the pass that first sees a process gives it the kind of its nearest ancestor that has one,
+// exactly as it gives that kind to a process whose own command line matches no rule. Here that
+// ancestor is the harness, so the `go build` of one pass is charged `tool` and the build counter
+// of the role never moves.
+func TestAProcessOfOnePassIsNeverReadForItsCommandLine(t *testing.T) {
+	root := t.TempDir()
+	above := harnessTree()
+	walk := newWalk(t, root, Rules{})
+	read := cmdlineReads(t)
+
+	writeProc(t, root, above...)
+	next(t, walk, rolesOf())
+	if len(*read) != 0 {
+		t.Errorf("the pass that first saw the tree read %v for a command line, want none of them", *read)
+	}
+
+	// A build appears, spends three seconds and is gone before the next pass, which is what
+	// the harness's reap of its whole life says.
+	compile := fakeProcess{pid: 50, parent: 12, own: 300, args: []string{"go", "build", "./..."}}
+	writeProc(t, root, append(slices.Clone(above), compile)...)
+	appeared := next(t, walk, rolesOf())
+	if got, want := pairOf(t, appeared, 50), (Pair{"implementer", KindTool}); got != want {
+		t.Errorf("the build on the pass that first saw it is %v, want %v", got, want)
+	}
+	wantCPU(t, appeared, Pair{"implementer", KindTool}, 3)
+	wantCPU(t, appeared, Pair{"implementer", KindBuild}, 0)
+	if want := []int{1, 10, 12}; !slices.Equal(*read, want) {
+		t.Errorf("the pass read %v for a command line, want the %v it had seen before", *read, want)
+	}
+
+	above[2].reaped = 300
+	writeProc(t, root, above...)
+	ended := next(t, walk, rolesOf())
+	wantCPU(t, ended, Pair{"implementer", KindBuild}, 0)
+	wantCPU(t, ended, Pair{"implementer", KindTool}, 0)
+	if want := []int{1, 10, 12}; !slices.Equal(*read, want) {
+		t.Errorf("the command lines read are %v: process 50 lived one pass and %v was read for it", *read, want)
+	}
+}
+
+// A process that is still there on the next pass is read then, and the kind its own command line
+// gives it is the kind it carries from that pass on. What the pass that first saw it charged
+// stays where it was charged: the kind a pass gives a process is the kind that pass charges it
+// to, and the reading that corrects it corrects nothing already counted.
+func TestAProcessThatSurvivesIsReadOnTheNextPassAndTakesItsOwnRule(t *testing.T) {
+	root := t.TempDir()
+	above := harnessTree()
+	walk := newWalk(t, root, Rules{})
+	read := cmdlineReads(t)
+
+	writeProc(t, root, above...)
+	next(t, walk, rolesOf())
+
+	build := fakeProcess{pid: 50, parent: 12, own: 300, args: []string{"go", "build", "./..."}}
+	writeProc(t, root, append(slices.Clone(above), build)...)
+	appeared := next(t, walk, rolesOf())
+	wantCPU(t, appeared, Pair{"implementer", KindTool}, 3)
+	wantCPU(t, appeared, Pair{"implementer", KindBuild}, 0)
+
+	// The build is still running on the next pass, which reads its command line: the two
+	// seconds it has spent since are a build's, and so is every second it spends after them.
+	build.own = 500
+	writeProc(t, root, append(slices.Clone(above), build)...)
+	settled := next(t, walk, rolesOf())
+	if got, want := pairOf(t, settled, 50), (Pair{"implementer", KindBuild}); got != want {
+		t.Errorf("the build on the pass that read it is %v, want %v", got, want)
+	}
+	wantCPU(t, settled, Pair{"implementer", KindBuild}, 2)
+	wantCPU(t, settled, Pair{"implementer", KindTool}, 0)
+	if want := []int{1, 10, 12, 50}; !slices.Equal(*read, want) {
+		t.Errorf("the command lines read are %v, want %v: each on the pass after the one that first saw it", *read, want)
+	}
+
+	build.own = 800
+	writeProc(t, root, append(slices.Clone(above), build)...)
+	wantCPU(t, next(t, walk, rolesOf()), Pair{"implementer", KindBuild}, 3)
+}
+
 // The pass reports the processes largest resident memory first, so a reader spending a budget on
 // something costlier than a stat spends it on the processes worth reading, and two processes of
 // one size come in pid order so that two passes agree.
@@ -208,7 +499,7 @@ func TestAPassReportsTheLargestResidentMemoryFirst(t *testing.T) {
 		fakeProcess{pid: 3, parent: 1, args: []string{"gopls"}, pages: 300},
 		fakeProcess{pid: 4, parent: 1, args: []string{"go", "build", "./..."}, pages: 4000},
 	)
-	pass := next(t, NewWalk(root, Rules{}), nil)
+	pass := next(t, newWalk(t, root, Rules{}), nil)
 
 	var order []int
 	for _, process := range pass.Processes {
@@ -234,12 +525,16 @@ func TestTheFirstPassChargesTheLifetimeAndTheNextChargesTheRise(t *testing.T) {
 		{pid: 14, parent: 12, args: []string{"go", "build", "./..."}, own: 300},
 	}
 	writeProc(t, root, tree...)
-	walk := NewWalk(root, Rules{})
+	walk := newWalk(t, root, Rules{})
 
+	// The role-init and the harness are the role's own machinery wherever they stand, which
+	// the stat the pass has already read says; the `go` has no command line read yet and
+	// carries the kind of the nearest ancestor that has one, which under a harness is tool.
 	first := next(t, walk, rolesOf())
 	wantCPU(t, first, Pair{RoleShared, KindShared}, 1)
 	wantCPU(t, first, Pair{"implementer", KindAgent}, 2)
-	wantCPU(t, first, Pair{"implementer", KindBuild}, 3)
+	wantCPU(t, first, Pair{"implementer", KindTool}, 3)
+	wantCPU(t, first, Pair{"implementer", KindBuild}, 0)
 
 	tree[0].own, tree[1].own, tree[3].own = 110, 205, 600
 	writeProc(t, root, tree...)
@@ -255,23 +550,33 @@ func TestTheFirstPassChargesTheLifetimeAndTheNextChargesTheRise(t *testing.T) {
 func TestAReusedPIDStartsAgainRatherThanRising(t *testing.T) {
 	root := t.TempDir()
 	launcher := fakeProcess{pid: 1, args: []string{"legion", "launcher"}, start: 10}
-	writeProc(t, root,
-		launcher,
-		fakeProcess{pid: 7, parent: 1, args: []string{"go", "build", "./..."}, own: 5000, start: 4000},
-	)
-	walk := NewWalk(root, Rules{})
-	first := next(t, walk, nil)
-	wantCPU(t, first, Pair{RoleShared, KindBuild}, 50)
+	build := fakeProcess{pid: 7, parent: 1, args: []string{"go", "build", "./..."}, start: 4000}
+	walk := newWalk(t, root, Rules{})
+	writeProc(t, root, launcher, build)
+	next(t, walk, nil)
 
+	build.own = 5000
+	writeProc(t, root, launcher, build)
+	wantCPU(t, next(t, walk, nil), Pair{RoleShared, KindBuild}, 50)
+
+	// The kernel hands the number on. The pass that meets the new process charges the three
+	// ticks it has spent and nothing of the fifty seconds the build spent under the same pid,
+	// and gives it the kind of the launcher above it until a pass reads its command line.
 	writeProc(t, root,
 		launcher,
 		fakeProcess{pid: 7, parent: 1, args: []string{"gopls"}, own: 3, start: 9000},
 	)
 	second := next(t, walk, nil)
-	if got := pairOf(t, second, 7); got != (Pair{RoleShared, KindTool}) {
-		t.Errorf("the reused pid is %v, want the new process's own kind", got)
+	if got := pairOf(t, second, 7); got != (Pair{RoleShared, KindShared}) {
+		t.Errorf("the reused pid is %v, want the kind of the process above it", got)
 	}
-	wantCPU(t, second, Pair{RoleShared, KindTool}, 0.03)
+	wantCPU(t, second, Pair{RoleShared, KindShared}, 0.03)
+
+	third := next(t, walk, nil)
+	if got := pairOf(t, third, 7); got != (Pair{RoleShared, KindTool}) {
+		t.Errorf("the reused pid is %v once read, want the new process's own kind", got)
+	}
+	wantCPU(t, third, Pair{RoleShared, KindTool}, 0)
 }
 
 // The CPU a parent reaps for a child the walk saw belongs to that child's kind, and only the part
@@ -285,8 +590,13 @@ func TestAParentChargesAReapedChildsOwnKind(t *testing.T) {
 		{pid: 12, parent: 10, args: []string{"omp", "--mode", "rpc"}},
 		{pid: 14, parent: 12, args: []string{"go", "build", "./..."}, own: 50},
 	}
+	walk := newWalk(t, root, Rules{})
+	// The build's own kind is read on the pass after the one that first saw it, so the tree
+	// that pass finds has spent nothing yet and the 50 ticks are the rise the next one
+	// charges — to `build`, which is the kind the reap below is answered under.
+	writeProc(t, root, sighted(tree)...)
+	next(t, walk, rolesOf())
 	writeProc(t, root, tree...)
-	walk := NewWalk(root, Rules{})
 	wantCPU(t, next(t, walk, rolesOf()), Pair{"implementer", KindBuild}, 0.50)
 
 	// The build ended at 80 ticks, 30 of them after the pass that last read it, and the
@@ -297,6 +607,76 @@ func TestAParentChargesAReapedChildsOwnKind(t *testing.T) {
 	wantCPU(t, second, Pair{"implementer", KindBuild}, 0.30)
 	wantCPU(t, second, Pair{"implementer", KindTool}, 0)
 	wantCPU(t, second, Pair{"implementer", KindAgent}, 0)
+}
+
+// A build is two processes and not one: the shell the agent started,
+// `bash -c 'time go build …'`, and the `go` it runs, which reaps every compile of the build.
+// Both of them end between one pass and the next, and the harness above them reaps the shell's
+// whole accounting — the shell's own CPU, the `go`, and every compile the `go` reaped — in that
+// one rise.
+//
+// The pod measured on 2026-11-05 charged all of it a second time. The walk's record of the shell
+// held the shell's own two counters as the last pass read them, and both were nothing: the shell
+// spends no CPU and had reaped nothing until the moment it ended. So almost the whole rise looked
+// like CPU no series had counted, and `legion_sampler_cpu_seconds_total{kind="build"}` went from
+// 402.20 s to 805.87 s in the one pass after a build that spent 403.63 s.
+//
+// What a reap answers for is everything the walk has already charged below the child that
+// vanished, which is what reading.charged keeps: the shell's own CPU plus that, and the remainder
+// alone is new.
+func TestABuildReapedWithItsShellIsChargedOnce(t *testing.T) {
+	root := t.TempDir()
+	// The ticks below are the real run's shape in miniature: the shell spends almost nothing,
+	// the `go` spends its own CPU and reaps a compile at a time, and the whole subtree spends
+	// 237 ticks before the two of them end together.
+	above := []fakeProcess{
+		{pid: 1, args: []string{"/opt/legion/bin/legion", "launcher"}},
+		{pid: 10, parent: 1, args: []string{"/opt/legion/bin/legion", "role-init", "--role", "implementer"}},
+		{pid: 12, parent: 10, args: []string{"omp", "--mode", "rpc"}},
+	}
+	shell := fakeProcess{pid: 50, parent: 12, own: 1, args: []string{"bash", "-c", "time go build -a -o /dev/null ./..."}}
+	driver := fakeProcess{pid: 51, parent: 50, own: 40, args: []string{"go", "build", "-a", "-o", "/dev/null", "./..."}}
+	compile := fakeProcess{pid: 60, parent: 51, own: 60, args: []string{"/usr/lib/go/pkg/tool/linux_amd64/compile", "-o", "a.out"}}
+	build := Pair{"implementer", KindBuild}
+	walk := newWalk(t, root, Rules{})
+	var charged float64
+
+	// The pass that first sees the three of them reads no command line, so it finds a build
+	// that has spent nothing and the pass after it charges the whole 101 ticks as the rise
+	// they are.
+	writeProc(t, root, sighted(append(slices.Clone(above), shell, driver, compile))...)
+	next(t, walk, rolesOf())
+	writeProc(t, root, append(slices.Clone(above), shell, driver, compile)...)
+	first := next(t, walk, rolesOf())
+	wantCPU(t, first, build, 1.01)
+	charged += first.CPUSeconds[build]
+
+	// The first compile ended at 70 ticks, ten of them after the pass that read it, and the
+	// `go` reaped it and started another. Those ten ticks and both processes' own rises are
+	// charged through the `go`, which is where the walk records them.
+	driver.own, driver.reaped = 100, 70
+	later := fakeProcess{pid: 61, parent: 51, own: 50, args: []string{"/usr/lib/go/pkg/tool/linux_amd64/compile", "-o", "b.out"}}
+	writeProc(t, root, append(slices.Clone(above), shell, driver, later)...)
+	second := next(t, walk, rolesOf())
+	wantCPU(t, second, build, 1.20)
+	charged += second.CPUSeconds[build]
+
+	// The build ends: the second compile at 55 ticks, the `go` at 110 of its own, the shell at
+	// 2, and the harness reaps the 237 ticks of the whole subtree at once. Of those, 221 are
+	// the shell's own CPU and what the walk has charged below it, so 16 are new.
+	above[2].reaped = 237
+	writeProc(t, root, above...)
+	third := next(t, walk, rolesOf())
+	wantCPU(t, third, build, 0.16)
+	wantCPU(t, third, Pair{"implementer", KindTool}, 0)
+	wantCPU(t, third, Pair{"implementer", KindAgent}, 0)
+	charged += third.CPUSeconds[build]
+
+	// The three passes together charged the CPU the tree really spent: the shell's 2 ticks,
+	// the `go`'s 110 and the two compiles' 70 and 55.
+	if want := float64(2+110+70+55) / 100; math.Abs(charged-want) > 1e-9 {
+		t.Errorf("the three passes charged the build %g seconds, want the %g the tree spent", charged, want)
+	}
 }
 
 // Two children the walk saw ending between one pass and the next share what their parent reaped
@@ -311,8 +691,12 @@ func TestTwoReapedChildrenShareTheRiseInProportion(t *testing.T) {
 		{pid: 14, parent: 12, args: []string{"go", "build", "./..."}, own: 30},
 		{pid: 16, parent: 12, args: []string{"go", "test", "./..."}, own: 10},
 	}
+	walk := newWalk(t, root, Rules{})
+	// Both children are read on the pass after the one that first saw them, and the kind each
+	// is read with is the kind its share of the reap below is charged to.
+	writeProc(t, root, sighted(tree)...)
+	next(t, walk, rolesOf())
 	writeProc(t, root, tree...)
-	walk := NewWalk(root, Rules{})
 	next(t, walk, rolesOf())
 
 	// Both ended; the harness reaped 60 ticks, 20 above the 40 the walk had charged them.
@@ -336,7 +720,7 @@ func TestCPUFromAChildNoReadSawGoesToTheParentsKind(t *testing.T) {
 		{pid: 13, parent: 12, args: []string{"bash", "-lc", "make -j4"}},
 	}
 	writeProc(t, root, tree...)
-	walk := NewWalk(root, Rules{})
+	walk := newWalk(t, root, Rules{})
 	next(t, walk, rolesOf())
 
 	tree[0].reaped = 25 // the launcher reaped what a `kubectl exec` left behind
@@ -359,7 +743,7 @@ func TestEachPassTakesTheRolesFileAsItStandsNow(t *testing.T) {
 	writeProc(t, root, launcher,
 		fakeProcess{pid: 10, parent: 1, args: []string{"legion", "role-init", "--role", "implementer"}},
 		harness)
-	walk := NewWalk(root, Rules{})
+	walk := newWalk(t, root, Rules{})
 	if got := pairOf(t, next(t, walk, map[string]int{"implementer": 10}), 12); got != (Pair{"implementer", KindAgent}) {
 		t.Errorf("the harness of the running generation is %v, want the role's agent", got)
 	}
@@ -390,7 +774,7 @@ func TestAProcessThatEndsMidPassIsSkippedAndOtherFailuresAreCounted(t *testing.T
 		fakeProcess{pid: 1, args: []string{"legion", "launcher"}},
 		fakeProcess{pid: 42, parent: 1, args: []string{"go", "build", "./..."}, gone: true},
 	)
-	walk := NewWalk(root, Rules{})
+	walk := newWalk(t, root, Rules{})
 	pass := next(t, walk, nil)
 	for _, process := range pass.Processes {
 		if process.PID == 42 {
@@ -423,7 +807,7 @@ func TestTheWalkForgetsAProcessOnceItIsGone(t *testing.T) {
 	for pid := 2; pid <= 51; pid++ {
 		short = append(short, fakeProcess{pid: pid, parent: 1, args: []string{"gopls"}, own: 1})
 	}
-	walk := NewWalk(root, Rules{})
+	walk := newWalk(t, root, Rules{})
 	writeProc(t, root, short...)
 	next(t, walk, nil)
 	if len(walk.last) != len(short) {
