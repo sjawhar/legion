@@ -290,6 +290,43 @@ func TestTheWithheldNamesMoveAndANameBothRowsHoldIsKeptOnce(t *testing.T) {
 	}
 }
 
+// TestAWithholdMadeBeforeTheMoveSurvivesABoxThatEndedHoldingNothingElse is the usual order an
+// operator's revoke leaves behind: the revoke of an automatic grant writes the withheld_secrets
+// row and takes the grant, so the box ends holding no live grant and no pending request, its end
+// is terminal and its row never goes dormant. The withhold follows the session anyway — it is a
+// predecessor for its withheld names whatever state its row is in — so the next enrolment of the
+// name holds the name back as the operator said, rather than handing it over automatically
+// again.
+func TestAWithholdMadeBeforeTheMoveSurvivesABoxThatEndedHoldingNothingElse(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	for _, kind := range carryKinds {
+		for _, end := range endsOfTheBox() {
+			t.Run(kind+", "+end.name, func(t *testing.T) {
+				session := "withhold-alone-" + kind + "-" + uuid.NewString()[:8]
+				cred, old := carryEnrollment(t, svc, issuer, key, kind, session)
+				withholdSecret(t, svc, old.ID, "AUTO_TOKEN")
+
+				end.end(t, svc, cred, old)
+				if left := readCarryState(t, svc, old.ID); !left.Ended || left.Dormant {
+					t.Fatalf("after %s the %s enrollment is %+v, want it ended and not dormant: it holds no grant and no pending request, so its end is terminal — which is the state the withhold has to survive",
+						end.name, kind, left)
+				}
+
+				_, moved := movedTo(t, svc, issuer, key, kind, session, session+"-2")
+				if got := withheldNames(t, svc, moved.ID); len(got) != 1 || got[0] != "AUTO_TOKEN" {
+					t.Fatalf("after %s the %s enrollment the session moved to withholds %v, want [AUTO_TOKEN]: the operator took that name back from the session, and a new box does not give it back",
+						end.name, kind, got)
+				}
+				if got := withheldNames(t, svc, old.ID); len(got) != 0 {
+					t.Fatalf("after %s the ended %s enrollment still withholds %v, want nothing: every withheld row moves to the enrollment the session proves now",
+						end.name, kind, got)
+				}
+			})
+		}
+	}
+}
+
 // TestTheAdoptionTrailNamesBothEnrollments: an operator asking why a session reads a secret it
 // never asked this box for has to land on the box that did. One enrollment.adopted row on the
 // successor names the predecessor it took from, and one grant.moved row per grant names that

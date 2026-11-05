@@ -81,6 +81,17 @@ func backdateDormancy(t *testing.T, svc *Service, id uuid.UUID, by time.Duration
 	}
 }
 
+// clearCarryPrincipal nulls an enrollment's carry_principal, the one row shape Create cannot
+// make and the deploy is full of: every enrollment live when migration 0027 applies has the
+// column null, every daemon pod enrollment among them, and those name a session
+// (packages/daemon/internal/supervise/secrets.go).
+func clearCarryPrincipal(t *testing.T, svc *Service, id uuid.UUID) {
+	t.Helper()
+	if _, err := svc.Store.Pool.Exec(context.Background(), `update enrollments set carry_principal=null where id=$1`, id); err != nil {
+		t.Fatalf("clear the carry principal of %s: %v", id, err)
+	}
+}
+
 // auditRows counts the audit rows of kind written for an enrollment.
 func auditRows(t *testing.T, svc *Service, id uuid.UUID, kind string) int {
 	t.Helper()
@@ -406,5 +417,58 @@ func TestAnEndThatCarriesNothingEndsTheEnrollmentAsItAlwaysDid(t *testing.T) {
 				t.Fatalf("enrollment.expired audit rows for %s = %d, want one", tc.name, rows)
 			}
 		})
+	}
+}
+
+// TestAnEnrollmentWithNoPrincipalEndsAsItAlwaysDidAndOneWithAPrincipalGoesDormant: dormancy is
+// the promise that a later enrolment can take what the ended row still holds, and adopt matches
+// on the whole pair (carry_principal, session_id), so a row with no principal can be taken by
+// nobody. Leaving it dormant would only delay its revoke by the carry window and leave a card in
+// an approver's Inbox that no approval could grant. Every enrollment live when migration 0027
+// applies is such a row, so the probe reads the principal as well as the name. A named
+// enrollment that does record one goes dormant on either end of its box, as it always did.
+func TestAnEnrollmentWithNoPrincipalEndsAsItAlwaysDidAndOneWithAPrincipalGoesDormant(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	for _, tc := range []struct {
+		name string
+		// principal says whether the row keeps the principal its caller proved, or is left as
+		// the rows the deploy migrates are, with a session name and no principal at all.
+		principal bool
+	}{
+		{"no principal, as every row live at the deploy has", false},
+		{"the principal its caller proved", true},
+	} {
+		for _, end := range endsOfTheBox() {
+			t.Run(tc.name+", "+end.name, func(t *testing.T) {
+				session := "principal-probe-" + uuid.NewString()[:8]
+				cred, enr := carryEnrollment(t, svc, issuer, key, "pod", session)
+				grant := insertLiveGrant(t, svc, enr.ID)
+				pending := insertPendingRequest(t, svc, enr.ID)
+				if !tc.principal {
+					clearCarryPrincipal(t, svc, enr.ID)
+				}
+
+				end.end(t, svc, cred, enr)
+
+				held := 0
+				if tc.principal {
+					held = 1
+				}
+				got := readCarryState(t, svc, enr.ID)
+				if !got.Ended || got.Dormant != tc.principal || got.LiveGrants != held || got.Pending != held {
+					t.Fatalf("after %s the enrollment with %s is %+v, want it ended, dormant=%v, holding %d live grant (%s) and %d pending request (%s): a row nothing can adopt is ended for good, and one a session can come back to is kept",
+						end.name, tc.name, got, tc.principal, held, grant, held, pending)
+				}
+				wantState := "cancelled"
+				if tc.principal {
+					wantState = "pending"
+				}
+				if state, _, _, _ := requestState(t, svc, pending); state != wantState {
+					t.Fatalf("after %s the request of the enrollment with %s is %s, want %s: an approval must never land on a session nothing can take up",
+						end.name, tc.name, state, wantState)
+				}
+			})
+		}
 	}
 }

@@ -612,41 +612,73 @@ func carryPrincipal(cred Credential, in Enrollment) *string {
 // session": a live grant, or a request nobody has answered yet. Two statements read it, and they
 // must read it identically — endEnrollment's probe, which decides whether an end leaves the row
 // dormant instead of revoking what it holds, and adopt's predecessor query, which decides which
-// ended rows the next enrolment of the name takes from. Were one wider than the other, an end
-// could leave a row dormant that no successor ever adopts (its grants standing until the carry
-// sweep finds them) or adopt could take from a row an end revoked under it. Both splice it in
-// with e as the enrollment; adopt adds the withheld names outside this text, because those
-// follow the session as well but are no part of what makes an end carry.
+// ended rows the next enrolment of the name takes a grant or a request from. Were one wider than
+// the other, an end could leave a row dormant that no successor ever adopts (its grants standing
+// until the carry sweep finds them) or adopt could take from a row an end revoked under it. Both
+// splice it in with e as the enrollment, and both read the whole pair beside it: the probe tests
+// that the row names a session and records a principal, and adopt matches on both. adopt adds the
+// withheld names outside this text, because a withhold follows the session too but is no part of
+// what makes an end carry: it outlives an end of either kind (adopt's second part).
 const holdsForItsSession = `exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
 				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')`
 
+// carriesForItsSession is "the carry left something on enrollment e for its session": it still
+// holds a live grant or a pending request (holdsForItsSession) and no end has revoked them — it
+// is live, or it is dormant, which is the end of a box that left what it held standing
+// (endEnrollment). adopt reads it twice in one statement: as the first part of its predecessor
+// rule, and as the flag saying whether that predecessor's grants and requests move beside its
+// withheld names.
+const carriesForItsSession = `(e.revoked_at is null or e.dormant_since is not null) and (` + holdsForItsSession + `)`
+
 // adopt moves what every predecessor of this enrollment's (carry_principal, session_id) holds to
 // the enrollment createAttempt has just inserted, inside that same transaction, revoking none of
-// it. A predecessor is another enrollment of the same pair that still holds something for the
-// session — a live grant, a pending request or a withheld name — and it is one of two things: a
-// live enrollment, the box the session is moving off while that box is still up, or a dormant
-// one, a box whose end left what it held for the session to take (endEnrollment). Both kinds of
-// enrollment adopt, a session's and a pod's. An enrollment of the pair that holds nothing is no
-// predecessor and is left exactly as it is, which is what keeps a second live session of one
-// name from being ended by its neighbour's enrolment.
+// it. Both kinds of enrollment adopt, a session's and a pod's.
 //
-// What moves is every row keyed by the predecessor: grants.enrollment_id, requests.enrollment_id
-// and withheld_secrets.enrollment_id. The grants are what the session was approved for, the
-// requests are what it is still waiting on a person for — an approval must land on the session as
-// it stands when the answer comes, not on the box that asked — and the withholds are the one way
-// a person takes a secret back from a session, which a move must not undo. A withheld name the
+// A predecessor is another enrollment of the same pair, and the rule has two parts, because what
+// a grant may follow and what a withhold must follow are not the same thing:
+//
+//   - An enrollment the carry left something on (carriesForItsSession) is a predecessor for
+//     everything under it: its grants, its requests and its withheld names. It is one of two
+//     things, a live enrollment, the box the session is moving off while that box is still up, or
+//     a dormant one, a box whose end left what it held for the session to take (endEnrollment).
+//     What that reading keeps out is a row ended for good, whose grants its own end revoked and
+//     whose requests it cancelled: there is no live grant on it to follow the session.
+//   - An enrollment of the pair that holds withheld names is a predecessor for those names,
+//     whatever state its row is in — live, dormant, or ended for good. That last is the usual
+//     case rather than a corner: an operator's revoke of an automatic grant writes the withheld
+//     row and takes the grant, so the box is commonly left holding no live grant and no pending
+//     request at all, its end is therefore terminal and its row never goes dormant. Were the
+//     names left on it, the next enrolment of the session would find the secret automatic again
+//     and a replaced box would undo what the operator said. Taking them can never hand anything
+//     over, whichever row they come from: a withheld_secrets row only ever takes a name away from
+//     the session (requests.Machine refuses an automatic grant of a withheld name), so the widest
+//     reading of which rows to take it from is also the safest one.
+//
+// An enrollment of the pair that holds neither is no predecessor and is left exactly as it is,
+// which is what keeps a second live session of one name from being ended by its neighbour's
+// enrolment.
+//
+// What moves is the rows keyed by the predecessor: grants.enrollment_id and
+// requests.enrollment_id from a predecessor of the first part, withheld_secrets.enrollment_id
+// from a predecessor of either. The grants are what the session was approved for, the requests
+// are what it is still waiting on a person for — an approval must land on the session as it
+// stands when the answer comes, not on the box that asked — and the withholds are the one way a
+// person takes a secret back from a session, which a move must not undo. A withheld name the
 // successor already holds is kept once, since (enrollment_id, name) is that table's primary key.
-// Every row moves, the ended grants and decided requests beside the live ones, so the
-// predecessor is left holding nothing at all rather than a part of what it held.
+// Off a first-part predecessor every grant and request moves, the ended grants and decided
+// requests beside the live ones, so it is left holding nothing at all rather than a part of what
+// it held; off a row ended for good none does, since its own end revoked and cancelled them, and
+// moving those dead rows would only hang a grant.moved trail off grants that grant nothing.
 //
 // A dormant predecessor is then finished: dormant_since returns to null, because the row was
 // kept only for what it held and that is here now. Its revoked_at stands where its own end wrote
 // it, because the box ended then and not now. So it is no longer dormant, the carry sweep has
 // nothing of it to revoke (EndCarried) and it is a predecessor of nothing. A live predecessor is
 // left live: the box is still up and this is no end of it, and its own launcher ends it when the
-// session's process goes (Revoke), by which time there is nothing under it to revoke. Nothing is
-// revoked or cancelled here either way, which is why this does not go through endEnrollment,
-// whose terminal path would revoke grants the row no longer has.
+// session's process goes (Revoke), by which time there is nothing under it to revoke. A
+// predecessor already ended for good is left ended, the one thing that outlived its end taken
+// off it. Nothing is revoked or cancelled here in any of the three, which is why this does not go
+// through endEnrollment, whose terminal path would revoke grants the row no longer has.
 //
 // The trail names both enrollments: one enrollment.adopted row on the successor naming the
 // predecessor it took from and how much, and one grant.moved row per grant, naming the grant, the
@@ -667,14 +699,14 @@ func adopt(ctx context.Context, tx pgx.Tx, in Enrollment, actor string) error {
 	if in.carry == nil {
 		return nil
 	}
-	// A predecessor is an enrollment of the pair that has not been ended for good and holds
-	// something: the same reading of "holds something" that decides whether an end leaves a row
-	// dormant (endEnrollment, which splices in the same holdsForItsSession), with the withheld
-	// names beside the grants and pending requests, since those follow the session too.
-	rows, err := tx.Query(ctx, `select e.id, e.dormant_since is not null from enrollments e
+	// Both parts of the predecessor rule in one statement, over the pair. The second column says
+	// which part a row matched by: a row the carry left something on gives up its grants and
+	// requests as well as its withheld names, and a row that matched the withheld clause alone
+	// gives up the names.
+	rows, err := tx.Query(ctx, `select e.id, e.dormant_since is not null, `+carriesForItsSession+`
+		from enrollments e
 		where e.carry_principal=$1 and e.session_id=$2 and e.id <> $3
-			and (e.revoked_at is null or e.dormant_since is not null)
-			and (`+holdsForItsSession+`
+			and (`+carriesForItsSession+`
 				or exists (select 1 from withheld_secrets w where w.enrollment_id=e.id))
 		order by e.id for update of e`, *in.carry, *in.SessionID, in.ID)
 	if err != nil {
@@ -683,26 +715,34 @@ func adopt(ctx context.Context, tx pgx.Tx, in Enrollment, actor string) error {
 	type predecessor struct {
 		ID      uuid.UUID
 		Dormant bool
+		// Carries is the first part of the rule: the carry left a live grant or a pending request
+		// on this row, so its grants and requests move beside its withheld names. False is a row
+		// matched by the withheld clause alone, which gives up its names and keeps the rest.
+		Carries bool
 	}
 	predecessors, err := pgx.CollectRows(rows, pgx.RowToStructByPos[predecessor])
 	if err != nil {
 		return err
 	}
 	for _, from := range predecessors {
-		// One statement per table, each writing its own trail: every grant that moves gets its
-		// row, so the insert's own count is how many grants moved.
-		grants, err := tx.Exec(ctx, `with moved as (
-				update grants set enrollment_id=$2 where enrollment_id=$1 returning id
-			)
-			insert into audit (kind, enrollment_id, grant_id, actor, detail)
-			select 'grant.moved', $2, id, $3, jsonb_build_object('from',$1::uuid,'to',$2::uuid) from moved`,
-			from.ID, in.ID, actor)
-		if err != nil {
-			return err
-		}
-		requests, err := tx.Exec(ctx, `update requests set enrollment_id=$2 where enrollment_id=$1`, from.ID, in.ID)
-		if err != nil {
-			return err
+		var grants, requests int64
+		if from.Carries {
+			// One statement per table, each writing its own trail: every grant that moves gets its
+			// row, so the insert's own count is how many grants moved.
+			movedGrants, err := tx.Exec(ctx, `with moved as (
+					update grants set enrollment_id=$2 where enrollment_id=$1 returning id
+				)
+				insert into audit (kind, enrollment_id, grant_id, actor, detail)
+				select 'grant.moved', $2, id, $3, jsonb_build_object('from',$1::uuid,'to',$2::uuid) from moved`,
+				from.ID, in.ID, actor)
+			if err != nil {
+				return err
+			}
+			movedRequests, err := tx.Exec(ctx, `update requests set enrollment_id=$2 where enrollment_id=$1`, from.ID, in.ID)
+			if err != nil {
+				return err
+			}
+			grants, requests = movedGrants.RowsAffected(), movedRequests.RowsAffected()
 		}
 		// The delete and the insert are one statement over one snapshot, so a name the successor
 		// already holds leaves the predecessor's row deleted and the successor's as it was: the
@@ -723,7 +763,7 @@ func adopt(ctx context.Context, tx pgx.Tx, in Enrollment, actor string) error {
 		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.adopted',$1,$2,
 			jsonb_build_object('from',$3::uuid,'to',$1::uuid,'dormant',$4::boolean,
 				'grants',$5::bigint,'requests',$6::bigint,'withheld_secrets',$7::bigint))`,
-			in.ID, actor, from.ID, from.Dormant, grants.RowsAffected(), requests.RowsAffected(), withheld.RowsAffected()); err != nil {
+			in.ID, actor, from.ID, from.Dormant, grants, requests, withheld.RowsAffected()); err != nil {
 			return err
 		}
 	}
@@ -807,16 +847,30 @@ type endedEnrollment struct {
 // for the enrollment. It reports how many grants it revoked and requests it cancelled. The caller
 // holds the enrollment row's lock.
 //
-// One end does none of that. An enrollment that names a session (session_id), holds a live grant
-// or a pending request, and is ended by an end of its box rather than by a person (endMayCarry),
-// is marked revoked and dormant_since, and what it holds stays where it is for the next
-// enrollment of that session name under the same principal to take. Ending the box's enrollment
-// is how a session moves: a helper restarts, a machine is rebuilt, a person signs in on a second
-// box, a Legion pod is replaced, and in each of those the box's enrollment ends while the session
-// goes on and asks the broker for the same secret again. Both kinds carry, a session's and a
-// pod's: a pod's enrollment is always ended before its successor enrols — by the daemon's
-// launcher revoke when it lets the role's process go, or by EndLapsed one lease after the pod
-// stopped renewing — so a pod carry that waited for a live predecessor would find nothing.
+// One end does none of that. An enrollment that names a session (session_id), records the
+// principal that session belongs to (carry_principal), holds a live grant or a pending request,
+// and is ended by an end of its box rather than by a person (endMayCarry), is marked revoked and
+// dormant_since, and what it holds stays where it is for the next enrollment of that session
+// name under the same principal to take. Ending the box's enrollment is how a session moves: a
+// helper restarts, a machine is rebuilt, a person signs in on a second box, a Legion pod is
+// replaced, and in each of those the box's enrollment ends while the session goes on and asks
+// the broker for the same secret again. Both kinds carry, a session's and a pod's: a pod's
+// enrollment is always ended before its successor enrols — by the daemon's launcher revoke when
+// it lets the role's process go, or by EndLapsed one lease after the pod stopped renewing — so a
+// pod carry that waited for a live predecessor would find nothing.
+//
+// The probe reads the principal as well as the name because dormancy is a promise that some
+// later enrolment can take what the row still holds, and adopt matches on the whole pair
+// (carry_principal, session_id): a row with no principal can be adopted by nobody, whatever its
+// session_id says. Leaving such a row dormant would hold its grants unrevoked for
+// BROKER_SESSION_CARRY_SECONDS with no one able to take them, and leave its pending request's
+// card standing in an approver's Inbox where approving it is denied, since the enrollment behind
+// it has ended and nothing will inherit it. So an enrollment with no principal ends as every end
+// did before the carry. That is no corner of the deploy but the whole of it on the day it ships:
+// every enrollment live when migration 0027 applies has carry_principal null, among them every
+// daemon pod enrollment, which does carry a session_id
+// (packages/daemon/internal/supervise/secrets.go). Each of those ends once, as it always did,
+// and the enrolments that replace them record a principal and carry.
 //
 // A dormant enrollment proves nothing from the moment it goes dormant, because its key died with
 // its box: revoked_at is set, and Lookup, Get, Renew, SessionID, recoverConflict, liveCredentials
@@ -826,7 +880,7 @@ type endedEnrollment struct {
 func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string, mode endMode) (endedEnrollment, error) {
 	var dormant bool
 	if mode == endMayCarry {
-		if err := tx.QueryRow(ctx, `select coalesce(e.session_id,'') <> '' and (
+		if err := tx.QueryRow(ctx, `select coalesce(e.session_id,'') <> '' and e.carry_principal is not null and (
 				`+holdsForItsSession+`)
 			from enrollments e where e.id=$1`, id).Scan(&dormant); err != nil {
 			return endedEnrollment{}, err
