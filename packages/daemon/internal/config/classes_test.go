@@ -226,7 +226,8 @@ func TestTheFixedPathsAreTheOnesBootSettled(t *testing.T) {
 	}
 	slices.Sort(fixed)
 	want := []string{
-		"bind", "port", "postgres_dsn", "project", "projects.<KEY>.memory",
+		"bind", "pod_update_max_open_rounds", "pod_update_rounds_per_minute", "port",
+		"postgres_dsn", "project", "projects.<KEY>.memory",
 		"projects.<KEY>.memory.instructions", "projects.<KEY>.memory.mode", "runtime",
 		"runtime.kubernetes", "runtime.kubernetes.idle_release",
 		"runtime.kubernetes.idle_release.backstop_minutes",

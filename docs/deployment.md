@@ -571,8 +571,10 @@ The table is the daemon's own (`Classes`, `packages/daemon/internal/config/class
 | `omp_invocation` | launch | `runtime` |
 | `omp_launch_prefix` | launch | `runtime` |
 | `operator_token_file` | rebuild | `api-server` |
+| `pod_update_max_open_rounds` | fixed | — |
 | `pod_update_notice_hours` | decision | — |
 | `pod_update_retask_hours` | decision | — |
+| `pod_update_rounds_per_minute` | fixed | — |
 | `port` | fixed | — |
 | `postgres_dsn` | fixed | — |
 | `probe_interval_seconds` | rebuild | `runtime` |
@@ -689,3 +691,5 @@ Each line below is the reason the route answers with, for the keys it names.
 - `projects.<KEY>.memory`, `projects.<KEY>.memory.mode`, `projects.<KEY>.memory.instructions` — a tree's memory group is drawn once, as the tree is opened, under the mode admission and the API server were given at boot, and the instructions are read at boot into the launch specs: a change of either reaches the next boot and no tree already drawn.
 
 - `runtime.kubernetes.idle_release`, `runtime.kubernetes.idle_release.idle_minutes`, `runtime.kubernetes.idle_release.backstop_minutes` — the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it.
+
+- `pod_update_max_open_rounds`, `pod_update_rounds_per_minute` — the pod-update sweep reads both limits off the configuration the daemon booted on, and nothing builds that reader again: a change of either reaches the next boot and no sweep before it.

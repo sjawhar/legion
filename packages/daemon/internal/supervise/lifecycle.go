@@ -20,12 +20,22 @@ import (
 // revive binds an explicitly spawned, resumed or retried claim to the open tree epoch before
 // launching. In-lifetime recovery only rechecks the bound epoch (checkLaunch), so an old launch
 // cannot cross a cleanup confirmation into a later admission.
+//
+// A claim in an open pod round it has not answered takes that round's ask into its free
+// delivery slot here, before the launch (takeSlotForUpdate): the process this starts is asked
+// to push its work and answer before the pod is replaced, and a resume that let the claim's own
+// next task into the slot first would leave the round waiting on a worker nothing ever asked.
+// A claim already holding a task — the ask the sweep queued for this suspension among them — is
+// given nothing more, so the operator's resume still sends what the suspension kept.
 func (m *Machine) revive(ctx context.Context) error {
 	bound, err := m.deps.Store.AdmitClaim(ctx, m.claim)
 	if err != nil {
 		return err
 	}
 	m.claim.TreeEpoch = bound.TreeEpoch
+	if err := m.takeSlotForUpdate(ctx, true); err != nil {
+		return err
+	}
 	return m.launch(ctx)
 }
 

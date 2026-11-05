@@ -598,6 +598,8 @@
     "production_check_hours": 240,
     "pod_update_retask_hours": 1,
     "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": 6,
+    "pod_update_rounds_per_minute": 2,
     "review_round_cap": 4,
     "max_fix_attempts": 5,
     "controller": "daemon",
@@ -751,11 +753,19 @@
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },
+    "pod_update_max_open_rounds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
     "pod_update_notice_hours": {
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },
     "pod_update_retask_hours": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "pod_update_rounds_per_minute": {
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },

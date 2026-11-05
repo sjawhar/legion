@@ -114,16 +114,17 @@ type Row struct {
 // The reasons the fixed paths are refused, named here because the loader's own refusals quote
 // them and a test holds each to its row.
 const (
-	whyProject = "the project token names every claim, every record in the store and the daemon's own registry entry: a daemon that changed it would own none of the work it is running"
-	whyAddress = "the API's listening socket is bound at boot, and LEGION_LISTEN_FD may hand the daemon one it never bound; there is nothing to rebuild and no way to rebind under the requests it is serving"
-	whyStream  = "the worker stream's listening socket is bound at boot and every running shim holds a connection to it; rebinding it would cut every worker off"
-	whyState   = "every running claim names files under it — its prompt, its secrets, its session and its workspace — and nothing moves them"
-	whyStore   = "the store's pool is connected at boot and holds every record the daemon is working from"
-	whyRuntime = "the processes the daemon supervises are that runtime's, panes of its own tmux server or pods of its Sandboxes, and no running process moves to the other"
-	whyNamespc = "every Sandbox, pod, volume, Service and Secret the daemon works with lives in it: a daemon that changed it would see none of the pods it is supervising"
-	whyTakeOve = "it is read once at boot, when the daemon adopts the claims of the tmux server it takes over; a later change has nothing left to adopt"
-	whyIdleRel = "the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it"
-	whyMemory  = "a tree's memory group is drawn once, as the tree is opened, under the mode admission and the API server were given at boot, and the instructions are read at boot into the launch specs: a change of either reaches the next boot and no tree already drawn"
+	whyProject  = "the project token names every claim, every record in the store and the daemon's own registry entry: a daemon that changed it would own none of the work it is running"
+	whyAddress  = "the API's listening socket is bound at boot, and LEGION_LISTEN_FD may hand the daemon one it never bound; there is nothing to rebuild and no way to rebind under the requests it is serving"
+	whyStream   = "the worker stream's listening socket is bound at boot and every running shim holds a connection to it; rebinding it would cut every worker off"
+	whyState    = "every running claim names files under it — its prompt, its secrets, its session and its workspace — and nothing moves them"
+	whyStore    = "the store's pool is connected at boot and holds every record the daemon is working from"
+	whyRuntime  = "the processes the daemon supervises are that runtime's, panes of its own tmux server or pods of its Sandboxes, and no running process moves to the other"
+	whyNamespc  = "every Sandbox, pod, volume, Service and Secret the daemon works with lives in it: a daemon that changed it would see none of the pods it is supervising"
+	whyTakeOve  = "it is read once at boot, when the daemon adopts the claims of the tmux server it takes over; a later change has nothing left to adopt"
+	whyIdleRel  = "the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it"
+	whyMemory   = "a tree's memory group is drawn once, as the tree is opened, under the mode admission and the API server were given at boot, and the instructions are read at boot into the launch specs: a change of either reaches the next boot and no tree already drawn"
+	whyPodSweep = "the pod-update sweep reads both limits off the configuration the daemon booted on, and nothing builds that reader again: a change of either reaches the next boot and no sweep before it"
 )
 
 // Caller is which arm asked for a change through the settings route: what that caller may set.
@@ -245,6 +246,10 @@ var Classes = []Row{
 	{Field: "Config.ProductionCheckBound", Path: "production_check_hours", Class: ClassDecision},
 	{Field: "Config.PodUpdateRetask", Path: "pod_update_retask_hours", Class: ClassDecision},
 	{Field: "Config.PodUpdateNotice", Path: "pod_update_notice_hours", Class: ClassDecision},
+	// The pod-update sweep's two limits, which it reads off the configuration the daemon booted
+	// on (internal/daemon's supervision.cfg) rather than at each sweep.
+	{Field: "Config.PodUpdateMaxOpenRounds", Path: "pod_update_max_open_rounds", Class: ClassFixed, Why: whyPodSweep},
+	{Field: "Config.PodUpdateRoundsPerMinute", Path: "pod_update_rounds_per_minute", Class: ClassFixed, Why: whyPodSweep},
 	{Field: "Config.ReviewRoundCap", Path: "review_round_cap", Class: ClassDecision},
 	{Field: "Config.MaxFixAttempts", Path: "max_fix_attempts", Class: ClassDecision},
 	// The capability report is built from the configuration at every read of the state.
