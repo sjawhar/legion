@@ -379,39 +379,37 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if err != nil {
 		return err
 	}
+	// One of the three SecretProviderClasses, which differ in nothing else: the CSI driver reads
+	// the Secret Manager secret the consumer's Input names, at its latest version, and mounts it
+	// as the one file file names. input is that Input's own schema name, which the seed refusal
+	// names (refuseDispatchSeed): a seed there fails the output, so no child is registered with
+	// it. The rendered YAML is what the goldens hold, so writing it once changes nothing about
+	// what is applied.
+	secretClass := func(name string, secret pulumi.StringInput, input, file string) error {
+		path := refuseDispatchSeed(secret, dispatch, input).ApplyT(func(resource string) string {
+			return strings.TrimSuffix(resource, "/") + "/versions/latest"
+		}).(pulumi.StringOutput)
+		_, err := apiextensions.NewCustomResource(ctx, name, &apiextensions.CustomResourceArgs{
+			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(name),
+			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": path.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: " + file + "\n" }).(pulumi.StringOutput)}}},
+		}, child...)
+		return err
+	}
 	seedName := s.hostname + "-nats-seed"
-	seedPath := refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret").ApplyT(func(secret string) string {
-		return strings.TrimSuffix(secret, "/") + "/versions/latest"
-	}).(pulumi.StringOutput)
-	if _, err := apiextensions.NewCustomResource(ctx, seedName, &apiextensions.CustomResourceArgs{
-		ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(seedName),
-		OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": seedPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: nats-seed\n" }).(pulumi.StringOutput)}}},
-	}, child...); err != nil {
+	if err := secretClass(seedName, args.NatsSeedSecret, "natsSeedSecret", "nats-seed"); err != nil {
 		return err
 	}
 
 	azureKeyClassName := s.hostname + "-azure-embed-key"
 	if s.azure.key {
-		keyPath := refuseDispatchSeed(args.AzureEmbedKeySecret, dispatch, "azureEmbedKeySecret").ApplyT(func(secret string) string {
-			return strings.TrimSuffix(secret, "/") + "/versions/latest"
-		}).(pulumi.StringOutput)
-		if _, err := apiextensions.NewCustomResource(ctx, azureKeyClassName, &apiextensions.CustomResourceArgs{
-			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(azureKeyClassName),
-			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": keyPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: key\n" }).(pulumi.StringOutput)}}},
-		}, child...); err != nil {
+		if err := secretClass(azureKeyClassName, args.AzureEmbedKeySecret, "azureEmbedKeySecret", "key"); err != nil {
 			return err
 		}
 	}
 
 	chatTokenClassName := s.hostname + "-chat-token"
 	if s.answerer.place == dispatchAnswererEndpoint {
-		tokenPath := refuseDispatchSeed(args.ChatTokenSecret, dispatch, "chatTokenSecret").ApplyT(func(secret string) string {
-			return strings.TrimSuffix(secret, "/") + "/versions/latest"
-		}).(pulumi.StringOutput)
-		if _, err := apiextensions.NewCustomResource(ctx, chatTokenClassName, &apiextensions.CustomResourceArgs{
-			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(chatTokenClassName),
-			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": tokenPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: token\n" }).(pulumi.StringOutput)}}},
-		}, child...); err != nil {
+		if err := secretClass(chatTokenClassName, args.ChatTokenSecret, "chatTokenSecret", "token"); err != nil {
 			return err
 		}
 	}

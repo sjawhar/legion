@@ -276,8 +276,10 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 	ctx, done := context.WithDeadline(r.Context(), until)
 	defer done()
 	for {
-		frames, err := s.readGoingEventsAfter(ctx, id, after)
+		frames, state, err := s.readGoingStream(ctx, id, after)
 		if err != nil {
+			// pgx.ErrNoRows is the sweep having deleted the run under this reader
+			// (contracts.GoingRequestTTL); either way there is nothing left to read.
 			return
 		}
 		for _, frame := range frames {
@@ -292,18 +294,14 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		state, err := s.readGoingRunState(ctx, id)
-		if err != nil {
-			// pgx.ErrNoRows is the sweep having deleted the run under this reader
-			// (contracts.GoingRequestTTL); either way there is nothing left to read.
-			return
-		}
 		switch {
-		case state.Finished:
-			// The terminal frame is stored but was not in the read above, which took its frames
-			// first: the next read answers it, and every frame before it. A reader resuming past
-			// that frame's sequence is already at the end of a stream that is over.
-			if len(frames) == 0 {
+		case state.Terminal > 0:
+			// The run has stored its one ending. This reader stops on having written that
+			// frame, never on the run merely holding one: a terminal frame committed between
+			// the read of the frames and the read of this state is not in hand yet, and one
+			// more poll answers it, with every frame before it. A reader already past that
+			// sequence is at the end of a stream that is over.
+			if after >= state.Terminal {
 				return
 			}
 		case state.PastDeadline:

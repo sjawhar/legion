@@ -26,11 +26,6 @@ const (
 	chatSettingPrefix = "DISPATCH_CHAT_"
 )
 
-// azureSharedCredentials is the Azure sign-in both model services take, in table order. It is
-// three named rows rather than a prefix because the embedder's own settings begin with
-// DISPATCH_AZURE_ too, and whichever of the embedder and the answerer is azure reads these three.
-var azureSharedCredentials = []string{"DISPATCH_AZURE_TENANT_ID", "DISPATCH_AZURE_CLIENT_ID", "DISPATCH_AZURE_FEDERATED_TOKEN_FILE"}
-
 // answererConfig is where Dispatch's server generates text, as resolveAnswerer checked it. Place
 // is "" (no model configured), placeAnswererAzure or placeAnswererEndpoint; the rest belongs to
 // one place and is empty under the other.
@@ -71,7 +66,7 @@ func resolveAnswerer(env settingValues, embedderPlace string) (answererConfig, e
 			return answererConfig{}, fmt.Errorf("%s set, but %s: the DISPATCH_AZURE_CHAT_* settings are read only with DISPATCH_ANSWERER=azure", strings.Join(set, ", "), chosen)
 		}
 		if embedderPlace != embed.PlaceAzure {
-			if set := namedSettingsSet(env, azureSharedCredentials); len(set) > 0 {
+			if set := readAzureSignIn(env).set; len(set) > 0 {
 				return answererConfig{}, fmt.Errorf("%s set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure: the shared Azure sign-in is read by whichever of them is azure", strings.Join(set, ", "))
 			}
 		}
@@ -88,17 +83,6 @@ func resolveAnswerer(env settingValues, embedderPlace string) (answererConfig, e
 		return resolveEndpointAnswerer(env)
 	}
 	return answererConfig{}, nil
-}
-
-// namedSettingsSet names each of names env sets, in the order given.
-func namedSettingsSet(env settingValues, names []string) []string {
-	var set []string
-	for _, name := range names {
-		if strings.TrimSpace(env.get(name)) != "" {
-			set = append(set, name)
-		}
-	}
-	return set
 }
 
 // chatEndpoint is the base URL /chat/completions is appended to, as the row name names it: it is
@@ -139,27 +123,13 @@ func resolveAzureAnswerer(env settingValues) (answererConfig, error) {
 	if err != nil || cfg.TokensPerMinute <= 0 {
 		return answererConfig{}, fmt.Errorf("DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE=%q (expected a positive integer, the deployment's tokens-per-minute quota)", quota)
 	}
-	var set, missing []string
-	for _, credential := range []struct {
-		name  string
-		value *string
-	}{
-		{"DISPATCH_AZURE_TENANT_ID", &cfg.TenantID},
-		{"DISPATCH_AZURE_CLIENT_ID", &cfg.ClientID},
-		{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE", &cfg.FederatedToken},
-	} {
-		*credential.value = strings.TrimSpace(env.get(credential.name))
-		if *credential.value != "" {
-			set = append(set, credential.name)
-		} else {
-			missing = append(missing, credential.name)
-		}
-	}
+	signIn := readAzureSignIn(env)
+	cfg.TenantID, cfg.ClientID, cfg.FederatedToken = signIn.TenantID, signIn.ClientID, signIn.TokenFile
 	switch {
-	case len(set) == 0:
+	case len(signIn.set) == 0:
 		return answererConfig{}, fmt.Errorf("DISPATCH_ANSWERER=azure needs the keyless Azure sign-in (%s): the chat form takes no API key", azureKeylessNames)
-	case len(missing) > 0:
-		return answererConfig{}, fmt.Errorf("the keyless Azure sign-in needs %s: %s set, %s missing", azureKeylessNames, strings.Join(set, ", "), strings.Join(missing, ", "))
+	case len(signIn.missing) > 0:
+		return answererConfig{}, signIn.refusePartial()
 	}
 	return cfg, nil
 }

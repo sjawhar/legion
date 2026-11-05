@@ -67,11 +67,16 @@ type goingEvent struct {
 	Event    going.Event
 }
 
-// goingRunState is what a reader needs to decide whether a stream is over: whether the run
-// stored a terminal frame, and whether it is past its ends_at, after which a run that stored
-// none is ended by whoever reads it.
+// goingRunState is what a reader needs to decide whether a stream is over: the sequence of the
+// run's one terminal frame, 0 while the run has stored none, and whether it is past its ends_at,
+// after which a run that stored none is ended by whoever reads it. The terminal frame is a
+// sequence and not a bool because a reader ends its stream on having been written that frame and
+// not on the run having stored one: a terminal frame committed between a reader's read of the
+// frames and its read of this state would otherwise close a stream that never carried it. The
+// going_events_terminal index holds that there is at most one such frame, so one sequence says
+// all of it.
 type goingRunState struct {
-	Finished     bool
+	Terminal     int
 	PastDeadline bool
 }
 
@@ -206,16 +211,33 @@ func (s *server) readGoingTerminalEvent(ctx context.Context, requestID string) (
 	`, requestID, goingTerminalNames))
 }
 
+// goingEventsAfter is every frame of one run past a sequence, in stream order: $1 the run, $2
+// that sequence; scanGoingEvent decodes each row. It is named because readGoingStream queues it
+// beside the state read, and the two paths must run the one statement text, which pgx keeps one
+// prepared plan for.
+const goingEventsAfter = `
+	select ` + goingEventColumns + `
+	from going_events
+	where request_id = $1::uuid and sequence > $2
+	order by sequence`
+
+// goingRunStateOf reads one run's state, $1 the run and $2 the terminal frame names: the
+// sequence of its terminal frame, 0 while it has stored none, and whether now is past its
+// ends_at. Named for the reason goingEventsAfter is.
+const goingRunStateOf = `
+	select coalesce(
+	         (select e.sequence from going_events e where e.request_id = r.id and e.name = any($2::text[])),
+	         0
+	       ),
+	       now() >= r.ends_at
+	from going_requests r
+	where r.id = $1::uuid`
+
 // readGoingEventsAfter is every frame of the run past sequence after, in stream order: what a
 // reader resuming from Last-Event-ID asks for, and, with after zero, the whole stream for a
 // reader arriving fresh.
 func (s *server) readGoingEventsAfter(ctx context.Context, requestID string, after int) ([]goingEvent, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select `+goingEventColumns+`
-		from going_events
-		where request_id = $1::uuid and sequence > $2
-		order by sequence
-	`, requestID, after)
+	rows, err := s.deps.Store.Pool.Query(ctx, goingEventsAfter, requestID, after)
 	if err != nil {
 		return nil, err
 	}
@@ -224,20 +246,45 @@ func (s *server) readGoingEventsAfter(ctx context.Context, requestID string, aft
 	})
 }
 
-// readGoingRunState tells whether the run stored a terminal frame and whether it is past its
-// ends_at, in one read, since a reader deciding whether to end the stream itself needs both;
-// pgx.ErrNoRows when the record holds no such run.
+// readGoingRunState tells which sequence the run's terminal frame took, 0 while it has stored
+// none, and whether it is past its ends_at, in one read, since a reader deciding whether its
+// stream is over needs both; pgx.ErrNoRows when the record holds no such run.
 func (s *server) readGoingRunState(ctx context.Context, requestID string) (goingRunState, error) {
 	var state goingRunState
-	err := s.deps.Store.Pool.QueryRow(ctx, `
-		select exists (
-		         select 1 from going_events e where e.request_id = r.id and e.name = any($2::text[])
-		       ),
-		       now() >= r.ends_at
-		from going_requests r
-		where r.id = $1::uuid
-	`, requestID, goingTerminalNames).Scan(&state.Finished, &state.PastDeadline)
+	err := s.deps.Store.Pool.QueryRow(ctx, goingRunStateOf, requestID, goingTerminalNames).
+		Scan(&state.Terminal, &state.PastDeadline)
 	return state, err
+}
+
+// readGoingStream is what one poll of an open stream reads: the frames past after, and the run's
+// state, in one round trip (store.Pool.SendBatch), where a poll of a stream costs two. Either
+// statement failing is the whole read's failure, which ends the stream, and pgx.ErrNoRows is the
+// sweep having deleted the run under its reader.
+//
+// The two statements take their own snapshots, each at its own moment, so a frame committed
+// between them is in one answer and not the other. Which order they run in therefore settles
+// nothing, and it is immaterial: a terminal frame in the frames ends the stream on being
+// written, and a terminal sequence in the state ends it only once the reader has reached that
+// sequence (streamGoingAnswer), so neither order can close a stream that never carried its
+// ending.
+func (s *server) readGoingStream(ctx context.Context, requestID string, after int) ([]goingEvent, goingRunState, error) {
+	var frames []goingEvent
+	var state goingRunState
+	batch := &pgx.Batch{}
+	batch.Queue(goingEventsAfter, requestID, after).Query(func(rows pgx.Rows) error {
+		collected, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (goingEvent, error) {
+			return scanGoingEvent(row)
+		})
+		frames = collected
+		return err
+	})
+	batch.Queue(goingRunStateOf, requestID, goingTerminalNames).QueryRow(func(row pgx.Row) error {
+		return row.Scan(&state.Terminal, &state.PastDeadline)
+	})
+	if err := s.deps.Store.Pool.SendBatch(ctx, batch).Close(); err != nil {
+		return nil, goingRunState{}, err
+	}
+	return frames, state, nil
 }
 
 // scanGoingRequest decodes one goingRequestColumns row.

@@ -81,7 +81,8 @@ type loopRequest struct {
 type loopResult struct {
 	Text  string
 	Fault loopFault
-	// Detail says what a provider error was, for a log and never for a reader.
+	// Detail says what a provider error was, for a log and never for a reader: Answerer.Run
+	// writes it once, where that fault becomes the stream's ANSWER_FAILED.
 	Detail string
 }
 

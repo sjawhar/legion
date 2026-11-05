@@ -89,6 +89,50 @@ func settingsSet(env settingValues, prefix string) []string {
 	return set
 }
 
+// azureSignIn is the Azure sign-in both model services take, as readAzureSignIn found it: the
+// three values, and the names of the rows the deployment set and of those it left unset, in
+// table order, which is the order every refusal of the group names them in.
+type azureSignIn struct {
+	TenantID  string
+	ClientID  string
+	TokenFile string
+	set       []string
+	missing   []string
+}
+
+// readAzureSignIn reads the three rows of the shared Azure sign-in. They are named rows rather
+// than a prefix because the embedder's own settings begin with DISPATCH_AZURE_ too, and
+// whichever of the embedder and the answerer is azure reads these three. One reader, because
+// the embedder's resolution, the answerer's and the refusal of the group with neither place on
+// Azure must all read the same rows in the same order, and a second table could drift from the
+// first.
+func readAzureSignIn(env settingValues) azureSignIn {
+	var signIn azureSignIn
+	for _, row := range []struct {
+		name  string
+		value *string
+	}{
+		{"DISPATCH_AZURE_TENANT_ID", &signIn.TenantID},
+		{"DISPATCH_AZURE_CLIENT_ID", &signIn.ClientID},
+		{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE", &signIn.TokenFile},
+	} {
+		*row.value = strings.TrimSpace(env.get(row.name))
+		if *row.value != "" {
+			signIn.set = append(signIn.set, row.name)
+		} else {
+			signIn.missing = append(signIn.missing, row.name)
+		}
+	}
+	return signIn
+}
+
+// refusePartial is the one refusal of a sign-in set in part, which the embedder and the answerer
+// both write: the keyless form is all three rows or none, and an operator is told which of them
+// it has and which it is missing.
+func (s azureSignIn) refusePartial() error {
+	return fmt.Errorf("the keyless Azure sign-in needs %s: %s set, %s missing", azureKeylessNames, strings.Join(s.set, ", "), strings.Join(s.missing, ", "))
+}
+
 // resolveAzureEmbedder is resolveEmbedder for DISPATCH_EMBEDDER=azure.
 func resolveAzureEmbedder(env settingValues) (embedderConfig, error) {
 	cfg := embedderConfig{Place: embed.PlaceAzure}
@@ -115,29 +159,15 @@ func resolveAzureEmbedder(env settingValues) (embedderConfig, error) {
 	if err != nil {
 		return embedderConfig{}, err
 	}
-	var set, missing []string
-	for _, setting := range []struct {
-		name  string
-		value *string
-	}{
-		{"DISPATCH_AZURE_TENANT_ID", &cfg.AzureTenantID},
-		{"DISPATCH_AZURE_CLIENT_ID", &cfg.AzureClientID},
-		{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE", &cfg.AzureTokenFile},
-	} {
-		*setting.value = strings.TrimSpace(env.get(setting.name))
-		if *setting.value != "" {
-			set = append(set, setting.name)
-		} else {
-			missing = append(missing, setting.name)
-		}
-	}
+	signIn := readAzureSignIn(env)
+	cfg.AzureTenantID, cfg.AzureClientID, cfg.AzureTokenFile = signIn.TenantID, signIn.ClientID, signIn.TokenFile
 	switch {
-	case cfg.AzureKey != "" && len(set) > 0:
-		return embedderConfig{}, fmt.Errorf("DISPATCH_EMBEDDER=azure takes one credential, and both are set: the key (%s) and the keyless sign-in (%s set)", azureKeyNames, strings.Join(set, ", "))
-	case cfg.AzureKey == "" && len(set) == 0:
+	case cfg.AzureKey != "" && len(signIn.set) > 0:
+		return embedderConfig{}, fmt.Errorf("DISPATCH_EMBEDDER=azure takes one credential, and both are set: the key (%s) and the keyless sign-in (%s set)", azureKeyNames, strings.Join(signIn.set, ", "))
+	case cfg.AzureKey == "" && len(signIn.set) == 0:
 		return embedderConfig{}, fmt.Errorf("DISPATCH_EMBEDDER=azure needs a credential: the key (%s), or the keyless sign-in (%s)", azureKeyNames, azureKeylessNames)
-	case len(set) > 0 && len(missing) > 0:
-		return embedderConfig{}, fmt.Errorf("the keyless Azure sign-in needs %s: %s set, %s missing", azureKeylessNames, strings.Join(set, ", "), strings.Join(missing, ", "))
+	case len(signIn.set) > 0 && len(signIn.missing) > 0:
+		return embedderConfig{}, signIn.refusePartial()
 	}
 	return cfg, nil
 }

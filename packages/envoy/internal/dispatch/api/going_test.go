@@ -263,11 +263,11 @@ func TestTheGoingSweepEndsARunPastItsWindowOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the swept run's state: %v", err)
 	}
-	if !state.Finished || !state.PastDeadline {
-		t.Fatalf("the swept run reads %+v, want finished and past its deadline", state)
+	if state.Terminal != 2 || !state.PastDeadline {
+		t.Fatalf("the swept run reads %+v, want its ending at sequence 2 and past its deadline", state)
 	}
-	if state, err := rig.server.readGoingRunState(ctx, live.ID); err != nil || state.Finished || state.PastDeadline {
-		t.Fatalf("the live run reads %+v (%v), want neither finished nor past its deadline", state, err)
+	if state, err := rig.server.readGoingRunState(ctx, live.ID); err != nil || state.Terminal != 0 || state.PastDeadline {
+		t.Fatalf("the live run reads %+v (%v), want no ending stored and not past its deadline", state, err)
 	}
 }
 
@@ -313,7 +313,7 @@ func TestTheMaintenancePassEndsAGoingRunNobodyReads(t *testing.T) {
 	})
 	waitUntil(t, 30*time.Second, "the abandoned run ended by a maintenance pass", func() bool {
 		state, err := rig.server.readGoingRunState(context.Background(), abandoned.ID)
-		return err == nil && state.Finished
+		return err == nil && state.Terminal > 0
 	})
 	deadline := fmt.Sprintf(`1 %s {"code":%q}`, contracts.GoingEventError, contracts.GoingErrorAnswerDidNotArrive)
 	if frames := rig.frames(t, abandoned.ID); len(frames) != 1 || frames[0] != deadline {

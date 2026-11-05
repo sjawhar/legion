@@ -324,6 +324,10 @@ func (c *HTTPClient) token(ctx context.Context) (string, error) {
 // readChatStream reads the data: frames of one completion, handing each content delta to onText
 // as it arrives and assembling the turn's tool calls. [DONE] and a finish_reason both end the
 // turn; the frames after either say nothing about this turn.
+//
+// Each frame is read from the scanner's own bytes rather than from a string of them: the sentinel
+// is compared without a copy, and json.Unmarshal copies every string it decodes, so nothing the
+// turn keeps aliases a buffer the next line overwrites.
 func readChatStream(response *http.Response, onText func(string) error) ([]ToolCall, error) {
 	// One byte past the cap is read, so a stream that fills the cap exactly is told apart from
 	// one that runs past it, which is refused rather than read without end.
@@ -333,19 +337,19 @@ func readChatStream(response *http.Response, onText func(string) error) ([]ToolC
 	var calls []ToolCall
 	var indexes []int
 	for scanner.Scan() {
-		data, found := strings.CutPrefix(strings.TrimSpace(scanner.Text()), "data:")
+		data, found := bytes.CutPrefix(bytes.TrimSpace(scanner.Bytes()), []byte("data:"))
 		if !found {
 			continue
 		}
-		data = strings.TrimSpace(data)
-		if data == "" {
+		data = bytes.TrimSpace(data)
+		if len(data) == 0 {
 			continue
 		}
-		if data == "[DONE]" {
+		if string(data) == "[DONE]" {
 			return calls, nil
 		}
 		var frame chatWireFrame
-		if err := json.Unmarshal([]byte(data), &frame); err != nil {
+		if err := json.Unmarshal(data, &frame); err != nil {
 			return nil, fmt.Errorf("going: chat completions: HTTP %s, a frame that is not JSON", response.Status)
 		}
 		if len(frame.Choices) == 0 {

@@ -343,6 +343,119 @@ func TestGoingStreamReplaysStoredFramesAndResumes(t *testing.T) {
 	}
 }
 
+// goingStreamSink is one reader of an open stream: it keeps what the handler wrote and says when
+// the handler flushed, so a test acts at a point the handler has reached rather than after a
+// sleep. The body is held behind a mutex because the handler writes it on a goroutine of its own
+// while the test reads it.
+type goingStreamSink struct {
+	header  http.Header
+	flushed chan struct{}
+
+	mu   sync.Mutex
+	body strings.Builder
+}
+
+func (s *goingStreamSink) Header() http.Header { return s.header }
+
+func (s *goingStreamSink) WriteHeader(int) {}
+
+func (s *goingStreamSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.Write(p)
+}
+
+// Flush says one flush happened and never blocks: the handler flushes its headers before it
+// reads anything and then every frame it writes, and a test waits for the first of those.
+func (s *goingStreamSink) Flush() {
+	select {
+	case s.flushed <- struct{}{}:
+	default:
+	}
+}
+
+// text is what the handler has written so far.
+func (s *goingStreamSink) text() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.String()
+}
+
+// A stream ends on the frame that ends it and never on the run merely holding one. One poll
+// reads the frames and the run's state at two moments, so an ending committed between them is in
+// the state's answer and in no frame the reader was handed: a reader that stopped there would
+// close a stream that never carried its ending, which is the one way a stream may not end. The
+// lock asks for that order rather than waiting for it to happen: the ending is written and held
+// uncommitted, so every frames read answers nothing, and committed only once the state read is
+// waiting on going_requests, so the state it answers holds an ending no frames read could have
+// seen.
+func TestGoingStreamCarriesAnEndingStoredBetweenItsTwoReads(t *testing.T) {
+	rig := newGoingRoutesRig(t, nil)
+	ctx := context.Background()
+	run, err := rig.server.recordGoingRequest(ctx, goingAsker, "", "who is answering this?")
+	if err != nil {
+		t.Fatalf("record the run: %v", err)
+	}
+	for _, frame := range []going.Event{going.Text("Nobody "), going.Text("has.")} {
+		if _, err := rig.server.appendGoingEvent(ctx, run.ID, frame); err != nil {
+			t.Fatalf("append %s: %v", frame.Name, err)
+		}
+	}
+
+	// A reader holding frame 2, polling for whatever comes after it.
+	sink := &goingStreamSink{header: http.Header{}, flushed: make(chan struct{}, 4)}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/going/requests/"+run.ID+"/stream", nil)
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.Header.Set("Last-Event-ID", "2")
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		rig.handler.ServeHTTP(sink, request)
+	}()
+	select {
+	case <-sink.flushed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the stream wrote no headers within 30s")
+	}
+
+	ending, err := rig.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("open the transaction that ends the run: %v", err)
+	}
+	defer ending.Rollback(ctx)
+	if _, err := ending.Exec(ctx, `lock table going_requests in access exclusive mode`); err != nil {
+		t.Fatalf("lock going_requests: %v", err)
+	}
+	if _, err := ending.Exec(ctx, `
+		insert into going_events (request_id, sequence, name, data)
+		values ($1::uuid, 3, $2, '{"items":0,"words":2}'::jsonb)
+	`, run.ID, contracts.GoingEventEnd); err != nil {
+		t.Fatalf("store the ending: %v", err)
+	}
+	waitUntil(t, 30*time.Second, "the stream's state read waiting on going_requests", func() bool {
+		var waiting int
+		if err := rig.database.Pool.QueryRow(ctx, `
+			select count(*) from pg_locks where relation = 'going_requests'::regclass and not granted
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read what is waiting on going_requests: %v", err)
+		}
+		return waiting > 0
+	})
+	if err := ending.Commit(ctx); err != nil {
+		t.Fatalf("commit the ending: %v", err)
+	}
+
+	select {
+	case <-served:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the stream did not end within 60s of its run's ending")
+	}
+	want := "id: 3\nevent: " + contracts.GoingEventEnd + "\ndata: {\"items\":0,\"words\":2}\n\n"
+	if got := sink.text(); got != want {
+		t.Fatalf("the stream wrote %q, want the ending %q: the frame a run ended on reaches the reader waiting for it", got, want)
+	}
+}
+
 // A run nobody asked for, an id that could be nobody's, and a run that is somebody else's are
 // one answer, word for word: an id tells a caller nothing it did not already know.
 func TestGoingStreamAnswersEveryRunItWillNotServeAlike(t *testing.T) {

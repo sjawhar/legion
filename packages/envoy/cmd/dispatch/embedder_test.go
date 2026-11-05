@@ -144,8 +144,10 @@ func TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse(t *testing.T) {
 		)
 	}
 	// The shared sign-in is refused only where neither model service is on Azure: a Bedrock
-	// embedder beside an Azure answerer reads all three.
-	for _, variable := range azureSharedCredentials {
+	// embedder beside an Azure answerer reads all three. The three are the reader's own rows,
+	// in table order, which an empty environment leaves wholly missing, so no list here can
+	// drift from the one the resolvers walk.
+	for _, variable := range readAzureSignIn(envGetter(nil)).missing {
 		cases = append(cases,
 			refusal{variable + " with neither place azure", signInEnvironment(map[string]string{variable: "x"}),
 				[]string{variable + " set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure: the shared Azure sign-in is read by whichever of them is azure"}},

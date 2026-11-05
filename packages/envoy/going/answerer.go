@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -143,6 +144,12 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 	case loopFaultTime:
 		return run.send(Fault(contracts.GoingErrorAnswerDidNotArrive))
 	case loopFaultProviderError:
+		// The reader is told ANSWER_FAILED and no more than that, so this is the one place the
+		// refusal is said: an operator whose deployment answers 401 or 429 reads it here and
+		// nowhere else. The detail is what the model service said of the call, which runLoop
+		// built free of any credential, and neither the question's words nor a credential is
+		// named beside it.
+		slog.Warn("going: the model service refused the run", "detail", result.Detail)
 		return run.send(Fault(contracts.GoingErrorAnswerFailed))
 	}
 	if run.readErr != nil {

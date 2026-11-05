@@ -36,11 +36,10 @@ type answerFilter struct {
 	targetAt int
 
 	// words and inWord count the cleared text's words the way strings.Fields does, carried
-	// across deltas; items and named count the hits kept, each named once; dropped counts the
-	// links dropped as outside the citation set.
+	// across deltas; named holds the href of every hit kept, which is said once and counted by
+	// being there; dropped counts the links dropped as outside the citation set.
 	words   int
 	inWord  bool
-	items   int
 	named   map[string]bool
 	dropped int
 
@@ -95,12 +94,12 @@ func (f *answerFilter) Close() error {
 			return err
 		}
 	}
-	if f.items == 0 {
+	if len(f.named) == 0 {
 		if err := f.send(None()); err != nil {
 			return err
 		}
 	}
-	return f.send(End(f.words, f.items))
+	return f.send(End(f.words, len(f.named)))
 }
 
 // plain emits the cleared text up to the next [ and begins holding the span that [ may open.
@@ -213,7 +212,6 @@ func (f *answerFilter) resolve() error {
 		return nil
 	}
 	f.named[hit.Href] = true
-	f.items++
 	return f.send(Item(hit))
 }
 

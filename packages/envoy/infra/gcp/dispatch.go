@@ -567,17 +567,12 @@ func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
 	keyless := args.AzureTenantId != nil || args.AzureClientId != nil
 	azure := dispatchAzure{embedder: args.AzureEmbedEndpoint != nil, keyless: keyless}
 	if args.AzureEmbedEndpoint == nil && args.AzureChatEndpoint == nil {
-		for _, in := range []struct {
-			input string
-			set   bool
-		}{
+		if err := refuseDispatchInputsWithout("azureEmbedEndpoint or azureChatEndpoint", "the Azure sign-in is shared, read by whichever of the embedder and the answerer is on Azure", []dispatchInput{
 			{"azureTenantId", args.AzureTenantId != nil},
 			{"azureClientId", args.AzureClientId != nil},
 			{"azureFederationAudience", args.AzureFederationAudience != nil},
-		} {
-			if in.set {
-				return dispatchAzure{}, fmt.Errorf("azureEmbedEndpoint or azureChatEndpoint is required when %s is set: the Azure sign-in is shared, read by whichever of the embedder and the answerer is on Azure", in.input)
-			}
+		}); err != nil {
+			return dispatchAzure{}, err
 		}
 	}
 	if args.AzureTenantId != nil && args.AzureClientId == nil {
@@ -599,17 +594,12 @@ func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
 		}
 	}
 	if !azure.embedder {
-		for _, in := range []struct {
-			input string
-			set   bool
-		}{
+		if err := refuseDispatchInputsWithout("azureEmbedEndpoint", "every azureEmbed input configures the Azure embedder, which the endpoint turns on", []dispatchInput{
 			{"azureEmbedDeployment", args.AzureEmbedDeployment != nil},
 			{"azureEmbedTokensPerMinute", args.AzureEmbedTokensPerMinute != nil},
 			{"azureEmbedKeySecret", args.AzureEmbedKeySecret != nil},
-		} {
-			if in.set {
-				return dispatchAzure{}, fmt.Errorf("azureEmbedEndpoint is required when %s is set: every azureEmbed input configures the Azure embedder, which the endpoint turns on", in.input)
-			}
+		}); err != nil {
+			return dispatchAzure{}, err
 		}
 		return azure, nil
 	}
@@ -652,31 +642,21 @@ type dispatchAnswerer struct {
 // are judged by being set alone, as the embedder's are.
 func newDispatchAnswerer(args *DispatchArgs, keyless bool) (dispatchAnswerer, error) {
 	if args.AzureChatEndpoint == nil {
-		for _, in := range []struct {
-			input string
-			set   bool
-		}{
+		if err := refuseDispatchInputsWithout("azureChatEndpoint", "every azureChat input configures the Azure answerer, which the endpoint turns on", []dispatchInput{
 			{"azureChatDeployment", args.AzureChatDeployment != nil},
 			{"azureChatApiVersion", args.AzureChatApiVersion != nil},
 			{"azureChatScope", args.AzureChatScope != nil},
 			{"azureChatTokensPerMinute", args.AzureChatTokensPerMinute != nil},
-		} {
-			if in.set {
-				return dispatchAnswerer{}, fmt.Errorf("azureChatEndpoint is required when %s is set: every azureChat input configures the Azure answerer, which the endpoint turns on", in.input)
-			}
+		}); err != nil {
+			return dispatchAnswerer{}, err
 		}
 	}
 	if args.ChatEndpoint == nil {
-		for _, in := range []struct {
-			input string
-			set   bool
-		}{
+		if err := refuseDispatchInputsWithout("chatEndpoint", "every chat input configures the endpoint answerer, which the endpoint turns on", []dispatchInput{
 			{"chatModel", args.ChatModel != nil},
 			{"chatTokenSecret", args.ChatTokenSecret != nil},
-		} {
-			if in.set {
-				return dispatchAnswerer{}, fmt.Errorf("chatEndpoint is required when %s is set: every chat input configures the endpoint answerer, which the endpoint turns on", in.input)
-			}
+		}); err != nil {
+			return dispatchAnswerer{}, err
 		}
 	}
 	if args.AzureChatEndpoint != nil && args.ChatEndpoint != nil {
@@ -897,6 +877,20 @@ func dispatchGroupClause(feature string, group []dispatchInput) string {
 		return ""
 	}
 	return fmt.Sprintf(" (the %s inputs are set together or not at all; unset: %s)", feature, strings.Join(unset, ", "))
+}
+
+// refuseDispatchInputsWithout is the refusal a group of inputs an endpoint turns on shares: with
+// that endpoint unset, the first input of the group the consumer did set is named, together with
+// reason, which says what the endpoint the group needs is for. The first and not all of them,
+// because a consumer who set a whole group has one thing to do about it - set the endpoint - and
+// the group's own order is the order the table is written in. Nothing set is no refusal.
+func refuseDispatchInputsWithout(endpoint, reason string, inputs []dispatchInput) error {
+	for _, in := range inputs {
+		if in.set {
+			return fmt.Errorf("%s is required when %s is set: %s", endpoint, in.input, reason)
+		}
+	}
+	return nil
 }
 
 // refuseDispatchTailnetGroup judges the tailnet group alone: the tailnet name Dispatch is served

@@ -8,6 +8,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // seededItems is what seedItemText wrote: one item of every kind meaning search covers, with the
@@ -142,6 +143,38 @@ func TestItemTextCutsToRunes(t *testing.T) {
 	if got := texts["issue:ITEM-1"]; len([]rune(got)) != runes || len(got) == runes {
 		t.Fatalf("the issue's cut text is %q: %d runes in %d bytes, want %d runes of a text the bytes would cut differently",
 			got, len([]rune(got)), len(got), runes)
+	}
+}
+
+// The cut is the statement's now, and it lands on the character boundary the Go helper's cut
+// landed on: left counts characters in a UTF-8 database, so a budget falling between one-, two-,
+// three- and four-byte characters answers the bytes text.HeadRunes answered of the whole value.
+func TestItemTextCutsWhereTheRuneHelperCut(t *testing.T) {
+	database := storetest.Open(t)
+	seeded := seedItemText(t, database)
+	// A text whose characters are of all four widths, so a cut inside it says which unit the
+	// statement counted in: bytes, UTF-16 units or characters.
+	const satellites = "Déjà vu — 🛰🛰 two satellites"
+	var wide string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body) values ('ITEM-1', '{"kind":"user","id":"alice"}', $1) returning id::text
+	`, satellites).Scan(&wide); err != nil {
+		t.Fatalf("seed the four-byte comment: %v", err)
+	}
+	items := append(seeded.items, Item{Kind: "comment", ID: wide})
+	seeded.texts["comment:"+wide] = satellites
+	for _, runes := range []int{1, 2, 9, 10, 11, 12, 13} {
+		texts, err := ItemText(context.Background(), database.Pool, items, runes)
+		if err != nil {
+			t.Fatalf("ItemText cut to %d runes: %v", runes, err)
+		}
+		for key, whole := range seeded.texts {
+			want := text.HeadRunes(whole, runes)
+			if got := texts[key]; got != want {
+				t.Errorf("%s cut to %d runes reads %q (%d bytes), want the helper's %q (%d bytes)",
+					key, runes, got, len(got), want, len(want))
+			}
+		}
 	}
 }
 
