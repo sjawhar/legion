@@ -1999,6 +1999,11 @@ func (r *podUpdateRig) notDue() []fake.Call { return r.rt.CallsOf("ReplacePodNot
 // round keeps — is in no group of this tick and in no re-read of it either: every claim the
 // group holds is re-read, and a claim it never held is re-read nowhere. Deciding the replacement
 // from the group alone would end that role's turn and delete the issue's disk under it.
+//
+// The role is started here inside the pod's launch turn, which the sweep's own read of the
+// claims before the call is already behind (replacePodForRound): that read is what catches a
+// claim admitted before the sweep reached this replacement, and this last word is what catches
+// one admitted while the runtime waits the pod out.
 func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	rig := newPodUpdateRig(t,
 		readyWorker(claim.RoleImplementer),
@@ -2013,9 +2018,6 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// The group this tick carries: the one worker the issue had when the sweep read its claims,
 	// and it has answered.
 	group := rig.snapshotWithout(claim.RoleTester)
-	// Minutes later in that same tick, the next phase's role is started into the kept pod. It
-	// registers there, holds a session from that moment, and has answered nothing.
-	rig.startInPod(claim.RoleTester, podUpdatePod)
 
 	// The call below is the one sweep the test makes, over a group it built by hand, so nothing
 	// may still be deciding when it reads the claims: a machine mid-decision reads as not having
@@ -2023,6 +2025,14 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// refuse the replacement — under the race detector, 4 runs in 30 on the base this change sits
 	// on.
 	rig.settleAll()
+	// The next phase's role is started into the kept pod from inside the pod's launch turn,
+	// where the runtime waits: it registers there, holds a session from that moment, and has
+	// answered nothing. One hold only: the sweeps after this one find the runtime as this one
+	// left it.
+	rig.rt.HoldReplacePod(func() {
+		rig.rt.HoldReplacePod(nil)
+		rig.startInPod(claim.RoleTester, podUpdatePod)
+	})
 	rig.s.reconcilePodUpdates(rig.ctx, group)
 
 	if calls := rig.replacements(); len(calls) != 0 {
