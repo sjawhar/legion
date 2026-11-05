@@ -13,12 +13,7 @@ import type { DisplayTree } from "../../api/types";
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
-import {
-  type MarkdownEngine,
-  parsesInTheWorker,
-  renderWithEngine,
-  type SoftBreaks,
-} from "./markdown-engine";
+import { type MarkdownEngine, renderWithEngine, type SoftBreaks } from "./markdown-engine";
 import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
@@ -122,8 +117,8 @@ export type SliceYield = "page" | undefined;
 /**
  * A `paint` run a piece at a time: it fills the element as `paint` does, yielding wherever the
  * work can be cut, and the element holds the whole body once it is done.
- * `useRenderedMarkdown` drives it across tasks for a body the parse worker parsed, so a list of
- * thousands of items is built, and then put into the page, without holding the reader's thread
+ * `useRenderedMarkdown` drives it across tasks for a body of more nodes than a batch, so a list
+ * of thousands of items is built, and then put into the page, without holding the reader's thread
  * for one long task; everything a surface reads from a painted element - the ask hosts, the
  * anchors, the pictures, the diagrams, `onRendered` - waits for the last piece, so no portal and
  * no pass ever meets half a body.
@@ -136,6 +131,58 @@ export type PaintMarkdownInSlices = (
 
 /** How long one slice of off-page work may hold the page's thread before it hands it back. */
 const SLICE_MS = 50;
+
+/**
+ * How many nodes of the built body one task puts into the page. What an engine spends on a batch
+ * is the style and layout of what has just arrived, in the rendering update after that task, so
+ * the batch is what one such pass costs. Measured on this pod against the dashboard's own
+ * stylesheet (sjawhar/legion#2519), an 8,000-item list: put in with one `replaceChildren` the
+ * thread runs no task for 918-971 ms in WebKit, 211 ms in Chromium and 173 ms in Firefox; put in
+ * 500 nodes at a time, 72 ms, 124 ms and 39 ms, because each engine then lays out only the items
+ * of the batch. WebKit is why the batch exists at all: it spends ~700 ms on a pass over 16,000
+ * freshly attached nodes whether their boxes are laid out or skipped, so nothing but splitting
+ * the attach brings it under the second a reader may wait.
+ *
+ * `MarkdownBody`'s sliced painter attaches a batch of this many nodes, and the decision to paint
+ * in slices at all is read against the same number (`paintsAcrossTasks`), so what a task puts
+ * into the page and what is worth splitting into tasks cannot drift apart.
+ */
+export const ATTACH_BATCH = 500;
+
+/** How many nodes `node` holds, itself included, counted no further than `limit`: a document
+ *  bigger than a batch answers `limit` or a little more, which is all the decision below needs
+ *  to know. Shaped as `MarkdownBody`'s own count over a built node, since the two answer the
+ *  same question about a tree neither may walk whole. */
+function nodesInDocument(node: ProseMirrorNode, limit: number): number {
+  let count = 1;
+  for (let child = 0; child < node.childCount && count < limit; child += 1) {
+    count += nodesInDocument(node.child(child), limit - count);
+  }
+  return count;
+}
+
+/**
+ * Whether the paint of `parsed` is worth building and attaching across tasks rather than in one.
+ *
+ * This is not the parse worker's rule (`parsesInTheWorker` in `markdown-engine.ts`), and it is
+ * read of the document rather than of the source for the reason that rule cannot answer it: a
+ * stored text is drawn from the tree the server read it into and is parsed nowhere, in the
+ * worker or on the page, whatever its length, so a body of 32,000 characters reaches this
+ * callback with nothing having gone to the worker at all. Source length no longer tracks what a
+ * paint weighs in either direction: 30,000 characters of one paragraph are two nodes in the
+ * page, and 2,100 characters of a list are more than a thousand.
+ *
+ * What a paint costs is the nodes it attaches, and the style and layout the engine pays for them
+ * afterwards, a batch at a time (`ATTACH_BATCH`). So the decision counts the document's own
+ * nodes, which is the only measure of that this callback holds, and counts no further than one
+ * batch: a document that fits in a batch reaches the page in a single task whether it is sliced
+ * or not, and slicing it would only mark it pending and keep a reader's place across a paint
+ * that never grows the page under them. Each node of the document draws at least one node in
+ * the page, so the count is a floor under what the attach will put there.
+ */
+function paintsAcrossTasks(parsed: ProseMirrorNode): boolean {
+  return nodesInDocument(parsed, ATTACH_BATCH + 1) > ATTACH_BATCH;
+}
 
 /** What a sliced paint tells its caller as it runs: `beforeBatch` opens each task, before the
  *  work of it reaches the element; `afterPageBatch` ends a task that stopped on a piece which
@@ -204,8 +251,9 @@ export interface RenderedMarkdownOptions {
   onRendered?: () => void;
   /** The parse policy (`SoftBreaks`): `space`, the default, or `line`. */
   softBreaks?: SoftBreaks;
-  /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed;
-   *  without one such a body is painted in one go, as every other body is. */
+  /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body of more nodes than one task
+   *  puts into the page (`paintsAcrossTasks`); without one such a body is painted in one go, as
+   *  every other body is. */
   paintInSlices?: PaintMarkdownInSlices;
 }
 
@@ -376,13 +424,15 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * `use-follow-latest.ts` about itself (`onMarkdownLatePaint`), which places the reader again
  * where Jump to latest had placed them at the turn that just formatted.
  *
- * A body the parse worker parsed, where the surface gave a `paintInSlices`, is built a piece at
- * a time and put into the page a batch at a time: each task does at most `SLICE_MS` of off-page
- * work, and ends at once on a piece that reached the page (`SliceYield`), so neither the
- * building of the 16,000 elements of an 8,000-item list nor the engine's styling and layout of
- * them ever falls into one task. The reader sees the body fill where their own text was, over
- * those tasks. The element is marked pending until the last piece - a body served from the
- * engine's answer cache on a fresh mount is sliced without ever having waited for the worker,
+ * A body of more nodes than one task puts into the page (`paintsAcrossTasks`), where the surface
+ * gave a `paintInSlices`, is built a piece at a time and put into the page a batch at a time:
+ * each task does at most `SLICE_MS` of off-page work, and ends at once on a piece that reached
+ * the page (`SliceYield`), so neither the building of the 16,000 elements of an 8,000-item list
+ * nor the engine's styling and layout of them ever falls into one task. The reader sees the body
+ * fill over those tasks - where their own text was for a body the worker parsed, and from
+ * nothing for a stored one, which is drawn from its tree and was never shown as text. The
+ * element is marked pending until the last piece - a body served from the engine's answer cache
+ * on a fresh mount is sliced without ever having waited for the worker, as every stored body is,
  * and is marked all the same, since between the tasks it holds part of a body and nothing says
  * so otherwise - and the ask hosts, the anchors, the pictures, the diagrams and `onRendered`
  * all wait for it, so no portal is mounted into a body still being built. A frame arriving mid
@@ -396,8 +446,8 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * a repaint of the source the element already shows - a new decision card, a new `decorate`
  * pass - lands in the commit that asked for it, so everything mounted into the paint the reader
  * is reading moves to the new one with it. A source that differs from the one painted is sliced
- * however much the element already holds, so an edit of a long comment, and a streamed turn
- * that crossed the threshold after a short paint, never land in one task.
+ * however much the element already holds, so an edit of a long comment, and a streamed turn that
+ * grew past a batch after a short paint, never land in one task.
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
@@ -509,14 +559,10 @@ export function useRenderedMarkdown(
         // cards, the links and the pictures mounted into the paint the reader is reading move to
         // the new one with it rather than a few tasks later. It is the source that decides, not
         // merely whether anything is painted: an edit of a long comment, and a streamed turn
-        // that crossed the threshold after a short paint, are each a different source and each
+        // that grew past a batch after a short paint, are each a different source and each
         // 16,000 elements, which one `replaceChildren` of holds WebKit's thread for about a
-        // second (`MarkdownBody.tsx`, `ATTACH_BATCH`) (sjawhar/legion#2519).
+        // second (`ATTACH_BATCH`) (sjawhar/legion#2519).
         const first = painted.current !== markdown;
-        const inSlices =
-          paintInSlices !== undefined && parsesInTheWorker(markdown) && first
-            ? paintInSlices
-            : undefined;
         let place: ReadersPlace | undefined;
         // Everything a surface reads from the element, once the whole body is in it.
         const finish = (): void => {
@@ -556,11 +602,18 @@ export function useRenderedMarkdown(
         // A paint of an older frame can land after a refused one, and what the element holds
         // then is formatted, whatever the frame before it was.
         setIsFallback(false);
+        // Whether this paint is built and attached across tasks, which the document it will put
+        // into the page decides (`paintsAcrossTasks`), not the source the parse worker's own
+        // rule reads.
+        const inSlices =
+          paintInSlices !== undefined && first && paintsAcrossTasks(parsed)
+            ? paintInSlices
+            : undefined;
         // Where the reader is, watched for the whole paint, slices and all, and only for the
         // paint that lands after its own commit and grows the element under them: one that
         // replaces a pending element, and one built in slices, which a body served from the
         // engine's cache on a fresh mount is without ever having been pending. A paint that is
-        // neither - every body parsed on the page's own thread - measures nothing, so a short
+        // neither - every body that reaches the page in one task - measures nothing, so a short
         // body never lays the page out in this effect.
         if (replacesPending || inSlices !== undefined) {
           place = keepTheReadersPlace(element);

@@ -1466,9 +1466,8 @@ describe("A long body parsed in the worker", () => {
 
   // Every edit of a long comment, and a streamed turn that crossed the threshold after a short
   // paint, is a source the element does not hold - and 16,000 elements of it. Put in with one
-  // `replaceChildren` that is 918-971 ms of WebKit's thread (`MarkdownBody.tsx`, `ATTACH_BATCH`),
-  // so what decides is the source, not whether anything is painted here already
-  // (sjawhar/legion#2519).
+  // `replaceChildren` that is 918-971 ms of WebKit's thread (`ATTACH_BATCH`), so what decides is
+  // the source, not whether anything is painted here already (sjawhar/legion#2519).
   test("slices the paint of a changed source into a body it already shows formatted", async () => {
     const worker = installFakeParseWorker();
     const first = paragraphBody("A long comment before its edit");

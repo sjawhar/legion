@@ -4,7 +4,12 @@ import { type ReactNode, useRef } from "react";
 import type { DisplayTree } from "../../api/types";
 import { type MarkdownEngine, markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
-import { type PaintMarkdown, type SliceYield, useRenderedMarkdown } from "./useRenderedMarkdown";
+import {
+  ATTACH_BATCH,
+  type PaintMarkdown,
+  type SliceYield,
+  useRenderedMarkdown,
+} from "./useRenderedMarkdown";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
  * every textblock after it, joined with a single space - see `flattenInline`. */
@@ -138,19 +143,6 @@ function* appendNode(
   }
 }
 
-/**
- * How many nodes of the built body one task puts into the page. What an engine spends on a batch
- * is the style and layout of what has just arrived, in the rendering update after that task, so
- * the batch is what one such pass costs. Measured on this pod against the dashboard's own
- * stylesheet (sjawhar/legion#2519), an 8,000-item list: put in with one `replaceChildren` the
- * thread runs no task for 918-971 ms in WebKit, 211 ms in Chromium and 173 ms in Firefox; put in
- * 500 nodes at a time, 72 ms, 124 ms and 39 ms, because each engine then lays out only the items
- * of the batch. WebKit is why the batch exists at all: it spends ~700 ms on a pass over 16,000
- * freshly attached nodes whether their boxes are laid out or skipped, so nothing but splitting
- * the attach brings it under the second a reader may wait.
- */
-const ATTACH_BATCH = 500;
-
 /** How many nodes `node` holds, itself included, counted no further than `limit`: a subtree
  *  bigger than a batch answers `limit` or a little more, which is all a batch needs to know. */
 function nodeCount(node: Node, limit: number): number {
@@ -197,10 +189,10 @@ function* attachNode(parent: Node, node: Node, batch: { left: number }): Generat
 }
 
 /**
- * `paintBlock`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed:
- * the 16,000 elements of an 8,000-item list are built across several tasks rather than in one,
- * and then put into the page a batch at a time (`ATTACH_BATCH`), so no single task holds the
- * reader's thread while the body lands.
+ * `paintBlock`, a piece at a time (`PaintMarkdownInSlices`), for a body of more nodes than one
+ * task puts into the page (`paintsAcrossTasks`): the 16,000 elements of an 8,000-item list are
+ * built across several tasks rather than in one, and then put into the page a batch at a time
+ * (`ATTACH_BATCH`), so no single task holds the reader's thread while the body lands.
  *
  * The build is off the page, exactly as `paintBlock` serializes a body off the page: a tree
  * built in the page would be styled and laid out again for every piece, and everything watching
@@ -272,12 +264,12 @@ function* paintBlockInSlices(
  * layout phase of the commit that mounts it (`useRenderedMarkdown`); only the very first render
  * on a page, or a schema that failed to load, takes the asynchronous path. A longer body is
  * parsed off the page's own thread, so it holds its own text, marked `data-markdown-pending`,
- * until the parse worker answers (`markdown-engine.ts`), and the `block` variant then fills the
- * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
- * never reach the page in one task. A stored text waits for neither: its `tree` is drawn in the
- * commit that mounts it, however long it is, and a long one is still filled in a piece at a
- * time. A preview that must clamp its rendered line is `MarkdownPreview`, which draws the same
- * trees with the same engine.
+ * until the parse worker answers (`markdown-engine.ts`). A stored text waits for neither: its
+ * `tree` is drawn in the commit that mounts it, however long it is. Either way, the `block`
+ * variant fills the element a piece at a time (`paintBlockInSlices`) wherever the document holds
+ * more nodes than one task puts into the page (`paintsAcrossTasks`), so the 16,000 elements of
+ * an 8,000-item list never reach it in one task. A preview that must clamp its rendered line is
+ * `MarkdownPreview`, which draws the same trees with the same engine.
  */
 export function MarkdownBody({
   markdown,
