@@ -2,12 +2,15 @@ package secrets
 
 import "errors"
 
-// MintRequest is one release's input to a minter (GitHubApp.Mint, GoogleLogin.Mint): the secret's
-// stored value, and the policy's facts about it a minter needs. GitHubOwners is a github-app
-// secret's github-owners tag as lowercase logins; every other kind leaves it nil. GitHubNarrowing
-// is the narrowing a release asked for, nil for the owner-wide tokens; only the github-app minter
-// reads it.
+// MintRequest is one release's input to a minter: the secret's stored value, its name and
+// whether the policy snapshot checked for this release holds it as human tier. The Azure
+// minter requires that name to match its configured secret and HumanTier to be true.
+// GitHubOwners is a github-app secret's github-owners tag as lowercase logins; every other
+// kind leaves it nil. GitHubNarrowing is the narrowing a release asked for, nil for the
+// owner-wide tokens; only the github-app minter reads it.
 type MintRequest struct {
+	Name            string
+	HumanTier       bool
 	Value           string
 	GitHubOwners    []string
 	GitHubNarrowing *GitHubNarrowing
@@ -40,17 +43,17 @@ type GitHubNarrowing struct {
 // cannot be released or revoked.
 const MaxNarrowedRepositories = 100
 
-// The classes of a minter's failure (GitHubApp.Mint, GoogleLogin.Mint). Every error a minter
-// returns wraps exactly one, so the broker's log names the class an operator acts on without
-// reading the message, which never holds the stored value or a token.
+// The classes of a minter's failure. Every error a minter returns wraps exactly one, so the
+// broker's log names the class an operator acts on without reading the message, which never
+// holds the stored value or a token.
 var (
 	// ErrMintStoredValue: the secret's stored value cannot be minted from (it does not decode, its
 	// key does not parse, it names no App id). Its owner stores a new value.
 	ErrMintStoredValue = errors.New("the stored value cannot be minted from")
-	// ErrMintRefused: GitHub or Google answered and refused (a 4xx other than GitHub's 422 to a
-	// narrowed token, a Google login that needs a new sign-in, an App with no installation on a
-	// listed account). Its owner fixes the App or signs in again. A refusal of the narrowing a
-	// release asked for is ErrMintNarrowingRefused, the caller's to fix.
+	// ErrMintRefused: the minter refuses the release (an Azure login that is not the configured
+	// human-tier secret), or GitHub or Google refused (a 4xx other than GitHub's 422 to a narrowed
+	// token, a Google login that needs a new sign-in, an App with no installation on a listed
+	// account). A refusal of the narrowing a release asked for is ErrMintNarrowingRefused.
 	ErrMintRefused = errors.New("the upstream refused the mint")
 	// ErrMintNarrowingRefused: the narrowing the release asked for cannot be served: it names an
 	// account the secret's github-owners tag does not list, which requests.Machine.Values refuses
@@ -61,8 +64,9 @@ var (
 	ErrMintNarrowingRefused = errors.New("the narrowing cannot be served")
 	// ErrMintUpstream: GitHub or Google could not be asked or answered no usable reply (the network,
 	// a 5xx, a rate limit, a body past its cap or one that does not decode, a token GitHub describes
-	// as wider than the narrowing asked, which GitHubApp.Mint revokes at GitHub before it refuses).
-	// The broker's operator looks at egress and the upstream's status.
+	// as wider than the narrowing asked, which GitHubApp.Mint revokes at GitHub before it refuses),
+	// or the broker's Azure projected token is unreadable, malformed or expired.
+	// The broker's operator looks at the projected volume, egress and the upstream's status.
 	ErrMintUpstream = errors.New("the upstream could not be asked")
 )
 

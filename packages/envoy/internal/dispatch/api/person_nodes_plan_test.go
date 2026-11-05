@@ -22,13 +22,22 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 		select md5(n::text)::uuid, 'VOL-1', jsonb_build_object('kind', 'user', 'id', case when n % 1000 = 0 then 'alice' else 'user-' || (n % 1000)::text end), 'Volume comment'
 		from generate_series(1, 20000) n;
 		insert into comments (issue_key, author, body)
-		values ('VOL-1', '{"kind":"session","id":"s-owned","owner":"alice"}', 'An owned session');
+		values ('VOL-1', '{"kind":"session","id":"s-owned","owner":"alice","session_verified":true}', 'An owned session');
 		insert into events (issue_key, seq, type, actor, notify, payload, published_destinations)
 		select 'VOL-1', n, 'comment.created', '{"kind":"user","id":"sender"}', true,
 		       jsonb_build_object('id', md5((1 + (n - 1) % 20000)::text)::uuid::text),
 		       array[case when n % 1000 = 1 then 'notifications.agent.s-owned' else 'notifications.agent.other' end]
 		from generate_series(1, 100000) n;
-		analyze comments; analyze events;
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state)
+		select md5(n::text)::uuid, 'session:other', 1, 'aside', 'other', 'sent'
+		from generate_series(1, 20000) n;
+		insert into messages (id, issue_key, author, body)
+		select md5('message' || n::text)::uuid, 'VOL-1', '{"kind":"user","id":"bulk-sender"}', 'Volume message'
+		from generate_series(1, 20000) n;
+		insert into message_deliveries (message_id, attempt, delivery, session_id, state)
+		select md5('message' || n::text)::uuid, 1, 'aside', 'other', 'sent'
+		from generate_series(1, 20000) n;
+		analyze comments; analyze events; analyze messages; analyze message_deliveries; analyze comment_deliveries;
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +45,8 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 		name, sql string
 		args      []any
 	}{
-		{"person", personNodesQuery, []any{"alice", 50, 0}},
+		{"person", personNodesQuery, []any{"alice", 50, 0, time.Now().Add(-30*24*time.Hour), []string{"s-owned"}}},
+		{"person-aliases", personAliasesQuery, []any{"alice"}},
 		{"existing-point-read", `select * from graph_edges where from_kind = 'comment' and from_id = $1`, []any{"c4ca4238-a0b9-2382-0dcc-509a6f75849b"}},
 	} {
 		t.Run(query.name, func(t *testing.T) {
@@ -55,7 +65,10 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 			if len(plans) != 1 {
 				t.Fatalf("unexpected EXPLAIN: %s", raw)
 			}
-			t.Logf("20001 comments, 100000 recorded events: planning %.3f ms, execution %.3f ms", plans[0].PlanningTime, plans[0].ExecutionTime)
+			t.Logf("20001 comments, 20000 messages, 100000 recorded events, 20000 attempts per delivery table: planning %.3f ms, execution %.3f ms", plans[0].PlanningTime, plans[0].ExecutionTime)
+			if strings.HasPrefix(query.name, "person") && (plans[0].PlanningTime > 50 || plans[0].ExecutionTime > 200) {
+				t.Errorf("person graph exceeds its 50 ms planning / 200 ms execution budget")
+			}
 			var walk func(map[string]any)
 			walk = func(plan map[string]any) {
 				kind, _ := plan["Node Type"].(string)
@@ -64,8 +77,8 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 				if relation != "" {
 					t.Logf("%s %s %s", kind, relation, index)
 				}
-				if query.name == "existing-point-read" && strings.Contains(kind, "Seq Scan") && (relation == "events" || relation == "comments" || relation == "messages") {
-					t.Errorf("point graph read must not scan %s", relation)
+				if strings.Contains(kind, "Seq Scan") && (relation == "events" || relation == "comments" || relation == "messages" || (query.name == "person" && (relation == "comment_deliveries" || relation == "message_deliveries"))) {
+					t.Errorf("%s must not scan %s", query.name, relation)
 				}
 				children, _ := plan["Plans"].([]any)
 				for _, child := range children {
@@ -116,7 +129,7 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Checked != 20001 || report.Mismatched != 0 {
+	if report.Checked != 40001 || report.Mismatched != 0 {
 		t.Fatalf("volume census = %+v", report)
 	}
 	t.Logf("volume census: checked=%d by_kind=%v mismatched=%d missing=%v unexpected=%v", report.Checked, report.ByKind, report.Mismatched, report.Missing, report.Unexpected)

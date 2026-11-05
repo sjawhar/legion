@@ -42,7 +42,7 @@ the trailer.
   now, so a head with no check runs is this case, or a conflicting head
   (`docs/solutions/github/zero-check-runs-on-a-pushed-head-is-a-conflicting-head-not-a-trailer-pr2504.md`).
   Read the head commit's own check runs:
-  `gh api repos/sjawhar/legion/commits/<sha>/check-runs --jq '.total_count'`.
+  `gh api repos/cybermonklabs/legion/commits/<sha>/check-runs --jq '.total_count'`.
 
 ## What this adds to the pages already on the topic
 

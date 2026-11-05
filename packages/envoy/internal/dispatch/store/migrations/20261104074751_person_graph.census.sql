@@ -1,4 +1,4 @@
--- Creates person_aliases and graph_person_edges; graph_edges is unchanged.
--- Both are derived views: no existing table or view is altered, scanned, rewritten
--- or refused, and no stored row or index is created.
-select 0
+-- Creates derived views and expression/topic indexes without rewriting or refusing a row.
+-- Index builds read people, comments, messages, asks, events, issues and artifacts under SHARE;
+-- the migration census reports their sizes, row counts and competing locks.
+select 0;
