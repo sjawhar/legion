@@ -200,6 +200,8 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. Without `github` the listener opens no CI store and publishes no CI settlements. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when GitHub webhooks are enabled. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. |
+| `ENVOY_REVIEWER_APP_ID` | conditional | Required when GitHub webhooks are enabled; the App id whose check verdicts the listener records. |
+| `ENVOY_GITHUB_REPOSITORY_RENAMES` | no | Comma-separated `<former owner>/<name>=<current owner>/<name>` pairs, read when GitHub webhooks are enabled: each GitHub envelope of a pair's current repository is published a second time under its former name, the copy differing only in its topic, so a session that subscribed before the rename keeps hearing about the repository. One-way. Spell the former name as GitHub spelled it, capitals included: a NATS subject is compared with case, so another spelling addresses every copy to a subject nothing subscribes to, and the start-up line names each pair's copy subject prefix. A value it cannot read refuses startup naming the variable (`packages/envoy/AGENTS.md`). |
 | `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when Slack webhooks are enabled. |
 | `ENVOY_GHOSTWISPR_SIGNING_SECRET` | optional | Empty skips Ghost Wispr signature verification. |
 

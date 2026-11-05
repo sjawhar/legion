@@ -617,15 +617,21 @@ test("the live view shows an unread reply from outside the fifty most active con
     session
   );
   // Fifty conversations that moved after it, each answered, so the one above is the fifty-first.
-  for (let index = 0; index < 50; index += 1) {
-    const busier = await createAgentMessage(planner.session_id, {
-      body: `Busier question ${index}`,
-      delivery: "aside",
-    });
-    await replyToMessageDelivery(
-      busier.id,
-      { attempt: 1, body: `Busier answer ${index}` },
-      session
+  // Nothing reads the order of the fifty, so they go in bursts of ten.
+  for (let batch = 0; batch < 50; batch += 10) {
+    await Promise.all(
+      Array.from({ length: 10 }, async (_, offset) => {
+        const index = batch + offset;
+        const busier = await createAgentMessage(planner.session_id, {
+          body: `Busier question ${index}`,
+          delivery: "aside",
+        });
+        await replyToMessageDelivery(
+          busier.id,
+          { attempt: 1, body: `Busier answer ${index}` },
+          session
+        );
+      })
     );
   }
   const context = await asUser(browser, "alice");
@@ -634,7 +640,7 @@ test("the live view shows an unread reply from outside the fifty most active con
     await page.goto("/agents");
     await expect(page.getByText("New replies 51").filter({ visible: true }).first()).toBeVisible();
 
-    await page.goto(`/agents/${planner.session_id}/live`);
+    await navigateInApp(page, `/agents/${planner.session_id}/live`);
     await expect(page.getByTestId("agent-thread")).toContainText("Did the migration land?");
     await expect(page.getByText("No - it rolled back, here is why.")).toBeVisible();
     await expect(page.getByText(/^New repl/)).toHaveCount(0);
@@ -741,6 +747,9 @@ test("a session that has published nothing renders as empty, not as a conversati
   }
 });
 
+// SLOW(>=2s): the relay re-asks for a replay only on the server's own watch tick
+// (`agentStreamWatchInterval`, 10 s, `internal/dispatch/api/agent_stream.go`), which no test hook
+// shortens, so the recovery below cannot land sooner.
 test("a session nobody answers for is told so, and recovers when a responder appears", async ({
   browser,
 }) => {
@@ -1039,6 +1048,8 @@ test("a document-scrolling route is never capped for the keyboard, at mount or a
 // A reader who goes back into a live session's transcript is reading it, and a turn that arrives
 // while they are back there is news to come back to, not a reason to take the page away from
 // them. The control is how they come back, and what it counts is what they have not seen.
+// SLOW(>=2s): a forty-turn replay rebuilt into the live view, then eight live frames and a
+// message, with the thread's scroll measured after each.
 test("a reader scrolled back into a live session's transcript keeps their place, and Jump to latest carries what arrived @phone", async ({
   browser,
 }, testInfo) => {

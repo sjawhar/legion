@@ -93,7 +93,7 @@ func TestStatementTimings(t *testing.T) {
 
 	runner.Pair(t, "the issue's children",
 		benchtime.Statement{SQL: mainIssueChildrenQuery, Args: []any{subjects.Issue}},
-		benchtime.Statement{SQL: issueChildrenQuery, Args: []any{subjects.Issue}})
+		benchtime.Statement{SQL: issueChildrenStatement, Args: []any{subjects.Issue}})
 
 	// Which side these three readings are is the schema's answer, not the statement's: their
 	// text is the same on both databases, and what differs is whether the indexes a migration

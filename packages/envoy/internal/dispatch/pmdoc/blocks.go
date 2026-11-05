@@ -201,10 +201,19 @@ func tableIndexError(table *Node, axis, index, problem string) error {
 	}
 }
 
+// editTable is tableAt behind the validation an exported table edit pays for itself: it validates
+// doc (ValidateDocument), naming operation, and then reads the table.
 func editTable(doc *Node, blockID, operation string) ([]int, *Node, error) {
 	if _, err := ValidateDocument(doc, operation); err != nil {
 		return nil, nil, err
 	}
+	return tableAt(doc, blockID)
+}
+
+// tableAt is the path and the node of the table carrying blockID, over a tree its caller has
+// validated: a block the tree does not carry is ErrTargetNotFound, and one that is no table is
+// ErrSchema naming the type it is.
+func tableAt(doc *Node, blockID string) ([]int, *Node, error) {
 	path, _, ok := findBlock(doc, blockID)
 	if !ok {
 		return nil, nil, fmt.Errorf("%w: block %q", ErrTargetNotFound, blockID)
@@ -226,9 +235,23 @@ func TableIndexErrorFor(doc *Node, blockID, axis, index, problem string) error {
 	return tableIndexError(table, axis, index, problem)
 }
 
-// TableRowMarks returns the marks in the row a row deletion would remove.
+// TableRowMarks returns the marks in the row a row deletion would remove. It validates doc first
+// (ValidateDocument).
 func TableRowMarks(doc *Node, blockID string, index int) ([]MarkRef, error) {
-	_, table, err := editTable(doc, blockID, "TableRowMarks")
+	valid, err := ValidateDocument(doc, "TableRowMarks")
+	if err != nil {
+		return nil, err
+	}
+	return valid.TableRowMarks(blockID, index)
+}
+
+// TableRowMarks is TableRowMarks of d's tree without validating it again; the zero ValidDocument
+// wants a document.
+func (d ValidDocument) TableRowMarks(blockID string, index int) ([]MarkRef, error) {
+	if d.doc == nil {
+		return nil, wantsDocument("TableRowMarks")
+	}
+	_, table, err := tableAt(d.doc, blockID)
 	if err != nil {
 		return nil, err
 	}
@@ -242,9 +265,22 @@ func TableRowMarks(doc *Node, blockID string, index int) ([]MarkRef, error) {
 }
 
 // TableColumnMarks returns the marks in the cells a column deletion would
-// remove.
+// remove. It validates doc first (ValidateDocument).
 func TableColumnMarks(doc *Node, blockID string, index int) ([]MarkRef, error) {
-	_, table, err := editTable(doc, blockID, "TableColumnMarks")
+	valid, err := ValidateDocument(doc, "TableColumnMarks")
+	if err != nil {
+		return nil, err
+	}
+	return valid.TableColumnMarks(blockID, index)
+}
+
+// TableColumnMarks is TableColumnMarks of d's tree without validating it again; the zero
+// ValidDocument wants a document.
+func (d ValidDocument) TableColumnMarks(blockID string, index int) ([]MarkRef, error) {
+	if d.doc == nil {
+		return nil, wantsDocument("TableColumnMarks")
+	}
+	_, table, err := tableAt(d.doc, blockID)
 	if err != nil {
 		return nil, err
 	}
@@ -393,8 +429,23 @@ func padTable(table *Node, budget *WriteBudget) error {
 // the table carrying blockID. Row zero is the header; deleting it promotes the
 // first body row to the header so the table remains valid. A table's last body
 // row is refused so the table block survives.
+// It validates doc first (ValidateDocument).
 func DeleteTableRow(doc *Node, blockID string, index int) (*Node, error) {
-	path, table, err := editTable(doc, blockID, "DeleteTableRow")
+	valid, err := ValidateDocument(doc, "DeleteTableRow")
+	if err != nil {
+		return nil, err
+	}
+	return valid.DeleteTableRow(blockID, index)
+}
+
+// DeleteTableRow is DeleteTableRow of d's tree without validating it again; the zero
+// ValidDocument wants a document. The tree it returns is a new one, which it validates as
+// DeleteTableRow does.
+func (d ValidDocument) DeleteTableRow(blockID string, index int) (*Node, error) {
+	if d.doc == nil {
+		return nil, wantsDocument("DeleteTableRow")
+	}
+	path, table, err := tableAt(d.doc, blockID)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +456,7 @@ func DeleteTableRow(doc *Node, blockID string, index int) (*Node, error) {
 		return nil, tableIndexError(table, "row", strconv.Itoa(index), fmt.Sprintf("row index %d would remove the last remaining body row", index))
 	}
 
-	out := cloneNode(doc)
+	out := cloneNode(d.doc)
 	outTable := nodeAtPath(out, path)
 	children := make([]*Node, 0, len(outTable.Children)-1)
 	if index == 0 {
@@ -431,8 +482,23 @@ func DeleteTableRow(doc *Node, blockID string, index int) (*Node, error) {
 // the table carrying blockID. The column must exist in every row; this keeps a
 // ragged table intact rather than silently deleting cells from only some rows.
 // Removing a row's only cell is refused so the table block survives.
+// It validates doc first (ValidateDocument).
 func DeleteTableColumn(doc *Node, blockID string, index int) (*Node, error) {
-	path, table, err := editTable(doc, blockID, "DeleteTableColumn")
+	valid, err := ValidateDocument(doc, "DeleteTableColumn")
+	if err != nil {
+		return nil, err
+	}
+	return valid.DeleteTableColumn(blockID, index)
+}
+
+// DeleteTableColumn is DeleteTableColumn of d's tree without validating it again; the zero
+// ValidDocument wants a document. The tree it returns is a new one, which it validates as
+// DeleteTableColumn does.
+func (d ValidDocument) DeleteTableColumn(blockID string, index int) (*Node, error) {
+	if d.doc == nil {
+		return nil, wantsDocument("DeleteTableColumn")
+	}
+	path, table, err := tableAt(d.doc, blockID)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +514,7 @@ func DeleteTableColumn(doc *Node, blockID string, index int) (*Node, error) {
 		}
 	}
 
-	out := cloneNode(doc)
+	out := cloneNode(d.doc)
 	outTable := nodeAtPath(out, path)
 	for _, row := range outTable.Children {
 		row.Children = append(row.Children[:index:index], row.Children[index+1:]...)
@@ -577,10 +643,22 @@ func listItemRemoval(parent *Node, textblockPath []int) (removePath []int, hoist
 // target, the boundary a block insert uses. An empty target at the document
 // start or end selects that edge. A target inside the moved block is
 // ErrMoveInsideItself; a block that cannot stand at document level is ErrSchema.
+// It validates doc first (ValidateDocument).
 func MoveBlock(doc *Node, blockID string, target Range, after bool) (*Node, error) {
-	if _, err := ValidateDocument(doc, "MoveBlock"); err != nil {
+	valid, err := ValidateDocument(doc, "MoveBlock")
+	if err != nil {
 		return nil, err
 	}
+	return valid.MoveBlock(blockID, target, after)
+}
+
+// MoveBlock is MoveBlock of d's tree without validating it again; the zero ValidDocument wants a
+// document. The tree it returns is a new one, which it validates as MoveBlock does.
+func (d ValidDocument) MoveBlock(blockID string, target Range, after bool) (*Node, error) {
+	if d.doc == nil {
+		return nil, wantsDocument("MoveBlock")
+	}
+	doc := d.doc
 	path, moved, ok := findBlock(doc, blockID)
 	if !ok {
 		return nil, fmt.Errorf("%w: block %q", ErrTargetNotFound, blockID)

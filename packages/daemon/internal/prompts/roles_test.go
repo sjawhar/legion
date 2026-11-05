@@ -259,6 +259,31 @@ func TestNoPartSaysLegionNeverMerges(t *testing.T) {
 	}
 }
 
+// A release of an idle issue pod ends every role process in it and keeps each role's session, its
+// phase and its pending task (supervise.SuspendedByReleased), and the next task, message or CI
+// settlement for one of its roles brings the pod back. So a part that says a role, a process or a
+// session stays live from its first assignment until its issue closes or leaves the workflow, or
+// that a waiting role is not suspended, says what the daemon no longer does, and an agent that
+// reads it treats a pod that went as news about its issue. Four of these sentences cross a line
+// break in their part, so the match runs over a body whose whitespace is collapsed to one space,
+// and the needle is a pattern rather than the sentences spelled out, so a grep for one of them
+// over this directory finds only prompt text.
+func TestNoPartSaysARoleStaysLiveUntilItsIssueEnds(t *testing.T) {
+	saysARoleStaysLive := regexp.MustCompile(`(?i)stays? live,? (from|until|only|as)|idle and not suspended`)
+	whitespace := regexp.MustCompile(`\s+`)
+	for dir, parts := range map[string]embed.FS{"roles": roleParts, "go": goParts} {
+		err := eachPart(parts, dir, func(name string, body []byte) error {
+			if phrase := saysARoleStaysLive.Find(whitespace.ReplaceAll(body, []byte(" "))); phrase != nil {
+				t.Errorf("%s/%s says %q: a released pod's roles lose their processes and keep their sessions", dir, name, phrase)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("read the %s parts: %v", dir, err)
+		}
+	}
+}
+
 // Background work is on for every role: Legion writes no Oh My Pi settings overlay, so
 // a long bash call becomes a background job and a task subagent runs as one, and a role reads a
 // result with the `wait` tool. Nothing takes a turn away from a role either: a CI red
@@ -315,5 +340,41 @@ func TestNoPartKeepsItsWorkInTheForegroundAndEveryDispatchNamesWait(t *testing.T
 	want := []string{"go/claude-mechanics.md", "roles/implementer.md", "roles/planner.md"}
 	if !slices.Equal(dispatching, want) {
 		t.Errorf("the parts that dispatch a task subagent are %q, want %q", dispatching, want)
+	}
+}
+
+// dispatch://INFRA-332's four role-prompt rules, each pinned by the sentence that carries it. A
+// pin fails when a later edit deletes the rule; it does not show that an agent follows it, which
+// the issue's session runs measure. Each sentence sits in the core its role composes, so the rule
+// reaches that role and no other: the simplify pass and the class search are the implementer's,
+// the procedure and can-fail rules the tester's, the open-decision rule the planner's, and the
+// planner's WAITING line is phase mechanics, so it lives in its residue rather than its core.
+func TestEveryRolePartCarriesItsGuidanceRule(t *testing.T) {
+	for _, pin := range []struct{ file, rule string }{
+		// R1: the simplify pass covers every file of the diff and reports what it sees.
+		{"core/implementer.md", "Your behaviour-preserving simplify pass covers every file of the change"},
+		{"core/implementer.md", `"out of scope for this pass" is not a disposal`},
+		// R2: the tester runs the procedure, and records only checks that can fail.
+		{"core/tester.md", "A documented procedure is passed only by running it."},
+		{"core/tester.md", "Every check you record must be able to fail"},
+		// R3: after a fix or a forward merge, search the new head for each earlier finding's class.
+		{"core/implementer.md", "search the head you are about to push for the class of every finding of every earlier review round"},
+		{"core/tester.md", "An equal fingerprint still gets the class search"},
+		{"implementer.md", "`classSearch`, one entry per finding of every earlier review round"},
+		{"tester.md", "`classSearch`, one entry per finding of every earlier review round"},
+		// R4: the planner completes no phase with an open decision.
+		{"core/planner.md", "A decision only whoever owns the plan can make is never left open in the plan"},
+		{"core/planner.md", "do not complete the phase, and do not choose for them so the plan can be finished"},
+		{"core/planner.md", "An open decision in a finished plan is a gap the implementation inherits."},
+		{"planner.md", "end the turn with a line that begins WAITING, naming the decision"},
+	} {
+		if !strings.Contains(rolePart(t, pin.file), pin.rule) {
+			t.Errorf("%s does not contain %q", pin.file, pin.rule)
+		}
+	}
+	// The replaced sentence said the planner answers such a decision by naming it, which is what
+	// let a plan complete with four decisions open (dispatch://INFRA-206).
+	if strings.Contains(rolePart(t, "core/planner.md"), "and saying so is its answer") {
+		t.Error("core/planner.md still answers a decision its owner must make by naming it")
 	}
 }

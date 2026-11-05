@@ -25,6 +25,9 @@ The head the merger names is the head the reviewer approved.
   `docs/solutions/`, which no role writes any more, and a file under `.legion/` that GitHub lists
   as removed: the commit `legion handoffs import` makes, never one of yours. Since retro commits
   nothing, an ordinary head carries neither.
+- `READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own. Every one of them
+  sends the head back to review and none is an error to retry; the complete list, with each
+  remedy, is the merger's own role prompt part.
 
 Work on the existing issue branch: never rebase it onto another base, never make another branch or
 bookmark, and push nothing, because READY reads this branch's head and a push of yours would void

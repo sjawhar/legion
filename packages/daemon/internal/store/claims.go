@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,6 +43,49 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 // writes historical state in migrations and test fixtures.
 func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 	return putClaim(ctx, s.pool, c)
+}
+
+// PutClaimActivity writes the four activity columns of token's claim row and nothing else: what
+// that claim's session last reported of what it is doing (INFRA-945). The report is no part of
+// the claim's machine state — it arrives between a machine's writes, and the machine's in-memory
+// claim does not carry it — so one write of the whole row would erase every report sent since
+// that machine read its claim; the claim's own writes leave these columns alone, and the idle
+// rule reads them through its own view (IdleClaim).
+//
+// A report older than the one recorded is dropped rather than written: a session fires its
+// reports without an in-flight guard, so an earlier reading can land after a later one, and the
+// pod would then be released on a reading the session has already replaced. It answers whether
+// the store holds the claim at all, which a later report of a claim the daemon has forgotten
+// does not.
+//
+// The report's own clock is bounded to the daemon's, as the listener's is (decodeListenerWake):
+// the session chooses every field of what it sends, and one reading dated ahead of the daemon's
+// clock — a session whose host stepped its clock forward, corrected back afterwards — would
+// drop every honest report after it under that same ordering guard, while the stale reading it
+// left behind went on counting as current, background work and all.
+func (s *Store) PutClaimActivity(ctx context.Context, token claim.Token, a claim.SessionActivity) (bool, error) {
+	var reminder *time.Time
+	if a.Phase.NextReminderAt != nil && !a.Phase.NextReminderAt.IsZero() {
+		at := a.Phase.NextReminderAt.UTC()
+		reminder = &at
+	}
+	at := a.At.UTC()
+	if received := time.Now().UTC(); at.After(received) {
+		at = received
+	}
+	var known bool
+	err := s.pool.QueryRow(ctx, `with reported as (
+		update claims set activity_at = $2, activity_background = $3, activity_kinds = $4,
+			activity_next_reminder_at = $5, updated_at = now()
+		where token = $1 and (activity_at is null or activity_at <= $2) returning token)
+		select exists (select 1 from claims where token = $1)`,
+		string(token), at, a.BackgroundWork.Running,
+		strings.Join(a.BackgroundWork.Kinds, ","), reminder,
+	).Scan(&known)
+	if err != nil {
+		return false, fmt.Errorf("put the activity of claim %s: %w", token, err)
+	}
+	return known, nil
 }
 
 // putClaim writes a claim through whichever executor the caller has: the pool, or a transaction
@@ -103,6 +147,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		update_signalled_at = excluded.update_signalled_at, update_head = excluded.update_head,
 		update_told_at = excluded.update_told_at,
 		update_left_round = excluded.update_left_round,
+		-- The four activity columns are no part of a claim's write: PutClaimActivity owns them,
+		-- and a machine's write carries whatever its in-memory claim last read, so a report the
+		-- session sent since would be erased by the next state it persists.
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,

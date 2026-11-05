@@ -13,10 +13,10 @@ import (
 // A launch that keeps a drifted pod leaves out the shim's agent-secrets flags when the pod carries
 // neither the broker's token volume nor the role's key directory (launcherCommand, launch.enrolls),
 // so the role starts and runs without the broker until the update round replaces its pod. Its
-// environment must say the same thing. AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR are how an
-// agent decides whether it holds a broker at all — `skill://legion-worker` has it read exactly
-// those two before it reports a resource unreachable, and then run `agent-secrets <SECRET> -- …`
-// — and AGENT_SECRETS_KEY_DIR names /var/run/legion/agent-secrets, a directory the kept pod does
+// environment must say the same thing. AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR are how the
+// agent-secrets client finds a broker and the session's key — `skill://agent-secrets` has an agent
+// run the call through that client before it reports a resource unreachable — and
+// AGENT_SECRETS_KEY_DIR names /var/run/legion/agent-secrets, a directory the kept pod does
 // not mount.
 //
 // A role told it has a broker it has not, in a pod it cannot see is pending replacement, reads its
