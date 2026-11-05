@@ -3158,6 +3158,58 @@ test("a step out of a column held open over a hidden row drops the record, where
   }
 });
 
+test("a step that moves nothing in a column held open over a hidden row keeps the record", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+    inboxIssue("ask-c", "CORE-3", "Which owner?"),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { queryClient, unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+    // The same column as the test above: ask-a's unsent answer keeps its question here once the
+    // server withdraws its row, and the question stood above every row the list has left.
+    fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
+      target: { value: "Whichever the mirror already holds." },
+    });
+    served = rows.filter((row) => row.id !== "ask-a");
+    await act(async () => {
+      queryClient.setQueryData<AskRead>(["ask-thread", "ask-a"], retracted(rows[0]));
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    await waitFor(() => expect(rowIds()).toEqual(["ask-b", "ask-c"]));
+    expect(selectedIds()).toEqual([]);
+
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+    shortRow("ask-c").focus();
+    fireEvent.keyDown(shortRow("ask-c"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // `k` has no row to step to - the question the column keeps stood above both rows left - and
+    // no selected row to hand the focus back to, so the selection and the focus both stay
+    // exactly where they were. The reader has gone nowhere: they are still on the question they
+    // pressed `l` on, and the row the key recorded is the only way out the column has.
+    fireEvent.keyDown(scroller(), { key: "k" });
+    expect(selectedIds()).toEqual([]);
+    expect(document.activeElement).toBe(scroller());
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-c"));
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 test("Enter pressed inside the column belongs to the control holding it, and still leaves the list for the answer box", async () => {
   const narrow = widenToReadingPane();
   const rows = [

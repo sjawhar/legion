@@ -744,9 +744,14 @@ export function Inbox({
    *    the wrapper's `onBlur`, which covers every route out at once - `f` to the search box,
    *    Escape to the row, a Tab onto a row's checkbox, a click into the list, and the row a
    *    step out of the column focuses on its way.
-   *  - Dropped by a step out of the column that moves no focus: `move`, for the two steps no
-   *    blur fires for - a column held open over a hidden row has no selected row to take the
-   *    focus, and a step that unmounts the scroller leaves the focus nowhere.
+   *  - Dropped by a step that moves the selection while no row takes the focus: `move`, for the
+   *    one step no blur fires for - a column held open over a hidden row has no selected row to
+   *    hand the focus to, so the scroller keeps it - where the recorded row is a question the
+   *    reader has stepped off and Escape owes them the one the column is showing now.
+   *  - Kept through a step that moves nothing, which leaves the selection and the focus exactly
+   *    where they were: with no row to step to and none to take the focus the reader has gone
+   *    nowhere, so they are still on the question they pressed `l` on and the record is the
+   *    only way out the column has.
    *  - Kept through a window or tab blur, which reaches the handler naming no target while the
    *    reader has not moved at all and is still in the column.
    *  - Nothing else drops it: it is this component's ref, so it ends with the Inbox itself. */
@@ -787,15 +792,24 @@ export function Inbox({
    *  focus to `document.body` - where neither of Escape's branches holds and the key would do
    *  nothing. The reader then stands exactly where a click and then `j` leaves them today. */
   const move = (delta: 1 | -1) => {
-    if (paneShown && focusInPane()) {
-      // The record goes with the step out of the column. The row taking the focus blurs the
-      // scroller, and that blur drops it in the ordinary case; this covers the step that moves
-      // no focus for the blur to fire on - a column held open over a hidden row has no selected
-      // row to focus, and a step that unmounts the scroller focuses nothing either.
-      paneReturn.current = null;
+    const fromPane = paneShown && focusInPane();
+    // Read before the step and again after it, because only a step that moved the selection
+    // moved the reader: `paneSelection.step` selects synchronously, and `select` writes
+    // `selectedNow` as it goes, so these two reads are either side of the whole step.
+    const selectedBefore = paneSelection.selectedNow.current;
+    if (fromPane) {
       paneSelection.selectedRow()?.focus();
     }
     stepInMode(delta);
+    // The record goes with the step that carried the reader off the question they pressed `l`
+    // on. The row taking the focus blurs the scroller, and that blur drops it in the ordinary
+    // case; this covers the step no blur fires for - a column held open over a hidden row has
+    // no selected row to hand the focus to, so the scroller keeps it. A step that found no row
+    // to step to moved neither the selection nor the focus, and there the reader is still on
+    // the recorded question, which is the only row Escape has to return them to.
+    if (fromPane && paneSelection.selectedNow.current !== selectedBefore) {
+      paneReturn.current = null;
+    }
   };
   /** What the keys act on, for the bindings' labels: the row the column is showing, or the row
    *  holding the focus. */
