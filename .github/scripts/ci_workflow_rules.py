@@ -249,17 +249,20 @@ def check_workspace_table(workspaces: list, problems: list) -> None:
     to have its typecheck and its tests run nowhere. The other way round is a read every Bun job
     declares of a manifest no install reads. The table is an argument because main() holds it
     already, and because nothing here imports ci_job_reads: the engine's names are all this
-    module takes. A tree with no root manifest has no workspaces to hold, as one with
-    no ci-caches.yaml has no cache round trip.
+    module takes.
 
     The manifest is read as .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it,
     since the two checks are about the same list and a list one of them cannot read is not a list
-    the other may pass over: a manifest that is not valid JSON, and a `workspaces` that is not a
-    non-empty array of non-empty strings, are named rather than taken for an empty list, which
-    would hold the table to nothing. A trailing slash is stripped as that script strips it, since
-    `packages/x/` and `packages/x` are one workspace to bun and only one of the two spellings
-    could equal a table entry."""
+    the other may pass over: a root manifest that is missing or is not valid JSON, and a
+    `workspaces` that is not a non-empty array of non-empty strings, are named rather than taken
+    for an empty list, which would hold the table to nothing - and would do it exactly where
+    every read WORKSPACES feeds is wrong anyway, since a tree with no root manifest runs no
+    `bun install` the table could describe. A trailing slash is stripped as that script strips
+    it, since `packages/x/` and `packages/x` are one workspace to bun and only one of the two
+    spellings could equal a table entry."""
     if not (REPO / MANIFEST).is_file():
+        problems.append(f"::error file={MANIFEST}::the root manifest is missing, so {TABLE}'s WORKSPACES is held to "
+                        f"nothing while every read it gives each Bun job names a manifest this tree does not have")
         return
     try:
         manifest = json.loads((REPO / MANIFEST).read_text())

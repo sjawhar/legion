@@ -108,20 +108,21 @@
 #  14. a workspace of the root package.json that ci_job_reads.py's WORKSPACES does not name, or a
 #      WORKSPACES entry the root manifest does not list, naming the workspace. A frozen
 #      `bun install` reads every workspace manifest, so the table declares each of them a read of
-#      every Bun job and this check holds every filter gating such a job to all of them. A
-#      workspace missing from the table is therefore a manifest no filter has to select, and a
-#      change to that package starts no job at all: that is how packages/broker-client, a
-#      workspace of the root manifest from the day it was added, came to have its typecheck and
-#      its tests run in no job. The other way round is a read every Bun job declares of a
-#      manifest no install reads. The manifest is read as
+#      every Bun job and this check holds every filter gating such a job to all of them. What the
+#      rule prevents is exactly that: a workspace missing from the table is a manifest no filter
+#      has to select, so a change to it starts no job. It prevents nothing else, and
+#      packages/broker-client is the case that shows the difference - it was outside the table
+#      from the day it was added, and its own typecheck and tests ran in no job for a second
+#      reason no rule reads, that no step ran them. The other way round is a read every Bun job
+#      declares of a manifest no install reads. The manifest is read as
 #      .github/scripts/check-bun-workspace-manifests.sh:103-111 reads it: a package.json that is
-#      not valid JSON, and a `workspaces` that is not a non-empty array of non-empty strings, are
-#      named rather than taken for an empty list, and a trailing slash is stripped, since
-#      `packages/x/` and `packages/x` are one workspace to bun. A workspace's sources are another
-#      matter, which this rule says nothing about: a job can compile a package whose filter never
-#      selects it, which is why ci_job_reads.py's envoy_client_dep declares, in one place for
-#      every gate whose job compiles @legion/envoy-client, that it compiles
-#      @legion/broker-client with it.
+#      missing or is not valid JSON, and a `workspaces` that is not a non-empty array of
+#      non-empty strings, are named rather than taken for an empty list, and a trailing slash is
+#      stripped, since `packages/x/` and `packages/x` are one workspace to bun. A workspace's
+#      sources are another matter, which this rule says nothing about either: a job can compile a
+#      package whose filter never selects it, which is why ci_job_reads.py's envoy_client_dep
+#      declares, in one place for every gate whose job compiles @legion/envoy-client, that it
+#      compiles @legion/broker-client with it.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,
