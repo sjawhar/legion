@@ -1022,6 +1022,96 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 	})
 
+	// GitHub leaves a check suite's pull_requests list empty whenever it cannot resolve the pull
+	// request itself; the suite's head branch still carries the ref the pull request's head is
+	// fetched by, and attributes the observation.
+	suiteBody := func(suite map[string]any) map[string]any {
+		body := checkRunBody([]any{})
+		if suite != nil {
+			body["check_run"].(map[string]any)["check_suite"] = suite
+		}
+		return body
+	}
+
+	t.Run("check_run with no PR on a pull head ref is attributed by it", func(t *testing.T) {
+		obs := GithubCIObservations("check_run", suiteBody(map[string]any{
+			"id":          float64(900),
+			"head_branch": "refs/pull/42/head",
+		}))
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation, got %d", len(obs))
+		}
+		if o := obs[0]; o.Number != "42" || o.CheckName != "unit-tests" || o.SHA != "deadbeef" ||
+			o.CheckRunID != 987654321 || o.Conclusion != "failure" {
+			t.Fatalf("unexpected observation: %+v", o)
+		}
+	})
+
+	for _, head := range []struct {
+		name   string
+		branch string
+	}{
+		{name: "a zero number", branch: "refs/pull/0/head"},
+		{name: "a leading zero", branch: "refs/pull/007/head"},
+		{name: "a number that is not one", branch: "refs/pull/x/head"},
+		{name: "the merge ref", branch: "refs/pull/42/merge"},
+		{name: "the default branch", branch: "main"},
+		{name: "a topic branch", branch: "feature/x"},
+		{name: "a merge queue branch", branch: "gh-readonly-queue/main/pr-1-deadbeef"},
+		{name: "an empty head branch", branch: ""},
+	} {
+		t.Run("check_run with no PR on "+head.name+" yields nothing", func(t *testing.T) {
+			body := suiteBody(map[string]any{"id": float64(900), "head_branch": head.branch})
+			if obs := GithubCIObservations("check_run", body); len(obs) != 0 {
+				t.Fatalf("head branch %q yielded %+v", head.branch, obs)
+			}
+		})
+	}
+
+	t.Run("check_run with no PR and no check_suite yields nothing", func(t *testing.T) {
+		if obs := GithubCIObservations("check_run", suiteBody(nil)); len(obs) != 0 {
+			t.Fatalf("a run carrying no check suite yielded %+v", obs)
+		}
+	})
+
+	t.Run("check_suite with no PR on a pull head ref is attributed by it", func(t *testing.T) {
+		body := map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_suite": map[string]any{
+				"id":            float64(900),
+				"status":        "completed",
+				"conclusion":    "success",
+				"head_sha":      "deadbeef",
+				"head_branch":   "refs/pull/42/head",
+				"updated_at":    "2026-09-07T03:01:00Z",
+				"app":           map[string]any{"id": float64(12345)},
+				"pull_requests": []any{},
+			},
+		}
+		obs := GithubCIObservations("check_suite", body)
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation, got %d", len(obs))
+		}
+		if want := (CIObservation{
+			Owner:      "sjawhar",
+			Repo:       "legion",
+			Number:     "42",
+			SHA:        "deadbeef",
+			AppID:      "12345",
+			SuiteID:    "900",
+			Status:     "completed",
+			Conclusion: "success",
+			ObservedAt: "2026-09-07T03:01:00Z",
+		}); obs[0] != want {
+			t.Fatalf("suite observation = %+v, want %+v", obs[0], want)
+		}
+	})
+
 	t.Run("check_run missing head_sha yields nothing", func(t *testing.T) {
 		body := checkRunBody([]any{map[string]any{"number": 42}})
 		delete(body["check_run"].(map[string]any), "head_sha")
@@ -1067,6 +1157,102 @@ func TestGithubCIObservationsSkipMalformedCheckRunIDs(t *testing.T) {
 		}
 		if observations := GithubCIObservations("check_run", body); len(observations) != 0 {
 			t.Fatalf("check run ID %v yielded observations: %+v", checkRunID, observations)
+		}
+	}
+}
+
+// GitHub's REST listing GET /repos/{owner}/{repo}/commits/{sha}/check-runs returns each check run
+// outside any webhook body, with a short check_suite that carries no head_branch, so a caller
+// reading it names the pull request number itself and the mapper attributes nothing.
+func TestGithubCIObservationMapsARestListedCheckRun(t *testing.T) {
+	object := map[string]any{
+		"id":           float64(126934155799),
+		"name":         "ci-ok",
+		"status":       "completed",
+		"conclusion":   "failure",
+		"head_sha":     "deadbeef",
+		"html_url":     "https://example-host/checks/126934155799",
+		"started_at":   "2026-09-07T02:59:00Z",
+		"completed_at": "2026-09-07T03:00:00Z",
+		"app":          map[string]any{"id": float64(12345)},
+		"check_suite":  map[string]any{"id": float64(900)},
+	}
+	obs, ok := GithubCIObservation("check_run", object, "sjawhar", "legion", "42")
+	if !ok {
+		t.Fatalf("a listed check run mapped to nothing")
+	}
+	if want := (CIObservation{
+		Owner:      "sjawhar",
+		Repo:       "legion",
+		Number:     "42",
+		SHA:        "deadbeef",
+		AppID:      "12345",
+		CheckName:  "ci-ok",
+		CheckRunID: 126934155799,
+		URL:        "https://example-host/checks/126934155799",
+		Status:     "completed",
+		Conclusion: "failure",
+		ObservedAt: "2026-09-07T03:00:00Z",
+	}); obs != want {
+		t.Fatalf("observation = %+v, want %+v", obs, want)
+	}
+}
+
+// The mapper is the one rule behind every observation: the webhook's fan-out and a caller that
+// names the number itself record the same bytes for the same GitHub object.
+func TestGithubCIObservationAgreesWithTheWebhooksFanOut(t *testing.T) {
+	run := map[string]any{
+		"id":            float64(987654321),
+		"name":          "unit-tests",
+		"status":        "completed",
+		"conclusion":    "failure",
+		"head_sha":      "deadbeef",
+		"html_url":      "https://example-host/checks/987654321",
+		"completed_at":  "2026-09-07T03:00:00Z",
+		"app":           map[string]any{"id": float64(12345)},
+		"check_suite":   map[string]any{"id": float64(900), "head_branch": "refs/pull/42/head"},
+		"pull_requests": []any{map[string]any{"number": 42}},
+	}
+	body := map[string]any{
+		"action": "completed",
+		"repository": map[string]any{
+			"full_name": "sjawhar/legion",
+			"name":      "legion",
+			"owner":     map[string]any{"login": "sjawhar"},
+		},
+		"check_run": run,
+	}
+	fanned := GithubCIObservations("check_run", body)
+	if len(fanned) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(fanned))
+	}
+	mapped, ok := GithubCIObservation("check_run", run, "sjawhar", "legion", "42")
+	if !ok || mapped != fanned[0] {
+		t.Fatalf("mapped = %+v (ok=%v), webhook fan-out = %+v", mapped, ok, fanned[0])
+	}
+}
+
+// The reviewer rule decides one check run by its name and the App that created it; the handler
+// that drops a verdict logs what it dropped.
+func TestReviewerVerdictDecision(t *testing.T) {
+	for _, c := range []struct {
+		checkName     string
+		appID         string
+		reviewerAppID string
+		want          ReviewerVerdict
+	}{
+		{checkName: "unit-tests", appID: "98765", reviewerAppID: "12345", want: VerdictNotAVerdict},
+		{checkName: "unit-tests", appID: "98765", reviewerAppID: "", want: VerdictNotAVerdict},
+		{checkName: "tester", appID: "12345", reviewerAppID: "", want: VerdictNoReviewerApp},
+		{checkName: "architect", appID: "12345", reviewerAppID: "", want: VerdictNoReviewerApp},
+		{checkName: "tester", appID: "98765", reviewerAppID: "12345", want: VerdictUntrusted},
+		{checkName: "architect", appID: "", reviewerAppID: "12345", want: VerdictUntrusted},
+		{checkName: "tester", appID: "12345", reviewerAppID: "12345", want: VerdictTrusted},
+		{checkName: "architect", appID: "12345", reviewerAppID: "12345", want: VerdictTrusted},
+	} {
+		if got := ReviewerVerdictDecision(c.checkName, c.appID, c.reviewerAppID); got != c.want {
+			t.Errorf("ReviewerVerdictDecision(%q, %q, %q) = %d, want %d",
+				c.checkName, c.appID, c.reviewerAppID, got, c.want)
 		}
 	}
 }

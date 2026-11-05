@@ -34,6 +34,13 @@ export function inboxPane(page: Page): Locator {
   return page.getByTestId("inbox-pane");
 }
 
+/** The pane's one scroller, inside it: every flow draws what it shows in this box, and it is the
+ *  focus stop the keyboard reaches - `l` hands it the focus, and Escape gives it back to the
+ *  row. It is there wherever the reading column is, and nowhere else. */
+export function paneScroller(page: Page): Locator {
+  return inboxPane(page).getByTestId("inbox-pane-scroller");
+}
+
 /** One question's row, at either width. */
 export function inboxRow(page: Page, askId: string): Locator {
   return page.locator(`[data-inbox-row="${askId}"]`);

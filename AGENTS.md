@@ -878,6 +878,7 @@ READY compares the review round's recorded approved head with READY's head on Gi
 also a compare GitHub may have cut at its 300 files or that gives no file list, a head not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to review.
 The merger sends its `READY` packet with its completion;
 the daemon posts it on the Dispatch issue and, when the project's `projects.<KEY>.merge_queue_role` names one, publishes it to that role.
+A message the daemon posts carries no length of its own: Dispatch holds each block of a body to its own bound, and a message Dispatch refuses the way it would refuse every attempt is dropped and told to the issue's architect once (`message-refused`), naming the issue, how long the message was, its first line and Dispatch's own answer, since a message is the daemon's only word on the issue for what it carries.
 A project may configure `projects.<KEY>.merge.by_hand` regular-expression paths:
 a matching pull request completes READY without auto-arming, the daemon tells that READY with its `MANUAL_MERGE_REQUIRED:` note at the head of the packet and the packet's `Merge:` line replaced, so neither the issue nor that role is asked to arm it, and the repository's authorized person merges it.
 A by-hand READY refuses `READY_DISARM_PENDING` while an earlier auto-merge disarm for that pull request remains unfinished:

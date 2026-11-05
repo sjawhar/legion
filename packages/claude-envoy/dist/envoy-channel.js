@@ -36336,7 +36336,9 @@ var ArtifactReviewEventPayloadSchema = object({
   version: number2().int().optional(),
   actor: object({ kind: string2(), id: string2() }).passthrough().optional(),
   reason: string2().nullish(),
-  ask_id: string2().nullish()
+  ask_id: string2().nullish(),
+  content_sha256: string2().optional(),
+  content_sha256_source: _enum2(["insert", "backfill"]).optional()
 });
 var askEventPayloadFields = {
   id: string2().optional(),
@@ -36425,6 +36427,8 @@ var CommentEventPayloadSchema = object({
   project_key: string2().optional(),
   artifact_slug: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   reply_to: string2().nullish(),
   ask_id: string2().nullish(),
   ask_question: string2().optional(),
@@ -36450,6 +36454,8 @@ var CommentEventPayloadSchema = object({
 var MessageEventPayloadSchema = object({
   id: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   target: string2().nullish(),
   in_reply_to: string2().nullish(),
   reply_body: string2().optional(),
@@ -36772,12 +36778,14 @@ function componentsArgument(z) {
   }).describe("Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose.");
 }
 var SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
-function imagesArgument(z, owner, cap) {
-  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
+function imagesArgument(z, owner) {
+  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward the bound Dispatch holds the text to, which it names in its refusal.`).optional();
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
-var ASK_QUESTION_MAX = 2000;
-var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_BLOCK_UNITS = 32000;
+var DISPATCH_ITEM_BLOCKS = 32768;
+var BODY_BLOCK_RULE = `Each block (a paragraph, list, quote, table or code block) holds at most ${DISPATCH_BLOCK_UNITS} ` + `characters and a body at most ${DISPATCH_ITEM_BLOCKS} blocks; Dispatch refuses a longer one and ` + "names it, and `dispatch limits` prints the bounds.";
+var ASK_BOUND_RULE = "Dispatch bounds an ask's question and its options together, refuses a longer one and names " + "the bound, and `dispatch limits` prints it. An ask is short and asks one thing; its reasoning " + "goes in the document, not in the question.";
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
@@ -36796,16 +36804,12 @@ function handoffProblem(value) {
     return HANDOFF_PHASE_RULE;
   if (typeof body !== "string")
     return;
-  const bytes = new TextEncoder().encode(body).length;
-  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
-    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
-  }
   if (!isJsonObjectText(body)) {
     return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
   }
   return;
 }
-var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object.`;
 var handoffValidation = {
   check: (value) => handoffProblem(value) === undefined,
   message: HANDOFF_RULE,
@@ -36870,7 +36874,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
-      reason: z.string({ max: DISPATCH_BODY_MAX }).describe(`Required with status done, and only with it: why the issue is closing, at most ${DISPATCH_BODY_MAX} characters. Posted on the issue as a message before it closes.`).optional(),
+      reason: z.string().describe(`Required with status done, and only with it: why the issue is closing. Posted on the issue as a message before it closes. ${BODY_BLOCK_RULE}`).optional(),
       title: z.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z.array(z.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
@@ -36916,13 +36920,13 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. ${ASK_BOUND_RULE} The lines images appends count ` + `toward that bound, and an ask has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().describe(`${ASK_QUESTION_CONTRACT} ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -36934,7 +36938,7 @@ var dispatchToolSpecs = [
         quote: z.string().describe("Exact text the decision concerns."),
         occurrence: z.number({ int: true, min: 0 }).describe("Zero-based occurrence of the quote.").optional()
       }).describe("Optional document location for the question.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${ASK_QUESTION_MAX}-character question limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -36957,7 +36961,7 @@ var dispatchToolSpecs = [
     description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z) => ({
       ask: z.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question. ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -37009,7 +37013,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. ${BODY_BLOCK_RULE} The lines images appends count toward it. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37017,11 +37021,11 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Review comment. ${BODY_BLOCK_RULE}`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: commentValidation
   },
@@ -37033,7 +37037,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most ${DISPATCH_BODY_MAX} characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. ${BODY_BLOCK_RULE} ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37041,7 +37045,7 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text; a CR LF or a lone carriage return in it is written as a line feed."),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Optional rationale, at most ${DISPATCH_BODY_MAX} characters.`).optional(),
+      body: z.string().describe(`Optional rationale. ${BODY_BLOCK_RULE}`).optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional()
     }),
     validation: documentOwnerValidation(true, true)
@@ -37049,12 +37053,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `${BODY_BLOCK_RULE} The lines images appends count toward it. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Update text. ${BODY_BLOCK_RULE}`),
       in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
-      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)")
     }),
     validation: messageValidation
   },
@@ -37189,7 +37193,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "A comment reply chain names the comment each nested reply answers as `Answers: <comment id>`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37313,6 +37317,13 @@ var dispatchToolSpecs = [
     name: "dispatch_whoami",
     example: {},
     description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token and under a broker token that names a service and no person. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or the fleet a broker token naming no person belongs to, or null. A broker token that names a service may read and is refused every write with SIGN_IN_REQUIRED, which names the command a person signs in on that machine with. project is the one project key your credential may write, or null when it names none.",
+    arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_limits",
+    example: {},
+    description: "The bounds this Dispatch server holds a write to, read from the server itself: how long one block of a body may be and how many blocks a body may hold, how many options an ask may have and how long an ask's question and options are together, how long a body an event carries whole may be, and how many bytes a request, a document and a handoff body may hold. Dispatch refuses a text over a bound and names the block or the field it passed; no tool and no command cuts or refuses your text before the server reads it, so these numbers are what decides whether a write is taken.",
     arguments: () => ({}),
     strict: true
   },
@@ -41758,6 +41769,9 @@ class DispatchClient {
   async whoami() {
     return this.#json("GET", ["api", "v1", "whoami"]);
   }
+  async limits() {
+    return this.#json("GET", ["api", "v1", "limits"]);
+  }
   async inbox(assignee) {
     return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
   }
@@ -42722,6 +42736,40 @@ function eventPictures(event) {
   }
   return typeof text === "string" ? pictureAddresses(text) : [];
 }
+function carriedItem(event) {
+  const resource = event.type.startsWith("comment.") || event.type.startsWith("suggestion.") ? "comment" : event.type.startsWith("message.") ? "message" : undefined;
+  if (resource === undefined || !isObject3(event.payload))
+    return;
+  const id = event.payload["id"];
+  if (typeof id !== "string" || id === "")
+    return;
+  return { resource, id, issueKey: event.issue_key };
+}
+function bodyWasCut(payload) {
+  return isObject3(payload) && (payload["body_truncated"] === true || payload["payload_omitted"] === true);
+}
+function wholeItemRoute(item) {
+  return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
+}
+function carriedBodyNote(event) {
+  if (!bodyWasCut(event.payload))
+    return;
+  const what = isObject3(event.payload) && event.payload["payload_omitted"] === true ? "this event carries no body: it was too large for the bus" : "the body is its first part only";
+  const item = carriedItem(event);
+  return item === undefined ? what : `${what}; read it whole with ${wholeItemRoute(item)}`;
+}
+async function wholeCarriedBody(client, item, session) {
+  try {
+    if (item.resource === "comment") {
+      const read = await client.getComment(item.id);
+      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+    }
+    const read = item.issueKey === null ? session === undefined ? undefined : await client.getMessageThread(item.id, session) : await client.getMessage(item.issueKey, item.id);
+    return read === undefined ? undefined : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+  } catch {
+    return;
+  }
+}
 function senderLabel(envelope) {
   const sender = envelope.source_session ?? envelope.source ?? "unknown";
   return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
@@ -42927,7 +42975,13 @@ function dispatchReplyRef(event, topic, inReplyTo, comment) {
 function isObject3(value) {
   return typeof value === "object" && value !== null;
 }
-function parseDispatchFrame(rawPayload) {
+function withWholeBody(event, body) {
+  if (body === undefined || !isObject3(event.payload) || !bodyWasCut(event.payload))
+    return event;
+  const { body_truncated: _cut, payload_omitted: _omitted, ...carried } = event.payload;
+  return { ...event, payload: { ...carried, body } };
+}
+function parseDispatchFrame(rawPayload, wholeBody) {
   let value;
   try {
     value = JSON.parse(rawPayload);
@@ -42939,7 +42993,7 @@ function parseDispatchFrame(rawPayload) {
     if (targeted.success) {
       const wireFrame = value;
       return {
-        event: targeted.data.event,
+        event: withWholeBody(targeted.data.event, wholeBody),
         notify: wireFrame.event.notify,
         quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery
@@ -42973,7 +43027,7 @@ function parseDispatchFrame(rawPayload) {
     return { raw: value };
   const wireEvent = value;
   return {
-    event: parsed.data,
+    event: withWholeBody(parsed.data, wholeBody),
     notify: wireEvent.notify,
     quiet: wireEvent.quiet,
     delivery: undefined
@@ -42985,7 +43039,7 @@ function inboundTimestamp(milliseconds) {
   const date = new Date(Math.floor(milliseconds / 1000) * 1000);
   return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString().replace(".000Z", "Z");
 }
-function renderInbound(raw, sessionID, subject) {
+function renderInbound(raw, sessionID, subject, wholeBody) {
   let value;
   try {
     value = JSON.parse(raw);
@@ -43021,6 +43075,8 @@ function renderInbound(raw, sessionID, subject) {
   let rejectedDelivery;
   let malformedDelivery = false;
   let pictures = [];
+  let bodyNote;
+  let cutItem;
   let inReplyTo = envelope.in_reply_to;
   let askAuthor;
   let trailer = "";
@@ -43030,7 +43086,7 @@ function renderInbound(raw, sessionID, subject) {
     if (envelope.payload === undefined) {
       dispatchIssue = "payload";
     } else {
-      const frame = parseDispatchFrame(envelope.payload);
+      const frame = parseDispatchFrame(envelope.payload, wholeBody);
       if ("event" in frame) {
         const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
         if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
@@ -43091,6 +43147,7 @@ function renderInbound(raw, sessionID, subject) {
               replyFields: {},
               issueKey: frame.event.issue_key,
               body: message.data.body,
+              ...message.data.body_truncated === true ? { bodyTruncated: true } : {},
               ...typeof message.data.broadcast_id === "string" ? { broadcastId: message.data.broadcast_id } : {}
             };
             dispatchReply = {
@@ -43113,7 +43170,8 @@ function renderInbound(raw, sessionID, subject) {
               replyPath: dispatchReplyPath("comment", requested.data.comment_id),
               replyFields: { target: requested.data.target },
               issueKey: frame.event.issue_key,
-              body: comment.data.body
+              body: comment.data.body,
+              ...comment.data.body_truncated === true ? { bodyTruncated: true } : {}
             };
           }
         }
@@ -43128,6 +43186,9 @@ function renderInbound(raw, sessionID, subject) {
           ...compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }
         };
         dispatchActor = frame.event.actor;
+        bodyNote = carriedBodyNote(frame.event);
+        if (bodyWasCut(frame.event.payload))
+          cutItem = carriedItem(frame.event);
         pictures = eventPictures(frame.event);
         if (frame.event.type === "artifact.human_edited") {
           const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(frame.event.payload);
@@ -43193,6 +43254,7 @@ function renderInbound(raw, sessionID, subject) {
       ...summaryIsHead ? {} : { summary: payloadSummary },
       ...message === undefined ? {} : { message }
     },
+    ...bodyNote === undefined ? {} : { body_note: bodyNote },
     ...foreignSession === undefined ? {} : {
       note: `body names session ${foreignSession}; the sender is ${envelope.source_session ?? "unknown"}`
     },
@@ -43208,7 +43270,8 @@ ${trailer}`,
     ...delivery === undefined ? {} : { delivery },
     ...rejectedDelivery === undefined ? {} : { rejectedDelivery },
     ...malformedDelivery ? { malformedDelivery: true } : {},
-    ...pictures.length === 0 ? {} : { pictures }
+    ...pictures.length === 0 ? {} : { pictures },
+    ...cutItem === undefined ? {} : { cutItem }
   };
 }
 
@@ -46026,150 +46089,6 @@ async function resolveOrigin(env, exec, cwd) {
 
 // ../envoy-client/src/dispatch-picture-tools.ts
 import { basename, resolve as resolvePath } from "path";
-
-// ../envoy-client/src/tool-input-errors.ts
-class ToolInputError extends Error {
-  tool;
-  problems;
-  constructor(tool, problems) {
-    const count = problems.length;
-    const cli = isDispatchTool(tool);
-    const help = cli ? [
-      `Allowed flags: ${commandFlags(tool).join(", ")}`,
-      `Example: ${commandLine(tool, exampleFor(tool))}`
-    ] : [];
-    super([
-      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
-      ...problems.map((problem) => `- ${problem}`),
-      ...help.map((line) => `- ${line}`)
-    ].join(`
-`));
-    this.name = "ToolInputError";
-    this.tool = tool;
-    this.problems = problems;
-  }
-}
-function isDispatchTool(tool) {
-  return dispatchToolSpecs.some((spec) => spec.name === tool);
-}
-function exampleFor(tool) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  return { ...spec?.example };
-}
-function unwrap(schema) {
-  let current = schema;
-  while (current !== undefined) {
-    const def = current.def;
-    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
-      break;
-    current = def.innerType;
-  }
-  return current;
-}
-function shapeOf(schema) {
-  const unwrapped = unwrap(schema);
-  if (unwrapped === undefined)
-    return;
-  const def = unwrapped.def;
-  return def.type === "object" && "shape" in def ? def.shape : undefined;
-}
-function schemaAt(schema, path) {
-  let current = schema;
-  for (const key of path) {
-    const unwrapped = unwrap(current);
-    if (unwrapped === undefined)
-      return;
-    const def = unwrapped.def;
-    if (def.type === "object" && "shape" in def) {
-      current = shapeOf(unwrapped)?.[String(key)];
-    } else if (def.type === "array" && "element" in def) {
-      current = def.element;
-    } else {
-      return;
-    }
-  }
-  return unwrap(current);
-}
-function describeInput(value) {
-  if (value === null)
-    return "null";
-  if (Array.isArray(value))
-    return "an array";
-  switch (typeof value) {
-    case "number":
-    case "boolean":
-      return String(value);
-    case "string":
-      return "a string";
-    case "object":
-      return "an object";
-    default:
-      return typeof value;
-  }
-}
-function describeExpected(expected, schema) {
-  switch (expected) {
-    case "int":
-      return "an integer";
-    case "object": {
-      const shape = shapeOf(schema);
-      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
-      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
-    }
-    case "array":
-      return "an array";
-    default:
-      return `a ${expected}`;
-  }
-}
-function pathText(path, cliTool) {
-  const [head, ...rest] = path.map(String);
-  if (cliTool === undefined || head === undefined)
-    return path.map(String).join(".");
-  let flag = fieldFlag(cliTool, head);
-  let index = 0;
-  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
-    flag += `[${rest[index]}]`;
-  }
-  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
-  return tail === "" ? flag : `${flag} ${tail}`;
-}
-function formatZodIssues(issues, schema, tool) {
-  const cliTool = isDispatchTool(tool) ? tool : undefined;
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
-  return issues.flatMap((issue) => {
-    const path = pathText(issue.path, cliTool);
-    switch (issue.code) {
-      case "invalid_type":
-        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
-          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
-        ];
-      case "unrecognized_keys": {
-        if (cliTool !== undefined && issue.path.length === 0) {
-          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
-        }
-        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
-        const where = path === "" ? "" : ` in ${path}`;
-        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
-      }
-      case "invalid_value":
-        return [
-          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
-        ];
-      case "too_big":
-        if (issue.origin === "array" && Array.isArray(issue.input)) {
-          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
-        }
-        return [`${path} ${issue.message}`];
-      case "custom":
-        return [issue.message];
-      default:
-        return [path === "" ? issue.message : `${path}: ${issue.message}`];
-    }
-  });
-}
-
-// ../envoy-client/src/dispatch-picture-tools.ts
 var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
 async function localPictures(images, cwd, problems) {
   if (!Array.isArray(images))
@@ -46209,21 +46128,9 @@ async function localPicture(path, cwd) {
   }
   return { path, name: basename(absolute), file: Bun.file(absolute, { type }) };
 }
-function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
+async function textWithPictures(text, pictures, owner, upload, actor) {
   if (pictures.length === 0)
     return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
-  }
   const lines = [];
   const addresses = [];
   for (const picture of pictures) {
@@ -46240,11 +46147,7 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
     addresses.push(address);
     lines.push(pictureLine(picture.name, address));
   }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
-  }
-  return posted;
+  return withPictureLines(text, lines);
 }
 var AGENT_ARTIFACT_REF = new RegExp(`^dispatch://agent/(${SESSION_ID_PATTERN})/artifact/([^/@]+)(?:@v(\\d+))?$`, "u");
 function parseAgentArtifactRef(ref) {
@@ -46299,6 +46202,23 @@ function eventTexts(event) {
       texts = [];
   }
   return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
+}
+async function eventTextsWhole(client, events) {
+  const reads = new Map;
+  const whole = await Promise.all(events.map(async (event) => {
+    const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
+    if (item === undefined)
+      return eventTexts(event);
+    const key = `${item.resource}:${item.id}`;
+    let read = reads.get(key);
+    if (read === undefined) {
+      read = wholeCarriedBody(client, item);
+      reads.set(key, read);
+    }
+    const body = await read;
+    return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
+  }));
+  return whole.flat();
 }
 function shownPictureLine(index, address, name, mimeType, bytes) {
   return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
@@ -46915,6 +46835,148 @@ async function sessionAnswersSettled(session) {
   await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
 }
 
+// ../envoy-client/src/tool-input-errors.ts
+class ToolInputError extends Error {
+  tool;
+  problems;
+  constructor(tool, problems) {
+    const count = problems.length;
+    const cli = isDispatchTool(tool);
+    const help = cli ? [
+      `Allowed flags: ${commandFlags(tool).join(", ")}`,
+      `Example: ${commandLine(tool, exampleFor(tool))}`
+    ] : [];
+    super([
+      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+      ...problems.map((problem) => `- ${problem}`),
+      ...help.map((line) => `- ${line}`)
+    ].join(`
+`));
+    this.name = "ToolInputError";
+    this.tool = tool;
+    this.problems = problems;
+  }
+}
+function isDispatchTool(tool) {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+function exampleFor(tool) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  return { ...spec?.example };
+}
+function unwrap(schema) {
+  let current = schema;
+  while (current !== undefined) {
+    const def = current.def;
+    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
+      break;
+    current = def.innerType;
+  }
+  return current;
+}
+function shapeOf(schema) {
+  const unwrapped = unwrap(schema);
+  if (unwrapped === undefined)
+    return;
+  const def = unwrapped.def;
+  return def.type === "object" && "shape" in def ? def.shape : undefined;
+}
+function schemaAt(schema, path) {
+  let current = schema;
+  for (const key of path) {
+    const unwrapped = unwrap(current);
+    if (unwrapped === undefined)
+      return;
+    const def = unwrapped.def;
+    if (def.type === "object" && "shape" in def) {
+      current = shapeOf(unwrapped)?.[String(key)];
+    } else if (def.type === "array" && "element" in def) {
+      current = def.element;
+    } else {
+      return;
+    }
+  }
+  return unwrap(current);
+}
+function describeInput(value) {
+  if (value === null)
+    return "null";
+  if (Array.isArray(value))
+    return "an array";
+  switch (typeof value) {
+    case "number":
+    case "boolean":
+      return String(value);
+    case "string":
+      return "a string";
+    case "object":
+      return "an object";
+    default:
+      return typeof value;
+  }
+}
+function describeExpected(expected, schema) {
+  switch (expected) {
+    case "int":
+      return "an integer";
+    case "object": {
+      const shape = shapeOf(schema);
+      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
+      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
+    }
+    case "array":
+      return "an array";
+    default:
+      return `a ${expected}`;
+  }
+}
+function pathText(path, cliTool) {
+  const [head, ...rest] = path.map(String);
+  if (cliTool === undefined || head === undefined)
+    return path.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
+  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
+  return issues.flatMap((issue) => {
+    const path = pathText(issue.path, cliTool);
+    switch (issue.code) {
+      case "invalid_type":
+        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
+          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
+        ];
+      case "unrecognized_keys": {
+        if (cliTool !== undefined && issue.path.length === 0) {
+          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
+        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
+        const where = path === "" ? "" : ` in ${path}`;
+        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
+      }
+      case "invalid_value":
+        return [
+          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
+        ];
+      case "too_big":
+        if (issue.origin === "array" && Array.isArray(issue.input)) {
+          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
+        }
+        return [`${path} ${issue.message}`];
+      case "custom":
+        return [issue.message];
+      default:
+        return [path === "" ? issue.message : `${path}: ${issue.message}`];
+    }
+  });
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -47043,6 +47105,7 @@ var issueFreeTools = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
   dispatch_inbox: true,
   dispatch_architecture_sync: true
 };
@@ -47158,16 +47221,12 @@ function askUrgency(args) {
   const value = args.urgency;
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
-function questionWithRef(question, ref) {
+function askQuestionWithRef(args) {
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
   return ref === undefined || question.includes(ref) ? question : `${question}
 
 Ref: ${ref}`;
-}
-function askQuestionWithRef(args) {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-function askQuestionProblem(withRef) {
-  return withRef.length > ASK_QUESTION_MAX ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref` : undefined;
 }
 var pictureSendingTools = {
   dispatch_ask: true,
@@ -47361,16 +47420,6 @@ function itemReplyTo(args, field) {
 function argumentProblems(tool, args) {
   const problems = [];
   switch (tool) {
-    case "dispatch_ask": {
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined)
-          problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {
@@ -47935,17 +47984,18 @@ function approvalLine(artifact) {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft")
     return;
+  const content = approval.content_sha256 === undefined ? "" : `, content sha256:${approval.content_sha256}${approval.content_sha256_source === "backfill" ? " (hashed after approval)" : ""}`;
   switch (approval.state) {
     case "awaiting": {
       const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
       return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
     }
     case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}${content}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
   }
 }
 function componentsLine(components) {
@@ -48455,6 +48505,7 @@ function commentSummary({ comment, replies }, graph) {
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
     ...replyBlockLines(reply),
+    ...reply.answers != null && reply.answers !== comment.id ? [`Answers: ${reply.answers}`] : [],
     `Body: ${reply.body}`
   ]);
   return [
@@ -48890,6 +48941,25 @@ async function executeDispatchTool(input) {
       details: { session, owner, service, project }
     };
   }
+  if (input.tool === "dispatch_limits") {
+    const limits = await dispatchClient().limits();
+    const count = (value) => value.toLocaleString("en-US");
+    return {
+      text: [
+        `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+        `Blocks in one body: ${count(limits.item_blocks)}.`,
+        `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+        `Options on one ask: ${count(limits.ask_options)}.`,
+        `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+        `One request: ${count(limits.request_bytes)} bytes.`,
+        `One markdown document: ${count(limits.document_bytes)} bytes.`,
+        `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one."
+      ].join(`
+`),
+      details: { ...limits }
+    };
+  }
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
     const pending = client.credentialPending().then((answer) => ({ answer }), (error) => ({ error }));
@@ -48940,18 +49010,18 @@ async function executeDispatchTool(input) {
       throw new Error("issue is required");
     return owner.issue;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+  const postWithPictures = (text, owner, upload) => textWithPictures(text, pictures, owner, (picture) => upload(picture).catch((error) => {
     if (!(error instanceof DispatchWriteLandedError))
       throw error;
     throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
   }), actor);
-  const writePictures = (resolved, text, limit) => {
+  const writePictures = (resolved, text) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) => client.projectArtifact(project, upload));
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   const hostSession = input.sessionId?.trim();
   const shown = hostSession ? shownPictures(hostSession) : undefined;
@@ -49361,13 +49431,7 @@ async function executeDispatchTool(input) {
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question"
-      });
+      const question = await writePictures(resolved, askQuestionWithRef(args));
       const askInput = {
         question,
         ...Array.isArray(options) ? { options } : {},
@@ -49431,11 +49495,7 @@ async function executeDispatchTool(input) {
       }
       const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       const requestedTurn = optionalString(args, "turn");
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      });
+      const body = await writePictures(resolved, stringArg(args, "body"));
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
@@ -49505,11 +49565,6 @@ async function executeDispatchTool(input) {
       const target = messageInReplyTo(args);
       const inReplyTo = target?.id;
       const written = stringArg(args, "body");
-      const bodyLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      };
       if (owner === null && inReplyTo !== undefined) {
         let body = written;
         if (pictures.length > 0) {
@@ -49517,7 +49572,7 @@ async function executeDispatchTool(input) {
           if (!sessionId) {
             throw new Error("host session id is required to send pictures in a direct-message reply");
           }
-          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
+          body = await postWithPictures(written, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
         }
         const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
         if (reply.duplicate === true && reply.body === body) {
@@ -49546,7 +49601,7 @@ async function executeDispatchTool(input) {
         };
       }
       const issueKey = issue();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload));
+      const body = await postWithPictures(written, issueKey, (upload) => client.artifact(issueKey, upload));
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
@@ -49662,6 +49717,7 @@ Document token: ${listed.token}`,
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
+        ..."sha256" in document && document.sha256 !== undefined ? [`Content: sha256:${document.sha256}`] : [],
         ...approval === undefined ? [] : [approval]
       ];
       return {
@@ -50048,7 +50104,7 @@ ${handoff.body}`,
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join(`
 `),
@@ -50072,7 +50128,7 @@ ${handoff.body}`,
         liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts)
+          ...await eventTextsWhole(client, read.events)
         ]),
         issueCoverageOrReason(client, read.issue.key)
       ]);
@@ -50992,17 +51048,17 @@ var LEGION_CLAIM_STATES = [
   "retired"
 ];
 var legionLocator = discriminatedUnion("runtime", [
-  strictObject({
+  object({
     runtime: literal("tmux"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    tmux: strictObject({ window: nonEmptyString, pane: nonEmptyString })
+    tmux: object({ window: nonEmptyString, pane: nonEmptyString })
   }),
-  strictObject({
+  object({
     runtime: literal("sandbox"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    sandbox: strictObject({
+    sandbox: object({
       namespace: nonEmptyString,
       name: nonEmptyString,
       podUid: nonEmptyString,
@@ -51011,13 +51067,13 @@ var legionLocator = discriminatedUnion("runtime", [
     })
   })
 ]);
-var legionCapabilityReportView = strictObject({
+var legionCapabilityReportView = object({
   measuredAt: timestamp,
   incarnation: string2(),
   ok: array(nonEmptyString),
-  open: array(strictObject({ name: nonEmptyString, detail: nonEmptyString }))
+  open: array(object({ name: nonEmptyString, detail: nonEmptyString }))
 });
-var legionClaimView = strictObject({
+var legionClaimView = object({
   session: string2(),
   state: _enum2(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
@@ -51026,17 +51082,17 @@ var legionClaimView = strictObject({
   updateRound: nonEmptyString.optional(),
   updateHead: nonEmptyString.optional()
 });
-var legionHandoffRecordView = strictObject({
+var legionHandoffRecordView = object({
   id: nonEmptyString,
   version: number2().int().positive()
 });
-var legionPhaseView = strictObject({
+var legionPhaseView = object({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
   handoffRecord: legionHandoffRecordView.optional(),
   rounds: number2().int().nonnegative()
 });
-var legionPullRequestView = strictObject({
+var legionPullRequestView = object({
   repo: nonEmptyString,
   number: number2().int().positive(),
   head: nonEmptyString,
@@ -51045,22 +51101,22 @@ var legionPullRequestView = strictObject({
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: number2().int().nonnegative()
 });
-var legionGateView = strictObject({
+var legionGateView = object({
   artifactId: nonEmptyString,
   currentVersion: number2().int().positive(),
   approvedVersion: number2().int().positive().nullable()
 });
-var legionSlotView = strictObject({
+var legionSlotView = object({
   index: number2().int().nonnegative(),
   admittedAt: timestamp,
   lentTo: issueKey.optional()
 });
-var legionCheckWakeView = strictObject({
+var legionCheckWakeView = object({
   kind: nonEmptyString,
   detail: string2(),
   at: timestamp
 });
-var legionCheckView = strictObject({
+var legionCheckView = object({
   repo: nonEmptyString,
   pullRequest: number2().int().positive(),
   mergeCommit: string2(),
@@ -51087,8 +51143,8 @@ var legionWaitTimes = {
   answeredBy: _enum2(LEGION_WAIT_ANSWERS).optional()
 };
 var legionWaitingOn = discriminatedUnion("kind", [
-  strictObject({ kind: literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
-  strictObject({
+  object({ kind: literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
+  object({
     kind: literal("gate"),
     gateVersion: number2().int().positive(),
     artifactId: nonEmptyString,
@@ -51097,26 +51153,26 @@ var legionWaitingOn = discriminatedUnion("kind", [
 ]).refine((wait) => wait.answeredAt === undefined === (wait.answeredBy === undefined), {
   message: "answeredAt and answeredBy appear together"
 });
-var legionPendingStatusWrite = strictObject({
+var legionPendingStatusWrite = object({
   issue: nonEmptyString,
   payload: record(string2(), unknown()),
   attempts: number2().int().nonnegative(),
   nextAt: timestamp,
   lastError: string2().optional()
 });
-var legionStrandedClaim = strictObject({
+var legionStrandedClaim = object({
   issue: issueKey,
   role: _enum2(LEGION_ROLES),
   state: _enum2(["suspended", "failed"])
 });
-var legionHeldOutboxRow = strictObject({
+var legionHeldOutboxRow = object({
   id: number2().int().positive(),
   kind: nonEmptyString,
   issue: nonEmptyString,
   waitedSeconds: number2().int().nonnegative(),
   waitsOn: number2().int().positive()
 });
-var legionIssue = strictObject({
+var legionIssue = object({
   key: nonEmptyString,
   generation: number2().int().nonnegative(),
   phase: _enum2(LEGION_PHASES),
@@ -51125,42 +51181,45 @@ var legionIssue = strictObject({
   defaultBranch: nonEmptyString.optional(),
   holdReason: literal("escalated").optional(),
   architect: legionClaimView.optional(),
-  workers: partialRecord(_enum2(LEGION_ROLES), legionPhaseView),
+  workers: partialRecord(string2(), legionPhaseView),
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
   waitingOn: legionWaitingOn.optional(),
-  check: legionCheckView.optional()
+  check: legionCheckView.optional(),
+  memoryGroup: _enum2(["memory", "none"]).optional(),
+  memoryDrawMode: _enum2(["off", "on", "random"]).optional(),
+  memoryDrawnAt: timestamp.optional()
 });
-var daemonInfo = strictObject({
+var daemonInfo = object({
   project: nonEmptyString,
   schemaVersion: number2().int().nonnegative(),
   boots: number2().int().nonnegative(),
   firstBootAt: timestamp,
   startedAt: timestamp
 });
-var legionBlockedIssue = strictObject({
+var legionBlockedIssue = object({
   issue: issueKey,
   blockedBy: array(issueKey)
 });
-var legionAdmission = strictObject({
+var legionAdmission = object({
   cap: number2().int().nonnegative(),
   active: array(nonEmptyString),
   waiting: array(nonEmptyString),
   blocked: array(legionBlockedIssue),
   free: number2().int().nonnegative().optional()
 });
-var legionControllerLocator = strictObject({
+var legionControllerLocator = object({
   runtime: _enum2(["tmux", "kubernetes"]),
   external: literal(true),
   sessionId: nonEmptyString,
   registeredAt: timestamp,
   pluginContract: number2().int().nonnegative()
 });
-var legionAgentSecretsLoginView = strictObject({
+var legionAgentSecretsLoginView = object({
   state: string2()
 });
-var legionCapabilityState = strictObject({
+var legionCapabilityState = object({
   name: nonEmptyString,
   status: _enum2(["present", "unchecked", "withheld", "decided", "open"]),
   detail: nonEmptyString,
@@ -51172,7 +51231,7 @@ var legionSettings = looseObject({
   max_fix_attempts: number2().int().positive(),
   worker_boot_timeout_seconds: number2().int().positive()
 });
-var legionCacheView = strictObject({
+var legionCacheView = object({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
   state: _enum2(["starting", "cloning", "ready", "failing", "refused"]),
@@ -51185,18 +51244,18 @@ var legionCacheView = strictObject({
   healthError: nonEmptyString.optional(),
   retainedUntil: timestamp.optional()
 });
-var legionRepositories = strictObject({
+var legionRepositories = object({
   owners: array(nonEmptyString),
-  mapped: array(strictObject({
+  mapped: array(object({
     repo: nonEmptyString,
     default: boolean2(),
     cache: legionCacheView.optional()
   })),
-  refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
-  withoutWebhookApp: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  refused: array(object({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: array(object({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
 });
-var legionConsumerLag = strictObject({
+var legionConsumerLag = object({
   name: nonEmptyString,
   waiting: number2().int().nonnegative(),
   oldestAt: timestamp.nullable(),
@@ -51205,7 +51264,7 @@ var legionConsumerLag = strictObject({
   stalled: boolean2(),
   unavailable: nonEmptyString.optional()
 });
-var LegionStateResponse = strictObject({
+var LegionStateResponse = object({
   daemon: daemonInfo,
   admission: legionAdmission,
   issues: record(string2(), legionIssue),
@@ -51219,7 +51278,7 @@ var LegionStateResponse = strictObject({
   settings: legionSettings,
   consumers: array(legionConsumerLag)
 });
-var LegionRegisterResponse = strictObject({
+var LegionRegisterResponse = object({
   claimToken: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
@@ -51259,7 +51318,7 @@ var LegionActivityRequest = strictObject({
   secret: nonEmptyString,
   activity: LegionSessionActivity
 });
-var legionReleaseRecord = strictObject({
+var legionReleaseRecord = object({
   id: number2().int().positive(),
   issue: issueKey,
   generation: number2().int().nonnegative(),
@@ -51267,7 +51326,7 @@ var legionReleaseRecord = strictObject({
   at: timestamp,
   bundleBytes: number2().int().nonnegative()
 });
-var legionResumeRecord = strictObject({
+var legionResumeRecord = object({
   id: number2().int().positive(),
   release: number2().int().nonnegative(),
   issue: issueKey,
@@ -51278,7 +51337,7 @@ var legionResumeRecord = strictObject({
   firstTurnAt: timestamp.optional(),
   stuck: boolean2()
 });
-var legionHoldRecord = strictObject({
+var legionHoldRecord = object({
   id: number2().int().positive(),
   issue: issueKey,
   reason: nonEmptyString,
@@ -51292,23 +51351,23 @@ var LegionReleaseRecordsRequest = strictObject({
   secret: nonEmptyString,
   since: timestamp
 });
-var LegionReleaseRecordsResponse = strictObject({
+var LegionReleaseRecordsResponse = object({
   releases: array(legionReleaseRecord),
   resumes: array(legionResumeRecord),
   holds: array(legionHoldRecord)
 });
-var LegionControllerRegisterResponse = strictObject({
+var LegionControllerRegisterResponse = object({
   claimToken: nonEmptyString,
   role: literal("controller"),
   generation: number2().int().positive(),
   secret: nonEmptyString
 });
-var LegionControllerSecretResponse = strictObject({
+var LegionControllerSecretResponse = object({
   secret: nonEmptyString,
   designGate: _enum2(["root-issues", "off"])
 });
-var LegionControllerCredentialResponse = strictObject({
-  owners: record(nonEmptyString, strictObject({
+var LegionControllerCredentialResponse = object({
+  owners: record(nonEmptyString, object({
     hosts: nonEmptyString,
     config: nonEmptyString
   })),
@@ -51316,11 +51375,11 @@ var LegionControllerCredentialResponse = strictObject({
   app: _enum2(["implement", "review"]),
   expiresAt: timestamp
 });
-var LegionErrorResponse = union([
-  strictObject({ error: nonEmptyString }),
-  strictObject({ code: nonEmptyString, error: nonEmptyString })
-]);
-var legionDeliveryView = strictObject({
+var LegionErrorResponse = object({
+  error: nonEmptyString,
+  code: nonEmptyString.optional()
+});
+var legionDeliveryView = object({
   id: nonEmptyString,
   task: nonEmptyString,
   phase: _enum2(LEGION_WORKFLOW_PHASES).optional(),
@@ -51329,7 +51388,7 @@ var legionDeliveryView = strictObject({
   confirmedAt: timestamp.optional(),
   interrupted: literal(true).optional()
 });
-var LegionOperatorClaimResponse = strictObject({
+var LegionOperatorClaimResponse = object({
   token: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
@@ -51341,7 +51400,7 @@ var LegionOperatorClaimResponse = strictObject({
   forgottenSession: nonEmptyString.optional(),
   forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
-  budgets: strictObject({
+  budgets: object({
     launchFailures: number2().int().nonnegative(),
     deaths: number2().int().nonnegative(),
     promptFailures: number2().int().nonnegative(),
@@ -51355,18 +51414,27 @@ var LegionOperatorClaimResponse = strictObject({
   updateRound: nonEmptyString.optional(),
   updateHead: nonEmptyString.optional()
 });
-var LegionOperatorClaimsResponse = strictObject({
-  claims: array(LegionOperatorClaimResponse)
+var legionPodUpdateRounds = object({
+  swept: boolean2(),
+  max_open_rounds: number2().int().nullable(),
+  rounds_per_minute: number2().int().nullable(),
+  in_round: array(nonEmptyString),
+  waiting_on_max_open_rounds: array(nonEmptyString),
+  waiting_on_rounds_per_minute: array(nonEmptyString)
 });
-var LegionGrantResponse = strictObject({
+var LegionOperatorClaimsResponse = object({
+  claims: array(LegionOperatorClaimResponse),
+  pod_update_rounds: legionPodUpdateRounds
+});
+var LegionGrantResponse = object({
   grantId: nonEmptyString,
   expiresAt: timestamp
 });
-var LegionEmptyResponse = strictObject({});
-var LegionHandoffCompleteResponse = strictObject({
+var LegionEmptyResponse = object({});
+var LegionHandoffCompleteResponse = object({
   note: nonEmptyString.optional()
 });
-var LegionWaveReleaseResponse = strictObject({
+var LegionWaveReleaseResponse = object({
   released: array(nonEmptyString),
   started: array(issueKey),
   held: array(legionBlockedIssue)
@@ -51560,7 +51628,7 @@ async function retryWhileDaemonRestarts(label, call, options = {}) {
     }
   }
 }
-function parseStrictly(schema, body) {
+function parseBody(schema, body) {
   let json;
   try {
     json = JSON.parse(body);
@@ -51588,16 +51656,15 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     const text = await response.text();
     if (response.ok)
       return { status: response.status, text };
-    const refusal = parseStrictly(LegionErrorResponse, text);
+    const refusal = parseBody(LegionErrorResponse, text);
     if ("value" in refusal) {
-      const code = "code" in refusal.value && typeof refusal.value.code === "string" ? refusal.value.code : undefined;
-      throw new LegionDaemonApiError(method, path, response.status, code, refusal.value.error);
+      throw new LegionDaemonApiError(method, path, response.status, refusal.value.code, refusal.value.error);
     }
     throw new LegionDaemonApiError(method, path, response.status, undefined, `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`);
   };
   const read = async (method, path, schema, body, signal) => {
     const { status, text } = await call(method, path, body, signal);
-    const parsed = parseStrictly(schema, text);
+    const parsed = parseBody(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
     }
@@ -54130,7 +54197,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 48
+  daemonApiVersion: 49
 };
 
 // src/channel-forwarder.ts
