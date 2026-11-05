@@ -49,19 +49,16 @@ import type {
   WriteAdvice,
 } from "@legion/contracts";
 import {
-  ASK_QUESTION_MAX,
   ASK_URGENCIES,
   actorActText,
   actorLabel,
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
-  DISPATCH_BODY_MAX,
   decodeBlockId,
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
   itemFromSearch,
-  overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
@@ -111,11 +108,10 @@ import {
   type AgentArtifactRef,
   askTexts,
   datedBodies,
-  eventTexts,
+  eventTextsWhole,
   type LocalPicture,
   localPictures,
   type PicturesRead,
-  type PictureTextLimit,
   parseAgentArtifactRef,
   readPictures,
   shownPictureLine,
@@ -463,6 +459,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
   dispatch_inbox: true,
   dispatch_architecture_sync: true,
 };
@@ -642,20 +639,12 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
-/** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
-function questionWithRef(question: string, ref: string | undefined): string {
-  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
-}
-
-/** The validated question plus ref; `argumentProblems` has already refused an over-cap pair. */
+/** The question text sent to Dispatch: the ref appended unless the question already cites it.
+ *  Dispatch holds the pair to its own bound and refuses a longer one. */
 function askQuestionWithRef(args: ToolArguments): string {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-
-function askQuestionProblem(withRef: string): string | undefined {
-  return withRef.length > ASK_QUESTION_MAX
-    ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref`
-    : undefined;
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
+  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
 }
 
 /** The tools whose `images` argument sends pictures. */
@@ -1009,16 +998,6 @@ function itemReplyTo(
 function argumentProblems(tool: string, args: ToolArguments): string[] {
   const problems: string[] = [];
   switch (tool) {
-    case "dispatch_ask": {
-      // The schema already caps the bare question; this covers the ref the tool appends.
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined) problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {
@@ -3775,6 +3754,24 @@ export async function executeDispatchTool(
       details: { session, owner, service, project },
     };
   }
+  if (input.tool === "dispatch_limits") {
+    const limits = await dispatchClient().limits();
+    const count = (value: number) => value.toLocaleString("en-US");
+    return {
+      text: [
+        `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+        `Blocks in one body: ${count(limits.item_blocks)}.`,
+        `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+        `Options on one ask: ${count(limits.ask_options)}.`,
+        `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+        `One request: ${count(limits.request_bytes)} bytes.`,
+        `One markdown document: ${count(limits.document_bytes)} bytes.`,
+        `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one.",
+      ].join("\n"),
+      details: { ...limits },
+    };
+  }
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
     // All three reads at once: they depend on nothing of each other, and the credential list is
@@ -3855,15 +3852,12 @@ export async function executeDispatchTool(
   // the call undone: it fails, rather than reading as the call's landing.
   const postWithPictures = (
     text: string,
-    limit: PictureTextLimit,
     owner: string,
     upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
   ): Promise<string> =>
     textWithPictures(
-      input.tool,
       text,
       pictures,
-      limit,
       owner,
       (picture) =>
         upload(picture).catch((error: unknown) => {
@@ -3876,19 +3870,13 @@ export async function executeDispatchTool(
       actor
     );
   // An ask or comment uploads to the project of the project document it is on, else to its issue.
-  const writePictures = (
-    resolved: ResolvedArtifact | undefined,
-    text: string,
-    limit: PictureTextLimit
-  ): Promise<string> => {
+  const writePictures = (resolved: ResolvedArtifact | undefined, text: string): Promise<string> => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) =>
-        client.projectArtifact(project, upload)
-      );
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   // The pictures this host session was already shown: dispatch_read names them instead of sending
   // them again, and it and dispatch_doc_read add the ones their result shows.
@@ -4452,13 +4440,7 @@ export async function executeDispatchTool(
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question",
-      });
+      const question = await writePictures(resolved, askQuestionWithRef(args));
       const askInput = {
         question,
         ...(Array.isArray(options)
@@ -4547,11 +4529,7 @@ export async function executeDispatchTool(
       // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
       // and a turn outside agent|human, so the value is the contract's shape.
       const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body",
-      });
+      const body = await writePictures(resolved, stringArg(args, "body"));
       const commentInput: CreateCommentInput = {
         body,
         ...(anchored === undefined ? {} : { anchor: anchored }),
@@ -4641,11 +4619,6 @@ export async function executeDispatchTool(
       const target = messageInReplyTo(args);
       const inReplyTo = target?.id;
       const written = stringArg(args, "body");
-      const bodyLimit: PictureTextLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body",
-      };
       if (owner === null && inReplyTo !== undefined) {
         // A direct message's conversation belongs to no issue, so its pictures belong to this
         // session's own conversation, where the person reads the reply.
@@ -4657,7 +4630,7 @@ export async function executeDispatchTool(
               "host session id is required to send pictures in a direct-message reply"
             );
           }
-          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) =>
+          body = await postWithPictures(written, `agent/${sessionId}`, (upload) =>
             client.agentArtifact(sessionId, upload)
           );
         }
@@ -4720,7 +4693,7 @@ export async function executeDispatchTool(
         };
       }
       const issueKey = issue();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) =>
+      const body = await postWithPictures(written, issueKey, (upload) =>
         client.artifact(issueKey, upload)
       );
       const message = await client.message(issueKey, {
@@ -5432,7 +5405,7 @@ export async function executeDispatchTool(
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
           details: { issue: read.issue.key },
@@ -5460,7 +5433,7 @@ export async function executeDispatchTool(
         liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts),
+          ...(await eventTextsWhole(client, read.events)),
         ]),
         issueCoverageOrReason(client, read.issue.key),
       ]);

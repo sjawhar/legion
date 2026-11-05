@@ -835,6 +835,9 @@ export interface ArtifactBlock {
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+  /** Where meaning search stands on the block (`BlockEmbedding`). Absent from a Dispatch older
+   *  than block windows. */
+  readonly embedding?: BlockEmbedding;
 }
 
 /** One attribute a typed block carries: the name its type declares it under, the value the
@@ -1394,6 +1397,26 @@ export interface ThreadLoginsPayload {
   readonly thread_logins?: string[];
 }
 
+/** What of an item an event carries, on the `comment.*`, `suggestion.*` and `message.*` payloads.
+ *
+ *  `body_truncated` is that `body` is the first part of the item's body and not all of it. A
+ *  comment, comment edit, message or broadcast body is bounded block by block
+ *  (`DISPATCH_BLOCK_UNITS` on each block, `DISPATCH_ITEM_BLOCKS` on how many it holds), so one
+ *  body can be far longer than the `DISPATCH_EVENT_BODY_MAX` UTF-16 units an event carries, and
+ *  the rest is one read away: `GET /api/v1/comments/{id}` or `GET /api/v1/messages/{id}`. Envoy's
+ *  webhook normalizer writes a field of the same name, a string (`"true"`), on the payload of a
+ *  GitHub review whose body it cut; that is another payload and another field, and a reader must
+ *  not take one for the other.
+ *
+ *  `payload_omitted` is that the message bus refused this event whole, so Dispatch's outbox
+ *  published a stand-in in its place: the payload holds the original's top-level fields that are
+ *  short enough to send and nothing else, so `body` and every other long field is absent. The
+ *  item itself answers the rest. */
+export interface CarriedBodyPayload {
+  readonly body_truncated?: boolean;
+  readonly payload_omitted?: boolean;
+}
+
 /** What an `issue.created`, `issue.updated` or `issue.closed` write changed, read in its own
  *  transaction. Each field is absent from every other `issue.*` type and from an event written
  *  before the fields existed, which a reader takes as "anything may have changed". */
@@ -1570,7 +1593,16 @@ export interface ItemBlock {
   readonly to: number;
   readonly changed_revision?: number;
   readonly changed_at?: string;
+  /** Where meaning search stands on the block. Absent on a hit from a Dispatch older than block
+   *  windows. */
+  readonly embedding?: BlockEmbedding;
 }
+
+/** Where meaning search stands on one block: every window of blocks covering it is embedded at
+ *  the text it holds now, one of them is still waiting for its vector, or no window covers the
+ *  block at all - a block the indexer leaves out of every window, and every block of an item
+ *  whose windows are not written yet. */
+export type BlockEmbedding = "embedded" | "pending" | "none";
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
  *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
@@ -1609,6 +1641,7 @@ export interface AcceptSuggestionResponse extends Comment {
  */
 export interface CommentEventPayload
   extends Omit<Comment, "mentions" | "deliveries">,
+    CarriedBodyPayload,
     ReferenceChangesPayload,
     ThreadLoginsPayload {
   readonly mentions?: CommentMention[];
@@ -1950,7 +1983,11 @@ export interface ChangedReference {
 /** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
  *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
  *  thread, so its messages carry none. */
-export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
+export interface MessageEventPayload
+  extends Message,
+    CarriedBodyPayload,
+    ReferenceChangesPayload,
+    ThreadLoginsPayload {
   /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
    *  empty otherwise. */
   readonly reply_body?: string;
@@ -2035,6 +2072,12 @@ export interface SearchResult {
   };
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
+  /** The block of the hit whose own text matched: a block of the document, of the comment's or
+   *  the message's body, or the part of an ask's question, options or answer. Meaning search
+   *  reads windows of neighbouring blocks and names the covered block that ranks highest for the
+   *  query, so this is absent on an issue hit, which has no blocks, on a hit only the keyword
+   *  list found, and on every hit from a Dispatch older than block windows. */
+  readonly block_id?: string;
   readonly snippet: string;
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
@@ -2102,26 +2145,46 @@ export interface SearchCoverageCounts {
   readonly oldest_lacking_seconds: number | null;
 }
 
-/** `SearchCoverage`'s counts for each kind meaning search ranks. Mirrors
+/** `SearchCoverage`'s counts for each kind meaning search ranks: the issue, whose vector is its
+ * title and the head of its spec, and one kind for each kind of window of blocks - a document's,
+ * a comment's, a message's and an ask's parts (INFRA-370) - whose items are the windows
+ * themselves, not the documents or the comments they belong to. Mirrors
  * `model.SearchCoverageKinds`. */
 export interface SearchCoverageKinds {
   readonly issue: SearchCoverageCounts;
-  readonly document: SearchCoverageCounts;
-  readonly comment: SearchCoverageCounts;
-  readonly ask: SearchCoverageCounts;
-  readonly message: SearchCoverageCounts;
+  readonly document_block: SearchCoverageCounts;
+  readonly comment_block: SearchCoverageCounts;
+  readonly message_block: SearchCoverageCounts;
+  readonly ask_part: SearchCoverageCounts;
 }
 
 /** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
  * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
  * search compares, `place` and `model` are read from it; all three are null when no embedder is
- * configured, and then nothing is current. Mirrors `model.SearchCoverage`. */
+ * configured, and then nothing is current. `dev` is the local harness's own embedder, which no
+ * deployment runs. Mirrors `model.SearchCoverage`. */
 export interface SearchCoverage {
   readonly identity: string | null;
-  readonly place: "bedrock" | "azure" | null;
+  readonly place: "bedrock" | "azure" | "dev" | null;
   readonly model: string | null;
   readonly total: SearchCoverageCounts;
   readonly kinds: SearchCoverageKinds;
+}
+
+/** `GET /api/v1/limits`: the bounds the Dispatch server holds a write to, each from the constant
+ * that enforces it, which `dispatch limits` prints. `block_units` and `ask_units` are UTF-16 code
+ * units, `event_body_units` the units of a body an event carries whole; `item_blocks` is the most
+ * blocks one body may hold and `ask_options` the most options one ask may have; `request_bytes`,
+ * `document_bytes` and `handoff_bytes` are UTF-8 bytes. Mirrors `model.DispatchLimits`. */
+export interface DispatchLimits {
+  readonly block_units: number;
+  readonly item_blocks: number;
+  readonly ask_options: number;
+  readonly ask_units: number;
+  readonly event_body_units: number;
+  readonly request_bytes: number;
+  readonly document_bytes: number;
+  readonly handoff_bytes: number;
 }
 
 export interface DuplicateCandidate {
@@ -3843,6 +3906,9 @@ export const CommentEventPayloadSchema = z
     project_key: z.string().optional(),
     artifact_slug: z.string().optional(),
     body: z.string().optional(),
+    // `CarriedBodyPayload` states what these two mean and who answers the rest.
+    body_truncated: z.boolean().optional(),
+    payload_omitted: z.boolean().optional(),
     reply_to: z.string().nullish(),
     ask_id: z.string().nullish(),
     ask_question: z.string().optional(),
@@ -3878,6 +3944,9 @@ export const CommentEventPayloadSchema = z
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),
   body: z.string().optional(),
+  // `CarriedBodyPayload` states what these two mean and who answers the rest.
+  body_truncated: z.boolean().optional(),
+  payload_omitted: z.boolean().optional(),
   target: z.string().nullish(),
   in_reply_to: z.string().nullish(),
   reply_body: z.string().optional(),

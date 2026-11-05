@@ -199,3 +199,49 @@ test("an Activity row pins into the review margin and unpins from it @phone", as
     await alice.close();
   }
 });
+
+// A comment body is bounded block by block, so one far longer than an event carries rides as
+// its first part and the event says so. The row a reader opens then shows the part it has and,
+// under it, a link to the comment's own page, which reads the stored body whole. The margin's
+// Pinned tab is where the Activity tab draws an event's body, so the row is pinned first.
+test("an Activity row whose comment event carried the body in part links to the whole comment @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "A comment longer than one event" });
+  // Two 20,000-unit paragraphs: each is inside the 32,000-unit block bound, and together they
+  // are past the 32,000 units one event carries, so the event keeps the first paragraph alone.
+  const first = "A".repeat(20_000);
+  const comment = await createComment(
+    issue.key,
+    { body: `${first}\n\n${"B".repeat(20_000)}` },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/activity`);
+    const row = page
+      .getByRole("list", { name: "Issue activity" })
+      .getByRole("listitem")
+      .filter({ hasText: "commented on" });
+    await expect(row).toHaveCount(1);
+    await row.getByRole("button", { name: "Pin" }).click();
+
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: /Open review panel/ }).click();
+    }
+    const margin = page.getByTestId("margin-sheet");
+    await margin.getByRole("tab", { name: "Pinned" }).click();
+    const link = margin.getByRole("link", { name: "Read the whole comment" });
+    await expect(link).toBeVisible();
+
+    await link.click();
+    await expect(page).toHaveURL(
+      new RegExp(`/issues/${issue.key}/comments/${comment.id}(\\?|#|$)`)
+    );
+  } finally {
+    await alice.close();
+  }
+});

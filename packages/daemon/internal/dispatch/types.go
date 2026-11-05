@@ -8,18 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
-
-// MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
-// units, so a character outside the Basic Multilingual Plane counts twice.
-func MessageBodyLength(body string) int {
-	length := 0
-	for _, r := range body {
-		length += utf16.RuneLen(r)
-	}
-	return length
-}
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
