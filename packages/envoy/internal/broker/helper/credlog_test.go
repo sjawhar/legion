@@ -60,13 +60,13 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	// refusal's own.
 	waitForRecord(t, &out, "machine login issued; the helper holds a launcher credential")
 	credentialID, expiresAt := b.cred.Load().id, b.cred.Load().expiresAt.Format(time.RFC3339)
-	if _, _, err := b.Enroll(context.Background(), sess); err != nil {
+	if _, _, err := b.EnrollIdentity(context.Background(), sess.identity()); err != nil {
 		t.Fatalf("a fresh credential must enroll: %v", err)
 	}
 	f.mu.Lock()
 	f.enrollUnauthorizedNext = 1
 	f.mu.Unlock()
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil {
+	if _, _, err := b.EnrollIdentity(context.Background(), sess.identity()); err == nil {
 		t.Fatal("an enroll the broker refuses 401 LAUNCHER_INVALID must fail")
 	}
 

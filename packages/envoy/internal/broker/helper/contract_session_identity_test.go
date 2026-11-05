@@ -36,7 +36,7 @@ type contractValues struct {
 // for that exact method and URL, which is how every session route authenticates.
 func (cr *contractRig) sessionReq(t *testing.T, sess *Session, method, path string, body any) (int, []byte) {
 	t.Helper()
-	signed, err := proof.Sign(sess.identity().Key, sess.EnrollmentID(), method, cr.broker.URL+path, time.Now())
+	signed, err := proof.Sign(sess.identity().Key, sess.identity().EnrollmentID, method, cr.broker.URL+path, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,16 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 	next.Recover(ctx)
 	next.SweepDormant(ctx)
 
-	status, body = cr.sessionReq(t, sess, http.MethodPost, "/v1/grants/"+*created.GrantID+"/values", nil)
+	// The sweep fires each revoke off rather than holding its own goroutine on one
+	// (SweepDormant), so the broker stops honouring the grant a moment after the sweep returns.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, body = cr.sessionReq(t, sess, http.MethodPost, "/v1/grants/"+*created.GrantID+"/values", nil)
+		if status != http.StatusOK || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if status == http.StatusOK {
 		t.Fatalf("a session that never came back still released its grant: %d %s", status, body)
 	}

@@ -199,7 +199,7 @@ func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 	r.fake.mu.Unlock()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if id := r.srv.Registry.Get(os.Getpid()).EnrollmentID(); id != "" && id != lapsed {
+		if id := r.srv.Registry.Get(os.Getpid()).identity().EnrollmentID; id != "" && id != lapsed {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -299,8 +299,8 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 	if !slices.Equal(live, []string{third}) {
 		t.Fatalf("live enrollments at the fake: %q; want only the third, %q", live, third)
 	}
-	if sess := r.srv.Registry.Get(os.Getpid()); sess.EnrollmentID() != third || sess.lapsed() != "" {
-		t.Fatalf("session enrollment %q, lapsed id %q; want %q and none", sess.EnrollmentID(), sess.lapsed(), third)
+	if sess := r.srv.Registry.Get(os.Getpid()); sess.identity().EnrollmentID != third || sess.lapsed() != "" {
+		t.Fatalf("session enrollment %q, lapsed id %q; want %q and none", sess.identity().EnrollmentID, sess.lapsed(), third)
 	}
 	waitFor(t, func() bool { return recordedID(t, state, os.Getpid()) == third })
 }
@@ -470,7 +470,7 @@ func TestAPriorEnrollmentOfAnotherOperatorDoesNotStrandTheSession(t *testing.T) 
 	r.login(t)
 	waitFor(t, func() bool {
 		sess := r.srv.Registry.Get(pid)
-		return sess != nil && sess.EnrollmentID() != ""
+		return sess != nil && sess.identity().EnrollmentID != ""
 	})
 	r.fake.mu.Lock()
 	attempts := r.fake.revokeAttempts
@@ -498,7 +498,7 @@ func TestAPriorEnrollmentOfAReplacedCredentialDoesNotStrandTheSession(t *testing
 	r.login(t)
 	waitFor(t, func() bool {
 		sess := r.srv.Registry.Get(pid)
-		return sess != nil && sess.EnrollmentID() != ""
+		return sess != nil && sess.identity().EnrollmentID != ""
 	})
 	r.fake.mu.Lock()
 	attempts := r.fake.revokeAttempts
@@ -520,7 +520,7 @@ func recordPrior(t *testing.T, state, id string) int {
 	}
 	prior := NewRegistry(state)
 	old, _ := newSession(pid, ticks, fmt.Sprintf("testhost:%d:%d", pid, ticks), "", nil, nil)
-	old.setEnrolled(id)
+	old.setEnrolledAt(id, old.identity().Generation)
 	prior.Add(old)
 	if err := prior.Save(); err != nil {
 		t.Fatal(err)
@@ -587,7 +587,7 @@ func TestASecondRestartBeforeTheLoginStillRevokesThePriorEnrollment(t *testing.T
 	r.login(t)
 	waitFor(t, func() bool {
 		sess := r.srv.Registry.Get(pid)
-		return sess != nil && sess.EnrollmentID() != ""
+		return sess != nil && sess.identity().EnrollmentID != ""
 	})
 	if !revoked(r, "enr-prior") {
 		t.Fatal("the prior enrollment must be revoked before the session enrolls again")

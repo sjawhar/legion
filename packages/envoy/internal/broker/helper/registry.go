@@ -5,13 +5,10 @@ package helper
 
 import (
 	"crypto/ecdsa"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -63,7 +60,7 @@ type Session struct {
 	confirmed bool
 	// lapsedID is an enrollment of this session's runtime that must be revoked before it enrolls
 	// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the
-	// re-pinned session's prior one, the one its record named (setLapsed, from Recover).
+	// re-pinned session's prior one, the one its record named (takeLapsed, from Recover).
 	// enrollLoop revokes it first (clearLapsed once done). While the session lives it stays on the
 	// session's record, so a restart in between still revokes it once the helper is logged in. A
 	// session that ends first leaves the record without it and hands the id to the bounded revoke
@@ -177,7 +174,7 @@ func (s *Session) rename(sessionID, runtimeID string, key *ecdsa.PrivateKey, enr
 		// Inherited, not confirmed: the broker holds it for this key under this runtime id,
 		// so it is the right id to sign with and to record, but nothing has shown it is still
 		// live. The session's own enroll, woken now, settles that (Session.inherit).
-		s.enrollmentID, s.confirmed = enrollmentID, false
+		s.inheritLocked(enrollmentID)
 	}
 	return true
 }
@@ -196,12 +193,6 @@ func (s *Session) wakeCh() <-chan struct{} { return s.wake }
 // the shape is written; scripts/agentbox builds the same string for an agent box, so a session
 // that moves between a box and the host keeps one enrollment.
 func SessionRuntimeID(sessionID string) string { return "session-" + sessionID }
-
-func (s *Session) EnrollmentID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.enrollmentID
-}
 
 // enrollmentState is a session's enrollment as one read sees it: its id, the state that id means,
 // and the last attempt's error. It is the only way to read the state or the error, so every reply
@@ -235,11 +226,13 @@ func (s *Session) snapshot() enrollmentState {
 func (s *Session) inherit(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.enrollmentID, s.confirmed = id, false
+	s.inheritLocked(id)
 }
 
-func (s *Session) setEnrolled(id string) {
-	s.setEnrolledAt(id, s.identity().Generation)
+// inheritLocked is inherit's body, for a caller already holding s.mu: Session.rename installs the
+// enrollment the replacement key already holds this way too, inside its own critical section.
+func (s *Session) inheritLocked(id string) {
+	s.enrollmentID, s.confirmed = id, false
 }
 
 // setEnrolledAt records an enrollment an attempt that began at generation produced. A rename
@@ -319,13 +312,6 @@ func (s *Session) lapseLocked(reason string) {
 		s.ready = make(chan struct{})
 	default:
 	}
-}
-
-// setLapsed gives a re-pinned session its recorded enrollment as the lapsed id.
-func (s *Session) setLapsed(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lapsedID = id
 }
 
 // swapLapsed puts id in the lapsed slot whatever is there, and answers what it displaced ("" when
@@ -430,18 +416,14 @@ func nonEmpty(ids ...string) []string {
 	return out
 }
 
-// Key reads a record's signing key, nil when it has none and an error when what it has is not a
-// P-256 PKCS#8 key (a records file edited or truncated): the caller then makes a fresh key, as
-// it did before records carried one at all.
+// PrivateKey reads a record's signing key, nil when it has none and an error when what it has is
+// not a P-256 PKCS#8 key (a records file edited or truncated): the caller then makes a fresh key,
+// as it did before records carried one at all.
 func (rec Record) PrivateKey() (*ecdsa.PrivateKey, error) {
 	if rec.Key == "" {
 		return nil, nil
 	}
-	der, err := base64.StdEncoding.DecodeString(rec.Key)
-	if err != nil {
-		return nil, fmt.Errorf("session %s: key: %w", rec.RuntimeID, err)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	parsed, err := decodeKeyDER(rec.Key)
 	if err != nil {
 		return nil, fmt.Errorf("session %s: key: %w", rec.RuntimeID, err)
 	}
@@ -458,11 +440,11 @@ func encodeKey(key *ecdsa.PrivateKey) string {
 	if key == nil {
 		return ""
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
+	encoded, err := encodeKeyDER(key)
 	if err != nil {
 		return ""
 	}
-	return base64.StdEncoding.EncodeToString(der)
+	return encoded
 }
 
 // Registry is the live sessions, the dormant records of sessions that may come back, and the
@@ -516,11 +498,17 @@ func (r *Registry) Dormant(sessionID string) (Record, bool) {
 // Park keeps rec for its session id, so the same session coming back gets its identity rather
 // than a new one. A record with no session id is not parked: nothing could ever claim it.
 func (r *Registry) Park(rec Record) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.parkLocked(rec)
+}
+
+// parkLocked is Park's body, for a caller already holding r.mu: Retire parks the record its park
+// function built in the very critical section that takes the session out of the live set.
+func (r *Registry) parkLocked(rec Record) bool {
 	if rec.SessionID == "" {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.dormant[rec.SessionID] = rec
 	return true
 }
@@ -687,8 +675,8 @@ func (r *Registry) Retire(s *Session, park func(cur identity) (Record, bool)) bo
 	if park == nil {
 		return true
 	}
-	if rec, keep := park(s.identity()); keep && rec.SessionID != "" {
-		r.dormant[rec.SessionID] = rec
+	if rec, keep := park(s.identity()); keep {
+		r.parkLocked(rec)
 	}
 	return true
 }
@@ -850,6 +838,26 @@ func (r *Registry) Draining() bool {
 	return r.draining
 }
 
+// record is the record one reading of a live session's identity belongs in: the pid, start ticks
+// and boot id that together name the process incarnation a restart may re-pin (SameBoot), the
+// identity's runtime id, session id and both enrollment ids, and its key — the key only for a
+// named session, since an unnamed one's runtime id dies with its process and keeping the key
+// would be exposure that buys nothing. Save writes it for every live session and retire's park
+// function builds the dormant record from it (Server.dormantRecord, which adds GoneAt), so a
+// record a restart re-pins and one a returning session reclaims carry the same fields.
+//
+// The caller passes one identity() reading, taken under whichever lock it holds: a record must
+// not pair one generation's runtime id with another's key, nor this moment's live enrollment
+// with another's lapsed one.
+func (r *Registry) record(s *Session, cur identity) Record {
+	rec := Record{PID: s.PID, StartTicks: s.StartTicks, BootID: r.bootID, RuntimeID: cur.RuntimeID,
+		EnrollmentID: cur.EnrollmentID, LapsedEnrollmentID: cur.LapsedID, SessionID: cur.SessionID}
+	if cur.SessionID != "" {
+		rec.Key = encodeKey(cur.Key)
+	}
+	return rec
+}
+
 // Save writes every live session's record and every dormant one, atomically, 0600 in a directory
 // it makes 0700: a record of a named session holds that session's signing key, so nothing but
 // this user may read the file or list the directory. After Close it writes nothing.
@@ -869,14 +877,7 @@ func (r *Registry) Save() error {
 	for _, s := range r.byPID {
 		// One reading of the identity, so a record cannot pair one generation's runtime id
 		// with another's key, nor this moment's live enrollment with another's lapsed one.
-		id := s.identity()
-		// The boot id goes with the pid and the start ticks: only all three together name one
-		// process incarnation after a restart that was also a reboot (Registry.SameBoot).
-		rec := Record{PID: s.PID, StartTicks: s.StartTicks, BootID: r.bootID, RuntimeID: id.RuntimeID,
-			EnrollmentID: id.EnrollmentID, LapsedEnrollmentID: id.LapsedID, SessionID: id.SessionID}
-		if id.SessionID != "" {
-			rec.Key = encodeKey(id.Key)
-		}
+		rec := r.record(s, s.identity())
 		recs = append(recs, rec)
 	}
 	for _, rec := range r.dormant {
@@ -888,28 +889,7 @@ func (r *Registry) Save() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(r.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	// MkdirAll leaves an EXISTING directory's mode alone, so a records directory that was there
-	// already — the one the machine login lives in, made by an older release or by hand — could
-	// stay group- or world-readable while holding a session's signing key. Correct it on every
-	// save, so no write lands in a directory anyone else can list.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	tmp := r.path + ".tmp"
-	// O_EXCL through CreateTemp-like semantics is not needed here (the name is ours and the
-	// directory is 0700), but the mode is: WriteFile applies it only when it creates the file,
-	// so a .tmp left by an interrupted save with a wider mode is corrected before it is written.
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.path)
+	return writeFileOwnerOnly(r.path, data)
 }
 
 // LoadDormant takes the dormant records out of recs and keeps them, so a session that comes back

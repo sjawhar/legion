@@ -24,14 +24,45 @@
 -- the same principal when it adopts them. So "dormant_since is not null" is exactly "this ended row
 -- still holds something a session may take".
 --
--- The index is deliberately not unique. A unique partial index would refuse to apply on a
+-- The carry index is deliberately not unique. A unique partial index would refuse to apply on a
 -- production broker that already holds two live enrollments sharing a session id, which is a shape
 -- the broker allowed until now and a migration must not refuse to run against. Uniqueness buys
 -- nothing here either: the adoption moves what every predecessor of the pair holds, under one
 -- lock, rather than assuming there is one.
+--
+-- The three indexes beside it serve the three statements this change added to a hot path:
+--
+--   * enrollments_dormant serves the carry sweep's batch query, which runs every
+--     BROKER_SWEEP_SECONDS (5 by default, so 17,280 times a day) and reads
+--     "dormant_since is not null and dormant_since <= now() - ... order by dormant_since"
+--     (enroll.endCarriedBatch). Nothing ever deletes an enrollments row, so without this index
+--     every sweep reads the whole table: measured on 100,000 enrollments, a sequential scan of
+--     1818 buffers and 51.3 ms to find nothing, against 1 buffer and 0.05 ms with it. It is
+--     partial on the same predicate the sweep uses, since the rows that are not dormant are the
+--     vast majority and no query of this column wants them.
+--
+--   * grants_enrollment and requests_enrollment serve the adoption's row moves
+--     (enroll.adopt): "update grants set enrollment_id=$2 where enrollment_id=$1" and the same
+--     for requests. The partial indexes these tables already carry — grants_enrollment_live and
+--     requests_pending — cannot serve them, because the adoption moves EVERY row of a
+--     predecessor, the revoked grants and the decided requests included, so that the predecessor
+--     is left holding nothing at all; a partial index holds only the live and the pending rows
+--     and so answers for part of the move. Measured at 100,000 rows: the grants update 30.5 ms
+--     to 0.6 ms, the requests update 49.8 ms to 0.2 ms. The move runs inside the enrolment's own
+--     transaction, on the API path, holding the credential row and every predecessor, so every
+--     box move and every pod replacement pays it and its cost grows with the broker's whole
+--     history.
+--
+-- All four are a plain create index, which holds off writes to its table while it builds: the
+-- runner applies every migration in one transaction, where CONCURRENTLY is refused
+-- (0008_lookup_indexes.up.sql and 0011_credential_requests_approver.up.sql take the same approach
+-- for the same reason).
 --
 -- Both columns are additive and nullable, so this rewrites no row and is safe on a fresh or an
 -- already-migrated database.
 alter table enrollments add column if not exists carry_principal text;
 alter table enrollments add column if not exists dormant_since timestamptz;
 create index if not exists enrollments_carry on enrollments (carry_principal, session_id);
+create index if not exists enrollments_dormant on enrollments (dormant_since) where dormant_since is not null;
+create index if not exists grants_enrollment on grants (enrollment_id);
+create index if not exists requests_enrollment on requests (enrollment_id);

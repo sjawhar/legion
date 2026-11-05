@@ -56,7 +56,7 @@ func recordNamed(t *testing.T, state string, pid int, ticks uint64, sessionID, i
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.setEnrolled(id)
+	sess.setEnrolledAt(id, sess.identity().Generation)
 	prior.Add(sess)
 	if err := prior.Save(); err != nil {
 		t.Fatal(err)
@@ -204,7 +204,7 @@ func TestARestartKeepsANamedSessionsEnrollment(t *testing.T) {
 	if sess.identity().Thumbprint != thumbprintOf(t, key) {
 		t.Fatal("a re-pinned named session must keep the key its record holds, not a fresh one")
 	}
-	waitFor(t, func() bool { return sess.EnrollmentID() == "enr-before" })
+	waitFor(t, func() bool { return sess.identity().EnrollmentID == "enr-before" })
 	if got := r.revokes(t); len(got) != 0 {
 		t.Fatalf("a restart revoked %v; a named session's enrollment is not the restart's to end", got)
 	}
@@ -280,6 +280,9 @@ func TestASessionThatDoesNotComeBackLosesItsGrants(t *testing.T) {
 	// Server's own goroutines read is a data race, which `go test -race` caught here.
 	r.srv.SetDormantGrace(time.Nanosecond)
 	r.srv.SweepDormant(context.Background())
+	// The sweep fires each revoke off rather than holding its own goroutine on one (SweepDormant),
+	// so the revoke lands a moment after the sweep returns.
+	waitFor(t, func() bool { return len(r.revokes(t)) > 0 })
 	if got := r.revokes(t); len(got) != 1 || got[0] != "enr-before" {
 		t.Fatalf("the sweep revoked %v, want [enr-before]", got)
 	}
@@ -349,7 +352,7 @@ func TestASessionNamedAfterItStartedEnrolsUnderThatName(t *testing.T) {
 	// session enrols afresh under its name.
 	waitFor(t, func() bool { return slices.Contains(r.revokes(t), first.EnrollmentID) })
 	waitFor(t, func() bool {
-		cur := sess.EnrollmentID()
+		cur := sess.identity().EnrollmentID
 		return cur != "" && cur != first.EnrollmentID
 	})
 	// And a session that is already named is not another caller's to rename.
@@ -398,6 +401,8 @@ func TestANamedSessionThatEndsIsKeptForTheGraceThenRevoked(t *testing.T) {
 	}
 	r.srv.SetDormantGrace(time.Nanosecond)
 	r.srv.SweepDormant(context.Background())
+	// The sweep fires its revokes off (SweepDormant), so this waits for the one it must make.
+	waitFor(t, func() bool { return len(r.revokes(t)) > 0 })
 	if got := r.revokes(t); !slices.Contains(got, resp.EnrollmentID) {
 		t.Fatalf("the sweep revoked %v, want %s among them", got, resp.EnrollmentID)
 	}

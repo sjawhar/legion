@@ -166,8 +166,9 @@ func Load(fsys fs.FS, dir string) ([]Migration, error) {
 // It runs only for a collision, once for the whole set.
 func collisionRemedy(migrations []Migration) string {
 	const timestamp = "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)"
-	// A timestamp has 14 digits, as migrationid's identifier rule requires.
-	if migrations[len(migrations)-1].Version >= 10_000_000_000_000 {
+	// A timestamp has 14 digits, as migrationid's identifier rule requires
+	// (migrationid.NarrowerThanATimestamp is where that rule writes the threshold).
+	if migrations[len(migrations)-1].Version >= migrationid.NarrowerThanATimestamp {
 		return timestamp
 	}
 	version := make(map[int]string, 1)

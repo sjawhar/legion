@@ -163,6 +163,20 @@ func (s *Server) reply(conn net.Conn, resp Response) {
 	_, _ = conn.Write(append(data, '\n'))
 }
 
+// sessionHeldMsg is the refusal a register gets when another live process already holds the omp
+// session id it names, with that id and that process's pid: the admission of a new root finds
+// one (Registry.AdmitRoot's Held) and so does the rename of a session that registered without an
+// id (Registry.ClaimName's Held). A second process may not take a session's broker identity, and
+// both sites say so in the same words.
+const sessionHeldMsg = "session %s is already registered as pid %d; a second process may not take its broker identity"
+
+// sessionGoneMsg is the refusal a register gets when the session it would have answered for was
+// retired — unregistered, or its process exited — before the reply went out. Both membership
+// checks answer with it: the one adoptSessionID makes for a session with no name to claim, and
+// the one registerReply makes just before it builds the reply (Registry.Holds). Neither may tell
+// a launcher its session has a broker identity that nothing live holds.
+const sessionGoneMsg = "the session this process was in ended before this register could answer for it; run: agent-secrets register"
+
 // register makes pid a session root — unless pid is already inside a session, whose reply it
 // then gets — generating the key and starting enrollment in the background. Registry.Root and
 // Registry.AdmitRoot both walk /proc ancestry from pid while peer's pidfd stays open; the kernel
@@ -236,9 +250,8 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, sessionID st
 		return Response{Code: CodeKeygen, Error: adm.Err.Error()}
 	case adm.Held:
 		peer.Close()
-		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("session %s is already registered as pid %d; a second process may not take its broker identity", sessionID, adm.Session.PID)}
-	}
-	if adm.Unidentified {
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf(sessionHeldMsg, sessionID, adm.Session.PID)}
+	case adm.Unidentified:
 		peer.Close()
 		return Response{Code: CodeUnidentified, Error: "the peer no longer matches the identified pid"}
 	}
@@ -283,11 +296,9 @@ func (s *Server) dormantRecord(sess *Session) func(identity) (Record, bool) {
 			return Record{}, false
 		}
 		gone := time.Now()
-		return Record{
-			PID: sess.PID, StartTicks: sess.StartTicks, BootID: s.Registry.bootID, RuntimeID: cur.RuntimeID,
-			EnrollmentID: cur.EnrollmentID, LapsedEnrollmentID: cur.LapsedID, SessionID: cur.SessionID,
-			Key: encodeKey(cur.Key), GoneAt: &gone,
-		}, true
+		rec := s.Registry.record(sess, cur)
+		rec.GoneAt = &gone
+		return rec, true
 	}
 }
 
@@ -353,7 +364,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 		// tell a launcher its session has a broker identity when nothing live holds the name
 		// and the identity is parked for the sweep.
 		if !s.Registry.Holds(sess) {
-			return Response{Code: CodeNotASession, Error: "the session this process was in ended before this register could answer for it; run: agent-secrets register"}, true
+			return Response{Code: CodeNotASession, Error: sessionGoneMsg}, true
 		}
 		return Response{}, false
 	}
@@ -364,7 +375,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 		return s.reclaimIdentity(sessionID, rec, kept)
 	})
 	if got.Held != nil {
-		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("session %s is already registered as pid %d; a second process may not take its broker identity", sessionID, got.Held.PID)}, true
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf(sessionHeldMsg, sessionID, got.Held.PID)}, true
 	}
 	if got.Gone {
 		// The session was retired — unregistered, or its process exited — while this call was
@@ -409,8 +420,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // The wait ends early when the session is retired (its stop closes), and a retire can also land
 // just as the wait runs out, so the reply is built only after a last membership check: a session
 // the registry no longer holds is answered NOT_A_SESSION, not OK with an identity nothing live
-// has. registerReply answers a session the caller has already found, so it takes the registry it
-// belongs to as well.
+// has.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	if wait > 0 && credential {
@@ -421,7 +431,7 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		}
 	}
 	if !s.Registry.Holds(sess) {
-		return Response{Code: CodeNotASession, Error: "the session this process was in ended before this register could answer for it; run: agent-secrets register"}
+		return Response{Code: CodeNotASession, Error: sessionGoneMsg}
 	}
 	st := sess.snapshot()
 	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID(), Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
@@ -483,8 +493,13 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 	if !ok {
 		return resp
 	}
-	// One reading: the key that signs must be the key of the enrollment the proof names, even
-	// if a rename lands between the two.
+	// Two readings, compared: the identity, whose key signs, and the enrollment snapshot, whose
+	// id the reply reports. They are taken under two separate acquisitions of the session's
+	// mutex, so a rename can land between them, and then the two name different enrollments —
+	// which is why they are compared rather than used. A mismatch means exactly that, and the
+	// call is answered not-enrolled rather than signed: the session is enrolling under its new
+	// name, and a proof made in that window would pair a key with an enrollment it does not
+	// hold.
 	cur := sess.identity()
 	st := sess.snapshot()
 	id := cur.EnrollmentID
@@ -720,7 +735,7 @@ func (s *Server) unenrollSessionKey(ctx context.Context, enrollmentID string) Re
 
 // adopt starts the two goroutines every session has: enrollment with renewal, and the exit
 // watch. A session Recover re-pinned arrives with its recorded old enrollment as its lapsed id
-// (Session.setLapsed), which enrollLoop revokes before its first Broker.Enroll call.
+// (takeLapsed), which enrollLoop revokes before its first Broker.EnrollIdentity call.
 func (s *Server) adopt(ctx context.Context, sess *Session) {
 	go s.enrollLoop(ctx, sess)
 	go s.watchExit(ctx, sess)
@@ -789,7 +804,7 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-cha
 // enrollLoop enrolls with backoff for as long as the session lives, then renews; a refused
 // renew comes back here and enrolls again with the same key. Each pass first revokes the
 // session's lapsed id, if it has one: a renew-refused enrollment (renewLoop's markLapsed), or a
-// re-pinned session's recorded old enrollment (Recover's setLapsed). So a fresh enroll for the
+// re-pinned session's recorded old enrollment (Recover's takeLapsed). So a fresh enroll for the
 // same runtime_id never races the old row's revoke. That race matters against the real broker,
 // whatever it looks like against the fake one here: the real broker's idempotent-enroll conflict
 // is keyed on (launcher_credential_id, runtime_id), not the session's signing-key thumbprint, so
@@ -852,7 +867,6 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		}
 		var id string
 		var lease time.Time
-		var generation uint64
 		// renamed ends the retry at once when the identity moves under it: the pass above
 		// revoked the lapsed id this identity had, and a rename brings a NEW one that must be
 		// revoked before the new runtime id can enrol at all (the broker refuses a second row
@@ -873,18 +887,19 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 			}
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID(), "error", err, "in", delay)
 		}, func() error {
-			// ONE reading per attempt, and the generation of that very reading: the loop can
-			// retry across a rename, and an attempt that enrolled the NEW identity must be
-			// recognised as the new one's. Reading the generation once outside this closure
-			// would make such an answer look superseded, and the id it carries — which may be
-			// the enrollment the new identity was just handed back — would be lapsed and
-			// revoked, destroying the grant this change exists to keep.
+			// ONE reading per attempt, compared with the generation this pass began at. An
+			// attempt that reads any other has found a rename and enrols nothing: the retry
+			// ends there (errRenamed) and the whole pass starts again, because the rename
+			// brought a lapsed id that must be revoked before the new runtime id can enrol at
+			// all. So every enrollment this retry can produce belongs to pass, and pass is
+			// what setEnrolledAt is given below: an answer for an identity the session has
+			// moved on from is installed on the identity it has now by nobody, and revoked by
+			// nobody either, since it may be the very enrollment that identity was handed back.
 			cur := sess.identity()
 			if cur.Generation != pass {
 				renamed = true
 				return errRenamed
 			}
-			generation = cur.Generation
 			var err error
 			id, lease, err = s.Broker.EnrollIdentity(ctx, cur)
 			return err
@@ -896,7 +911,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		if !enrolled {
 			return
 		}
-		if !sess.setEnrolledAt(id, generation) {
+		if !sess.setEnrolledAt(id, pass) {
 			// A rename landed while this enroll was in flight. The id belongs to the name this
 			// session no longer has, so it blocks nothing the session is about to enrol: it
 			// takes the lapsed slot only while that slot is free. The rename may have put the
@@ -912,7 +927,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		}
 		s.save()
 		s.Log.Info("session enrolled", "runtime_id", sess.RuntimeID(), "enrollment_id", id)
-		if !s.renewLoop(ctx, sess, lease, generation) {
+		if !s.renewLoop(ctx, sess, lease, pass) {
 			return
 		}
 	}
@@ -959,7 +974,7 @@ func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass ident
 		if cur := sess.identity(); cur.Generation != pass.Generation || cur.EnrollmentID != pass.EnrollmentID {
 			return errRenamed
 		}
-		next, _, err := s.Broker.renewIdentity(ctx, pass)
+		next, err := s.Broker.renewIdentity(ctx, pass)
 		if err != nil {
 			if _, ended := enrollmentNotLive(err); ended {
 				return fmt.Errorf("%w (%w)", errRefused, err)
@@ -1053,10 +1068,14 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time, 
 // back to the broker's idempotent-enroll conflict path, which can keep answering it forever —
 // and, like enrollLoop's, woken by a login, since a revoke needs the credential too.
 //
-// Returns false only when the session ended or ctx was canceled first. A session that ends
-// mid-backoff cannot leave the id to retire, which revokes only sess.EnrollmentID(), and a
-// lapsed id is never that. So the id goes to the same bounded, independent revoke retire uses,
-// decoupled from the session: three tries, 2 s apart. They need a launcher credential like any
+// Returns false only when the session ended or ctx was canceled first. Retire does not end the
+// id for it: an unnamed session's retire revokes both the ids its identity held, the live one
+// and this lapsed one (nonEmpty(cur.EnrollmentID, cur.LapsedID)), while a named one's parks both
+// on the dormant record instead, for the session coming back to take or the sweep to revoke.
+// Either way this revoke is not left half-done: the id goes to the same bounded, independent
+// revoke retire uses, decoupled from the session — three tries, 2 s apart. Revoking an id twice
+// costs nothing (Broker.Revoke counts a 404 as done), and leaving one to its lease would hand it
+// back to the broker's idempotent-enroll conflict path. They need a launcher credential like any
 // revoke, so before a login they fail, and the id is left to its lease; nothing renews that row
 // again, since the session's key went with it. ctx done means the whole daemon is exiting, and
 // nothing further is attempted.
@@ -1184,7 +1203,17 @@ func (s *Server) SweepDormant(ctx context.Context) {
 		ids := rec.enrollments()
 		s.Log.Info("a session did not come back; ending its enrollment", "runtime_id", rec.RuntimeID, "session_id", rec.SessionID, "enrollment_ids", ids)
 		for _, id := range ids {
-			s.revoke(ctx, id)
+			// Fired off, never waited for: this runs on the one goroutine SweepLoop owns, and
+			// a revoke that fails costs about four seconds of bounded retries on top of its
+			// own HTTP timeouts, with nothing to interrupt it. A reboot parks every recorded
+			// session, so one batch of twenty records — up to two ids each — is potentially
+			// eighty seconds in which this loop sweeps nothing, the ticker drops its ticks and
+			// the save below does not run. There is nothing to wait for either: revoke returns
+			// nothing, logs its own failure, and touches no registry state. ctx bounds these
+			// goroutines exactly as it bounded the calls made inline, and every sibling path
+			// in this file fires the same call off the same way (register, adoptSessionID and
+			// both branches of Recover).
+			go s.revoke(ctx, id)
 		}
 	}
 	s.save()
@@ -1231,7 +1260,7 @@ func (s *Server) save() {
 // requests and its grants survive the restart. Nothing is lapsed, and nothing is revoked.
 //
 // A record with no key is re-pinned with a fresh one, as before, and takes its recorded
-// enrollment as its lapsed id (setLapsed), so its own enrollLoop revokes that id before
+// enrollment as its lapsed id (takeLapsed), so its own enrollLoop revokes that id before
 // enrolling the fresh key, exactly as after a refused renew: the real broker's idempotent-enroll
 // conflict is keyed on (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of
 // the old row's revoke can be refused outright (409 ALREADY_ENROLLED) even though it carries a

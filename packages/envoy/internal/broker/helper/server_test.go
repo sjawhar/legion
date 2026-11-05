@@ -440,7 +440,7 @@ func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
 	r.fake.mu.Unlock()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if id := r.srv.Registry.Get(os.Getpid()).EnrollmentID(); id != "" && id != reg.EnrollmentID {
+		if id := r.srv.Registry.Get(os.Getpid()).identity().EnrollmentID; id != "" && id != reg.EnrollmentID {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -518,7 +518,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled")
 	}
-	if sess.identity().Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID() != first.RuntimeID {
+	if sess.identity().Thumbprint == oldTP || sess.identity().EnrollmentID == first.EnrollmentID || sess.RuntimeID() != first.RuntimeID {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
@@ -575,8 +575,8 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 // alone, keyed on the recovered session's brand-new thumbprint, cannot). fakeBroker's
 // revokeFirstDelay holds the old row "live" for a window so a concurrent (buggy) enroll would
 // hit that conflict if one were ever attempted; the fixed enrollLoop revokes synchronously
-// before its first Broker.Enroll call, so no enroll is ever attempted during that window and
-// conflicts stays zero however long the delay runs.
+// before its first Broker.EnrollIdentity call, so no enroll is ever attempted during that window
+// and conflicts stays zero however long the delay runs.
 func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
@@ -672,16 +672,15 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 // this: enrollLoop's revoke-before-enroll guard calls revokeLapsed synchronously, and
 // revokeLapsed retries indefinitely with backoff — so if the re-pinned session ends
 // (Registry.Remove, exactly what retire/unregister would do) while that revoke is genuinely stuck
-// retrying against a failing broker, the prior id would be abandoned: retire's own revoke only
-// ever touches sess.EnrollmentID(), still empty at this point since this session never reached its
-// first successful Enroll, and once Registry.Remove drops the record a later restart's Recover has
-// no way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
-// independent s.revoke used elsewhere whenever it gives up because the session ended rather than
-// because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a 503 (an
-// unreachable broker, not merely a slow one) until the session has ended and its own retry loop
-// has stopped, so revokeLapsed is genuinely retrying when the session ends, however long the test
-// takes to get there: no assertion here has to land inside a real backoff window. Only then is the
-// fault cleared, so only the handed-off revoke can land the prior id.
+// retrying against a failing broker, the prior id would be abandoned: Registry.Remove is the
+// registry step alone and revokes nothing, and once it drops the record a later restart's Recover
+// has no way to find the prior id either. revokeLapsed therefore hands the id to the same
+// bounded, independent s.revoke used elsewhere whenever it gives up because the session ended
+// rather than because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a
+// 503 (an unreachable broker, not merely a slow one) until the session has ended and its own
+// retry loop has stopped, so revokeLapsed is genuinely retrying when the session ends, however
+// long the test takes to get there: no assertion here has to land inside a real backoff window.
+// Only then is the fault cleared, so only the handed-off revoke can land the prior id.
 func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
@@ -753,7 +752,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if id := sess.EnrollmentID(); id != "" {
+	if id := sess.identity().EnrollmentID; id != "" {
 		t.Fatalf("the re-pinned session must not have reached its own first enroll yet: %q", id)
 	}
 	r.fake.mu.Lock()
@@ -801,7 +800,7 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 	_ = dead.Run()
 	reg := NewRegistry(state)
 	sess, _ := newSession(dead.ProcessState.Pid(), 1, "testhost:dead", "", nil, nil)
-	sess.setEnrolled("enr-dead")
+	sess.setEnrolledAt("enr-dead", sess.identity().Generation)
 	reg.Add(sess)
 	if err := reg.Save(); err != nil {
 		t.Fatal(err)
@@ -857,7 +856,7 @@ func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var newID string
 	for time.Now().Before(deadline) {
-		if id := r.srv.Registry.Get(os.Getpid()).EnrollmentID(); id != "" && id != reg.EnrollmentID {
+		if id := r.srv.Registry.Get(os.Getpid()).identity().EnrollmentID; id != "" && id != reg.EnrollmentID {
 			newID = id
 			break
 		}

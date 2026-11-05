@@ -697,16 +697,14 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		Scan(&body, &createdAt); err != nil {
 		return Decision{}, err
 	}
-	var enrollmentID string
 	var live bool
 	var enr enrollmentRow
 	if err := tx.QueryRow(ctx, `select e.id, e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service, c.host
 		from requests r join enrollments e on e.id = r.enrollment_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where r.record_id=$1 for share of e`, recordID).
-		Scan(&enrollmentID, &live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
+		Scan(&enr.ID, &live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
 		return Decision{}, err
 	}
-	enr.ID = enrollmentID
 	var requestID, state string
 	var expired bool
 	if err := tx.QueryRow(ctx, `select id, state, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
@@ -781,11 +779,11 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	var grantID string
 	if next == "granted" {
 		// The grant lasts the lifetime the approved record names, or the default above.
-		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, lifetime); err != nil {
+		if grantID, err = insertGrant(ctx, tx, requestID, enr.ID, login, lifetime); err != nil {
 			return Decision{}, err
 		}
 	}
-	if err := audit(ctx, tx, "request."+next, enrollmentID, requestID, nullable(grantID), by, auditDetail{"detail": detail, "record_id": recordID}); err != nil {
+	if err := audit(ctx, tx, "request."+next, enr.ID, requestID, nullable(grantID), by, auditDetail{"detail": detail, "record_id": recordID}); err != nil {
 		return Decision{}, err
 	}
 	return Decision{RequestID: requestID, State: next, GrantID: grantID}, tx.Commit(ctx)

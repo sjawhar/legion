@@ -151,7 +151,7 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sess.setEnrolled("enrollment-1")
+			sess.setEnrolledAt("enrollment-1", sess.identity().Generation)
 			start := time.Now()
 			broker := &outageBroker{start: start, gapStart: want.GapStart, gapEnd: want.GapEnd + margin, delays: delays, timeout: model.ClientTimeout, lease: c.lease}
 			srv := &Server{

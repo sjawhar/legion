@@ -187,7 +187,7 @@ func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) 
 		reg := NewRegistry(filepath.Join(t.TempDir(), "sessions.json"))
 		reg.parent = rootingParent
 		old := namedSession(t, 1000, testSessionID, key)
-		old.setEnrolled("enr-before")
+		old.setEnrolledAt("enr-before", old.identity().Generation)
 		reg.Add(old)
 
 		var adm admission
@@ -267,7 +267,7 @@ func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
 	if sess == nil {
 		t.Fatal("the resumed session must be registered")
 	}
-	if got := sess.EnrollmentID(); got != "enr-before" {
+	if got := sess.identity().EnrollmentID; got != "enr-before" {
 		t.Fatalf("the reclaimed session holds enrollment %q, want enr-before", got)
 	}
 	if got := sess.identity().Thumbprint; got != thumbprintOf(t, key) {
@@ -496,7 +496,7 @@ func TestARefusedRenewOfAnOldEnrollmentLeavesTheReclaimedOneAlone(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.setEnrolled("enr-old")
+	sess.setEnrolledAt("enr-old", sess.identity().Generation)
 	renewed := sess.identity() // what Broker.Renew signed
 	if renewed.EnrollmentID != "enr-old" || !renewed.Confirmed {
 		t.Fatalf("the session must hold enr-old, confirmed: %+v", renewed)
@@ -511,7 +511,7 @@ func TestARefusedRenewOfAnOldEnrollmentLeavesTheReclaimedOneAlone(t *testing.T) 
 	if !sess.rename(testSessionID, SessionRuntimeID(testSessionID), reclaimedKey, "enr-kept", "named") {
 		t.Fatal("rename")
 	}
-	if got := sess.EnrollmentID(); got != "enr-kept" {
+	if got := sess.identity().EnrollmentID; got != "enr-kept" {
 		t.Fatalf("the renamed session holds %q, want the reclaimed enr-kept", got)
 	}
 
@@ -519,7 +519,7 @@ func TestARefusedRenewOfAnOldEnrollmentLeavesTheReclaimedOneAlone(t *testing.T) 
 	if id, applied := sess.markLapsedAt(renewed, "the broker refused this session's renew"); applied {
 		t.Fatalf("a refusal for enr-old lapsed the session's current enrollment as %q", id)
 	}
-	if got := sess.EnrollmentID(); got != "enr-kept" {
+	if got := sess.identity().EnrollmentID; got != "enr-kept" {
 		t.Fatalf("the reclaimed enrollment is now %q; a stale refusal must not touch it", got)
 	}
 	if got := sess.lapsed(); got != "enr-old" {
@@ -539,7 +539,7 @@ func TestARefusedRenewOfAnOldEnrollmentLeavesTheReclaimedOneAlone(t *testing.T) 
 // enrol at all until the blocking row's lease ends.
 func TestTheBlockingEnrollmentTakesTheLapsedSlot(t *testing.T) {
 	sess := namedSession(t, 1000, testSessionID, nil)
-	sess.setLapsed("enr-old-pid") // what a rename retired: the old runtime's enrollment
+	sess.adoptLapsed("enr-old-pid") // what a rename retired: the old runtime's enrollment
 	orphans := takeLapsed(sess, []string{"enr-blocking", "enr-other"}, true)
 	if got := sess.lapsed(); got != "enr-blocking" {
 		t.Fatalf("the lapsed slot holds %q, want the blocking enr-blocking", got)
@@ -549,7 +549,7 @@ func TestTheBlockingEnrollmentTakesTheLapsedSlot(t *testing.T) {
 	}
 	// With nothing blocking, an occupied slot is left alone.
 	other := namedSession(t, 1001, testSessionID, nil)
-	other.setLapsed("enr-old-pid")
+	other.adoptLapsed("enr-old-pid")
 	if got := takeLapsed(other, []string{"enr-spare"}, false); len(got) != 1 || got[0] != "enr-spare" {
 		t.Fatalf("orphans %v, want enr-spare left for the bounded revoke", got)
 	}
@@ -609,7 +609,7 @@ func TestATransientRenewFailureDoesNotCostTheInheritedEnrollment(t *testing.T) {
 		t.Fatal("the resumed session must be registered")
 	}
 	waitFor(t, func() bool { return sess.snapshot().State == "enrolled" })
-	if got := sess.EnrollmentID(); got != "enr-before" {
+	if got := sess.identity().EnrollmentID; got != "enr-before" {
 		t.Fatalf("a renew the broker could not answer cost the session its enrollment: %q", got)
 	}
 	r.fake.mu.Lock()
@@ -631,7 +631,7 @@ func TestAWakeRaisedBeforeThisEnrollmentDoesNotEnrollAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.setEnrolled("enr-kept")
+	sess.setEnrolledAt("enr-kept", sess.identity().Generation)
 	served := sess.identity().Generation
 	sess.wakeEnroll() // the rename's wake, left over from before enr-kept was confirmed
 
@@ -667,7 +667,7 @@ func TestAWakeRaisedBeforeThisEnrollmentDoesNotEnrollAgain(t *testing.T) {
 // refused 409 ALREADY_ENROLLED for as long as its row lives, and nothing is left to revoke it.
 func TestARevokeFinishingAfterARenameLeavesTheBlockingID(t *testing.T) {
 	sess := namedSession(t, 1000, testSessionID, nil)
-	sess.setLapsed("enr-old") // the id whose revoke is in flight
+	sess.adoptLapsed("enr-old") // the id whose revoke is in flight
 	takeLapsed(sess, []string{"enr-blocking"}, true)
 	if sess.clearLapsedIf("enr-old") {
 		t.Fatal("the finished revoke cleared a slot that no longer held its id")
@@ -689,10 +689,11 @@ func TestARevokeFinishingAfterARenameLeavesTheBlockingID(t *testing.T) {
 }
 
 // TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker drives the real enrollLoop, not
-// the slot helpers it calls, so it fails if that callsite is changed back to setLapsed: an
-// enroll held in flight while a rename reclaims the blocking enrollment must send its own now-
-// obsolete id to the bounded revoke, not into the slot over the blocker. With the blocker kept,
-// the loop revokes it first and the new runtime enrols; with it overwritten, the new runtime's
+// the slot helpers it calls, so it fails if that callsite writes the lapsed slot whatever is in
+// it (swapLapsed) rather than only while it is free (adoptLapsed): an enroll held in flight while
+// a rename reclaims the blocking enrollment must send its own now-obsolete id to the bounded
+// revoke, not into the slot over the blocker. With the blocker kept, the loop revokes it first
+// and the new runtime enrols; with it overwritten, the new runtime's
 // enroll meets the live blocker and loops on 409 ALREADY_ENROLLED.
 func TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker(t *testing.T) {
 	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
@@ -732,7 +733,7 @@ func TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker(t *testing.T) {
 	takeLapsed(sess, []string{"enr-blocking"}, true)
 	release() // the in-flight enroll now returns an id for the runtime the session has left
 
-	// At HEAD the session enrols under its new name; under the setLapsed regression it never
+	// At HEAD the session enrols under its new name; with the blocker overwritten it never
 	// does, because the blocker it dropped keeps refusing the new runtime's enroll.
 	waitFor(t, func() bool { return sess.snapshot().State == "enrolled" })
 	if got := sess.RuntimeID(); got != SessionRuntimeID(testSessionID) {
@@ -767,7 +768,7 @@ func TestARenameDuringTheOldRevokeRevokesTheNewBlockerFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.setLapsed("enr-old") // the id whose revoke the loop runs first
+	sess.adoptLapsed("enr-old") // the id whose revoke the loop runs first
 	r.srv.Registry.Add(sess)
 	t.Cleanup(func() { r.srv.Registry.Remove(sess) })
 
@@ -824,7 +825,7 @@ func TestARegisterForASessionTheRegistryNoLongerHoldsIsRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Never added to the registry: exactly what a session retired a moment ago is.
 			sess := namedSession(t, 4242, testSessionID, nil)
-			sess.setEnrolled("enr-kept")
+			sess.setEnrolledAt("enr-kept", sess.identity().Generation)
 			resp, refused := r.srv.adoptSessionID(context.Background(), sess, tc.sessionID)
 			if !refused || resp.Code != CodeNotASession {
 				t.Fatalf("a register for a session the registry no longer holds got %+v (refused %v), want NOT_A_SESSION", resp, refused)

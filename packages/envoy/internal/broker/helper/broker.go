@@ -1244,12 +1244,6 @@ func (b *Broker) logger() *slog.Logger {
 	return b.Log
 }
 
-// Enroll registers the session's key. 201 is a new enrollment; 200 is the live one for the same
-// credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
-func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
-	return b.EnrollIdentity(ctx, s.identity())
-}
-
 // EnrollIdentity enrols ONE reading of a session's identity, so the caller decides which
 // generation the attempt belongs to rather than the broker rereading a session a rename may
 // have moved on. The answer of an attempt that began under an identity the session no longer
@@ -1421,27 +1415,30 @@ func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, identity, er
 	// One reading: the enrollment id and the key that signs for it must be the same
 	// generation's, or the proof names an enrollment the key does not hold.
 	cur := s.identity()
-	return b.renewIdentity(ctx, cur)
+	next, err := b.renewIdentity(ctx, cur)
+	return next, cur, err
 }
 
-// renewIdentity renews the enrollment one identity reading names, with that reading's key.
-func (b *Broker) renewIdentity(ctx context.Context, cur identity) (time.Time, identity, error) {
+// renewIdentity renews the enrollment one identity reading names, with that reading's key. It
+// answers the new lease alone: every caller already holds the reading it passed in, so handing
+// that back would tell it nothing it does not have.
+func (b *Broker) renewIdentity(ctx context.Context, cur identity) (time.Time, error) {
 	id := cur.EnrollmentID
 	url := b.URL + "/v1/enrollments/" + id + "/renew"
 	compact, err := proof.Sign(cur.Key, id, http.MethodPost, url, time.Now())
 	if err != nil {
-		return time.Time{}, cur, err
+		return time.Time{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return time.Time{}, cur, redact.Error(err, b.URL)
+		return time.Time{}, redact.Error(err, b.URL)
 	}
 	req.Header.Set("Proof", compact)
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK}, &out); err != nil {
-		return time.Time{}, cur, err
+		return time.Time{}, err
 	}
-	return out.LeaseExpiresAt, cur, nil
+	return out.LeaseExpiresAt, nil
 }
 
 // Revoke deletes the enrollment and every grant under it. 204 and 404 both mean done.

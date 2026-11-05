@@ -56,7 +56,7 @@ func TestSaveAndLoadRecordsCarryNoKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.setEnrolled("enr-1")
+	sess.setEnrolledAt("enr-1", sess.identity().Generation)
 	reg.Add(sess)
 	if err := reg.Save(); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	if sess.snapshot().LastError == "" {
 		t.Fatal("the last broker error is kept for NOT_ENROLLED replies")
 	}
-	sess.setEnrolled("enr-2")
+	sess.setEnrolledAt("enr-2", sess.identity().Generation)
 	if st := sess.snapshot(); st.State != "enrolled" || st.LastError != "" {
 		t.Fatalf("enrolled: %s %q", st.State, st.LastError)
 	}
@@ -162,7 +162,7 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	if got := sess.identity().LapsedID; got != "" {
 		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
 	}
-	sess.setEnrolled("enr-3")
+	sess.setEnrolledAt("enr-3", sess.identity().Generation)
 	select {
 	case <-sess.readyCh():
 	default:

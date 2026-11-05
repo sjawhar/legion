@@ -608,6 +608,18 @@ func carryPrincipal(cred Credential, in Enrollment) *string {
 	return nil
 }
 
+// holdsForItsSession is the one SQL text for "enrollment e still holds something for its
+// session": a live grant, or a request nobody has answered yet. Two statements read it, and they
+// must read it identically — endEnrollment's probe, which decides whether an end leaves the row
+// dormant instead of revoking what it holds, and adopt's predecessor query, which decides which
+// ended rows the next enrolment of the name takes from. Were one wider than the other, an end
+// could leave a row dormant that no successor ever adopts (its grants standing until the carry
+// sweep finds them) or adopt could take from a row an end revoked under it. Both splice it in
+// with e as the enrollment; adopt adds the withheld names outside this text, because those
+// follow the session as well but are no part of what makes an end carry.
+const holdsForItsSession = `exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
+				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')`
+
 // adopt moves what every predecessor of this enrollment's (carry_principal, session_id) holds to
 // the enrollment createAttempt has just inserted, inside that same transaction, revoking none of
 // it. A predecessor is another enrollment of the same pair that still holds something for the
@@ -657,13 +669,12 @@ func adopt(ctx context.Context, tx pgx.Tx, in Enrollment, actor string) error {
 	}
 	// A predecessor is an enrollment of the pair that has not been ended for good and holds
 	// something: the same reading of "holds something" that decides whether an end leaves a row
-	// dormant (endEnrollment), with the withheld names beside the grants and pending requests,
-	// since those follow the session too.
+	// dormant (endEnrollment, which splices in the same holdsForItsSession), with the withheld
+	// names beside the grants and pending requests, since those follow the session too.
 	rows, err := tx.Query(ctx, `select e.id, e.dormant_since is not null from enrollments e
 		where e.carry_principal=$1 and e.session_id=$2 and e.id <> $3
 			and (e.revoked_at is null or e.dormant_since is not null)
-			and (exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
-				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')
+			and (`+holdsForItsSession+`
 				or exists (select 1 from withheld_secrets w where w.enrollment_id=e.id))
 		order by e.id for update of e`, *in.carry, *in.SessionID, in.ID)
 	if err != nil {
@@ -816,8 +827,7 @@ func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason strin
 	var dormant bool
 	if mode == endMayCarry {
 		if err := tx.QueryRow(ctx, `select coalesce(e.session_id,'') <> '' and (
-				exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
-				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending'))
+				`+holdsForItsSession+`)
 			from enrollments e where e.id=$1`, id).Scan(&dormant); err != nil {
 			return endedEnrollment{}, err
 		}

@@ -148,7 +148,7 @@ func TestARefusalOfAReplacedCredentialIsAnOrdinaryRetry(t *testing.T) {
 	open() // the broker refuses the old credential's enroll
 
 	sess := r.srv.Registry.Get(os.Getpid())
-	waitFor(t, func() bool { return sess.EnrollmentID() != "" })
+	waitFor(t, func() bool { return sess.identity().EnrollmentID != "" })
 	if b.cred.Load() != fresh {
 		t.Fatal("a refusal of the replaced credential must leave the new one in place")
 	}
@@ -200,7 +200,7 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 	}
 
 	sess := r.srv.Registry.Get(os.Getpid())
-	waitFor(t, func() bool { return sess.EnrollmentID() != "" })
+	waitFor(t, func() bool { return sess.identity().EnrollmentID != "" })
 	if b.cred.Load() != fresh {
 		t.Fatal("the session enrolled, but not with the credential the login installed")
 	}

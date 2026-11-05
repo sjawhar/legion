@@ -181,14 +181,24 @@ func DefaultSocket(getenv func(string) string) string {
 // UnitName is the helper's systemd user unit.
 const UnitName = "agent-secrets-helper.service"
 
-// UnitPath is where `agent-secrets-helper install` writes the helper's user unit: under
-// $XDG_CONFIG_HOME, default $HOME/.config. Its presence says the helper is installed here.
-func UnitPath(getenv func(string) string) string {
+// configDir is the directory this helper's per-user files live under: $XDG_CONFIG_HOME, and
+// $HOME/.config when that is unset, which is the default the XDG base directory specification
+// names. UnitPath and DefaultStatePath both read it, so the unit and the session records are
+// looked for under one directory whichever of them a caller asks about. getenv is injectable for
+// the reason it is on DefaultSocket: so a caller can test its own defaulting against a fake
+// environment.
+func configDir(getenv func(string) string) string {
 	dir := getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		dir = filepath.Join(getenv("HOME"), ".config")
 	}
-	return filepath.Join(dir, "systemd", "user", UnitName)
+	return dir
+}
+
+// UnitPath is where `agent-secrets-helper install` writes the helper's user unit: under
+// $XDG_CONFIG_HOME, default $HOME/.config. Its presence says the helper is installed here.
+func UnitPath(getenv func(string) string) string {
+	return filepath.Join(configDir(getenv), "systemd", "user", UnitName)
 }
 
 // LegacyStatePath is where the helper's session records used to live: beside its socket, under
@@ -203,18 +213,49 @@ func LegacyStatePath(getenv func(string) string) string {
 // is unset: under $XDG_CONFIG_HOME (default $HOME/.config), beside the machine login, because a
 // named session's record holds that session's signing key and must outlive a reboot.
 func DefaultStatePath(getenv func(string) string) string {
-	dir := getenv("XDG_CONFIG_HOME")
-	if dir == "" {
-		dir = filepath.Join(getenv("HOME"), ".config")
+	return filepath.Join(configDir(getenv), "agent-secrets", "sessions.json")
+}
+
+// writeFileOwnerOnly writes data to path so that nothing but this user can read it, and
+// atomically: it makes path's directory 0700, writes the bytes to path+".tmp" 0600, and renames
+// that over path, so a reader finds either the whole old file or the whole new one. Both the
+// session records and the file MigrateStateFile leaves hold session signing keys, and both are
+// written through here.
+//
+// Both chmods are needed, though the call above each already names the same mode. MkdirAll
+// leaves an EXISTING directory's mode alone, so a directory that was there already — the one the
+// machine login lives in, made by an older release or by hand — could stay group- or
+// world-readable while holding a session's signing key; it is corrected on every write, so no
+// write lands in a directory anyone else can list. And WriteFile applies its mode only when it
+// CREATES the file, so a .tmp left behind by an interrupted write with a wider mode is corrected
+// before these bytes go into it.
+//
+// O_EXCL through CreateTemp-like semantics is not needed here: the name is this writer's own and
+// the directory is 0700.
+func writeFileOwnerOnly(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
-	return filepath.Join(dir, "agent-secrets", "sessions.json")
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // MigrateStateFile moves a records file left at the old runtime-directory path to the durable
 // one, once, when the durable path has none: a helper upgraded in place keeps the sessions it
 // had rather than revoking them all at its first start. A rename across filesystems (tmpfs to
-// the home disk) is expected to fail, so it copies and removes instead. Anything that goes
-// wrong is returned and only logged: a lost record costs the sessions it names their
+// the home disk) is expected to fail, so it copies and removes instead, writing the copy through
+// writeFileOwnerOnly, the owner-only atomic write the records file is saved with. Anything that
+// goes wrong is returned and only logged: a lost record costs the sessions it names their
 // continuity, never the helper its start.
 func MigrateStateFile(from, to string) error {
 	if from == "" || to == "" || from == to {
@@ -232,17 +273,7 @@ func MigrateStateFile(from, to string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(filepath.Dir(to), 0o700); err != nil {
-		return err
-	}
-	tmp := to + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, to); err != nil {
+	if err := writeFileOwnerOnly(to, data); err != nil {
 		return err
 	}
 	return os.Remove(from)

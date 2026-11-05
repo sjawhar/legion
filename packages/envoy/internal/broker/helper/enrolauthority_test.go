@@ -422,7 +422,7 @@ func TestBothKindsOfSessionFollowTheBoxAcrossASignIn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := b.Enroll(context.Background(), sess); err != nil {
+		if _, _, err := b.EnrollIdentity(context.Background(), sess.identity()); err != nil {
 			t.Fatalf("enrol a host session: %v", err)
 		}
 	}
