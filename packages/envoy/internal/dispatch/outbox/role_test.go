@@ -847,6 +847,51 @@ func TestAKeptFallbackCopyHandedToItsOwnMentionedHolderCarriesTheMentionsKey(t *
 	}
 }
 
+// A role route whose holder is the session the comment mentions, when that mention's send failed
+// before the event was published - a receipt timeout, whose message the listener had already
+// published, so the session has it - is forwarded to that holder under the mention's own key, as
+// a session route's copy of a failed mention is (TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey)
+// and as a held copy forwarded to its own mentioned holder is: the host has claimed that key and
+// drops the copy, so the session is shown the comment once. Forwarded under the event's key, the
+// holder is shown it a second time - observed on the real binaries with a role route held by the
+// session a comment mentions and the listener's send answer held past Dispatch's 5 s window: the
+// session received agent.<s>.<comment>:session:<s>:steer and envoy.role.forward.dispatch-<event>.
+func TestARoleCopyToTheHolderWhoseOwnMentionFailedCarriesTheMentionsKey(t *testing.T) {
+	ctx := store.WithTransactionTracking(context.Background())
+	rig := newRoleRig(t)
+	const role, holder, target = "reviewer", "s1", "session:s1"
+	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	recv := rig.receiver(t, holder, true)
+	deps := rig.deps()
+	route := "role:" + role
+	seedIssue(t, deps.Store, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, deps.Store, "T-1", alice, "@s1 are you there?", nil)
+	appendEvent(t, deps.Store, deps.Broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf(holder),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new(holder),
+		},
+	})
+	seedMentionDelivery(t, deps.Store, commentID, holder, "failed")
+
+	holding(t, deps).scan(ctx, unfenced{})
+
+	forwards := recv.received()
+	if len(forwards) != 1 {
+		t.Fatalf("%s was sent %d copies, want the route's one copy: %+v", holder, len(forwards), forwards)
+	}
+	want := contracts.AgentSendDedupeKey(holder, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+	if forwards[0].DedupeKey != want {
+		t.Fatalf("the role route's copy forwarded to %s, whose own mention failed, is keyed %q, want the mention's own key %q, which its host drops",
+			holder, forwards[0].DedupeKey, want)
+	}
+}
+
 // heldPendingCopy holds what one pass that reached no holder left of the copy held for
 // destination: the row unsettled and unpublished with its one attempt and its back-off, one
 // logged failure naming why the holder was not reached, and that destination counted under its
