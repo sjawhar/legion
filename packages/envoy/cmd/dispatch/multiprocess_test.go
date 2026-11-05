@@ -2944,19 +2944,6 @@ func requireLeasedOncePerPeriod(t *testing.T, pair *dispatchPair, lease string) 
 	// above for a reader of a failure.
 }
 
-// waitForEitherLine waits for either process to write a line holding every part.
-func waitForEitherLine(t *testing.T, pair *dispatchPair, within time.Duration, parts ...string) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for len(pair.a.logLines(parts...)) == 0 && len(pair.b.logLines(parts...)) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("neither process wrote a line holding %v within %v:\nA:\n%s\nB:\n%s",
-				parts, within, pair.a.Output.String(), pair.b.Output.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
 // leasePeriodOf is the period= field of one `leased pass ran` line, which names the period that
 // pass served (duty.Exclusive).
 func leasePeriodOf(t *testing.T, line string) string {
@@ -3049,11 +3036,11 @@ const (
 //
 // Five of the eleven leases are observable here inside a window a test can wait out, and they
 // keep different rules once the hold lets go. webhook-redelivery, block-index and
-// search-term-stats are timer loops whose first pass is immediate: each window is served once
-// across the two processes, by whichever took the lease. document-compaction's first tick is at
-// start too, and it is not held inside its pass: its period is the aligned hour, so the process
-// whose tick comes second skips because the lease is held or because the hour is served, and
-// either way the pass runs once - provided both first ticks fall in one hour, which
+// search-term-stats are timer loops whose first pass is immediate, and what this row holds them
+// to is per period: at least one pass across the two processes, and no period served twice.
+// document-compaction's first tick is at start too, and it is not held inside its pass: its
+// period is the aligned hour, and the same per-period claim holds for it - at least one pass, and
+// no hour served twice - provided both first ticks fall in one hour, which
 // waitOutABucketBoundary sees to. reference-excerpts is a woken loop
 // (docs.RunReferenceExcerptReconciliation) that runs a pass at start and again on the
 // pglisten.Hub wake after its first LISTEN: the process that found the lease held retries (every
@@ -3126,11 +3113,20 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
 	// lists the App webhook's failed deliveries before it writes anything. What the release below
-	// needs is that pass to be inside that call, which its own line says; the other process's
-	// skip does not, since a tick that lands in the next period passes rather than skipping, and
-	// waiting for a skip here failed for exactly that reason - two honest passes, each in its own
-	// two-minute period, and no skip at all (INFRA-985).
-	waitForEitherLine(t, pair, 60*time.Second, `msg="dispatch: redelivering the GitHub App webhook's failed deliveries"`)
+	// needs is that pass to be inside that call, and the proof of that is the fake's own count:
+	// the fake counts the listing and only then holds it, so a counted listing means a pass is in
+	// the call or about to block in it. The pass's own log line is not that proof - main.go writes
+	// it at boot, before the sweeper goroutine starts, so it is there before any GitHub call is
+	// made. The other process's skip is no proof either, since a tick that lands in the next
+	// period passes rather than skipping, and waiting for a skip here failed for exactly that
+	// reason - two honest passes, each in its own two-minute period, and no skip at all
+	// (INFRA-985).
+	for deadline := time.Now().Add(60 * time.Second); fake.deliveryListings() == 0; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no webhook delivery listing reached the fake within %v, so no redelivery pass is inside its GitHub call:\nA:\n%s\nB:\n%s",
+				60*time.Second, pair.a.Output.String(), pair.b.Output.String())
+		}
+	}
 	fake.Release()
 	waitForLease(t, pair, leaseRan, "webhook-redelivery", 60*time.Second)
 	requireLeasedOncePerPeriod(t, pair, "webhook-redelivery")

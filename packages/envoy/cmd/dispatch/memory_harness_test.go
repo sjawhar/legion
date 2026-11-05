@@ -233,8 +233,9 @@ func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
 func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	t.Helper()
 	owed := h.readOwed(t)
-	if owed.settlements+owed.documents+owed.items+owed.itemBlocks == 0 {
-		t.Logf("block index before start (%s): indexed 0 documents, 0 items, 0 item blocks; owed 0", t.Name())
+	if total := owed.settlements + owed.documents + owed.items + owed.itemBlocks; total == 0 {
+		t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed %d",
+			t.Name(), 0, 0, 0, total)
 		return
 	}
 	// One service for both pieces of work, shut down before the server starts, so neither its
@@ -250,8 +251,17 @@ func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	if owed.documents+owed.items+owed.itemBlocks > 0 {
 		documents, items, itemBlocks = h.writeOwedBlockIndex(t, service)
 	}
-	t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed 0",
-		t.Name(), documents, items, itemBlocks)
+	// What the line reports is a reading taken after the work, not an assumption that the work
+	// cleared everything: a row still owed here is one nothing in this process can clear, and it
+	// would be measured inside the window as this guard exists to prevent.
+	left := h.readOwed(t)
+	remaining := left.settlements + left.documents + left.items + left.itemBlocks
+	if remaining != 0 {
+		t.Fatalf("after the drain (%s) the database still owes %d documents a block index, %d items, %d item blocks and %d settlements, which nothing in this process can clear",
+			t.Name(), left.documents, left.items, left.itemBlocks, left.settlements)
+	}
+	t.Logf("block index before start (%s): indexed %d documents, %d items, %d item blocks; owed %d",
+		t.Name(), documents, items, itemBlocks, remaining)
 }
 
 // settleOwed settles, on this goroutine, every document owed a settlement, by the issue each
