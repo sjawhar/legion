@@ -15,30 +15,20 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// seedHeadIssue records one issue the attribution can name, with a project of its own, mapped
-// to acme/widgets by default: a head row is attributed only to an issue that resolves to the
-// pull request's own repository (headAttribution), so an issue of no repository is attributed
-// to nobody. The key is HEAD-<n>, since an issue's number is its key's.
+// seedHeadIssue records one issue the attribution can name, in the project that owns
+// acme/widgets (seedDeliveryProject): a head row is attributed only to an issue that resolves
+// to the pull request's own repository (headAttribution), so an issue of no repository is
+// attributed to nobody. The key is HEAD-<n>, which is what a failure names; the number is n in
+// this fixture's band of the shared project.
 func seedHeadIssue(t *testing.T, ctx context.Context, pool *store.Pool, number int) string {
 	t.Helper()
 	key := fmt.Sprintf("HEAD-%d", number)
-	if _, err := pool.Exec(ctx, `
-		insert into projects (key, name) values ('HEAD', 'Heads') on conflict (key) do nothing
-	`); err != nil {
-		t.Fatalf("seed the project: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-		insert into repo_projects (repo, project, created_by, is_default)
-		values ('acme/widgets', 'HEAD', '{"kind":"system","id":"test"}'::jsonb, true)
-		on conflict (repo) do nothing
-	`); err != nil {
-		t.Fatalf("map the repository to the project: %v", err)
-	}
+	seedDeliveryProject(t, ctx, pool)
 	if _, err := pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, status, created_by, rank)
-		values ($1, 'HEAD', $2, $1, 'todo', '{"kind":"system","id":"test"}'::jsonb, $1)
+		values ($1, $2, $3, $1, 'todo', '{"kind":"system","id":"test"}'::jsonb, $1)
 		on conflict do nothing
-	`, key, number); err != nil {
+	`, key, deliveryProject, headIssueBand+number); err != nil {
 		t.Fatalf("seed issue %s: %v", key, err)
 	}
 	return key

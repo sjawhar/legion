@@ -94,9 +94,10 @@ func IssueDescendants(ctx context.Context, q Queryer, key string) ([]string, err
 // issueSummaryQuery).
 //
 // This is the server's one repository-resolution rule. The issue page resolves a page of issues
-// through these terms (api's issue reads) and IssueRepository resolves one key through them, so
-// the currency mark and the pull-request head attribution can never disagree with the issue
-// page.
+// through these terms (api's issue reads), IssueRepository resolves one key through them, and
+// delivery's attribution splices them over the candidate keys of a pull request to hold its
+// issue to the repository it is in, so the currency mark and the pull-request head attribution
+// can never disagree with the issue page.
 var IssueRepoTerms = `repo_chain as (
 		select s.key as start, i.parent_key, i.repo, 0 as depth
 		from subjects s join issues i on i.key = s.key
@@ -119,10 +120,22 @@ var IssueRepoTerms = `repo_chain as (
 const IssueRepoJoin = `left join repo on repo.key = i.key
 	left join repo_projects repo_default on repo_default.project = i.project_key and repo_default.is_default`
 
+// IssueRepoResolved is the repository an issue resolves to, over IssueRepoJoin: the nearest one
+// its chain names, else its project's default mapping, else null. A statement that holds an
+// issue to a repository rather than reading one — delivery's attributionHeld, which keeps a
+// pull request's issue to the repository the pull request is in — compares against this
+// expression, so it can never be a second copy of the rule drifting from this one.
+const IssueRepoResolved = `coalesce(repo.owned, repo_default.repo)`
+
+// IssueRepoTooDeep reports whether the walk ran out of depth with links still above it, which
+// every reader of the resolved repository refuses rather than answer with the project's default
+// (api's repoScan.resolve, IssueRepository below, delivery's attributionHeld).
+const IssueRepoTooDeep = `coalesce(repo.too_deep, false)`
+
 // IssueRepoColumns are the repository columns every issue read scans, in the order api's
 // repoScan and IssueRepository below take them: the issue's own, the nearest one its chain names
 // else its project's default, and whether the walk ran out of depth.
-const IssueRepoColumns = `i.repo, coalesce(repo.owned, repo_default.repo), coalesce(repo.too_deep, false)`
+const IssueRepoColumns = `i.repo, ` + IssueRepoResolved + `, ` + IssueRepoTooDeep
 
 // issueRepositoryQuery is IssueRepoTerms over a subjects term of one key, the shape api's
 // issueWithProgressQuery gives the issue page's single-key read. The text is built once, at
@@ -139,7 +152,7 @@ var issueRepositoryQuery = `
 // and nil for an issue no row has and for the empty key. It runs IssueRepoTerms for one key, the
 // terms the issue reads run for a whole page, so it answers exactly what the issue page shows; a
 // chain the walk could not finish is an error rather than the project's default, which would be
-// a wrong answer. The results route and the pull-request head attribution both make this read.
+// a wrong answer. The results route makes this read for the issue of a check.
 func IssueRepository(ctx context.Context, q Queryer, key string) (*string, error) {
 	if key == "" {
 		return nil, nil

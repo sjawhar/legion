@@ -95,6 +95,46 @@ func seedDeliverySettings(t *testing.T, ctx context.Context, pool *store.Pool) D
 	return settings
 }
 
+// deliveryProject is the project this package's issue fixtures write their issues in, and
+// deliveryRepo the repository it owns by default. One project owns it because repo_projects'
+// primary key is the repository (migration 0005_repo_projects), so only one project can map
+// acme/widgets, and the attribution now holds a pull request's issue to the repository the pull
+// request is in (delivery's attributionHeld): an issue of a project that maps nothing resolves
+// to no repository and would attribute nobody. The key is a neutral one, since the head, the
+// attribution and the deployed fixtures all seed into it.
+const (
+	deliveryProject = "DLVY"
+	deliveryRepo    = "acme/widgets"
+)
+
+// Each fixture numbers its issues in a band of its own: they share deliveryProject and an issue
+// is unique on (project_key, number) (migration 0001_init), while the keys a failure names —
+// HEAD-<n>, ATTR-<n>, DEPL-<n> — stay each fixture's own.
+const (
+	headIssueBand        = 0
+	attributionIssueBand = 1000
+	deployedIssueBand    = 2000
+)
+
+// seedDeliveryProject writes deliveryProject and maps deliveryRepo to it as its default, so
+// every issue the fixtures seed resolves to the repository their pull requests are in.
+// Idempotent: each fixture calls it, and the tests of this package share one database.
+func seedDeliveryProject(t *testing.T, ctx context.Context, pool *store.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		insert into projects (key, name) values ($1, 'Delivery') on conflict do nothing
+	`, deliveryProject); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by, is_default)
+		values ($1, $2, '{"kind":"system","id":"delivery-test"}'::jsonb, true)
+		on conflict do nothing
+	`, deliveryRepo, deliveryProject); err != nil {
+		t.Fatalf("map the repository to the project: %v", err)
+	}
+}
+
 // publishPullRequestEnvelope publishes one notifications.github.<owner>.<repo>.pr.<number>
 // envelope (the shape intake.go's handlePullRequestEnvelope reads) and waits for the publish to
 // be acknowledged by JetStream before returning.

@@ -13,14 +13,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// seedAttributionIssues writes project ATTR and one issue per key (ATTR-<n>), and each
-// links[key] URL as that issue's external link. Idempotent, so tests sharing the database can
-// seed the same keys.
+// seedAttributionIssues writes one issue per key (ATTR-<n>) in the project that owns
+// acme/widgets (seedDeliveryProject), since an attribution holds an issue to the repository the
+// pull request is in, and each links[key] URL as that issue's external link. Idempotent, so
+// tests sharing the database can seed the same keys.
 func seedAttributionIssues(t *testing.T, ctx context.Context, pool *store.Pool, keys []string, links map[string][]string) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `insert into projects (key, name) values ('ATTR', 'Attribution') on conflict do nothing`); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
+	seedDeliveryProject(t, ctx, pool)
 	for _, key := range keys {
 		number, err := strconv.Atoi(strings.TrimPrefix(key, "ATTR-"))
 		if err != nil {
@@ -28,8 +27,8 @@ func seedAttributionIssues(t *testing.T, ctx context.Context, pool *store.Pool, 
 		}
 		if _, err := pool.Exec(ctx, `
 			insert into issues (key, project_key, number, title, status, created_by, rank)
-			values ($1, 'ATTR', $2, $1, 'todo', '{"kind":"system","id":"test"}', $1)
-			on conflict do nothing`, key, number); err != nil {
+			values ($1, $2, $3, $1, 'todo', '{"kind":"system","id":"test"}', $1)
+			on conflict do nothing`, key, deliveryProject, attributionIssueBand+number); err != nil {
 			t.Fatalf("seed issue %s: %v", key, err)
 		}
 		for _, url := range links[key] {
