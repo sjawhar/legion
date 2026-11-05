@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A reviewer approves a head whose only open findings are text, leaving each as the inline review thread it already wrote, and submits `REQUEST_CHANGES` only for a behavioural finding, one whose closing changes code that runs. It no longer fixes a prose-only finding in a commit of its own. Retro closes those threads: it lists the pull request''s unresolved threads itself, replies on each, resolves each one, commits the text fixes and nothing else, and waits for that head''s required checks. The guides say where a merge gate for an open thread lives for a repository that wants one, and that neither repository Legion runs in sets it today.'
+time: 2026-11-05T21:58:53.604488772Z
+custom:
+    Issue: pr2827
