@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+// listComments answers an issue's comment list under a strong ETag: the hash of the answer's own
+// bytes (commentListETag). Nothing cheaper decides them. The list cannot be validated by the
+// issue's event sequence the way its activity feed is (eventFeedETag), because the body carries
+// each comment's mentions and delivery attempts (hydrateCommentSideTables), and a delivery row is
+// written by the claim and by the resolution recorded before a send with no event appended at all
+// (comment_delivery.go), which leaves issues.last_seq where it was: a validator over that column
+// would answer 304 to a reader whose list has changed.
+//
+// So the comments are read and the answer encoded before the comparison can be made, and a reader
+// of this code should expect no less: what the 304 saves is the bytes on the wire and the
+// reader's own parse of them, never this server's query. What the warm read saves is the
+// compression, from the answer kept under the ETag (list_answers.go); the query and the encode
+// are what it costs to find that key at all.
 func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -34,7 +48,31 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 		texts = commentDisplayTexts(nil, comments...)
 	}
 	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("key"), texts)()
-	WriteJSON(w, http.StatusOK, commentReads(comments, trees))
+	encoded, err := encodeListAnswer(commentReads(comments, trees))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	etag := commentListETag(encoded, trees)
+	if answerNotModified(w, r, etag) {
+		return
+	}
+	key := listAnswerKeyFor(r, commentListRoute, r.PathValue("key"), etag)
+	if s.listAnswers.answer(w, key) {
+		return
+	}
+	s.writeListAnswer(w, key, encoded)
+}
+
+// commentListETag is a comment list answer's strong validator: the hash of the bytes themselves,
+// closed with the lines both lists' ETags carry (listETag). Hashing the answer costs one pass
+// over bytes that are already in hand, and it is the only validator that moves for every write
+// the list shows - an edited body, a resolved thread, a mention resolved to another session, a
+// delivery attempt opened - whether or not that write appended an event.
+func commentListETag(encoded listAnswerBytes, trees bool) string {
+	hash := sha256.New()
+	_, _ = hash.Write(encoded)
+	return listETag(hash, trees)
 }
 
 func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, artifactFilter string) ([]model.Comment, error) {
