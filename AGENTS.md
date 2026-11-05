@@ -181,6 +181,18 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   in a pod within one grace of a stop (its SIGKILL reaches the whole PID namespace), and within one grace of a child's own exit for the processes it left behind, then lets connections still open finish for at most one second before it closes them (docs/kubernetes.md "What `cloudsql-iam` puts in a pod");
   it survives a daemon restart without stopping the child, refuses a generation that already ran or a reused request id with another payload, and never restarts a child itself
 
+- `legion sampler [--listen 0.0.0.0:9464] [--rules <json>] [--restarts <n>] (--project <key> --issue <key> [--roles-file <path>] [--volumes-file <path>] [--cgroup-root <dir>] | --node [--node-name <node>] [--namespaces <a,b>] [--exclude-namespaces <a,b>] [--exclude-pods <a,b>])`
+
+  Kubernetes runtime; launcher-spawned.
+  The pod's resource sampler reads the pod's own /proc and cgroup files and serves `GET /metrics` on 0.0.0.0:9464, the `sampler` port an issue pod's `roles` container declares:
+  each role's CPU and memory split by the kind of work its processes do, each volume's used bytes and the pod's own totals (`docs/sampler-metrics.md` lists every series, its labels and the rules behind it, and a test holds the code to that file).
+  An issue pod's launcher starts it as a child of its own when the daemon passes `--sampler <json>`, starts it again five seconds after any exit, and writes it the two files it reads under `/var/run/legion/roles/sampler/`:
+  `volumes.json`, the volumes to measure, written once before any role starts, and `roles.json`, each running role's generation's `role-init` process id, rewritten whenever one of them starts or ends;
+  both sit under the roles directory, which every role's namespace covers, so no role can rewrite the map of process ids the sampler reads its roles from.
+  The controller's pod runs no sampler: it holds no issue, and these series are an issue pod's.
+  `--rules` carries the deployment's own kind rules (`runtime.kubernetes.sampler_rules`, docs/kubernetes.md "Operator configuration"), which say what a process's work counts as and are tried before the sampler's built-in list.
+  `--node` reads every pod of one node instead, as a DaemonSet on a grade node, and serves one set of series per pod, with no anonymous memory and no volumes, which a node's sampler cannot read
+
 - `legion controller start --config <controller.yaml> [--daemon-url <url>]`
 
   either runtime — the operator starts the interactive controller on their own machine:
@@ -268,6 +280,8 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   - claims
 
   - sessions
+
+  - sampler
 
   - probe-boot
 
@@ -463,6 +477,12 @@ Each item below names a task and where its code is, then notes on it.
 - Worker image (Kubernetes) — `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml`
 
   See `docs/kubernetes.md`
+
+- Pod and node resource metrics — `packages/daemon/internal/sampler/`, `packages/daemon/internal/procread/`
+
+  `legion sampler`'s series registry, its pod and node collectors and its kind rules, over `procread`, the /proc and cgroup reader both modes share.
+  `docs/sampler-metrics.md` is the contract: every series, its labels and the rules behind them, which a test holds the registry to.
+  An issue pod's launcher runs the sampler (`packages/daemon/internal/launcher/sampler.go`), and its port, volumes and rules come from the daemon's pod builder (`packages/daemon/internal/runtime/sandbox/podkind.go`)
 
 - Get a tool a role's work needs into the pod — `skills/legion-worker/references/tools.md`
 
