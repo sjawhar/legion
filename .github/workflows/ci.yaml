@@ -2342,10 +2342,11 @@ jobs:
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
     # retry arithmetic instead. So 1671 s x 1.15 = 1922 s -> 33 min for the browser step, and
-    # 8 min for the install step, for the reason its own comment gives. The job budget is the sum
-    # of its step budgets plus the measured maximum of every step without one, rounded up:
-    # 8 + 33 min plus 232 s = 45 min. The spread is the fleet's rather than the suite's, which is
-    # why each budget is that measured maximum plus a margin rather than a figure near the median.
+    # 14 min for the install step, for the reason its own comment gives. The job budget is the
+    # sum of its step budgets plus the measured maximum of every step without one, rounded up:
+    # 840 + 1980 + 232 s = 3052 s -> 51 min. The spread is the fleet's rather than the suite's,
+    # which is why each budget is that measured maximum plus a margin rather than a figure near
+    # the median.
     #
     # Budgets on the steps and not on the job alone, because a step the runner cancels at its own
     # budget fails that step and names it (`The action '<step name>' has timed out after <N>
@@ -2353,7 +2354,7 @@ jobs:
     # upload steps below still run and the Playwright report, the memory samples and the CPU
     # samples still reach the run, which a cancelled job loses. The job budget is the backstop
     # above the sum of the step budgets, so it never fires first.
-    timeout-minutes: 45
+    timeout-minutes: 51
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2483,22 +2484,34 @@ jobs:
       # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
       # to launch.
       #
-      # The 8-minute budget is the step's own retry arithmetic, not its measured maximum, which
-      # the new bounds make unreachable: two bounded attempts of `apt-get update` at 60 s, two of
-      # the download at 90 s, then the unpack, the browser download and the two apt simulations
-      # of the list check, none of which touch the Ubuntu mirror. Measured in job 127238648049,
-      # the slowest install this job has run, 613 of its 634 s were that mirror serving 114 MB at
-      # 186 kB/s; unpacking 181 packages and `playwright install` together took 14 s there, and
-      # in job 127214381394 Chromium, its headless shell and ffmpeg downloaded in 6 s. So the
-      # arithmetic is 120 + 180 s of bounded apt, 20 s of unpack, 90 s for the browsers and 30 s
-      # for the check: 440 s, rounded up to 8 min. Healthy today is a 38 s median and a 102 s
-      # 95th percentile for the whole step.
+      # The 14-minute budget is the step's own retry arithmetic, not its measured maximum, which
+      # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
+      # download at 250 s, then the unpack, the browser download and the two apt simulations of
+      # the list check, none of which touch the Ubuntu mirror. So the arithmetic is
+      # 2 x 90 + 2 x 250 s of bounded apt, about 20 s of unpack, about 90 s for the browsers and
+      # about 30 s for the list check: 820 s, rounded up to 14 min. Healthy today is a 38 s
+      # median and a 102 s 95th percentile for the whole step.
+      #
+      # The two bounds are the smallest pair that fails none of the 205 green dispatch jobs of
+      # the tester's window (2026-11-05T08:51:42Z to 23:07:42Z, a different window from the
+      # table above, which is why its count differs), modelled by scaling each job's merge-base
+      # mirror rate onto the head's smaller fetch. The job that sets them is 127238648049, the
+      # slowest install this job has run: apt logged `Fetched 114 MB in 10min 13s (186 kB/s)`
+      # there, 613 of its 634 s, which the model reads as 126.9 MB over 614 s, or 207 kB/s, so
+      # the head's 12.9 MB of indexes would take 62 s and its 51.4 MB of packages 249 s. A 90 s
+      # download bound, the first value tried, would have failed 5 of those 205 jobs, which
+      # would be a new class of red on pull requests that broke nothing. The model assumes a
+      # retry meets the same mirror rate, and azure.archive.ubuntu.com is a pool, so the real
+      # rate is at or below every figure here and the zero is a modelled zero.
+      #
+      # The worst case the step now carries: both attempts of both phases end, so it fails by its
+      # own name in at most 680 s, against the 40-minute job cancel it replaces.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
         # down with it. Chrome is already installed there; the source only serves upgrades, so
         # drop it before installing our deps.
-        timeout-minutes: 8
+        timeout-minutes: 14
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
@@ -2530,11 +2543,11 @@ jobs:
           }
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
-          twice "apt-get update" sudo timeout 60 apt-get update
+          twice "apt-get update" sudo timeout 90 apt-get update
           # Download only, so an attempt the timeout kills holds no dpkg lock and the retry is
           # free to start. It prints what it fetched, which is this step's own byte record.
           # $packages is left unquoted on purpose, to split into words.
-          twice "the package download" sudo timeout 90 apt-get install -y --no-install-recommends -d $packages
+          twice "the package download" sudo timeout 250 apt-get install -y --no-install-recommends -d $packages
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
           # The browsers alone. Named, because with no argument Playwright resolves its own
@@ -2770,19 +2783,6 @@ jobs:
         # current and start in seconds.
         run: go build -o ./dispatch-e2e ./cmd/dispatch
         working-directory: packages/envoy
-      # Chromium, its headless shell and ffmpeg, which the install step below downloads under the
-      # Playwright version bun.lock pins, which is what decides their revisions. This job cached
-      # nothing before and downloaded all three on every run. The key is its own,
-      # playwright-chromium-, which the dispatch job's playwright-<runner.os>- restore prefix does
-      # not match, so the two jobs never read each other's entry. No pull-request or merge-queue
-      # run writes an Actions cache entry, so this restores nothing until the save below has run
-      # on main once.
-      - id: playwright-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-chromium-{0}-', runner.os) || '' }}
       - name: Install Playwright Chromium
         # No apt in this step at all. Playwright's `chromium` entry in its ubuntu24.04-x64 table
         # adds no package this GitHub ubuntu-24.04 image lacks, so `--with-deps` installed only
@@ -2804,18 +2804,15 @@ jobs:
         # job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at 66.4 kB/s, which this
         # step no longer asks for; Chromium, its headless shell and ffmpeg downloaded in 6 s
         # there. Healthy today is a 20 s median and a 34 s 95th percentile for the whole step.
+        #
+        # No browser cache here: it would save about 4 s, since the three archives - Chrome for
+        # Testing, its headless shell and ffmpeg - download in 8 to 9 s, and it would add about
+        # 250 MiB to a cache store already holding 18.6 GB in 162 entries, where each existing
+        # playwright-Linux- entry is 481 MiB. The dispatch job's cache stays and is worth its
+        # place; this job's would not be.
         timeout-minutes: 4
         run: bunx playwright install chromium
         working-directory: packages/dispatch
-      # Beside the install, not at the end of the job: it keeps what the install just downloaded,
-      # so a job that installs Chromium and then fails a row does not throw the download away.
-      # Only on a push to main whose steps have succeeded so far: no other run of this repository
-      # writes an Actions cache entry.
-      - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
       - name: Browser-test dispatch dashboard against two server processes
         # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
         # multiprocess specs through the round-robin proxy.
