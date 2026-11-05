@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -1199,6 +1200,181 @@ sleep() { command sleep 0.05; }`;
     expect(result.code).toBe(0);
     expect(readFileSync(path.join(run, "seen"), "utf8")).toBe(
       `${bin}/pin/bin/omp -p The person answered your asks on LWEVAL-2. --continue --session-dir ${run}/sessions\nexit=0\n`
+    );
+  });
+});
+
+// A batch's Postgres and its NATS are the servers SKILL_SCENARIOS_POSTGRES_URL and
+// SKILL_SCENARIOS_NATS_URL name when both are set, and otherwise two containers it starts. The
+// harness gives services_up a docker that records its command line and answers `docker port`, so
+// the container branch runs where there is no docker, and a pg_sql that answers every query with
+// 100, the max_connections of a server that admits 100.
+describe("services_up and services_down", () => {
+  const stubs = `
+until_true() { shift 2; "$@"; }
+pg_sql() { printf '%s\\n' 100; }
+nats_ready() { :; }
+start_listener() { envoy_port=4100; }
+go() { printf 'go %s\\n' "$*" >>"$S/go-calls"; }
+docker() {
+  printf 'docker %s\\n' "$*" >>"$S/docker-calls"
+  case $1 in port) case $2 in *-pg) echo 127.0.0.1:55432 ;; *) echo 127.0.0.1:54222 ;; esac ;; esac
+}`;
+  const given = {
+    SKILL_SCENARIOS_POSTGRES_URL: "postgres://rig:secret@127.0.0.1:5432/postgres?sslmode=disable",
+    SKILL_SCENARIOS_NATS_URL: "nats://127.0.0.1:4222",
+  };
+  function up(env: Record<string, string>) {
+    const S = freshDir("services-up");
+    const result = bash(
+      `${fn("note")}\n${fn("fail")}\n${fn("given_services")}\n${fn("safe_url")}\n${fn("services_up")}\n${stubs}\nS=$1 root=$2 tag=rig-test\nservices_env=$S/env\nservices_postgres=$S/postgres-url\nservices_up`,
+      [S, root],
+      env
+    );
+    return { S, ...result };
+  }
+
+  // Catches: a batch that starts a container although the operator gave it both servers, which is
+  // every batch in a Legion pod and in a builds Job, where there is no docker at all.
+  test("both URLs set: no container, the Postgres recorded 0600 for each run, the given NATS in the services env", () => {
+    const { S, code, stdout, stderr } = up({ ...given, SKILL_SCENARIOS_PARALLEL: "2" });
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(existsSync(path.join(S, "docker-calls"))).toBe(false);
+    expect(readFileSync(path.join(S, "postgres-url"), "utf8")).toBe(
+      `${given.SKILL_SCENARIOS_POSTGRES_URL}\n`
+    );
+    expect(statSync(path.join(S, "postgres-url")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path.join(S, "env"), "utf8")).toContain(
+      "ENVOY_NATS_URL=nats://127.0.0.1:4222\n"
+    );
+    // The listener is still built from the checkout.
+    expect(readFileSync(path.join(S, "go-calls"), "utf8")).toContain("build -o");
+    // No message prints the password.
+    expect(stdout).toContain("Postgres postgres://rig@127.0.0.1:5432/postgres?sslmode=disable");
+    expect(stdout).not.toContain("secret");
+  });
+
+  // Catches: a batch that starts its runs against a given server with too few connections, where
+  // each run's Dispatch server takes 30 and the run that cannot get them fails for the rig's fault.
+  test("a parallelism the given Postgres cannot serve is refused, naming both numbers", () => {
+    const { S, code, stderr } = up({ ...given, SKILL_SCENARIOS_PARALLEL: "3" });
+    expect(code).toBe(1);
+    expect(stderr).toContain("needs 110 connections");
+    expect(stderr).toContain("which admits 100");
+    expect(stderr).toContain("set SKILL_SCENARIOS_PARALLEL to 2 or lower");
+    // It refuses before it builds anything.
+    expect(existsSync(path.join(S, "go-calls"))).toBe(false);
+  });
+
+  // Catches: a batch on a box with docker that takes one of the two URLs, or none, and stops
+  // starting its containers.
+  test("neither URL, or one without the other: the two containers, and no Postgres recorded", () => {
+    for (const env of [{}, { SKILL_SCENARIOS_NATS_URL: given.SKILL_SCENARIOS_NATS_URL }]) {
+      const { S, code, stdout } = up({ ...env, SKILL_SCENARIOS_PARALLEL: "1" });
+      expect(code).toBe(0);
+      const calls = readFileSync(path.join(S, "docker-calls"), "utf8");
+      expect(calls).toContain("--name rig-test-pg");
+      expect(calls).toContain("max_connections=50");
+      expect(calls).toContain("--name rig-test-nats");
+      expect(existsSync(path.join(S, "postgres-url"))).toBe(false);
+      expect(readFileSync(path.join(S, "env"), "utf8")).toContain(
+        "ENVOY_NATS_URL=nats://127.0.0.1:54222\n"
+      );
+      expect(stdout).toContain(
+        "Postgres postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable"
+      );
+    }
+  });
+
+  function down(env: Record<string, string>) {
+    const S = freshDir("services-down");
+    for (const file of ["env", "postgres-url", "up"]) writeFileSync(path.join(S, file), "");
+    const result = bash(
+      `${fn("given_services")}\n${fn("services_down")}\nstop_tree() { printf 'stop_tree %s\\n' "$*" >>"$S/stopped"; }\ndocker() { printf 'docker %s\\n' "$*" >>"$S/docker-calls"; }\nS=$1 tag=rig-test\nservices_env=$S/env\nservices_postgres=$S/postgres-url\nlistener_pid=4242\nservices_down`,
+      [S],
+      env
+    );
+    return { S, ...result };
+  }
+
+  // Catches: a teardown that removes a server it was given, or the databases on it.
+  test("both URLs set: the listener stops, the batch's own files go, and no docker runs", () => {
+    const { S, code } = down(given);
+    expect(code).toBe(0);
+    expect(existsSync(path.join(S, "docker-calls"))).toBe(false);
+    expect(readFileSync(path.join(S, "stopped"), "utf8")).toBe("stop_tree 4242\n");
+    for (const file of ["env", "postgres-url", "up"]) {
+      expect(existsSync(path.join(S, file))).toBe(false);
+    }
+  });
+
+  // Catches: a teardown that leaves the batch's own containers running.
+  test("neither URL: the batch's two containers are removed", () => {
+    const { S, code } = down({});
+    expect(code).toBe(0);
+    expect(readFileSync(path.join(S, "docker-calls"), "utf8")).toBe(
+      "docker rm -fv rig-test-nats rig-test-pg\n"
+    );
+  });
+});
+
+// The probes services_up waits on: one for a given server as for a started container.
+describe("nats_ready and the URL helpers", () => {
+  /** A server on 127.0.0.1 that writes TEXT to every connection, as a process of its own: bash()
+   * runs synchronously, so a listener in this process would never reach its accept. */
+  async function greeting(text: string) {
+    const child = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        'const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open: (socket) => void socket.write(process.env.GREETING ?? ""), data: () => {} } });\nconsole.log(server.port);',
+      ],
+      { env: { ...childEnv, GREETING: text }, stdout: "pipe", stderr: "inherit" }
+    );
+    const reader = child.stdout.getReader();
+    const { value } = await reader.read();
+    reader.releaseLock();
+    return {
+      port: Number(new TextDecoder().decode(value).trim()),
+      stop: async () => {
+        child.kill();
+        await child.exited;
+      },
+    };
+  }
+
+  // Catches: a probe that takes any process holding the port for a NATS, so a batch starts against
+  // a dead one.
+  test("the INFO line a NATS sends on connect, and nothing else, is ready", async () => {
+    const probe = (port: number) =>
+      bash(`${fn("nats_ready")}\nnats_ready "nats://127.0.0.1:$1"`, [String(port)]).code;
+    const nats = await greeting('INFO {"server_id":"rig"}\r\n');
+    const other = await greeting("+OK\r\n");
+    try {
+      expect(probe(nats.port)).toBe(0);
+      expect(probe(other.port)).toBe(1);
+    } finally {
+      await nats.stop();
+      await other.stop();
+    }
+    // Port 1, where nothing listens, is the rig's own address for that.
+    expect(probe(1)).toBe(1);
+  });
+
+  // Catches: a message that prints the password of a server the operator gave, and a run's
+  // database URL that drops the query a given URL carries (sslmode, say).
+  test("safe_url drops the password, pg_database_url swaps the database and keeps the query", () => {
+    const { stdout } = bash(
+      `${fn("safe_url")}\n${fn("pg_database_url")}\nsafe_url "$1"\npg_database_url "$1" run_x\npg_database_url "$2" run_x`,
+      [
+        "postgres://rig:secret@db.example:5432/postgres?sslmode=disable",
+        "postgres://127.0.0.1:5432",
+      ]
+    );
+    expect(stdout).toBe(
+      "postgres://rig@db.example:5432/postgres?sslmode=disable\n" +
+        "postgres://rig:secret@db.example:5432/run_x?sslmode=disable\n" +
+        "postgres://127.0.0.1:5432/run_x\n"
     );
   });
 });

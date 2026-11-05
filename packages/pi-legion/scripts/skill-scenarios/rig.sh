@@ -109,15 +109,19 @@
 # and they cannot detect a lost skill rule. A new scenario is an instrument only once an ablate
 # arm has scored lower on it.
 #
-# A batch's services are a Postgres container, a NATS container, and the Envoy listener built from
-# this checkout. Each run gets a Dispatch of its own (own_dispatch): a database named after the run
+# A batch's services are a Postgres, a NATS, and the Envoy listener built from this checkout. The
+# Postgres and the NATS are two containers the batch starts and removes, or, when
+# SKILL_SCENARIOS_POSTGRES_URL and SKILL_SCENARIOS_NATS_URL are both set, the two servers those
+# URLs name, which the batch uses and leaves running: that is how a batch runs where there is no
+# docker. Each run gets a Dispatch of its own (own_dispatch): a database named after the run
 # in the batch's Postgres, and the e2e harness's real Go Dispatch server
 # (packages/dispatch/e2e/run-server.sh) on that database, seeded and read back through its API
 # (seed.ts) and stopped when the run ends. A `dispatch search` searches every project of its
 # server, and a Dispatch bearer cannot be limited to one project, so a shared server would show
 # each run the other runs' issues and asks. Each run records its Dispatch in <run>/dispatch.json,
-# and score.ts does not score two runs that name one database. Docker assigns the containers' host
-# ports, the listener serves on a port the kernel chose and scripts/e2e/lib/rig.sh holds for it
+# and score.ts does not score two runs that name one database. A given server's URL carries its
+# port and docker assigns a container's host port; the listener serves on a port the kernel chose
+# and scripts/e2e/lib/rig.sh holds for it
 # until it serves (start_held), each run's Dispatch on its own run-server.sh holds the same way and
 # reports, and the kernel assigns each run's daemon stand-in its port.
 #
@@ -153,6 +157,25 @@
 #                                 nochange-block, untried or tried (required for that scenario)
 #   SKILL_SCENARIOS_ASKGATE_MODE  askgate: warn or block, the agent's OMP_ASKGATE (unset: the
 #                                 verdicts block and the marker checks warn)
+#   SKILL_SCENARIOS_POSTGRES_URL  a Postgres the batch uses in place of the container it would
+#                                 start, as a URL
+#                                 (postgres://<user>:<password>@<host>:<port>/<database>). Its
+#                                 login must be allowed to CREATE DATABASE, since each run makes a
+#                                 database of its own on it (own_dispatch); those databases stay
+#                                 there, because the batch drops no database and stops no server
+#                                 it was given, so drop them between batches: a later run of the
+#                                 same name finds its database there and fails, naming it. Its
+#                                 max_connections must admit 30 connections for
+#                                 each concurrent run and 20 more: services_up reads
+#                                 max_connections and refuses a SKILL_SCENARIOS_PARALLEL above
+#                                 what the server admits. A server that admits 100 takes a
+#                                 parallelism of 1 or 2
+#   SKILL_SCENARIOS_NATS_URL      a NATS the batch uses in place of the container it would start,
+#                                 as a URL (nats://<host>:<port>). Each run's agent is given it as
+#                                 ENVOY_NATS_URL, so give a URL whose credentials a run may hold
+# Set both and the batch starts no container, so it needs neither docker nor a docker daemon. Set
+# one without the other and the batch ignores it and starts both containers, as it does when
+# neither is set.
 # For spec-writing and spec-rewrite:
 #   SKILL_SCENARIOS_SOURCE      `batch`: a directory name under $SKILL_SCENARIOS_WORK/sources
 #   SKILL_SCENARIOS_SUPERPOWERS `profile`: the superpowers plugin's directory; its writing-plans
@@ -282,7 +305,7 @@ tmux() { command tmux -S "$tmux_socket" "$@"; }
 # pids lib/rig.sh's start_process sets (a run's own Dispatch server among them), and the services'
 # ports and directory.
 R='' session='' daemon_pid='' listener_pid='' dispatch_pid='' runs_pid='' batch_scenario=''
-S='' envoy_port='' dispatch_port='' pg_port='' nats_port=''
+S='' envoy_port='' dispatch_port='' pg_url='' nats_url=''
 
 label_dir() {
   [[ $1 =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "label '$1' is not lower-case letters, digits and hyphens"
@@ -666,7 +689,8 @@ stop_panes() {
 
 # A run's or a live read's exit: its daemon stand-in, its own Dispatch server, its agent's session,
 # and every process that carries its SKILL_SCENARIO_RUN. The run's database stays in the batch's
-# Postgres container, which services_down removes. The two services are this shell's own jobs, so
+# Postgres: services_down removes the container it started, and leaves a given server, with every
+# database its runs made, to the operator. The two services are this shell's own jobs, so
 # each is waited for once it is killed: bash otherwise prints a `Killed` notice for it on stderr.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_run() {
@@ -723,12 +747,17 @@ cmd_live_read() {
 }
 
 services_env=$work/services/env
+# The Postgres SKILL_SCENARIOS_POSTGRES_URL names, written by services_up and read by own_dispatch,
+# which runs in a process of its own (`rig.sh run`): a run takes the Postgres its batch brought up,
+# never one its own environment names. The file is 0600, since the URL can carry a password, and
+# its absence is how a run knows its batch started a container instead.
+services_postgres=$work/services/postgres-url
 
 # start_listener serves the Envoy listener on a port the kernel chose, held from that choice until
 # the listener serves on it (lib/rig.sh's start_held), and sets envoy_port.
 start_listener() {
   ENVOY_API_TOKEN="$(<"$S/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="$tag" NATS_URLS="nats://127.0.0.1:$nats_port" \
+    ENVOY_MACHINE_ID="$tag" NATS_URLS="$nats_url" \
     start_held listener envoy_port ENVOY_LISTEN_FD --env 'PORT={port}' -- "$S/envoy-listener"
   await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
     curl -fsS -o /dev/null -H "Authorization: Bearer $(<"$S/envoy-token")" "http://127.0.0.1:$envoy_port/v1/sessions"
@@ -762,57 +791,143 @@ lock_services() {
     fail "a batch already holds $S/up; a batch killed outright leaves it, its $tag-* containers and its processes behind"
 }
 
+# given_services is whether the operator gave the batch both a Postgres and a NATS, so it starts
+# no container and needs no docker. One URL without the other is ignored: a batch that started the
+# other service as a container would need docker anyway.
+given_services() {
+  [ -n "${SKILL_SCENARIOS_POSTGRES_URL:-}" ] && [ -n "${SKILL_SCENARIOS_NATS_URL:-}" ]
+}
+
+# safe_url URL prints URL without the password of its userinfo, for a note, a failure message and a
+# run's dispatch.json: a server the operator gave can carry one in its URL.
+safe_url() { printf '%s\n' "$1" | sed -E 's,^([a-z]+://[^:/@]+):[^@]*@,\1@,'; }
+
+# pg_sql URL SQL runs SQL on URL and prints each row's values, one row a line, tabs between them.
+# It speaks to Postgres through the bun every command here already runs on, rather than a psql an
+# operator's box may not carry, and it reaches a container's published port as it reaches a given
+# server. URL goes in the environment, never the command line, which every user of the box reads.
+# A failure is bun's own: it prints what Postgres answered and exits 1.
+pg_sql() {
+  RIG_PG_URL=$1 bun -e '
+const sql = new Bun.SQL({ url: process.env.RIG_PG_URL, max: 1 });
+try {
+  for (const row of await sql.unsafe(Bun.argv[1])) console.log(Object.values(row).join("\t"));
+} finally {
+  await sql.close();
+}' -- "$2"
+}
+
+# pg_database_url URL NAME prints URL with NAME as its database and its query kept: where a run's
+# own Dispatch server reaches the database own_dispatch made for it.
+pg_database_url() {
+  local scheme=${1%%://*} rest=${1#*://} query=''
+  case $rest in *\?*)
+    query="?${rest#*\?}"
+    rest=${rest%%\?*}
+    ;;
+  esac
+  printf '%s://%s/%s%s\n' "$scheme" "${rest%%/*}" "$2" "$query"
+}
+
+# nats_ready URL succeeds when a server answers on URL's host and port with the INFO line every
+# NATS server sends on connect, so it tells a NATS from any other process holding the port. bash's
+# own /dev/tcp opens the connection, in a child with a timeout of its own: the probe needs no
+# client, and a host that swallows the connection cannot hold its caller past its bound.
+nats_ready() {
+  local hostport=${1#*://} line=''
+  hostport=${hostport##*@}
+  hostport=${hostport%%/*}
+  line=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2" && IFS= read -r -t 5 -u 3 line && printf "%s" "$line"' \
+    -- "${hostport%:*}" "${hostport##*:}" 2>/dev/null) || return 1
+  case $line in 'INFO '*) ;; *) return 1 ;; esac
+}
+
 # Each run's Dispatch server opens at most 30 connections to the batch's Postgres: its shared pool
 # (16), loop leases (8), document rooms (4), health probe (1) and listener (1), the sizes in
 # packages/envoy/internal/dispatch/store/pool.go. Postgres admits 100 by default, too few for 5
-# servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
+# servers at once, so a container this batch starts gets max_connections of 30 for each concurrent
+# run and 20 more for the batch's own queries. A given server's max_connections is the operator's,
+# not the batch's, so services_up reads it and refuses a parallelism the server cannot serve.
 services_up() {
   evidence=$S
-  # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-  docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
-    -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
-  pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
-  [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
-  # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
-  nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
-  [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
-  until_true 60 "Postgres to accept TCP connections" docker exec "$tag-pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres
-  until_true 60 "NATS to be ready" sh -c "docker logs '$tag-nats' 2>&1 | grep -q 'Server is ready'"
+  local parallel=${SKILL_SCENARIOS_PARALLEL:-5} needs admits fits pg_port nats_port
+  needs=$((30 * parallel + 20))
+  if given_services; then
+    pg_url=$SKILL_SCENARIOS_POSTGRES_URL
+    nats_url=$SKILL_SCENARIOS_NATS_URL
+    (umask 077 && printf '%s\n' "$pg_url" >"$services_postgres")
+  else
+    # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+    docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
+      -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+      -c max_connections=$needs >/dev/null
+    pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
+    [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
+    pg_url="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable"
+    # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+    docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
+    nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
+    [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
+    nats_url=nats://127.0.0.1:$nats_port
+  fi
+  until_true 60 "Postgres at $(safe_url "$pg_url") to answer a query" pg_sql "$pg_url" 'select 1'
+  until_true 60 "NATS at $(safe_url "$nats_url") to send its INFO line" nats_ready "$nats_url"
+  if given_services; then
+    admits=$(pg_sql "$pg_url" 'SHOW max_connections')
+    fits=$(((admits - 20) / 30))
+    [ "$fits" -ge 1 ] ||
+      fail "$(safe_url "$pg_url") admits $admits connections, and one run needs 50: give a Postgres whose max_connections is 50 or more"
+    [ "$parallel" -le "$fits" ] ||
+      fail "SKILL_SCENARIOS_PARALLEL is $parallel, so this batch needs $needs connections to $(safe_url "$pg_url"), which admits $admits: set SKILL_SCENARIOS_PARALLEL to $fits or lower"
+  fi
   (cd "$root/packages/envoy" && go build -o "$S/envoy-listener" ./cmd/listener)
   (umask 077 && openssl rand -hex 24 >"$S/envoy-token" && printf 'e2e-token\n' >"$S/dispatch-token")
   start_listener
   {
     echo "ENVOY_URL=http://127.0.0.1:$envoy_port"
-    echo "ENVOY_NATS_URL=nats://127.0.0.1:$nats_port"
+    echo "ENVOY_NATS_URL=$nats_url"
     echo "ENVOY_TOKEN_FILE=$S/envoy-token"
   } >"$services_env"
-  note "services up: listener :$envoy_port, NATS :$nats_port, Postgres :$pg_port"
+  note "services up: listener :$envoy_port, NATS $(safe_url "$nats_url"), Postgres $(safe_url "$pg_url")"
 }
 
 # shellcheck disable=SC2329 # stop_batch, an exit trap, runs it
 services_down() {
   stop_tree "${listener_pid:-}"
-  docker rm -fv "$tag-nats" "$tag-pg" >/dev/null 2>&1 || true
-  rm -f "$services_env" "$S/up"
+  # Only what the batch started. A given Postgres and a given NATS keep running, and every database
+  # a run made on that Postgres (own_dispatch) stays there for the operator to drop.
+  given_services || docker rm -fv "$tag-nats" "$tag-pg" >/dev/null 2>&1 || true
+  rm -f "$services_env" "$services_postgres" "$S/up"
 }
 
 # own_dispatch SEED gives the run a Dispatch of its own and seeds it with `seed.ts SEED`, the world
 # the scenario needs (project, or brainstorm): a database named after the run in the batch's
-# Postgres, and a Dispatch server on it, which stop_run stops. It records the container, the
-# database and the server in $R/dispatch.json, which score.ts reads, and sets dispatch_port.
+# Postgres, and a Dispatch server on it, which stop_run stops. It records the Postgres, the
+# database and the server in $R/dispatch.json, which score.ts reads, and sets dispatch_port. The
+# batch's Postgres is the server $services_postgres names, and the batch's own container when that
+# file is absent.
 own_dispatch() {
-  local seed=$1 database=run_${R##*/} pg_port postgres
+  local seed=$1 database=run_${R##*/} pg_port postgres url
   database=${database//-/_}
   # Postgres cuts a longer name to 63 bytes, and two runs whose names agree that far would share it.
   [ "${#database}" -le 63 ] || fail "the run's database name $database is longer than Postgres's 63 bytes"
-  pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
-  postgres=$(docker inspect -f '{{.Id}}' "$tag-pg")
-  [ -n "$pg_port" ] && [ -n "$postgres" ] || fail "no Postgres container $tag-pg for the run's Dispatch"
-  docker exec "$tag-pg" psql -U postgres -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
-    fail "CREATE DATABASE $database failed; see $R/fixture.log"
-  start_dispatch "postgres://postgres:ci@127.0.0.1:$pg_port/$database?sslmode=disable"
+  if [ -f "$services_postgres" ]; then
+    postgres=$(<"$services_postgres")
+    url=$(pg_database_url "$postgres" "$database")
+    # A given server must let its login make a database. Nothing here checks that: the refusal a
+    # server without the right gives is Postgres's own, in the run's fixture.log.
+    pg_sql "$postgres" "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
+      fail "CREATE DATABASE $database on $(safe_url "$postgres") failed; see $R/fixture.log"
+    postgres=$(safe_url "$postgres")
+  else
+    pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
+    postgres=$(docker inspect -f '{{.Id}}' "$tag-pg")
+    [ -n "$pg_port" ] && [ -n "$postgres" ] || fail "no Postgres container $tag-pg for the run's Dispatch"
+    docker exec "$tag-pg" psql -U postgres -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
+      fail "CREATE DATABASE $database failed; see $R/fixture.log"
+    url="postgres://postgres:ci@127.0.0.1:$pg_port/$database?sslmode=disable"
+  fi
+  start_dispatch "$url"
   jq -n --arg postgres "$postgres" --arg database "$database" --argjson port "$dispatch_port" \
     '{postgres:$postgres, database:$database, port:$port, url:("http://127.0.0.1:" + ($port|tostring))}' >"$R/dispatch.json"
   (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$seed") >>"$R/fixture.log" 2>&1 ||
