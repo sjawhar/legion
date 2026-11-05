@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -99,6 +100,10 @@ func printClaim(w io.Writer, answer []byte) error {
 	return nil
 }
 
+// printClaims is the listing: one line for each claim, and under them the one line that says what
+// the daemon's last pod-update sweep decided (podUpdateRoundsLine). That line is printed whenever
+// the command prints at all, over no claims as over many, because an operator served no line
+// cannot tell a daemon holding no issue back from a binary too old to know the limits.
 func printClaims(w io.Writer, answer []byte) error {
 	var list api.OperatorClaims
 	if err := decodeAnswer(answer, &list); err != nil {
@@ -107,7 +112,56 @@ func printClaims(w io.Writer, answer []byte) error {
 	for _, c := range list.Claims {
 		writeClaimLine(w, c)
 	}
+	fmt.Fprintln(w, podUpdateRoundsLine(list.PodUpdateRounds))
 	return nil
+}
+
+// podUpdateRoundsLine is the one line an operator reads for the pod rounds the daemon's last
+// sweep decided (api.PodUpdateRounds): the project's two limits, the issues holding a round under
+// them, and the issues each limit held back. No claim's own line says either half — an issue in a
+// round has every worker of it told to push and start nothing new, and an issue a limit held back
+// is drifted and was posted nothing at all — so a roll an operator thinks is stuck is read here.
+//
+// A daemon that has not swept says so rather than print each list empty, which would read as a
+// sweep that found nothing to do.
+func podUpdateRoundsLine(rounds api.PodUpdateRounds) string {
+	if !rounds.Swept {
+		return "pod update rounds: the daemon has not swept yet"
+	}
+	return fmt.Sprintf("pod update rounds: max open %s, %s a minute; %s; %s; %s",
+		limitOrNoLimit(rounds.MaxOpenRounds), limitOrNoLimit(rounds.RoundsPerMinute),
+		issuesOrNone("in a round", rounds.InRound),
+		issuesOrNone("waiting on the open-round limit", rounds.WaitingOnMaxOpenRounds),
+		issuesOrNone("waiting on the limit a minute", rounds.WaitingOnRoundsPerMinute))
+}
+
+// limitOrNoLimit is one of the project's two limits as the line prints it: the number legion.yaml
+// sets, or `no limit` for a key it does not set, which asks for no limit rather than one of none.
+func limitOrNoLimit(limit *int) string {
+	if limit == nil {
+		return "no limit"
+	}
+	return strconv.Itoa(*limit)
+}
+
+// namedIssueCap is how many issue keys one list of that line names. One template change drifts
+// every pod of the project at once, so the issues waiting on a limit are a fleet's worth of keys:
+// named in full they would scroll the claims themselves off the operator's screen, and the count
+// in front of them is the whole number either way.
+const namedIssueCap = 20
+
+// issuesOrNone is one list of that line: its name, then `none`, or how many issues it holds and
+// the first of them in key order, with `and <n> more` in place of the rest. It is the shape
+// `legion state` prints its own summaries in (main.go's roundsSummary).
+func issuesOrNone(name string, issues []string) string {
+	if len(issues) == 0 {
+		return name + ": none"
+	}
+	named := issues
+	if len(named) > namedIssueCap {
+		named = append(slices.Clone(named[:namedIssueCap]), fmt.Sprintf("and %d more", len(issues)-namedIssueCap))
+	}
+	return fmt.Sprintf("%s: %d — %s", name, len(issues), strings.Join(named, ", "))
 }
 
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {

@@ -19,6 +19,7 @@ package daemon
 // every sweep, hold its slot for ever, and no issue behind it would ever get one.
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -178,6 +179,28 @@ func (r *fleetRig) replacedOnce(issues ...string) {
 			r.t.Errorf("the pod of %s was replaced %d times, want once", issue, len(calls))
 		}
 	}
+}
+
+// wantPodUpdateRecord holds the record the rig's last sweep wrote (podUpdateRoundsView) to want.
+// Both are read as the operator's route serves them (api.PodUpdateRounds.MarshalJSON), which is
+// where the two differences that are no difference go away: a limit is the number it holds rather
+// than the address of a pointer, and a list nothing filled reads as the empty list the wire
+// carries.
+func (r *fleetRig) wantPodUpdateRecord(what string, want api.PodUpdateRounds) {
+	r.t.Helper()
+	if got := r.recordAsServed(r.s.podUpdateRoundsView()); got != r.recordAsServed(want) {
+		r.t.Errorf("the record after %s is %s, want %s", what, got, r.recordAsServed(want))
+	}
+}
+
+// recordAsServed is one sweep record as the claim listing's route answers it.
+func (r *fleetRig) recordAsServed(rounds api.PodUpdateRounds) string {
+	r.t.Helper()
+	served, err := json.Marshal(rounds)
+	if err != nil {
+		r.t.Fatalf("encode the sweep's record: %v", err)
+	}
+	return string(served)
 }
 
 // The cap on open rounds is a cap on how much of the fleet is held waiting at once: an issue in a
@@ -503,4 +526,50 @@ func TestPodUpdateRoundsPerMinuteSlowSweep(t *testing.T) {
 
 	next.tick()
 	next.awaitRounds("the first sweep of a restarted daemon", "INFRA-2", "INFRA-3", "INFRA-4")
+}
+
+// The one line an operator reads for the sweep (`legion claims list`) is this record, and these
+// are real sweeps of the fleet writing it. Nothing else holds what it says: an issue in a round
+// has that round on its claims, but an issue a limit held back is posted nothing at all and no
+// claim of it says a word, so a fleet-wide roll that has stalled and one the limits are pacing
+// read exactly alike without it. Each waiting issue is under the limit that held it back at that
+// sweep, because that is the one an operator would have to raise to free it: the limits are read
+// off the record together with the issues they are holding.
+func TestClaimsListPodUpdateLine(t *testing.T) {
+	keys := []string{"INFRA-2", "INFRA-10", "INFRA-1000", "INFRA-30", "INFRA-4"}
+	rig := newLimitRig(t, keys...)
+	rig.s.cfg.PodUpdateMaxOpenRounds = new(2)
+	rig.s.cfg.PodUpdateRoundsPerMinute = new(1)
+
+	rig.wantPodUpdateRecord("a daemon whose first sweep has not run", api.PodUpdateRounds{})
+
+	// The first sweep has both slots free and spends the minute's whole budget on the first issue
+	// of the walk, so every issue behind it waits on the limit a minute.
+	rig.tick()
+	rig.awaitRounds("the first sweep at two open rounds and one a minute", "INFRA-10")
+	rig.wantPodUpdateRecord("the first sweep", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+		InRound:                  []string{"INFRA-10"},
+		WaitingOnRoundsPerMinute: []string{"INFRA-1000", "INFRA-2", "INFRA-30", "INFRA-4"},
+	})
+
+	// A minute on, the budget is back and the second opening takes the last slot: from there the
+	// limit on open rounds is what holds the rest, and it is the one they are named under.
+	rig.clock.advance(time.Minute)
+	rig.tick()
+	rig.awaitRounds("a second sweep one minute later", "INFRA-10", "INFRA-1000")
+	rig.wantPodUpdateRecord("the second sweep", api.PodUpdateRounds{
+		Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+		InRound:                []string{"INFRA-10", "INFRA-1000"},
+		WaitingOnMaxOpenRounds: []string{"INFRA-2", "INFRA-30", "INFRA-4"},
+	})
+
+	// A project that sets neither key asks for no limit, which no number says: the whole fleet is
+	// in a round at the one sweep and nothing waits on anything.
+	none := newLimitRig(t, keys...)
+	none.tick()
+	none.awaitRounds("one sweep under neither limit", keys...)
+	none.wantPodUpdateRecord("a sweep of a project that sets neither key", api.PodUpdateRounds{
+		Swept: true, InRound: []string{"INFRA-10", "INFRA-1000", "INFRA-2", "INFRA-30", "INFRA-4"},
+	})
 }

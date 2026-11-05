@@ -1107,11 +1107,16 @@ func TestListShowsAClaimsDeathsAndItsInterruptedTask(t *testing.T) {
 	}
 }
 
+// A daemon supervising no claim answers `claims` as the empty array, never `null`, and the
+// sweep's record beside it with each of its own lists the same way: the readers on the other
+// side of this wire are strict, and one of them is the operator's own listing.
 func TestListOfNoClaimsIsAnEmptyArray(t *testing.T) {
 	h := newHarness(t)
 	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
-	if got := strings.TrimSpace(recorder.Body.String()); recorder.Code != http.StatusOK || got != `{"claims":[]}` {
-		t.Fatalf("list = %d %s, want 200 {\"claims\":[]}", recorder.Code, got)
+	want := `{"claims":[],"pod_update_rounds":{"swept":false,"max_open_rounds":null,"rounds_per_minute":null,` +
+		`"in_round":[],"waiting_on_max_open_rounds":[],"waiting_on_rounds_per_minute":[]}}`
+	if got := strings.TrimSpace(recorder.Body.String()); recorder.Code != http.StatusOK || got != want {
+		t.Fatalf("list = %d %s, want 200 %s", recorder.Code, got, want)
 	}
 }
 
@@ -1236,5 +1241,60 @@ func TestForgetSessionRefusesDaemonStopAfterPreflight(t *testing.T) {
 	wantRefusal(t, <-response, http.StatusServiceUnavailable, "forget-session refused: the daemon is stopping; ask again once it is back")
 	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_architect" || got.SessionFile != "/sessions/ses_architect.jsonl" {
 		t.Fatalf("stopped forget changed the claim to %+v", got)
+	}
+}
+
+// The claim listing carries what the daemon's last pod-update sweep decided beside the claims
+// (Options.PodUpdateRounds): the project's two limits on how fast a pod template change reaches
+// the fleet, the issues holding a round under them, and the issues each limit held back. No claim
+// row carries it — an issue a limit held back is posted nothing at all — so the route is where an
+// operator's `legion claims list` reads it.
+//
+// Each limit is a pointer, so a key legion.yaml does not set is `null` rather than 0, which would
+// read as a project that opens no round at all; and each list is an array, empty rather than
+// `null`, because the readers on the other side of this wire are strict (packages/contracts's
+// LegionOperatorClaimsResponse). A daemon whose first sweep has not run answers the zero record,
+// whose `swept` says so.
+func TestClaimsListPodUpdateLine(t *testing.T) {
+	h := newHarness(t)
+	for _, testCase := range []struct {
+		name   string
+		rounds PodUpdateRounds
+		want   string
+	}{
+		{
+			name: "both limits set, with issues in a round and issues waiting",
+			rounds: PodUpdateRounds{
+				Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+				InRound: []string{"INFRA-10", "INFRA-1000"}, WaitingOnMaxOpenRounds: []string{"INFRA-2"},
+			},
+			want: `{"claims":[],"pod_update_rounds":{"swept":true,"max_open_rounds":2,"rounds_per_minute":1,` +
+				`"in_round":["INFRA-10","INFRA-1000"],"waiting_on_max_open_rounds":["INFRA-2"],"waiting_on_rounds_per_minute":[]}}`,
+		},
+		{
+			name:   "a project that sets neither key",
+			rounds: PodUpdateRounds{Swept: true, WaitingOnRoundsPerMinute: []string{"INFRA-2"}},
+			want: `{"claims":[],"pod_update_rounds":{"swept":true,"max_open_rounds":null,"rounds_per_minute":null,` +
+				`"in_round":[],"waiting_on_max_open_rounds":[],"waiting_on_rounds_per_minute":["INFRA-2"]}}`,
+		},
+		{
+			name:   "a daemon that has not swept",
+			rounds: PodUpdateRounds{},
+			want: `{"claims":[],"pod_update_rounds":{"swept":false,"max_open_rounds":null,"rounds_per_minute":null,` +
+				`"in_round":[],"waiting_on_max_open_rounds":[],"waiting_on_rounds_per_minute":[]}}`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			*h.podUpdateRounds = testCase.rounds
+
+			list := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+
+			if list.Code != http.StatusOK {
+				t.Fatalf("list = %d; body %s", list.Code, list.Body)
+			}
+			if got := strings.TrimSpace(list.Body.String()); got != testCase.want {
+				t.Fatalf("the listing is %s, want %s", got, testCase.want)
+			}
+		})
 	}
 }
