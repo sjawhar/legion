@@ -20,6 +20,12 @@ function tabs(artifactCount: number): readonly TabDefinition<IssueTab>[] {
   ];
 }
 
+/** The tablist's labels in order, for the loading skeleton that stands in for this tablist
+ *  (`app.tsx`). It stood on a hand-written copy of this list until that copy had drifted by
+ *  three tabs, so it reads the list itself; the count a label can carry is a number the skeleton
+ *  has no issue to take, and it stands in for the plain label. */
+export const ISSUE_TAB_LABELS: readonly string[] = tabs(0).map((tab) => tab.label);
+
 /** The IssuePage tablist keeps its active view in the canonical issue route. `artifactCount` is
  *  how many rows the Artifacts tab lists - every artifact the issue has, its primary document
  *  included - so the badge and the list a reader checks it against say the same number. */

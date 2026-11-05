@@ -280,8 +280,11 @@ An issue with no Verification document, or no plan document, shows on that tab t
 The box at the foot of the Conversation posts a comment on the issue. Type `@` to mention an agent
 role or a live agent session; the comment is then delivered to it. The picker also offers, under
 **Not running**, this issue's Legion roles that no running agent holds; a mention picked there is
-addressed to the role, and the comment reaches it once a Legion daemon has recorded the issue's
-agents. Start the comment with `/btw ` or `/aside ` to choose how a mentioned agent receives it.
+addressed to the role, and the comment is posted on the issue, but its delivery fails while
+nobody holds that role, since there is no session to take it. The thread shows that failed
+attempt with **Retry** beside it, which sends to whoever holds the role at the time; that Retry
+is offered for three days, after which a fresh comment is the way to reach the role.
+Start the comment with `/btw ` or `/aside ` to choose how a mentioned agent receives it.
 [Agents](/legion/dispatch/agents/#sending-to-one-agent) explains the delivery modes.
 
 Press `Ctrl+Enter` (`⌘Enter` on a Mac) to send. `Enter` alone starts a new line.

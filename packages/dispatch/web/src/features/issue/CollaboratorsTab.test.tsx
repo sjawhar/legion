@@ -77,8 +77,10 @@ function renderTab(collaborators: IssueCollaborators, agents: readonly Agent[] =
   };
 }
 
+/** Each row's own agent, in order: the name `Row` marks `data-collaborator`, never the one a
+ *  "replaced by" line names inside the same row. */
 function sessionsIn(container: HTMLElement): string[] {
-  return [...container.querySelectorAll("li > div:first-child [data-agent-name]")].map(
+  return [...container.querySelectorAll("[data-collaborator] [data-agent-name]")].map(
     (node) => node.getAttribute("data-agent-name") ?? ""
   );
 }
@@ -132,7 +134,7 @@ test("the Collaborators tab orders Legion agents by role, other agents by activi
     );
     expect(
       legion
-        .querySelector('li > div:first-child [data-agent-name="old-reviewer"]')
+        .querySelector('[data-collaborator] [data-agent-name="old-reviewer"]')
         ?.getAttribute("data-agent-state")
     ).toBe("not-running");
 

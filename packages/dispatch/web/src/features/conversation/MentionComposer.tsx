@@ -1,4 +1,4 @@
-import { LEGION_ROLES } from "@legion/contracts";
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
 import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { hashKey, type MutationKey, useQuery } from "@tanstack/react-query";
 import {
@@ -213,9 +213,11 @@ export function mentionOptions(
  * (`IssueCollaborators.agents[].legion`) that no live agent holds - the live agents' `roles`, the
  * rule the live role options follow - addressed `role:<token>` and drawn by the role's newest
  * session, the one entry per token the server leaves unreplaced (`legion.replaced_by` null), so a
- * replaced session is never an option of its own. `live` undefined is a live list whose state is
- * unknown (not read yet, or its read failed): every role could be held, so none is offered as not
- * running.
+ * replaced session is never an option of its own. A session the live list itself names is left
+ * out whatever its roles say: a live session that claims no role would otherwise be offered here
+ * and draw its own `Running` mark, so one row would read running and not running at once. `live`
+ * undefined is a live list whose state is unknown (not read yet, or its read failed): every role
+ * could be held, so none is offered as not running.
  */
 export function stoppedRoleOptions(
   live: readonly Agent[] | undefined,
@@ -224,16 +226,24 @@ export function stoppedRoleOptions(
 ): MentionOption[] {
   if (live === undefined) return [];
   const held = new Set(live.flatMap((agent) => agent.roles));
+  const running = new Set(live.map((agent) => agent.session_id));
+  // A role this build does not know sorts after every role it does, rather than ahead of them
+  // all, which is where `indexOf`'s -1 would put it.
+  const order = (role: LegionRole) =>
+    LEGION_ROLES.indexOf(role) === -1 ? LEGION_ROLES.length : LEGION_ROLES.indexOf(role);
   return collaborators
     .flatMap((agent) => {
       const legion = agent.legion;
-      return legion === null || legion.replaced_by !== null || held.has(legion.role_token)
+      return legion === null ||
+        legion.replaced_by !== null ||
+        held.has(legion.role_token) ||
+        running.has(agent.session_id)
         ? []
         : [{ agent, legion }];
     })
     .sort(
       (left, right) =>
-        LEGION_ROLES.indexOf(left.legion.role) - LEGION_ROLES.indexOf(right.legion.role) ||
+        order(left.legion.role) - order(right.legion.role) ||
         left.legion.role_token.localeCompare(right.legion.role_token)
     )
     .map(({ agent, legion }) => {
@@ -626,10 +636,11 @@ export function MentionComposer({
   const text = useAgentText();
   const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
   // The issue's collaborators feed the "Not running" options, read once the picker opens on an
-  // issue or one of its documents: a closed picker and a direct message read nothing. The key is
-  // the Collaborators tab's, so the two readers share one entry - a tab read within the shell's
-  // 30 s `staleTime` opens the picker with no request of its own - and an invalidation of the
-  // `["issue", key]` prefix refetches it under a picker that stays open.
+  // issue owner alone: the composer in a document's margin carries that document rather than its
+  // issue, and a closed picker and a direct message read nothing. The key is the Collaborators
+  // tab's, so the two readers share one entry - a tab read within the shell's 30 s `staleTime`
+  // opens the picker with no request of its own - and an invalidation of the `["issue", key]`
+  // prefix refetches it under a picker that stays open.
   const collaboratorsIssue = owner.kind === "issue" ? owner.issueKey : undefined;
   const collaborators = useQuery({
     enabled: collaboratorsIssue !== undefined && autocompleteOpen,
@@ -1407,7 +1418,10 @@ export function MentionComposer({
               {filteredStoppedOptions.map(mentionOptionButton)}
             </div>
           )}
-          {filteredOptions.length === 0 ? (
+          {/* Only when the picker offers nothing at all: a "Not running" group with options in
+              it is a match, so saying no agent matches underneath it would contradict the list
+              the reader is looking at. */}
+          {filteredOptions.length === 0 && filteredStoppedOptions.length === 0 ? (
             <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
           ) : null}
         </div>

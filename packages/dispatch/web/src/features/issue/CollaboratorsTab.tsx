@@ -11,8 +11,9 @@ import type {
 } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
-import { compareTimestamps } from "../../lib/timestamps";
+import { compareTimestamps, isTimestamp } from "../../lib/timestamps";
 import {
+  borderDefault,
   card,
   textMutedOnCanvas,
   textMutedOnSurface,
@@ -37,15 +38,21 @@ export interface CollaboratorSections {
   readonly people: readonly IssueCollaboratorPerson[];
 }
 
-/** Newer first; a missing time sorts after every time. */
+/** Newer first; a missing time sorts after every time, and so does one this reader cannot order.
+ *  `started_at` and `last_at` are the Legion daemon's and the listener's, relayed verbatim, so
+ *  they are asked of `isTimestamp` first: `compareTimestamps` throws on anything but the server's
+ *  own form, and that throw would land in a render. */
 function newestFirst(left: string | null, right: string | null): number {
-  if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
+  const known = (value: string | null): value is string => value !== null && isTimestamp(value);
+  if (!(known(left) && known(right))) return known(left) ? -1 : known(right) ? 1 : 0;
   return compareTimestamps(right, left);
 }
 
 export function collaboratorSections(collaborators: IssueCollaborators): CollaboratorSections {
+  const roleOf = (agent: IssueCollaboratorAgent): LegionRole | undefined =>
+    LEGION_ROLES.find((role) => role === agent.legion?.role);
   const legion = collaborators.agents.filter(
-    (agent): agent is LegionAgent => agent.legion !== null
+    (agent): agent is LegionAgent => agent.legion !== null && roleOf(agent) !== undefined
   );
   return {
     legion: LEGION_ROLES.flatMap((role) => {
@@ -54,8 +61,10 @@ export function collaboratorSections(collaborators: IssueCollaborators): Collabo
         .sort((left, right) => newestFirst(left.legion.started_at, right.legion.started_at));
       return agents.length === 0 ? [] : [{ agents, role }];
     }),
+    // Every session no Legion section holds, so a registry entry naming a role this build does
+    // not know is listed rather than dropped from the page.
     others: collaborators.agents
-      .filter((agent) => agent.legion === null)
+      .filter((agent) => roleOf(agent) === undefined)
       .sort((left, right) => newestFirst(left.last_at, right.last_at)),
     people: collaborators.people,
   };
@@ -65,11 +74,16 @@ function SectionHeading({ children }: { children: ReactNode }): ReactNode {
   return <h2 className={`text-sm font-semibold ${textSecondaryOnCanvas}`}>{children}</h2>;
 }
 
-/** One collaborator's row: who, then the line that says how they worked the issue. */
+/** One collaborator's row: who, then the line that says how they worked the issue. `card` carries
+ *  the colours and no border width, as every other card in this app pairs it with one.
+ *  `data-collaborator` marks the row's own name, which a test selects instead of the row's shape,
+ *  since the detail line can name another session (the one that replaced this row's). */
 function Row({ detail, name }: { detail: ReactNode; name: ReactNode }): ReactNode {
   return (
-    <li className={`min-w-0 rounded-lg p-3 break-words ${card}`}>
-      <div className={`min-w-0 font-medium ${textPrimaryOnSurface}`}>{name}</div>
+    <li className={`min-w-0 rounded-lg border p-3 break-words ${borderDefault} ${card}`}>
+      <div className={`min-w-0 font-medium ${textPrimaryOnSurface}`} data-collaborator="">
+        {name}
+      </div>
       <div
         className={`mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm ${textMutedOnSurface}`}
       >

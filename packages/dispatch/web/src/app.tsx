@@ -14,6 +14,7 @@ import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
+import { ISSUE_TAB_LABELS } from "./features/issue/IssueTabs";
 import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
 import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
@@ -180,17 +181,7 @@ function IssuePageFallback(): ReactNode {
         </h1>
       </header>
       <div className={`mb-4 flex gap-2 border-b ${borderDefault}`} role="tablist">
-        {[
-          "Spec",
-          "Verification",
-          "Plan",
-          "Conversation",
-          "Children",
-          "Artifacts",
-          "Activity",
-          "Decisions",
-          "Collaborators",
-        ].map((label) => (
+        {ISSUE_TAB_LABELS.map((label) => (
           <span
             className={`animate-pulse rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
             key={label}

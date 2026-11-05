@@ -130,23 +130,31 @@ function oldestFirst(left: FakeLegionAgent, right: FakeLegionAgent): number {
 }
 
 /** Where a role token sits in the listener's order: its role in workflow order, then the token.
- *  A token with no session cannot occur - a group exists because an entry made it - and sorts
- *  last if it ever did. */
+ *  A role no `LEGION_ROLES` names, and a token with no session, sort last rather than ahead of
+ *  every real role, which is where `indexOf`'s -1 would put them. */
 function tokenOrder(sessions: readonly FakeLegionAgent[]): [number, string] {
   const first = sessions[0];
-  return first === undefined
-    ? [LEGION_ROLES.length, ""]
-    : [LEGION_ROLES.indexOf(first.role), first.role_token];
+  if (first === undefined) return [LEGION_ROLES.length, ""];
+  const place = LEGION_ROLES.indexOf(first.role);
+  return [place === -1 ? LEGION_ROLES.length : place, first.role_token];
 }
 
-/** A registry read's answer for `agents`, every one of them of one role token or many: each entry
- *  with `live` from this listener's live sessions and, within its role token ordered by start,
- *  the session that replaced it and when (`replaced_by`/`replaced_at`, null for the newest), as
- *  the listener derives them at the read (`legionAgentAnswer`, `legionagents.succession`). Newest
- *  first within a role token; across tokens by role in workflow order, then by token. */
-function legionAnswer(agents: readonly FakeLegionAgent[]): Record<string, unknown>[] {
+/** A registry read's answer for `agents`, holding the selected entries: each with `live` from this
+ *  listener's live sessions and, within its role token ordered by start, the session that replaced
+ *  it and when (`replaced_by`/`replaced_at`, null for the newest), as the listener derives them at
+ *  the read (`legionAgentAnswer`, `legionagents.succession`). Newest first within a role token;
+ *  across tokens by role in workflow order, then by token.
+ *
+ *  Succession is derived over every entry of each token the registry holds and the selection is
+ *  applied after, so the three reads never answer one session two ways: an issue read of a token
+ *  whose entries were recorded under two issues would otherwise call its newest entry unreplaced
+ *  while the token's own read named its replacement. */
+function legionAnswer(selected: readonly FakeLegionAgent[]): Record<string, unknown>[] {
+  const chosen = new Set(selected.map((agent) => agent.session_id));
+  const tokens = new Set(selected.map((agent) => agent.role_token));
   const byToken = new Map<string, FakeLegionAgent[]>();
-  for (const agent of agents) {
+  for (const agent of state.legionAgents) {
+    if (!tokens.has(agent.role_token)) continue;
     byToken.set(agent.role_token, [...(byToken.get(agent.role_token) ?? []), agent]);
   }
   return [...byToken.values()]
@@ -158,15 +166,18 @@ function legionAnswer(agents: readonly FakeLegionAgent[]): Record<string, unknow
     .flatMap((sessions) => {
       const ordered = [...sessions].sort(oldestFirst);
       return ordered
-        .map((agent, index) => {
+        .flatMap((agent, index) => {
+          if (!chosen.has(agent.session_id)) return [];
           const next = ordered[index + 1];
-          return {
-            ...agent,
-            live: isLive(agent.session_id),
-            recorded_at: agent.recorded_at ?? agent.started_at,
-            replaced_at: next?.started_at ?? null,
-            replaced_by: next?.session_id ?? null,
-          };
+          return [
+            {
+              ...agent,
+              live: isLive(agent.session_id),
+              recorded_at: agent.recorded_at ?? agent.started_at,
+              replaced_at: next?.started_at ?? null,
+              replaced_by: next?.session_id ?? null,
+            },
+          ];
         })
         .reverse();
     });

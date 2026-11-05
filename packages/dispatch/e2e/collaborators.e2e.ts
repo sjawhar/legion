@@ -91,10 +91,10 @@ async function seed(): Promise<Fixture> {
   };
 }
 
-/** An agent's own row name in the Legion agents section: the `AgentName` of the row's first line
- *  (`Row` in `CollaboratorsTab.tsx`), not one that names it as another row's replacement. */
+/** An agent's own row name in the Legion agents section: the name `Row` marks `data-collaborator`
+ *  (`CollaboratorsTab.tsx`), never one that names it as another row's replacement. */
 function agentRowName(legion: Locator, sessionId: string): Locator {
-  return legion.locator(`li > div:first-child [data-agent-name="${sessionId}"]`);
+  return legion.locator(`[data-collaborator] [data-agent-name="${sessionId}"]`);
 }
 
 // No `@phone` tag: this row starts at the project's own desktop width and narrows the window
@@ -129,7 +129,7 @@ test("the Collaborators tab lists an issue's people and its Legion agents, runni
       "reviewer",
     ]);
     const reviewers = legion.getByRole("region", { name: "reviewer" });
-    const reviewerNames = reviewers.locator("li > div:first-child [data-agent-name]");
+    const reviewerNames = reviewers.locator("[data-collaborator] [data-agent-name]");
     await expect(reviewerNames).toHaveCount(2);
     expect(
       await reviewerNames.evaluateAll((nodes) =>
