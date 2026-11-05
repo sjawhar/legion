@@ -1172,32 +1172,6 @@ export function Inbox({
     </div>
   );
 
-  if (shown.length === 0 && held === undefined) {
-    const emptyMessage = emptyStateMessage({
-      agent,
-      agentTitle,
-      credentials,
-      selection,
-      viewer,
-      words,
-    });
-    // Nothing to read, so nothing to select and no column beside the list: the list column is
-    // the whole Inbox, as it is below the reading column's width. The one question that
-    // outlives every row is the one the column is keeping for an unsent answer, and it keeps
-    // its column here too: the reader's text is in it.
-    presented.current = [];
-    const empty = (
-      <div className="space-y-6" data-testid="inbox-list">
-        {header}
-        {emptyMessage === undefined ? null : (
-          <EmptyState label="Inbox empty state" message={emptyMessage} />
-        )}
-      </div>
-    );
-    const kept = paneSelection.showing([]);
-    return kept === undefined ? empty : columns(empty, kept);
-  }
-
   const rowsIn = (section: InboxSection) =>
     withHeld(
       shown.filter((ask) => sectionOf(ask, place) === section && ask.id !== held?.ask.id),
@@ -1224,10 +1198,25 @@ export function Inbox({
   // with the short name rather than a count of something the reader cannot see.
   const ordinals = askOrdinals(presented.current.map(({ ask }) => ask));
   const selectedAsk = paneSelection.showing(listedRows);
+  // The line the list shows in place of its bands when none of them has a row, and undefined
+  // where the Inbox has nothing to say yet: a credential list that has not come back, or
+  // credential requests of its own listed above (`emptyStateMessage`).
+  const emptyMessage =
+    sections.length > 0
+      ? undefined
+      : emptyStateMessage({ agent, agentTitle, credentials, selection, viewer, words });
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
   // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
+  //
+  // One tree, rows or none: what appears and disappears under the header is the bands, never
+  // the header itself. That is the rule the comment above `columns` states for the columns
+  // root, and the header is under it for the same reason - drawing the empty list in a tree of
+  // its own would have React unmount the header on the letter that leaves nothing listed and
+  // mount a fresh one, taking the search box out from under the reader's hand and their focus
+  // to `document.body` with it, so the rest of the word, and the Backspace that would correct
+  // it, would reach the Inbox's own single-key bindings instead of the box (INFRA-963).
   const list = (
     // With the reading column beside it the list scrolls in itself rather than in the window,
     // so the two columns move independently; the anchor is given that same box, so a refetch
@@ -1246,75 +1235,86 @@ export function Inbox({
         scroller={paneShown ? listScroller : undefined}
       >
         {header}
-        <ul className="space-y-3">
-          {sections.flatMap(({ groups, rows, section }, index) => [
-            <li
-              className={index === 0 ? undefined : "pt-2"}
-              key={`heading-${section}`}
-              role="presentation"
-            >
-              {/* A band divider, not a heading that competes with the questions under it. */}
-              <h2 className={`text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}>
-                {COLLAPSED_SECTIONS[section] === true ? (
-                  <DisclosureToggle
-                    expanded={laterOpen}
-                    label={`${titles[section]} (${rows.length})`}
-                    onToggle={() => setLaterOpen((open) => !open)}
-                    textClassName={textMutedOnCanvas}
-                  />
-                ) : (
-                  titles[section]
-                )}
-              </h2>
-            </li>,
-            ...bandGroupItems({
-              groups,
-              notes: notes.get(section),
-              onJump: jumpToGroup,
-              // The reader's hand holds the row, and lets it go when their focus or pointer
-              // leaves it, whichever layout it is drawn in.
-              renderRow: (ask, group) =>
-                paneShown ? (
-                  <InboxShortRow
-                    ask={ask}
-                    grouped={group.rows.length > 1}
-                    key={ask.id}
-                    marked={marked.has(ask.id)}
-                    onMark={onMark}
-                    onRelease={ask.id === held?.ask.id ? release : undefined}
-                    onSelect={selectRow}
-                    ordinal={ordinals.get(ask.id)}
-                    ownerKey={group.owner.key}
-                    section={section}
-                    selected={ask.id === paneSelection.id}
-                  />
-                ) : (
-                  <InboxCardRow
-                    ask={ask}
-                    assignLive={assigning.has(ask.id)}
-                    grouped={group.rows.length > 1}
-                    key={ask.id}
-                    marked={marked.has(ask.id)}
-                    onAnswered={recordAnswered}
-                    onAssignLive={onAssignLive}
-                    onMark={onMark}
-                    onRelease={ask.id === held?.ask.id ? release : undefined}
-                    onSnoozeLive={onSnoozeLive}
-                    ordinal={ordinals.get(ask.id)}
-                    ownerKey={group.owner.key}
-                    section={section}
-                    threadUpdatedAt={inbox.dataUpdatedAt}
-                    viewer={viewer}
-                  />
-                ),
-              section,
-              titles,
-            }),
-          ])}
-        </ul>
+        {emptyMessage === undefined ? null : (
+          <EmptyState label="Inbox empty state" message={emptyMessage} />
+        )}
+        {sections.length === 0 ? null : (
+          <ul className="space-y-3">
+            {sections.flatMap(({ groups, rows, section }, index) => [
+              <li
+                className={index === 0 ? undefined : "pt-2"}
+                key={`heading-${section}`}
+                role="presentation"
+              >
+                {/* A band divider, not a heading that competes with the questions under it. */}
+                <h2
+                  className={`text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}
+                >
+                  {COLLAPSED_SECTIONS[section] === true ? (
+                    <DisclosureToggle
+                      expanded={laterOpen}
+                      label={`${titles[section]} (${rows.length})`}
+                      onToggle={() => setLaterOpen((open) => !open)}
+                      textClassName={textMutedOnCanvas}
+                    />
+                  ) : (
+                    titles[section]
+                  )}
+                </h2>
+              </li>,
+              ...bandGroupItems({
+                groups,
+                notes: notes.get(section),
+                onJump: jumpToGroup,
+                // The reader's hand holds the row, and lets it go when their focus or pointer
+                // leaves it, whichever layout it is drawn in.
+                renderRow: (ask, group) =>
+                  paneShown ? (
+                    <InboxShortRow
+                      ask={ask}
+                      grouped={group.rows.length > 1}
+                      key={ask.id}
+                      marked={marked.has(ask.id)}
+                      onMark={onMark}
+                      onRelease={ask.id === held?.ask.id ? release : undefined}
+                      onSelect={selectRow}
+                      ordinal={ordinals.get(ask.id)}
+                      ownerKey={group.owner.key}
+                      section={section}
+                      selected={ask.id === paneSelection.id}
+                    />
+                  ) : (
+                    <InboxCardRow
+                      ask={ask}
+                      assignLive={assigning.has(ask.id)}
+                      grouped={group.rows.length > 1}
+                      key={ask.id}
+                      marked={marked.has(ask.id)}
+                      onAnswered={recordAnswered}
+                      onAssignLive={onAssignLive}
+                      onMark={onMark}
+                      onRelease={ask.id === held?.ask.id ? release : undefined}
+                      onSnoozeLive={onSnoozeLive}
+                      ordinal={ordinals.get(ask.id)}
+                      ownerKey={group.owner.key}
+                      section={section}
+                      threadUpdatedAt={inbox.dataUpdatedAt}
+                      viewer={viewer}
+                    />
+                  ),
+                section,
+                titles,
+              }),
+            ])}
+          </ul>
+        )}
       </ViewportAnchor>
     </div>
   );
 
+  // Nothing to read is nothing to select, so an empty list is the whole Inbox, as it is below
+  // the reading column's width. The one question that outlives every row is the one the column
+  // is keeping for an unsent answer, and `showing` hands that one back from an empty list too,
+  // so it keeps its column here: the reader's text is in it.
   return paneShown ? columns(list, selectedAsk) : list;
 }
