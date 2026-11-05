@@ -107,11 +107,13 @@ fi
 # spec but the ones that drive meaning search is written against. The acceptance driver and the
 # two-process run ask for it (packages/dispatch/README.md).
 web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
+dev_embedder=0
 case "${DISPATCH_E2E_SIGNIN:-}" in
   "")
     signin_env=(DISPATCH_DEV_SIGNIN=1)
     if [ "${DISPATCH_E2E_EMBEDDER:-}" = "1" ]; then
       signin_env+=(DISPATCH_DEV_EMBEDDER=1)
+      dev_embedder=1
     fi
     if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
       signin_env+=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
@@ -233,13 +235,15 @@ listener_takeover_window="${DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW:-500ms}"
 # queue's Run returns at once and no query is embedded. A caller that set the variable itself
 # keeps its own value, as it does for the settle delay above.
 #
-# The runs that do prove the embed path are the ones that ask for the dev embedder
-# (DISPATCH_E2E_EMBEDDER=1 above, which calls no model service): the acceptance driver's meaning
+# The runs that do prove the embed path are the ones this harness builds the dev embedder for
+# (DISPATCH_DEV_EMBEDDER above, which calls no model service): the acceptance driver's meaning
 # rows and `two-builds.multiprocess.e2e.ts`'s rollout row, which read vectors the queue wrote and
-# can pass no other way. They are the run "that one day proves the embed path turns it back on
-# with 0", so the default follows what the caller asked for rather than making each of them say
-# it twice.
-if [ "${DISPATCH_E2E_EMBEDDER:-}" = "1" ]; then
+# can pass no other way. The default follows that build rather than making each of them say it
+# twice, and it follows the build rather than the request for it, since the server reads the dev
+# embedder beside dev sign-in alone: a run that asks for it under DISPATCH_E2E_SIGNIN=oidc gets
+# no embedder, and defaulting on the request there would leave it building Bedrock's client on
+# the file store's static keys, which is the one thing this setting exists to stop.
+if [ "$dev_embedder" = "1" ]; then
   embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-0}"
 else
   embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"

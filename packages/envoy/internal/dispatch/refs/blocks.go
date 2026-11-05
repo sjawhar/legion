@@ -251,8 +251,8 @@ func writeDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown s
 		return fmt.Errorf("read the title of %s for its windows: %w", artifactID, err)
 	}
 	return writeWindows(ctx, tx, DocumentWindowKind, artifactID,
-		itemblocks.DocumentWindows(title, documentBlockTexts(markdown, nodes)), windowState{
-			stamp: `select $1::text, $2::text, ` + documentBlockState + `, now()
+		itemblocks.DocumentWindows(title, documentBlockTexts(markdown, nodes)), blockState{
+			query: `select ` + documentBlockState + ` as block_state
 			          from document_block_versions v where v.artifact_id = $5::uuid`,
 			args: []any{artifactID},
 		})
@@ -276,20 +276,17 @@ func documentBlockTexts(markdown string, nodes []model.ArtifactBlock) []itembloc
 	return blocks
 }
 
-// windowState is how one write of an owner's windows (writeWindows) records the state the
-// blocks those windows cover are in, beside them, and - where the same index settles the
-// owner's own state row - that settling write too.
-//
-// stamp is a select of the four columns of embedding_window_states, reading the table that
-// holds the owner's block state. settle, where the caller has one, is the update that settles
-// the owner's state row: it runs as the statement's first common table expression, named
-// `settled`, and returns a block_state column for stamp to read, so the index pays no round
-// trip of its own for either the windows or the stamp. Both fragments number their parameters
-// from $5 and pass their values in args, since writeWindows holds $1 to $4.
-type windowState struct {
-	settle string
-	stamp  string
-	args   []any
+// blockState is how one write of an owner's windows (writeWindows) tells that write what state
+// the blocks those windows cover are in: one query returning a single block_state column, which
+// the write runs as a common table expression and stamps beside the windows. An index that
+// settles the owner's own state row writes that row here, returning the state it has just
+// written (indexedItemState), so it pays no round trip for the stamp; a write that settles no
+// such row reads the state the row already holds (storedItemState, and the document's own query
+// above). The query numbers its parameters from $5 and passes their values in args, since
+// writeWindows holds $1 to $4.
+type blockState struct {
+	query string
+	args  []any
 }
 
 // writeWindows writes windows as the windows of owner ownerKey, of kind kind, in the caller's
@@ -300,18 +297,18 @@ type windowState struct {
 // stand, and an owner left with no block loses every window it had.
 //
 // The whole write is one statement, so a document of fifty windows costs one round trip and an
-// index that settles its owner's state row with them (state.settle) costs none beyond the one
-// it was already sending. The windows go through jsonb_to_recordset in the top-level select;
-// the delete, the stamp of the block state and the caller's settling write are data-modifying
-// common table expressions, which Postgres runs exactly once and to completion whether or not
-// the select reads them. The delete cannot race the enqueue: it names only ids the new set does
-// not hold, and the enqueue writes only ids it does.
+// index whose state query settles its owner's state row (indexedItemState) pays nothing beyond
+// the round trip it was already sending for that. The windows go through jsonb_to_recordset in
+// the top-level select; the state query, the stamp of what it returns and the delete are common
+// table expressions, and Postgres runs a data-modifying one exactly once and to completion
+// whether or not the select reads it. The delete cannot race the enqueue: it names only ids the
+// new set does not hold, and the enqueue writes only ids it does.
 //
 // The delete names the kind twice, as the parameter and in the literal list of every window
 // kind, because a generic plan knows nothing of what the parameter holds: the literal list is
 // what lets the planner prove embeddings_window_owner's partial predicate and read the owner's
 // rows through that index.
-func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows []itemblocks.Window, state windowState) error {
+func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows []itemblocks.Window, state blockState) error {
 	type row struct {
 		Suffix string   `json:"suffix"`
 		Text   string   `json:"text"`
@@ -327,15 +324,13 @@ func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows
 	if err != nil {
 		return fmt.Errorf("encode the windows of %s %s: %w", kind, ownerKey, err)
 	}
-	settle := ""
-	if state.settle != "" {
-		settle = `settled as (` + state.settle + `),`
-	}
 	if _, err := tx.Exec(ctx, `
-		with `+settle+`
+		with state as (
+			`+state.query+`
+		),
 		stamped as (
 			insert into embedding_window_states (kind, owner_key, block_state, written_at)
-			`+state.stamp+`
+			select $1::text, $2::text, state.block_state, now() from state
 			on conflict (kind, owner_key) do update
 			  set block_state = excluded.block_state, written_at = excluded.written_at
 		),

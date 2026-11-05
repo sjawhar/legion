@@ -1518,7 +1518,9 @@ than 250 ms. A caller that set the variable itself keeps its own value.
 `DISPATCH_TEST_HOOKS=1`, and every server it starts gets them, the one behind
 `bun run dispatch:local` included. Each is read as `${VAR:-default}`, so a
 caller that set the variable itself keeps its own value; the value named at the
-end of each paragraph below is the server's own behaviour back.
+end of each paragraph below is the server's own behaviour back. Three of the
+four defaults are the same in every run; the embedder's follows what the run
+builds, as its own paragraph says.
 
 `DISPATCH_TEST_MARK_WAIT=250ms` is how long a Send that names a provisional
 comment, ask or suggestion mark waits for the room to receive that mark before
@@ -1553,7 +1555,12 @@ keyword-only and says so. Locally that is a search that never ranks by meaning,
 and a server that makes no call to Bedrock - which it would otherwise make for
 every indexed text and every query, on the file store's static keys, and be
 refused 403. `DISPATCH_TEST_EMBEDDER_OFF=0` builds the embedder again, for a
-run that means to prove that path.
+run that means to prove that path. Its default is the one default of the four
+that is not fixed: `0` where this harness builds the dev embedder for the run
+(`DISPATCH_DEV_EMBEDDER`, which the server reads beside dev sign-in alone, so
+`DISPATCH_E2E_EMBEDDER=1` under `DISPATCH_E2E_SIGNIN=oidc` builds none), `1`
+everywhere else, so the runs that read a vector the queue wrote need say it
+once and no other run reaches Bedrock.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile

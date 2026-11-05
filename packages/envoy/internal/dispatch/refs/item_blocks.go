@@ -407,8 +407,8 @@ func indexItemBlocks(
 
 // writeItemWindows writes the windows of the item's blocks (blocks, under ids, embedded under
 // windowContext), in the caller's transaction, and stamps the state those blocks are in beside
-// them, as state says (indexedItemState for an index, which settles the item's state row in the
-// same statement; storedItemState for a write that leaves that row alone). Every index of an
+// them, as state says (indexedItemState for an index, whose query settles the item's state row
+// in the same statement; storedItemState for a write that leaves that row alone). Every index of an
 // item's blocks writes them, one that found nothing changed included: the window of a text that
 // did not move is a no-op upsert (writeWindows). An item whose blocks are indexed and whose
 // windows are not - one written before meaning search moved to windows, one whose write failed
@@ -421,7 +421,7 @@ func writeItemWindows(
 	itemID, windowContext string,
 	blocks []itemblocks.Block,
 	ids []string,
-	state windowState,
+	state blockState,
 ) error {
 	windowed := make([]itemblocks.WindowBlock, len(blocks))
 	for i, block := range blocks {
@@ -437,35 +437,32 @@ func writeItemWindows(
 // one no block-aware build has indexed - stamps and compares as the empty string.
 const itemBlockState = `coalesce(s.body_sha256, '')`
 
-// indexedItemState records the item indexed from the text whose sum is bodySum, at revision
-// with next as the next block number for a kind that counts revisions, settles its owed_at, and
-// stamps that sum beside the windows the same statement writes (writeWindows). The update
-// returns the sum it has just written rather than the statement reading it back, since a
-// separate read would see the row as it stood before.
-func indexedItemState(tables itemTables, itemID string, revision, next int, bodySum string) windowState {
-	stamp := `select $1::text, $2::text, settled.block_state, now() from settled`
+// indexedItemState is the query that records the item indexed from the text whose sum is
+// bodySum, at revision with next as the next block number for a kind that counts revisions, and
+// settles its owed_at. It returns the sum it has just written, which the write of the windows
+// stamps beside them (writeWindows), rather than leaving that write to read the row back: a
+// read of the row in the same statement would see it as it stood before this update.
+func indexedItemState(tables itemTables, itemID string, revision, next int, bodySum string) blockState {
 	if tables.revisions() {
-		return windowState{
-			settle: `update ` + tables.state + ` s set revision = $6, next_block = $7, body_sha256 = $8, owed_at = null
-			         where s.` + tables.item + ` = $5::uuid returning ` + itemBlockState + ` as block_state`,
-			stamp: stamp,
-			args:  []any{itemID, revision, next, bodySum},
+		return blockState{
+			query: `update ` + tables.state + ` s set revision = $6, next_block = $7, body_sha256 = $8, owed_at = null
+			        where s.` + tables.item + ` = $5::uuid returning ` + itemBlockState + ` as block_state`,
+			args: []any{itemID, revision, next, bodySum},
 		}
 	}
-	return windowState{
-		settle: `update ` + tables.state + ` s set body_sha256 = $6, owed_at = null
-		         where s.` + tables.item + ` = $5::uuid returning ` + itemBlockState + ` as block_state`,
-		stamp: stamp,
-		args:  []any{itemID, bodySum},
+	return blockState{
+		query: `update ` + tables.state + ` s set body_sha256 = $6, owed_at = null
+		        where s.` + tables.item + ` = $5::uuid returning ` + itemBlockState + ` as block_state`,
+		args: []any{itemID, bodySum},
 	}
 }
 
-// storedItemState stamps the state the item's state row already holds beside the windows the
-// statement writes, for a write that settles no such row of its own: the block-index tick's
-// window arm, which windows an item whose block index already stands (WriteItemWindows).
-func storedItemState(tables itemTables, itemID string) windowState {
-	return windowState{
-		stamp: `select $1::text, $2::text, ` + itemBlockState + `, now()
+// storedItemState is the query that reads the state the item's state row already holds, for a
+// write of its windows that settles no such row of its own: the block-index tick's window arm,
+// which windows an item whose block index already stands (WriteItemWindows).
+func storedItemState(tables itemTables, itemID string) blockState {
+	return blockState{
+		query: `select ` + itemBlockState + ` as block_state
 		          from ` + tables.state + ` s where s.` + tables.item + ` = $5::uuid`,
 		args: []any{itemID},
 	}
