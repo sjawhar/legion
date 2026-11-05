@@ -24,8 +24,9 @@ export type ProviderTurnOutcome =
   | { kind: "provider-error"; status?: number };
 
 /** Anthropic's refusal text: `Refusal`, or `Refusal (<category>)`, either one optionally followed
- * by `: <explanation>` (`packages/ai/src/providers/anthropic.ts:3121-3126` at the pinned tag). */
-const ANTHROPIC_REFUSAL = /^Refusal(?: \(([^)]*)\))?(?::|$)/;
+ * by `: <explanation>` (`packages/ai/src/providers/anthropic.ts:3121-3126` at the pinned tag).
+ * The category is bounded as the Google reasons below are, and for the same reason. */
+const ANTHROPIC_REFUSAL = /^Refusal(?: \(([^)]{0,200})\))?(?::|$)/;
 
 /** What OpenAI's own filter leaves: the chat completion's `finish_reason`
  * (`packages/ai/src/providers/openai-completions.ts:3079-3080` at the pinned tag) and the
@@ -47,13 +48,21 @@ const GOOGLE_FILTER_REASONS: Record<string, true> = {
   RECITATION: true,
 };
 
-/** `packages/ai/src/providers/google-shared.ts:851` at the pinned tag. */
-const GOOGLE_FINISH_REASON = /Generation failed with finish reason: ([A-Z_]+)/;
+/** `packages/ai/src/providers/google-shared.ts:851` at the pinned tag.
+ *
+ * Every repetition below is bounded, and that bound is what keeps a long error text cheap. The
+ * text is the provider's own and nothing limits its length, so an unbounded `[^)]*` behind a
+ * literal the text repeats costs one scan to the end of the text per repetition: 16,000
+ * repetitions of `Request blocked by Google (` took 12.3 s in one call, measured in a worker pod
+ * on bun 1.4.4, which is the stalled worker this issue exists to stop (CodeQL reads the same
+ * shape as `js/polynomial-redos`). A reason Google names is one short token, so a bound well
+ * above the longest of them changes no answer and leaves the work linear in the text. */
+const GOOGLE_FINISH_REASON = /Generation failed with finish reason: ([A-Z_]{1,64})/;
 
 /** The prompt feedback Google returns in place of a candidate (`google-shared.ts:806` at the
  * pinned tag), and the same block as the Gemini-through-Droid provider words it. */
-const GOOGLE_PROMPT_BLOCKED = /Request blocked by Google \(([^)]*)\)/;
-const GOOGLE_FILTERS_BLOCKED = /Generation was blocked by content filters \(([^)]*)\)/;
+const GOOGLE_PROMPT_BLOCKED = /Request blocked by Google \(([^)]{0,200})\)/;
+const GOOGLE_FILTERS_BLOCKED = /Generation was blocked by content filters \(([^)]{0,200})\)/;
 
 /** `packages/ai/src/providers/amazon-bedrock.ts:1071-1075` at the pinned tag: the service's own
  * filters, and a guardrail the request configured. */
