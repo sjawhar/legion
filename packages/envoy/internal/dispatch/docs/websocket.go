@@ -629,8 +629,16 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		askBlocks = askBlockIDs(tree)
 	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
-	// (releaseIfUnusedLocked).
+	// (releaseIfUnusedLocked). The load is this room's first use, which is where the peerless-room
+	// budget orders it from until something uses it again (noteRoomUsed), and the bytes it decoded
+	// are what that budget weighs the room by (roomWeight). The trim is not run
+	// here: the room is not ygo's to close until this hook has returned, and the Apply that caused
+	// the load runs it on that return (roomServer.Apply) - a load a browser's join caused is a
+	// room with a peer, which the budget does not count, and the next Apply or disconnect trims
+	// whatever its arrival pushed past the budget.
 	state := s.lockState(room)
+	state.lastUsed = s.now()
+	state.weight = roomWeight(stored)
 	state.closed = !open
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
@@ -985,7 +993,10 @@ func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 // removeConnection forgets a browser that left room, and with the last one, once ygo has retired
 // the room, the room's state (releaseIfUnusedLocked). A document without state has none to forget.
 // The departure of the last browser of an actor is when the unrecorded marks that actor wrote
-// start to age (sweepUnrecordedMarks).
+// start to age (sweepUnrecordedMarks). The last browser to leave is also when a room becomes one
+// of the rooms the peerless-room budget counts, so the room is stamped used from here
+// (noteRoomUsed): the state is stamped under the lock this already holds, and the trim runs after
+// it.
 func (s *Service) removeConnection(room string, id uint64) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -996,7 +1007,9 @@ func (s *Service) removeConnection(room string, id uint64) {
 	if registered {
 		recordMarkAuthorDeparture(state, actor, s.now())
 	}
+	state.lastUsed = s.now()
 	s.unlockState(room, state)
+	s.trimPeerlessRooms()
 }
 
 // settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its

@@ -595,6 +595,7 @@ Every series is read when the scrape comes, but the outbox lag, which one query 
 | `dispatch_http_admitted_units`, `dispatch_http_admitted_units_limit`, `dispatch_http_admitted_reserved_read_units` | Admission units held across both classes now, the combined cap over the two (40, below the 28 reads and 24 writes the class limits allow), and how many of the cap's units writes leave to the reads while a read waits for room (22); no labels. |
 | `dispatch_doc_writer_queued` | Writers waiting for a document's writer gate. |
 | `dispatch_settlements_running`, `dispatch_settlements_waiting` | Document settlements holding one of the settlement slots, and waiting for one. |
+| `dispatch_doc_rooms_resident`, `dispatch_doc_rooms_peerless`, `dispatch_doc_rooms_peerless_bytes`, `dispatch_doc_rooms_budget_closed_total` | Documents this process holds a live room for, loaded or loading; how many of those rooms have no browser connected; the heap those rooms are taken to hold, which the resident-room budget of 256 MiB bounds (`peerlessRoomHeapBudget`, estimated from the bytes each room's load decoded); and the rooms that budget has closed, least recently used first. `peerless_bytes` standing at the budget while the resident count falls is the budget holding against documents that have grown; the closed total rising steeply is a burst of writes to documents nobody is reading. |
 | `dispatch_log_dropped_total` | Log records dropped because the log writer fell behind; label `level`: `debug`, `info`, `warn` or `error`. |
 
 ## The live socket behind a proxy
@@ -3313,7 +3314,7 @@ Each item below names a status and code, then its meaning.
 - `409 DOCUMENT_LIVE`
 
   A rebuild found the document resident in this server:
-  open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds).
+  open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds; a room nobody is connected to goes sooner when those rooms hold more than their 256 MiB budget, `peerlessRoomHeapBudget`).
   Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown.
 
 - `409 DOCUMENT_LOADS`

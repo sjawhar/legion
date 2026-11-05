@@ -38,7 +38,7 @@ func TestAPeerApplyErrorStillStoresWhatTheRoomParked(t *testing.T) {
 			}
 
 			store := &parkedErrorStore{}
-			service := &Service{srv: newRoomServer(websocket.NewServer()), persistence: store}
+			service := &Service{srv: newRoomServer(websocket.NewServer(), nil), persistence: store}
 			state := newRoomState()
 			state.unsettled = true
 			service.rooms.Store("r", state)

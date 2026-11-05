@@ -144,8 +144,21 @@ type Service struct {
 	afterBlockIndexListed func()
 	rooms                 sync.Map
 	shutdownRooms         sync.Map
-	nextConnection        atomic.Uint64
-	stopping              atomic.Bool
+	// peerlessRoomBytes is the heap the service keeps in rooms with no browser connected
+	// (peerlessRoomHeapBudget, which New sets it to, and which says why there is a budget at
+	// all); a test lowers it, which is why it is atomic - every trim reads it. Zero leaves such
+	// a room to roomIdleTimeout alone.
+	peerlessRoomBytes atomic.Int64
+	// trimmingRooms is held by the one trim of those rooms that runs at a time
+	// (trimPeerlessRooms), trimPending records an ask for a trim that arrived while one ran,
+	// lastRoomTrim is when the last pass weighed the rooms (roomTrimInterval), and
+	// roomsClosedToBudget counts the rooms those trims have closed (RoomsClosedToBudget).
+	trimmingRooms       atomic.Bool
+	trimPending         atomic.Bool
+	lastRoomTrim        atomic.Int64
+	roomsClosedToBudget atomic.Int64
+	nextConnection      atomic.Uint64
+	stopping            atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool
@@ -680,6 +693,7 @@ func New(deps Deps) *Service {
 		reads:             newDocumentReads(documentReadBudget),
 		maxPendingItems:   maxUpdateItems,
 	}
+	service.peerlessRoomBytes.Store(peerlessRoomHeapBudget)
 	service.compactions = startCompactionQueue(service.compactionStep)
 	// The store tells the queue of every append it commits and every load it reads; a store that
 	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
@@ -701,21 +715,22 @@ func New(deps Deps) *Service {
 	srv.MaxPendingItems = service.maxPendingItems
 	srv.PeerWriteQueueBytes = peerWriteQueueBytes
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
-	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
-	// Apply on a room no peer is in returns (reearth/ygo#269). Idle eviction refuses a room any
-	// Apply holds (evictIdleRoom's inflight check) and counts its idle time from the last Apply's
-	// return, and the sweeper flushes the room before it evicts it, so every write a room the
-	// sweeper evicts has taken is durable before a successor can load. No other close retires a
-	// room under a caller either: ygo's CloseRoom answers ErrRoomInUse while an Apply, a relay
+	// been idle for roomIdleTimeout, and no longer than the peerless-room budget holds it
+	// (peerlessRoomHeapBudget, trimPeerlessRooms): ygo stamps a room idle when its last peer leaves,
+	// and when an Apply on a room no peer is in returns (reearth/ygo#269). Idle eviction refuses a
+	// room any Apply holds (evictIdleRoom's inflight check) and counts its idle time from the last
+	// Apply's return, and the sweeper flushes the room before it evicts it, so every write a room
+	// the sweeper evicts has taken is durable before a successor can load. No other close retires
+	// a room under a caller either: ygo's CloseRoom answers ErrRoomInUse while an Apply, a relay
 	// Inject or a browser's join is inside the room (reearth/ygo#342), so the service's closes of
-	// an issue's rooms (SetIssueClosed), of a room with an editor at Shutdown and of a room it
-	// evicts (evictRoom) wait for those callers to leave (roomServer.closeWhenFree), and its close
-	// of a room behind the durable head runs inside its own Apply on the room
-	// (roomServer.closeInstance, ygo's CloseRoomWithin). A write's commit into a room therefore
-	// reaches that room's own persistence worker.
+	// an issue's rooms (SetIssueClosed), of a room with an editor at Shutdown, of a room it evicts
+	// (evictRoom) and of the rooms over that budget wait for those callers to leave
+	// (roomServer.closeWhenFree), and its close of a room behind the durable head runs inside its
+	// own Apply on the room (roomServer.closeInstance, ygo's CloseRoomWithin). A write's commit
+	// into a room therefore reaches that room's own persistence worker.
 	srv.RoomIdleTimeout = roomIdleTimeout
 
-	service.srv = newRoomServer(srv)
+	service.srv = newRoomServer(srv, service.noteRoomUsed)
 	srv.Authorize = service.authorize
 	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject

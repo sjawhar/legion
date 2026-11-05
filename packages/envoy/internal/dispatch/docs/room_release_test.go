@@ -271,6 +271,13 @@ func createDocuments(t *testing.T, database *store.Store, n int) []string {
 // published to the room once it commits.
 func appendThroughAPI(t *testing.T, service *Service, id string) {
 	t.Helper()
+	appendMarkdownThroughAPI(t, service, id, "Room cap probe.")
+}
+
+// appendMarkdownThroughAPI is appendThroughAPI with the markdown it appends, for a test that tells
+// one write from another in the document it reads back.
+func appendMarkdownThroughAPI(t *testing.T, service *Service, id, markdown string) {
+	t.Helper()
 	ctx := context.Background()
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
@@ -281,7 +288,7 @@ func appendThroughAPI(t *testing.T, service *Service, id string) {
 	defer release()
 	joined, ledger := service.Join(writeCtx, tx)
 	defer ledger.Discard()
-	ops := []model.EditOp{{Op: "insert", After: "end", Markdown: "Room cap probe."}}
+	ops := []model.EditOp{{Op: "insert", After: "end", Markdown: markdown}}
 	if _, err := service.ApplyOps(joined, id, ops, model.Actor{Kind: "session", ID: "agent"}, nil); err != nil {
 		t.Fatalf("edit document %s: %v", id, err)
 	}

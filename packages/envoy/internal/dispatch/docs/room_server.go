@@ -12,7 +12,10 @@ import (
 
 // roomServer is the service's ygo server. Its CloseRoom shadows ygo's, so every close of a room
 // the service makes waits for each repair committing into the room (holdOpen) to hand its update
-// to the room's persistence, and holds off new repairs until the room is closed.
+// to the room's persistence, and holds off new repairs until the room is closed. Its Apply shadows
+// ygo's too, so every Apply the service makes notes the room it ran on as used (used,
+// Service.noteRoomUsed): ygo stamps the room idle there, and the service's own budget of resident
+// peerless rooms counts from the same moment (peerlessRoomBudget).
 //
 // A settlement writes its repairs while it holds the document's advisory lock, and ygo hands a
 // commit's update to the room's persistence inside the commit. Were the room's persistence worker
@@ -33,6 +36,9 @@ import (
 // room (closeInstance) is ygo's CloseRoomWithin.
 type roomServer struct {
 	*websocket.Server
+	// used runs after every Apply on a room returns, with that room's name. Nil in a roomServer
+	// built without a service, which the tests of the forks and the close gate alone build.
+	used func(room string)
 	// gatesMu guards gates and every gate's holders.
 	gatesMu sync.Mutex
 	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
@@ -49,8 +55,20 @@ type closeGate struct {
 	holders int
 }
 
-func newRoomServer(server *websocket.Server) *roomServer {
-	return &roomServer{Server: server, gates: make(map[string]*closeGate)}
+func newRoomServer(server *websocket.Server, used func(room string)) *roomServer {
+	return &roomServer{Server: server, used: used, gates: make(map[string]*closeGate)}
+}
+
+// Apply runs ygo's Apply and then notes room used, whether or not the callback changed anything:
+// an Apply is the one way the service reaches a room with no browser in it - an agent's write
+// publishing into the room, a read or a settlement warming it - and a room ygo stamps idle on this
+// return is a room the budget may close from now on, least recently used first.
+func (r *roomServer) Apply(ctx context.Context, room string, mutate func(*crdt.Doc, func(func(*crdt.Transaction)))) error {
+	err := r.Server.Apply(ctx, room, mutate)
+	if r.used != nil {
+		r.used(room)
+	}
+	return err
 }
 
 // CloseRoom closes room through ygo's CloseRoom once no repair is committing into it, holding

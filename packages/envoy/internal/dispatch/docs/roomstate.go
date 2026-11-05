@@ -117,6 +117,13 @@ type roomState struct {
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
 	// before it went takes the document's current state instead.
 	released bool
+	// lastUsed is when the room this state holds was last used: its load, the return of a
+	// Server.Apply on it, or the last browser leaving it (noteRoomUsed). It is the order the
+	// budget of resident peerless rooms closes them in, least recently used first
+	// (peerlessRoomsOverBudget). weight is the heap that room is taken to hold, from the bytes
+	// its load decoded (roomWeight); both are read by the budget alone.
+	lastUsed time.Time
+	weight   int64
 }
 
 // documentUpdateClass is what the room's update observer recorded for one update, which its

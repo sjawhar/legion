@@ -140,6 +140,8 @@ func TestTheMetricsEndpointListsEverySeriesForEveryOpenPool(t *testing.T) {
 		"dispatch_http_admitted_units_limit " + strconv.Itoa(admission.MaxAdmittedUnits) + "\n",
 		"dispatch_http_admitted_reserved_read_units " + strconv.Itoa(admission.ReservedReadUnits) + "\n",
 		"dispatch_doc_writer_queued 0\n", "dispatch_settlements_running 0\n", "dispatch_settlements_waiting 0\n",
+		"dispatch_doc_rooms_resident 0\n", "dispatch_doc_rooms_peerless 0\n", "dispatch_doc_rooms_peerless_bytes 0\n",
+		"dispatch_doc_rooms_budget_closed_total 0\n",
 		`dispatch_log_dropped_total{level="debug"} 0`, `dispatch_log_dropped_total{level="error"} 0`,
 	} {
 		requireLine(t, body, line)

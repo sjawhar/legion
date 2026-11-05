@@ -140,7 +140,7 @@ func TestEvictWithACancelledContextLeavesTheRoomResident(t *testing.T) {
 func TestACancelledEvictionLeavesTheFailedRoomForItsOwnEviction(t *testing.T) {
 	server := websocket.NewServer()
 	server.RoomIdleTimeout = time.Hour
-	service := &Service{srv: newRoomServer(server)}
+	service := &Service{srv: newRoomServer(server, nil)}
 	entered, release, applied := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	evicting, evict := make(chan struct{}), make(chan struct{})
 	var released, evicted sync.Once
@@ -212,7 +212,7 @@ func TestAnEvictionHandsOverFailureOnlyAfterTheRoomCloses(t *testing.T) {
 		{"shutdown", websocket.ErrServerShutdown, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service := &Service{srv: newRoomServer(websocket.NewServer())}
+			service := &Service{srv: newRoomServer(websocket.NewServer(), nil)}
 			state := newRoomState()
 			state.failed = errors.New("failed room")
 			service.rooms.Store("room", state)

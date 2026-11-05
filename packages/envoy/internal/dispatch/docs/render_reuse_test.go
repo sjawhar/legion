@@ -392,7 +392,7 @@ func TestTheRenderShadowReadsClassesForAParkedOnlyCommit(t *testing.T) {
 	if roomDoc.PendingStats().Items == 0 {
 		t.Fatal("the fixture did not park an update")
 	}
-	service := &Service{srv: newRoomServer(ygws.NewServer())}
+	service := &Service{srv: newRoomServer(ygws.NewServer(), nil)}
 	state := newRoomState()
 	state.unsettled = true
 	state.updateClasses = append(state.updateClasses, &queuedClass{documentUpdateClass: documentUpdateClass{update: emptyUpdateV1}})
