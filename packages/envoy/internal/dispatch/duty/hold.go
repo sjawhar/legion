@@ -69,7 +69,7 @@ const (
 			delete from duty_holds where name = $1 and holder = $2 returning name)
 		select pg_notify('` + HoldReleasedChannel + `', name) from released`
 	// holdExpiry is how long name's hold has left, in microseconds on the database's clock.
-	holdExpiry = `select (extract(epoch from expires_at - now()) * 1000000)::bigint
+	holdExpiry = `select (extract(epoch from expires_at - (now() + interval '1 second')) * 1000000)::bigint
 		from duty_holds where name = $1`
 )
 
