@@ -171,6 +171,15 @@
 # their messages through the listener's relay of their consumers, which is the delivery R5 names
 # ("each listener uses the consumer delivery the Envoy plugin uses").
 #
+# A route_mix is a file, and `loadgen run` reads it on the machine it runs on. The deployment
+# file names it by a bare name, which is read from this package's own directory here -- the one
+# holding routes-spec-loop-2026-11-03.txt -- or by an absolute path, which is taken as given; a
+# step puts that file in <remote_work> on the load machine and gives loadgen run the copy
+# (push_route_mix). Nothing else carries it there, so a setting that names no file on this pod
+# is refused with the deployment file's other values, before a container or a step is touched
+# (check_route_mixes): a step started without its mix dies at its first second with its whole
+# window booked.
+#
 # The run directory is ${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>: state.json
 # (mode 600, the deployment file's values that the run was started with), the run's OS Login
 # keypair, cgroup.jsonl, steps/, curves/ and logs/. up names the run in <root>/current, and every
@@ -190,6 +199,11 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=packages/envoy/loadtest/common.sh
 source "$here/../common.sh"
 export LC_ALL=C TZ=UTC
+
+# This package's own directory in the checkout, packages/envoy/loadtest: the directory a route
+# mix the deployment file names by a bare name is read from (route_mix_path), which is where the
+# committed mixes live.
+PACKAGE_DIR=$(cd -- "$here/.." && pwd -P)
 
 VM_ROOT=${LOADTEST_VM_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest-vm}
 # R11's run-time limit: Google stops each VM 72 hours after it starts, and check reads it back
@@ -294,6 +308,10 @@ VM_NAMES=()
 declare -A CONTAINER_VM=()
 LOAD_VM=""
 DISPATCH_VM=""
+# The route-mix files this process has already put on the load machine: the path on that
+# machine, to the file here it was put from. A series runs a dozen steps in one process and they
+# share a mix, so it is copied once (push_route_mix).
+declare -A ROUTE_MIX_PUT=()
 # The OS Login user every ssh runs as and the run's own private key it runs with, both set by
 # oslogin_ready before the first ssh of a subcommand that reaches a machine.
 SSH_USER=""
@@ -345,8 +363,10 @@ declare -A OPT=()
 POS=()
 
 # parse "VALUE FLAGS" "BOOLEAN FLAGS" ARGS...: OPT[flag] and POS, then the required --config into
-# CONFIG. Every subcommand calls it first, so each refuses a missing deployment file before it
-# reaches a VM.
+# CONFIG, and the two readings of that file every subcommand needs before it does anything: the
+# deployment's shape, check_placement, and the route mixes a step would run, check_route_mixes.
+# Every subcommand calls it first, so each refuses a missing deployment file, a deployment the
+# file describes wrongly and a route mix this pod does not hold before it reaches a VM.
 parse() {
   local vflags=" $1 " bflags=" $2 " flag
   shift 2
@@ -377,6 +397,7 @@ parse() {
   CONFIG=$(abs_file --config "${OPT[config]}")
   jq -e . "$CONFIG" >/dev/null 2>&1 || die "$CMD: --config $CONFIG is not readable JSON"
   check_placement
+  check_route_mixes
 }
 
 # positional N WHAT: refuse anything but N positional arguments.
@@ -474,6 +495,50 @@ check_placement() {
   [[ $all == *" $LOAD_VM "* ]] ||
     die "the deployment file $CONFIG gives load_vm as '$LOAD_VM', which is none of its machines (${VM_NAMES[*]}): load_vm names the machine the load runs from, where loadgen, the stub embedder and a step's profiling tunnel live"
   DISPATCH_VM=${CONTAINER_VM[dispatch]}
+}
+
+# route_mix_path VALUE: the file a route_mix of the deployment file names, as a path here. A
+# value that starts with / is taken as given; any other is read from this package's own
+# directory, which is where the committed mixes live, so a deployment file names
+# routes-spec-loop-2026-11-03.txt and not a path into whatever checkout this pod holds.
+route_mix_path() {
+  case $1 in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PACKAGE_DIR" "$1" ;;
+  esac
+}
+
+# route_mix_value WHICH: the route mix the deployment file gives the baseline or the loop, as
+# the file names it. Empty is no mix at all, which leaves loadgen its own committed default.
+route_mix_value() {
+  case $1 in
+    loop) load_value loop.route_mix routes-spec-loop-2026-11-03.txt ;;
+    *) load_value baseline.route_mix "" ;;
+  esac
+}
+
+# check_route_mixes: every route mix the deployment file names is a readable file here, refused
+# by name with the deployment's other values, before a container or a step is touched. A route
+# mix is a file, and `loadgen run` reads the one -route-mix names on the machine it runs on
+# (routes.go loadRouteMix): a step puts it on the load machine first (push_route_mix), and a
+# setting that names no file on this pod is one no step can be given. Refusing it here is the
+# point of the check -- an hour-long step that starts without its mix dies at its first second
+# and measures nothing (dispatch://INFRA-988). The copy on the load machine keeps the file's own
+# name, which is a path element there, so that name is held to the shape every value that
+# reaches a command line is held to.
+check_route_mixes() {
+  local which value path name
+  for which in baseline loop; do
+    value=$(route_mix_value "$which")
+    [ -n "$value" ] || continue
+    path=$(route_mix_path "$value")
+    if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+      die "the deployment file $CONFIG gives load.$which.route_mix as '$value', which is no readable file on this pod: $path. A route mix is read by the loadgen that runs on the $LOAD_VM VM, out of the copy a step puts there from this file, so a step would read no route mix and end at its first second. Name a file of $PACKAGE_DIR, or an absolute path on this pod."
+    fi
+    name=${path##*/}
+    valid name "$name" ||
+      die "the deployment file $CONFIG gives load.$which.route_mix as '$value', whose file name '$name' is the name a step writes the copy on the $LOAD_VM VM under: it holds letters, digits, '.', '_' and '-', and at most 63 of them"
+  done
 }
 
 # container_vm ROLE: the machine ROLE runs on, as check_placement read it.
@@ -1716,15 +1781,35 @@ step_rates() {
 
 # step_mixes FACTOR: the step's -event-mix and -route-mix, into EVENT_MIX and ROUTE_MIX. A step at
 # factor 0 is the baseline alone and takes the baseline's mixes; every step above it takes the
-# loop's, which carry the loop's three write kinds and seven read routes.
+# loop's, which carry the loop's three write kinds and seven read routes. ROUTE_MIX is the mix
+# as the deployment file names it; what loadgen is given is the copy on the load machine
+# (push_route_mix).
 step_mixes() {
   if awk -v f="$1" 'BEGIN { exit !(f > 0) }'; then
     EVENT_MIX=$(load_value loop.event_mix spec-loop-2026-11-03)
-    ROUTE_MIX=$(load_value loop.route_mix routes-spec-loop-2026-11-03.txt)
+    ROUTE_MIX=$(route_mix_value loop)
   else
     EVENT_MIX=$(load_value baseline.event_mix production-2026-10-26)
-    ROUTE_MIX=$(load_value baseline.route_mix "")
+    ROUTE_MIX=$(route_mix_value baseline)
   fi
+}
+
+# push_route_mix VALUE WORK: the route-mix file VALUE names, put in WORK on the load machine,
+# its path there into ROUTE_MIX_REMOTE. `loadgen run` reads -route-mix as a file of the machine
+# it runs on (routes.go loadRouteMix), which is the load machine, and nothing else carries a
+# route mix there: a step given the deployment file's own value would read no route mix and die
+# at its first second (dispatch://INFRA-988). A route mix is public -- the weights and paths of
+# the loop's reads -- and the loadgen that reads it runs as the ssh user put_file writes as, so
+# it goes in at put_file's own mode. It is put once per process, so a series of a dozen steps
+# copies the mix they share once; the answer is a variable and not a printed path because a
+# command substitution would keep that table in a subshell of its own.
+push_route_mix() {
+  local value=$1 work=$2 path
+  path=$(route_mix_path "$value")
+  ROUTE_MIX_REMOTE=$work/${path##*/}
+  [ "${ROUTE_MIX_PUT[$ROUTE_MIX_REMOTE]-}" != "$path" ] || return 0
+  put_file "$LOAD_VM" "$path" "$ROUTE_MIX_REMOTE"
+  ROUTE_MIX_PUT[$ROUTE_MIX_REMOTE]=$path
 }
 
 # loop_listener_urls: the four listener endpoints the loop's sessions register on, comma
@@ -1783,6 +1868,10 @@ run_step() {
   step_mixes "$factor"
   mkdir -p -- "$dir" "$RUN_DIR/logs"
   note "step $name: factor $factor, $EVENTS events/s, $REQUESTS requests/s, $SESSIONS sessions, $UNIT_STARTS unit starts/s, window $duration after $warmup"
+  # The mix the requests are drawn from is read on the load machine, so it goes there before
+  # the load does; check_route_mixes has already proven this pod holds the file.
+  ROUTE_MIX_REMOTE=""
+  [ -z "$ROUTE_MIX" ] || push_route_mix "$ROUTE_MIX" "$work"
 
   reset_deployment "$dir/reset.json"
   # The step's -pprof is the tunnel's loopback address on the load machine, and the tunnel is
@@ -1811,7 +1900,7 @@ run_step() {
     -duration "$duration" -warmup "$warmup" -grace 20s
     -session-delivery "$(load_value session_delivery consumer)"
   )
-  [ -z "$ROUTE_MIX" ] || args+=(-route-mix "$ROUTE_MIX")
+  [ -z "$ROUTE_MIX_REMOTE" ] || args+=(-route-mix "$ROUTE_MIX_REMOTE")
   args+=("${ENDPOINTS[@]}")
   on_vm_for "$seconds" "$LOAD_VM" "$remote" "${args[@]}" >"$dir/loadgen.out" 2>&1 || rc=$?
   step_cleanup

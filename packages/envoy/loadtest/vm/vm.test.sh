@@ -35,8 +35,12 @@
 # an emptied JetStream store, the four load listeners and the Dispatch listener, then Dispatch,
 # then /healthz -- and records its duration; (g) step passes the loop's flags to loadgen run
 # (-loop-seed, -loop-factor, -generator-role, -unit-starts, -unit-life, -loop-listeners,
-# -driver-topics, -receipt-deadline, -route-mix and -event-mix), with the rates the factor gives,
-# fetches the profile from Dispatch's own machine and runs cgroup-merge, cloudsql-cpu and tables;
+# -driver-topics, -receipt-deadline and -event-mix), with the rates the factor gives, gives
+# -route-mix a file it has itself put on the load machine and that holds the loop's routes
+# there, read off the step's own argument rather than off the deployment file's setting,
+# fetches the profile from Dispatch's own machine and runs cgroup-merge, cloudsql-cpu and
+# tables, and is refused -- naming the setting and the path it resolved to, with no load sent --
+# when the route_mix names no file on this pod;
 # (h) a step at factor 0 is the baseline alone, at the baseline's own rates and mixes; (i) series
 # runs the baseline, 1x and 2x at the long duration after the long warm-up, stops the grid at the
 # first failing step, and then follows refine.txt until it is empty; (j) a step whose VM stopped
@@ -962,6 +966,22 @@ seeded_run
 run_vm step --config "$config" 2x 2 --duration 10m
 ((RC == 0)) || fail "step failed: see the output above"
 line=$(tail -n1 "$fake/loadgen-run.log")
+
+# The route mix the step named, read off the step's own argument -- never off the deployment
+# file's setting. `loadgen run` reads -route-mix with os.ReadFile on the machine it runs on
+# (routes.go loadRouteMix), which is the load machine, so the question is not what the step was
+# configured with but whether the path it named holds the mix over there. Nothing put a route
+# mix on a machine before this issue, and every loop step died at its first second reading one
+# (dispatch://INFRA-988).
+mix=$(awk '{ for (i = 1; i < NF; i++) if ($i == "-route-mix") print $(i + 1) }' <<<"$line")
+[ -n "$mix" ] || fail "step's loadgen run names no -route-mix: $line"
+grep -q "^ssh	$gen_target	sh -c .* sh $mix 600$" "$fake/actions.log" ||
+  fail "nothing put $mix on the load machine, so the step named a file loadgen cannot read there"
+[ -r "$mix" ] || fail "the route mix the step named is no readable file on the load machine: $mix"
+grep -qE '^[0-9]+(\.[0-9]+)? +loop +agent +GET +/' "$mix" ||
+  fail "the file the step named as its route mix holds none of the loop's routes: $mix"
+pass "the route mix a loop step names is a file the step put on the load machine, and it holds the loop's routes there"
+
 for want in \
   "-loop-seed $remote/work/loopseed.seed.json" \
   "-loop-factor 2" \
@@ -971,7 +991,6 @@ for want in \
   "-loop-listeners http://10.138.0.22:9021,http://10.138.0.22:9022,http://10.138.0.22:9023,http://10.138.0.22:9024" \
   "-driver-topics 614" \
   "-receipt-deadline 1s" \
-  "-route-mix routes-spec-loop-2026-11-03.txt" \
   "-event-mix spec-loop-2026-11-03" \
   "-events 11" \
   "-requests 137" \
@@ -1011,6 +1030,26 @@ for want in "-loop-factor 0" "-unit-starts 0" "-events 4" "-requests 60" "-event
 done
 [[ $line == *"-route-mix"* ]] && fail "the baseline step named a route mix; it takes loadgen's committed one: $line"
 pass "a step at factor 0 is the baseline alone, at the baseline's own rates and mixes"
+
+# The negative control of the case above: a route_mix this pod holds no file for is refused
+# where the deployment file's other values are read, before the reset and before any load. The
+# refusal names the setting and the path it resolved to, because a step that starts without its
+# mix has an hour's window booked and dies in its first second.
+package_dir=$(cd -- "$here/.." && pwd -P)
+jq '.load.loop.route_mix = "routes-nowhere-2026-11-05.txt"' "$config" >"$tmp/no-mix.json"
+runs_before=$(wc -l <"$fake/loadgen-run.log")
+run_vm step --config "$tmp/no-mix.json" 9x 9 --duration 10m
+((RC != 0)) || fail "step ran with a route mix that names no file on this pod"
+grep -q 'load.loop.route_mix' "$tmp/out" ||
+  fail "the refusal does not name the setting: $(cat "$tmp/out")"
+grep -qF -- "$package_dir/routes-nowhere-2026-11-05.txt" "$tmp/out" ||
+  fail "the refusal does not name the path the setting resolved to: $(cat "$tmp/out")"
+grep -q 'no route mix' "$tmp/out" ||
+  fail "the refusal does not say that a step would read no route mix: $(cat "$tmp/out")"
+[ "$(wc -l <"$fake/loadgen-run.log")" = "$runs_before" ] ||
+  fail "a step whose route mix is missing sent its load all the same"
+[ ! -e "$(run_dir)/steps/9x" ] || fail "a step refused for its route mix left a directory"
+pass "a route_mix naming a file this pod does not hold refuses the step before any load, naming the setting and the path"
 
 # ---- (i) series -----------------------------------------------------------------------------------
 

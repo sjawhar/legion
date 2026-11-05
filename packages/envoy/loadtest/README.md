@@ -2956,6 +2956,16 @@ script does. What the example cannot carry is why each key is there, which is be
   "routes-spec-loop-2026-11-03.txt"}, "unit_life": "5m", "driver_topics": 614,
   "receipt_deadline": "1s", "session_delivery": "consumer"}`. A step at factor 0 is the baseline
   alone and takes the baseline's mixes; every step above it takes the loop's.
+- A `route_mix` is a file, and the step reads it where the load runs. A bare name, such as the
+  loop's own `routes-spec-loop-2026-11-03.txt`, is read from `packages/envoy/loadtest`, the
+  directory holding the committed mixes; a value that starts with `/` is a path on the pod that
+  drives the run, taken as given. The step puts that file in `paths.remote_work` on the load
+  machine, once per run, and gives `loadgen run` `-route-mix <that copy>`, because `loadgen`
+  opens the file on the machine it runs on. A `route_mix` that names no file on the driving pod
+  is refused with the deployment file's other values, before a container or a step is touched:
+  an hour-long step that starts without its mix dies in its first second. An empty `route_mix`,
+  which is the baseline's default, names no file and leaves `loadgen` its own committed
+  `routes-2026-10-26-1719Z.txt`.
 - `paths.stateful_dir` is the directory under `/mnt/stateful_partition` that `up` bind-mounts at
   `remote_root`, on every machine, at every run. The machines run Container-Optimized OS, where
   `/var` is mounted `noexec`, so a `loadgen` copied under `/var/lib/...` cannot be executed and
