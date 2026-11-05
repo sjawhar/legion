@@ -139,5 +139,13 @@ shape; a spec that does not is the place to fix.
   produced from a queue commit. (The tracker settles any commit of a pull request, not only its
   head, so this rests on that list alone.)
 
+  **Superseded 2026-11-05 (INFRA-1211).** The tracker no longer records only check runs that list a
+  pull request: a run or suite that lists none, whose check suite's `head_branch` is exactly
+  `refs/pull/<n>/head`, is recorded under pull request n, and Dispatch's CI reconcile pass records
+  every completed run and suite at an open pull request's head whatever its webhook said. The
+  conclusion for a queue commit still holds, by the branch rather than by the list: a
+  `gh-readonly-queue/...` branch is not `refs/pull/<n>/head`, and the pass reads only the heads
+  GitHub lists as open pull requests', which a queue commit is not. The rest of this bullet stands.
+
 Related: [template-names-a-ci-check-the-repository-never-produces](../legion/template-names-a-ci-check-the-repository-never-produces.md)
 (the ruleset's required names must be names the repository's workflows actually emit).
