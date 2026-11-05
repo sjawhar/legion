@@ -60,7 +60,9 @@ export function DecisionCard({
       <p className={`flex flex-wrap gap-x-2 text-xs ${textMutedOnSelectedCard}`}>
         <span>{decision.kind === "person" ? "A person's decision" : "Agent's decision"}</span>
         {decision.unsure ? (
-          <span className={`font-semibold ${decisionUnsureText}`}>Unsure</span>
+          <span className={`font-semibold ${decisionUnsureText}`}>
+            {decision.uncertainty === "" ? "Unsure" : `Unsure: ${decision.uncertainty}`}
+          </span>
         ) : null}
       </p>
       <h3 className={`mt-1 font-medium ${textPrimaryOnSurface}`}>

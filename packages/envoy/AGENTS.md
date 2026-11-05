@@ -1267,7 +1267,9 @@ Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 21474
 
 An issue's decisions are the `decision` and `ask` nodes of its documents (`api/decision_nodes.go`), declared in block schema version 4.
 A person's answered ask is the decision itself: the query reads its question, options, selected labels and answer from that ask row, without an agent restatement.
-A `decision` block is an agent's choice, with `title`, `replaced`, `shaped` (`block[]`, scoped to the same issue's spec), `from_ask` (an ask reference) and `decided_by` (a canonical person login).
+A `decision` block is an agent's choice, with `title`, `replaced`, `shaped` (`block[]`, scoped to the same issue's spec), `from_ask` (an ask reference), `decided_by` (a canonical person login), `uncertainty` (`low`, `medium` or `high`) and `uncertainty_reason` (plain text: what would change the choice).
+A write that gives `uncertainty_reason` without `uncertainty`, or `uncertainty` on a block whose `decided_by` names a person, is refused by the schema (`pmdoc.validateDecisionUncertainty`): a person's answer is read from their ask row word for word, and an agent never qualifies it.
+The read returns `uncertainty` and `uncertainty_reason` as written, empty where the author recorded none, and `unsure` is true when the node carries a level or its text holds an `Unsure:` paragraph.
 The pointer indexer derives these relations into `block_refs`; an answered ask's `decided_by` relation comes from its existing server-owned `answered_by` metadata.
 `GET /api/v1/issues/{key}/decisions` retains `{document, open_questions, decisions}`: open document asks oldest first, then decision nodes in document order, the primary document first and other documents by creation time.
 `document` names the first document holding a decision, or is null when none do; each decision's `ref` names its own node.

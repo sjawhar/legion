@@ -225,7 +225,23 @@ function DecisionCard({
           : decision.kind === "person"
             ? "A person's decision"
             : "Agent's decision"}
+        {decision.uncertainty === "" ? null : (
+          <span
+            className={`ml-2 font-semibold ${decisionUnsureAccent}`}
+            data-decision-uncertainty={decision.uncertainty}
+          >
+            {`Unsure: ${decision.uncertainty}`}
+          </span>
+        )}
       </p>
+      {decision.uncertainty_reason === "" ? null : (
+        <div
+          className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
+          data-testid="decision-uncertainty-reason"
+        >
+          {decision.uncertainty_reason}
+        </div>
+      )}
       {decision.kind === "person" || closedQuestion ? (
         <div className="whitespace-pre-wrap" data-testid="decision-answer">
           {decision.text.startsWith(decision.heading)

@@ -42,6 +42,8 @@ function decision(fields: Partial<Decision> & Pick<Decision, "block_id" | "headi
     ref: `dispatch://CORE-1/artifact/choices-md#b-${fields.block_id}`,
     replaced: false,
     text_sha256: `sum-${fields.block_id}`,
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure: false,
     waiting_review: false,
     ...fields,
@@ -163,6 +165,33 @@ test("the panel sorts the view into its four lists, in order", async () => {
     expect(within(mine).queryByRole("button", { name: "Keep" })).toBeNull();
 
     expect(within(list("Replaced")).getByText("Keep them in a file")).toBeDefined();
+  } finally {
+    read.mockRestore();
+  }
+});
+
+test("a decision an agent made alone shows how sure it is and what would change it", async () => {
+  const unsure = decision({
+    block_id: "store",
+    heading: "Store notices in a table",
+    text: "## Store notices in a table\n\nA table keeps them queryable.",
+    uncertainty: "medium",
+    uncertainty_reason: "A second writer would change it.",
+    unsure: true,
+    waiting_review: true,
+  });
+  const read = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [unsure],
+    document: "dispatch://CORE-1/artifact/choices-md",
+    open_questions: [],
+  });
+  try {
+    renderPanel();
+    const waiting = await screen.findByRole("region", { name: "Waiting for your review" });
+    expect(within(waiting).getByText("Unsure: medium")).toBeDefined();
+    expect(within(waiting).getByTestId("decision-uncertainty-reason").textContent).toBe(
+      "A second writer would change it."
+    );
   } finally {
     read.mockRestore();
   }

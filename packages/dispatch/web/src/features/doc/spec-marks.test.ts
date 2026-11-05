@@ -45,6 +45,8 @@ function decision(blockId: string, links: DecisionLink[], replaced = false): Dec
     replaced,
     text: "We decided.",
     text_sha256: `sum-${blockId}`,
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure: false,
     waiting_review: true,
   };

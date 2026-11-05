@@ -2387,8 +2387,11 @@ export interface DecisionLink {
 // Decision is an actual typed node in an issue document. kind person is an answered ask,
 // with its own question/options/selected answer and answer text verbatim; kind agent is a
 // decision block, never a person's answer inferred from a prose citation. replaced is the
-// node's attribute; unsure comes from an Unsure: paragraph. changed_version/changed_at belong
-// to this stable block; text_sha256 is the SHA-256 of text that Keep carries back.
+// node's attribute. uncertainty is how sure the agent that made the choice is, "" on a
+// person's decision and on one whose author recorded none, and uncertainty_reason is the
+// plain text that author wrote about what would change the choice; unsure is true when the
+// node carries a level or the text holds an Unsure: paragraph. changed_version/changed_at
+// belong to this stable block; text_sha256 is the SHA-256 of text that Keep carries back.
 export interface Decision {
   readonly block_id: string;
   readonly heading: string;
@@ -2397,6 +2400,8 @@ export interface Decision {
   readonly text_sha256: string;
   readonly kind: "agent" | "person";
   readonly unsure: boolean;
+  readonly uncertainty: "" | "low" | "medium" | "high";
+  readonly uncertainty_reason: string;
   readonly replaced: boolean;
   readonly asks: string[];
   readonly links: DecisionLink[];

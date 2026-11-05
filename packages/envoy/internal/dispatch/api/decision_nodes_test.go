@@ -74,6 +74,26 @@ func TestTypedDecisionNodesOwnTheirShapedEdgesAndKeep(t *testing.T) {
 	}
 }
 
+// A decision an agent made alone says how sure it is, and the read carries the level and the
+// reason as the node holds them. A write that puts a level on a person's decision is refused,
+// so the tab never shows an agent's doubt over an answer a person gave.
+func TestADecisionNodeReadCarriesItsAuthorsUncertainty(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", shipIt("Ship it.")+"\n")
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#store title=\"Use a table\" uncertainty=\"medium\" uncertainty_reason=\"A second writer would change it.\"}\nChoose the table.\n:::"}})
+	decision := decisionNamed(t, readIssueDecisions(t, handler, issue.Key), "Use a table")
+	if decision.Kind != "agent" || decision.Uncertainty != "medium" ||
+		decision.UncertaintyReason != "A second writer would change it." || !decision.Unsure {
+		t.Fatalf("node: %s", mustJSON(t, decision))
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits",
+		map[string]any{"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#theirs title=\"Their call\" uncertainty=\"high\" decided_by=\"alice\"}\nTheir choice.\n:::"}}}, "alice")
+	if response.Code < 400 || !strings.Contains(response.Body.String(), "uncertainty") {
+		t.Fatalf("uncertainty on a person's decision: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestDecisionShadowEqualityAndIssueScope(t *testing.T) {
 	fixture := newDecisionsFixture(t)
 	created := dispatchRequest(t, fixture.handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Unrelated choice", "spec": ":::decision{#unrelated title=\"Other issue only\"}\nUnrelated choice.\n:::\n", "force": true}, "alice")

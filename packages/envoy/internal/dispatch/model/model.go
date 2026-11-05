@@ -2070,21 +2070,27 @@ type DecisionLink struct {
 // Decision is an actual typed node of an issue document. A person's decision is its answered
 // ask, read verbatim; an agent's is a decision block. ChangedVersion/ChangedAt belong to this
 // stable block. Keep carries TextSHA256, the sum of Text; WaitingReview compares that sum.
+// Uncertainty is how sure the agent that made the choice is, one of low, medium and high, and
+// is empty on a person's decision and on one whose author recorded none; UncertaintyReason is
+// the plain text that author wrote about what would change the choice. Unsure is true when the
+// node carries a level or the text holds an Unsure: paragraph.
 type Decision struct {
-	BlockID        string         `json:"block_id"`
-	Heading        string         `json:"heading"`
-	Ref            string         `json:"ref"`
-	Text           string         `json:"text"`
-	TextSHA256     string         `json:"text_sha256"`
-	Kind           string         `json:"kind"`
-	Unsure         bool           `json:"unsure"`
-	Replaced       bool           `json:"replaced"`
-	Asks           []string       `json:"asks"`
-	Links          []DecisionLink `json:"links"`
-	ChangedVersion int            `json:"changed_version"`
-	ChangedAt      *time.Time     `json:"changed_at"`
-	Kept           *DecisionKeep  `json:"kept"`
-	WaitingReview  bool           `json:"waiting_review"`
+	BlockID           string         `json:"block_id"`
+	Heading           string         `json:"heading"`
+	Ref               string         `json:"ref"`
+	Text              string         `json:"text"`
+	TextSHA256        string         `json:"text_sha256"`
+	Kind              string         `json:"kind"`
+	Unsure            bool           `json:"unsure"`
+	Uncertainty       string         `json:"uncertainty"`
+	UncertaintyReason string         `json:"uncertainty_reason"`
+	Replaced          bool           `json:"replaced"`
+	Asks              []string       `json:"asks"`
+	Links             []DecisionLink `json:"links"`
+	ChangedVersion    int            `json:"changed_version"`
+	ChangedAt         *time.Time     `json:"changed_at"`
+	Kept              *DecisionKeep  `json:"kept"`
+	WaitingReview     bool           `json:"waiting_review"`
 }
 
 // DocumentRead is one person's last read version of a document: null when they have read none.

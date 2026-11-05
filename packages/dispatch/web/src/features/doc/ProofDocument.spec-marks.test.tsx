@@ -64,6 +64,8 @@ const decisions: IssueDecisions = {
       replaced: false,
       text: "Ship it in two steps.",
       text_sha256: "sum-d-1",
+      uncertainty: "",
+      uncertainty_reason: "",
       unsure: false,
       waiting_review: true,
     },

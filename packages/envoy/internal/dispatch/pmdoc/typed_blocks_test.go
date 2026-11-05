@@ -984,3 +984,50 @@ func TestAskContentErrorNamesTheBlockThatBreaksTheRule(t *testing.T) {
 		}
 	}
 }
+
+// A decision node says how sure the agent that made the choice is: a level and the reason it
+// gives for it round-trip as written, a reason without a level is refused, and so is a level on
+// a choice a person made, whose answer is read from their ask row word for word.
+func TestADecisionNodeCarriesItsAuthorsUncertainty(t *testing.T) {
+	const markdown = ":::decision{#d1 title=\"Use one store\" uncertainty=\"medium\" uncertainty_reason=\"A second writer would change it.\"}\nOne store keeps the answer.\n:::\n"
+	doc, err := ParseRendering(markdown)
+	if err != nil {
+		t.Fatalf("parse a decision with an uncertainty: %v", err)
+	}
+	decision := doc.Children[0]
+	if decision.Type != "decision" ||
+		decision.Attrs["uncertainty"] != "medium" ||
+		decision.Attrs["uncertainty_reason"] != "A second writer would change it." {
+		t.Fatalf("decision attributes = %v, want uncertainty medium with its reason", decision.Attrs)
+	}
+	const rendered = ":::decision{#d1 title=\"Use one store\" replaced=\"false\" uncertainty=\"medium\" uncertainty_reason=\"A second writer would change it.\"}\nOne store keeps the answer.\n:::\n"
+	if got, err := Render(doc); err != nil || got != rendered {
+		t.Fatalf("render = %q (%v), want %q", got, err, rendered)
+	}
+	for _, test := range []struct {
+		markdown string
+		want     string
+		why      string
+	}{
+		{
+			":::decision{#d1 uncertainty_reason=\"A second writer would change it.\"}\nOne store.\n:::\n",
+			"needs \"uncertainty\"",
+			"a reason with no level gives a reader nothing to rank",
+		},
+		{
+			":::decision{#d1 uncertainty=\"high\" decided_by=\"alice\"}\nOne store.\n:::\n",
+			"uncertainty belongs to a decision an agent made alone",
+			"a person's answer is theirs, and an agent never qualifies it",
+		},
+		{
+			":::decision{#d1 uncertainty=\"very\"}\nOne store.\n:::\n",
+			"uncertainty",
+			"the level is one of low, medium and high",
+		},
+	} {
+		_, err := ParseRendering(test.markdown)
+		if err == nil || !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("%s: parse = %v, want a schema refusal saying %q", test.why, err, test.want)
+		}
+	}
+}

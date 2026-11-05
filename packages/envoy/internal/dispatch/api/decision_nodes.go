@@ -156,7 +156,10 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 			if decision.Heading == "" {
 				decision.Heading = strings.SplitN(decision.Text, "\n", 2)[0]
 			}
-			decision.Unsure = strings.HasPrefix(decision.Text, "Unsure:") || strings.Contains(decision.Text, "\n\nUnsure:")
+			decision.Uncertainty = blockAttribute(block, "uncertainty")
+			decision.UncertaintyReason = blockAttribute(block, "uncertainty_reason")
+			decision.Unsure = decision.Uncertainty != "" ||
+				strings.HasPrefix(decision.Text, "Unsure:") || strings.Contains(decision.Text, "\n\nUnsure:")
 			if keep, ok := keeps[block.ID]; ok {
 				decision.Kept = &keep
 			}
