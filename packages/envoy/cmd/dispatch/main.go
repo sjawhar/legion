@@ -376,14 +376,10 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:             database,
-		Events:            broker,
-		Identity:          requestIdentity,
-		ServerURL:         serverURL,
-		Settle:            boot.SettleDelay,
-		MarkWait:          boot.MarkWait,
-		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
-		EditNoticeQuiet:   boot.EditNoticeQuiet,
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
 	})
 	publishRoomFigures(documentService)
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
@@ -1232,12 +1228,22 @@ func devSignInSharedSigningKey(shared string) string {
 
 // newDocumentService is the document service main serves the document websocket and the API's
 // documents from: built, what main made from the rest of the configuration, with every setting the
-// service takes from boot filled in. The settings tests build it through here, as they build the
-// router through appContextOptions, so dropping a hand-off here fails a case.
+// service takes from boot filled in (documentDeps).
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
+	return docs.New(documentDeps(boot, built))
+}
+
+// documentDeps is built with every setting the document service takes from boot filled in. The
+// settings tests read its answer, as they build the router through appContextOptions, so dropping
+// a hand-off here fails a case (TestDocumentDepsCarryEveryBootSetting).
+func documentDeps(boot bootConfig, built docs.Deps) docs.Deps {
+	built.Settle = boot.SettleDelay
+	built.MarkWait = boot.MarkWait
+	built.UnrecordedMarkTTL = boot.UnrecordedMarkTTL
+	built.EditNoticeQuiet = boot.EditNoticeQuiet
 	built.MaxLiveRooms = boot.MaxLiveRooms
 	built.MaxDocConnections = boot.MaxDocConnections
-	return docs.New(built)
+	return built
 }
 
 // dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
