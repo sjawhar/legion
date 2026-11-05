@@ -122,10 +122,10 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 	return response
 }
 
-// One approval request on a document with no request open costs thirty-four round trips, counted
+// One approval request on a document with no request open costs thirty-three round trips, counted
 // as the issue read's are (roundTrips): one for each statement it runs on its own and one for
 // each batch, whatever that batch holds. The first eight read the coverage the answer reports,
-// before the request's transaction opens (approvalCoverage); the twenty-six after them are the
+// before the request's transaction opens (approvalCoverage); the twenty-five after them are the
 // transaction itself. In the order it sends them:
 //
 //  1. the artifact row the coverage is read for (loadArtifact);
@@ -161,17 +161,18 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  25. the state the parts were indexed at (storeItemState);
 //  26. the thread's followers, for the event payload (events.AskEventPayload);
 //  27. the issue's sequence, locked (appendEvent);
-//  28. the ask.opened event row;
-//  29. that event's payload, rewritten with its own id (events.Broker.Append);
-//  30. the issue's last_seq;
-//  31. the references' source sequence (refs.Stamp);
-//  32. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
-//  33. a batch of 2: the approval as the request leaves it (attachApproval again);
-//  34. commit.
+//  28. the ask.opened event row, inserted with its id and time returned in one statement
+//     (events.Broker.AppendAll);
+//  29. a batch of 2: that event's payload, rewritten with its own id, and the issue's last_seq
+//     (events.Broker.AppendAll);
+//  30. the references' source sequence (refs.Stamp);
+//  31. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
+//  32. a batch of 2: the approval as the request leaves it (attachApproval again);
+//  33. commit.
 //
-// The four batches hold ten statements between them, so a request that sent each statement on
+// The five batches hold twelve statements between them, so a request that sent each statement on
 // its own would send forty round trips.
-func TestApprovalRequestsCostThirtyFourRoundTrips(t *testing.T) {
+func TestApprovalRequestsCostThirtyThreeRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
 	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
@@ -192,7 +193,7 @@ func TestApprovalRequestsCostThirtyFourRoundTrips(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("request approval: status=%d body=%s", response.Code, response.Body.String())
 	}
-	const want = 34
+	const want = 33
 	if len(counted) != want {
 		t.Fatalf("the approval request made %d round trips, want %d:\n%s",
 			len(counted), want, strings.Join(roundTripLines(counted), "\n"))
