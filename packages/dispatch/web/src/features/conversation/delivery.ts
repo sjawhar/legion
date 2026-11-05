@@ -27,8 +27,8 @@ export function capabilityLabel(capability: string): string {
 /**
  * The mode a message with no `/aside ` or `/btw ` command goes in when it answers no thread, from
  * the capabilities of each live session it addresses: Send when every one of them advertises it,
- * else Aside when every one of them advertises that - so a plain message to a Claude Code session,
- * which takes only Aside, is an Aside rather than a Send recorded as failed. A session that
+ * else Aside when every one of them advertises that - so a plain message to a session that takes
+ * only Aside is an Aside rather than a Send recorded as failed. A session that
  * advertises no mode takes none, so it does not decide the mode for the rest. BTW is never picked
  * for the reader: it answers in a side turn that leaves the conversation as it was, which a plain
  * message does not ask for. Otherwise, or with nobody live to ask, it is a Send, which the composer
@@ -43,8 +43,8 @@ export function plainDelivery(capabilities: readonly (readonly string[])[]): Mes
 /**
  * The mode a broadcast goes in until its sender picks one, from the capabilities of each live
  * session selected: BTW, the broadcast's own default, when every one of them advertises it, else
- * Aside when every one advertises that - so a selection that holds a Claude Code session, which
- * takes only Aside, reaches it rather than leaving it out. A session that advertises no mode takes
+ * Aside when every one advertises that - so a selection that holds a session taking only Aside
+ * reaches it rather than leaving it out. A session that advertises no mode takes
  * none and does not decide it. Otherwise, or with nobody live, it is BTW, and the composer names
  * who that leaves out.
  */

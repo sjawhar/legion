@@ -197,8 +197,8 @@ worker_backends:
 Each key is an issue role (`architect`, `planner`, `implementer`, `tester`, `reviewer`, `merger`)
 and each value `omp` or `claude`; a role left out runs on Oh My Pi. What each harness may run is
 one table, `runtime.Backends` (`packages/daemon/internal/runtime/backend.go`): Claude Code runs the
-phase workers alone, since an architect is woken by notices on its Envoy role topic and Claude
-Code's print mode delivers no channel notification, and it runs them under either runtime — a tmux
+phase workers alone, since the architect's loop and the controller's are proven only on Oh My Pi,
+and it runs them under either runtime — a tmux
 pane here, and an issue pod under `runtime: kubernetes`, whose worker image carries the
 claude-envoy plugin and Claude Code's pin, from which the pod installs and verifies the pinned
 Claude Code at every launch (`docs/kubernetes.md`). The loader refuses a role on a harness that does

@@ -275,9 +275,9 @@ export interface ChannelDelivery {
 }
 
 /**
- * The channel delivery of a running session, which also shows what replay recovers
- * (`@legion/envoy-client/replay`), on the same notifier as a live frame: the channel notification,
- * or the Legion bridge's inbox.
+ * The delivery path of a running session, which also shows what replay recovers
+ * (`@legion/envoy-client/replay`), on the same notifier as a live frame: the mod's write into
+ * the conversation, or the Legion bridge's inbox.
  */
 export interface ChannelDeliveryPath extends ChannelDelivery {
   /**

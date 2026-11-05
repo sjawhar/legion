@@ -296,7 +296,7 @@ test("Agents lists live session activity and capability-aware actions", async ()
   }
 });
 
-// A Claude Code session takes Aside but not Send: the card's plain message goes as an Aside and
+// A session that takes Aside but not Send: the card's plain message goes as an Aside and
 // says so, rather than warning that the Send it would have been records a failed attempt. A
 // session that advertises no mode at all says on its card that it takes no messages.
 test("an agent card sends a plain message in the mode the session takes", async () => {
@@ -1142,11 +1142,11 @@ function sentAttempt(
 
 const accepted = { accepted_as: "user_turn", accepted_at: recentAttemptAt } as const;
 
-// A person's direct Send or Aside that an Oh My Pi session took as its own user turn is answered
-// in the session's conversation, never with a Dispatch reply, so its card waits on no reply and
+// A person's direct Send or Aside that a session took as its own user turn is answered in the
+// session's conversation, never with a Dispatch reply, so its card waits on no reply and
 // offers no other way to send it. The session records that with Dispatch; nothing else says it,
-// so every attempt the session did not accept - a Claude Code session's, an older plugin's, an
-// accept Dispatch refused - keeps today's card and its mode-change row.
+// so every attempt the session did not accept - an older plugin's, an accept Dispatch refused -
+// keeps today's card and its mode-change row.
 for (const [name, session, read, headline, retries] of [
   [
     "a person's direct Aside the session took as its own turn",
@@ -1618,7 +1618,7 @@ test("an exchange answered within the Clear's millisecond but after it stays vis
   }
 });
 
-// A Claude Code session takes Aside alone: a reply into an exchange whose last attempt was a
+// A session that takes Aside alone: a reply into an exchange whose last attempt was a
 // Send it refused goes as an Aside, not as a BTW it refuses too.
 test("a reply to an Aside-only agent after a refused Send goes as an Aside", async () => {
   const root = message("Can this ship?", {

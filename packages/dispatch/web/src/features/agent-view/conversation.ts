@@ -286,8 +286,8 @@ export function toThreadMessages(state: AgentConversation): KeyedMessage[] {
 
 /**
  * The model the session is currently running, for the live view's header: the most recent
- * assistant turn's own report, whatever it is. A session whose client never reports one (Claude
- * Code) shows nothing here rather than a guess. `state.messages` is kept sorted ascending by `at`
+ * assistant turn's own report, whatever it is. A session whose client never reports one shows
+ * nothing here rather than a guess. `state.messages` is kept sorted ascending by `at`
  * (`applyFrame`), so walking from the end finds the newest assistant entry first;
  * `Array.prototype.findLast` would read the same way but needs ES2023, past this package's ES2022
  * `lib`.
@@ -334,9 +334,10 @@ export type SessionSettingsView =
  * A picker is offered only where the session lists the built-in a pick runs (`model`, `effort`)
  * and runs it from Dispatch, since a pick is a person's Send of `/model <id>` or `/effort <level>`.
  *
- * A session that is not answering the live view (a Claude Code session, an older plugin, or one
- * no longer running) gets no notice, since the empty transcript's own text already says why; nor
- * does one whose replay has not arrived yet, since the replay is where the frame would be.
+ * A session that is not answering the live view (an older plugin, one started without its plugin,
+ * or one no longer running) gets no notice, since the empty transcript's own text already says
+ * why; nor does one whose replay has not arrived yet, since the replay is where the frame would
+ * be.
  */
 export function sessionSettingsView(
   state: AgentConversation,

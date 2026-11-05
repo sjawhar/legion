@@ -1,17 +1,19 @@
 # Claude Envoy Plugin Package
 
-Claude Code channel plugin package for Legion's Envoy subsystem.
+Claude Code plugin package for Legion's Envoy subsystem.
 
 ## Overview
 
-One MCP stdio process is the channel ingress. It subscribes NATS directly to the session's
+One MCP stdio process is the Envoy ingress.
+It subscribes NATS directly to the session's
 `notifications.agent.<session_id>` subject and every topic the session follows — the lane receipts,
 the live team topics and the core fallback ride those subscriptions, not the session's messages,
 which come from the relay below. It renders each
 envelope through `@legion/envoy-client/delivery`, then writes it into the session's own
 conversation through the mod (`src/mod-session.ts`), or, in a Legion pane, through the bridge's
-inbox. A core-NATS direct delivery gets its empty receipt
-when the server enqueues the write; that means adapter-accepted, not processed by Claude.
+inbox.
+A core-NATS direct delivery gets its empty receipt
+when the server enqueues the write; that means the server took it, not that the model read it.
 There is no Monitor and no native Claude messaging socket path. The server's tools are the
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
@@ -29,8 +31,9 @@ as it decodes, goes to the same write queue a live frame takes, and is answered 
 notifier resolved its write and the ledger recorded it (`deliverRelayed`), at once for a frame
 skipped, already shown or a late BTW, which is passed over. In a Legion pane the notifier
 resolves when `legion claude-bridge` answers its inbox, which it does once Claude Code re-emits
-the delivery as the user message it took (`--replay-user-messages`); in channel mode it resolves
-when the MCP notification write does, the last signal Claude Code gives there. A write that fails
+the delivery as the user message it took (`--replay-user-messages`); in a terminal session it
+resolves once the mod has put the line into the conversation.
+A write that fails
 answers `nak`, and from the frame's third delivery `done` with a notice naming it; a frame that
 arrives after a `/clear` moved the session to another id is answered `nak`. The core copies of
 those subjects answer only a lane's receipt (`relaysCoreTopic`), and the replay engine makes no
@@ -51,8 +54,8 @@ from Envoy's notification stream through its listener (`POST /v1/replay`) with t
 `@legion/envoy-client/replay`, which pi-envoy uses too (its rules are "Missed messages" in
 `packages/pi-envoy/AGENTS.md`). A sweep runs at channel start (a resume included), on each nats.js
 `reconnect` status, on every heartbeat and after a new follow, and shows each stored frame the
-session was not shown, once, through the same path a live frame takes (the channel notification,
-or the Legion bridge's inbox), with a last line saying when it was published while the
+session was not shown, once, through the same path a live frame takes (the mod's write into the
+conversation, or the Legion bridge's inbox), with a last line saying when it was published while the
 connection was down (`replayedText`, worded by the engine, as are the notices, which its
 `envoyNoticeText` renders in TOON as every live card is); a frame there runs nothing. On this
 path, role messages and team or other ad-hoc topics are not recovered. The live path records
@@ -89,7 +92,7 @@ ping interval left a frozen path for up to 6 minutes. Every registration names t
 `plugin` `@sjawhar/claude-envoy` and `plugin_version` the version segment of the plugin-cache
 directory the bundle runs from (`…/plugins/cache/<marketplace>/<plugin>/<version>/`, the first 12
 characters of the marketplace commit Claude Code installed; `installedPluginVersion` in
-`src/claude-channel.ts`), or `source` for a bundle outside the plugin cache (a checkout,
+`src/installed-build.ts`), or `source` for a bundle outside the plugin cache (a checkout,
 `--plugin-dir`); `package.json`'s `version` names no build and is never sent.
 
 A session advertises what it can take now, read again at every registration
@@ -230,10 +233,13 @@ above says how to run it).
 
 - `renderInbound` from `@legion/envoy-client/delivery` is the sole inbound renderer. Never add an
   adapter-specific renderer or emit raw envelope bytes.
-- Each channel meta key must contain only letters, digits, and underscores and every value must be
-  a string. `producer`, `topic`, `event_id`, `dedupe_key`, `urgency`, `from_session`,
-  `expects_reply`, and `in_reply_to` are the current contract. Never emit a `source` key: Claude
-  Code stamps its own `source="plugin:claude-envoy:envoy"` attribute on the `<channel>` tag.
+- A frame's identity fields are `event_id`, `dedupe_key`, `source`, `source_event_id` and
+  `topic` (`deliveryIdentity` in `src/channel-forwarder.ts`), each parsed on its own and kept
+  only when valid, so one field the rule refuses still leaves its sibling able to recognise a
+  repeat.
+  Nothing else of an envelope leaves the renderer: what reaches the session is the rendered
+  text, and, where a line carries more than text (a person's pictures), Claude Code's own
+  content blocks for it.
 - Subscribe NATS before registering the self-subscribed session route — on startup, on a session-id
   handoff (new direct subject first, then deregister the old id, drop the old subject, register,
   move the role by soft claim; a handoff that fails before the id switch drops the new subject
@@ -276,11 +282,11 @@ above says how to run it).
   a targeted delivery in a mode the session does
   not advertise, and a message with no command goes in the mode the addressed sessions take
   (`plainDelivery`), as a broadcast does (`broadcastDelivery`).
-  The direct NATS receipt occurs immediately after notification enqueue; it cannot imply model
-  processing because Claude Code does not acknowledge channel notifications. A relayed frame's
-  `done` waits for the write instead: the resolved notification write in channel mode, which is
-  the last signal Claude Code gives there, and the bridge's inbox answer in a Legion pane, which
-  comes once Claude Code re-emits the delivery (`--replay-user-messages`).
+  The direct NATS receipt occurs immediately after the write is enqueued; it cannot imply model
+  processing, because nothing in the mod protocol says the model read a row.
+  A relayed frame's `done` waits for the write instead: the mod's write into the conversation in
+  a terminal session, and the bridge's inbox answer in a Legion pane, which comes once Claude
+  Code re-emits the delivery (`--replay-user-messages`).
 - Preserve the held role at `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json` (keyed by session id so
   `claude --resume <id>` finds it); soft-reclaim it with its `previous_session_id` after
   registration, then reassert it on each registration heartbeat. The listener grants such a claim
@@ -301,12 +307,13 @@ above says how to run it).
   dropped — never shown to the model.
 - `envoy_inbox` is bounded to 50 metadata-only entries. Keep full payloads in neither the tool
   output nor plugin data.
-- Deployment is `--channels plugin:claude-envoy@legion-plugins` under managed settings
-  (`channelsEnabled`, `allowedChannelPlugins`); `--dangerously-load-development-channels` is for
-  entries outside the allowlist and cannot be combined with any `--channels` entry naming the same
-  plugin: Claude Code matches the `--channels` entry first, which then needs the allowlist and its
-  own marketplace. `claude -p` has no interactive plan approval, multiple-choice,
-  or consent surfaces; workers need pre-approved configuration.
+- Deployment needs nothing enabled on the machine: Claude Code 2.1.310 or newer loads the mod
+  from the plugin's `hooks.json`.
+  A session takes no message and shows no conversation when its Claude Code is older, when it
+  starts with `--bare` or `--safe-mode`, or when settings turn mods off (`disableAllHooks`, or
+  `allowManagedModsOnly` or `allowManagedHooksOnly` in managed settings).
+  `claude -p` has no interactive plan approval, multiple-choice, or consent surfaces; workers
+  need pre-approved configuration.
 - A pull request never commits `dist/` or `legion/`. Main's Rebuild Claude Envoy plugin workflow
   (`.github/workflows/claude-envoy-rebuild.yaml`) commits them after each merge that changes a
   build input; a merge that changes none starts no run of it. Its push job waits

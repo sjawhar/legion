@@ -148,7 +148,7 @@ function report(what: string, error: unknown): void {
  * One channel process receives both its direct Envoy route and every followed
  * topic. It deduplicates at the broker boundary, by event id and by dedupe key,
  * so an event covered by several patterns, and a re-send of one already
- * delivered, still becomes one Claude Code channel notification. With a replay
+ * delivered, still becomes one line in the session's conversation. With a replay
  * ledger, a frame the session was shown before this process started is dropped
  * too, and each frame handed on is recorded there before its claim settles.
  */

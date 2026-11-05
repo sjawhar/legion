@@ -67,7 +67,7 @@ func TestWorkerBackendsRefusals(t *testing.T) {
 			"worker_backends must be a mapping of an issue role to its backend (claude, omp), e.g. {implementer: claude}"},
 		{"the architect on claude", "worker_backends: {architect: claude}",
 			"worker_backends.architect is claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: " +
-				"an architect is woken by notices on its Envoy role topic and the controller by its own, and Claude Code's print mode delivers no channel notification"},
+				"the architect's loop and the controller's are proven only on Oh My Pi, and Claude Code runs the phase workers, whose loops Legion's live proofs cover"},
 		{"the controller", "worker_backends: {controller: omp}",
 			`worker_backends names "controller", which is not an issue role (architect, planner, implementer, tester, reviewer, merger)`},
 		{"an unknown role", "worker_backends: {coder: claude}",

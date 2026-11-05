@@ -76,12 +76,13 @@ message from Dispatch's Agents page as that person's own turn.
   Envoy's notification stream and relays on `notifications.envoy.deliver.<session_id>`, which
   the server subscribes before it registers: the session's own subject, the stored copies of role
   messages to a role it holds, and every followed topic the stream stores, in stream order. The
-  server answers each frame `received` as it decodes and `done` once Claude Code has it: in a
-  Legion pane once the bridge reports that Claude Code took the delivery, and in channel mode once
-  the channel notification is written, the last signal Claude Code gives there, so a notification
-  Claude Code drops after that (a channel it did not load) is not sent again. A frame not taken
-  yet when Claude Code stops, or published while the session was not running or disconnected,
-  comes again and is delivered once, for up to 72 hours. Team and other ad-hoc topics, which the
+  server answers each frame `received` as it decodes and `done` once the session has it: in a
+  Legion pane once the bridge reports that Claude Code took the delivery, and in a terminal
+  session once the mod has put the line into the conversation (`$.session.append`, or
+  `$.prompt.submit` while the session is idle).
+  A frame not taken yet when Claude Code stops, or published while the session was not running
+  or disconnected, comes again and is delivered once, for up to 72 hours.
+  Team and other ad-hoc topics, which the
   stream does not store, stay live only. The resume point is kept in `replay-<session id>.json`
   with the replay state below. `packages/envoy/AGENTS.md`, "Session consumers", states the rule.
 - The core path is the rollout fallback dispatch://INFRA-771 removes (a listener that answers
@@ -106,10 +107,11 @@ message from Dispatch's Agents page as that person's own turn.
   messages are not recovered, and live delivery goes on as before.
 - A forwarded role-lane envelope (one that still names its `notifications.role.<role>` topic while
   arriving on the direct subject) receives its empty receipt immediately after the server accepts
-  the event into its ordered MCP notification queue. That confirms adapter acceptance, not that
-  Claude Code or the model processed the event: the channel protocol has no processing ack. A plain
-  direct send (`/v1/messages/send`) is a JetStream publish and gets no receipt: its reply subject is
-  the publisher's acknowledgement inbox, and an empty receipt there fails the publish.
+  the event into its ordered notification queue.
+  That confirms the server took the event, not that the model read it: nothing in the mod
+  protocol says the model read a row.
+  A plain direct send (`/v1/messages/send`) is a JetStream publish and gets no receipt: its reply
+  subject is the publisher's acknowledgement inbox, and an empty receipt there fails the publish.
 - The server registers the session as self-subscribed with what it can take now
   (`sessionCapabilities` in `src/envoy-channel-server.ts`), read again at every registration. A
   terminal session reaches the model only through its mod (`hooks/mod.ts`, `src/mod-session.ts`),
@@ -161,21 +163,21 @@ message from Dispatch's Agents page as that person's own turn.
   session's Bash first), with `ENVOY_URL` and `ENVOY_TOKEN_FILE` or `ENVOY_TOKEN` over its `envoy`
   section. With Envoy off it sends nothing and exits 1, saying why.
 
-## Channel metadata
+## What a delivered line carries
 
-Each notification has rendered Envoy content and only identifier-safe, string-valued metadata.
-Claude Code drops invalid meta keys, so the server filters them before writing to stdio.
+Every line the server writes into the session is one Envoy envelope as the shared
+`@legion/envoy-client/delivery` renderer renders it; raw envelope bytes are never exposed.
+The rendering names the sender (`from`), the time (`at`) and the event's id (`id`), and, where the
+envelope carries them, `urgency`, `expects_reply`, `re` for a correlated inbound event, and
+`reply_with`, the command that answers it.
 
-| Key | Meaning |
+Three envelope fields the server acts on and shows nowhere:
+
+| Field | What the server does with it |
 | --- | --- |
-| `producer` | Envoy producer, or `unknown` for a malformed envelope (`source` is Claude Code's own attribute, naming the channel). |
-| `topic` | NATS subject that delivered the event. |
-| `event_id` | Envoy event identity of this publish; the listener mints a new one for every send. The channel uses it to deliver one copy of a publish that arrives on two overlapping subscriptions. |
-| `dedupe_key` | Identity a re-send shares with the first delivery; the channel uses it to drop the re-send. |
-| `urgency` | Optional: how soon the sender asks the reader to act. Informational only: it does not change when or in what order deliveries arrive. |
-| `from_session` | Optional source session identifier. |
-| `expects_reply` | Optional Envoy reply expectation. |
-| `in_reply_to` | Optional correlated inbound event id. |
+| `event_id` | Envoy event identity of this publish; the listener mints a new one for every send. The server writes one copy of a publish that arrives on two overlapping subscriptions. |
+| `dedupe_key` | Identity a re-send shares with the first delivery; the server drops the re-send. |
+| `topic` | The NATS subject the event arrived on: the session's own subject, a followed topic, or a role lane. |
 
 ## Envoy tools
 
@@ -196,7 +198,8 @@ follow an ask prints `Following ask <id> on <issue>: …` once per ask, after it
 longer than 25,000 characters is written to a file the output names. It reads the envoy.json
 below on every call.
 
-Dispatch asks remain on native Dispatch. Channel notifications are one-way ingress, not a remote
+Dispatch asks remain on native Dispatch.
+An Envoy delivery is one-way ingress, not a remote
 human approval surface.
 
 ## Skills
@@ -235,8 +238,8 @@ Claude Code when `legion.yaml` sets `worker_backends: {<role>: claude}` (tmux ru
 - serves the `legion` tool: `read_record`, `handoff_complete` and `request_backward_move`, the
   phase ops `@sjawhar/pi-legion`'s tool serves, on the same schema and executor
   (`src/legion-tool.ts`);
-- hands each Envoy delivery to the bridge's socket (`LEGION_CLAUDE_INBOX`), which sends it as a
-  user turn, since print mode delivers no channel notification (`src/legion-inbox.ts`): the bridge
+- hands each Envoy delivery to the bridge's socket (`LEGION_CLAUDE_INBOX`), which sends it to
+  Claude Code as a user turn (`src/legion-inbox.ts`): the bridge
   starts a turn with it when Claude Code is idle, and sends it as the next user message of the
   running turn otherwise. So the session advertises `steer` (Dispatch's Send) beside `aside`, and
   the bridge handles both alike. The bridge runs Claude Code with `--replay-user-messages` and
@@ -426,9 +429,10 @@ comment or message from the session carries the same name. With inbound messages
 writes it once, for the id the session starts with. It writes nothing when the session starts with
 Dispatch off, or under the QA override `ENVOY_SESSION_ID`.
 
-`claude -p` can run a channel session, but it disables features that need terminal input, including
-multiple-choice questions and plan approval. Production Legion workers must have MCP and channel
-consent preconfigured and must not depend on local dialogs.
+`claude -p` can run a session with this plugin, but it disables features that need terminal
+input, including multiple-choice questions and plan approval.
+Production Legion workers must have
+MCP consent preconfigured and must not depend on local dialogs.
 
 ## Intentionally omitted
 

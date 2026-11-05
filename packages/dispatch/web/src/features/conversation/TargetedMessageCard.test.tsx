@@ -85,9 +85,9 @@ test("Retry is disabled with a visible reason when the recipient dropped the att
   }
 });
 
-// A reason that names a way out names only one the session takes: an aside-only session (a
-// Claude Code session) refuses a BTW as well, so its "Use Send instead" is not told to use
-// BTW, while a session that takes BTW is.
+// A reason that names a way out names only one the session takes: an aside-only session refuses
+// a BTW as well, so its "Use Send instead" is not told to use BTW, while a session that takes
+// BTW is.
 for (const [capabilities, reason] of [
   [["aside"], "planner does not support Send."],
   [["aside", "btw"], "planner does not support Send — use BTW."],

@@ -419,7 +419,7 @@ const SUBJECTS = [
 ] as const
 
 const SINKS = [
-  { name: "the channel notification", make: async (_directory: string) => channelSink() },
+  { name: "the write into the conversation", make: async (_directory: string) => channelSink() },
   { name: "the Legion bridge inbox", make: inboxSink },
 ] as const
 

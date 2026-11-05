@@ -245,8 +245,8 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   rows last, caps it at 50, and writes a picked item as `/name `. On `/agents`, only an attempt
   whose `accepted_as` is `user_turn` reads `Delivered to <session>'s conversation` with no retry
   row, even after a later `failed` (`takenAsUserTurn` in
-  `features/conversation/TargetedMessageCard.tsx`); every other attempt, a Claude Code session's
-  or an older plugin's included, keeps today's states. The page refreshes on `message.accepted`.
+  `features/conversation/TargetedMessageCard.tsx`); every other attempt, an older plugin's
+  included, keeps today's states. The page refreshes on `message.accepted`.
   A pick in the live view's header (INFRA-195, `SessionSettings.tsx`) is the person's own Send of
   `/model <id>` or `/effort <level>`: always `steer`, whatever the composer's mode, since a BTW is
   no user turn, with the id exactly as the session's `settings` frame listed it (the select clips a
@@ -262,7 +262,7 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   BTW only when its session takes it.
 - A message with no `/aside ` or `/btw ` command that answers no thread goes in `plainDelivery`
   (`features/conversation/delivery.ts`): Send when every live session it addresses that takes any
-  mode advertises Send, else Aside when every one advertises Aside (a Claude Code session), else
+  mode advertises Send, else Aside when every one advertises Aside, else
   Send, which the composer warns about; BTW is never picked for the reader. An agent card's reply
   (`exchangeDelivery` in `AgentsPage.tsx`) falls back the same way for a session that takes
   neither Send nor BTW. The composer computes it from the
@@ -273,7 +273,7 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 - A broadcast's mode is null in `useBroadcastComposition` until the sender picks one; the page
   then sends in `broadcastDelivery` (`features/conversation/delivery.ts`) of the selected live
   sessions: BTW, else Aside when every selected session that takes any mode takes Aside and one
-  refuses BTW (a Claude Code session), and the composer says "Sending as Aside: … does not
+  refuses BTW, and the composer says "Sending as Aside: … does not
   advertise BTW.". The server still never switches a mode it is sent.
 - The Agents broadcast page renders recipients in the order the server returns them: the send's
   tick order after exclusions.

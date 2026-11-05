@@ -94,7 +94,7 @@ function heldNotifier() {
 
 const delivery = (input: SubscribeInput | undefined): DeliveryRequest | undefined => input?.delivery
 
-test("channel mode answers a relay frame received at once and done only once the notification write resolves", async () => {
+test("a terminal session answers a relay frame received at once and done only once the write into the conversation resolves", async () => {
   const directory = await scratchState()
   const nats = new FakeNats()
   const held = heldNotifier()

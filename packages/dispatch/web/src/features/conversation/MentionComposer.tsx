@@ -977,7 +977,7 @@ export function MentionComposer({
     return option === undefined ? [] : [option];
   });
   // What a message with no command goes in: Send, or the mode every addressed session takes
-  // when one of them refuses Send - an Aside to a Claude Code session.
+  // when one of them refuses Send - an Aside to a session that advertises Aside alone.
   const plainMode = plainDelivery(targetOptions.map((option) => option.capabilities));
   // The mode a send this composer holds - out, or refused - went in, where pressing Send or Retry
   // now would send that very request again: the live view picks a mode outright, and the message
@@ -1067,8 +1067,8 @@ export function MentionComposer({
       ? []
       : targetOptions.filter((option) => !option.capabilities.includes(outboundMode));
   const unsupported = unsupportedOptions.length > 0;
-  // Sessions that advertise no mode at all take no message in any mode: a Claude Code session
-  // whose Envoy channel Claude Code did not load says so by advertising none.
+  // Sessions that advertise no mode at all take no message in any mode: a session whose plugin
+  // cannot reach its conversation says so by advertising none.
   const deaf =
     unsupported && unsupportedOptions.every((option) => option.capabilities.length === 0);
   // The plain mode, named whenever it is not Send, so the reader knows what their words become.
@@ -1332,8 +1332,8 @@ export function MentionComposer({
         <p className={`text-sm ${dangerText}`}>
           {unsupportedOptions.map((option) => option.title).join(" and ")}{" "}
           {unsupportedOptions.length > 1 ? "advertise" : "advertises"} no delivery mode, so sending
-          it records a failed attempt. A Claude Code session takes messages only when it was started
-          with its Envoy channel.
+          it records a failed attempt. A session advertises none while its plugin cannot reach its
+          conversation.
         </p>
       ) : unsupported ? (
         <p className={`text-sm ${dangerText}`}>

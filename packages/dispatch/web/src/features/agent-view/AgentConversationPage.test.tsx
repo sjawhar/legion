@@ -530,7 +530,7 @@ test("a streamed user message tagged with a person's message but saying somethin
 });
 
 // Send is the terminal's Enter: the default wherever the session takes a steer. A session that
-// takes only asides (a Claude Code session) would refuse one, so Aside is its default.
+// advertises Aside and no Send would refuse one, so Aside is its default.
 test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
     async (_session, input) => message("sent", input.body)
@@ -846,8 +846,8 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
 });
 
-// A Claude Code session whose Envoy channel Claude Code did not load advertises no mode: the
-// live view says a message sent here records a failed attempt, before the person sends one.
+// A session whose plugin cannot reach its conversation advertises no mode: the live view says a
+// message sent here records a failed attempt, before the person sends one.
 test("the live view says a session advertising no delivery mode takes no messages", async () => {
   renderLiveView({
     agentState: {},
@@ -914,8 +914,8 @@ test("the live view shows the session's model next to its title and on the turn 
   expect(turnModel.textContent).toBe("anthropic/claude-opus-5");
 });
 
-// A session whose client never reports a model (Claude Code or a build too old) shows nothing,
-// in the header or on the turn, rather than a guess.
+// A session whose client never reports a model (a build too old) shows nothing, in the header or
+// on the turn, rather than a guess.
 test("the live view shows nothing for a session whose client reports no model", async () => {
   renderLiveView({
     agentState: {},

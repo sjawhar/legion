@@ -339,7 +339,7 @@ test("the prompt that carries this endpoint's own reminder does not reset its co
 })
 
 test("a prompt carrying a line this server wrote for a delivery is that delivery's turn", async () => {
-  const delivery = "<channel>the architect asks for a status</channel>"
+  const delivery = "Envoy delivery from the architect: the architect asks for a status"
   const open = await harness({ record: recorded("open", 2), claim: implementer })
   try {
     open.endpoint.deliveryWritten(delivery)
