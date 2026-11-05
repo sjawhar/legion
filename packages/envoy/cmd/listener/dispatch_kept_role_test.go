@@ -77,7 +77,7 @@ func runOutbox(t *testing.T, harness listenerDeliveryHarness, database *dispatch
 // what one of the outbox's own publishes does (keptUnderAClaim).
 func runOutboxThrough(t *testing.T, harness listenerDeliveryHarness, database *dispatchstore.Store, broker *events.Broker, publisher outbox.Publisher) {
 	t.Helper()
-	holders := roles.NewBuckets(harness.client)
+	holders := roles.NewBuckets(harness.client, roles.Windows{})
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {

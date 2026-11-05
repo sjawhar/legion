@@ -8,7 +8,20 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput, SessionInfo } from "./transport";
+import {
+  type MessageMetadataInput,
+  type SessionInfo,
+  type SessionState,
+  UNRESPONSIVE_RULE,
+} from "./transport";
+
+// The rule itself lives beside the states it is about (`transport.ts`), so the tool
+// descriptions, the send confirmation and a refusal's message all say it in one wording.
+
+const SESSION_STATE_GUIDE =
+  "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 " +
+  "minutes, unresponsive after that and within an hour, gone past the hour or with no record at " +
+  `all. ${UNRESPONSIVE_RULE} A session named with no state is live.`;
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
@@ -186,7 +199,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. The confirmation names the recipient's state. A message to an unresponsive session is stored and reaches it when it answers again, so an unresponsive recipient is not a failed send and no reason to send to someone else instead. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema
         .string()
@@ -203,7 +216,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, a session holds the role, and the stream stores the forward for that holder's consumer. Its 200 says the stream stored it, and it does not say that the holder read it. Second, no session holds the role, or its holder's claim has lapsed. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way: the holder refuses the message, or the forward is not stored within four seconds. A team topic (such as notifications.team.deploy-squad.all) is stored like every other, so a session subscribed to it that was away still receives it when it returns, and one that subscribes after you publish does not. A notifications. topic no stream subject captures is refused by name: nothing would store it. ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, a session holds the role, and the stream stores the forward for that holder's consumer. Its 200 says the stream stored it, and it does not say that the holder read it; it names the holder and the state the listener resolved the holder in. Second, no session holds the role. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way: the holder refuses the message, or the forward is not stored within four seconds. A holder that stopped answering keeps its role but was not sent the message, and nothing waits for it, so publish the message again once that holder's holder_state reads live, and start no replacement for that session. A team topic (such as notifications.team.deploy-squad.all) is stored like every other, so a session subscribed to it that was away still receives it when it returns, and one that subscribes after you publish does not. A notifications. topic no stream subject captures is refused by name: nothing would store it. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -216,7 +229,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_role_get",
-    description: "Get the live holder of a named Envoy role.",
+    description: `Get the holder of a named Envoy role, with its holder_state and the holder's last_seen. A holder that is only unresponsive still holds the role: nothing a lookup does releases its claim, and only a gone holder leaves the role unheld. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.getRole,
   },
@@ -230,7 +243,9 @@ export const envoyToolSpecs = [
   {
     name: "envoy_sessions",
     description:
-      "List all live sessions registered with Envoy. Filter by optional machine, directory, or title.",
+      "List the Envoy sessions that are live or unresponsive; a gone session is listed by neither. " +
+      "Filter by optional machine, directory, or title. Each row carries its state and its " +
+      `last_seen, the epoch milliseconds of its last registration. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({
       machine: schema.string().optional(),
       dir: schema.string().optional(),
@@ -255,36 +270,63 @@ export const envoyToolSpecs = [
   },
 ] as const satisfies readonly ToolSpec[];
 
-/** The envoy_send confirmation line both hosts show the model. */
+/** The envoy_send confirmation line both hosts show the model, naming the recipient's state and,
+ *  for one that stopped answering, since when (`lastSeen`, the listener's record of its last
+ *  registration): a send to an unresponsive session is stored for it, not a delivery that
+ *  failed, and how long it has been silent is what an agent judges the wait by. */
 export function sendConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly recipient: string;
+  readonly recipientState: SessionState;
   readonly confirmed: boolean;
+  readonly lastSeen?: number;
   readonly duplicate: boolean;
 }): string {
   if (result.duplicate) {
     return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
   }
-  return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+  const since =
+    result.lastSeen === undefined ? "" : ` since ${new Date(result.lastSeen).toISOString()}`;
+  const state =
+    result.recipientState === "unresponsive"
+      ? `unresponsive${since}, so it is stored until that session answers; ${UNRESPONSIVE_RULE}`
+      : result.recipientState;
+  return `sent ${result.envelope.event_id} to ${result.recipient} (${state})${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
 
-/**
- * The envoy_publish confirmation line both hosts show the model, so a kept answer reads the same
- * on each. A kept answer is a success: the listener holds the message on the role's kept lane and
- * hands it to the session that claims the role next, so the line says that and names no holder —
- * on `holder_lapsed` the holder the answer carries is the lapsed claim's session, which never
- * received the message.
- */
+/** The envoy_publish confirmation line both hosts show the model. The listener accepts a topic
+ *  send whose subscriber stopped answering: it stores that session's copy, asks it for no
+ *  receipt, and names the session under `unresponsive`. So the publish is no failure, and that
+ *  peer has not taken the message. This line is the only place the agent that published hears
+ *  it, which is why it names every such session and says the rule. A role publish names its
+ *  holder and the state the listener resolved the holder in. */
 export function publishConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly holder?: string;
+  readonly holderState?: SessionState;
+  readonly unresponsive: readonly string[];
   readonly kept?: boolean;
 }): string {
-  const published = `published ${result.envelope.event_id}`;
+  const sentences = [`published ${result.envelope.event_id}.`];
+  // A kept answer is a success of its own: the listener holds the message on the role's kept
+  // lane and hands it to the session that claims the role next, and no holder received it.
   if (result.kept === true) {
-    return `${published}; kept for the role: no session holds it yet, and the message waits for the session that claims it next`;
+    sentences.push(
+      "Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next."
+    );
+  } else if (result.holder !== undefined) {
+    const state = result.holderState === undefined ? "" : ` (${result.holderState})`;
+    sentences.push(`Its role holder is ${result.holder}${state}.`);
   }
-  return result.holder === undefined ? published : `${published}; holder ${result.holder}`;
+  if (result.unresponsive.length > 0) {
+    const one = result.unresponsive.length === 1;
+    sentences.push(
+      `Envoy stored it for ${result.unresponsive.join(", ")}.`,
+      `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it has" : "they have"} not taken it yet.`,
+      UNRESPONSIVE_RULE
+    );
+  }
+  return sentences.join(" ");
 }
 
 /**

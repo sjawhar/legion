@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+    `DELETE /v1/sessions/<session_id>` takes an `if_not_registered_after` query parameter, a unix
+    timestamp in milliseconds naming the moment the delete belongs to: the registration is removed
+    only while it was last written at or before that moment, under the same compare-and-swap the
+    route's `client_instance_id` condition deletes with, and a request may name both. A deletion
+    that happened answers `200 {"deleted":true}` and one the condition refused
+    `200 {"deleted":false,"reason":…}`, as a conditional delete already answered; a value that is
+    not a positive whole number of milliseconds is a `400` naming the parameter, never a delete.
+    The Legion daemon's clean stop of a role whose agent process is gone carries that moment, so a
+    stop that lands after the daemon relaunched the claim under the same session id leaves the new
+    process's live registration alone. Without either parameter the route is exactly as it was: the
+    registration is removed whoever wrote it, answered 200 with no body.

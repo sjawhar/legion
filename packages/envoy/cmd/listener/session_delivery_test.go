@@ -1169,6 +1169,89 @@ func TestSessionConsumerWithoutTheGrantIsRefusedAndWritesNothing(t *testing.T) {
 	rig.requireNothingWritten(t, "ses_ungranted_too")
 }
 
+// cappedNotificationStream creates the notifications stream on the server uri names, carrying its
+// own subjects and holding at most limit consumers, before the listener's start finds it:
+// nats-server v2.10.29 refuses an update that changes MaxConsumers ("stream configuration update
+// can not change MaxConsumers", server/stream.go), so a capped stream has to be created capped.
+// The start reconciles the rest of the configuration and leaves the cap alone (bus.ownedStream).
+func cappedNotificationStream(t *testing.T, uri string, limit int) {
+	t.Helper()
+	conn := testnats.Connect(t, uri)
+	defer conn.Close()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream to create the capped stream: %v", err)
+	}
+	if _, err := js.AddStream(&natsgo.StreamConfig{
+		Name:         bus.Stream,
+		Subjects:     bus.StreamCarriedSubjects(),
+		Retention:    natsgo.LimitsPolicy,
+		Discard:      natsgo.DiscardNew,
+		Storage:      natsgo.FileStorage,
+		MaxConsumers: limit,
+	}); err != nil {
+		t.Fatalf("create %s holding at most %d consumers: %v", bus.Stream, limit, err)
+	}
+}
+
+// fillConsumerLimit creates durable consumers on the stream until it holds limit of them, so the
+// next create the server is sent is one it refuses at the cap.
+func fillConsumerLimit(t *testing.T, client *bus.Client, limit int) {
+	t.Helper()
+	js := client.JS()
+	for filler := 0; ; filler++ {
+		info, err := js.StreamInfo(bus.Stream)
+		if err != nil {
+			t.Fatalf("read %s: %v", bus.Stream, err)
+		}
+		if info.State.Consumers >= limit {
+			return
+		}
+		name := fmt.Sprintf("filler-%d", filler)
+		if _, err := js.AddConsumer(bus.Stream, &natsgo.ConsumerConfig{Durable: name, AckPolicy: natsgo.AckExplicitPolicy}); err != nil {
+			t.Fatalf("create the consumer %s that fills the stream to its cap: %v", name, err)
+		}
+	}
+}
+
+// A stream holding as many consumers as its max_consumers allows makes the server refuse the
+// create of the next session's consumer, and a session receives only from its own consumer. So
+// the registration is refused 503 consumer_limit, the refusal names the stream and the cap - the
+// one thing an operator reading the session's transcript can change - and nothing is written: no
+// interest row, no session entry, no consumer. The session whose consumer the stream already
+// holds is answered consumer delivery after that refusal: the cap refuses creates alone, which is
+// why this refusal takes no listener-wide backoff as no_grant does.
+func TestSessionConsumerAtTheStreamsConsumerLimitIsRefusedAndWritesNothing(t *testing.T) {
+	const limit = 8
+	url := testnats.URL(t)
+	cappedNotificationStream(t, url, limit)
+	client, err := bus.ConnectOwningStream([]string{url}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the listener: %v", err)
+	}
+	t.Cleanup(client.Close)
+	rig := newSessionConsumerRigOn(t, client, url)
+	const held = `{"session_id":"ses_under_cap","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, held)
+	fillConsumerLimit(t, client, limit)
+
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_capped","self_subscribed":true,"topics":["notifications.dispatch.issue.CAP.>"],"delivery":{"consumer":true,"epoch":"e"}}`)
+
+	refusal.requireRefused(t, http.StatusServiceUnavailable, "consumer_limit")
+	for _, named := range []string{bus.Stream, "max_consumers", "ses_capped"} {
+		if !strings.Contains(refusal.Error, named) {
+			t.Fatalf("the refusal %q does not name %s", refusal.Error, named)
+		}
+	}
+	if _, err := rig.consumers.Info(context.Background(), "ses_capped"); !errors.Is(err, bus.ErrSessionConsumerNotFound) {
+		t.Fatalf("consumer of ses_capped: %v, want none", err)
+	}
+	rig.requireNothingWritten(t, "ses_capped")
+	if answer := rig.subscribe(t, held); answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
+		t.Fatalf("the registration of ses_under_cap, whose consumer the stream holds, was answered %s, want consumer delivery", answer.raw)
+	}
+}
+
 // A portless session, which every Oh My Pi and Claude Code session is, is delivered its stored
 // message by its relay and by nothing else: both frames arrive on the session's relay subject,
 // and the durable path, reading the same copies off the stream, pushes nothing, raises no

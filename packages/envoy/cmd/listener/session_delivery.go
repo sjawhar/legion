@@ -32,6 +32,9 @@ const (
 	// deliveryReasonNoGrant: the listener's NATS user may not manage session consumers (a hub whose
 	// grant predates them, bus.ErrConsumerNotGranted).
 	deliveryReasonNoGrant = "no_grant"
+	// deliveryReasonConsumerLimit: the stream holds as many consumers as its max_consumers allows,
+	// so the server refuses to create this session's (bus.ErrConsumerLimitReached).
+	deliveryReasonConsumerLimit = "consumer_limit"
 	// deliveryReasonInvalidSessionID: the session id names no consumer (bus.SessionConsumerName).
 	deliveryReasonInvalidSessionID = "invalid_session_id"
 	// deliveryReasonConsumerError: the consumer could not be read, created or updated, or this
@@ -424,8 +427,21 @@ func noGrantRefusal(sessionID string) *deliveryRefusal {
 	}
 }
 
+// consumerLimitRefusal is the refusal of sessionID's registration because the stream already
+// holds as many consumers as its max_consumers allows, so the server refuses to create this
+// session's. It names the cap, since that is the one thing an operator reading the session's
+// transcript has to change; the session itself can do nothing about it.
+func consumerLimitRefusal(sessionID string) *deliveryRefusal {
+	return &deliveryRefusal{
+		status: http.StatusServiceUnavailable,
+		Error: "the " + bus.Stream + " stream holds as many consumers as its max_consumers allows, so it can give " +
+			sessionID + " none and that session receives nothing: raise the stream's max_consumers",
+		Reason: deliveryReasonConsumerLimit,
+	}
+}
+
 // refused is the refusal of a registration whose consumer call for sessionID failed with err:
-// both causes may pass of themselves, so both are 503. A refusal for want of a grant starts the
+// every cause may pass of itself, so all are 503. A refusal for want of a grant starts the
 // no-grant backoff (noGrantBackoff), or extends the episode running.
 func (m *sessionDelivery) refused(sessionID string, err error) *deliveryRefusal {
 	if consumerGrantRefused(err) {
@@ -440,6 +456,19 @@ func (m *sessionDelivery) refused(sessionID string, err error) *deliveryRefusal 
 		}
 		return noGrantRefusal(sessionID)
 	}
+	if consumerLimitReached(err) {
+		// No backoff, unlike no_grant: the cap refuses only the creates, so a session whose
+		// consumer the stream already holds is still answered, and a listener-wide backoff would
+		// refuse those sessions too. The server answers each refused create as an ordinary API
+		// error, with no permissions violation logged on either side, and the stream drops below
+		// its cap the moment an operator raises max_consumers or an idle consumer is removed
+		// (bus.SessionConsumerInactiveThreshold), so every heartbeat asks again and the session is
+		// answered as soon as there is room. One WARN per refused registration is what the
+		// consumer_error arm this takes over from already logged.
+		m.logger.Warn("the stream holds as many consumers as its max_consumers allows; the registration is refused until max_consumers is raised",
+			slog.String("session_id", sessionID), slog.String("stream", bus.Stream), slog.String("error", err.Error()))
+		return consumerLimitRefusal(sessionID)
+	}
 	m.logger.Warn("session consumer call failed; the registration is refused",
 		slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	return &deliveryRefusal{
@@ -453,6 +482,13 @@ func (m *sessionDelivery) refused(sessionID string, err error) *deliveryRefusal 
 // grant. bus.ErrConsumerNotGranted always wraps bus.ErrPublishDenied, so the one test covers both.
 func consumerGrantRefused(err error) bool {
 	return errors.Is(err, bus.ErrPublishDenied)
+}
+
+// consumerLimitReached reports whether err is the server's refusal of a consumer create because
+// the stream holds as many consumers as its max_consumers allows (bus.ErrConsumerLimitReached,
+// which bus wraps around the server's jetstream.ErrMaximumConsumersLimit).
+func consumerLimitReached(err error) bool {
+	return errors.Is(err, bus.ErrConsumerLimitReached)
 }
 
 // grantRefused reports whether a refusal for want of a grant was met less than noGrantBackoff

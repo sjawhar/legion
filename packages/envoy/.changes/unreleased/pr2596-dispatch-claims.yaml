@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+    Dispatch no longer reads a session's absence from the listener's list as proof that it ended.
+    The route roster keeps every registered session with its state, so a stalled holder's route
+    reads `holder_unresponsive` rather than `no_holder`, a role route whose holder is unresponsive
+    resolves to that holder and the message is stored for it, and a broadcast still counts it a
+    recipient. A claim take or release is refused while the holder is `live`, or `unresponsive`
+    with its last registration no older than `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` (twenty minutes);
+    the refusal names the state and since when, and a person still forces it. The issue read
+    carries `holder_state`, `last_seen` and `takeable_at` beside the claim, never inside the claim
+    itself, which is an event payload and must hold no read-time state. An issue read answers
+    `holder_state: unknown` and never fails while the listener is unreachable or refilling, where a
+    claim write still refuses `ENVOY_UNAVAILABLE`.

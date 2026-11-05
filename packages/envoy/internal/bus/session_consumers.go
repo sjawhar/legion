@@ -40,6 +40,15 @@ const sessionConsumerPrefix = "s-"
 // WARN for the episode and then answering for ten minutes without a further server call.
 var ErrConsumerNotGranted = errors.New("bus: the NATS user may not manage session consumers")
 
+// ErrConsumerLimitReached is wrapped by the create of a session consumer the server refused
+// because the stream already holds as many consumers as its max_consumers allows
+// (jetstream.ErrMaximumConsumersLimit, JSErrCodeMaximumConsumersLimit). The cause is the stream's
+// own setting, not this connection's grant and not the session: every session whose consumer
+// exists keeps receiving, and only a session whose consumer has to be created is refused, until
+// an operator raises max_consumers. The listener refuses such a registration 503 consumer_limit
+// and writes nothing - no interest row, no session entry.
+var ErrConsumerLimitReached = errors.New("bus: the stream holds as many consumers as its max_consumers allows")
+
 // ErrSessionConsumerNotFound is returned by a call on a session consumer the stream does not hold:
 // never created, deleted, or removed by the server after SessionConsumerInactiveThreshold.
 var ErrSessionConsumerNotFound = errors.New("bus: no session consumer")
@@ -141,7 +150,7 @@ func (s *SessionConsumers) Publish(ctx context.Context, msg *nats.Msg) error {
 	if err := s.client.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return s.client.currentConn().PublishMsg(msg)
+	return s.client.Connection().PublishMsg(msg)
 }
 
 // SubscribeReplies subscribes handler over core NATS to subject, typically a reply-inbox wildcard,
@@ -153,7 +162,7 @@ func (s *SessionConsumers) SubscribeReplies(subject string, handler nats.MsgHand
 	if _, err := s.client.SubscribeCore(subject, handler); err != nil {
 		return err
 	}
-	return s.client.currentConn().Flush()
+	return s.client.Connection().Flush()
 }
 
 // SessionConsumerStart is what Ensure or RestartAtFloor did to a session's consumer.
@@ -575,6 +584,12 @@ func (s *SessionConsumers) upsert(ctx context.Context, name string, config jetst
 		return nil, err
 	}
 	if response.Error != nil {
+		// The server refuses a create once the stream holds its max_consumers, and that refusal is
+		// the session's whole delivery: it is surfaced as ErrConsumerLimitReached so the listener
+		// can name the cause rather than report a consumer it could not create.
+		if errors.Is(response.Error, jetstream.ErrMaximumConsumersLimit) {
+			return nil, fmt.Errorf("%w: %s session consumer %s: %w", ErrConsumerLimitReached, action, name, response.Error)
+		}
 		return nil, fmt.Errorf("bus: %s session consumer %s: %w", action, name, response.Error)
 	}
 	return &response.ConsumerInfo, nil

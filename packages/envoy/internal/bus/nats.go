@@ -294,6 +294,9 @@ type Client struct {
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
+	// disconnectHooks run on each disconnect of the client's connection (AddDisconnectHook), under
+	// reconnectHooksMu as the reconnect hooks are.
+	disconnectHooks []func()
 	// drainHooks run once in Drain, after the delivery subscriptions and before the connection's
 	// own drain (AddDrainHook), under reconnectHooksMu as the reconnect hooks are.
 	drainHooks []func(context.Context)
@@ -446,7 +449,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onDisconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 	}
 	if opts.background {
 		c.awaitingConnection = true
@@ -564,8 +567,10 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
-// currentConn is the client's connection now, read under its lock.
-func (c *Client) currentConn() *nats.Conn {
+// Connection is the client's connection now, read under its lock. A KV handle opened outside this
+// package is opened on it (OpenKeyValue, roles.Buckets), and so is re-opened on the replacement
+// after a connection event.
+func (c *Client) Connection() *nats.Conn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.Conn
@@ -1280,7 +1285,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onDisconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
@@ -1478,7 +1483,7 @@ func validSubject(subject string) bool {
 // would.
 func (c *Client) refused(err error, size int) error {
 	if errors.Is(err, nats.ErrMaxPayload) {
-		conn := c.currentConn()
+		conn := c.Connection()
 		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
 			ErrTooLarge, size, conn.MaxPayload())
 	}
