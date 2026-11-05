@@ -1166,11 +1166,14 @@ version for the session. It passes that schema to the live editor, historical-ve
 the one headless Markdown engine cached per schema version; the connection carries it as
 `schema_version`. A server version mismatch admits the tab read-only and the surface shows
 `Reload to edit`. A closed issue's document is admitted read-only too, and names no reload, which
-cannot make it editable: `ProofDocument` shows the line only for a read-only admission that came
-while the issue was open (`closedAdmission` records whether it was closed then), while the issue
-is open and the socket is connected. The admission and the connection decide the line, not the
-close or the reopen: each drops the socket only on the server process that served it
-(`SetIssueClosed`), and where it does, the reconnect's admission decides again. Typed blocks use
+cannot make it editable: `ProofDocument` shows the line while the admission is read-only, the
+issue the page holds now is open, and the socket is connected. It reads the issue as the page
+holds it rather than as the cache held it when the admission arrived, because a reconnect whose
+admission lands before the issue query refreshes would otherwise leave the reader of a reopened
+issue in front of a read-only editor with no way out named. The admission and the connection
+decide the line, not the close or the reopen: each drops the socket only on the server process
+that served it (`SetIssueClosed`), and where it does, the reconnect's admission decides again.
+Typed blocks use
 `:::name{#block-id key="value"}` container directives. The server owns their schema and version,
 while Dispatch owns host rendering for `render: "host"` types; the SPA must not invent node schemas
 or parse a second directive grammar.

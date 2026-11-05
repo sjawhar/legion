@@ -508,16 +508,20 @@ test("ProofDocument makes a schema-read-only admission non-editable and reloadab
   }
 });
 
-// The server admits a closed issue's socket read-only as it admits a schema it does not serve, and
-// a reload cannot make a closed issue's document editable, so that admission names no reload: not
-// while the issue is closed, not once it reopens while that socket still holds it, and not through
-// the drop and the reconnect's draw that follow, until the reconnect's own admission decides. A
-// read-only admission that comes while the issue is open is the schema's, and names one.
-test("ProofDocument names a reload for a read-only admission only while the issue is open", async () => {
+// The server admits a closed issue's socket read-only as it admits a schema version it does not
+// serve, and the page cannot tell those apart. While the issue is closed the page shows the
+// closed line and no reload, which could not make that document editable. Once the issue is open
+// again, a reload does make it editable, because the reload's new socket is admitted on the issue
+// as it stands. The older rule - that a socket admitted while the issue was closed names no
+// reload, not even after the reopen - was wrong for exactly that case: it left a reader of a
+// reopened issue in front of a read-only editor with no line telling them what to do.
+test("ProofDocument names a reload once a read-only admission's issue is open again", async () => {
   const { admit, connections, editors, rerender, status, sync, view } = renderProofDocument({
     isClosed: true,
   });
   const reloadLine = () => within(view.container).queryByText("Reload to edit.");
+  const closedLine = () =>
+    within(view.container).queryByText("This issue is closed. Its document is read-only.");
 
   try {
     await waitFor(() => expect(connections).toHaveLength(1));
@@ -527,31 +531,37 @@ test("ProofDocument names a reload for a read-only admission only while the issu
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
+    expect(closedLine()).not.toBeNull();
     expect(reloadLine()).toBeNull();
 
-    // The reopen, then the drop it makes and the reconnect's draw: no reload is named at any step.
+    // Reopened while that socket still holds the document: the editor stays read-only, and the
+    // page shows the reload that makes it editable again.
     act(() => rerender({ isClosed: false }));
+    expect(editors[0]?.readOnly).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
-    expect(reloadLine()).toBeNull();
-    for (const step of ["offline", "connecting", "connected"] as const) {
+    expect(closedLine()).toBeNull();
+    expect(reloadLine()).not.toBeNull();
+
+    // The drop the reopen may make, and the reconnect's draw: a socket that is not connected names
+    // no reload, and the reconnect names it again until its own admission says otherwise.
+    for (const step of ["offline", "connecting"] as const) {
       act(() => status(step));
       expect(reloadLine()).toBeNull();
     }
+    act(() => status("connected"));
+    expect(reloadLine()).not.toBeNull();
+
+    // A writable admission names neither line.
     act(() => admit(false));
     expect(editors[0]?.readOnly).toBe(false);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe(
       "false"
     );
+    expect(closedLine()).toBeNull();
     expect(reloadLine()).toBeNull();
 
-    // A reconnect the server admits read-only while the issue is open is the schema's.
-    act(() => status("offline"));
-    act(() => status("connected"));
-    act(() => admit(true));
-    expect(editors[0]?.readOnly).toBe(true);
-    expect(reloadLine()).not.toBeNull();
-
     act(() => rerender({ isClosed: true }));
+    expect(closedLine()).not.toBeNull();
     expect(reloadLine()).toBeNull();
   } finally {
     view.unmount();
