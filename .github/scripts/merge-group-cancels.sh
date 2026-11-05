@@ -72,9 +72,12 @@
 #     the answer is this word. It cancels the descendants, which are doomed either way, and
 #     never the asking run, which is the only run that can still post this group's verdict: a
 #     later job of it finds that `failure` among the reports and posts the failing ci-ok. When
-#     that job is the last of its run to report there is no later job: nothing posts a verdict,
-#     and the group carries no ci-ok until GitHub's 180-minute check timeout takes it out of the
-#     queue. It trades what the `absent` case below trades, and for the same reason.
+#     the report step's artifact list or post was refused and that job is the last of its run
+#     to report, there is no later job: nothing posts a verdict, and the group carries no ci-ok
+#     until GitHub's 180-minute check timeout takes it out of the queue. When only the marker's
+#     own upload failed after a post that worked, the failing verdict is already on the commit
+#     and the queue acts on it. It trades what the `absent` case below trades, and for the same
+#     reason.
 #   * `absent` — the job uploaded no report, so this group carries no ci-ok of its own yet.
 #     `cancel-changes` always meets this: `changes` has no ci-ok-report step, and the jobs that
 #     post for a run whose `changes` did not succeed (lint, typecheck and test, whose `if:`

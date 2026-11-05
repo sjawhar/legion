@@ -81,7 +81,7 @@ include "ci-ok";
   elif $posted then
     [$report.status, "\($job) reported \($report.status) for attempt \($attempt), and the ci-ok it posted for this group is in the run artifacts beside it"]
   else
-    ["unposted", "\($job) reported \($report.status) for attempt \($attempt), and no ci-ok of this group was posted for it"]
+    ["unposted", "\($job) reported \($report.status) for attempt \($attempt), and no marker of a posted ci-ok for this group is beside it"]
   end
 | @tsv')
 IFS=$'\t' read -r report reasoning <<<"$answer"

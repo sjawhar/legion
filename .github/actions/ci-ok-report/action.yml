@@ -69,9 +69,10 @@ runs:
     # The marker the step above leaves only when it posted ci-ok, which this job's merge-group
     # follower waits for. `if-no-files-found: ignore` is what makes the absence of that file the
     # absence of the artifact: no file matched, no artifact created, and the follower then reads
-    # this job's report as a verdict that never went up. `always()`, because the job this marker
-    # matters for is a job whose earlier steps failed, and a step with no `if:` is skipped on
-    # such a job: without it a post that succeeded there would leave no marker at all.
+    # this job's report as a verdict that never went up. `always()`, because the jobs this marker
+    # matters for are a job whose earlier steps failed and a job cancelled gracefully, which
+    # ci-ok-report.sh still posts for, and a step with no `if:` is skipped on either: without it
+    # a post that succeeded there would leave no marker at all.
     - if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id)
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:

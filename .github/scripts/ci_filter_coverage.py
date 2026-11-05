@@ -765,7 +765,8 @@ REQUIRED_CHECKS = ("ci-ok", "pr-title")
 EXEMPT_LIST = "CI_OK_EXEMPT"
 # The cancel jobs EXEMPT_LIST names are held by ci_workflow_rules.check_followers, which reads
 # EXEMPT_LIST and PULL_REQUEST_ONLY_LIST, the one list of this module's EVENT_LISTS, from the
-# same env and imports both names from here, so each entry is named in one place.
+# same env and imports both names from here. ENV_ALLOWED above and ci-ok-report.sh's yq read
+# write the same keys again.
 
 
 def check_ci_ok(document: dict, problems: list) -> None:

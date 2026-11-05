@@ -31,9 +31,10 @@
 # `failure` report is in the list it reads (.github/scripts/merge-group-report.sh reads the
 # report and the marker, and .github/scripts/merge-group-cancels.sh's header says what each
 # answer it gives does, and what each trades). When that refused job is itself the last of its
-# run to report, no later job posts anything at all, and the group carries no ci-ok until that
-# same 180-minute timeout. The report artifact this step uploads is the very signal the follower
-# reads, so the two never disagree about which job's work failed. `changes`
+# run to report and no other job of the run has posted this group's verdict already, no later
+# job posts anything at all, and the group carries no ci-ok until that same 180-minute timeout.
+# The report artifact this step uploads is the very signal the follower reads, so the two never
+# disagree about which job's work failed. `changes`
 # is the other decided case with no force-cancel behind it: it uploads no report, so its
 # follower cancels the groups built on this one and leaves this run alive, and the first of
 # lint, typecheck and test to report posts the verdict below.

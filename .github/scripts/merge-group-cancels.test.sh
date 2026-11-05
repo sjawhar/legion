@@ -366,7 +366,7 @@ read_report() {
 check "a failure whose ci-ok never went up is unposted" \
   "$(is "$(read_report ci-ok-typecheck-2-failure ci-ok-lint-2-success)" unposted)"
 check "and says so, naming the job and the attempt" \
-  "$(contains "$(cat "$work/err")" "^typecheck reported failure for attempt 2, and no ci-ok of this group was posted for it\$")"
+  "$(contains "$(cat "$work/err")" "^typecheck reported failure for attempt 2, and no marker of a posted ci-ok for this group is beside it\$")"
 check "the same failure beside its posted marker is a failure" \
   "$(is "$(read_report ci-ok-typecheck-2-failure ci-ok-posted-typecheck-2)" failure)"
 check "a cancellation beside its posted marker is a cancellation" \
