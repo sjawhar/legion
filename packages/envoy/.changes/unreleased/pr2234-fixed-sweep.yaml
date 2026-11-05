@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+  The delivery sweep no longer fails a stranded delivery because its issue closed. Now that a
+  closed issue takes comments and messages, every sender delivers there, so the sweep sends the
+  attempts a dead process left on an issue that closed under them - a message's, a keyed send
+  with no attempt yet, and a comment mention's - each under its own attempt number, where each
+  was settled `failed` with `not sent: the issue closed before this attempt was delivered`
+  before. What the sweep still settles instead of sending is a mention attempt whose comment no
+  longer holds the mention and one whose document is no longer a project's.

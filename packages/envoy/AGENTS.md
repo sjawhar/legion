@@ -4179,15 +4179,17 @@ The delivery sweep (`internal/dispatch/api/delivery_sweep.go`) finishes the deli
 Every write that delivers to sessions - a send to one session, the live view's model and thinking switch, a broadcast's recipients, an issue message to a session, a comment's and a document comment's mentions, and a retry from an agent card - claims each attempt before its send and settles it after, on a context its client's cancellation does not reach.
 A process that dies between the two leaves the attempt pending under a claim nobody holds.
 Every pass of the maintenance loop (`RunMaintenanceSweep`, once a minute across the processes under the `suggestion-outcomes` lease, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
-It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 of each kind a read until a read comes back short or a round settles nothing:
-a message attempt on a closed issue and a keyed send with no attempt on a closed issue (given a failed attempt 1), `not sent: the issue closed before this attempt was delivered`;
-a mention attempt whose document is no longer a project's, `not sent: the document is gone`, or whose issue closed, as above;
-and one whose comment no longer holds the mention, `not sent: the
-comment no longer mentions this target`.
-Each settle is a transaction of its own that takes the owner's lock first and checks the cause again under it, so an issue reopened meanwhile keeps its attempt owed.
+It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 a read until a read comes back short or a round settles nothing:
+a mention attempt whose comment no longer holds the mention, `not sent: the
+comment no longer mentions this target`, and one whose document is no longer a project's, `not sent: the document is gone`.
+A closed issue is not one of them:
+a message and a comment on a closed issue are delivered like any other (`lockIssue`, `lockedCommentForDelivery`), so an attempt stranded on an issue that closed under it is sent, not settled.
+Each settle is a transaction of its own that takes the owner's lock first and checks the cause again under it, so a comment that holds its mention again keeps its attempt owed.
+A document-gone attempt has no owner left to take that lock or to hold its receipt (`lockEventOwner` reads a project's artifact alone), so its settle fails and the pass logs `settle an owed delivery nothing can send`;
+the pass leaves it out of what it sends all the same, so it crowds nothing, and `TestTheDeliverySweepSettlesWhatItCannotSend` holds the sweep to that.
 It then sends, `broadcastDeliveryWorkers` at a time and at most `deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its mention's latest, still pending, its claim lapsed (`claimLapsed`, a minute), opened over a minute ago and inside `DeliveryDuplicateWindow` - the exact attempt it selected, bound to its attempt number for a message and a mention alike, never an older pending one a card retry overtook - and the first attempt of a keyed send whose process died between committing its message and opening that attempt, found by its key's recovery point once the key's holder is gone.
-One rule says what is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the closed or gone predicates, package constants):
-the settle reads use them as they are and the send reads (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch.
+One rule says what is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the two gone predicates, package constants):
+the settle read uses the gone predicates as they are and the send read of the mention attempts (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch.
 Of two senders that find one attempt owed - the sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends nothing.
 The sweep's reads stay as small as the work still owed:
 migration `0138` indexes the pending attempts (`message_deliveries_pending`, `comment_deliveries_pending`, partial on `state = 'pending'`), and `0137` the keyed sends still owed (`request_keys_owed_sends`, on `created_at`, partial on rows with no status whose recovery names a message).

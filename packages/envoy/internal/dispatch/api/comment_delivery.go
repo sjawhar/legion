@@ -867,8 +867,8 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// `reply_to_block` names a block of the comment this callback answers, the only item the
-	// request names, which lockedComment holds after its owner — never a part of the ask the
-	// thread hangs under, which a reply naming `ask_id` on the comments route names.
+	// request names, which lockedCommentForDelivery holds after its owner — never a part of the
+	// ask the thread hangs under, which a reply naming `ask_id` on the comments route names.
 	var block *namedBlock
 	if input.ReplyToBlock != nil {
 		block, err = s.namedReplyBlock(r.Context(), tx, refs.ItemComment, comment.ID, *input.ReplyToBlock)

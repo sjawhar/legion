@@ -895,7 +895,11 @@ export function ProofDocument({
   // The server admits every socket on a closed issue's document read-only, and decides a socket's
   // admission once, as it connects. A reopened issue's document takes edits again, so the page has
   // its connection admitted again: until the new admission (`onAdmission`) replaces the closed
-  // one's, the socket is still read-only, and so is the editor.
+  // one's, the socket is still read-only, and so is the editor. The reopen closes the issue's
+  // rooms itself, which readmits every browser on them, but only on the process that served the
+  // PATCH (`SetIssueClosed`); this covers the two sockets that close never reaches: one whose
+  // room another process holds, and one whose room the close could not close, each of which
+  // keeps the read-only admission it was given.
   useEffect(() => {
     setQuoteRefusal(undefined);
     editorRef.current?.setAccess(editorAccess(page, isClosed, schemaReadOnlyRef.current));
