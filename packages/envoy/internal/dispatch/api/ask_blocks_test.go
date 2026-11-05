@@ -345,9 +345,14 @@ func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
 
 // awaitIndexedAskBlock polls the inbox until the ask block with blockID on artifactID is
 // indexed, failing the test when settlement never reaches it.
+//
+// A minute rather than ten seconds: this waits for an event, and under the race detector with
+// every package of the module beside it a settlement of a million-character option took longer
+// than ten (run 42039747360, envoy-go-race-api). Waiting longer for an event weakens nothing and
+// costs a healthy run nothing - it returns in milliseconds when the settlement is quick.
 func awaitIndexedAskBlock(t *testing.T, handler http.Handler, artifactID, blockID, question string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		if inbox.Code != http.StatusOK {

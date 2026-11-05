@@ -19,7 +19,9 @@ import (
 // The boot's repair withdraws the open ask a close by an older release left on a closed issue,
 // naming that close's actor, and logs its counts.
 func TestRepairIssueAsksAtBootWithdrawsAndLogsItsCounts(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel: this test reads what the boot logged, and logtest.SetDefault below sends
+	// slog's default logger, which the whole process shares, to this test's own buffer. Beside a
+	// parallel test each would take the other's lines (dispatch://INFRA-1075).
 	ctx := store.WithTransactionTracking(context.Background())
 	database := storetest.Open(t)
 	for _, query := range []string{

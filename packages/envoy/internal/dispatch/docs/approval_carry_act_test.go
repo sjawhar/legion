@@ -48,7 +48,11 @@ func seededActDocument(t *testing.T) (*store.Store, *Service, string) {
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, actAnswerSpec)
 	service.SettleNow(artifactID)
-	waitFor(t, 3*time.Second, "settlement to index both blocks", func() bool {
+	// 30 s rather than 3: this waits for an event - the settlement indexing both blocks - and on
+	// CI's four cores, with every package of the module running beside it, three seconds was not
+	// enough once (run 42039747360). Waiting longer for an event costs a healthy run nothing:
+	// the wait returns in milliseconds on an idle server.
+	waitFor(t, 30*time.Second, "settlement to index both blocks", func() bool {
 		var rows int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from asks where block_artifact_id = $1 and block_id = any($2::text[])

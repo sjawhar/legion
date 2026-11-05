@@ -50,6 +50,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -205,6 +207,14 @@ type Pool struct {
 	dropMu    sync.Mutex
 	dropFails []string
 
+	// countMu guards counts: how many databases this pool created and dropped in this run, and
+	// for which reason. A create forces two checkpoints and a drop one, so the reason behind
+	// each is where the next cut has to come from (dispatch://INFRA-1075). finish prints the
+	// line, and the file PGCLONE_COUNTS names, when it is set, takes one line per pool from
+	// every package binary of a run.
+	countMu sync.Mutex
+	counts  map[string]int
+
 	// resetMu guards what Main reports about the databases no reset put back: a reset that could
 	// not run at all is worth a line, since a harness that never reuses a database is as slow as
 	// one that drops every database, and so is the count of the databases a test changed the
@@ -249,10 +259,17 @@ func (p *Pool) Take(t testing.TB, reusable bool) string {
 	}
 	name := ""
 	if reusable {
-		name = p.takeFree()
+		if name = p.takeFree(); name != "" {
+			p.count("reuse")
+		}
 	}
 	if name == "" {
 		name = p.RandomName(t)
+		if reusable {
+			p.count("create/miss")
+		} else {
+			p.count("create/fresh")
+		}
 		if _, err := p.admin.Exec(context.Background(), p.CloneStatement(name)); err != nil {
 			t.Fatalf("clone a test database from the template: %v", err)
 		}
@@ -313,7 +330,12 @@ func (p *Pool) Release(name string, close func()) {
 // held it closed already, so what a plain drop meets is a backend the server has not finished
 // closing rather than a session anything is using. The plain drop is therefore retried for a
 // moment, and the force is the last resort for a session a test really left behind.
-func (p *Pool) Drop(name string) {
+func (p *Pool) Drop(name string) { p.drop(name, "drop/caller") }
+
+// drop is Drop with the reason the count records: a database a caller took fresh and gave back
+// (Drop), one the pool refused, or one the run leaves behind.
+func (p *Pool) drop(name, reason string) {
+	p.count(reason)
 	// The reset's own connection to this database goes first, and before the goroutine starts:
 	// it is this process's session, and a plain drop would meet it.
 	p.closeKept(name)
@@ -366,13 +388,14 @@ func (p *Pool) finish(code int) int {
 		return code
 	}
 	defer p.admin.Close()
+	defer p.reportCounts()
 	// A prepare that failed before it started the workers left no queue to close.
 	if p.recycling != nil {
 		close(p.recycling)
 		p.recyclers.Wait()
 	}
 	for name := p.takeFree(); name != ""; name = p.takeFree() {
-		p.Drop(name)
+		p.drop(name, "drop/end-free-list")
 	}
 	p.drops.Wait()
 	if p.changed > 0 {
@@ -391,6 +414,7 @@ func (p *Pool) finish(code int) int {
 	if p.template == "" {
 		return code
 	}
+	p.count("drop/end-template")
 	if _, err := p.admin.Exec(context.Background(), "drop database "+p.template); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: drop template database %s: %v\n", p.config.Name, p.template, err)
 		if code == 0 {
@@ -413,6 +437,51 @@ func (p *Pool) takeFree() string {
 	return name
 }
 
+// count records one create database or drop database this pool made, under the reason it was
+// made for. A create forces two checkpoints and a drop one, every package testing against the
+// server queues on that server's one checkpointer, and the sample of CI run 42035294257 found
+// IPC/CheckpointDone and IPC/CheckpointStart five times every other wait event together
+// (dispatch://INFRA-1075) - so what a run can cut is read off which reason the creates and drops
+// fall under, not off their total.
+func (p *Pool) count(reason string) {
+	p.countMu.Lock()
+	defer p.countMu.Unlock()
+	if p.counts == nil {
+		p.counts = map[string]int{}
+	}
+	p.counts[reason]++
+}
+
+// reportCounts writes what this pool created and dropped, to stderr and, when PGCLONE_COUNTS
+// names a file, as one line appended to it: a run of several package binaries at once writes one
+// line per pool there, each naming its own test binary, so the whole run's creates and drops can
+// be read off one file.
+func (p *Pool) reportCounts() {
+	p.countMu.Lock()
+	reasons := make([]string, 0, len(p.counts))
+	for reason := range p.counts {
+		reasons = append(reasons, reason+"="+strconv.Itoa(p.counts[reason]))
+	}
+	p.countMu.Unlock()
+	slices.Sort(reasons)
+	line := fmt.Sprintf("pgclone-counts binary=%s pool=%q %s",
+		filepath.Base(os.Args[0]), p.config.Name, strings.Join(reasons, " "))
+	fmt.Fprintln(os.Stderr, line)
+	path := os.Getenv("PGCLONE_COUNTS")
+	if path == "" {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: open PGCLONE_COUNTS: %v\n", p.config.Name, err)
+		return
+	}
+	defer file.Close()
+	if _, err := fmt.Fprintln(file, line); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: write PGCLONE_COUNTS: %v\n", p.config.Name, err)
+	}
+}
+
 // putFree puts an emptied database back for the next test.
 func (p *Pool) putFree(name string) {
 	p.freeMu.Lock()
@@ -430,7 +499,11 @@ func (p *Pool) recycleWorker() {
 			p.noteResetFailure(name, err)
 		}
 		if !reusable {
-			p.Drop(name)
+			if err != nil {
+				p.drop(name, "drop/reset-failed")
+			} else {
+				p.drop(name, "drop/changed")
+			}
 			continue
 		}
 		p.putFree(name)
@@ -868,6 +941,7 @@ func (p *Pool) prepare(raw string) error {
 	}
 	name := p.config.TemplatePrefix + suffix
 	// The template is a file copy of template1, for the reason each clone of it is one.
+	p.count("create/template")
 	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		return fmt.Errorf("create the template database: %w", err)
 	}
