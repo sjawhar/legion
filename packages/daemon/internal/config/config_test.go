@@ -526,6 +526,86 @@ func TestLoadRefusesProjectDeploys(t *testing.T) {
 	}
 }
 
+// A project's commit_issue_trailer_repos are the repositories whose commits a pane stamps with
+// the issue key, each a parsed repository, kept in the file's order. A project that names none,
+// or names an empty list, has none. The key only selects among the project's repositories, so
+// two projects may each name one side of a configured rename, which is two projects' own
+// selections and not one list naming one repository twice.
+func TestLoadReadsProjectCommitIssueTrailerRepos(t *testing.T) {
+	body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n"+
+		"  DEMO:\n    commit_issue_trailer_repos: [acme/widgets, acme/infra]\n"+
+		"  ONE: { commit_issue_trailer_repos: [acme/gadgets] }\n"+
+		"  OTHER: {}\n"+
+		"  EMPTY: { commit_issue_trailer_repos: [] }\n", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project commit_issue_trailer_repos: %v", err)
+	}
+	want := []ghrepo.Repository{ghrepo.MustParse("acme/widgets"), ghrepo.MustParse("acme/infra")}
+	if got := cfg.Projects["DEMO"].CommitIssueTrailerRepos; !reflect.DeepEqual(got, want) {
+		t.Errorf("DEMO commit_issue_trailer_repos = %#v, want %#v", got, want)
+	}
+	if got := cfg.Projects["ONE"].CommitIssueTrailerRepos; !reflect.DeepEqual(got, []ghrepo.Repository{ghrepo.MustParse("acme/gadgets")}) {
+		t.Errorf("ONE commit_issue_trailer_repos = %#v, want acme/gadgets alone", got)
+	}
+	for _, key := range []string{"OTHER", "EMPTY"} {
+		if got := cfg.Projects[key].CommitIssueTrailerRepos; got != nil {
+			t.Errorf("%s commit_issue_trailer_repos = %#v, want nil", key, got)
+		}
+	}
+
+	pair := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n",
+		"projects:\n  DEMO: { commit_issue_trailer_repos: [acme/widgets] }\n"+
+			"  OTHER: { commit_issue_trailer_repos: [acme/gadgets] }\n", 1) +
+		"repository_renames: [{from: acme/widgets, to: acme/gadgets}]\n"
+	if _, err := Load(writeConfigFile(t, pair), noEnv); err != nil {
+		t.Errorf("Load the pair's two names, one in each project: %v", err)
+	}
+}
+
+// The loader refuses a commit_issue_trailer_repos entry it could stamp no commit for, or that
+// names one repository the list already names: a value that is no owner and name, one repository
+// twice, a repeat differing only in case — GitHub compares a name without case — and a repeat a
+// configured repository_renames pair makes one repository, which readCommitIssueTrailerRepos
+// cannot see because a project is read before the renames settle (checkCommitTrailerRenames).
+func TestLoadRefusesProjectCommitIssueTrailerRepos(t *testing.T) {
+	for _, tc := range []struct{ name, repos, renames, want string }{
+		{
+			name:  "a value that is no owner and name",
+			repos: "[widgets]",
+			want:  `projects.DEMO.commit_issue_trailer_repos[0] must be "owner/name" (got "widgets")`,
+		},
+		{
+			name:  "one repository twice",
+			repos: "[acme/widgets, acme/widgets]",
+			want:  "projects.DEMO.commit_issue_trailer_repos names acme/widgets twice",
+		},
+		{
+			name:  "one repository twice in two cases",
+			repos: "[acme/widgets, Acme/Widgets]",
+			want:  "projects.DEMO.commit_issue_trailer_repos names Acme/Widgets twice",
+		},
+		{
+			name:    "the two names of a configured rename",
+			repos:   "[acme/widgets, Acme/Gadgets]",
+			renames: "repository_renames: [{from: acme/widgets, to: acme/gadgets}]\n",
+			want: "projects.DEMO.commit_issue_trailer_repos[0] (acme/widgets) and projects.DEMO.commit_issue_trailer_repos[1] (Acme/Gadgets) name one repository: " +
+				"repository_renames makes acme/widgets and Acme/Gadgets one repository, so the list names it twice; name it once",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n  DEMO:\n    commit_issue_trailer_repos: "+tc.repos+"\n", 1)
+			if body == minimalFile {
+				t.Fatal("the fixture's projects block was not replaced")
+			}
+			_, err := Load(writeConfigFile(t, body+tc.renames), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadReadsPrivateKeyCommand(t *testing.T) {
 	body := strings.Replace(minimalFile, "private_key: implement-test-key", "private_key_command: printf command-key", 1)
 

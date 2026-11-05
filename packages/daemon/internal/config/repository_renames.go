@@ -97,3 +97,29 @@ func checkDeployRenames(cfg *Config) error {
 	}
 	return nil
 }
+
+// checkCommitTrailerRenames refuses two `commit_issue_trailer_repos` entries of one project whose
+// repositories a configured rename makes one repository. readCommitIssueTrailerRepos already
+// refuses one name twice (compared without case), but it reads a project before the renames
+// settle and knows nothing of them, so the pair is caught here, where both the equivalence and
+// every project's list stand. A rename is read wherever a name is compared
+// (ghrepo.Renames.Same), so the two entries select the one repository, and the list would name
+// that repository twice while saying nothing a single entry does not.
+func checkCommitTrailerRenames(cfg *Config) error {
+	if cfg.RepositoryRenames.IsZero() {
+		return nil
+	}
+	for _, key := range slices.Sorted(maps.Keys(cfg.Projects)) {
+		repos := cfg.Projects[key].CommitIssueTrailerRepos
+		for index, repo := range repos {
+			for earlier, named := range repos[:index] {
+				if !cfg.RepositoryRenames.Same(named.String(), repo.String()) {
+					continue
+				}
+				return fmt.Errorf("projects.%s.commit_issue_trailer_repos[%d] (%s) and projects.%s.commit_issue_trailer_repos[%d] (%s) name one repository: %s makes %s and %s one repository, so the list names it twice; name it once",
+					key, earlier, named, key, index, repo, repositoryRenamesKey, named, repo)
+			}
+		}
+	}
+	return nil
+}

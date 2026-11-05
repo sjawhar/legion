@@ -615,6 +615,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	w.repositories.set(accepted, refused)
 	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
 	w.logUnservedRenames(accepted)
+	w.logUnservedCommitTrailerRepos(accepted)
 	w.logRenameOwnerConflicts()
 	return nil
 }
@@ -631,6 +632,24 @@ func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
 		}
 		w.log.Warn("workflow: a configured repository rename names a repository this project does not serve, so the pair is read wherever a name is compared but nothing is served under it",
 			"from", pair.From.String(), "to", pair.To.String(), "project", w.dispatchProject)
+	}
+}
+
+// logUnservedCommitTrailerRepos says, once at the boot's mapping load, that
+// `commit_issue_trailer_repos` names a repository the project does not serve, naming the name and
+// the project: the key only selects among the project's repositories, which are Dispatch's
+// mapping, so a name the mapping does not hold stamps nothing. It is said here, and refuses
+// nothing, because the served set is Dispatch's mapping alone and `legion start --check-config`
+// reads no Dispatch at all — it runs config.LoadForValidation and daemon.CheckStart and nothing
+// else (checkStartConfig, cmd/legion/main.go) — so it can refuse only what the file alone
+// decides, and a name mapped the day after the file is written is no fault of the file.
+func (w *workflowRuntime) logUnservedCommitTrailerRepos(accepted []mappedRepository) {
+	for _, repo := range w.commitTrailerRepos {
+		if slices.ContainsFunc(accepted, func(mapped mappedRepository) bool { return strings.EqualFold(mapped.Repo.String(), repo.String()) }) {
+			continue
+		}
+		w.log.Warn("workflow: commit_issue_trailer_repos names a repository this project does not serve, so no pane stamps a commit with the issue key for it",
+			"repository", repo.String(), "project", w.dispatchProject)
 	}
 }
 
