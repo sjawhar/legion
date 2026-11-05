@@ -74,40 +74,50 @@ var contract46Issue = []string{
 
 // The route authenticates nobody, so it knows a plugin by the pod the request came from: a pod
 // whose claims record a contract below memoryContract is served issues with only the keys
-// the last strict reader before it knows, and the rest of the body as it is. The two downgrades
-// compose: a pod at 46 to 48 is served the update rounds it reads and no memory, a pod below 46
-// neither, and a pod at this contract, a pod whose claims record none and a caller in no pod —
-// the operator's `legion state`, whose memory line reads the draws — are served both.
+// the last strict reader before it knows, and the rest of the body as it is. The three downgrades
+// compose: a pod at 46 to 48 is served the update rounds it reads and no memory and no gated
+// steps, a pod at 49 those two and no gated steps, a pod below 46 none of the three, and a pod at
+// this contract, a pod whose claims record none and a caller in no pod — the operator's `legion
+// state`, whose memory line reads the draws — are served all of them.
 func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(memoryContract-1))
-	if !strings.Contains(string(full), `"memoryGroup"`) || !strings.Contains(string(full), `"updateRound"`) {
-		t.Fatalf("the fixture's state %s carries no memory draw or no update round; this test proves nothing", full)
+	for _, field := range []string{`"memoryGroup"`, `"updateRound"`, `"gatedSteps"`} {
+		if !strings.Contains(string(full), field) {
+			t.Fatalf("the fixture's state %s carries no %s; this test proves nothing", full, field)
+		}
 	}
-
 	for _, tc := range []struct {
 		name   string
 		remote string
 		sup    Supervisor
 		memory bool
 		rounds bool
+		steps  bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod below PodUpdateContract, below both", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod below PodUpdateContract, below all three", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod at the memory contract, below the gated steps", remote: statePodAddr + ":41000", sup: podClaims(gatedStepsContract - 1), memory: true, rounds: true},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, rounds: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, rounds: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, rounds: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, rounds: true, steps: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, rounds: true, steps: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, rounds: true, steps: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
 
 			// Only LEGION-208's tree was drawn: its root and its child carry the draw when the
-			// caller is served it, and no other issue carries one whoever asks.
+			// caller is served it, and no other issue carries one whoever asks. Every root of the
+			// fixture carries the one step `root-issues` gates; LEGION-209, a child of
+			// LEGION-208's tree, carries none whoever asks.
 			drawn := map[string]bool{"LEGION-208": true, "LEGION-209": true}
+			gated := map[string]bool{"LEGION-207": true, "LEGION-208": true, "LEGION-210": true, "LEGION-212": true}
 			for key, view := range issueViews(t, body) {
 				carries := view["memoryGroup"] != nil || view["memoryDrawMode"] != nil || view["memoryDrawnAt"] != nil
 				if want := tc.memory && drawn[key]; carries != want {
 					t.Errorf("issue %s of %s carries a memory draw = %v, want %v", key, body, carries, want)
+				}
+				if carries, want := view["gatedSteps"] != nil, tc.steps && gated[key]; carries != want {
+					t.Errorf("issue %s of %s carries gated steps = %v, want %v", key, body, carries, want)
 				}
 				if tc.memory {
 					continue
@@ -133,6 +143,9 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 					delete(issue, "memoryGroup")
 					delete(issue, "memoryDrawMode")
 					delete(issue, "memoryDrawnAt")
+				}
+				if !tc.steps {
+					delete(issue, "gatedSteps")
 				}
 				if tc.rounds {
 					continue

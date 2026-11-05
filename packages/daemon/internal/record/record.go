@@ -44,18 +44,18 @@ type ClassifiedPush struct {
 // session's write the daemon sets back (sessionStatusWrite), which leaves it. While a chain of
 // writes is queued, it can briefly hold an earlier write's echo.
 type Issue struct {
-	Key                 string
-	Tree                string
-	Project             string
-	Title               string
-	Parent              *string
-	Phase               phase.Phase
-	Generation          uint64
-	Status              string
-	Rank                string
-	LingerUntil         *time.Time
-	Hold                *Hold
-	LastDispatchSeq     int64
+	Key             string
+	Tree            string
+	Project         string
+	Title           string
+	Parent          *string
+	Phase           phase.Phase
+	Generation      uint64
+	Status          string
+	Rank            string
+	LingerUntil     *time.Time
+	Hold            *Hold
+	LastDispatchSeq int64
 	// ReadyPendingVersion is the document version a READY the design gate refused waits to see
 	// approved, and ReadyPendingStep the step whose document that version is. The two are one
 	// fact and the stored row holds both or neither, so everything that writes the refusal writes
@@ -964,8 +964,12 @@ type Slot struct {
 // OutboxRow is one effect that has not yet been completed. A claimed row carries a non-empty
 // lease token and its expiry; callers must present that exact token to finish or retry it.
 type OutboxRow struct {
-	ID         int64
-	Kind       OutboxKind
+	ID   int64
+	Kind OutboxKind
+	// Issue is the issue the effect belongs to. A project-level row carries the bare project key
+	// instead — the deployment's gated-steps publish, which belongs to no issue — and the same
+	// split_part(issue, '-', 1) that scopes an issue's row to its own daemon answers that key
+	// itself, since a project key holds no hyphen.
 	Issue      string
 	Payload    json.RawMessage
 	Attempts   int
@@ -1295,6 +1299,12 @@ type Store interface {
 	// triage wake, for the issue while one is pending; the issue's other status rows, a hand-over
 	// row among them, are not counted.
 	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
+	// GatedStepsPending says whether outbox still holds an unfinished gated_steps_publish row of
+	// the Dispatch project key project, whose row carries that bare key as its issue: a finished
+	// row is deleted, so any such row is one still to run or retrying. The boot publishes its
+	// configured list through the outbox and keeps no record of what it last published, so this
+	// is what keeps a restart loop from queueing a second row behind the first.
+	GatedStepsPending(ctx context.Context, tx pgx.Tx, project string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
 	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.

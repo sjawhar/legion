@@ -1649,6 +1649,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			reports:      s.capabilityReports,
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
+			gatedSteps:   cfg.Gates.Steps(),
 			settings:     api.SettingsOf(cfg),
 		},
 		StateTransactions:  st,
@@ -1782,6 +1783,9 @@ type source struct {
 	// caches is the Kubernetes runtime's repository caches with their last health reads
 	// (sandbox.Runtime.RepositoryCaches); nil under a runtime that keeps none.
 	caches func() []sandbox.CacheStatus
+	// gatedSteps are the design-gate steps the deployment gates (config.Gates.Steps), which every
+	// root of the state answers its own state of; the empty list gates none.
+	gatedSteps []record.DesignStep
 	// settings is the resolved configuration as the state shows it, built once here: Load reads
 	// legion.yaml once and an edit to it restarts the daemon, so once-at-boot is live.
 	settings api.Settings
@@ -1901,7 +1905,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
-	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), time.Now().UTC())
+	state, err := projection.Project(ctx, tx, records, s.project, s.gatedSteps, claims, s.reports(), time.Now().UTC())
 	if err != nil {
 		return api.State{}, err
 	}

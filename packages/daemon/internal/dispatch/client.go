@@ -133,6 +133,23 @@ func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) (Issue, 
 	return response.issue(), nil
 }
 
+// PutGatedSteps publishes the deployment's design-gate steps onto project's row through PUT
+// /api/v1/projects/{key}/gated-steps, as the daemon's own session, the actor every write of this
+// client carries. The list is always sent, empty for a deployment that gates nothing: Dispatch
+// refuses a body that names no list rather than read it as the empty one, so a nil slice would
+// be refused where it means the same thing. A Dispatch older than the route answers 404, which
+// the caller retries: the route arrives with the next server release, and nothing is lost by
+// waiting for it.
+func (c *HTTPClient) PutGatedSteps(ctx context.Context, project string, steps []string) error {
+	if steps == nil {
+		steps = []string{}
+	}
+	return c.request(ctx, http.MethodPut, "/api/v1/projects/"+url.PathEscape(project)+"/gated-steps", gatedStepsWrite{
+		Steps: steps,
+		Actor: daemonActor(project),
+	}, nil)
+}
+
 // HandOver writes issue's status for its hand-over to Legion, on the issue's sequence as the client
 // read it (expected_sequence), so a person's move since that read is refused (ISSUE_CHANGED) rather
 // than overwritten. An issue that does not yet carry LegionLabel has it added in the same PATCH
@@ -594,4 +611,11 @@ type daemonWrite struct {
 	ExpectedSequence int64    `json:"expected_sequence,omitempty"`
 	Body             string   `json:"body,omitempty"`
 	Actor            actor    `json:"actor"`
+}
+
+// gatedStepsWrite is the body of the gated-steps publish: the list, never omitted, and the
+// daemon's actor.
+type gatedStepsWrite struct {
+	Steps []string `json:"steps"`
+	Actor actor    `json:"actor"`
 }

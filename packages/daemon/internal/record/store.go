@@ -1620,6 +1620,15 @@ func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue s
 	return pending, nil
 }
 
+func (s *Postgres) GatedStepsPending(ctx context.Context, tx pgx.Tx, project string) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2)",
+		string(OutboxKindGatedStepsPublish), project).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a gated-steps publish pending: %w", project, err)
+	}
+	return pending, nil
+}
+
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
 // readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:
@@ -1737,7 +1746,9 @@ func kindNames(kinds []OutboxKind) []string {
 // lane reads what is due, then claims each by id (ClaimRow). Issue "" is every issue of project,
 // kinds nil every kind. The database is shared by the daemons of several projects, and a row
 // belongs to its issue's project: an issue key is `<project>-<n>`, and a project key has no hyphen
-// (the configuration's projects keys, claim.IsIssueKey). The scope is in the select, and ClaimRow
+// (the configuration's projects keys, claim.IsIssueKey). A project-level row — the deployment's
+// gated-steps publish — carries that bare project key in place of an issue, and the same
+// split_part scopes it to its own daemon. The scope is in the select, and ClaimRow
 // claims only an id a list gave it, because a lease taken on another project's row is what would
 // take it from its own daemon.
 func (s *Postgres) DueRows(ctx context.Context, tx pgx.Tx, project, issue string, kinds []OutboxKind, now time.Time) ([]OutboxRow, error) {

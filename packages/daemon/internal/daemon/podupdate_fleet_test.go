@@ -278,6 +278,7 @@ func (d *fleetHandoffs) HandOver(context.Context, dispatch.Issue, string) error 
 func (d *fleetHandoffs) PostMessage(context.Context, string, string) error         { return nil }
 func (d *fleetHandoffs) BuildCommit(context.Context) (string, error)               { return "", nil }
 func (d *fleetHandoffs) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *fleetHandoffs) PutGatedSteps(context.Context, string, []string) error     { return nil }
 func (d *fleetHandoffs) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }

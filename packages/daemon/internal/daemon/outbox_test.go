@@ -131,6 +131,11 @@ type outboxDispatch struct {
 	build          string
 	buildErr       error
 	buildAsked     int
+	// gatedSteps is each list a gated_steps_publish row published, gatedStepsOf the project each
+	// went to, and gatedStepsErr what the publish answers.
+	gatedSteps    [][]string
+	gatedStepsOf  []string
+	gatedStepsErr error
 }
 
 func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -174,6 +179,11 @@ func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProje
 	return nil, nil
 }
 func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *outboxDispatch) PutGatedSteps(_ context.Context, project string, steps []string) error {
+	d.gatedStepsOf = append(d.gatedStepsOf, project)
+	d.gatedSteps = append(d.gatedSteps, append(make([]string, 0, len(steps)), steps...))
+	return d.gatedStepsErr
+}
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())

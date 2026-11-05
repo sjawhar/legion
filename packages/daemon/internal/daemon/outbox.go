@@ -525,6 +525,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
 		return r.mergeQueue(ctx, row, value)
+	case record.GatedStepsPublish:
+		return r.publishGatedSteps(ctx, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
 	case record.AutoMergeDisable:
@@ -596,6 +598,27 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
+	}
+	return nil
+}
+
+// publishGatedSteps writes the deployment's design-gate steps onto the project's Dispatch row.
+// The row's own issue is that project key, and the payload names it too, so the write addresses
+// the project the boot that queued it served however the row is read back.
+//
+// A Dispatch that has not got the route yet answers 404, and nothing here treats that as final:
+// the kind is no permanent refusal, so the lane's backoff holds the row until the server has the
+// route, which is what lets the daemon and Dispatch deploy in either order.
+func (r *outbox) publishGatedSteps(ctx context.Context, payload record.GatedStepsPublish) error {
+	if r.dispatch == nil {
+		return errors.New("gated steps executor has no Dispatch client")
+	}
+	steps := make([]string, 0, len(payload.Steps))
+	for _, step := range payload.Steps {
+		steps = append(steps, string(step))
+	}
+	if err := r.dispatch.PutGatedSteps(ctx, payload.Project, steps); err != nil {
+		return fmt.Errorf("publish the gated steps of %s: %w", payload.Project, err)
 	}
 	return nil
 }

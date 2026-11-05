@@ -182,10 +182,20 @@ export type AnchorInput =
       readonly occurrence?: never;
     };
 
+/** A design-gate step a Legion deployment gates: one document of a root issue a person must
+ *  approve before the tree's work runs. `decisions` names the issue's decisions document,
+ *  `criteria` its Verification document, `spec` its primary document. */
+export type GatedStep = "decisions" | "criteria" | "spec";
+
 export interface Project {
   readonly key: string;
   readonly name: string;
   readonly open_asks?: number;
+  /** The design-gate steps the Legion deployment that serves this project gates, in the order it
+   *  gates them, as its daemon last published them. The empty list is a deployment that gates
+   *  nothing and one that has not published yet alike: neither holds a step waiting for a
+   *  person. */
+  readonly gated_steps?: GatedStep[];
   readonly created_at: string;
 }
 

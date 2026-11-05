@@ -40,6 +40,9 @@ type Client interface {
 	Handoff(ctx context.Context, id string) (Handoff, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+	// PutGatedSteps publishes the design-gate steps the deployment gates onto project's Dispatch
+	// project row, in the order it gates them; an empty list is a deployment that gates none.
+	PutGatedSteps(ctx context.Context, project string, steps []string) error
 	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
 	// webhook events through, is installed on repo (owner/name).
 	WebhookAppInstalled(ctx context.Context, repo string) (bool, error)

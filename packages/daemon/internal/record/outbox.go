@@ -38,6 +38,9 @@ const (
 	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
 	OutboxKindIssueBundle       OutboxKind = "issue_bundle"
 	OutboxKindIssueRelease      OutboxKind = "issue_release"
+	// OutboxKindGatedStepsPublish is the one kind whose row belongs to no issue: its issue column
+	// holds the bare project key (GatedStepsPublish).
+	OutboxKindGatedStepsPublish OutboxKind = "gated_steps_publish"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on three lanes side by
@@ -51,9 +54,12 @@ const (
 // (check_compare, check_look, check_bound), which start and end the implementer's looks in order
 // with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
-// an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
-// daemon addresses to a role of the issue that is not its architect (phase_ended), on a lane of its
-// own because the board lane's architect notices are ordered among themselves and one of them waits
+// an image, and a slow publish never holds a stop back. It carries the deployment's gated-steps
+// publish too, the one row addressed to the bare project key rather than to an issue, so that
+// write runs on a board lane of the project's own, behind none of any issue's rows and holding
+// none of them back. The role-message lane runs the one kind the daemon addresses to a role of
+// the issue that is not its architect (phase_ended), on a lane of its own because the board
+// lane's architect notices are ordered among themselves and one of them waits
 // for as long as its architect holds no role (the daemon's errNoticeWaits): a role told that its
 // phase ended must hear it while that is news, not after whatever its tree's architect is owed.
 type OutboxLane string
@@ -68,7 +74,7 @@ const (
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
 	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindIssueBundle, OutboxKindIssueRelease, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
-	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish, OutboxKindGatedStepsPublish},
 	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
 
@@ -589,6 +595,22 @@ type MergeQueuePublish struct {
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
 
+// GatedStepsPublish is the design-gate steps the deployment gates, written onto the Dispatch
+// project row so a person reading Dispatch sees what holds a tree's work without reading the
+// deployment's configuration. Project is the Dispatch project key, and Steps the configured list
+// in the order the deployment gates it, empty for a deployment that gates nothing.
+//
+// The row belongs to no issue: its issue column holds Project itself, the bare key, which the
+// same split_part every reader scopes a row by answers. The daemon publishes at every boot and
+// keeps no record of what it last published, so the route is what decides whether anything
+// changed; a boot whose list matches the stored one writes no row there and appends no event.
+type GatedStepsPublish struct {
+	Project string       `json:"project"`
+	Steps   []DesignStep `json:"steps"`
+}
+
+func (GatedStepsPublish) OutboxKind() OutboxKind { return OutboxKindGatedStepsPublish }
+
 // IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at the repository's default
 // branch, where GitHub does not have it yet, before any role of the issue starts: GitHub can refuse
 // the push that creates a branch of a large repository, where it takes a push that moves one. A
@@ -835,6 +857,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindGatedStepsPublish:
+		value := GatedStepsPublish{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindIssueBranch:
 		value := IssueBranch{}
 		if err := decoder.Decode(&value); err != nil {
@@ -998,6 +1026,15 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Packet == "" {
 			return fmt.Errorf("merge queue publish requires packet")
+		}
+	case GatedStepsPublish:
+		if value.Project == "" {
+			return fmt.Errorf("a gated-steps publish requires the project whose row it writes")
+		}
+		for _, step := range value.Steps {
+			if !step.Valid() {
+				return fmt.Errorf("a gated-steps publish names %q, which is no design-gate step", step)
+			}
 		}
 	case AutoMergeDisable:
 		if value.Number <= 0 {

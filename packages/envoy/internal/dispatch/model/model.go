@@ -210,11 +210,31 @@ type AnchorInput struct {
 
 // Project groups native issues under a short key.
 type Project struct {
-	Key       string    `json:"key"`
-	Name      string    `json:"name"`
-	OpenAsks  int       `json:"open_asks"`
-	CreatedAt time.Time `json:"created_at"`
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	OpenAsks int    `json:"open_asks"`
+	// GatedSteps are the design-gate steps the Legion deployment that serves this project
+	// gates, in the order it gates them, as its daemon last published them
+	// (PUT /api/v1/projects/{key}/gated-steps). Each one names a document of a root issue a
+	// person must approve before the tree's work runs. The empty list is a deployment that
+	// gates nothing and a deployment that has not published yet alike: neither holds a step
+	// waiting for a person, so a reader need not tell them apart.
+	GatedSteps []string  `json:"gated_steps"`
+	CreatedAt  time.Time `json:"created_at"`
 }
+
+// GatedStepDecisions, GatedStepCriteria and GatedStepSpec are the three design-gate steps
+// Project.GatedSteps names, each one a document of the root issue: the issue's decisions
+// document, its Verification document, and its primary document. GatedStepsKnown is the set in
+// the order the gate runs them, which the route checks a published list against and the
+// database's own check on projects.gated_steps repeats.
+const (
+	GatedStepDecisions = "decisions"
+	GatedStepCriteria  = "criteria"
+	GatedStepSpec      = "spec"
+)
+
+var GatedStepsKnown = []string{GatedStepDecisions, GatedStepCriteria, GatedStepSpec}
 
 // RepoProject assigns an external repository to a native Dispatch project. Default marks the one
 // mapping of the project an issue with no repository of its own, and none on its parent chain,

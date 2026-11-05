@@ -190,6 +190,24 @@ const legionGateView = z.object({
   approvedVersion: z.number().int().positive().nullable(),
 });
 
+/** `api.GatedStepView` — one step of the deployment's design gate as one issue stands in it
+ * (contract 50). `artifactId` and `currentVersion` are the document its architect registered for
+ * the step and that document's current version, absent until one is registered; `approvedVersion`
+ * is the version a person approved, null until one does. `status` is where the step stands:
+ * `unregistered` (the deployment gates it and the issue holds no record of it, so it holds the
+ * tree's work), `waiting` (registered, and no person has reviewed its current version),
+ * `approved` (a person approved its current version, the one status that lets the work past the
+ * step) or `changes_requested` (its reviewer asked for changes at its current version, with
+ * `changesReason` the reason they gave; absent under every other status). */
+const legionGatedStepView = z.object({
+  step: z.enum(["decisions", "criteria", "spec"]),
+  artifactId: nonEmptyString.optional(),
+  currentVersion: z.number().int().positive().optional(),
+  approvedVersion: z.number().int().positive().nullable(),
+  status: z.enum(["unregistered", "waiting", "approved", "changes_requested"]),
+  changesReason: nonEmptyString.optional(),
+});
+
 /** `api.SlotView` — the admission slot the issue occupies and when it took it. */
 const legionSlotView = z.object({
   index: z.number().int().nonnegative(),
@@ -338,6 +356,13 @@ const legionIssue = z.object({
   workers: z.partialRecord(z.string(), legionPhaseView),
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
+  /** The deployment's design gate as this issue stands in it, one entry for each step the
+   * deployment gates, in the order it gates them (contract 50). This daemon always writes it, and
+   * it is empty for an issue that is not its tree's root, for a deployment that gates no step and
+   * for an issue the workflow does not record; a daemon before contract 50 writes none, which is
+   * why a reader takes it as absent rather than as an empty list. `designGate` above is unchanged
+   * beside it, the `spec` step's row, which a reader that asks one question of one gate takes. */
+  gatedSteps: z.array(legionGatedStepView).optional(),
   slot: legionSlotView.optional(),
   waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional(),

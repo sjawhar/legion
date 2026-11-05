@@ -285,9 +285,10 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
 // checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
-// from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
-// written before the record carried its repository. build is the daemon's own build (Build), which
-// the engine and the boot fact compare against the open production checks.
+// from, the Apps' logins, the App tokens minted for every served owner, the fill of any record
+// written before the record carried its repository, then the deployment's design-gate steps
+// queued for the project's Dispatch row (queueGatedStepsPublish). build is the daemon's own
+// build (Build), which the engine and the boot fact compare against the open production checks.
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
@@ -370,7 +371,33 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
 	}
+	if err := w.queueGatedStepsPublish(ctx); err != nil {
+		return nil, err
+	}
 	return w, nil
+}
+
+// queueGatedStepsPublish queues the deployment's design-gate steps for the project's Dispatch
+// row. The boot queues it rather than writing it, so a Dispatch that is down or has not got the
+// route refuses no boot; the outbox's first sweep after attach runs the row.
+//
+// It queues at every boot, because the daemon stores no list it last published: the route writes
+// only a difference (`gated_steps is distinct from`), so a boot on an unchanged list touches no
+// row and appends no event. A row of the kind still in the outbox is the one this boot would
+// write, so a restart loop queues no second.
+func (w *workflowRuntime) queueGatedStepsPublish(ctx context.Context) error {
+	var pending bool
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		pending, err = w.records.GatedStepsPending(ctx, tx, w.dispatchProject)
+		return err
+	}); err != nil {
+		return fmt.Errorf("read whether %s has a gated-steps publish pending: %w", w.dispatchProject, err)
+	}
+	if pending {
+		return nil
+	}
+	return w.enqueueOutbox(ctx, w.dispatchProject, record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps})
 }
 
 // wakeOutbox is the records' wake (projectRecords.wake): it reaches the outbox attach stored, and

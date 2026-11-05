@@ -35,7 +35,7 @@ type Config struct {
 	// Project once where it is built (store.Store.PodRecordsOf), so this configuration carries
 	// one spelling of the project and a wake can file no row under another. Nil, as in every
 	// engine built without the pod tables, wakes nothing and records no listener report.
-	Pods           Pods
+	Pods Pods
 	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order a
 	// root's architect takes them. Every hold the gate puts on a tree's work reads the whole list
 	// (classify.DesignGatesOpen), and the empty list gates no step, which is `gates.design: off`.

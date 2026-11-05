@@ -199,6 +199,10 @@ func (r *statusRecorder) WebhookAppInstalled(context.Context, string) (bool, err
 	return true, nil
 }
 
+func (r *statusRecorder) PutGatedSteps(context.Context, string, []string) error {
+	return nil
+}
+
 var _ dispatch.Client = (*statusRecorder)(nil)
 
 func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder, *statusRecorder) {

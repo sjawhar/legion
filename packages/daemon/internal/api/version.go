@@ -542,4 +542,21 @@ package api
 // (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 49
+//
+// 50: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
+// record of `GET /legion/v1/state` gains `gatedSteps`, one entry for each step the deployment
+// gates, in the order it gates them (`api.GatedStepView`): the `step` (`decisions`, `criteria` or
+// `spec`), the document its architect registered for that step and that document's
+// `currentVersion` (both absent until one is registered), the `approvedVersion` a person
+// approved (null until one does), the `status` — `unregistered`, `waiting`, `approved` or
+// `changes_requested` — and `changesReason`, what the reviewer asked for, on that last status
+// alone. It is absent, as `designGate` is, from an issue that is not its tree's root, from every
+// issue of a deployment that gates no step and from an issue the workflow does not record, so the
+// wire carries no empty list. `designGate` is unchanged beside it, the spec step's row as it has
+// always been, so a reader that asks one question of one gate reads what it read before.
+// `GET /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a
+// contract below 50 is served the issues without the field (api's stateFor, withoutGatedSteps),
+// as a caller below 49 is served them without the memory draw and one below 46 without the claim
+// views' update rounds; the three compose, and every reader from 50 on takes the field as
+// optional.
+const DaemonAPIVersion = 50

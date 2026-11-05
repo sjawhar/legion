@@ -280,6 +280,7 @@ func (d *pilotDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProjec
 	return nil, nil
 }
 func (d *pilotDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *pilotDispatch) PutGatedSteps(context.Context, string, []string) error     { return nil }
 
 // filteringDispatch honors the statuses argument exactly as the real HTTPClient does: only
 // summaries whose status is in the requested set, or every summary when the caller asks for none.
@@ -332,6 +333,9 @@ func (d *filteringDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoPr
 }
 func (d *filteringDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
 	return true, nil
+}
+func (d *filteringDispatch) PutGatedSteps(context.Context, string, []string) error {
+	return nil
 }
 
 // reconcile's boot listing read only todo through retro, so a root moved to
