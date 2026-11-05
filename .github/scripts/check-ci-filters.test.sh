@@ -1001,33 +1001,56 @@ check "fails" "$(is "$status" 1)"
 check "names the entry and the manifest" \
   "$(contains "$out" "::error file=.github/scripts/ci_job_reads.py::WORKSPACES names packages/gone, which the root manifest's workspaces does not")"
 
-echo "case: every filter of a job that compiles packages/broker-client selects it"
+echo "case: every filter of a job that compiles or reads another package's files selects them"
 # Rule 14 holds the root manifest's workspaces equal to WORKSPACES, which makes every Bun job
 # declare a read of each workspace's manifest. It says nothing about a workspace's sources, so a
-# package can be compiled by a job whose filter never selects it. packages/broker-client is:
-# packages/envoy-client/src/broker-credential.ts:21-22 imports @legion/broker-client/environment
-# and /token-client, and that package's exports map every entry to ./src/*.ts, so each of the
-# five packages below holds its seven sources in its own tsc program, measured with
-# `bunx tsc --listFilesOnly`. A filter that gates such a job and does not select the package
-# leaves the change that breaks that typecheck starting no job at all, on the pull request and
-# again on the merge group that lands it. The sixth pair is a file rather than a package:
-# packages/broker-client/src/__tests__/wire.test.ts:25-26 reads
-# packages/envoy/internal/brokerclient/testdata/wire.json by relative path — the Go package's own
-# corpus, "that file itself, never a copy" — so a field added there, which is the change that
-# file exists to force, must start the one job that replays it in TypeScript.
+# package can be compiled by a job whose filter never selects it, and a test can read a file of
+# another package that no filter of its job names. Rule 1 does not see either, because for the
+# Bun gates the declared reads are hand-kept beside the filter and the two go short together.
+# Each pair below was measured rather than reasoned: COMPILERS with
+# `bunx tsc --listFilesOnly` in the package, or `bun build --sourcemap=external` of the entry
+# the job runs, and READS by following the relative path the named test resolves. A filter that
+# gates such a job and does not select what it compiles or reads leaves the change that breaks
+# it starting no job at all, on the pull request and again on the merge group that lands it.
+#
+# This list is hand-kept, like the reads it guards: it holds the pairs somebody has measured,
+# and nothing derives it, so a job added later is not held until its pair is written here.
 uncovered=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$script_dir" python3 - "$script_dir/../workflows/ci.yaml" <<'PY'
 import sys, yaml, workflow_paths as wp
 from pathlib import Path
 
+SOURCE = "packages/broker-client/src/token-client.ts"
+
+# Each job's own tsc program, or the runtime closure of the entry it runs, holds the seven
+# sources of packages/broker-client, which packages/envoy-client/src/broker-credential.ts:21-22
+# imports and whose exports map every entry to ./src/<module>.ts.
 COMPILERS = (
     ("claude-envoy", "claude_envoy"),
     ("envoy-client", "envoy_client"),
+    ("envoy-session-stall", "envoy_session_stall"),
     ("pi-envoy", "pi_envoy"),
     ("pi-legion", "pi_legion"),
     ("pi-shared", "pi_shared"),
 )
-SOURCE = "packages/broker-client/src/token-client.ts"
-CORPUS = "packages/envoy/internal/brokerclient/testdata/wire.json"
+
+# A file of another package that the job's own tests compile or read by relative path, with the
+# test that reaches it.
+READS = (
+    ("envoy_client", "packages/envoy/internal/brokerclient/testdata/wire.json",
+     "packages/broker-client/src/__tests__/wire.test.ts:25-26"),
+    ("contracts", "packages/envoy/internal/dispatch/text/testdata/dispatch-block-id-encodings.json",
+     "packages/contracts/src/dispatch-block-ref.test.ts:98-102"),
+    ("contracts", "packages/daemon/internal/intake/testdata/dispatch/server-started.json",
+     "packages/contracts/src/dispatch-api.test.ts:293-300"),
+    ("dispatch_ui", "packages/envoy/internal/dispatch/pmdoc/schema/block-node-types.json",
+     "packages/proof-editor/tests/ask-concurrent-edit.test.ts:269-275"),
+    ("claude_envoy", "packages/envoy-client/test/stall-proxy.ts",
+     "packages/claude-envoy/tests/envoy-channel-stall.test.ts:9-11"),
+    ("pi_legion", "packages/dispatch/e2e/harness-processes.ts", "packages/pi-legion's tsc program"),
+    ("pi_legion", "packages/dispatch/e2e/harness-broker.ts", "packages/pi-legion's tsc program"),
+    ("pi_legion", "packages/dispatch/e2e/harness-real-broker.ts", "packages/pi-legion's tsc program"),
+    ("pi_legion", "packages/dispatch/e2e/harness-signin.ts", "packages/pi-legion's tsc program"),
+)
 
 doc = yaml.safe_load(Path(sys.argv[1]).read_text())
 step = next(s for s in doc["jobs"]["changes"]["steps"] if s.get("id") == "filter")
@@ -1042,13 +1065,13 @@ def covers(name, path):
     return wp.Filter(flat(filters[name])).covers(path)
 
 
-bad = [f"{job} ({name})" for job, name in COMPILERS if not covers(name, SOURCE)]
-if not covers("envoy_client", CORPUS):
-    bad.append("envoy-client (envoy_client) for the wire corpus its broker-client tests read")
-print(", ".join(bad))
+bad = [f"{job} ({name}) compiles {SOURCE}" for job, name in COMPILERS if not covers(name, SOURCE)]
+bad += [f"{name} does not select {path}, which {who} reads"
+        for name, path, who in READS if not covers(name, path)]
+print("; ".join(bad))
 PY
 )
-check "no filter gates a job that compiles packages/broker-client without selecting it" \
+check "no filter gates a job that compiles or reads files it does not select" \
   "$(is "$uncovered" "")"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
