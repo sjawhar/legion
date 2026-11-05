@@ -2007,8 +2007,9 @@ A hit on an issue that is `done` ranks below every hit on an open owner, since k
 `GET` and `POST /api/v1/projects/{key}/related` (`dispatch related`) run the same check on a title and a text and write nothing.
 
 A new ask on an issue carries one more field beside the check's own result: `proxy`, set where the issue's assignee has a proxy skill, a skill that holds that person's recorded advice.
-It names the skill (`skill`), the person (`target`), and `answers`, what that person has already answered on the issue and on its parent, newest answer first and at most 5, each `{ref, line}`: the answered ask's `dispatch://` address, and the answer's first line that is not blank, trimmed and cut at 200 runes with an ellipsis, `line` empty for an answer that chose options and wrote no words.
-An approval Dispatch carried forward is left out, by the mark the carry writes on the answer itself (`carried`, `model.AskAnswer.Carried`), never by its wording: the carry answers in the person's name, with their user, their act and their actor on the event, and the sentence it writes as the text is one a person may write too.
+It names the skill (`skill`), the person (`target`), and `answers`, what that person has already answered to a question on the issue or on its parent, newest answer first and at most 5, each `{ref, line}`: the answered ask's `dispatch://` address, and the answer's first line that is not blank, trimmed and cut at 200 runes with an ellipsis, `line` empty for an answer that chose options and wrote no words.
+An approval request's answer is never listed, whoever gave it and whenever it was given: it is a sign-off on a document version, which the document's own approval state shows, and the Approve a carried approval writes on an open request (`docs.answerApprovalAsk`) is words the person never wrote at all.
+The rule reads `asks.kind`, which every row has carried since `0014`, and never the wording of an answer: a person's own answer that opens with the carry's sentence is theirs and is listed.
 The table of people with a proxy skill is `askProxySkills` in `internal/dispatch/api/ask_proxy.go`, and a second person is one row.
 The field refuses nothing and asks for no further ask; an issue whose assignee has no proxy skill, and an ask on a document, carry none.
 

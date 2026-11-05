@@ -47,14 +47,15 @@ const askProxyAssignee = `select coalesce(assignee, '') from issues where key = 
 // string in the row's jsonb and is compared as an instant, not as text: Go writes a whole second
 // without a fraction, so "12:00:00Z" sorts above "12:00:00.1Z" as text and below it as a time.
 //
-// An approval Dispatch carried forward is left out. The carry answers an open approval request
-// in the person's name, with the person as the answer's user and as the ask.answered event's
-// actor: words the person never wrote, on a question nobody asked them, and left in, a run of
-// them would push the person's real answers out of the few rows the advisory lists. What tells
-// them apart is the mark the carry writes on the answer itself (model.AskAnswer.Carried, written
-// by docs.answerApprovalAsk alone), never the wording of its text: the carry's sentence is a
-// sentence a person may write too, and an answer of theirs that opens with it is theirs. An
-// answer stored before the mark existed has none and is read as the person's, as it was then.
+// Only a question's answer is listed. An approval request is not a question an agent asked for
+// advice: its answer is a sign-off on a document version, which the document's own approval
+// state already shows, and the one Dispatch writes itself - the Approve a carried approval puts
+// on the open request in the person's name (docs.answerApprovalAsk) - is words the person never
+// wrote at all. Left in, a run of those would push the person's real answers out of the few rows
+// the advisory lists. The kind is on every ask row and always has been (migration 0014), so an
+// approval answered before this rule is left out as one answered after it; and nothing here
+// reads the wording of an answer, which would drop a person's own answer that happens to open
+// with the carry's sentence.
 const askProxyAnswers = `
 with scope as (
 	select i.key from issues i where i.key = $1
@@ -63,8 +64,7 @@ with scope as (
 )
 select a.issue_key, a.id::text, coalesce(a.answer->>'text', '')
   from asks a join scope on scope.key = a.issue_key
- where a.state = 'answered' and lower(a.answer->>'user') = $2
-   and coalesce(a.answer->>'carried', '') <> 'true'
+ where a.kind = 'question' and a.state = 'answered' and lower(a.answer->>'user') = $2
  order by (a.answer->>'at')::timestamptz desc nulls last, a.id desc
  limit $3`
 

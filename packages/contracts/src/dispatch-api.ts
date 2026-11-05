@@ -1343,12 +1343,6 @@ export interface AskAnswer {
   /** The agent that answered for the person `user` names, absent where the person answered
    *  themselves. Whether the answer can carry an approval is read from its `scopes`. */
   readonly act?: ActorAct;
-  /** The one answer no person wrote: the `Approve` an approval Dispatch carries forward writes
-   *  on the open request in that person's name. The user, the act and the `ask.answered` event's
-   *  actor are all the person's, so this is what tells a carry from their own words. No caller
-   *  writes it, and an answer stored before it existed carries none. Mirrors
-   *  `model.AskAnswer.Carried`. */
-  readonly carried?: boolean;
 }
 
 export interface AskResolution {

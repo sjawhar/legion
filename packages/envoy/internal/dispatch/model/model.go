@@ -1415,13 +1415,6 @@ type AskOption struct {
 // person's either way, which every reader that matches User against the answering actor relies
 // on. The asks row's answer is jsonb, so an answer stored before this field existed simply
 // carries no act.
-//
-// Carried marks the one answer no person wrote: the Approve that an approval Dispatch carries
-// forward writes on the open request in that person's name (docs.answerApprovalAsk, its only
-// writer). The user, the act and the ask.answered event's actor are all the person's, so nothing
-// else in the row tells the two apart, and a reader that wants the person's own words must read
-// this field. No caller writes it. An answer stored before the field existed carries none, which
-// reads as false: a carry from then is read as a person's answer, as it was before the field.
 type AskAnswer struct {
 	ID       string    `json:"id,omitempty"`
 	User     string    `json:"user"`
@@ -1429,7 +1422,6 @@ type AskAnswer struct {
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
 	Act      *ActorAct `json:"act,omitempty"`
-	Carried  bool      `json:"carried,omitempty"`
 }
 
 // UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer

@@ -3,8 +3,10 @@ package api
 import (
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -178,14 +180,17 @@ func setAnswerTime(t *testing.T, database *store.Store, askID, at string) {
 
 // An approval Dispatch carried forward in the target's name is not one of their answers. The
 // carry answers the open approval request as the person: their user on the answer, their actor
-// on the event, and a sentence of Dispatch's as the text, so only the mark the carry writes on
-// the answer (model.AskAnswer.Carried) tells it from words they wrote. The four steps that make
-// one: the person approves version 1, the agent changes the document and asks for approval, the
-// agent restores the approved text, which answers the request, and an ask then lists the
-// person's answers. Left in, a run of carries would push their real answers out of the few rows
-// the advisory lists.
+// on the event, and a sentence of Dispatch's as the text, so nothing in the answer itself tells
+// it from words they wrote. The four steps that make one: the person approves version 1, the
+// agent changes the document and asks for approval, the agent restores the approved text, which
+// answers the request, and an ask then lists the person's answers. Left in, a run of carries
+// would push their real answers out of the few rows the advisory lists.
+//
+// The row the carry stores is the row every carry has ever stored - the ask's kind is what the
+// advisory reads, and the answer carries no field of its own - so this is the upgrade case too:
+// a carry written before this rule is left out exactly as one written after it.
 func TestAskProxyAdviceLeavesOutAnApprovalDispatchCarried(t *testing.T) {
-	handler := approvalCarryHandler(t)
+	handler, database, _ := settlingCarryDocuments(t, 20*time.Millisecond)
 	person, _ := proxyPerson(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Carry the approval under a proxy", restoreSpec)
 
@@ -201,9 +206,10 @@ func TestAskProxyAdviceLeavesOutAnApprovalDispatchCarried(t *testing.T) {
 	agentEdit(t, handler, issue.PrimaryArtifactID, 3, replaceOp("behind a flag and a canary.", "behind a flag."))
 	carried := readBlockAsk(t, handler, request.ID)
 	if carried.State != "answered" || carried.Answer == nil || model.CanonicalLogin(carried.Answer.User) != person ||
-		carried.Answer.Text == nil || *carried.Answer.Text != restoreSentence(1) || !carried.Answer.Carried {
-		t.Fatalf("the request after the restore = state %q answer %#v, want the carry in %s's name, marked carried", carried.State, carried.Answer, person)
+		carried.Answer.Text == nil || *carried.Answer.Text != restoreSentence(1) {
+		t.Fatalf("the request after the restore = state %q answer %#v, want the carry in %s's name", carried.State, carried.Answer, person)
 	}
+	requireStoredAnswerFields(t, database, request.ID, []string{"at", "selected", "text", "user"})
 	setIssueAssignee(t, handler, issue.Key, person)
 
 	_, suggestions := openProxyAsk(t, handler, issue.Key, "Which region takes the first wave?", "alice")
@@ -250,5 +256,51 @@ func TestAskProxyAdviceKeepsAnAnswerThatOpensWithTheCarrysWording(t *testing.T) 
 	want := []model.AskProxyAnswer{{Ref: "dispatch://" + issue + "/ask/" + answered, Line: worded}}
 	if !reflect.DeepEqual(proxy.Answers, want) {
 		t.Fatalf("proxy answers = %+v, want the answer %s wrote, whatever it opens with", proxy.Answers, person)
+	}
+}
+
+// requireStoredAnswerFields reads the ask's answer as the row holds it and requires exactly the
+// given keys, so a test that calls a stored shape the pre-change shape has said so against the
+// bytes rather than against the struct that decoded them.
+func requireStoredAnswerFields(t *testing.T, database *store.Store, askID string, want []string) {
+	t.Helper()
+	var keys []string
+	if err := database.Pool.QueryRow(t.Context(),
+		`select coalesce(array(select jsonb_object_keys(answer) order by 1), '{}') from asks where id = $1::uuid`,
+		askID).Scan(&keys); err != nil {
+		t.Fatalf("read the stored answer of %s: %v", askID, err)
+	}
+	if !slices.Equal(keys, want) {
+		t.Fatalf("the stored answer of %s holds %v, want %v", askID, keys, want)
+	}
+}
+
+// A person's own approval is not listed either: it is a sign-off on a document version, which
+// the document's approval state shows, and the advisory lists answers to questions.
+func TestAskProxyAdviceLeavesOutThePersonsOwnApproval(t *testing.T) {
+	handler, _, _ := settlingCarryDocuments(t, 20*time.Millisecond)
+	person, _ := proxyPerson(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Approve under a proxy", restoreSpec)
+
+	answered, _ := openProxyAsk(t, handler, issue.Key, "Does the service ship behind a flag?", "alice")
+	answerProxyAsk(t, handler, answered, "It ships behind a flag.", person)
+	request := requestApproval(t, handler, issue.PrimaryArtifactID)
+	approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+request.ID+"/answer",
+		map[string]any{"selected": []string{"Approve"}, "text": "Ship it."}, person)
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve the request as %s: status=%d body=%s", person, approved.Code, approved.Body.String())
+	}
+	setIssueAssignee(t, handler, issue.Key, person)
+
+	_, suggestions := openProxyAsk(t, handler, issue.Key, "Which region takes the first wave?", "alice")
+	proxy := suggestions.Proxy
+	if proxy == nil {
+		t.Fatalf("advice.suggestions = %+v, want the proxy advisory for %s", suggestions, person)
+	}
+	want := []model.AskProxyAnswer{{
+		Ref: "dispatch://" + issue.Key + "/ask/" + answered, Line: "It ships behind a flag.",
+	}}
+	if !reflect.DeepEqual(proxy.Answers, want) {
+		t.Fatalf("proxy answers = %+v, want the answer to the question alone, never the approval %s", proxy.Answers, request.ID)
 	}
 }
