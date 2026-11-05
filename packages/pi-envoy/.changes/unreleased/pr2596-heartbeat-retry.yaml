@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+    A session registration that fails is tried once more between 20 and 40 seconds later, instead
+    of waiting the whole 90-second heartbeat out: a listener slow enough to time the call out used
+    to cost the pane three missed refreshes and drop it out of every live listing. The extra call
+    is one per failing session per interval — a second failure waits for the next heartbeat rather
+    than asking again — and its delay is drawn afresh each time, so the panes one slow listener
+    failed together come back spread out instead of in a burst. Any registration that succeeds
+    returns the session to the plain interval at once. The warning says how far out the extra call
+    is.
