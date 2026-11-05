@@ -436,9 +436,14 @@ func TestASettlementTellsTheRoleItWokeNoMessageOfItself(t *testing.T) {
 		name  string
 		phase phase.Phase
 		woken claim.Role
+		// told is every role the settlement must still reach, each exactly once: the roles
+		// tellChecks addresses less the one this settlement woke.
+		told []claim.Role
 	}{
-		{"the implementer holds the phase", phase.Implementing, claim.RoleImplementer},
-		{"the tester holds it, and the implementer is told", phase.Testing, claim.RoleTester},
+		{"the implementer holds the phase", phase.Implementing, claim.RoleImplementer,
+			[]claim.Role{claim.RoleArchitect}},
+		{"the tester holds it, and the implementer is told", phase.Testing, claim.RoleTester,
+			[]claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newWakeRig(t)
@@ -449,11 +454,15 @@ func TestASettlementTellsTheRoleItWokeNoMessageOfItself(t *testing.T) {
 			rig.apply("settled", settlement("head1", "build"))
 
 			told := roleMessageTokens(t, rig.pool)
-			if slices.Contains(told, string(wakeToken(t, tc.woken))) {
-				t.Errorf("the settlement told the %s it woke: %v", tc.woken, told)
+			want := make([]string, 0, len(tc.told))
+			for _, role := range tc.told {
+				want = append(want, string(wakeToken(t, role)))
 			}
-			if want := string(wakeToken(t, claim.RoleArchitect)); !slices.Contains(told, want) {
-				t.Errorf("role messages = %v, want the architect's %s among them", told, want)
+			slices.Sort(told)
+			slices.Sort(want)
+			if !slices.Equal(told, want) {
+				t.Errorf("the settlement's role messages = %v, want %v: the %s it woke is told by its wake task alone",
+					told, want, tc.woken)
 			}
 
 			// The listener reports that very message, which is the sequence the defect was in.
