@@ -111,7 +111,16 @@ func NewReading(store record.Store, read func() Config, log *slog.Logger) *Engin
 // change applied while a fact is being decided moves nothing under it. The engine itself holds
 // no decision's configuration — two facts are decided at once, each on its own — so this is a
 // copy of it, which is three fields and the one read.
+//
+// An engine that is already a decision's answers itself. Every exported method begins here, and
+// a decision calls them — Apply reaches ReenterChild, which reaches Ancestry, which reaches
+// NoteRepositoryKept, and AdoptionRefusal and Ancestry reach RanAsRoot — so without this the
+// decision would read the holder again partway through and finish on a configuration it did not
+// start on.
 func (e *Engine) decision() *Engine {
+	if e.settled != nil {
+		return e
+	}
 	settled := e.readConfig()
 	return &Engine{store: e.store, readConfig: e.readConfig, settled: &settled, log: e.log}
 }

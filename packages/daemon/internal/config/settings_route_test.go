@@ -61,7 +61,7 @@ func TestAProjectedCallerSetsThePlainDataRowsAndNothingElse(t *testing.T) {
 	for _, path := range []string{
 		"admission_cap", "review_round_cap", "max_fix_attempts", "linger_hours",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit",
-		"worker_boot_timeout_seconds", "tree_stop_timeout_seconds", "gates.design",
+		"worker_boot_timeout_seconds", "tree_stop_timeout_seconds",
 	} {
 		if admitted, why := CallerProjected.Admits(path); !admitted {
 			t.Errorf("a projected token may not set %s (%s), and it is plain data", path, why)
@@ -74,6 +74,8 @@ func TestAProjectedCallerSetsThePlainDataRowsAndNothingElse(t *testing.T) {
 		"settings_route.oidc_issuer", "settings_route.audience", "settings_route.service_accounts",
 		"instructions", "omp_invocation", "omp_launch_prefix", "runtime.kubernetes.image",
 		"runtime.kubernetes.pod.env", "controller", "repository_renames",
+		// The design gate is plain data by its row and is refused all the same (below).
+		"gates", "gates.design",
 	} {
 		admitted, why := CallerProjected.Admits(path)
 		if admitted {
@@ -94,5 +96,34 @@ func TestAProjectedCallerSetsThePlainDataRowsAndNothingElse(t *testing.T) {
 	// setting, so no caller learns which paths exist from this answer alone.
 	if admitted, _ := CallerProjected.Admits("no_such_setting"); !admitted {
 		t.Error("a path the class table does not hold is refused by the caller rule, want it left to the apply")
+	}
+}
+
+// The design gate is the one plain-data key a projected ServiceAccount token may not set, and it
+// is refused by name: a gate is the rule that says a person decides a tree's specification, and
+// a caller holding a token the whole service shares is not the party that may switch that rule
+// off. Its row is a decision row still — the operator bearer and the daemon's own file change it
+// as they change any other key — so the rule lives in the caller and not in the table.
+func TestAProjectedCallerIsRefusedTheGatesBlockByName(t *testing.T) {
+	if admitted, why := CallerProjected.Admits("admission_cap"); !admitted {
+		t.Fatalf("a projected token may not set admission_cap (%s), and it is plain data", why)
+	}
+	for _, path := range []string{"gates", "gates.design"} {
+		admitted, why := CallerProjected.Admits(path)
+		if admitted {
+			t.Errorf("a projected token may set %s, want it refused by name", path)
+		}
+		if why == "" {
+			t.Errorf("the refusal of %s says nothing", path)
+		}
+	}
+	// The row keeps its class, its holder and its answer to every other reader: only the
+	// projected caller is refused it.
+	row, known := ClassOf("gates.design")
+	if !known || row.Class != ClassDecision || !row.Plain() {
+		t.Fatalf("gates.design's row = %+v, want the decision row it was", row)
+	}
+	if admitted, why := CallerOperator.Admits("gates.design"); !admitted {
+		t.Fatalf("the operator bearer may not set gates.design (%s)", why)
 	}
 }

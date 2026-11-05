@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -244,7 +246,7 @@ func TestARereadRebuildsOnlyTheHoldersWhoseCredentialFilesMoved(t *testing.T) {
 		}
 	}
 	cfg := &config.Config{OperatorTokenFile: operatorFile, NatsNkeySeedFile: seedFile}
-	rebuild := newRebuilder(quietLogger())
+	rebuild := newRebuilder(quietLogger(), config.Settled(*cfg))
 	server := &countingCredentialHolder{
 		countingHolder: countingHolder{name: config.HolderAPIServer},
 		files:          func(cfg *config.Config) []string { return []string{cfg.OperatorTokenFile} },
@@ -255,17 +257,19 @@ func TestARereadRebuildsOnlyTheHoldersWhoseCredentialFilesMoved(t *testing.T) {
 	}
 	rebuild.register(server, natsClient)
 
-	// The first reread holds no digest of its own, so it reads every holder's files: the daemon
-	// has no record of what they said when it booted on them.
+	// The first reread after boot rebuilds nothing: each holder was built from its files as they
+	// stand, and what they said was recorded as the holder was registered. Without that the
+	// kubelet's first refresh of any watched directory — `agent_secrets.token_file`'s among them
+	// — would reconnect NATS, migrate every durable consumer and drop every App lease.
 	rebuild.rereadCredentials(cfg)
-	if server.built != 1 || natsClient.built != 1 {
-		t.Fatalf("the first reread rebuilt the API server %d times and NATS %d, want one each", server.built, natsClient.built)
+	if server.built != 0 || natsClient.built != 0 {
+		t.Fatalf("the first reread rebuilt the API server %d times and NATS %d, want neither: nothing they read has moved since boot", server.built, natsClient.built)
 	}
 
-	// A wake whose watched files did not move rebuilds nothing.
+	// A wake whose watched files did not move rebuilds nothing either.
 	rebuild.rereadCredentials(cfg)
-	if server.built != 1 || natsClient.built != 1 {
-		t.Fatalf("a reread over unmoved files rebuilt the API server %d times and NATS %d, want the one each the first reread did", server.built, natsClient.built)
+	if server.built != 0 || natsClient.built != 0 {
+		t.Fatalf("a reread over unmoved files rebuilt the API server %d times and NATS %d, want neither", server.built, natsClient.built)
 	}
 
 	// A rotation of the operator bearer in place rebuilds the API server, and only it.
@@ -273,17 +277,17 @@ func TestARereadRebuildsOnlyTheHoldersWhoseCredentialFilesMoved(t *testing.T) {
 		t.Fatalf("rotate the operator token: %v", err)
 	}
 	rebuild.rereadCredentials(cfg)
-	if server.built != 2 {
-		t.Fatalf("the API server was rebuilt %d times over a rotated operator_token_file, want 2", server.built)
+	if server.built != 1 {
+		t.Fatalf("the API server was rebuilt %d times over a rotated operator_token_file, want once", server.built)
 	}
-	if natsClient.built != 1 {
-		t.Fatalf("NATS was rebuilt %d times over a rotation of someone else's file, want the one the first reread did", natsClient.built)
+	if natsClient.built != 0 {
+		t.Fatalf("NATS was rebuilt %d times over a rotation of someone else's file, want never", natsClient.built)
 	}
 
 	// And the wake after that rotation, with the file settled again, rebuilds nothing.
 	rebuild.rereadCredentials(cfg)
-	if server.built != 2 || natsClient.built != 1 {
-		t.Fatalf("the reread after the rotation rebuilt the API server %d times and NATS %d, want 2 and 1", server.built, natsClient.built)
+	if server.built != 1 || natsClient.built != 0 {
+		t.Fatalf("the reread after the rotation rebuilt the API server %d times and NATS %d, want 1 and 0", server.built, natsClient.built)
 	}
 }
 
@@ -345,7 +349,7 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the workflow's NATS: %v", err)
 	}
-	rebuild := newRebuilder(w.log)
+	rebuild := newRebuilder(w.log, config.Settled(*live.Snapshot()))
 	live.OnChange(rebuild.observe)
 	w.nats = newNATSHolder(conn, consumers, w.log, open)
 	rebuild.register(w.nats)
@@ -374,6 +378,56 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	}
 	if w.nats.intake() == nil {
 		t.Fatal("the rebuilt client carries no durable consumers")
+	}
+}
+
+// A NATS rebuild hears every repository the daemon hears now, not the set it booted on. The
+// repositories GitHub intake hears move while the daemon runs — a mapping read replaces them on
+// the consumers themselves (refreshMapping's SetRepositories) and names no setting, so nothing
+// is rebuilt for it — and a rebuild that rewrote the shared durable consumer's FilterSubjects
+// back to the boot's list would leave a repository mapped since boot unheard: JetStream would
+// skip its merges, check runs and reviews, and redeliver none of them when the filter widened
+// again.
+func TestANatsRebuildHearsTheRepositoriesMappedSinceBoot(t *testing.T) {
+	url := testnats.URL(t)
+	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("connect to the test NATS server: %v", err)
+	}
+	t.Cleanup(probe.Close)
+	js, err := jetstream.New(probe)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+	logs := &syncBuffer{}
+	w := grantWorkflow(t, logs)
+	cfg := daemonGrantConfig(url)
+	// The boot: the consumers are opened through the daemon's own path, with the repositories
+	// the mapping serves now (grantWorkflow's sjawhar/legion).
+	if err := w.connect(t.Context(), cfg, newRebuilder(w.log, config.Settled(cfg)), func(string) (string, bool) { return "", false }); err != nil {
+		t.Fatalf("connect the workflow's NATS: %v", err)
+	}
+	t.Cleanup(w.stop)
+	mapped := ghrepo.MustParse("acme/widgets")
+	if err := w.nats.intake().SetRepositories(t.Context(), append(w.nats.intake().Repositories(), mapped)); err != nil {
+		t.Fatalf("hear the repository mapped after boot: %v", err)
+	}
+
+	// Any rebuild: a rotated seed, a changed URL, a reread of the credential files.
+	if err := w.nats.rebuild(&cfg); err != nil {
+		t.Fatalf("rebuild the NATS holder: %v", err)
+	}
+
+	if heard := w.nats.intake().Repositories(); !slices.Contains(heard, mapped) {
+		t.Fatalf("after the rebuild GitHub intake hears %v, want the repository mapped since boot among them", heard)
+	}
+	stream, err := js.Stream(t.Context(), "ENVOY_NOTIFICATIONS")
+	if err != nil {
+		t.Fatalf("open the notification stream: %v", err)
+	}
+	if filters := githubFiltersOf(t, stream, cfg.Project); !slices.Contains(filters, "notifications.github.acme.widgets.>") {
+		t.Fatalf("the GitHub durable consumer filters on %v, want the subject of the repository mapped since boot among them", filters)
 	}
 }
 

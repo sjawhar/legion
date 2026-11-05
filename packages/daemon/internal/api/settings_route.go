@@ -12,7 +12,6 @@ import (
 	"github.com/sjawhar/envoy/oidc"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/settings"
 )
 
 // SettingsChangeRequest is the body of `PUT /legion/v1/operator/settings`: the dotted
@@ -93,7 +92,7 @@ const invalidSettingsCaller = "Invalid operator token or ServiceAccount token"
 // the configuration file under the daemon, and the same way — both arms call the one settings
 // holder, which resolves the whole file under the change (internal/settings).
 func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
-	by, caller, authorized := s.settingsCaller(r)
+	identity, caller, authorized := s.settingsCaller(r)
 	if !authorized {
 		writeJSON(w, http.StatusForbidden, errorBody(invalidSettingsCaller))
 		return
@@ -106,9 +105,7 @@ func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody("changes is required: name each dotted legion.yaml path with the value it takes"))
 		return
 	}
-	if req.By != "" {
-		by = req.By
-	}
+	by := authoredBy(caller, identity, req.By)
 	changes := make(map[string]any, len(req.Changes))
 	for path, raw := range req.Changes {
 		var value any
@@ -123,7 +120,7 @@ func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applied, refused, err := s.applySettings(r.Context(), caller, by, changes)
-	var notRecorded *settings.NotRecorded
+	var notRecorded *config.NotRecorded
 	switch {
 	case errors.As(err, &notRecorded):
 		// The daemon applied the change and could not keep it: it is running on the new value,
@@ -144,6 +141,27 @@ func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, SettingsChangeResponse{Settings: settingResults(changes, applied, refused)})
+}
+
+// authoredBy is the change's author as the daemon records it and its log line names: the person
+// the body named, and on the projected arm the ServiceAccount of the token that presented it
+// beside them.
+//
+// Nothing verifies `by`. The operator bearer is the deployment's own secret, so what it names
+// stands; a projected ServiceAccount token is held by a whole service — Dispatch's path, whose
+// caller is any deployment-scoped Dispatch user — and a copy of it captured anywhere could
+// otherwise write any person's name into the daemon's record of who changed a setting. The
+// verified identity is therefore kept beside the named one, and the one the body chose is never
+// the whole answer.
+func authoredBy(caller config.Caller, identity, named string) string {
+	switch {
+	case named == "":
+		return identity
+	case caller == config.CallerProjected:
+		return named + " (" + identity + ")"
+	default:
+		return named
+	}
 }
 
 // settingResults is the answer the caller reads: one result per path it named, whether that path

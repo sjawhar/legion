@@ -211,8 +211,15 @@ func (c *Consumers) SetRepositories(ctx context.Context, repositories []ghrepo.R
 	return nil
 }
 
-// repositories is the set GitHub intake hears now.
-func (c *Consumers) repositories() []ghrepo.Repository {
+// Repositories is the set GitHub intake hears now: the boot's, or whatever the last
+// SetRepositories replaced it with. It is what every decode reads an event's repository
+// against, and what the daemon builds a new connection's consumers from when it rebuilds them,
+// so a repository mapped since boot stays heard (internal/daemon's workflowRuntime.connect).
+//
+// The slice is the holder's own and is never written in place — SetRepositories and
+// OpenConsumers each store a clone — so a caller reads it without copying it and must not write
+// to it.
+func (c *Consumers) Repositories() []ghrepo.Repository {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.repos
@@ -503,7 +510,7 @@ func (c *Consumers) consumeConsumer(ctx context.Context, consumer jetstream.Cons
 	lag := &lagWatch{consumer: consumer.CachedInfo().Name, logger: c.spec.Logger, now: time.Now}
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
 		lag.observe(message)
-		if consumeMessage(ctx, message, c.spec, c.repositories(), c.pool, handlers) {
+		if consumeMessage(ctx, message, c.spec, c.Repositories(), c.pool, handlers) {
 			progress.handle(c.spec.Now())
 		}
 	}, jetstream.PullMaxMessages(1))

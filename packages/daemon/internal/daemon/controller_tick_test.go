@@ -45,7 +45,8 @@ func TestTheControllerTickQueuesOneWakeWhileASlotIsFree(t *testing.T) {
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
 		pool: pool, records: tickRecords(), admission: admission, handlers: []intake.Handler{engine, admission},
-		dispatchProject: "CAPTURE", bootID: "test-boot", log: log, controllerWake: 10 * time.Millisecond,
+		dispatchProject: "CAPTURE", bootID: "test-boot", log: log,
+		keeper: newKeeperHolder(10*time.Millisecond, false, nil),
 	}
 	ticks := func() (rows int, issue string) {
 		t.Helper()
@@ -85,7 +86,7 @@ func TestTheControllerTickComesShortlyAfterTheRuntimeStarts(t *testing.T) {
 	w := &workflowRuntime{
 		pool: pool, records: tickRecords(), admission: admission, handlers: []intake.Handler{engine, admission},
 		dispatchProject: "CAPTURE", bootID: "test-boot", log: log,
-		controllerWake: time.Hour, controllerFirstWake: 10 * time.Millisecond,
+		keeper: newKeeperHolder(time.Hour, false, nil), controllerFirstWake: 10 * time.Millisecond,
 	}
 	processed := func() bool {
 		var n int

@@ -59,7 +59,7 @@ func TestANatsRebuildWaitsForTheIntakeItEndedToSettle(t *testing.T) {
 func TestARuntimeRebuildStopsTheRuntimeItReplaced(t *testing.T) {
 	replaced, stopReplaced := context.WithCancel(t.Context())
 	var built []context.Context
-	holder := newRuntimeHolder(fake.NewRuntime(), stopReplaced, func(config.Config) (runtime.Runtime, context.CancelFunc, error) {
+	holder := newRuntimeHolder(fake.NewRuntime(), stopReplaced, quietLogger(), func(config.Config) (runtime.Runtime, context.CancelFunc, error) {
 		living, stop := context.WithCancel(t.Context())
 		built = append(built, living)
 		return fake.NewRuntime(), stop, nil
@@ -88,7 +88,7 @@ func TestARuntimeRebuildStopsTheRuntimeItReplaced(t *testing.T) {
 // is supervising with keeps running.
 func TestARuntimeRebuildThatFailsStopsNothingTheDaemonIsSupervisingWith(t *testing.T) {
 	serving, stopServing := context.WithCancel(t.Context())
-	holder := newRuntimeHolder(fake.NewRuntime(), stopServing, func(config.Config) (runtime.Runtime, context.CancelFunc, error) {
+	holder := newRuntimeHolder(fake.NewRuntime(), stopServing, quietLogger(), func(config.Config) (runtime.Runtime, context.CancelFunc, error) {
 		return nil, nil, errors.New("the cluster credential cannot be read")
 	})
 
@@ -100,6 +100,97 @@ func TestARuntimeRebuildThatFailsStopsNothingTheDaemonIsSupervisingWith(t *testi
 	}
 }
 
+// blockingRuntime is a runtime whose Spawn is still inside it when the rebuild comes, as a
+// Sandbox Spawn is while it waits on the informers for its pod (runtime/sandbox's await).
+type blockingRuntime struct {
+	runtime.Runtime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingRuntime) Spawn(ctx context.Context, _ runtime.SpawnSpec) (runtime.Locator, error) {
+	close(r.entered)
+	<-r.release
+	return runtime.Locator{}, ctx.Err()
+}
+
+// A runtime rebuild ends the runtime it replaced only once the calls inside it have returned. A
+// Spawn or a Resume already in that runtime polls its informers until its pod is there
+// (runtime/sandbox's await, awaitNewPod); ending the runtime under it freezes that store, so the
+// launch waits out its boot timeout, fails, and spends one of the claim's launch failures
+// (supervise.Limits.LaunchFailures) for a settings change that took no pod down.
+func TestARuntimeRebuildWaitsForTheCallsInsideTheRuntimeItReplaced(t *testing.T) {
+	spawning := &blockingRuntime{Runtime: fake.NewRuntime(), entered: make(chan struct{}), release: make(chan struct{})}
+	replaced, stopReplaced := context.WithCancel(t.Context())
+	holder := newRuntimeHolder(spawning, stopReplaced, quietLogger(), func(config.Config) (runtime.Runtime, context.CancelFunc, error) {
+		_, stop := context.WithCancel(t.Context())
+		return fake.NewRuntime(), stop, nil
+	})
+	launched := make(chan error, 1)
+	go func() {
+		_, err := holder.Spawn(t.Context(), runtime.SpawnSpec{})
+		launched <- err
+	}()
+	<-spawning.entered
+
+	rebuilt := make(chan error, 1)
+	go func() { rebuilt <- holder.rebuild(&config.Config{}) }()
+
+	select {
+	case err := <-rebuilt:
+		t.Fatalf("the rebuild returned while a launch was still inside the runtime it replaced: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if replaced.Err() != nil {
+		t.Fatal("the rebuild ended the runtime a launch was still inside: its informers stop and the launch polls a store nothing refreshes until its boot timeout")
+	}
+	close(spawning.release)
+
+	select {
+	case err := <-rebuilt:
+		if err != nil {
+			t.Fatalf("rebuild: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rebuild did not return once the launch had left the runtime it replaced")
+	}
+	if replaced.Err() == nil {
+		t.Fatal("the rebuild left the runtime it replaced running after its last call returned")
+	}
+	if err := <-launched; err != nil {
+		t.Fatalf("the launch inside the replaced runtime = %v, want it answered on a runtime that was still running", err)
+	}
+}
+
+// The App token manager is built again only when its own App credentials moved. A rebuild closes
+// the manager it replaces — every lease it granted is dropped and a `token_command` still
+// waiting on a person's approval is killed — and the file watcher wakes on every watched
+// directory, the one the kubelet rewrites the projected token in among them, so a manager
+// rebuilt at every wake would do that routinely for nothing.
+func TestARereadRebuildsTheAppTokenManagerOnlyWhenItsAppCredentialsMoved(t *testing.T) {
+	cfg := &config.Config{GitHubApps: config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "1", PrivateKey: "implement-key"},
+		Review:    config.GitHubApp{AppID: "2", PrivateKey: "review-key"},
+	}}
+	rebuild := newRebuilder(quietLogger(), config.Settled(*cfg))
+	held := &closingTokens{}
+	rebuild.register(newAppsHolder(held))
+
+	// A wake of the watcher with the App credentials where they were.
+	rebuild.rereadCredentials(cfg)
+
+	if held.closed {
+		t.Fatal("a reread over unmoved App credentials closed the manager the daemon holds: every lease dropped and every token_command killed")
+	}
+
+	cfg.GitHubApps.Implement.PrivateKey = "rotated-implement-key"
+	rebuild.rereadCredentials(cfg)
+
+	if !held.closed {
+		t.Fatal("a reread after the App private key moved left the manager built on the old key serving")
+	}
+}
+
 // `repository_renames` is held by four things — the API server's settings, the project's
 // repository mapping, the intake consumers and the gh bundles the runtime's launches hand each
 // role — so a change of it builds all four again. The operator is told the API server was
@@ -107,7 +198,7 @@ func TestARuntimeRebuildThatFailsStopsNothingTheDaemonIsSupervisingWith(t *testi
 // row's Also, and a reader left on the boot's value would compare two names of one repository as
 // two repositories.
 func TestAChangedRepositoryRenamesRebuildsEveryHolderOfIt(t *testing.T) {
-	rebuild := newRebuilder(quietLogger())
+	rebuild := newRebuilder(quietLogger(), config.Settled(config.Config{}))
 	holders := map[string]*countingHolder{}
 	for _, name := range []string{
 		config.HolderAPIServer, config.HolderRepositoryMapping, config.HolderNATS, config.HolderRuntime,

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,8 +30,17 @@ type Keeper struct {
 	// is about, applies, and writes its rows under it, so two changes of one path can never
 	// store the older value over the newer, and the file arm never reads a digest a route change
 	// is in the middle of writing. The holder has a lock of its own, which orders the applies;
-	// this one covers the reads and the writes around them.
+	// this one covers the reads and the writes around them. unstored is read and written under
+	// it too.
 	mu sync.Mutex
+	// unstored is the file's digest for each path the route applied and stored no row for: a
+	// secret, which is never written into a database every project's daemon shares, and every
+	// path of a change the store refused (NotRecorded). The holder is running on those values
+	// and the store knows nothing of them, so without this the file arm would find no row for
+	// the path and never take the key back: an operator's later edit of that key in
+	// `legion.yaml` would do nothing until the daemon restarted. It is memory alone, as the
+	// overlay it answers for is: a restart reads the file's own value for those paths.
+	unstored map[string]string
 }
 
 // New is the keeper of live's changes, storing what the route applies in store (nil keeps none).
@@ -40,7 +48,8 @@ func New(live *config.Live, store *Store, log *slog.Logger) *Keeper {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Keeper{live: live, store: store, log: log, now: func() time.Time { return time.Now().UTC() }}
+	return &Keeper{live: live, store: store, log: log, unstored: map[string]string{},
+		now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Live is the settings holder this keeper applies through.
@@ -76,9 +85,6 @@ func (k *Keeper) Route(ctx context.Context, caller config.Caller, by string, cha
 	if err != nil {
 		return nil, refused, err
 	}
-	if k.store == nil {
-		return applied, refused, nil
-	}
 	at := k.now()
 	var rows []Change
 	var forget []string
@@ -89,12 +95,15 @@ func (k *Keeper) Route(ctx context.Context, caller config.Caller, by string, cha
 		row, known := config.ClassOf(path)
 		switch {
 		case changes[path] == nil:
+			// The overlay is gone, so there is nothing left for this keeper to remember either.
 			forget = append(forget, path)
+			delete(k.unstored, path)
 			continue
 		case known && row.Secret:
 			k.log.Warn("legion settings: a credential changed through the route is applied and not stored; the daemon's next restart reads the file's own value for it",
 				"path", path, "by", by)
 			forget = append(forget, path)
+			k.unstored[path] = Digest(values[path])
 			continue
 		}
 		value, err := json.Marshal(changes[path])
@@ -105,38 +114,53 @@ func (k *Keeper) Route(ctx context.Context, caller config.Caller, by string, cha
 			Path: path, Value: value, FileDigest: Digest(values[path]),
 			Source: config.SourceRoute, By: by, At: at,
 		})
+		delete(k.unstored, path)
+	}
+	if k.store == nil {
+		k.remember(rows)
+		return applied, refused, nil
 	}
 	if err := k.store.Write(ctx, rows, forget); err != nil {
-		return applied, refused, &NotRecorded{Paths: requested, Err: err}
+		// The change is applied and nothing holds it, so the file's digest of each path is the
+		// keeper's to hold instead: the file arm takes the key back when the file's own value
+		// for it moves, as it does for a path the store does hold a row for.
+		k.remember(rows)
+		return applied, refused, &config.NotRecorded{Paths: requested, Err: err}
 	}
 	return applied, refused, nil
 }
 
-// NotRecorded is a change the daemon applied and could not store: it is running on the new
-// value, and its next restart reads the file's own value for those paths again. The caller is
-// answered what happened — the change took effect, and nothing keeps it — rather than a refusal
-// of a change the daemon made (api's settingsChange).
-type NotRecorded struct {
-	Paths []string
-	Err   error
+// remember holds the file's digest of each row's path in memory, for the paths this keeper
+// applied and stored no row for (unstored). The caller holds mu.
+func (k *Keeper) remember(rows []Change) {
+	for _, row := range rows {
+		k.unstored[row.Path] = row.FileDigest
+	}
 }
-
-func (e *NotRecorded) Error() string {
-	return fmt.Sprintf("the daemon applied the change of %s and could not record it: %v", strings.Join(e.Paths, ", "), e.Err)
-}
-
-func (e *NotRecorded) Unwrap() error { return e.Err }
 
 // File settles the configuration file as it now reads. It is the file arm, and the watcher's one
 // call: the file is read again under the route changes still standing above it, and every path
 // the file has itself changed since a route change of that path takes its key back — the latest
 // change of a key wins, and the stored row goes with it (split).
+//
+// A path the route applied and stored no row for — a secret, and every path of a change the
+// store refused — is taken back the same way, from the digest this keeper holds for it in
+// memory (unstored): the overlay the daemon is running on is the same overlay whether or not a
+// row backs it, so the file's own value takes the key back either way.
 func (k *Keeper) File(ctx context.Context) ([]config.Change, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	_, taken, err := k.split(ctx)
 	if err != nil {
 		return nil, err
+	}
+	unstored, err := k.unstoredTaken()
+	if err != nil {
+		return nil, err
+	}
+	taken = append(taken, unstored...)
+	for _, path := range unstored {
+		delete(k.unstored, path)
 	}
 	withdraw := make(map[string]any, len(taken))
 	for _, path := range taken {
@@ -276,6 +300,27 @@ func (k *Keeper) split(ctx context.Context) (kept []Change, taken []string, err 
 		kept = append(kept, row)
 	}
 	return kept, taken, nil
+}
+
+// unstoredTaken is every path this keeper holds no row for whose own value in the file has
+// moved since the route applied it: the file taking that key back, which no stored row would
+// show (unstored). The caller holds mu, and withdraws what this answers.
+func (k *Keeper) unstoredTaken() ([]string, error) {
+	if len(k.unstored) == 0 {
+		return nil, nil
+	}
+	paths := slices.Sorted(maps.Keys(k.unstored))
+	values, err := k.fileValues(paths)
+	if err != nil {
+		return nil, err
+	}
+	var taken []string
+	for _, path := range paths {
+		if Digest(values[path]) != k.unstored[path] {
+			taken = append(taken, path)
+		}
+	}
+	return taken, nil
 }
 
 // fileValues is what the file itself says for each path, by path, read from the document alone.

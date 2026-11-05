@@ -7,6 +7,8 @@ import (
 
 	"github.com/sjawhar/envoy/oidc"
 	"github.com/sjawhar/envoy/oidc/oidctest"
+
+	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
 // TestAProjectedTokenWithdrawsNoKeyItMayNotSet: the settings route's body maps a path to `null`
@@ -61,5 +63,63 @@ func TestAProjectedTokenWithdrawsNoKeyItMayNotSet(t *testing.T) {
 	}
 	if held := live.Snapshot().InstructionsPath; held != operators {
 		t.Errorf("after the withdrawal the daemon reads instructions from %q, want the operator's %q still", held, operators)
+	}
+}
+
+// The design gate is the one key the daemon reads at each decision that a projected
+// ServiceAccount token may not set (INFRA-1077's spec, version 17): the gate is the rule that
+// says a person decides a tree's specification, and Dispatch's path — any deployment-scoped
+// Dispatch user, a person or an agent — is not the party that may switch it off. The operator
+// bearer's own change of the same key applies, and the projected caller's withdrawal of it is
+// refused as the withdrawal of any other key it may not set.
+func TestAProjectedTokenDoesNotMoveTheDesignGate(t *testing.T) {
+	issuer := oidctest.New(t)
+	key := issuer.PublishKey(t, "cluster-key")
+	const audience = "legion-daemon"
+	const dispatch = "system:serviceaccount:dispatch:dispatch"
+	handler, live := settingsRouteServer(t, SettingsRouteAuth{
+		Verifier:        oidc.NewLazyVerifier(issuer.URL(), audience),
+		ServiceAccounts: []string{dispatch},
+	})
+	projected := issuer.Mint(t, key, issuer.Claims(dispatch, audience))
+	gate := live.Snapshot().Gates.Design
+
+	recorder := settingsCall(t, handler, projected, SettingsChangeRequest{
+		By:      "ana@example.com",
+		Changes: map[string]json.RawMessage{"gates.design": json.RawMessage(`"off"`)},
+	})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("the projected call = %d; body %s", recorder.Code, recorder.Body)
+	}
+	if got := settingsAnswer(t, recorder)["gates.design"]; got.Refused == "" || got.Applied != "" {
+		t.Fatalf("the answer for gates.design = %+v, want it refused by name and nothing applied", got)
+	}
+	if held := live.Snapshot().Gates.Design; held != gate {
+		t.Fatalf("the daemon's design gate is %q, want the %q it was running on", held, gate)
+	}
+
+	// The withdrawal of a gate key is a change to it like any other, and is refused too.
+	recorder = settingsCall(t, handler, projected, SettingsChangeRequest{
+		By:      "ana@example.com",
+		Changes: map[string]json.RawMessage{"gates.design": nil},
+	})
+	if got := settingsAnswer(t, recorder)["gates.design"]; got.Refused == "" || got.Applied != "" {
+		t.Fatalf("the answer for the withdrawal = %+v, want it refused by name and nothing applied", got)
+	}
+	if held := live.Snapshot().Gates.Design; held != gate {
+		t.Fatalf("after the withdrawal the design gate is %q, want the %q it was running on", held, gate)
+	}
+
+	// The operator bearer's same change applies: the key is no more fixed than it was.
+	recorder = settingsCall(t, handler, testOperatorToken, SettingsChangeRequest{
+		By:      "ana@example.com",
+		Changes: map[string]json.RawMessage{"gates.design": json.RawMessage(`"off"`)},
+	})
+	if got := settingsAnswer(t, recorder)["gates.design"]; got.Refused != "" || got.Applied == "" {
+		t.Fatalf("the operator's change of gates.design = %+v, want it applied", got)
+	}
+	if held := live.Snapshot().Gates.Design; held != config.DesignGateOff {
+		t.Fatalf("the daemon's design gate is %q, want the operator's off", held)
 	}
 }

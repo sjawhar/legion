@@ -62,6 +62,26 @@ type Refusal struct {
 	Reason string
 }
 
+// NotRecorded is a change the daemon applied and could not store: it is running on the new
+// value, and its next restart reads the file's own value for those paths again. The caller is
+// answered what happened — the change took effect, and nothing keeps it — rather than a refusal
+// of a change the daemon made.
+//
+// It is declared here, beside Change and Refusal, because it is a third thing an applied change
+// can be and both sides of the route read it: internal/settings returns it from the keeper's
+// route arm, and internal/api answers for it (api's settingsChange), which otherwise would
+// import internal/settings for this error alone.
+type NotRecorded struct {
+	Paths []string
+	Err   error
+}
+
+func (e *NotRecorded) Error() string {
+	return fmt.Sprintf("the daemon applied the change of %s and could not record it: %v", strings.Join(e.Paths, ", "), e.Err)
+}
+
+func (e *NotRecorded) Unwrap() error { return e.Err }
+
 // Live is the daemon's one settings holder: the configuration file, the route overlay laid over
 // it, and the resolved Config every reader takes a snapshot of.
 //

@@ -129,7 +129,8 @@ const (
 // It is the rule of INFRA-1077's spec, "Which settings a projected token may change": the
 // operator bearer and the daemon's own file may change every key except those fixed for the
 // process, and a projected ServiceAccount token — Dispatch's path, whose caller is any
-// deployment-scoped Dispatch user, a person or an agent — only a key whose value is plain data.
+// deployment-scoped Dispatch user, a person or an agent — only a key whose value is plain data
+// and is no `gates` key.
 type Caller string
 
 const (
@@ -137,7 +138,8 @@ const (
 	// every path the loader takes, which is every row but one fixed for the process.
 	CallerOperator Caller = "operator"
 	// CallerProjected is a caller holding a projected ServiceAccount token: only a row whose
-	// value is plain data (Row.Plain). Every other path is refused by name.
+	// value is plain data (Row.Plain) and that is no `gates` key, which is refused by name
+	// whatever its row says (Caller.Admits). Every other path is refused by name too.
 	CallerProjected Caller = "projected"
 )
 
@@ -148,12 +150,29 @@ const (
 	whyNotRead = "a projected ServiceAccount token changes only the settings the daemon reads at each decision, and this one is held by a client, a listener, a launch, or the rule of who may call this route"
 )
 
+// gatesKey is `gates`, the one block a projected ServiceAccount token may not set, by name: the
+// block itself and every key under it.
+const gatesKey = "gates"
+
 // Admits is whether this caller may set path, and why not when it may not. A path the class
 // table does not hold is admitted here and refused by Apply as an unknown setting, so no caller
 // learns from this answer alone which paths the daemon has.
+//
+// `gates` is named here rather than read off its row. Its rows are decision rows and stay so —
+// the operator bearer and the daemon's own file change them as they change any other, and the
+// API server and the launch specs hold their copies as before — but a gate is the rule that
+// says a person decides, and a caller holding a projected token is not the party that may
+// switch that rule off. It is refused with the reason the arm already gives for a key it may
+// not set, since the design gate is held by the launch specs and the API server too.
 func (c Caller) Admits(path string) (bool, string) {
 	row, known := ClassOf(path)
-	if !known || c != CallerProjected || row.Plain() {
+	if !known || c != CallerProjected {
+		return true, ""
+	}
+	if path == gatesKey || strings.HasPrefix(path, gatesKey+".") {
+		return false, whyNotRead
+	}
+	if row.Plain() {
 		return true, ""
 	}
 	if row.Secret {
@@ -164,8 +183,7 @@ func (c Caller) Admits(path string) (bool, string) {
 
 // Plain is whether this row's value is plain data: a value the daemon reads at each decision and
 // hands to nothing else — no command it runs, no credential, no file holding one, no address it
-// connects to or listens on, and none of the rules of who may call the settings route. It is
-// exactly what a change under a projected ServiceAccount token may set.
+// connects to or listens on, and none of the rules of who may call the settings route.
 //
 // It is a property of the row and no second list: the class says the daemon reads the value as
 // it decides rather than handing it to a client, a listener, a launch or a command, which leaves
@@ -177,6 +195,9 @@ func (c Caller) Admits(path string) (bool, string) {
 // `tree_stop_timeout_seconds`), the workflow's own bounds (`linger_hours`,
 // `production_check_hours`, `pod_update_retask_hours`, `pod_update_notice_hours`,
 // `review_round_cap`, `max_fix_attempts`), `capabilities.decided` and `gates.design`.
+//
+// It is no longer the whole of what a projected token may set: `gates.design` is plain data and
+// that caller is refused it by name (Caller.Admits).
 func (r Row) Plain() bool { return r.Class == ClassDecision && !r.Secret }
 
 // Classes is every settable unit of `legion.yaml`, one row per field the loader reads it into.

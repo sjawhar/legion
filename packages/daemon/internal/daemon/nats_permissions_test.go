@@ -136,7 +136,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				attempt, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
 				w := grantWorkflow(t, logs)
-				if err := w.connect(attempt, cfg, newRebuilder(w.log), daemonSeedLookup(daemonSeed)); err == nil {
+				if err := w.connect(attempt, cfg, newRebuilder(w.log, config.Settled(cfg)), daemonSeedLookup(daemonSeed)); err == nil {
 					t.Fatal("the daemon connected without the dispatch consumer-create permission")
 				}
 
@@ -191,7 +191,7 @@ func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workf
 	t.Helper()
 	cfg := daemonGrantConfig(uri)
 	w := grantWorkflow(t, logs)
-	if err := w.connect(t.Context(), cfg, newRebuilder(w.log), daemonSeedLookup(seed)); err != nil {
+	if err := w.connect(t.Context(), cfg, newRebuilder(w.log, config.Settled(cfg)), daemonSeedLookup(seed)); err != nil {
 		t.Fatalf("connect the daemon: %v", err)
 	}
 	return w

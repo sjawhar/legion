@@ -92,10 +92,6 @@ type workflowRuntime struct {
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
-	// controllerWake is the wake a runtime a test builds by hand runs the controller tick on
-	// (`controller_wake_interval_seconds`), where no keeper holder was built for it; zero means
-	// the configuration's default hour. A daemon's own runtime reads the holder (wakeInterval).
-	controllerWake time.Duration
 	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
 	controllerFirstWake time.Duration
 	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
@@ -424,11 +420,22 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	if err != nil {
 		return err
 	}
-	// The repositories this project hears about are read once, at boot: a mapping change moves
-	// them through the consumers themselves (SetRepositories), not through a rebuild.
+	// The repositories this project hears about move while the daemon runs: a mapping read
+	// replaces them on the consumers themselves (refreshMapping, SetRepositories), which names
+	// no setting and so rebuilds nothing. A rebuild therefore builds its consumers from the set
+	// the consumers hear now and not from the boot's, or a repository mapped since boot would
+	// stop being heard the moment anything reopened the connection: its merges, check runs and
+	// reviews would be skipped by JetStream's own filter, and nothing redelivers them when the
+	// filter widens again. Before the holder exists this is the boot's own set.
 	open := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
+		hearing := heard
+		if w.nats != nil {
+			if consumers := w.nats.intake(); consumers != nil {
+				hearing = consumers.Repositories()
+			}
+		}
 		return openNATS(ctx, w, c, lookup, intake.ConsumerSpec{
-			Project: c.Project, Repositories: heard, Deploys: c.Projects[c.Project].Deploys, Renames: c.RepositoryRenames,
+			Project: c.Project, Repositories: hearing, Deploys: c.Projects[c.Project].Deploys, Renames: c.RepositoryRenames,
 			AckWait: c.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 			ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
 			RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
@@ -1384,8 +1391,9 @@ func (w *workflowRuntime) stop() {
 }
 
 // closeTokens closes an App token manager that can be closed, so a token_command still waiting on
-// a grant does not outlive what owned the manager. A token source a test supplied, and the holder
-// itself, answer no Close and are left alone: the holder's own rebuild closes what it replaces.
+// a grant does not outlive what owned the manager. The holder answers Close by closing the
+// manager it holds (appsHolder.Close), so the daemon's stop ends that manager's commands through
+// it; a token source a test supplied answers none and is left alone.
 func closeTokens(tokens appauth.Tokens) {
 	if closer, ok := tokens.(interface{ Close() }); ok {
 		closer.Close()
@@ -1394,10 +1402,6 @@ func closeTokens(tokens appauth.Tokens) {
 
 // wakeInterval is how often the controller tick wakes the controller
 // (`controller_wake_interval_seconds`): the keeper's holder answers it, so a change of the
-// setting moves the next tick; a runtime a test built by hand reads its own field.
-func (w *workflowRuntime) wakeInterval() time.Duration {
-	if w.keeper != nil {
-		return w.keeper.interval()
-	}
-	return w.controllerWake
-}
+// setting moves the next tick. Every runtime that ticks holds one, a test's built by hand
+// included (newKeeperHolder).
+func (w *workflowRuntime) wakeInterval() time.Duration { return w.keeper.interval() }

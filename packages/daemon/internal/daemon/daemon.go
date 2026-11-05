@@ -272,7 +272,7 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 	// happens once — the sockets, the state directory, the runtime's own options — is this one,
 	// and every reader that must see a change goes through live instead.
 	cfg := *live.Snapshot()
-	rebuild := newRebuilder(log)
+	rebuild := newRebuilder(log, live)
 	live.OnChange(rebuild.observe)
 	if o.settingsRebuilder != nil {
 		o.settingsRebuilder(rebuild)
@@ -1178,7 +1178,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	// The runtime behind its holder: a `runtime.*` change builds the runtime again over this same
 	// listener and address and swaps it, and every reader — the machines, the supervision, the
 	// API's tree releaser — holds the holder.
-	rt := newRuntimeHolder(built, stopBuilt, buildRuntime)
+	rt := newRuntimeHolder(built, stopBuilt, log, buildRuntime)
 	// The launch specs behind theirs: everything a launch reads that the claim does not carry,
 	// built again from the configuration a `launch` change settled, read by the next launch.
 	buildSpecs := func(c config.Config) (specs, error) {
@@ -2088,35 +2088,43 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 	}
 }
 
-// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime
-// that keeps them, and nil under any other. The Sandbox runtime behind rt is read at every call
-// (sandboxOf), which is what makes the answer follow a rebuild of the runtime: the holder's
-// readers hold the holder, and the runtime inside it is replaced under them.
-func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
+// sandboxQuestion is a question only the Sandbox runtime answers — its repository caches, the
+// pod at an address — as the daemon asks it: nil when rt is no Sandbox runtime, so the caller
+// hands the API nothing to ask; otherwise ask, over the Sandbox runtime behind rt at the moment
+// of the call (sandboxOf), which is what makes the answer follow a rebuild of the runtime: the
+// holder's readers hold the holder, and the runtime inside it is replaced under them. A runtime
+// that is no Sandbox one by then answers the zero value.
+func sandboxQuestion[A any](rt runtime.Runtime, ask func(*sandbox.Runtime) A) func() A {
 	if _, sandboxed := sandboxOf(rt); !sandboxed {
 		return nil
 	}
-	return func() []sandbox.CacheStatus {
+	return func() (none A) {
 		sandboxed, ok := sandboxOf(rt)
 		if !ok {
-			return nil
+			return none
 		}
-		return sandboxed.RepositoryCaches()
+		return ask(sandboxed)
 	}
 }
 
-// callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that runs
-// pods, and nil under any other (api's Options.CallerPod). It reads the Sandbox runtime behind
-// rt at every call, as repositoryCachesOf does.
+// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime
+// that keeps them, and nil under any other.
+func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
+	return sandboxQuestion(rt, (*sandbox.Runtime).RepositoryCaches)
+}
+
+// callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that
+// runs pods, and nil under any other (api's Options.CallerPod).
 func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
-	if _, sandboxed := sandboxOf(rt); !sandboxed {
+	at := sandboxQuestion(rt, func(sandboxed *sandbox.Runtime) func(netip.Addr) (string, bool) { return sandboxed.PodAt })
+	if at == nil {
 		return nil
 	}
 	return func(addr netip.Addr) (string, bool) {
-		sandboxed, ok := sandboxOf(rt)
-		if !ok {
+		pod := at()
+		if pod == nil {
 			return "", false
 		}
-		return sandboxed.PodAt(addr)
+		return pod(addr)
 	}
 }

@@ -137,6 +137,76 @@ func TestACredentialChangedThroughTheRouteIsAppliedAndNotStored(t *testing.T) {
 	}
 }
 
+// The file takes back a key the route applied and the store holds no row for. A credential is
+// applied and never stored (above), so nothing in the store says the daemon is running on the
+// route's value for it: without the digest the keeper holds in memory the file arm would find
+// no row, withdraw nothing, and leave the operator's later edit of that key in `legion.yaml`
+// doing nothing at all until the daemon restarted.
+func TestTheFileTakesBackACredentialTheRouteAppliedAndStoredNoRowFor(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	path := configFile(t, minimalFile)
+	keeper := keeperOn(t, path, store)
+	const byRoute = "/etc/legion/operator-token"
+	if _, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{
+		"operator_token_file": byRoute,
+	}); err != nil || len(refused) != 0 {
+		t.Fatalf("Route: %v, refused %+v", err, refused)
+	}
+	if file := keeper.Live().Snapshot().OperatorTokenFile; file != byRoute {
+		t.Fatalf("the daemon reads operator_token_file %q, want the route's %q", file, byRoute)
+	}
+
+	// The operator edits that key in the file itself, and the watcher settles the file.
+	const byFile = "/etc/legion/operator-token-2"
+	rewrite(t, path, minimalFile+"operator_token_file: "+byFile+"\n")
+	if _, err := keeper.File(ctx); err != nil {
+		t.Fatalf("File: %v", err)
+	}
+
+	if file := keeper.Live().Snapshot().OperatorTokenFile; file != byFile {
+		t.Fatalf("the daemon reads operator_token_file %q, want the file's own %q: the file changed that key and takes it back", file, byFile)
+	}
+	// And the key stays the file's: a later settle of an unchanged file withdraws nothing and
+	// changes nothing.
+	if _, err := keeper.File(ctx); err != nil {
+		t.Fatalf("the second File: %v", err)
+	}
+	if file := keeper.Live().Snapshot().OperatorTokenFile; file != byFile {
+		t.Fatalf("the daemon reads operator_token_file %q after a second settle, want the file's own %q", file, byFile)
+	}
+}
+
+// The same holds for a change no row backs because nothing stored it: a keeper with no store,
+// which is what a daemon whose store write failed is left with for those paths (NotRecorded).
+// The route's value stands until the file's own value for that key moves, and then the file's
+// stands.
+func TestTheFileTakesBackAKeyAStorelessKeeperApplied(t *testing.T) {
+	ctx := context.Background()
+	path := configFile(t, minimalFile)
+	keeper := keeperOn(t, path, nil)
+	if _, refused, err := keeper.Route(ctx, config.CallerOperator, "ana@example.com", map[string]any{"admission_cap": 7}); err != nil || len(refused) != 0 {
+		t.Fatalf("Route: %v, refused %+v", err, refused)
+	}
+
+	// A settle of a file that did not change that key leaves the route's value standing.
+	if _, err := keeper.File(ctx); err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	if cap := keeper.Live().Snapshot().AdmissionCap; cap != 7 {
+		t.Fatalf("admission_cap = %d after a settle of an unchanged key, want the route's 7", cap)
+	}
+
+	rewrite(t, path, minimalFile+"admission_cap: 9\n")
+	if _, err := keeper.File(ctx); err != nil {
+		t.Fatalf("the settle after the file changed the key: %v", err)
+	}
+
+	if cap := keeper.Live().Snapshot().AdmissionCap; cap != 9 {
+		t.Fatalf("admission_cap = %d, want the file's own 9: the file changed that key and takes it back", cap)
+	}
+}
+
 // The file takes its key back: a change of that key in the file itself, while the daemon was
 // down, outlives the route change above it, and the row goes with it. A route change of another
 // key stands (acceptance A5, "until the file changes that key").

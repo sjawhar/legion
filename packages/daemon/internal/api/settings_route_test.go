@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/sjawhar/envoy/oidc"
@@ -335,14 +336,14 @@ func TestTheOperatorBearerChangesACommandKeyAndADecisionKeyAlike(t *testing.T) {
 // A change the daemon applied and could not record is answered as what it is: the keys' own
 // verdicts, and a status that says the daemon did not finish what the caller asked for. The old
 // answer was a 400 saying the configuration does not resolve, which was false of a change the
-// daemon is running on (internal/settings' NotRecorded).
+// daemon is running on (config.NotRecorded).
 func TestASettingsChangeAppliedAndNotRecordedIsNotAnsweredAsARefusal(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := NewServer("127.0.0.1", 8439, Options{
 		Project: testProject, Log: quiet, Settings: NewLiveSettings(HeldSettings{OperatorToken: testOperatorToken}),
 		ApplySettings: func(context.Context, config.Caller, string, map[string]any) ([]config.Change, []config.Refusal, error) {
 			applied := []config.Change{{Path: "admission_cap", Old: "4", New: "9", Class: config.ClassDecision, Outcome: config.OutcomeAtOnce}}
-			return applied, nil, &settings.NotRecorded{Paths: []string{"admission_cap"}, Err: errors.New("the store is unreachable")}
+			return applied, nil, &config.NotRecorded{Paths: []string{"admission_cap"}, Err: errors.New("the store is unreachable")}
 		},
 	})
 
@@ -401,4 +402,42 @@ func jsonError(t *testing.T, body, want string) bool {
 		return false
 	}
 	return answer["error"] == want
+}
+
+// Who a change is recorded as made by is the token's own identity on the projected arm, beside
+// whoever the body names. Nothing verifies `by`: the operator bearer is the deployment's own
+// secret, so what it names stands, but a projected ServiceAccount token is held by a whole
+// service and a copy of one captured anywhere could otherwise write any person's name into the
+// daemon's record of who changed a setting.
+func TestTheProjectedArmRecordsTheServiceAccountBesideTheNamedPerson(t *testing.T) {
+	issuer := oidctest.New(t)
+	key := issuer.PublishKey(t, "cluster-key")
+	const audience = "legion-daemon"
+	const dispatch = "system:serviceaccount:dispatch:dispatch"
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var recorded []string
+	server := NewServer("127.0.0.1", 8439, Options{
+		Project: testProject, Log: quiet,
+		Settings: NewLiveSettings(HeldSettings{OperatorToken: testOperatorToken, SettingsRoute: SettingsRouteAuth{
+			Verifier:        oidc.NewLazyVerifier(issuer.URL(), audience),
+			ServiceAccounts: []string{dispatch},
+		}}),
+		ApplySettings: func(_ context.Context, _ config.Caller, by string, _ map[string]any) ([]config.Change, []config.Refusal, error) {
+			recorded = append(recorded, by)
+			return []config.Change{{Path: "admission_cap", Old: "4", New: "9", Class: config.ClassDecision, Outcome: config.OutcomeAtOnce}}, nil, nil
+		},
+	})
+	body := SettingsChangeRequest{By: "ana@example.com", Changes: map[string]json.RawMessage{"admission_cap": json.RawMessage(`9`)}}
+
+	if code := settingsCall(t, server.Handler, issuer.Mint(t, key, issuer.Claims(dispatch, audience)), body).Code; code != http.StatusOK {
+		t.Fatalf("the projected call = %d", code)
+	}
+	if code := settingsCall(t, server.Handler, testOperatorToken, body).Code; code != http.StatusOK {
+		t.Fatalf("the operator's call = %d", code)
+	}
+
+	want := []string{"ana@example.com (" + dispatch + ")", "ana@example.com"}
+	if !slices.Equal(recorded, want) {
+		t.Fatalf("the changes were recorded as made by %q, want %q: the projected arm's verified identity beside the person its body names, and the operator's as it names it", recorded, want)
+	}
 }

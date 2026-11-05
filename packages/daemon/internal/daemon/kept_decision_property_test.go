@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -1068,9 +1069,12 @@ func (r *keptRun) restart() {
 	sup.deps = supervise.Deps{
 		Runtime: r.rt, Conns: fake.NewConns(), Store: r.claims, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
 		// The daemon's own readings of whether a root architect's task may be sent and of what that
-		// task says now (workflowRuntime.rootHears, rootTask), over this run's pool and store.
-		RootHears:      (&workflowRuntime{pool: r.pool, records: r.records}).rootHears,
-		RootTask:       (&workflowRuntime{pool: r.pool, records: r.records}).rootTask,
+		// task says now (workflowRuntime.rootHears, rootTask), over this run's pool and store. Each
+		// reads the design gate through the settings holder as it decides, as the daemon's does
+		// (config.Live.Snapshot), so the run gives it one: the shipped policy, which is the gate
+		// this run's engine is built on.
+		RootHears:      (&workflowRuntime{pool: r.pool, records: r.records, live: config.Settled(config.Config{})}).rootHears,
+		RootTask:       (&workflowRuntime{pool: r.pool, records: r.records, live: config.Settled(config.Config{})}).rootTask,
 		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,

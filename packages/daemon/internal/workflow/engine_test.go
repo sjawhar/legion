@@ -1123,3 +1123,34 @@ func TestABackwardMovesTaskNamesThePullRequestAndTheReason(t *testing.T) {
 		}
 	}
 }
+
+// One decision reads the daemon's settings holder once. Every exported method of the engine
+// begins by taking the decision's configuration (decision), and a decision calls them: Apply
+// reaches ReenterChild, which reaches Ancestry and NoteRepositoryKept, and AdoptionRefusal and
+// Ancestry reach RanAsRoot. A second read inside one of those would finish the decision under a
+// configuration its earlier steps never saw — an operator's change of `gates.design` or
+// `linger_hours` applied between two steps of one fact.
+func TestADecisionReadsTheSettingsHolderOnce(t *testing.T) {
+	pool := migratedPool(t)
+	openTree(t, pool)
+	applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))("child-todo", childTodo(1, "sjawhar/legion"))
+
+	reads := 0
+	settled := testEngine(config.DesignGateRootIssues, nil).settings()
+	// Each read after the first answers another design gate, so a decision that read the holder
+	// twice would decide its later steps under a policy its earlier steps did not see.
+	engine := NewReading(record.NewStore(), func() Config {
+		reads++
+		if reads > 1 {
+			settled.DesignGate = config.DesignGateOff
+		}
+		return settled
+	}, nil)
+
+	// The child is recorded and in todo, so this one fact is Apply → ReenterChild → Ancestry.
+	applyFacts(t, pool, engine)("child-todo-again", childTodo(2, "sjawhar/legion"))
+
+	if reads != 1 {
+		t.Fatalf("one fact read the settings holder %d times, want once: every step of a decision reads the configuration that decision began on", reads)
+	}
+}

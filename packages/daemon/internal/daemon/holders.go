@@ -14,9 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
-
 	"github.com/sjawhar/envoy/oidc"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -24,8 +21,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/intake"
-	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
@@ -97,22 +92,34 @@ type rebuilt interface {
 // holder rebuilds nothing — its readers read the new value at their next decision.
 type rebuilder struct {
 	log *slog.Logger
+	// live is the settings holder the daemon runs on, which register reads to record what a
+	// holder's credential files said when that holder was built from them.
+	live *config.Live
 	// order is the registration order, and holders the registry by name: a holder the daemon did
 	// not build — a test's replaced runtime, a supplied token source — is simply not registered,
 	// and a change naming it is logged and does nothing.
 	order   []string
 	holders map[string]rebuilt
 	// credentialDigests is what each credential holder's files said the last time
-	// rereadCredentials looked, by holder name: the guard that keeps a wake of the file watcher
-	// from rebuilding a holder whose files have not moved (rereadCredentials).
+	// rereadCredentials looked, by holder name, seeded at registration with what they said when
+	// the holder was built: the guard that keeps a wake of the file watcher from rebuilding a
+	// holder whose files have not moved (rereadCredentials).
 	credentialDigests map[string]string
 }
 
-func newRebuilder(log *slog.Logger) *rebuilder {
-	return &rebuilder{log: log, holders: map[string]rebuilt{}, credentialDigests: map[string]string{}}
+// newRebuilder is the rebuild observer of the daemon running on live, whose snapshot every
+// registration reads the new holder's credential files from.
+func newRebuilder(log *slog.Logger, live *config.Live) *rebuilder {
+	return &rebuilder{log: log, live: live, holders: map[string]rebuilt{}, credentialDigests: map[string]string{}}
 }
 
 // register adds one holder. A second registration of the same name replaces the first.
+//
+// A holder that reads credential files is registered having just been built from them, so what
+// those files say now is recorded here: without it the first reread after boot would count every
+// one of them as moved and rebuild it — reconnecting NATS, migrating every durable consumer and
+// dropping every App lease — on the first wake of the file watcher, which the kubelet's refresh
+// of any watched directory, `agent_secrets.token_file`'s among them, is.
 func (r *rebuilder) register(holders ...rebuilt) {
 	for _, h := range holders {
 		if h == nil {
@@ -122,6 +129,13 @@ func (r *rebuilder) register(holders ...rebuilt) {
 			r.order = append(r.order, h.holder())
 		}
 		r.holders[h.holder()] = h
+		reads, credentials := h.(credentialReader)
+		if !credentials || r.live == nil {
+			continue
+		}
+		if digest, comparable := credentialsOf(reads, r.live.Snapshot()); comparable {
+			r.credentialDigests[h.holder()] = digest
+		}
 	}
 }
 
@@ -184,11 +198,36 @@ func (r *rebuilder) rebuild(cfg *config.Config, holder rebuilt) {
 //
 // A holder that reads credentials but names no file of this host's — the GitHub App manager,
 // whose private key is the key itself and whose command and secret are no file — answers none
-// and is rebuilt at every reread. A holder that is no credentialReader is left alone by a
-// reread: nothing it holds was read from a file that can rotate under it.
+// and says what it was built from as a credentialValues instead. A holder that is no
+// credentialReader is left alone by a reread: nothing it holds was read from a file that can
+// rotate under it.
 type credentialReader interface {
 	rebuilt
 	credentialFiles(cfg *config.Config) []string
+}
+
+// credentialValues is a credential holder whose credentials are values of the configuration
+// rather than files of this host's: it digests what its own rebuild would be built from, so a
+// reread rebuilds it when that moved and leaves it alone when it did not. Without it such a
+// holder would be rebuilt at every wake of the file watcher, and the GitHub App manager's
+// rebuild closes the manager it replaces — every lease dropped, every token_command still
+// waiting on a person's approval killed (appauth.Manager.Close).
+type credentialValues interface {
+	credentialReader
+	credentialMark(cfg *config.Config) string
+}
+
+// credentialsOf is what a holder's credentials say now: the digest of the files it names, or,
+// for a holder that names none, what it was built from (credentialValues). A holder that
+// answers neither has nothing a reread can compare, and is rebuilt at every reread as before.
+func credentialsOf(holder credentialReader, cfg *config.Config) (string, bool) {
+	if files := holder.credentialFiles(cfg); len(files) > 0 {
+		return credentialDigest(files), true
+	}
+	if values, marks := holder.(credentialValues); marks {
+		return values.credentialMark(cfg), true
+	}
+	return "", false
 }
 
 // credentialDigest is what files say, as one string: each file's name beside the digest of its
@@ -212,11 +251,35 @@ func credentialDigest(files []string) string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-// rereadCredentials builds every holder whose credential files have moved since the last reread
+// drainBound is how long a rebuild waits for what it replaced to let go of the work inside it
+// before it ends that thing anyway: the NATS rebuild's wait for the intake it ended to settle
+// its messages (natsHolder.rebuild), and the runtime rebuild's for the calls still inside the
+// runtime it replaced (runtimeHolder.rebuild). It is longer than the ack wait a consumer is
+// built with (`worker_rpc_timeout_seconds`) and than a launch's boot deadline
+// (`worker_boot_timeout_seconds`), so work that is going to finish has its turn, and short
+// enough that work that will never return does not hold the settings change for ever: the
+// daemon then closes the old connection, or ends the old runtime, and logs that it did, where
+// the messages still in flight are redelivered by the durable consumers the new connection
+// holds and a call inside the old runtime sees its context cancelled.
+//
+// That wait is taken under the settings holder's lock, which every other settings change takes:
+// a rebuild runs either from an apply's observers (config.Live.Apply holds l.mu for the whole
+// apply) or from the watcher's reread (config.Live.WhileSettled), so for as long as a rebuild
+// drains, another route call and the file watcher's own settle wait behind it. That is the
+// trade this daemon takes, and it is taken deliberately: the alternative — closing what was
+// replaced from a goroutine of its own — would answer the operator `rebuilt` while the daemon
+// still held the connection or the runtime it says it replaced, and would let the next rebuild
+// of that holder start while the one before it was still letting go, with two drains of one
+// holder in flight and no order between their ends. A drain is rare (nothing is in flight in
+// the ordinary case, and the wait returns at once) and bounded; a rebuild answering for work it
+// has not finished would be neither.
+const drainBound = 2 * time.Minute
+
+// rereadCredentials builds every holder whose credentials have moved since the last reread
 // again, whatever the configuration says: the answer to a rotation of a file whose path did not
 // change, which no settings change names, since the path is what the file holds and the path has
 // not moved. It runs in the order the holders were registered, and over the holders that read a
-// credential file at all (credentialReader).
+// credential at all (credentialReader).
 //
 // The file watcher calls it, once the file arm has settled the configuration, and calls it
 // under the settings holder's own lock (config.Live.WhileSettled), where an applied change's
@@ -227,16 +290,16 @@ func credentialDigest(files []string) string {
 // whole directory, so a projected token the kubelet refreshed beside a seed that did not move
 // settles the configuration again; without the guard that wake would reconnect NATS and migrate
 // every durable consumer, drop every App lease and rewrite the deployment instructions. A holder
-// whose files read the same holds what they say already, so rebuilding it is work with no answer
-// of its own; a holder that names no file (the GitHub App manager) is rebuilt as before.
+// whose credentials read the same holds what they say already, so rebuilding it is work with no
+// answer of its own. What each holder said when it was built is recorded as it is registered
+// (register), so the first reread after boot rebuilds nothing either.
 func (r *rebuilder) rereadCredentials(cfg *config.Config) {
 	for _, name := range r.order {
 		holder, reads := r.holders[name].(credentialReader)
 		if !reads {
 			continue
 		}
-		if files := holder.credentialFiles(cfg); len(files) > 0 {
-			digest := credentialDigest(files)
+		if digest, comparable := credentialsOf(holder, cfg); comparable {
 			moved := r.credentialDigests[name] != digest
 			r.credentialDigests[name] = digest
 			if !moved {
@@ -419,8 +482,19 @@ func newAppsHolder(tokens appauth.Tokens) *appsHolder {
 func (h *appsHolder) holder() string { return config.HolderGitHubApps }
 
 // credentialFiles is none of this host's: an App private key is the key itself, and its command
-// and its secret are no file here (buildApps), so the manager is built again at every reread.
+// and its secret are no file here (buildApps). credentialMark is what a reread compares instead.
 func (h *appsHolder) credentialFiles(*config.Config) []string { return nil }
+
+// credentialMark is the App credentials this manager was built from (buildApps), digested: a
+// reread rebuilds the manager only when one of them moved. It has to, because the rebuild closes
+// the manager it replaces: every lease that manager granted is dropped and a `token_command`
+// still waiting on a person's approval is killed (appauth/tokencommand.go's run). The watcher
+// wakes on a whole directory and the kubelet rewrites the projected token in one of them, so
+// without this the daemon would do that routinely, for nothing.
+func (h *appsHolder) credentialMark(cfg *config.Config) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%+v", cfg.GitHubApps))
+	return hex.EncodeToString(sum[:])
+}
 
 func (h *appsHolder) rebuild(cfg *config.Config) error {
 	tokens := buildApps(*cfg)
@@ -634,205 +708,6 @@ func (h *specsHolder) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime
 	return h.current.Load().SpawnSpec(ctx, c)
 }
 
-// runtimeHolder is the process runtime, Sandbox or tmux (config.HolderRuntime): everything a
-// launch reads, and the pod shapes the Sandbox runtime caches when it is built
-// (runtime/sandbox's podShape). It is a runtime.Runtime itself, held by the machines' Deps, the
-// supervision and the API's tree releaser, so a rebuild reaches all of them behind one pointer
-// and takes no pod down: the new runtime observes and adopts the processes the old one was
-// supervising, which are the cluster's and the tmux server's, not the runtime's.
-//
-// Observe is the one call whose answer outlives it: supervision ranges over one channel for its
-// whole life. The holder owns that channel and feeds it from whichever runtime is current, so a
-// rebuild moves the feed across without supervision noticing.
-type runtimeHolder struct {
-	current atomic.Pointer[runtime.Runtime]
-	// build makes a runtime from a configuration and answers the stop that ends it: the Sandbox
-	// runtime's informers, its cache and credential refreshers and the tmux runtime's sweeps run
-	// on a context of that runtime's own, so a rebuild can end the one it replaces rather than
-	// leave it watching the cluster for the daemon's whole life.
-	build func(cfg config.Config) (runtime.Runtime, context.CancelFunc, error)
-
-	// mu guards the observation feed: out is the channel supervision ranges over, once it has
-	// asked for one, observing the context it asked on, and stopFeed ends the feed from the
-	// runtime being replaced. feeds numbers the feeds, so the one a rebuild replaced knows not to
-	// close the channel the new one is writing to, and closed says the channel is already closed.
-	// stopCurrent ends the runtime the holder holds now.
-	mu          sync.Mutex
-	out         chan runtime.Observation
-	watching    context.Context
-	stopFeed    context.CancelFunc
-	stopCurrent context.CancelFunc
-	feeds       uint64
-	closed      bool
-}
-
-var _ runtime.Runtime = (*runtimeHolder)(nil)
-
-// newRuntimeHolder holds rt, which stop ends, and builds its replacements with build.
-func newRuntimeHolder(rt runtime.Runtime, stop context.CancelFunc, build func(cfg config.Config) (runtime.Runtime, context.CancelFunc, error)) *runtimeHolder {
-	h := &runtimeHolder{build: build, stopCurrent: stop}
-	h.current.Store(&rt)
-	return h
-}
-
-func (h *runtimeHolder) holder() string { return config.HolderRuntime }
-
-// rebuild builds the runtime again from the configuration that has just settled, moves
-// supervision's feed onto it, swaps it in, and only then ends the one it replaced: everything
-// that runtime runs of its own — the Sandbox runtime's three informers and its cache and
-// credential refreshers — ends with it, so a deployment that changes a `runtime.*` key ten
-// times is watching the cluster once and not ten times over.
-//
-// A failure changes nothing: the runtime that was built is stopped, the feed stays on the
-// runtime the daemon is supervising with, and the rebuilder logs what could not be built.
-func (h *runtimeHolder) rebuild(cfg *config.Config) error {
-	next, stopNext, err := h.build(*cfg)
-	if err != nil {
-		return err
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.out != nil {
-		// The feed moves to the new runtime before the old one's ends, so no observation is
-		// missed between them; a duplicate observation of one process is what every probe
-		// already answers.
-		previous := h.stopFeed
-		h.feeds++
-		if err := h.feed(next); err != nil {
-			h.feeds--
-			stopNext()
-			return err
-		}
-		if previous != nil {
-			previous()
-		}
-	}
-	h.current.Store(&next)
-	replaced := h.stopCurrent
-	h.stopCurrent = stopNext
-	if replaced != nil {
-		replaced()
-	}
-	return nil
-}
-
-func (h *runtimeHolder) get() runtime.Runtime { return *h.current.Load() }
-
-// Observe is supervision's one channel of process observations, fed from whichever runtime is
-// current. The caller's context is the feed's life; a second call answers the same channel.
-func (h *runtimeHolder) Observe(ctx context.Context) (<-chan runtime.Observation, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.out != nil {
-		return h.out, nil
-	}
-	h.out, h.watching = make(chan runtime.Observation), ctx
-	if err := h.feed(h.get()); err != nil {
-		h.out, h.watching = nil, nil
-		return nil, err
-	}
-	return h.out, nil
-}
-
-// feed starts forwarding rt's observations into the holder's channel until the rebuild that
-// replaces rt, or the context Observe was given, ends. The caller holds mu.
-//
-// The last feed closes the channel as it ends, as a runtime's own Observe channel closes when
-// its context ends: supervision ranges over it, and a channel that never closes would hold the
-// daemon's stop until its budget ran out. A feed a rebuild replaced closes nothing — the feed
-// that replaced it is writing to that same channel.
-func (h *runtimeHolder) feed(rt runtime.Runtime) error {
-	feeding, stop := context.WithCancel(h.watching)
-	observations, err := rt.Observe(feeding)
-	if err != nil {
-		stop()
-		return err
-	}
-	h.stopFeed = stop
-	mine := h.feeds
-	go func() {
-		defer h.ended(mine)
-		defer stop()
-		for {
-			select {
-			case <-feeding.Done():
-				return
-			case observation, open := <-observations:
-				if !open {
-					return
-				}
-				select {
-				case h.out <- observation:
-				case <-feeding.Done():
-					return
-				}
-			}
-		}
-	}()
-	return nil
-}
-
-// ended closes the observation channel once the feed numbered mine was the last one.
-func (h *runtimeHolder) ended(mine uint64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.feeds != mine || h.closed {
-		return
-	}
-	h.closed = true
-	close(h.out)
-}
-
-func (h *runtimeHolder) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
-	return h.get().Spawn(ctx, spec)
-}
-
-func (h *runtimeHolder) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
-	return h.get().Resume(ctx, prev, spec)
-}
-
-func (h *runtimeHolder) Suspend(ctx context.Context, loc runtime.Locator) error {
-	return h.get().Suspend(ctx, loc)
-}
-
-func (h *runtimeHolder) Release(ctx context.Context, k runtime.Known) error {
-	return h.get().Release(ctx, k)
-}
-
-func (h *runtimeHolder) Probe(ctx context.Context, loc runtime.Locator) (runtime.Observation, error) {
-	return h.get().Probe(ctx, loc)
-}
-
-func (h *runtimeHolder) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
-	return h.get().ReconcileOrphans(ctx, known, grace)
-}
-
-func (h *runtimeHolder) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id runtime.GitIdentity) error {
-	return h.get().AdoptWorkingCopy(ctx, loc, id)
-}
-
-func (h *runtimeHolder) ProvisionsWorkspaces() bool { return h.get().ProvisionsWorkspaces() }
-
-func (h *runtimeHolder) ProvisionBound() time.Duration { return h.get().ProvisionBound() }
-
-func (h *runtimeHolder) LaunchBound() time.Duration { return h.get().LaunchBound() }
-
-func (h *runtimeHolder) PodDrift(ctx context.Context, k runtime.Known) ([]string, error) {
-	return h.get().PodDrift(ctx, k)
-}
-
-func (h *runtimeHolder) ReplacePod(ctx context.Context, k runtime.Known, due func(context.Context) error) error {
-	return h.get().ReplacePod(ctx, k, due)
-}
-
-func (h *runtimeHolder) RescueUnpushed(ctx context.Context, k runtime.Known, request runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
-	return h.get().RescueUnpushed(ctx, k, request)
-}
-
-func (h *runtimeHolder) CleanupTree(ctx context.Context, tree string) error {
-	return h.get().CleanupTree(ctx, tree)
-}
-
 // keeperHolder is the controller keeper and the controller tick
 // (config.HolderControllerKeeper): whether this daemon launches the project's controller itself
 // (`controller`) and how often it wakes it (`controller_wake_interval_seconds`). A rebuild
@@ -911,152 +786,4 @@ func (h *keeperHolder) rebuild(cfg *config.Config) error {
 	}
 	h.stop = h.start()
 	return nil
-}
-
-// natsHolder is the NATS connection and its durable consumers (config.HolderNATS). A rebuild
-// opens a new connection with the configuration's URLs and seed, moves this project's durable
-// consumers onto it, and only then ends the old connection's intake and closes it, waiting for
-// the run it ended to settle its messages first (rebuild). No consumer is deleted and no
-// position is lost — the consumers are durable, and the new ones resume where the old ones
-// stopped.
-type natsHolder struct {
-	// open builds a connection and its consumers from a configuration.
-	open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)
-	log  *slog.Logger
-
-	mu         sync.Mutex
-	conn       *nats.Conn
-	consumers  *intake.Consumers
-	generation uint64
-	// cancelRun ends the intake loop's current generation; generation above is what a loop whose
-	// run ended compares, to tell a rebuild's cancel from the daemon's stop (rebuilt). settled is
-	// closed by that loop once its Run has returned, which is what a rebuild waits for before it
-	// closes the connection that run was on; nil when no generation is running.
-	cancelRun context.CancelFunc
-	settled   chan struct{}
-}
-
-// drainBound is how long a rebuild waits for the intake it ended to settle its messages before
-// it closes the connection anyway. It is longer than the ack wait a consumer is built with
-// (`worker_rpc_timeout_seconds`), so a handler that is working has its turn, and short enough
-// that a handler that will never return does not hold the settings change for ever: the daemon
-// then closes the old connection and logs that it did, where the messages still in flight are
-// redelivered by the durable consumers the new connection holds.
-const drainBound = 2 * time.Minute
-
-func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, log *slog.Logger, open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)) *natsHolder {
-	if log == nil {
-		log = slog.Default()
-	}
-	return &natsHolder{open: open, log: log, conn: conn, consumers: consumers}
-}
-
-func (h *natsHolder) holder() string { return config.HolderNATS }
-
-// credentialFiles are the nkey seeds the connection authenticates as, which a rebuild reads
-// again (readNATSConnection).
-func (h *natsHolder) credentialFiles(cfg *config.Config) []string {
-	return []string{cfg.NatsNkeySeedFile, cfg.NatsDaemonNkeySeedFile}
-}
-
-// connection and intake are the connection and the consumers as they now stand.
-func (h *natsHolder) connection() *nats.Conn {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.conn
-}
-
-func (h *natsHolder) intake() *intake.Consumers {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.consumers
-}
-
-// begin is one generation of the intake loop: the consumers to run, a context the next rebuild
-// cancels, the generation's number, which the loop compares to tell a rebuild's cancel from the
-// daemon's stop, and the settled the loop closes once its Run has returned.
-func (h *natsHolder) begin(ctx context.Context) (*intake.Consumers, context.Context, uint64, chan struct{}) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	running, cancel := context.WithCancel(ctx)
-	h.cancelRun, h.settled = cancel, make(chan struct{})
-	return h.consumers, running, h.generation, h.settled
-}
-
-// rebuilt says whether generation is behind the holder's: the loop's run was ended by a rebuild
-// and the next one is the new connection's.
-func (h *natsHolder) rebuilt(generation uint64) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return generation != h.generation
-}
-
-// rebuild opens a connection with the configuration's URLs and seed, moves this project's
-// durable consumers onto it, and only then ends the old connection's intake and closes it: the
-// generation the intake loop runs (begin) is cancelled, and the connection is closed once that
-// loop says its Run has returned, which is once every message it was holding has been acked or
-// nak'd. An ack of a fact in flight therefore goes to the connection it was delivered on, never
-// to a closed one, and a fact the handler had not finished is redelivered by the durable
-// consumer the new connection holds. No consumer is deleted and no position is lost.
-func (h *natsHolder) rebuild(cfg *config.Config) error {
-	conn, consumers, err := h.open(*cfg)
-	if err != nil {
-		return err
-	}
-	h.mu.Lock()
-	old, cancel, settled := h.conn, h.cancelRun, h.settled
-	h.conn, h.consumers, h.generation = conn, consumers, h.generation+1
-	h.cancelRun, h.settled = nil, nil
-	h.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if settled != nil {
-		select {
-		case <-settled:
-		case <-time.After(drainBound):
-			h.log.Warn("legion settings: the intake of the NATS connection being replaced did not settle; the daemon closes it and its durable consumers redeliver whatever was in flight",
-				"holder", config.HolderNATS, "waited", drainBound)
-		}
-	}
-	if old != nil {
-		old.Close()
-	}
-	return nil
-}
-
-// close ends the connection the holder holds, which the daemon's stop calls.
-func (h *natsHolder) close() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.conn != nil {
-		h.conn.Close()
-		h.conn = nil
-	}
-}
-
-// openNATS is how the daemon opens a connection and this project's durable consumers from a
-// configuration: boot's own path (workflowRuntime.connect) and the holder's rebuild run it, so
-// the two can never settle differently. It reads the daemon's nkey seed again (readNATSConnection),
-// which is how a rotated seed reaches the connection.
-func openNATS(ctx context.Context, w *workflowRuntime, cfg config.Config, lookup func(string) (string, bool), spec intake.ConsumerSpec) (*nats.Conn, *intake.Consumers, error) {
-	nc, err := readNATSConnection(cfg, lookup)
-	if err != nil {
-		return nil, nil, err
-	}
-	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
-	if err != nil {
-		return nil, nil, fmt.Errorf("connect Envoy NATS: %w", err)
-	}
-	js, err := jetstream.New(conn)
-	if err != nil {
-		conn.Close()
-		return nil, nil, fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
-	}
-	consumers, err := intake.OpenConsumers(ctx, js, w.pool, spec)
-	if err != nil {
-		conn.Close()
-		return nil, nil, natsauth.WithLastError(err, conn)
-	}
-	return conn, consumers, nil
 }

@@ -150,9 +150,18 @@ func prepareAsDelivered(t *testing.T, w *workflowRuntime, fact intake.DispatchIs
 	}
 }
 
+// githubFilterSubjects is what LEGION's GitHub durable consumer — the project every mapping rig
+// runs — filters on now, read from JetStream itself.
 func githubFilterSubjects(t *testing.T, stream jetstream.Stream) []string {
 	t.Helper()
-	consumer, err := stream.Consumer(context.Background(), "legion-go-LEGION-github")
+	return githubFiltersOf(t, stream, "LEGION")
+}
+
+// githubFiltersOf is project's GitHub durable consumer's filters: the set that decides whether
+// an event of a repository is ever delivered, which a rebuild of the consumers writes again.
+func githubFiltersOf(t *testing.T, stream jetstream.Stream, project string) []string {
+	t.Helper()
+	consumer, err := stream.Consumer(context.Background(), "legion-go-"+project+"-github")
 	if err != nil {
 		t.Fatal(err)
 	}

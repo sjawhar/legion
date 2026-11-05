@@ -686,7 +686,7 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	if err := consumers.SetRepositories(context.Background(), capturedRepositories); err != nil {
 		t.Fatalf("SetRepositories: %v", err)
 	}
-	if decoded, err := decodeMessage("notifications.github.acme.widgets.pr.42", spec.Project, consumers.repositories(), nil, ghrepo.Renames{}, []byte(opened)); err != nil || decoded.Fact != nil {
+	if decoded, err := decodeMessage("notifications.github.acme.widgets.pr.42", spec.Project, consumers.Repositories(), nil, ghrepo.Renames{}, []byte(opened)); err != nil || decoded.Fact != nil {
 		t.Fatalf("decode of an unlisted repository's event = %#v, %v; want no fact", decoded.Fact, err)
 	}
 	// A daemon serving no repository hears none: the consumer filters on a subject no repository's
@@ -697,7 +697,7 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	if got := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects; !slices.Equal(got, []string{"notifications.github.-.-"}) {
 		t.Fatalf("GitHub consumer filters hearing none = %v, want the one no repository publishes on", got)
 	}
-	if decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", spec.Project, consumers.repositories(), nil, ghrepo.Renames{}, capturedGitHubEnvelope(t, "pr-opened.json")); err != nil || decoded.Fact != nil {
+	if decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", spec.Project, consumers.Repositories(), nil, ghrepo.Renames{}, capturedGitHubEnvelope(t, "pr-opened.json")); err != nil || decoded.Fact != nil {
 		t.Fatalf("decode while hearing none = %#v, %v; want no fact", decoded.Fact, err)
 	}
 }
@@ -718,7 +718,7 @@ func TestAFailedSetRepositoriesChangesNothing(t *testing.T) {
 	if err := consumers.SetRepositories(canceled, widgets); err == nil {
 		t.Fatal("SetRepositories with a failed consumer update reported no failure")
 	}
-	if got := consumers.repositories(); !slices.Equal(got, capturedRepositories) {
+	if got := consumers.Repositories(); !slices.Equal(got, capturedRepositories) {
 		t.Fatalf("the decoder's set after a failed update = %v, want it unchanged, %v", got, capturedRepositories)
 	}
 	if got, want := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects, githubFilters(capturedRepositories); !slices.Equal(got, want) {

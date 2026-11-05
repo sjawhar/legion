@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -161,8 +162,10 @@ func newHeldTaskRig(t *testing.T) *heldTaskRig {
 	trees := outboxTreeStore(t, pool, heldTaskRoot)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Store = keptClaimStore{Store: trees}
-	sup.deps.RootHears = (&workflowRuntime{pool: pool, records: records}).rootHears
-	sup.deps.RootTask = (&workflowRuntime{pool: pool, records: records}).rootTask
+	// rootTask reads the design gate through the settings holder as it decides, as the daemon's
+	// does, so this runtime holds one: the shipped policy, as this rig's engine is built on.
+	sup.deps.RootHears = (&workflowRuntime{pool: pool, records: records, live: config.Settled(config.Config{})}).rootHears
+	sup.deps.RootTask = (&workflowRuntime{pool: pool, records: records, live: config.Settled(config.Config{})}).rootTask
 	conn := fake.NewConn()
 	token := mustClaimToken(t, heldTaskRoot, claim.RoleArchitect)
 	sup.deps.Conns.(*fake.Conns).Register(token, conn)
