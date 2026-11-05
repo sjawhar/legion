@@ -7,8 +7,9 @@ import { SQL, type TransactionSQL } from "bun";
  * reached, for that session's next assistant message, and which tool call was open when it
  * arrived. The source is the project's Oh My Pi session store, a shared database, so it is read
  * through the deployment's read-only login: the connection URL comes from the file
- * `SESSION_READER_DSN_FILE` names, and from the file `OMP_SESSION_SQL_DSN_FILE` names only where
- * the deployment gives no reader. Each session is its `omp_session_files.content` row followed
+ * `SESSION_READER_DSN_FILE` names, or from `--dsn-file`. The session URL the file
+ * `OMP_SESSION_SQL_DSN_FILE` names is never a route for a read: it is what the role's own agent
+ * writes its transcript with. Each session is its `omp_session_files.content` row followed
  * by its `omp_session_files_parts` rows in `start_offset` order, which is the shape
  * `packages/daemon/internal/ompsessions/ompsessions.go` defines and reads back, and every read is
  * scoped by `path`, the primary key of both tables, since a scan of the parts table takes
@@ -69,10 +70,9 @@ Options:
                           default only the role sessions themselves are measured: the session
                           file the daemon launches, named for its launch.
   --path-contains <text>  Measure only the sessions whose path holds this text, e.g. infra-338.
-  --dsn-file <path>       The file holding the store's connection URL. Defaults to the file
-                          SESSION_READER_DSN_FILE names, the deployment's read-only login, and
-                          falls back to the file OMP_SESSION_SQL_DSN_FILE names where the
-                          deployment names no reader.
+  --dsn-file <path>       The explicit route: the file holding the store's connection URL.
+                          Without it the URL comes from the file SESSION_READER_DSN_FILE names,
+                          the deployment's read-only login, and there is no other route.
   --help                  Print this.
 
 Prints one line per wait of at least the threshold, longest first, in two groups: the waits a
@@ -506,12 +506,12 @@ async function main(argv: readonly string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  const fromEnv = process.env.SESSION_READER_DSN_FILE || process.env.OMP_SESSION_SQL_DSN_FILE;
-  const dsnFile = options.dsnFile ?? fromEnv;
+  const dsnFile = options.dsnFile ?? process.env.SESSION_READER_DSN_FILE;
   if (dsnFile === undefined || dsnFile === "") {
     console.error(
-      "unavailable: no session store; SESSION_READER_DSN_FILE, the read-only login tried " +
-        "first, names no file, and OMP_SESSION_SQL_DSN_FILE, tried after it, names none either"
+      "unavailable: SESSION_READER_DSN_FILE names no file, so this deployment gives no read " +
+        "route to the session store, which is a fault of the deployment to report; --dsn-file " +
+        "names the file holding the URL of a read-only login where you have one"
     );
     return 2;
   }
