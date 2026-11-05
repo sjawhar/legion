@@ -178,9 +178,12 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Meaning search's embedder and coverage**: `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go`
 
-  Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`;
-  each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue, which scans when `embeddings_enqueue` notifies `dispatch_embeddings` (migration 0151) or a pending row falls due.
-  `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain, and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
+  Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`, or, under `DISPATCH_DEV_EMBEDDER=1` beside dev sign-in alone, a local harness's own (`dev.go`), which hashes a text's words into a vector in the process and calls no service, so a window and a query rank near each other by the words they share;
+  each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue, which scans when `embeddings_enqueue` or `embeddings_enqueue_window` notifies `dispatch_embeddings` (migrations 0151, 20261102233625) or a pending row falls due.
+  An issue is embedded whole by its trigger; a document, a comment, a message and an ask are embedded in windows of their blocks, written by the indexer of those blocks (`internal/dispatch/refs`) and by the block-index tick's window arm (`internal/dispatch/docs/block_index.go`), which also deletes each whole-text row once its owner's window carries a current vector.
+  The windows themselves are built in `internal/dispatch/itemblocks/windows.go`, text alone, so no indexer pulls this package and the services it dials into its own closure;
+  `embed`'s `TestEveryWindowFitsTheEmbedder` holds those windows to `MaxInputRunes`.
+  `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain - and are all a window kind takes, since the indexers own which windows exist - and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
 
 - **Document tree (Proof schema)**: `internal/dispatch/pmdoc/`
 
@@ -2719,15 +2722,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Readers compare these as strings (`packages/dispatch/web/src/lib/timestamps.ts`'s `compareTimestamps`, and the e2e specs), so an offset the host's zone decided would order them wrongly;
   nothing pins `TZ` to keep that from happening.
 
-- The comment, comment-edit, message and broadcast body cap is `contracts.DispatchBodyMax` (32,000 UTF-16 units), generated from `DISPATCH_BODY_MAX` in `packages/contracts` rather than spelled here:
-  `comment_create.go`, `comment_actions.go`, `messages.go` and `broadcasts.go` are its four enforcement sites, each refusing with the `CAP_EXCEEDED` wording above.
-  Change it in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`;
-  the same constant generates the Legion daemon's `dispatch.MessageBodyLimit`, from which `record.MessagePostLimit` (31,956) subtracts the outbox marker, so a server older than a daemon of the same release refuses what that daemon posts.
-  Never raise `DISPATCH_BODY_MAX` past `maxInputChars` in `internal/dispatch/embed/embed.go`, the rune limit a comment or message body is embedded at:
-  past it the body's tail is dropped from search by meaning with no error, and `.github/scripts/check-body-embed-limit.sh` fails the build when the body cap exceeds it;
-  that check also requires one line of each package guide (this bullet, and the body-limit row of `packages/contracts/AGENTS.md`) to name both constants, so keep a line of this bullet that names both constants.
-  The declaration comments that pair the two constants - `maxInputChars`'s comment in `embed.go` and the `DISPATCH_BODY_MAX` JSDoc in `dispatch-tools.ts` - are confirmed by a human at review, not by the check:
-  reading a comment out of a file cannot tell comment text from a `//` or `/*` inside a string literal without parsing the language, and a gate that can report agreement it has not established is worse than one that does not try.
+- A comment, comment-edit, message, broadcast and delivery-reply body is bounded block by block rather than as a whole: `contracts.DispatchBlockUnits` (32,000 UTF-16 units) on each block of it and `contracts.DispatchItemBlocks` (32,768) on how many blocks it holds, generated from `DISPATCH_BLOCK_UNITS` and `DISPATCH_ITEM_BLOCKS` in `packages/contracts` rather than spelled here, and published by `GET /api/v1/limits`:
+  `itemblocks.Check` is the one check and `blockBoundError` the one refusal, called from `comment_create.go`, `comment_actions.go`, `messages.go`, `broadcasts.go`, `comment_delivery.go` and `message_delivery.go`.
+  A block over the bound is `400 CAP_EXCEEDED` reading `body block N (<type>) is K characters over the 32000-character block limit (L/M)`, and a body over the count reads `body is K blocks over the 32768-block limit (C/M)`;
+  the count is checked first, so a body built to break the indexer is refused for how many blocks it holds.
+  An ask's question and its options' labels and descriptions together (`validateAskWording`, and `docs.askWordingTooLong` for a document's decision block), an answer's `text`, a resolution's `reason` and a review's `reason` each take `contracts.DispatchEventBodyMax` (32,000 UTF-16 units), the longest body one event carries whole; an approval request's summary takes that bound less the longest question and the fixed options (`approvalQuestion`), so no accepted summary can make its ask fail the ask bound.
+  Change any of them in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`.
 
 - Caller text PostgreSQL cannot store (`text.Storable`) is refused before anything is written (`api/storable_text.go`, positions in UTF-16 units from 1):
   a U+0000, which neither its text nor its jsonb holds, is `400 NUL_CHARACTER` reading `<field> holds a NUL character (U+0000) at character N, which Dispatch cannot store`, and a byte that is not UTF-8, which its text does not hold, is `400 INVALID_UTF8` reading `<field> holds a byte that is not UTF-8 (0xFF) at character N, which Dispatch cannot store`.
@@ -3021,7 +3021,9 @@ a denied role forward adds the subject and the server's violation.
 The listener's own core publishes (a role message's forward or an ad-hoc topic's publish through `/v1/messages/publish`, a fanout exception) count as published only once a flush has shown the server accepted them (`bus.confirmFlushed` and `bus.confirmPublished` hold how), and one the server denies (`bus.ErrPublishDenied`) answers the API publish 403 opening with `publishDeniedPrefix`;
 a denied forward of an ad-hoc topic's copy to one of its recipients is named `delivery_failed` in the route's 504 instead.
 A destination NATS refuses (`bus.ErrRefused`:
-an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations.
+an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and the same event is sent once more with its payload left out (`standInEnvelope`), logged `dispatch outbox: a stand-in went out with the payload left out`:
+  the stand-in keeps the topic, the event id and the `payload_summary`, and in place of the event's payload carries its top-level fields whose encoded value is at most 256 bytes plus `payload_omitted: true`, so a reader still learns which comment or message to read rather than hearing nothing.
+  A stand-in NATS refuses in its turn is logged and counted done as every refusal was before stand-ins, and the event goes on to its other destinations.
 The listener holds one line for both of the bearer kinds `/v1` accepts:
 the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one;
 a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path;

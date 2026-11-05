@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -94,9 +95,13 @@ func (s *server) sendResolvedDelivery(
 	if target.Delivery == "btw" {
 		expectsReply = "required"
 	}
+	// Message is the body a second time, beside the frame, and the listener puts it on the
+	// envelope: it takes the part an event carries (model.EventBody), as the frame's own copy
+	// does, so one send never carries a body twice at two lengths.
+	carried, _ := model.EventBody(body)
 	send, err := s.deps.Envoy.Send(ctx, dispatchenvoy.SendInput{
 		TargetSession:  *target.SessionID,
-		Message:        body,
+		Message:        carried,
 		Payload:        frame,
 		IdempotencyKey: idempotencyKey,
 		Urgency:        deref(urgency),
@@ -716,9 +721,16 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "reply requires one body or error for a delivery attempt")
 		return
 	}
-	if input.Body != nil && strings.TrimSpace(*input.Body) == "" {
-		writeError(w, "MENTION_INPUT", http.StatusBadRequest, "comment body is required")
-		return
+	if input.Body != nil {
+		if strings.TrimSpace(*input.Body) == "" {
+			writeError(w, "MENTION_INPUT", http.StatusBadRequest, "comment body is required")
+			return
+		}
+		// A reply is stored as a comment of its own, so it takes the comment routes' bound.
+		if err := blockBoundError(itemblocks.Check("body", *input.Body)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if input.ReplyToBlock != nil && input.Body == nil {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to_block names the block a reply's body answers; an error report has none")

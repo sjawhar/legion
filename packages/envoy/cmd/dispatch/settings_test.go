@@ -1636,6 +1636,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Error("two dev-sign-in processes with no shared value signed with one key")
 			}
 		},
+		"DISPATCH_DEV_EMBEDDER": func(t *testing.T) {
+			// Its reader: the embedder newEmbedder builds, which calls nothing and names itself.
+			boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_EMBEDDER": "1"}))
+			if err != nil {
+				t.Fatalf("DISPATCH_DEV_EMBEDDER=1 under dev sign-in: %v", err)
+			}
+			embedder, err := newEmbedder(context.Background(), boot.Embedder)
+			if err != nil || embedder == nil || embedder.Identity() != embed.NewDev().Identity() {
+				t.Fatalf("newEmbedder = %v, %v, want the dev embedder", embedder, err)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"}, "DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1")
+		},
 		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=1: hooks off")

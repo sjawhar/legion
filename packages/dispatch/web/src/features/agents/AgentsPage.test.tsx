@@ -24,6 +24,10 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
+// The live view is a lazy route of the app. Importing it here loads its module with the test
+// file, so a `findByRole` after the click waits for the render alone, not for that first load,
+// which takes longer than the second such a wait allows.
+import "../agent-view/AgentConversationPage";
 import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
 import type { AgentPart } from "../refs/AgentName";
 import { KEYED_SEND_ATTEMPT_MS, SendStoppedError } from "../writes/keyed-write";

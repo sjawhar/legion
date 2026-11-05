@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 )
 
 // An issue title is at most contracts.IssueTitleMax UTF-16 units, the dashboard's maxLength, on
@@ -25,7 +26,7 @@ func TestIssueTitlesAreCappedOnCreateAndRetitle(t *testing.T) {
 		t.Helper()
 		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CAP", "title": title, "force": true}, "alice")
 		if response.Code != http.StatusCreated {
-			t.Fatalf("create a title of %d units: status=%d body=%.300s", len16(title), response.Code, response.Body.String())
+			t.Fatalf("create a title of %d units: status=%d body=%.300s", itemblocks.Units16(title), response.Code, response.Body.String())
 		}
 		return decodeBody[issue](t, response)
 	}
@@ -51,7 +52,7 @@ func TestIssueTitlesAreCappedOnCreateAndRetitle(t *testing.T) {
 	atLimit := strings.Repeat("é", contracts.IssueTitleMax)
 	created := create("  " + atLimit + "  ")
 	if created.Title != atLimit {
-		t.Fatalf("created title is %d units, want the %d it was sent without its spaces", len16(created.Title), contracts.IssueTitleMax)
+		t.Fatalf("created title is %d units, want the %d it was sent without its spaces", itemblocks.Units16(created.Title), contracts.IssueTitleMax)
 	}
 	retitledTo := strings.Repeat("a", contracts.IssueTitleMax)
 	retitled := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+created.Key, map[string]any{"title": " " + retitledTo + " "}, "alice")
@@ -59,7 +60,7 @@ func TestIssueTitlesAreCappedOnCreateAndRetitle(t *testing.T) {
 		t.Fatalf("retitle at the limit: status=%d body=%.300s", retitled.Code, retitled.Body.String())
 	}
 	if title := read(created.Key).Title; title != retitledTo {
-		t.Fatalf("retitled title is %d units, want %d", len16(title), contracts.IssueTitleMax)
+		t.Fatalf("retitled title is %d units, want %d", itemblocks.Units16(title), contracts.IssueTitleMax)
 	}
 	issues := count()
 
@@ -73,7 +74,7 @@ func TestIssueTitlesAreCappedOnCreateAndRetitle(t *testing.T) {
 				t.Fatalf("the refused creation left %d issues in CAP, want %d", after, issues)
 			}
 			if title := read(created.Key).Title; title != retitledTo {
-				t.Fatalf("the refused retitle left a title of %d units, want the %d it had", len16(title), contracts.IssueTitleMax)
+				t.Fatalf("the refused retitle left a title of %d units, want the %d it had", itemblocks.Units16(title), contracts.IssueTitleMax)
 			}
 		})
 	}
