@@ -487,10 +487,12 @@ test("every prompt and agent that may write says to make its own scratch and del
 
 // R9: a push moves the branch while the pull request can keep naming the old commit, so the new
 // commit gets no checks (dispatch://INFRA-1318). The step is one wording held across
-// `skill://legion-worker` and the daemon's worker prompt, counted once in each file, so the two
-// copies cannot drift; the carve-out that keeps the "never wait on CI" rule from reading as
-// forbidding the read is a second wording, held across the pr-body reference and the
-// implementer's prompt part. This shows the text ships, never that a role follows it.
+// `skill://legion-worker` and the daemon's worker prompt, counted once in each file, so the
+// pinned sentences cannot drift; the prompt also carries text of its own that no pin here holds,
+// and the pins below hold what only the prompt carries and the skill points at. The carve-out
+// that names the step's reads as the one sleep the "never sleep in a loop" rule allows is a
+// second wording, held across the pr-body reference and the implementer's prompt part. This
+// shows the text ships, never that a role follows it.
 test("the worker skill tells a role to read the pull request's head after its own push", () => {
   const sharedWithTheWorkerPrompt = [
     "skills/legion-worker/SKILL.md",
@@ -510,13 +512,22 @@ test("the worker skill tells a role to read the pull request's head after its ow
     countedOncePerFile(rule, sharedWithTheWorkerPrompt);
   }
   countedOncePerFile(
-    "the read of the pull request's head after a push is no wait on CI, because it reads the pull request's head and no check",
+    "the step's spaced reads of the pull request's head after a push are the one sleep this rule allows, and they read no check",
     [
       "skills/legion-worker/references/pr-body.md",
       "packages/daemon/internal/prompts/go/implementer.md",
     ]
   );
+  const onlyInTheWorkerPrompt = ["packages/daemon/internal/prompts/go/worker-common.md"];
+  countedOncePerFile(
+    "`jj -R \"$LEGION_WORKSPACE\" new --no-edit --insert-after @- -m '<issue>: carry the pull request to the pushed commit'`",
+    onlyInTheWorkerPrompt
+  );
+  countedOncePerFile(
+    '`jj -R "$LEGION_WORKSPACE" log -r legion/<issue>@origin --no-graph -T commit_id`',
+    onlyInTheWorkerPrompt
+  );
   expect(collapsed(path.join(staged, "legion-worker", "SKILL.md"))).toContain(
-    "push a new commit on the one you pushed, an empty one when your work is complete, since a push of a commit the branch already holds moves no ref"
+    "When the last read still is not your commit, carry the pull request with a commit of its own, an empty one when your work is complete and an empty one just as much when `@` holds work of yours, since a push of a commit the branch already holds moves no ref; the push section of your role prompt gives the one `jj` recipe, which leaves `@` and everything in it where it is."
   );
 });

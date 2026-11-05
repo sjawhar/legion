@@ -420,9 +420,9 @@ func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {
 // composed prompt therefore carries the read of the pull request's own head after its own push,
 // escalation sentence included, and neither architect shape does: a later edit that moves the
 // step into a part both shapes compose fails here rather than telling an architect to push. The
-// implementer's part carries the carve-out that keeps its "never sleep in a loop for anything"
-// rule from reading as forbidding the read. This shows the text is loaded, never that a role
-// follows it.
+// implementer's part carries the carve-out that names the step's spaced reads as the one sleep
+// its "never sleep in a loop for anything" rule allows. This shows the text is loaded, never
+// that a role follows it.
 func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 	composer, err := New(t.TempDir())
 	if err != nil {
@@ -446,9 +446,9 @@ func TestTheComposedPushingPromptsPinTheReadOfThePullRequestHead(t *testing.T) {
 			}
 		}
 	}
-	const carveOut = "the read of the pull request's head after a push is no wait on CI, because it reads the pull request's head and no check"
+	const carveOut = "the step's spaced reads of the pull request's head after a push are the one sleep this rule allows, and they read no check"
 	if !strings.Contains(foldWhitespace(composedText(t, composer, claim.RoleImplementer, false)), carveOut) {
-		t.Errorf("the composed %s prompt omits %q, so it holds \"never sleep in a loop for anything\" beside the head read with nothing saying the read is no wait on CI",
+		t.Errorf("the composed %s prompt omits %q, so it holds \"never sleep in a loop for anything\" beside a step whose reads are spaced by sleeps, with nothing saying that rule allows them",
 			claim.RoleImplementer, carveOut)
 	}
 	for _, isRoot := range []bool{true, false} {
