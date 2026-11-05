@@ -82,6 +82,7 @@ import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
+import { useAskCardsDrawnInTasks } from "./useAskCardsDrawnInTasks";
 import { VersionView } from "./VersionView";
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
@@ -421,6 +422,9 @@ export function ProofDocument({
   );
   const blocksReadOnly = isClosed || schemaReadOnly;
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  // One card to a task, so the set of them never draws in the task the editor is swapped in
+  // with (`useAskCardsDrawnInTasks`, dispatch://INFRA-341, R11).
+  const drawnAskBlockHosts = useAskCardsDrawnInTasks(askBlockHosts);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
   // its own beside its button.
@@ -1231,7 +1235,7 @@ export function ProofDocument({
             </PreviewDecisionsContext.Provider>
           </TextAskCard.Provider>
         ) : null}
-        {askBlockHosts.map((host) => {
+        {drawnAskBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
             <AskBlockCard

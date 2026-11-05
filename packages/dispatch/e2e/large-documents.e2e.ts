@@ -75,6 +75,18 @@ interface BlockFrame {
   readonly twice: readonly string[];
 }
 
+/** What one task of the page drew: how many top-level blocks the editor gained in it, and how
+ *  many decision cards were mounted into the shells of their blocks. A `MutationObserver`
+ *  delivers every record of one task in one callback, at that task's own microtask checkpoint,
+ *  so one of these is one task's work and nothing else's. `drawsOfEachTask` records them and
+ *  the row below reads them. */
+interface DrawnInATask {
+  /** When the task's changes were read, counted from the start of navigation. */
+  readonly at: number;
+  readonly blocks: number;
+  readonly cards: number;
+}
+
 declare global {
   interface Window {
     /** How many of the document's blocks the editor's root held at each animation frame, which
@@ -83,6 +95,9 @@ declare global {
     /** What each animation frame of the build held, which `framesOfTheBlocks` records and the
      *  count row reads. */
     __blockFrames?: BlockFrame[];
+    /** What each task of the build drew, which `drawsOfEachTask` records and the decision-card
+     *  row reads. */
+    __drawnInTasks?: DrawnInATask[];
     /** What the page made of the edits `readerEditsTheBuild` gave it, and the refusal where
      *  the editor would not take one. */
     __readerEdits?: EditMade[];
@@ -1216,6 +1231,99 @@ test("a phone draws the margin's ask cards only once its reader opens the review
         timeout: 30_000,
       })
       .toHaveLength(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * Records what each task of the page drew: the editor's top-level blocks and the decision
+ * cards mounted into their shells. Install before the navigation it watches.
+ *
+ * A `MutationObserver` is what makes a task the unit: every record one task leaves is
+ * delivered in a single callback, at that task's own microtask checkpoint, so a callback that
+ * sees two cards appear is a task that drew two of them. The counts are read off the page
+ * rather than taken from the records, because a card's own markup is a subtree the portal
+ * brings in whole and the editor's blocks arrive as a batch's nodes: the count after each task
+ * is the only thing either of them says plainly.
+ *
+ * A decision card is drawn when the shell's header slot - which `AskBlockView` leaves empty
+ * (`web/src/features/doc/typed-block-drawing.ts`) - holds anything: that is `AskBlockCard`'s
+ * portal, the first draw of the card and the one this row is about.
+ */
+async function drawsOfEachTask(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ blocks: blockSelector, headers }: { blocks: string; headers: string }) => {
+      const drawn: DrawnInATask[] = [];
+      window.__drawnInTasks = drawn;
+      let blocks = 0;
+      let cards = 0;
+      const look = () => {
+        const nowBlocks = document.querySelectorAll(blockSelector).length;
+        const nowCards = [...document.querySelectorAll(headers)].filter(
+          (header) => header.childElementCount > 0
+        ).length;
+        if (nowBlocks === blocks && nowCards === cards) return;
+        drawn.push({
+          at: Math.round(performance.now()),
+          blocks: nowBlocks - blocks,
+          cards: nowCards - cards,
+        });
+        blocks = nowBlocks;
+        cards = nowCards;
+      };
+      // The document itself, because this script runs before the page has an element to watch.
+      new MutationObserver(look).observe(document, { childList: true, subtree: true });
+    },
+    {
+      blocks: builtBlocks,
+      headers: "[data-dispatch-ask-block] > [data-dispatch-ask-header]",
+    }
+  );
+}
+
+// The five decision cards of a document are five React cards portalled into the editor's own
+// shells, and their first draw is the dearest thing on the way to an open editor after the
+// build itself: drawn together they were 470 ms of one 678 ms task on this pod, `iphone` at 4x
+// CPU throttling, and that task was the one the host swaps the editor in with
+// (dispatch://INFRA-341, R11). So each card is drawn in a task of its own, and no task both
+// adopts a batch of the editor's blocks and draws a card. This row reads the seam, not the
+// clock: it throttles nothing, because which task a draw lands in is the same however fast the
+// machine is.
+test(`each decision card of ${documentNames.small} is drawn in a task of its own @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(600_000);
+  const { path } = await seedDocument("specs-small.md", smallDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await drawsOfEachTask(page);
+    await page.goto(path);
+    await expect(documentEditor(page)).toBeVisible({ timeout: 240_000 });
+    // Every decision of the document is hosting its ask card, so every card this row is about
+    // has been drawn and the record below is complete.
+    await expect(
+      documentEditor(page).locator('[data-dispatch-ask-block] article[data-testid^="ask-"]')
+    ).toHaveCount(decisionBlocks, { timeout: 240_000 });
+
+    const drawn = await page.evaluate(() => window.__drawnInTasks ?? []);
+    const drewACard = drawn.filter((task) => task.cards > 0);
+    expect(
+      drewACard.length,
+      `the page drew its ${decisionBlocks} decision cards over ${drewACard.length} task(s): ` +
+        "a card drawn in the same task as another is a freeze the reader feels as one"
+    ).toBeGreaterThanOrEqual(decisionBlocks);
+    expect(
+      drewACard.filter((task) => task.cards > 1),
+      "one task drew more than one decision card"
+    ).toEqual([]);
+    expect(
+      drawn.filter((task) => task.cards > 0 && task.blocks !== 0),
+      "one task both changed the editor's own blocks and drew a decision card: the build's " +
+        "batch and the card's first draw are two tasks, never one"
+    ).toEqual([]);
   } finally {
     await alice.close();
   }
