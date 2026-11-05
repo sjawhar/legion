@@ -7,9 +7,9 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 ## The conversation
 
-Reach shared understanding with the person at the least cost of their time. A spec is a conversation, not a document you write and then ask about. A Legion phase worker writes none (`skill://legion-worker`). In order:
+Reach shared understanding with the person at the least cost of their time. A spec is a conversation with them, not a document you write and then ask about. A Legion phase worker writes none (`skill://legion-worker`). In order:
 
-1. Read the issue, the code and what the person wrote.
+1. Research: read the issue, the code and what the person has written.
 2. Send what you found and the questions it leaves open, a few at a time, before the spec states a design.
 3. Write each part only after the answers it rests on.
 4. A wrong premise or a changed request changes the request first.
@@ -28,7 +28,7 @@ Part | Content
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
 
-`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into children.
+`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
 
 ## Rules for the text
 
@@ -38,7 +38,8 @@ For each spec, ask, comment and message:
 - Write about the current design, never the person or how people reached it, and never quote or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence citing a gate that passed (test, review, check) says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
+- A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
+- Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name a new reader may not know, and what each issue you name does for them.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
@@ -47,7 +48,7 @@ For each spec, ask, comment and message:
 
 - Name the concrete case and its numbers, then the choice in those terms, never "Which option?".
 - A choice inside what the person asked for, or one their messages favour, is yours.
-- Ask only for the person's authority, taste or risk appetite, when the options differ on what they care about.
+- Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
 - Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options, answerable on a phone.
 
 ## Each version
@@ -73,7 +74,7 @@ Rewrite a spec outside the outline whole in one version, its ask blocks moved wi
 ## Approval
 
 - Request approval of the spec and `verification.md` (`--include-verification`): each ask block answered or waived, each claim checked, this version unapproved. An unrun check never delays it.
-- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment. An exact undo restores approval.
+- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment. An exact undo can restore approval.
 
 ## The plan
 

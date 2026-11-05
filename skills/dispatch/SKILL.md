@@ -17,7 +17,7 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 ```md
 :::ask{urgency="med"}
-Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation and reason.
+Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation and its reason.
 
 - Option one: what it costs.
 - Option two: what it costs.
@@ -56,7 +56,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Architecture components
 
-Attach each architectural issue to its components (`--components-json`), the root before decomposing it. Change code and `.dispatch/architecture/<id>.md` in one review.
+Attach each architectural issue to its components (`--components-json`), the root before decomposing it. Change code and `.dispatch/architecture/<id>.md` in the same review.
 
 ## References
 
