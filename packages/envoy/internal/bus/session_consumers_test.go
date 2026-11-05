@@ -770,7 +770,8 @@ func TestSessionConsumersStreamID(t *testing.T) {
 
 // A NATS user whose grant predates session consumers may read a consumer's info but not create
 // one: Ensure returns ErrConsumerNotGranted, at once rather than after a request timeout, so the
-// listener can answer the registration with core delivery.
+// listener refuses that registration 503 no_grant and writes nothing - no interest row, no
+// session entry - rather than making the client wait out that timeout first.
 func TestEnsureWithoutTheCreateGrantIsErrConsumerNotGranted(t *testing.T) {
 	seed, public := testnats.User(t)
 	uri := testnats.StartNkeyGranted(t, public, "$JS.API.INFO", "$JS.API.STREAM.>", "$JS.API.CONSUMER.INFO.>", "_INBOX.>").URL

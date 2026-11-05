@@ -35,8 +35,9 @@ const sessionConsumerPrefix = "s-"
 
 // ErrConsumerNotGranted is wrapped, with the server's refusal (ErrPublishDenied), by a session
 // consumer call the connection's NATS user may not make: a hub whose grant predates session
-// consumers refuses their info, create and delete. The listener answers such a session's
-// registration with core delivery.
+// consumers refuses their info, create and delete. The listener refuses such a session's
+// registration 503 no_grant and writes nothing - no interest row, no session entry - logging one
+// WARN for the episode and then answering for ten minutes without a further server call.
 var ErrConsumerNotGranted = errors.New("bus: the NATS user may not manage session consumers")
 
 // ErrSessionConsumerNotFound is returned by a call on a session consumer the stream does not hold:
