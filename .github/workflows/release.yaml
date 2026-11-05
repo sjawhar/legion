@@ -596,7 +596,7 @@ jobs:
   # Publishes what the three build jobs made, in one job for all three packages, so their release
   # waits for a runner once: pi-envoy, pi-legion, then legion, which links those two and so goes
   # only once both are on npm. It runs no bun, no node, no Go, no built binary and no scripts/
-  # program, only release-push.sh, git, gh, jq, awk, sha256sum, npm (view, and publish of a handed
+  # program, only release-push.sh, git, gh, jq, sha256sum, npm (view, and publish of a handed
   # tarball) and the pinned actions below, so the scopes and the deploy key it holds never meet the
   # code the build jobs ran. It runs on main even when nothing releases: its pair_ok output decides
   # whether worker_image_attest attests the image, and each step decides for its own package.
@@ -735,11 +735,9 @@ jobs:
           name: pi-envoy-notes
           path: ${{ runner.temp }}/pi-envoy-notes
 
-      # The entries go under one "## Changelog" heading in the release's body, below the notes
-      # `release-push.sh release` generated for it. A re-run renders the same entries again, so an
-      # existing section of that heading is replaced rather than added to: the read-replace-write
-      # worker_image_release's "Name the worker image on the legion release" step makes, over this
-      # heading. gh, awk and the shell alone, as everything this job runs.
+      # pi_envoy_build's entries become the release body's one "## Changelog" section, below the
+      # notes `release-push.sh release` generated for it. release-section replaces a section that
+      # heading already holds, and says there why the write is a replace and not an append.
       - name: "pi-envoy: Write the changelog into the release body"
         if: ${{ !cancelled() && steps.pi_envoy_notes.outcome == 'success' }}
         env:
@@ -747,25 +745,8 @@ jobs:
           TAG: ${{ steps.pi_envoy_handed.outputs.tag }}
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
         run: |
-          entries="$RUNNER_TEMP/pi-envoy-notes/pi-envoy_$VERSION.md"
-          test -s "$entries"
-          body="$RUNNER_TEMP/pi-envoy-body.md"
-          new="$RUNNER_TEMP/pi-envoy-new-body.md"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$body"
-          # The section runs to the next heading of level 1 or 2.
-          rest=$(awk '/^## Changelog[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' "$body")
-          if [ -n "$rest" ]; then
-            printf '%s\n\n' "$rest" > "$new"
-          else
-            : > "$new"
-          fi
-          { echo "## Changelog"; echo; cat "$entries"; } >> "$new"
-          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
-          if [ "$(<"$body")" = "$(<"$new")" ]; then
-            echo "Release $TAG already holds this release's entries"
-            exit 0
-          fi
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$new"
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/pi-envoy-notes/pi-envoy_$VERSION.md"
 
       # pi-legion: what pi_legion_build packed, published as pi-envoy's above is.
       - name: "pi-legion: Download the tarball"
@@ -847,25 +828,8 @@ jobs:
           TAG: ${{ steps.pi_legion_handed.outputs.tag }}
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
         run: |
-          entries="$RUNNER_TEMP/pi-legion-notes/pi-legion_$VERSION.md"
-          test -s "$entries"
-          body="$RUNNER_TEMP/pi-legion-body.md"
-          new="$RUNNER_TEMP/pi-legion-new-body.md"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$body"
-          # The section runs to the next heading of level 1 or 2.
-          rest=$(awk '/^## Changelog[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' "$body")
-          if [ -n "$rest" ]; then
-            printf '%s\n\n' "$rest" > "$new"
-          else
-            : > "$new"
-          fi
-          { echo "## Changelog"; echo; cat "$entries"; } >> "$new"
-          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
-          if [ "$(<"$body")" = "$(<"$new")" ]; then
-            echo "Release $TAG already holds this release's entries"
-            exit 0
-          fi
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$new"
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/pi-legion-notes/pi-legion_$VERSION.md"
 
       # The plugin pair npm carries for this run, which legion links and the worker image installs:
       # for each Oh My Pi plugin, the version its build released when "Create GitHub release", the
@@ -1109,8 +1073,8 @@ jobs:
   # package in publish failed. It runs beside worker_image_attest, not after it: if the attestation
   # fails, the release names a digest that the consumers' `gh attestation verify` refuses, which
   # fails closed. It runs no build and no dependency code, only the runner's own `docker buildx
-  # imagetools`, gh, awk and the pinned login action, so the scopes it holds never meet the
-  # Dockerfile worker_image ran.
+  # imagetools`, release-push.sh, gh and the pinned login action, so the scopes it holds never meet
+  # the Dockerfile worker_image ran.
   worker_image_release:
     needs: [worker_image, publish]
     # On `always()`, so a job skipped upstream does not skip this one; it tests the result of both
@@ -1158,24 +1122,12 @@ jobs:
           fi
           echo "$IMAGE:$VERSION names $DIGEST"
 
+      # The release's body gets one "## Worker image" section, naming the digest the version tag
+      # points at now. release-section replaces a section that heading already holds, which is what
+      # a whole-run rerun of this image needs, and says there why the write is a replace.
       - name: Name the worker image on the legion release
         run: |
           test -n "$REF"
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
-          # A whole-run rerun rebuilds the image under the same version tag, so an existing
-          # "## Worker image" section is replaced rather than added to: the body names only the
-          # digest the tag points at now. The section runs to the next heading of level 1 or 2.
-          rest=$(awk '/^## Worker image[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' body.md)
-          if [ -n "$rest" ]; then
-            printf '%s\n\n' "$rest" > notes.md
-          else
-            : > notes.md
-          fi
           # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
-          printf '## Worker image\n\n`%s`\n' "$REF" >> notes.md
-          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
-          if [ "$(<body.md)" = "$(<notes.md)" ]; then
-            echo "Release $RELEASE_TAG already names $REF"
-            exit 0
-          fi
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+          printf '`%s`\n' "$REF" |
+            .github/scripts/release-push.sh release-section "$RELEASE_TAG" '## Worker image' -

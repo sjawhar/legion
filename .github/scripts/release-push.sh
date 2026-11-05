@@ -7,9 +7,9 @@
 # dependencies' code and holds no credential, and a publish job, which holds
 # the credentials and runs no dependency code (the rebuild workflow's push job
 # is one). `version`, `check-built`, `extract-built`, `no-credential` and
-# `fold-notes` are the build job's; `release`, `restart`, `push-tag` and
-# `push-built` the publish job's; `tag`, `tagged`, `handed` and `fold-plan`
-# serve both.
+# `fold-notes` are the build job's; `release`, `release-section`, `restart`,
+# `push-tag` and `push-built` the publish job's; `tag`, `tagged`, `handed` and
+# `fold-plan` serve both.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -94,6 +94,25 @@
 #            upload fails, so only a job cancelled or lost mid-upload leaves
 #            one, possibly short of assets. A failed upload leaves the draft
 #            unpublished; either failure fails the step, naming the release.
+# release-section: write one section into the body of the GitHub release of
+#            <tag>, in $GITHUB_REPOSITORY: the <heading> line, a blank line and
+#            the bytes of <content-file>, which is '-' to read the content from
+#            standard input. Every other line of the body gh prints is kept in
+#            its order, and a section the body already holds under that heading
+#            - that line, trailing blanks and a CR apart, and everything down to
+#            the next heading of level one or two - is dropped before the new
+#            one is appended. The write is a replace and not an append because
+#            every caller is a step a re-run runs again: it renders the same
+#            entries, or names the digest the version tag points at now, and an
+#            append would leave the body holding that section twice. A body
+#            already holding exactly what would be written, trailing newlines
+#            apart, is left alone and nothing is edited; which of the two it did
+#            is said on stdout. The heading must be a level-two heading line
+#            ('## ' and a title), the one shape a later run finds again, and the
+#            content must be a file that is not empty, or the heading would
+#            stand over nothing: either is an ::error:: naming it, with nothing
+#            written. It runs gh, awk and the shell alone, as every caller is a
+#            job holding a credential.
 # push-tag:  push the local tag <tag> to $GITHUB_REPOSITORY on GitHub over SSH
 #            with the deploy key in $DEPLOY_KEY, for a job whose checkout keeps
 #            no credential. The key and GitHub's host keys, pinned below, go
@@ -346,7 +365,7 @@
 #            output.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes [--label <label>] <notes-dir> <spec>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh release-section <tag> <heading> <content-file> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes [--label <label>] <notes-dir> <spec>... | release-push.sh no-credential}
 
 # The identity of the commit this script makes, push-built's rebuild: GitHub
 # Actions' own bot.
@@ -855,7 +874,7 @@ unlisted_files() {
 # ::error:: both say about the paths unlisted_files left in unlisted: every one
 # of them, the specs the command was given, and what to do with the file.
 unlisted_message() {
-  printf '%s at HEAD: each is under the .changes/ of a package the fold was not given, here %s, and the fold folds the fragments of the packages it is given alone, so the fold does not fold it and it stays on main unfolded; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
+  printf '%s at HEAD: each is under the .changes/ of a package the fold was not given, here %s, and the fold reads the fragments of the packages it is given alone, so no release and no documentation page renders it and it stays where it is; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
 
 # group_column <dir> <label> <column>: the plan's <column> (4 the path) on each
@@ -1178,6 +1197,61 @@ case "$command" in
         exit 1
         ;;
     esac
+    ;;
+  release-section)
+    shift
+    usage='usage: release-push.sh release-section <tag> <heading> <content-file>'
+    if [ $# -ne 3 ]; then
+      echo "::error::release-push.sh release-section: a tag, a heading and a content file are needed; $usage" >&2
+      exit 2
+    fi
+    tag=$1 heading=$2 content=$3
+    repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must name the repository as owner/repo}
+    # The heading is how a later run finds the section it must replace, so it is
+    # refused unless it is a level-two heading line: under any other heading the
+    # awk below would find nothing and a re-run would add a second copy.
+    if [[ $heading != '## '[^[:space:]]* ]] || [[ $heading == *[[:space:]] ]]; then
+      echo "::error::release-push.sh release-section: the heading $(quote_all "$heading") is not a level-two heading line ('## ' and a title); refusing it" >&2
+      exit 2
+    fi
+    section_dir=$(mktemp -d)
+    on_exit_remove "$section_dir"
+    if [ "$content" = - ]; then
+      shown='standard input'
+      content=$section_dir/content.md
+      cat > "$content"
+    else
+      shown=$(quote_all "$content")
+    fi
+    # A heading over nothing is no section, and an empty file is a caller whose
+    # content was never rendered: either way the body is left as it is.
+    [ -s "$content" ] ||
+      fail_error "nothing to write into the $heading section of release $tag: $shown holds no content"
+    body=$section_dir/body.md new=$section_dir/new-body.md
+    gh release view "$tag" --repo "$repo" --json body -q .body > "$body"
+    # Every other line of the body is kept in its order; the section runs to the
+    # next heading of level 1 or 2. The heading goes to awk through the
+    # environment, which passes it as it is, where -v would read a backslash in
+    # it as an escape and so match no line of the body.
+    rest=$(section_heading=$heading awk '
+      { line = $0; sub(/[ \t\r]+$/, "", line) }
+      line == ENVIRON["section_heading"] { skip = 1; next }
+      skip && /^##? / { skip = 0 }
+      !skip
+    ' "$body")
+    if [ -n "$rest" ]; then
+      printf '%s\n\n' "$rest" > "$new"
+    else
+      : > "$new"
+    fi
+    { printf '%s\n\n' "$heading"; cat "$content"; } >> "$new"
+    # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
+    if [ "$(<"$body")" = "$(<"$new")" ]; then
+      echo "Release $tag already holds this $heading section"
+      exit 0
+    fi
+    gh release edit "$tag" --repo "$repo" --notes-file "$new"
+    echo "Wrote the $heading section into the body of release $tag"
     ;;
   push-tag)
     tag=${2:?tag}

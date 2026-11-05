@@ -56,11 +56,11 @@ on:
 # scope beyond docker's package push, and each ends in a tripwire (`release-push.sh
 # no-credential`) that fails when a credential is reachable from it anyway. attest and
 # release_publish hold the credentials and run no dependency code: attest runs one pinned action;
-# release_publish only release-push.sh, git, gh, jq, awk, sha256sum, `docker buildx imagetools`
-# and the pinned actions below. Neither restores a cache (`cache-mode: none`), and the deploy key
-# is in the env of the one step that pushes the tag. image_index is neither: it holds docker's
-# package push alone and runs no dependency code, only `docker buildx imagetools` over the digests
-# the docker legs hand over.
+# release_publish only release-push.sh, git, gh, jq, sha256sum, `docker buildx imagetools` and the
+# pinned actions below. Neither restores a cache (`cache-mode: none`), and the deploy key is in the
+# env of the one step that pushes the tag. image_index is neither: it holds docker's package push
+# alone and runs no dependency code, only `docker buildx imagetools` over the digests the docker
+# legs hand over.
 permissions: {}
 
 env:
@@ -592,7 +592,7 @@ jobs:
   # writes SHA256SUMS, tags the commit, attests the host binaries and creates the GitHub release.
   # When another run took the version first, it publishes nothing and sees to it that a run
   # releases this commit ("Confirm the version").
-  # It runs no Go, no bun and no built binary, only release-push.sh, git, gh, jq, awk, sha256sum,
+  # It runs no Go, no bun and no built binary, only release-push.sh, git, gh, jq, sha256sum,
   # `docker buildx imagetools` and the pinned actions below, so the scopes and the deploy key it
   # holds never meet the code the build jobs run.
   release_publish:
@@ -936,11 +936,9 @@ jobs:
         with:
           name: envoy-release-notes
           path: ${{ runner.temp }}/release-notes
-      # The entries go under one "## Changelog" heading in the release's body, below the fixed
-      # sentence above. A re-run renders the same entries again, so an existing section of that
-      # heading is replaced rather than added to: the read-replace-write release.yaml's "Name the
-      # worker image on the legion release" step makes, over this heading. gh, awk and the shell
-      # alone, as everything this job runs.
+      # release_build's entries become the release body's one "## Changelog" section, below the
+      # fixed sentence above. release-section replaces a section that heading already holds, and
+      # says there why the write is a replace and not an append.
       - name: Write the changelog into the release body
         if: steps.notes.outcome == 'success'
         env:
@@ -948,22 +946,5 @@ jobs:
           TAG: ${{ steps.assets.outputs.tag }}
           VERSION: ${{ needs.release_build.outputs.version }}
         run: |
-          entries="$RUNNER_TEMP/release-notes/envoy_$VERSION.md"
-          test -s "$entries"
-          body="$RUNNER_TEMP/release-body.md"
-          new="$RUNNER_TEMP/release-new-body.md"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$body"
-          # The section runs to the next heading of level 1 or 2.
-          rest=$(awk '/^## Changelog[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' "$body")
-          if [ -n "$rest" ]; then
-            printf '%s\n\n' "$rest" > "$new"
-          else
-            : > "$new"
-          fi
-          { echo "## Changelog"; echo; cat "$entries"; } >> "$new"
-          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
-          if [ "$(<"$body")" = "$(<"$new")" ]; then
-            echo "Release $TAG already holds this release's entries"
-            exit 0
-          fi
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$new"
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/release-notes/envoy_$VERSION.md"

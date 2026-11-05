@@ -8,8 +8,11 @@
 # nothing and pushes nothing; for the two pair_member functions of
 # release.yaml, which read each plugin's released version from the tags; for
 # `release-push.sh release`, which makes a GitHub release carry the run's
-# assets; for `release-push.sh restart`, which leaves a lost version's commit
-# to a later unfinished run or starts a run for it, bounded, against a stub gh;
+# assets; for `release-push.sh release-section`, which writes one section into
+# a release's body, replacing the one that heading already holds and editing
+# nothing when the body already holds it; for `release-push.sh restart`, which
+# leaves a lost version's commit to a later unfinished run or starts a run for
+# it, bounded, against a stub gh;
 # for `release-push.sh push-tag`, which pushes a tag with the deploy
 # key; for `release-push.sh push-built`, which lands a build of the Claude
 # Envoy plugin on the claude-plugin branch through land_on_branch, made on
@@ -49,6 +52,12 @@
 # The `release` cases run against a stub `gh` first on PATH, which answers `gh
 # release view` for a release that does not exist, is a draft or is published,
 # can fail an upload, an edit or a create, and logs every call it gets. The
+# `release-section` cases drive that stub too: it answers `gh release view
+# --json body` with the body each case leaves it and keeps what an edit's
+# --notes-file held, so each case reads the body release-section would write,
+# byte for byte, over bodies holding that section nowhere, in the middle, at
+# the end, before another heading and already as it would be written, and over
+# a content or a heading it must refuse. The
 # `push-tag` cases push to a local bare origin through a URL rewrite, and two
 # more reach github.com itself: one with the pinned host keys, one with a copy
 # of the script whose pinned key GitHub does not hold. Those, and a comparison
@@ -801,28 +810,41 @@ echo "Case 11: release creates a missing release, publishes a draft, and reuses 
 # shows up as a different log line. `gh release view <tag> ... --json isDraft
 # -q .isDraft` answers for $GH_TEST_RELEASE: none (exit 1, as gh does for a
 # missing release), draft or published (true or false), or odd (a value gh
-# never prints). An upload, edit or create fails when $GH_TEST_FAIL names it.
-# Any other call fails as unexpected, so a call the command should not make
-# shows up as an error.
+# never prints); `--json body -q .body` prints $GH_TEST_DIR/body.md, the
+# release's body as the case left it, for the release-section cases below. An
+# upload, edit or create fails when $GH_TEST_FAIL names it, and the file an
+# edit's --notes-file names is copied to $GH_TEST_DIR/edited.md, the body that
+# edit would write. Any other call fails as unexpected, so a call the command
+# should not make shows up as an error.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
 { printf '[%s]' "$@"; printf '\n'; } >> "$GH_TEST_DIR/calls"
 case "$1 $2" in
   "release view")
-    [[ " $* " == *" --json isDraft -q .isDraft "* ]] || { echo "view without --json isDraft: $*" >&2; exit 3; }
-    case $GH_TEST_RELEASE in
-      none) echo "release not found" >&2; exit 1 ;;
-      draft) echo true ;;
-      published) echo false ;;
-      odd) echo null ;;
-      *) echo "unknown GH_TEST_RELEASE $GH_TEST_RELEASE" >&2; exit 3 ;;
-    esac ;;
+    if [[ " $* " == *" --json body -q .body "* ]]; then
+      cat "$GH_TEST_DIR/body.md"
+    elif [[ " $* " == *" --json isDraft -q .isDraft "* ]]; then
+      case $GH_TEST_RELEASE in
+        none) echo "release not found" >&2; exit 1 ;;
+        draft) echo true ;;
+        published) echo false ;;
+        odd) echo null ;;
+        *) echo "unknown GH_TEST_RELEASE $GH_TEST_RELEASE" >&2; exit 3 ;;
+      esac
+    else
+      echo "view without --json isDraft or --json body: $*" >&2
+      exit 3
+    fi ;;
   "release upload" | "release edit" | "release create")
     if [ "$GH_TEST_FAIL" = "$2" ]; then
       echo "HTTP 502: the test failed this $2" >&2
       exit 1
-    fi ;;
+    fi
+    while [ $# -gt 1 ]; do
+      [ "$1" != --notes-file ] || cp "$2" "$GH_TEST_DIR/edited.md"
+      shift
+    done ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 GH
@@ -885,6 +907,115 @@ release_run none "" pkg-v1.0.1 "Pkg v1.0.1"
 check "no asset: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 release_run none "" --draft pkg-v1.0.1 "Pkg v1.0.1" a.tgz
 check "an unknown option: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
+
+echo
+echo "Case 11a: release-section writes one section into the release's body, replacing the one it holds"
+# The content a changelog step hands over: markdown of its own, with "###" headings and list
+# items, which must reach the body unchanged.
+entries="$work/section-entries.md"
+printf '### Added\n\n- an entry\n- another entry\n\n### Fixed\n\n- a bug\n' > "$entries"
+: > "$work/section-stdin.md"
+# section_run <arg>...: runs `release-push.sh release-section pkg-v1.0.1 <arg>...` against the
+# stub, which answers the body view with $work/body.md as the case left it, and with standard
+# input from $work/section-stdin.md, empty unless the case wrote it; leaves its exit code in rc,
+# its combined output in out, the stub's call log in calls and the body the edit was handed in
+# edited, emptied first so a case can tell that no edit came.
+section_run() {
+  rm -f "$work/edited.md"
+  : > "$work/calls"
+  set +e
+  out=$(cd "$work" && GITHUB_REPOSITORY=example/repo GH_TEST_DIR="$work" GH_TEST_RELEASE=published \
+    GH_TEST_FAIL='' PATH="$work/bin:$PATH" "$release_push" release-section pkg-v1.0.1 "$@" \
+    < "$work/section-stdin.md" 2>&1)
+  rc=$?
+  set -e
+  calls=$(<"$work/calls")
+  edited=''
+  [ ! -e "$work/edited.md" ] || edited=$(<"$work/edited.md")
+}
+# edited_is <kept> <heading> <content-file>: true when the body the edit was handed holds, byte
+# for byte, <kept> — the body's other lines as release-section keeps them, empty for none — then
+# the heading, a blank line and the content file.
+edited_is() {
+  { [ -z "$1" ] || printf '%s\n\n' "$1"; printf '%s\n\n' "$2"; cat "$3"; } > "$work/expected-body.md"
+  cmp -s "$work/edited.md" "$work/expected-body.md" && echo true || echo false
+}
+body_view=$(argv release view pkg-v1.0.1 --repo example/repo --json body -q .body)
+# The edit's --notes-file names a file under the command's own temporary directory, so the log
+# line is read by its shape; one_edit: the body view and one edit, and nothing else.
+notes_edit='^\[release\]\[edit\]\[pkg-v1\.0\.1\]\[--repo\]\[example/repo\]\[--notes-file\]\[/'
+one_edit() { is "$(grep -c . <<<"$calls")|$(contains "$calls" "$notes_edit")" '2|true'; }
+# A body holding no such section: the section is appended under its heading, and every other line
+# is kept as it was.
+printf 'Pkg v1.0.1, built from the tag.\n\n## Worker image\n\n`ghcr.io/example/worker@sha256:a1`\n' > "$work/body.md"
+kept=$(<"$work/body.md")
+section_run '## Changelog' "$entries"
+check "no such section: exits 0, viewing the body and editing it once" "$(is "$rc|$(one_edit)" '0|true')"
+check "no such section: the section is appended, the body's other lines kept byte for byte" \
+  "$(edited_is "$kept" '## Changelog' "$entries")"
+check "no such section: says it wrote the section" \
+  "$(contains "$out" '^Wrote the ## Changelog section into the body of release pkg-v1\.0\.1$')"
+check "no such section: the content's own markdown goes through unchanged" \
+  "$(is "$(contains "$edited" '^### Added$')|$(contains "$edited" '^- another entry$')|$(contains "$edited" '^### Fixed$')" 'true|true|true')"
+# The same body, now holding that section with other content, between two others.
+printf 'Pkg v1.0.1, built from the tag.\n\n## Changelog\n\n### Added\n\n- an older entry\n\n## Worker image\n\n`ghcr.io/example/worker@sha256:a1`\n' > "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a section already there: exits 0, viewing the body and editing it once" "$(is "$rc|$(one_edit)" '0|true')"
+check "a section already there: replaced, the body's other lines in their order and the next heading kept" \
+  "$(edited_is "$kept" '## Changelog' "$entries")"
+check "a section already there: nothing of what it held is left" "$(is "$(contains "$edited" 'an older entry')" false)"
+# The body already holding exactly what would be written, which a re-run of the step hands over
+# again: nothing is edited, a difference in trailing newlines alone included.
+cp "$work/expected-body.md" "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a body already holding it: exits 0, viewing the body and editing nothing" "$(is "$rc|$calls|$edited" "0|$body_view|")"
+check "a body already holding it: says the release already holds it" \
+  "$(contains "$out" '^Release pkg-v1\.0\.1 already holds this ## Changelog section$')"
+printf '\n\n' >> "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a body differing in trailing newlines alone: still edits nothing" "$(is "$rc|$calls" "0|$body_view")"
+# The section at the end of the body, and one followed by a heading of level one.
+printf 'Lead sentence.\n\n## Changelog\n\n- an older entry\n' > "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a section at the end of the body: replaced, the lead kept" \
+  "$(is "$rc|$(edited_is 'Lead sentence.' '## Changelog' "$entries")" '0|true')"
+printf 'Lead sentence.\n\n## Changelog\n\n- an older entry\n\n# Notes\n\nTail sentence.\n' > "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a section followed by a heading of level one: that heading and what follows it survive" \
+  "$(is "$rc|$(edited_is "$(printf 'Lead sentence.\n\n# Notes\n\nTail sentence.')" '## Changelog' "$entries")" '0|true')"
+# The worker-image caller's shape: one line of content on standard input, under its own heading.
+printf 'Pkg v1.0.1, built from the tag.\n' > "$work/body.md"
+# shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+printf '`%s`\n' 'ghcr.io/example/worker@sha256:b2' > "$work/section-stdin.md"
+section_run '## Worker image' -
+check "content on standard input: written under that heading" \
+  "$(is "$rc|$(edited_is 'Pkg v1.0.1, built from the tag.' '## Worker image' "$work/section-stdin.md")" '0|true')"
+# A content that is empty or missing, on either route: refused before the body is even read, so
+# the caller's step fails instead of leaving a heading over nothing.
+: > "$work/section-empty.md"
+: > "$work/section-stdin.md"
+section_run '## Changelog' "$work/section-empty.md"
+check "an empty content file: exits 1, calling no gh" "$(is "$rc|$calls|$edited" '1||')"
+check "an empty content file: the error names the file" \
+  "$([[ $out == *"::error::release-push.sh release-section: nothing to write into the ## Changelog section of release pkg-v1.0.1: $work/section-empty.md holds no content"* ]] && echo true || echo false)"
+section_run '## Changelog' "$work/section-missing.md"
+check "a content file that is not there: exits 1, calling no gh, naming the file" \
+  "$(is "$rc|$calls|$([[ $out == *"$work/section-missing.md holds no content"* ]] && echo true || echo false)" '1||true')"
+section_run '## Worker image' -
+check "empty standard input: exits 1, calling no gh, naming it" \
+  "$(is "$rc|$calls|$([[ $out == *"release pkg-v1.0.1: standard input holds no content"* ]] && echo true || echo false)" '1||true')"
+# A heading that is no level-two heading line: refused, since the awk that finds the section again
+# would find nothing and a re-run would add a second copy.
+for heading in '### Changelog' '# Changelog' 'Changelog' '## ' '## Changelog ' '##Changelog'; do
+  printf -v shown '%q' "$heading"
+  section_run "$heading" "$entries"
+  check "a heading that is no level-two heading line ($shown): exits 2, calling no gh" "$(is "$rc|$calls|$edited" '2||')"
+  check "a heading that is no level-two heading line ($shown): the error names it" \
+    "$([[ $out == *"the heading $shown is not a level-two heading line ('## ' and a title); refusing it"* ]] && echo true || echo false)"
+done
+section_run '## Changelog'
+check "a missing argument: exits 2, calling no gh, naming what is needed" \
+  "$(is "$rc|$calls|$(contains "$out" 'a tag, a heading and a content file are needed; usage: release-push\.sh release-section <tag> <heading> <content-file>$')" '2||true')"
 
 echo
 echo "Case 11b: restart leaves the release to a later unfinished run that holds this commit, else starts one"
@@ -2393,5 +2524,4 @@ else
   echo "  SKIP: the fold-notes cases (changie is not on PATH)"
 fi
 
-summary "release-push.sh version, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and fold-notes, and release.yaml's pair_member"
-
+summary "release-push.sh version, tagged, tag, release, release-section, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and fold-notes, and release.yaml's pair_member"
