@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -811,5 +813,194 @@ func TestChildsResultInItsOwnRepositoryIsOlderOnTheParentsTab(t *testing.T) {
 	}
 	if got := currencyOf(t, readResults(t, handler, parent.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
 		t.Fatalf("the child's result at its own repository's head = %q, want older", got)
+	}
+}
+
+// commitPullsFake is the GitHub a read-time read-through reads (readThroughGitHub): it answers
+// GET /repos/{owner}/{repo}/commits/{sha}/pulls from the body its test set last, so a test can
+// open a pull request between two reads, and counts every such ask per repository, so a test can
+// show what one read of an issue's results spent.
+type commitPullsFake struct {
+	mu     sync.Mutex
+	asked  map[string]int
+	answer func(repo, sha string) string
+}
+
+// answers sets what GET /repos/{owner}/{repo}/commits/{sha}/pulls answers from now on: the JSON
+// array of pull requests GitHub names for that commit. Until a test sets one, GitHub names none.
+func (f *commitPullsFake) answers(body func(repo, sha string) string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answer = body
+}
+
+// asks is how often GitHub has been asked for repo's pull requests, at any commit.
+func (f *commitPullsFake) asks(repo string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.asked[repo]
+}
+
+func (f *commitPullsFake) serveCommitPulls(w http.ResponseWriter, r *http.Request) {
+	repo := r.PathValue("owner") + "/" + r.PathValue("repo")
+	f.mu.Lock()
+	f.asked[repo]++
+	answer := f.answer
+	f.mu.Unlock()
+	if answer == nil {
+		fmt.Fprint(w, `[]`)
+		return
+	}
+	fmt.Fprint(w, answer(repo, r.PathValue("sha")))
+}
+
+// openPullAt is GitHub's answer for a commit that is the head of one open pull request titled
+// after issueKey, in whichever repository was asked about.
+func openPullAt(number int, issueKey string) func(repo, sha string) string {
+	return func(repo, sha string) string {
+		return fmt.Sprintf(`[{"number":%d,"title":%q,"body":"","html_url":"https://github.com/%s/pull/%d",
+			"state":"open","merged":false,"updated_at":"2026-11-05T07:15:08Z",
+			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}]`,
+			number, issueKey+" the work", repo, number, sha, repo)
+	}
+}
+
+// readThroughGitHub is resultsGitHub's twin for the read-time read-through: a Dispatch holding
+// an App key, the server its handler mounts — whose commitPulls cache a test moves — and the
+// GitHub it reads. The App is installed on repos and on nothing else, every repository it can
+// read answers `main` as its default branch (so a commit heading no pull request is `older`
+// rather than `unknown`), each pull request's commit messages are an empty page, and one commit's
+// pull requests are the fake's, which counts the asks.
+func readThroughGitHub(t *testing.T, repos ...string) (http.Handler, *store.Store, *server, *commitPullsFake) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate fixture key: %v", err)
+	}
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	installed := map[string]bool{}
+	for _, repo := range repos {
+		installed[repo] = true
+	}
+	fake := &commitPullsFake{asked: map[string]int{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
+		if !installed[r.PathValue("owner")+"/"+r.PathValue("repo")] {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found"}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":77,"app_slug":"dispatch-test","permissions":{"contents":"read","pull_requests":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"token":"ghs_fake_77","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"full_name":%q,"default_branch":"main"}`, r.PathValue("owner")+"/"+r.PathValue("repo"))
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}/pulls", fake.serveCommitPulls)
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[]`)
+	})
+	upstream := httptest.NewServer(mux)
+	t.Cleanup(upstream.Close)
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
+		githubAPIBase: upstream.URL,
+	})
+	return handler, database, served, fake
+}
+
+// INFRA-1240 at the surface a reviewer reads. A `before_merge` result is recorded at a commit no
+// pull request carries yet: GitHub names none, so the record's own read-through stores no head
+// row and the result reads `older`. The pull request is opened at that head a moment later and
+// nothing tells Dispatch — a deployment holding no delivery settings consumes no `pull_request`
+// event at all, the reconcile's head pass only re-reads rows that already exist, and the record's
+// read-through has run once and will not run again — so the read of the results asks GitHub
+// itself, and the result reads `current`.
+func TestAResultReadsCurrentOnceAPullRequestOpensAtItsCommit(t *testing.T) {
+	handler, database, served, fake := readThroughGitHub(t, "acme/widgets")
+	issue := issueInRepository(t, handler, "RESO", "acme/widgets", "Opened after the record")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)))
+	var heads int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from pull_request_heads where repo = 'acme/widgets'`).Scan(&heads); err != nil {
+		t.Fatalf("count the stored pull request heads: %v", err)
+	}
+	if heads != 0 {
+		t.Fatalf("recording at a commit GitHub names no pull request for stored %d head rows, want none", heads)
+	}
+	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("a result at a commit no pull request carries = %q, want older", got)
+	}
+
+	// The pull request opens at that head, and no event reaches Dispatch.
+	fake.answers(openPullAt(91, issue.Key))
+	// The read-through the first read spent holds the next one off for
+	// delivery.CommitPullReadStaleAfter, so that span is moved behind us: what the clock does on
+	// its own between a reviewer's refetches, without the test waiting for it.
+	served.commitPulls.RecordRead("acme/widgets", headCommit, time.Now().Add(-delivery.CommitPullReadStaleAfter))
+
+	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("a result at the head of a pull request opened after it was recorded = %q, want current: the read of the results reads GitHub itself", got)
+	}
+}
+
+// The bound on that read. Two reads in a row, while GitHub still names no pull request for the
+// commit, spend one read-through between them: the Verification tab refetches an issue's results
+// on every result.recorded, and a tab left open would otherwise spend a GitHub call per result
+// per refetch for ever, since nothing about such a commit is ever stored
+// (delivery.CommitPullReadStaleAfter).
+func TestTwoResultReadsSpendOneReadThroughOfACommit(t *testing.T) {
+	handler, _, _, fake := readThroughGitHub(t, "acme/widgets")
+	issue := issueInRepository(t, handler, "RESC", "acme/widgets", "Bounded")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)))
+	// The record's own read-through, which the read-time bound neither counts nor is bound by.
+	spent := fake.asks("acme/widgets")
+
+	for _, read := range []string{"first", "second"} {
+		if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
+			t.Fatalf("the %s read of a result at a commit no pull request carries = %q, want older", read, got)
+		}
+	}
+	if asked := fake.asks("acme/widgets") - spent; asked != 1 {
+		t.Fatalf("two reads in a row asked GitHub for the commit's pull requests %d times, want 1", asked)
+	}
+}
+
+// What the read never spends a GitHub call on. A repository Dispatch cannot see is the unknown
+// answer whatever GitHub would say about the commit, so it is not read through at all; and a
+// commit that already heads a pull request attributed to the check's own issue is answered from
+// that row, so neither the record nor the read asks GitHub anything.
+func TestAResultsReadReadsThroughNeitherAnUnseenRepositoryNorAKnownHead(t *testing.T) {
+	handler, database, _, fake := readThroughGitHub(t, "acme/widgets")
+	hidden := issueInRepository(t, handler, "RESJ", "acme/hidden", "Unreadable")
+	seen := issueInRepository(t, handler, "RESK", "acme/widgets", "Readable")
+	uploadDocument(t, handler, "/api/v1/issues/"+hidden.Key, "verification.md", twoChecks)
+	uploadDocument(t, handler, "/api/v1/issues/"+seen.Key, "verification.md", twoChecks)
+	// GitHub would name an open pull request of the issue for the commit in either repository, so
+	// a read that asked would read `current` and the counts below are what decides the test.
+	fake.answers(openPullAt(92, hidden.Key))
+
+	unreadable := decodeBody[recordedResult](t, recordResult(t, handler, hidden.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, hidden.Key), "k1", unreadable.Result.ID); got != model.CurrencyUnknown {
+		t.Fatalf("a result of a repository Dispatch cannot see = %q, want unknown", got)
+	}
+	if asked := fake.asks("acme/hidden"); asked != 0 {
+		t.Fatalf("acme/hidden's pull requests were asked for %d times, want none: Dispatch sees none of that repository", asked)
+	}
+
+	writeHead(t, database, "acme/widgets", 71, newHeadCommit, "open", seen.Key)
+	known := decodeBody[recordedResult](t, recordResult(t, handler, seen.Key, resultBody("k1", "pass", newHeadCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, seen.Key), "k1", known.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("a result at a head Dispatch already holds = %q, want current", got)
+	}
+	if asked := fake.asks("acme/widgets"); asked != 0 {
+		t.Fatalf("acme/widgets' pull requests were asked for %d times, want none: the stored head row answers", asked)
 	}
 }

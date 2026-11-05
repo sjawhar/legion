@@ -24,11 +24,12 @@ import (
 // answers for the child's own checks alone and never for a check of an issue above it.
 //
 // Three writers keep it: the `pull_request` envelope (intake.go, every action), the read-through
-// a recorded result makes when its commit is no head Dispatch knows (ReadThroughCommitPulls),
-// and the reconcile's five-minute pass (reconcile.go), which takes every open row read longer
-// than five minutes ago and every merged row credited to nobody that the rule this build judges
-// by has not judged yet — one offer per rule version (AttributionRuleVersion,
-// ListStalePullRequestHeads). Nothing is written when the results are read.
+// made for a commit that is no head Dispatch knows (ReadThroughCommitPulls) — by a recorded
+// result, and by the read of an issue's results for a `before_merge` result's commit, at most
+// once every CommitPullReadStaleAfter — and the reconcile's five-minute pass (reconcile.go),
+// which takes every open row read longer than five minutes ago and every merged row credited to
+// nobody that the rule this build judges by has not judged yet — one offer per rule version
+// (AttributionRuleVersion, ListStalePullRequestHeads).
 
 // PullRequestHead is one pull request's current head, as pull_request_heads stores it, and the
 // one shape every writer of that row fills in (UpsertPullRequestHead).
@@ -488,9 +489,9 @@ func repositoryUnreadable(err error) bool {
 // (`GET /repos/{o}/{r}/commits/{sha}/pulls`) and writes each one's head row, so a result
 // recorded at the head of a pull request no event has reached Dispatch for is current at once.
 // It answers how many rows it wrote. A repository the App cannot read writes nothing and comes
-// back as the App's own error, which its one caller logs at Info and records the result
-// regardless (api/results.go's readThroughPullRequests): the currency of that result is simply
-// unknown.
+// back as the App's own error, which each caller logs at Info and carries on from
+// (api/results.go's readThroughPullRequests, api/results_currency.go's readThroughHead): the
+// currency of that result stands as its stored rows leave it.
 //
 // Each row is attributed through all five sources, the commit messages included (attributeHead),
 // exactly as the envelope writer attributes one. Attributing from fewer and calling it complete
@@ -505,10 +506,11 @@ func repositoryUnreadable(err error) bool {
 //
 // repoFull comes from outside — the repository the check's issue resolves to — so it is
 // canonicalised before anything is asked of GitHub or written (refs.CanonicalRepo), and no row
-// is ever written under a name a repository was renamed away from. Its one caller has
-// canonicalised that name already (api/results_currency.go, currencyReader.repositoryOf), and
-// the rule reaches the canonical name in one step, so this read changes nothing there; it is
-// here because this function's key is its argument's, not its caller's.
+// is ever written under a name a repository was renamed away from. The read-time caller has
+// canonicalised that name already (api/results_currency.go, currencyReader.repositoryOf) and the
+// rule reaches the canonical name in one step, so this read changes nothing there; it is here
+// because this function's key is its argument's, not its caller's, and the record-time caller
+// hands over the name refs.IssueRepository answered.
 func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time) (int, error) {
 	canonical, err := refs.CanonicalRepo(ctx, pool, repoFull)
 	if err != nil {

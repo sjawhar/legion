@@ -417,6 +417,12 @@ type server struct {
 	// on every result.recorded does not spend one GET /repos/{owner}/{repo} apiece. The policy
 	// is delivery's; the server holds the one cache the process shares.
 	defaultBranches delivery.DefaultBranches
+	// commitPulls is when the results read last read GitHub for the pull requests of each commit
+	// it could answer for no other way (delivery.CommitPullReads, currencyReader.readThroughHead),
+	// held across requests so one commit costs at most one such read per
+	// delivery.CommitPullReadStaleAfter however often the tab refetches. The policy is delivery's;
+	// the server holds the one cache the process shares.
+	commitPulls delivery.CommitPullReads
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
