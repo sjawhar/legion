@@ -89,7 +89,7 @@ func CheckImage(ctx context.Context, img Image) ([]State, error) {
 			return State{Name: row.Name, Status: StatusPresent, Detail: detail}
 		},
 		live: func(row Capability) State {
-			return State{Name: row.Name, Status: StatusReported, Detail: "each session reports it at start; `legion state` renders it: " + row.Summary}
+			return State{Name: row.Name, Status: StatusReported, Detail: "a claimed session reports it while it runs, so the probe cannot check it; `legion state` renders it: " + row.Summary}
 		},
 		deployment: func(row Capability) State {
 			return State{Name: row.Name, Status: StatusReported, Detail: "the daemon reports it from the deployment's configuration: " + row.Summary}

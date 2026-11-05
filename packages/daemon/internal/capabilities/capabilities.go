@@ -55,9 +55,10 @@ const (
 	// SiteImage is checked inside the worker image by `legion probe-image` (CheckImage): the
 	// image either carries what the capability needs or it does not.
 	SiteImage Site = "image"
-	// SiteLive is proved by each session at its start: the session measures the row and reports
-	// it with its ready (claim.ReadyRequest.Capabilities), and the daemon renders the row from the
-	// live sessions' reports (Deployment.Sessions; LEGION-663).
+	// SiteLive is measured by a claimed session while it runs and is idle, and reported on
+	// claims/ready (claim.ReadyRequest.Capabilities). The daemon renders the row from the live
+	// sessions' reports, and a row no live session has reported reads unchecked
+	// (Deployment.Sessions; LEGION-663, INFRA-927).
 	SiteLive Site = "live"
 	// SiteDeployment is decided by the deployment's legion.yaml, which the daemon reports: no
 	// image or pod can show it.

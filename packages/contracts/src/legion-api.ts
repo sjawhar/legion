@@ -540,7 +540,7 @@ export const LegionRegisterResponse = z.object({
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+/** `claim.CapabilityReport` — what a session measured of the live capability rows: when it
  * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
  * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
  * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
@@ -556,8 +556,9 @@ export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
 
 /** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
  * agent has booted and can be prompted, authenticated by the registration's secret and naming the
- * launch generation it answers for. `capabilities` is the session's report of the live rows; a
- * ready without one (the controller's) reports nothing and changes no row. */
+ * launch generation it answers for. A boot's ready and a role-regain's carry no report; a claimed
+ * session sends its report on a `claims/ready` of its own, from the interval it runs while it is
+ * idle. A ready without a `capabilities` report reports nothing and changes no row. */
 export const LegionReadyRequest = z.strictObject({
   claimToken: nonEmptyString,
   sessionId: nonEmptyString,
