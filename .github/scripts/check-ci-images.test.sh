@@ -45,7 +45,7 @@ BUN_SLIM=sha256:2c3d4e5f607182932c3d4e5f607182932c3d4e5f607182932c3d4e5f60718293
 GOLANG=sha256:3d4e5f60718293a43d4e5f60718293a43d4e5f60718293a43d4e5f60718293a4
 GOLANG_NEXT=sha256:5f60718293a4b5c65f60718293a4b5c65f60718293a4b5c65f60718293a4b5c6
 UNKNOWN=sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021
-REGISTRY=ghcr.io/sjawhar/legion/ci
+REGISTRY=ghcr.io/cybermonklabs/legion/ci
 
 # The stand-in for the manifest HEAD: the package holds every digest but the ones MISSING names.
 head_script="$work/head.sh"
@@ -534,7 +534,7 @@ check "a missing file fails" "$(is "$status" 1)"
 check "says what it is for" "$(contains "$out" 'the one place that says which image a digest is')"
 
 root=$(fixture registry-moved)
-sed -i "s|^registry: .*|registry: ghcr.io/sjawhar/legion/other|" "$root/.github/ci-images.yaml"
+sed -i "s|^registry: .*|registry: ghcr.io/cybermonklabs/legion/other|" "$root/.github/ci-images.yaml"
 run_check tree "$root"
 check "another registry in the file itself fails" "$(is "$status" 1)"
 check "names the one every consumer reads" "$(contains "$out" "every consumer names $REGISTRY")"
@@ -553,7 +553,7 @@ status=$?
 set -e
 check "no mode fails" "$(is "$status" 1)"
 check "naming the tree mode" "$(contains "$out" 'this check takes one mode: .tree. reads the files of this tree')"
-check "and the package mode" "$(contains "$out" '.package. reads ghcr.io/sjawhar/legion/ci')"
+check "and the package mode" "$(contains "$out" '.package. reads ghcr.io/cybermonklabs/legion/ci')"
 
 set +e
 out=$("$check_script" tree package 2>&1)

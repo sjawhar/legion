@@ -185,7 +185,9 @@ func scan(row pgx.Row, session string) (model.SessionAnswer, error) {
 		}
 		item.Relation = model.SessionAnswerRelationAnsweredYourAsk
 		item.At = current.At
-		item.Author = model.Actor{Kind: "user", ID: current.User}
+		// The answer's own act, which a comment's or a message's author carries in its stored
+		// JSON: the person answered, and the agent that answered for them is named beside them.
+		item.Author = model.Actor{Kind: "user", ID: current.User, Act: current.Act}
 		if current.Text != nil {
 			item.Text = *current.Text
 		}

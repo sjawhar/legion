@@ -1,14 +1,16 @@
+import { DISPATCH_SCOPES } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
-import type { AgentToken, CreatedAgentToken } from "../../api/types";
+import type { AgentToken, CreatedAgentToken, DispatchScope } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useCopyFeedback } from "../../hooks/useCopyFeedback";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
   card,
+  checkboxAccent,
   dangerHoverText,
   dangerText,
   inputClasses,
@@ -58,9 +60,96 @@ function lostTokens(
     .sort((a, b) => compareTimestamps(b.created_at, a.created_at));
 }
 
+/** The OAuth scope a personal token holds, as its checkbox reads it: what the reader ticks, and
+ *  the line under it saying what a token holding it may do. */
+interface TokenScope {
+  readonly id: DispatchScope;
+  readonly label: string;
+  readonly allows: string;
+}
+
+/** Both scopes a personal token can hold, in the order a row shows them. The ids are the
+ *  contract's own (`DISPATCH_SCOPES`), so a row cannot offer a scope the server does not mint. */
+const TOKEN_SCOPES: readonly TokenScope[] = [
+  {
+    allows: "Reads and writes as you: issues, comments, asks, documents and messages.",
+    id: "person",
+    label: "Act as you",
+  },
+  {
+    allows: "Answers approvals for you, and approves the credentials agents ask you for.",
+    id: "approve",
+    label: "Approve and control credentials",
+  },
+];
+
+/** Both scopes: what a new token holds unless the reader clears one. */
+const BOTH_SCOPES: readonly DispatchScope[] = DISPATCH_SCOPES;
+
+/** The whole set a token holds after one box is ticked or cleared, in `TOKEN_SCOPES` order.
+ *  No token holds `approve` without `person`, so ticking Approve ticks Act as you and clearing
+ *  Act as you clears Approve: the server refuses every other pair (400 TOKEN_SCOPES_INPUT), and
+ *  a row that offered one would be a refusal waiting to happen. */
+function scopesAfterChoice(
+  held: readonly DispatchScope[],
+  scope: DispatchScope,
+  ticked: boolean
+): DispatchScope[] {
+  const next = new Set(held);
+  if (ticked) {
+    next.add(scope);
+    if (scope === "approve") next.add("person");
+  } else {
+    next.delete(scope);
+    if (scope === "person") next.delete("approve");
+  }
+  return TOKEN_SCOPES.filter((each) => next.has(each.id)).map((each) => each.id);
+}
+
+/** The two scope boxes, for a token's row and for the mint form. `subject` is the token they
+ *  belong to, so the boxes of one row are told from another row's by name. */
+function TokenScopeChoices({
+  chosen,
+  disabled,
+  onChoose,
+  subject,
+}: {
+  chosen: readonly DispatchScope[];
+  disabled: boolean;
+  onChoose: (scopes: DispatchScope[]) => void;
+  subject: string;
+}): ReactNode {
+  return (
+    <div className="space-y-2">
+      {TOKEN_SCOPES.map((scope) => (
+        <div key={scope.id}>
+          <label
+            className={`flex items-center gap-2 text-sm font-medium ${textSecondaryOnSurface}`}
+          >
+            <input
+              aria-label={`${scope.label} (${subject})`}
+              checked={chosen.includes(scope.id)}
+              className={`size-4 shrink-0 rounded ${checkboxAccent}`}
+              disabled={disabled}
+              onChange={(event) =>
+                onChoose(scopesAfterChoice(chosen, scope.id, event.target.checked))
+              }
+              type="checkbox"
+            />
+            {scope.label}
+          </label>
+          <p className={`mt-0.5 max-w-xs text-xs ${textMutedOnSurface}`}>{scope.allows}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
+  /** What the mint form's boxes hold: both scopes until the reader clears one. */
+  const [newScopes, setNewScopes] = useState<readonly DispatchScope[]>(BOTH_SCOPES);
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
   /** When the token list was last read again after a mint whose answer was lost. */
   const [rereadAt, setRereadAt] = useState<number | undefined>(undefined);
@@ -69,10 +158,13 @@ export function AgentTokensSection(): ReactNode {
   // The form shows a refused mint beside the name it was refused over.
   const createToken = useKeyedWrite({
     inline: true,
-    label: (input: { name: string; before: readonly string[] }) => `New agent token ${input.name}`,
-    write: ({ name: label }, bounds) => api.createAgentToken({ name: label }, bounds),
+    label: (input: { name: string; before: readonly string[]; scopes: readonly DispatchScope[] }) =>
+      `New agent token ${input.name}`,
+    write: ({ name: label, scopes }, bounds) =>
+      api.createAgentToken({ name: label, scopes: [...scopes] }, bounds),
     onSuccess: (created) => {
       setName("");
+      setNewScopes(BOTH_SCOPES);
       if (created === null) {
         // Minted, and its value - shown once only - is gone with the answer
         // (`createToken.unanswered`): the token is listed once the list is read again, and the
@@ -103,13 +195,27 @@ export function AgentTokensSection(): ReactNode {
       );
     },
   });
+  /** One row's two boxes, written as the whole set the token is to hold. The row reads the set
+   *  back from the list, so the boxes follow the write rather than the press. */
+  const setTokenScopes = useKeyedWrite({
+    label: (input: { id: string; name: string; scopes: DispatchScope[] }) =>
+      `What agent token ${input.name} may do`,
+    write: (input, bounds) => api.setAgentTokenScopes(input.id, input.scopes, bounds),
+    onSuccess: (updated, input) => {
+      queryClient.setQueryData<AgentToken[]>(agentTokensQueryKey, (current = []) =>
+        current.map((token) =>
+          token.id === input.id ? (updated ?? { ...token, scopes: input.scopes }) : token
+        )
+      );
+    },
+  });
   /** Every token the page lists now, read at a press. */
   const listedIds = () => (tokens.data ?? []).map((token) => token.id);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // An emptied form - a mint that landed - sends nothing, whatever submits it.
     if (name.trim() === "") return;
-    createToken.mutate({ before: listedIds(), name });
+    createToken.mutate({ before: listedIds(), name, scopes: newScopes });
   };
   /** A mint whose value was lost with its answer, until the next mint or the reader writes
    *  another label: the press's label and listed tokens, and whether the list has been read
@@ -125,7 +231,7 @@ export function AgentTokensSection(): ReactNode {
         };
   const candidates = lost === null ? [] : lostTokens(tokens.data, lost);
   /** Revokes `token` - once the reader confirms it, by its label and when it was made - and then
-   *  mints another under its label. */
+   *  mints another under its label, holding the scopes the lost one held. */
   const replaceLost = (token: AgentToken) => {
     const made = new Date(token.created_at).toLocaleString();
     if (
@@ -136,7 +242,8 @@ export function AgentTokensSection(): ReactNode {
       return;
     }
     revokeToken.mutate(token.id, {
-      onSuccess: () => createToken.mutate({ before: listedIds(), name: token.name }),
+      onSuccess: () =>
+        createToken.mutate({ before: listedIds(), name: token.name, scopes: token.scopes }),
     });
   };
   const replacing = revokeToken.isPending || createToken.isPending;
@@ -192,6 +299,9 @@ export function AgentTokensSection(): ReactNode {
                 <th className="px-4 py-3 font-semibold" scope="col">
                   Last used
                 </th>
+                <th className="px-4 py-3 font-semibold" scope="col">
+                  What it may do
+                </th>
                 <th className="px-4 py-3" scope="col">
                   <span className="sr-only">Actions</span>
                 </th>
@@ -200,7 +310,7 @@ export function AgentTokensSection(): ReactNode {
             <tbody>
               {tokens.data.length === 0 ? (
                 <tr>
-                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={5}>
+                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={6}>
                     No agent tokens yet.
                   </td>
                 </tr>
@@ -222,6 +332,16 @@ export function AgentTokensSection(): ReactNode {
                       ) : (
                         <Timestamp at={token.last_used_at} />
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <TokenScopeChoices
+                        chosen={token.scopes}
+                        disabled={token.revoked_at !== null || setTokenScopes.isPending}
+                        onChoose={(scopes) =>
+                          setTokenScopes.mutate({ id: token.id, name: token.name, scopes })
+                        }
+                        subject={token.name}
+                      />
                     </td>
                     <td className="px-4 py-3 text-right">
                       {token.revoked_at === null ? (
@@ -247,29 +367,37 @@ export function AgentTokensSection(): ReactNode {
       ) : null}
 
       <form
-        className={`mt-6 flex flex-col gap-3 rounded-xl border p-4 sm:flex-row sm:items-end ${borderDefault}`}
+        className={`mt-6 flex flex-col gap-4 rounded-xl border p-4 ${borderDefault}`}
         onSubmit={submit}
       >
-        <label
-          className={`grid flex-1 gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-          htmlFor="agent-token-name"
-        >
-          Token label
-          <input
-            className={`min-h-11 rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
-            id="agent-token-name"
-            onChange={(event) => {
-              createToken.forgetUnanswered();
-              setName(event.target.value);
-            }}
-            placeholder="Architect"
-            required
-            value={name}
-          />
-        </label>
-        <button className={settingsSubmitButton} disabled={createToken.isPending} type="submit">
-          New token
-        </button>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label
+            className={`grid flex-1 gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+            htmlFor="agent-token-name"
+          >
+            Token label
+            <input
+              className={`min-h-11 rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
+              id="agent-token-name"
+              onChange={(event) => {
+                createToken.forgetUnanswered();
+                setName(event.target.value);
+              }}
+              placeholder="Architect"
+              required
+              value={name}
+            />
+          </label>
+          <button className={settingsSubmitButton} disabled={createToken.isPending} type="submit">
+            New token
+          </button>
+        </div>
+        <TokenScopeChoices
+          chosen={newScopes}
+          disabled={createToken.isPending}
+          onChoose={setNewScopes}
+          subject="new token"
+        />
       </form>
       {lost === null ? null : (
         <div className="mt-4 space-y-2">
@@ -324,7 +452,9 @@ export function AgentTokensSection(): ReactNode {
           <QueryError
             message="Couldn't create the agent token."
             onRetry={() =>
-              createToken.mutate(createToken.variables ?? { name, pressedAt: Date.now() })
+              createToken.mutate(
+                createToken.variables ?? { before: listedIds(), name, scopes: newScopes }
+              )
             }
             retrying={createToken.isPending}
           />

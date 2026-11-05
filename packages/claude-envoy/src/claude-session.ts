@@ -9,11 +9,20 @@ export function configuredValue(value: string | undefined): string | undefined {
   return value !== undefined && value.trim().length > 0 ? value : undefined
 }
 
-/** Resolve the session route that Claude Code supplies, allowing a QA override. */
-export function claudeSessionId(environment: ClaudeSessionEnvironment): string {
-  const id =
+/** The session route Claude Code supplies, allowing a QA override, or undefined where it
+ *  supplies none. The one place that spells the precedence: a caller that must have an id calls
+ *  `claudeSessionId`, and one that acts as a session only where its shell names one — a
+ *  command's broker trade, which writes under that session — reads it here. */
+export function configuredSessionId(environment: ClaudeSessionEnvironment): string | undefined {
+  return (
     configuredValue(environment.ENVOY_SESSION_ID) ??
     configuredValue(environment.CLAUDE_CODE_SESSION_ID)
+  )
+}
+
+/** Resolve the session route that Claude Code supplies, allowing a QA override. */
+export function claudeSessionId(environment: ClaudeSessionEnvironment): string {
+  const id = configuredSessionId(environment)
   if (id !== undefined) return id
   throw new Error(
     "Envoy channel requires ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID; Claude Code did not provide a session identity",

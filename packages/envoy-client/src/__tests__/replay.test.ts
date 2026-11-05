@@ -1162,6 +1162,165 @@ describe("replay sweep", () => {
   });
 });
 
+describe("starting the cursors", () => {
+  /** A position read as `startCursors` makes it: no `after`, under its own short deadline. */
+  const positionRead = (...subjects: string[]) => ({
+    sessionID: SESSION,
+    subjects: subjects.map((subject) => ({ subject })),
+    timeoutMs: 2_000,
+  });
+
+  test("a subject with no cursor starts at the stream's end, reading nothing, and the first sweep shows what came after", async () => {
+    const { stream, host, engine } = setup([AGENT]);
+    stream.publish(AGENT, envelope());
+    await engine.startCursors();
+    expect(stream.calls).toEqual([positionRead(AGENT)]);
+    expect(host.attempts).toEqual([]);
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 1, after: 1 } });
+    expect(host.writes.at(-1)?.state?.subjects).toEqual({ [AGENT]: { since: 1, after: 1 } });
+
+    const stored = envelope();
+    stream.publish(AGENT, stored);
+    await engine.sweep();
+    expect(ids(host.shown)).toEqual([stored.event_id]);
+  });
+
+  test("a cursor already set is kept and read nothing for, and no cursor of a subject not followed now is dropped", async () => {
+    const { stream, host, engine } = setup([AGENT, ISSUE]);
+    await engine.sweep();
+    host.followed = [AGENT];
+    stream.publish(AGENT, envelope());
+    const calls = stream.calls.length;
+    await engine.startCursors();
+    expect(stream.calls.length).toBe(calls);
+    expect(engine.state().subjects).toEqual({
+      [AGENT]: { since: 0, after: 0 },
+      [ISSUE]: { since: 0, after: 0 },
+    });
+  });
+
+  test("a read that fails marks only the session's own agent subject from_start, writes it, says so, and never rejects", async () => {
+    const { clock, stream, host, engine } = setup([AGENT, ISSUE]);
+    stream.failCall(1, new Error("listener down"));
+    await engine.startCursors();
+    expect(engine.state().subjects).toEqual({ [AGENT]: { from_start: clock.now } });
+    expect(host.writes.at(-1)?.state?.subjects).toEqual({ [AGENT]: { from_start: clock.now } });
+    expect(engine.startPending()).toBe(true);
+    expect(
+      host.logs.some((line) =>
+        line.includes(`could not read the stream's position for ${AGENT} before registering`)
+      )
+    ).toBe(true);
+  });
+
+  test("a later start keeps the from_start mark and starts only the subjects with neither", async () => {
+    const { clock, stream, engine } = setup([AGENT, ISSUE]);
+    stream.failCall(1, new Error("listener down"));
+    await engine.startCursors();
+    const markedAt = clock.now;
+    clock.now += HOUR;
+    stream.publish(AGENT, envelope());
+    stream.refused.set(ISSUE, "not_followed");
+    await engine.startCursors();
+    expect(stream.calls.at(-1)).toEqual(positionRead(ISSUE));
+    expect(engine.state().subjects).toEqual({ [AGENT]: { from_start: markedAt } });
+
+    stream.refused.delete(ISSUE);
+    await engine.startCursors();
+    expect(engine.state().subjects).toEqual({
+      [AGENT]: { from_start: markedAt },
+      [ISSUE]: { since: 1, after: 1 },
+    });
+  });
+
+  test("a from_start subject is read from the stream's oldest message, with no gap noticed, and its cursor starts there", async () => {
+    const { stream, host, engine } = setup([AGENT]);
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    stream.expireBelow(3);
+    stream.failCall(1, new Error("listener down"));
+    await engine.startCursors();
+
+    const stored = envelope();
+    stream.publish(AGENT, stored);
+    await engine.sweep();
+    expect(stream.calls.at(-1)).toEqual({
+      sessionID: SESSION,
+      subjects: [{ subject: AGENT, after: 0 }],
+    });
+    expect(ids(host.shown)).toEqual([stored.event_id]);
+    expect(host.notices).toEqual([]);
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 2, after: 3 } });
+    expect(engine.startPending()).toBe(false);
+
+    await engine.sweep();
+    expect(ids(host.shown)).toEqual([stored.event_id]);
+  });
+
+  test("a from_start mark older than the stream's age limit notices the gap retention may have left", async () => {
+    // The stream drops messages only by age, after the duplicate window: a mark set longer ago than
+    // that may have lost a message stored after it, so the gap below the oldest one is noticed.
+    const { clock, stream, host, engine } = setup([AGENT]);
+    stream.failCall(1, new Error("listener down"));
+    await engine.startCursors();
+    stream.publish(AGENT, envelope());
+    clock.now += 72 * HOUR;
+    stream.expireBelow(2);
+    const stored = envelope();
+    stream.publish(AGENT, stored);
+    await engine.sweep();
+    expect(ids(host.shown)).toEqual([stored.event_id]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(engine.state().subjects[AGENT]).toEqual({ since: 1, after: 2 });
+  });
+
+  test("a from_start mark survives a restore, and the restored engine reads from the oldest message", async () => {
+    const { stream, host, engine, make } = setup([AGENT]);
+    stream.failCall(1, new Error("listener down"));
+    await engine.startCursors();
+    const snapshot = host.writes.at(-1)?.snapshot();
+    if (snapshot === undefined) throw new Error("nothing was written");
+    const stored = envelope();
+    stream.publish(AGENT, stored);
+
+    const restored = make();
+    restored.restore(snapshot);
+    expect(restored.startPending()).toBe(true);
+    await restored.sweep();
+    expect(ids(host.shown)).toEqual([stored.event_id]);
+  });
+
+  test("a subject the listener refuses gets no cursor", async () => {
+    const { stream, engine } = setup([AGENT, ISSUE]);
+    stream.refused.set(ISSUE, "not_followed");
+    await engine.startCursors();
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 0 } });
+  });
+
+  test("a sweep asked for while the cursors start runs after them", async () => {
+    const { stream, engine } = setup([AGENT]);
+    const release = stream.hold();
+    const starting = engine.startCursors();
+    const sweeping = engine.sweep();
+    release();
+    await Promise.all([starting, sweeping]);
+    expect(stream.calls).toEqual([
+      positionRead(AGENT),
+      { sessionID: SESSION, subjects: [{ subject: AGENT, after: 0 }] },
+    ]);
+  });
+
+  test("a start asked for while a sweep runs waits for it, and finds the cursor the sweep set", async () => {
+    const { stream, engine } = setup([AGENT]);
+    const release = stream.hold();
+    const sweeping = engine.sweep();
+    const starting = engine.startCursors();
+    release();
+    await Promise.all([sweeping, starting]);
+    expect(stream.calls).toEqual([{ sessionID: SESSION, subjects: [{ subject: AGENT }] }]);
+  });
+});
+
 describe("consumer mode", () => {
   test("a sweep makes no replay call while the listener relays the stream", async () => {
     const { stream, host, engine } = setup();

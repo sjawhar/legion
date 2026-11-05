@@ -1,3 +1,4 @@
+import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import type { Event } from "../../api/types";
@@ -42,7 +43,7 @@ function AskEventBody({
       {answer === null ? null : (
         <>
           <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-            Answered by {answer.user} <Timestamp at={answer.at} />
+            Answered by {actorActText(answer.user, answer.act)} <Timestamp at={answer.at} />
           </p>
           {answer.text === null || answer.text === "" ? null : (
             <div className="mt-2">

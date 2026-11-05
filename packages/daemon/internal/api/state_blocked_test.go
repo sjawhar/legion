@@ -32,7 +32,7 @@ func TestTheStateCarriesBlockedRootsAndChildrenInOneArray(t *testing.T) {
 }
 
 // Both the list and each row's keys are arrays on the wire, empty rather than null: the plugin's
-// strict reader refuses a null, and an admission with nothing blocked is the common case.
+// reader refuses a null, and an admission with nothing blocked is the common case.
 func TestTheStatesBlockedIsNeverNull(t *testing.T) {
 	encoded, err := json.Marshal(Admission{Cap: 2})
 	if err != nil {

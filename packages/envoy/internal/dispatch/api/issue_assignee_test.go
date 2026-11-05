@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -275,10 +276,11 @@ func TestListIssuesSummariesCarryAssignee(t *testing.T) {
 	expectAssignee(t, byTitle["Nobody's"], "")
 }
 
-// GET /users is the picker's option list: everyone who has signed in (`people`), sorted, humans
-// only.
-func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
-	handler := newTestHandler(t)
+// GET /users is the picker's option list: everyone who has signed in (`people`), sorted. It needs
+// the person scope, so the deployment's shared token is turned away and a person's own token
+// reads the same list their browser reads.
+func TestListUsersReturnsSignedInPeopleToThePersonScope(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/users", nil, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("list users: status=%d body=%s", response.Code, response.Body.String())
@@ -292,8 +294,13 @@ func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
 		t.Fatalf("users = %#v, want alice then bob", users)
 	}
 	denied := agentRequest(t, handler, http.MethodGet, "/api/v1/users", nil, "agent-token")
-	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer lists users: status=%d body=%s", denied.Code, denied.Body.String())
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token lists users: status=%d body=%s, want 403 %s", denied.Code, denied.Body.String(), codeScopeRequired)
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/users", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK || !strings.Contains(own.Body.String(), `"login":"alice"`) {
+		t.Fatalf("a person's own token lists users: status=%d body=%s", own.Code, own.Body.String())
 	}
 }
 
@@ -347,6 +354,89 @@ func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 	}
 	if anonymous := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, "wrong"); anonymous.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown bearer whoami: status=%d body=%s", anonymous.Code, anonymous.Body.String())
+	}
+}
+
+// GET /whoami answers every caller the OAuth scopes its own credential holds, which is what
+// decides the routes it may call (gateRouteScopes): both for a person at a browser, the set its own
+// row names for a personal token, and none at all for the two credentials a deployment
+// configures rather than a person. A credential holding none is answered an empty array and
+// never null, so a reader need not tell "this credential holds no scope" from "this build does
+// not say". A personal token holding the person scope is still kind `agent`, since the kind
+// names the credential and the owner names the person it acts for.
+func TestWhoamiAnswersTheScopesEachCredentialHolds(t *testing.T) {
+	issuer := newServiceTokenIssuer(t)
+	handler, database, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+	for _, test := range []struct {
+		name   string
+		call   func() *httptest.ResponseRecorder
+		kind   string
+		scopes []string
+	}{
+		{
+			name: "a person signed in at a browser",
+			call: func() *httptest.ResponseRecorder {
+				return dispatchRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, "alice")
+			},
+			kind:   "user",
+			scopes: []string{model.ScopePerson, model.ScopeApprove},
+		},
+		{
+			name: "a personal token holding both scopes",
+			call: func() *httptest.ResponseRecorder {
+				token := personalTokenHolding(t, database, model.ScopePerson, model.ScopeApprove)
+				return agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, token)
+			},
+			kind:   "agent",
+			scopes: []string{model.ScopePerson, model.ScopeApprove},
+		},
+		{
+			name: "a personal token holding the person scope alone",
+			call: func() *httptest.ResponseRecorder {
+				token := personalTokenHolding(t, database, model.ScopePerson)
+				return agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, token)
+			},
+			kind:   "agent",
+			scopes: []string{model.ScopePerson},
+		},
+		{
+			name: "the deployment's shared token",
+			call: func() *httptest.ResponseRecorder {
+				return agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, "agent-token")
+			},
+			kind:   "agent",
+			scopes: []string{},
+		},
+		{
+			name: "a verified service-account token",
+			call: func() *httptest.ResponseRecorder {
+				return agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, issuer.mint(t, serviceTokenAudience))
+			},
+			kind:   "agent",
+			scopes: []string{},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := test.call()
+			if response.Code != http.StatusOK {
+				t.Fatalf("whoami as %s: status=%d body=%s", test.name, response.Code, response.Body.String())
+			}
+			got := decodeBody[struct {
+				Kind string `json:"kind"`
+				// A pointer, so a null reads differently from the empty array the answer owes a
+				// credential that holds no scope.
+				Scopes *[]string `json:"scopes"`
+			}](t, response)
+			if got.Kind != test.kind {
+				t.Fatalf("whoami as %s = kind %q, want %q: %s", test.name, got.Kind, test.kind, response.Body.String())
+			}
+			if got.Scopes == nil {
+				t.Fatalf("whoami as %s answered no scopes array: %s", test.name, response.Body.String())
+			}
+			if !slices.Equal(*got.Scopes, test.scopes) {
+				t.Fatalf("whoami as %s = scopes %v, want %v", test.name, *got.Scopes, test.scopes)
+			}
+		})
 	}
 }
 

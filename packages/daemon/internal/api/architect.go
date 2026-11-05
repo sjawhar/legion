@@ -64,7 +64,7 @@ type WaveReleaseResponse struct {
 }
 
 // MarshalJSON keeps `released`, `started` and `held` arrays on the wire, empty rather than `null`:
-// the plugin parses this answer through a strict schema.
+// the plugin's parse of this answer refuses a null where it reads an array.
 func (wr WaveReleaseResponse) MarshalJSON() ([]byte, error) {
 	type wire WaveReleaseResponse
 	out := wire(wr)
@@ -173,7 +173,7 @@ func isPhaseWorker(role claim.Role) bool {
 // after Task 3.15. The read authorizes the caller; the fact itself still enters workflow through
 // ApplyFact's one write transaction.
 func (s *server) recordedIssue(ctx context.Context, issue string) (*record.Issue, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -878,7 +878,7 @@ type releasedChild struct {
 // read-only transaction, so releaseOutcome can tell a first phase this request started from one
 // the child was already in.
 func (s *server) readReleasedBefore(ctx context.Context, children []releasedChild) error {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -973,7 +973,7 @@ func underTodoChild(children []releasedChild) map[string]bool {
 // record it yet and its write's event is still to start it — or one already running a phase before
 // the request, which holds nothing back.
 func (s *server) releaseOutcome(ctx context.Context, children []releasedChild) ([]string, []HeldChild, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, nil, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -1260,7 +1260,7 @@ func (s *server) owns(ctx context.Context, grant credential.Grant, recorded reco
 		}
 		seen[current.Key] = true
 		if tx == nil {
-			if s.pool == nil || s.records == nil {
+			if s.pool == nil {
 				return false, errors.New("record dependencies are unavailable")
 			}
 			var err error

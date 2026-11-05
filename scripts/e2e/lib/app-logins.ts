@@ -97,10 +97,6 @@ const tokenPattern = /(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/
 /** A GitHub account login: what a release may name an installation by (internal/appauth,
  * loginPattern). */
 const loginPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
-/** How long the run's last line may take to drain before it exits anyway: a reader that stops
- * taking the bytes must not hold the run open, and a pipe nobody reads is exactly what the
- * output cap (outputLimit) leaves behind (exitAfterWriting). */
-const finalWriteDrainMs = 2_000;
 
 /** `text` with every GitHub token in it replaced. */
 export function redactTokens(text: string): string {
@@ -362,24 +358,22 @@ function parseRoles(value: string): AppRole[] | undefined {
   return roles.filter(known);
 }
 
-/**
- * Writes the run's last line, then exits with code once that write has drained, or after
- * finalWriteDrainMs if it does not.
- *
- * process.exit drops whatever is still queued on a pipe, and by the time this runs there can be
- * about a mebibyte of a token command's relayed stderr queued ahead of the line: the cap
- * (outputLimit) is tripped only past 1,048,576 bytes, every whole line of which runTokenCommand
- * has already written here. Exiting at once then loses the diagnosis with the unflushed tail -
- * measured as 638,976 to 1,003,640 bytes of 1,052,672 received by the caller, with the cap
- * message absent in two runs of six (INFRA-985). The timer is the backstop the explicit exit
- * below is for: a reader that never takes the bytes must not keep the run alive. The call
- * returns at once: the exit comes from the write's callback or from that timer, not from here.
- */
-function exitAfterWriting(stream: NodeJS.WriteStream, line: string, code: number): void {
-  const leave = () => process.exit(code);
-  const backstop = setTimeout(leave, finalWriteDrainMs);
-  backstop.unref();
-  stream.write(line, leave);
+/** How long a write below may wait to reach the pipe: the bound the drain of a token command's
+ * streams carries (the five seconds in runTokenCommand), for the same reason. A caller that has
+ * stopped reading, or an escaped descendant holding the pipe, can leave the write's callback to
+ * come late or never, and a lost tail beats a proof that never returns. */
+const writeLimitMs = 5000;
+
+/** Writes `text` to `stream` and resolves when the write has reached the pipe, or sooner when it
+ * fails or the bound passes. Every exit below is explicit, and an explicit exit discards whatever
+ * of this process's output is still buffered: a token command's relayed stderr can leave a
+ * megabyte of it in front of the line that matters, so each exit waits for its own write first. */
+async function writeFully(stream: NodeJS.WriteStream, text: string): Promise<void> {
+  const written = Promise.withResolvers<void>();
+  const bound = setTimeout(() => written.resolve(), writeLimitMs);
+  stream.write(text, () => written.resolve());
+  await written.promise;
+  clearTimeout(bound);
 }
 
 if (import.meta.main) {
@@ -391,23 +385,23 @@ if (import.meta.main) {
   }
   const [configPath, api = "https://api.github.com"] = args;
   if (roles === undefined || configPath === undefined || configPath === "") {
-    process.stderr.write(
+    await writeFully(
+      process.stderr,
       "usage: bun scripts/e2e/lib/app-logins.ts [--roles <role>[,<role>]] <legion.yaml> [<GitHub API URL>]\n"
     );
     process.exit(2);
   }
   // Exit explicitly: a stream reader a token command's escaped descendant still feeds would keep
-  // the event loop, and so the run, alive past the drain bound. The exit waits for the line it
-  // writes to drain first (exitAfterWriting), since that line is the whole of what a caller
-  // reads of this run.
+  // the event loop, and so the run, alive past the drain bound.
   try {
-    const logins = JSON.stringify(await appLogins(configPath, api, roles));
-    exitAfterWriting(process.stdout, `${logins}\n`, 0);
-  } catch (error) {
-    exitAfterWriting(
-      process.stderr,
-      `app-logins: ${error instanceof Error ? error.message : String(error)}\n`,
-      1
+    await writeFully(
+      process.stdout,
+      `${JSON.stringify(await appLogins(configPath, api, roles))}\n`
     );
+    process.exit(0);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeFully(process.stderr, `app-logins: ${message}\n`);
+    process.exit(1);
   }
 }

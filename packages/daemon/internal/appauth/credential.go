@@ -19,9 +19,10 @@ import (
 var ErrOwnerOutsideProject = errors.New("is not an owner of the project's repositories")
 
 // GitHubCredential is the one function every role's gh files come from (runtime.GitHubCredential)
-// over tokens: a bundle with a directory for every owner of the project (owners, lowercased, and
-// owner when it is outside them) — the role's App's lease for owner, the one the role writes to,
-// and that App's read-only lease (Tokens.ReadToken) for every other — each rendered as gh's
+// over tokens: a bundle with a directory for every owner of the project (GitHubOwners, which is
+// owners lowercased with every rename alias, and owner when it is outside them) — the role's
+// App's lease for owner, the one the role writes to, and that App's read-only lease
+// (Tokens.ReadToken) for every other — each rendered as gh's
 // hosts.yml and config.yml, named for the App and its expiry so a log can say whose token it
 // wrote, owner's directory the default. A role's owner is its issue's repository's, which the
 // daemon's own record names. The controller writes to no owner: every owner is read-only, owner's
@@ -49,27 +50,18 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 		appRole := AppRoleFor(role)
 		owner = strings.ToLower(owner)
 		writer := owner
-		all := map[string]bool{}
-		for _, o := range owners() {
-			all[strings.ToLower(o)] = true
-		}
-		// aliases is each owner a configured rename moved a repository away from, by the owner it
-		// moved to: the pair the bundle holds one entry for, and the daemon's one rule for whose
-		// installation holds a renamed repository now (ghrepo.Renames.OwnerAliases, which the
-		// mint sites of every GitHub call read too). Its conflicts are left to the mapping's load,
-		// so this is a pure function of its inputs and may be built per call.
-		aliases, _ := renames.OwnerAliases(func(name string) bool { return all[name] })
+		// all is the project's owner set (GitHubOwners), the aliases in it, and aliases the pairs
+		// mintFor reads; the request's own owner is added to all below, being the role's and not
+		// the project's.
+		all, aliases := projectOwners(owners, renames)
 		if role == claim.RoleController {
 			writer = ""
-			if _, alias := aliases[owner]; owner != "" && !all[owner] && !alias {
+			if owner != "" && !all[owner] {
 				return ghconfig.Bundle{}, fmt.Errorf("the controller's default owner %q %w", owner, ErrOwnerOutsideProject)
 			}
 		}
 		if owner != "" {
 			all[owner] = true
-		}
-		for from := range aliases {
-			all[from] = true
 		}
 		names := slices.Sorted(maps.Keys(all))
 		if len(names) == 0 {
@@ -114,4 +106,41 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 		}
 		return bundle, nil
 	}
+}
+
+// GitHubOwners is the GitHub owners the daemon serves the project with, lowercased, deduplicated
+// and sorted: every owner of the project's repositories (owners, the mapping's) with every owner
+// a configured rename moved a repository away from beside it (ghrepo.Renames.OwnerAliases), each
+// of which is a directory of the gh bundle a role is handed. It is the project's set alone: the
+// owner a request names is a role's own and GitHubCredential adds it there, so nothing a request
+// carries reaches this answer.
+//
+// GitHubCredential builds its bundle from it, and the Sandbox runtime compares it against the
+// owners a running pod's gh projection was fixed at (sandbox.Options.GitHubOwners), so the set a
+// pod created now would hold and the set a pod is read against are one computation. It reads the
+// mapping and the configured renames and nothing else: no token is minted and GitHub is not
+// called.
+func GitHubOwners(owners func() []string, renames ghrepo.Renames) []string {
+	all, _ := projectOwners(owners, renames)
+	return slices.Sorted(maps.Keys(all))
+}
+
+// projectOwners is GitHubOwners in the two halves GitHubCredential takes: all, the project's
+// owners by their lowercased names with the rename aliases among them, and aliases, each owner a
+// configured rename moved a repository away from by the owner it moved to — the pair the bundle
+// holds one entry for, and the daemon's one rule for whose installation holds a renamed
+// repository now (the mint sites of every GitHub call read it too). OwnerAliases is asked of the
+// project's own owners, an alias being no owner of it, so all is filled in that order. The
+// conflicts are left to the mapping's load, so this is a pure function of its inputs and may be
+// built per call.
+func projectOwners(owners func() []string, renames ghrepo.Renames) (all map[string]bool, aliases map[string]string) {
+	all = map[string]bool{}
+	for _, o := range owners() {
+		all[strings.ToLower(o)] = true
+	}
+	aliases, _ = renames.OwnerAliases(func(name string) bool { return all[name] })
+	for from := range aliases {
+		all[from] = true
+	}
+	return all, aliases
 }
