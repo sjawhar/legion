@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -49,12 +48,13 @@ const askProxyAssignee = `select coalesce(assignee, '') from issues where key = 
 // without a fraction, so "12:00:00Z" sorts above "12:00:00.1Z" as text and below it as a time.
 //
 // An approval Dispatch carried forward is left out. The carry answers an open approval request
-// in the person's name, with the person as the answer's user and as the event's actor, and the
-// carry's own sentence as its text (docs.answerApprovalAsk): words the person never wrote, on a
-// question nobody asked them. Its mark in the ask's own record is that text's opening
-// (docs.CarriedApprovalReasonPrefix, $4), which nothing else writes; the event's actor cannot
-// tell the two apart. Left in, a run of carries would push the person's real answers out of the
-// few rows the advisory lists.
+// in the person's name, with the person as the answer's user and as the ask.answered event's
+// actor: words the person never wrote, on a question nobody asked them, and left in, a run of
+// them would push the person's real answers out of the few rows the advisory lists. What tells
+// them apart is the mark the carry writes on the answer itself (model.AskAnswer.Carried, written
+// by docs.answerApprovalAsk alone), never the wording of its text: the carry's sentence is a
+// sentence a person may write too, and an answer of theirs that opens with it is theirs. An
+// answer stored before the mark existed has none and is read as the person's, as it was then.
 const askProxyAnswers = `
 with scope as (
 	select i.key from issues i where i.key = $1
@@ -64,13 +64,9 @@ with scope as (
 select a.issue_key, a.id::text, coalesce(a.answer->>'text', '')
   from asks a join scope on scope.key = a.issue_key
  where a.state = 'answered' and lower(a.answer->>'user') = $2
-   and coalesce(a.answer->>'text', '') not like $4
+   and coalesce(a.answer->>'carried', '') <> 'true'
  order by (a.answer->>'at')::timestamptz desc nulls last, a.id desc
  limit $3`
-
-// askProxyCarriedAnswer matches the text of an answer a carry wrote, for askProxyAnswers' $4.
-// The prefix holds no `%` or `_`, so it needs no escape of its own.
-var askProxyCarriedAnswer = docs.CarriedApprovalReasonPrefix + "%"
 
 // askProxyAdvice is the advisory a new ask on issueKey carries when the person it reaches has a
 // proxy skill, and nil when they do not, when the issue has no assignee, or when the assignee
@@ -91,7 +87,7 @@ func (s *server) askProxyAdvice(ctx context.Context, issueKey string) *model.Ask
 		return nil
 	}
 	advice := &model.AskProxy{Skill: skill, Target: target, Answers: []model.AskProxyAnswer{}}
-	rows, err := s.deps.Store.Pool.Query(ctx, askProxyAnswers, issueKey, target, askProxyAnswerLimit, askProxyCarriedAnswer)
+	rows, err := s.deps.Store.Pool.Query(ctx, askProxyAnswers, issueKey, target, askProxyAnswerLimit)
 	if err != nil {
 		slog.Warn("dispatch: ask proxy advisory read the target's answers", "issue", issueKey, "error", err)
 		return advice

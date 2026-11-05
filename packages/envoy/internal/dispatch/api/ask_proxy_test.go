@@ -177,12 +177,13 @@ func setAnswerTime(t *testing.T, database *store.Store, askID, at string) {
 }
 
 // An approval Dispatch carried forward in the target's name is not one of their answers. The
-// carry answers the open approval request as the person, with the person as the answer's user
-// and as the event's actor and the carry's own sentence as its text, so nothing but that text
-// tells it from an answer they wrote. The four steps that make one: the person approves version
-// 1, the agent changes the document and asks for approval, the agent restores the approved text,
-// which answers the request, and an ask then lists the person's answers. Left in, a run of
-// carries would push their real answers out of the few rows the advisory lists.
+// carry answers the open approval request as the person: their user on the answer, their actor
+// on the event, and a sentence of Dispatch's as the text, so only the mark the carry writes on
+// the answer (model.AskAnswer.Carried) tells it from words they wrote. The four steps that make
+// one: the person approves version 1, the agent changes the document and asks for approval, the
+// agent restores the approved text, which answers the request, and an ask then lists the
+// person's answers. Left in, a run of carries would push their real answers out of the few rows
+// the advisory lists.
 func TestAskProxyAdviceLeavesOutAnApprovalDispatchCarried(t *testing.T) {
 	handler := approvalCarryHandler(t)
 	person, _ := proxyPerson(t)
@@ -200,8 +201,8 @@ func TestAskProxyAdviceLeavesOutAnApprovalDispatchCarried(t *testing.T) {
 	agentEdit(t, handler, issue.PrimaryArtifactID, 3, replaceOp("behind a flag and a canary.", "behind a flag."))
 	carried := readBlockAsk(t, handler, request.ID)
 	if carried.State != "answered" || carried.Answer == nil || model.CanonicalLogin(carried.Answer.User) != person ||
-		carried.Answer.Text == nil || *carried.Answer.Text != restoreSentence(1) {
-		t.Fatalf("the request after the restore = state %q answer %#v, want the carry in %s's name", carried.State, carried.Answer, person)
+		carried.Answer.Text == nil || *carried.Answer.Text != restoreSentence(1) || !carried.Answer.Carried {
+		t.Fatalf("the request after the restore = state %q answer %#v, want the carry in %s's name, marked carried", carried.State, carried.Answer, person)
 	}
 	setIssueAssignee(t, handler, issue.Key, person)
 
@@ -225,5 +226,29 @@ func setIssueAssignee(t *testing.T, handler http.Handler, issueKey, login string
 		map[string]any{"assignee": login}, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("assign %s to %s: status=%d body=%s", issueKey, login, response.Code, response.Body.String())
+	}
+}
+
+// The carry's sentence is a sentence a person may write, so the wording is no mark of a carry:
+// an answer the person typed themselves that opens with it is theirs and stays listed. Before
+// the mark, the advisory filtered on that opening and this answer vanished from it.
+func TestAskProxyAdviceKeepsAnAnswerThatOpensWithTheCarrysWording(t *testing.T) {
+	handler := newTestHandler(t)
+	createSuggestionProject(t, handler, "PXW")
+	person, _ := proxyPerson(t)
+	issue := createProxyIssue(t, handler, "PXW", "Decide the canary", "", person)
+
+	worded := "Carried forward from the approval of version 1 is not my decision; keep the canary enabled."
+	answered, _ := openProxyAsk(t, handler, issue, "Does the canary stay on for the next wave?", "alice")
+	answerProxyAsk(t, handler, answered, worded, person)
+
+	_, suggestions := openProxyAsk(t, handler, issue, "Which region takes the first wave?", "alice")
+	proxy := suggestions.Proxy
+	if proxy == nil {
+		t.Fatalf("advice.suggestions = %+v, want the proxy advisory for %s", suggestions, person)
+	}
+	want := []model.AskProxyAnswer{{Ref: "dispatch://" + issue + "/ask/" + answered, Line: worded}}
+	if !reflect.DeepEqual(proxy.Answers, want) {
+		t.Fatalf("proxy answers = %+v, want the answer %s wrote, whatever it opens with", proxy.Answers, person)
 	}
 }

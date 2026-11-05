@@ -76,21 +76,19 @@ import (
 // change, as N's diff against A shows. A version whose decision blocks differ from A's does not
 // hold A's text, so the answer carry alone decides it, as before this rule.
 
-// CarriedApprovalReasonPrefix opens the reason of every approval Dispatch carries forward in a
-// person's name, and nothing else writes it. It is the mark of a carried answer in the ask's own
-// record: the request Dispatch answers for the person takes that reason as its answer's text
-// (answerApprovalAsk), so a reader of an ask row can tell such an answer from one the person
-// wrote. The Legion daemon reads the same prefix on the review
-// (packages/daemon/internal/intake, CarriedApprovalReasonPrefix, which holds its own literal
-// because it may not import this module).
-const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"
+// carriedApprovalReasonPrefix opens the reason of every approval Dispatch carries forward in a
+// person's name. The Legion daemon reads the same prefix on the review to tell a carry from a
+// person's own approval (packages/daemon/internal/intake, CarriedApprovalReasonPrefix, which
+// holds its own literal because it may not import this module). It is not what marks a carried
+// ANSWER: a person may write the same sentence, and model.AskAnswer.Carried is that mark.
+const carriedApprovalReasonPrefix = "Carried forward from the approval of version"
 
 // carryReason is the reason a carried review records, naming the approval it follows.
-const carryReason = CarriedApprovalReasonPrefix + " %d: the answer to a decision block was the whole change since it."
+const carryReason = carriedApprovalReasonPrefix + " %d: the answer to a decision block was the whole change since it."
 
 // restoreReason is the reason a review carried to a version restoring the approved text records,
 // naming the approval it follows. It opens as carryReason does.
-const restoreReason = CarriedApprovalReasonPrefix + " %d: this version's text is that version's, unchanged."
+const restoreReason = carriedApprovalReasonPrefix + " %d: this version's text is that version's, unchanged."
 
 // carryInput is what the rule is decided on once H, the version he approved, A, and when he
 // approved it are known: the blocks of N by block id, each its row (rowBackedBlocks); the block
@@ -571,12 +569,20 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // the transaction's now(), as the answer route's is: each process's host keeps its own clock, and
 // this one is the created_at of the ask.answered event appended here and of the review the carry
 // writes beside it, and the time the answer's part is written at (IndexAskPartsCounted below).
+//
+// The answer is marked carried (model.AskAnswer.Carried), the one mark of an answer the person
+// did not write: this is that field's only writer, and the user, the act and the event's actor
+// are the person's, as a reader that must tell a carry from the person's own words has nothing
+// else to read. The reason's wording is not that mark: a person may write it themselves.
 func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason, serverURL string) (model.Event, error) {
 	var answeredAt time.Time
 	if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
 		return model.Event{}, fmt.Errorf("read the approval answer's time: %w", err)
 	}
-	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: answeredAt.UTC()}
+	answer := model.AskAnswer{
+		User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason,
+		At: answeredAt.UTC(), Carried: true,
+	}
 	encoded, err := json.Marshal(answer)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("encode approval answer: %w", err)
