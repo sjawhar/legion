@@ -107,6 +107,7 @@ env:
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
+    packages/broker-client/
     skills/agent-secrets/ skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/
     skills/dispatch-writing-specs/ skills/envoy/ skills/outside-message/ skills/plain-words/
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
@@ -125,6 +126,7 @@ env:
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
+    packages/broker-client/
     skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/
     skills/legion-worker/ skills/leading-a-work-stream/ skills/ce-simplify-code/
     skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/
