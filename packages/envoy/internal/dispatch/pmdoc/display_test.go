@@ -204,3 +204,45 @@ func TestReadForDisplayShowsARefusedBlockAsItsTextAndKeepsTheOthers(t *testing.T
 		t.Errorf("the paragraph after it lost its formatting: %+v", last.Children)
 	}
 }
+
+// TestReadForDisplayEndsAnUnknownBlocksLinesAtEveryLineEnding holds the unknown-directive rule
+// to the line endings a stored text actually carries. A message is stored as it was sent, and a
+// person or an agent writing through a Windows client sends CRLF, while a lone CR reaches the
+// store the same way (e2e/unknown-directive.e2e.ts). The fence lines of an unknown directive
+// read as paragraph text line by line, so each of its lines is its own paragraph whichever
+// ending the text uses: with LF the read already does this, and the two others must agree with
+// it, since a reader is shown one body and not three readings of it. A line ending left inside
+// a text node is worse than a wrong block: HTML draws neither CR nor CRLF as a break, so the
+// lines run together on the page.
+func TestReadForDisplayEndsAnUnknownBlocksLinesAtEveryLineEnding(t *testing.T) {
+	want := []string{":::a", "body words", ":::"}
+	for _, ending := range []struct{ name, between string }{
+		{"a line feed", "\n"},
+		{"a carriage return and a line feed", "\r\n"},
+		{"a lone carriage return", "\r"},
+	} {
+		t.Run(ending.name, func(t *testing.T) {
+			markdown := "Lead **bold**\n\n" + strings.Join(want, ending.between) + "\n\nAfter"
+			doc := ReadForDisplay(markdown, DisplayLatest)
+			if err := doc.Validate(); err != nil {
+				t.Fatalf("the display read is outside the schema: %v", err)
+			}
+			if got := len(doc.Children); got != len(want)+2 {
+				t.Fatalf("the display read holds %s, want the lead, the block's %d lines and the line after it", BlockNames(doc.Children), len(want))
+			}
+			for index, line := range want {
+				block := doc.Children[index+1]
+				if block.Type != "paragraph" || len(block.Children) != 1 || block.Children[0].Text != line {
+					t.Errorf("line %d reads as %s holding %d nodes, want one paragraph of %q", index, block.Type, len(block.Children), line)
+				}
+			}
+			for _, block := range doc.Children {
+				for _, node := range block.Children {
+					if strings.ContainsAny(node.Text, "\r\n") {
+						t.Errorf("a text node keeps a line ending, which draws as no break at all: %q", node.Text)
+					}
+				}
+			}
+		})
+	}
+}
