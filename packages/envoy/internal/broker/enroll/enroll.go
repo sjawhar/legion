@@ -110,6 +110,10 @@ type Enrollment struct {
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
+	// carry is the principal the enrollment belongs to, as enrollments.carry_principal records
+	// it: Create works it out from what the caller proved (carryPrincipal) and nothing reads it
+	// back off this struct, so it is the package's own and never a caller's to state.
+	carry *string
 }
 
 type PodClaims struct {
@@ -382,6 +386,16 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
 // by anyone signed in for a service's), even after the caller's launcher proof was verified, is
 // ErrUnauthenticated.
+//
+// An enrollment that names a session also records the principal that session belongs to
+// (carryPrincipal), and takes what every predecessor of that name under that principal still
+// holds: its grants, its pending requests and its withholds move to this row, and a predecessor
+// a box's end left dormant is finished by the move (adopt). That is how a grant follows a
+// session to the next box it comes up on. It changes none of the identity checks above and
+// nothing in the answer: an enrollment that names no session, one whose caller proved no
+// principal and one with no predecessor each adopt nothing, an idempotent re-enrollment
+// (Existing) adopts nothing, and a pod's token check and the pod-uid ratchet run exactly as they
+// did. Only the rows move.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot
@@ -409,6 +423,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		}
 		in.Subject = &claims.Subject
 	}
+	// The other half of the pair a grant follows, read from what the caller has just proved and
+	// written beside the session's name in the insert below (carryPrincipal).
+	in.carry = carryPrincipal(cred, in)
 	in.ID = uuid.New()
 	in.LeaseExpires = time.Now().Add(s.Lease)
 
@@ -448,9 +465,9 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	// pod_token_renewed_at starts null on every row, a pod's included: the first renewal carrying
 	// the pod's token sets it, and from then on Renew refuses a token-less renewal from every live
 	// enrollment naming that pod UID (podTokenRatcheted).
-	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
+	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, carry_principal, subject, launcher_credential_id, lease_expires_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.carry, in.Subject, cred.ID, in.LeaseExpires)
 	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
 		// recovery asks the pool for one: holding one connection while waiting for a second is how
@@ -471,7 +488,155 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		in.ID, record.LauncherActor(cred.ID.String()), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
 		return Enrollment{}, false, err
 	}
+	if err := adopt(ctx, tx, in, record.LauncherActor(cred.ID.String())); err != nil {
+		return Enrollment{}, false, err
+	}
 	return in, false, tx.Commit(ctx)
+}
+
+// carryPrincipal is the identity an enrollment belongs to, which the insert writes into
+// enrollments.carry_principal: the half of the pair a grant follows that keeps one session name
+// from reaching another principal's grant (adopt). It is read from what the caller has already
+// proved and never from anything the launcher states, and every spelling is exchange's own, the
+// broker's one definition of each, so that the name a session writes its Dispatch tokens under
+// and the name its grant follows have the same holder.
+//
+//   - A pod belongs to the service account its own projected token proved
+//     (exchange.AccountPrincipal), the same account requests.Machine.requester reads a pod's
+//     service authority from.
+//   - A session under a credential that carries an operator — a person's own box, and that
+//     person's sign-in on a machine — belongs to that person (exchange.PersonPrincipal), so it
+//     follows them from one box to the next.
+//   - A machine's own session belongs to its fleet's Google account
+//     (exchange.GooglePrincipal), which is what its credential's subject names
+//     (machineCredential, exchange.ReadSubject).
+//
+// Anything else belongs to no principal at all: a null carries nothing, is adopted by nobody and
+// adopts nothing. So does an enrollment that states no session, whatever its credential proved,
+// because a principal with no name beside it is no pair.
+func carryPrincipal(cred Credential, in Enrollment) *string {
+	if in.SessionID == nil || *in.SessionID == "" {
+		return nil
+	}
+	switch {
+	case in.Kind == "pod" && in.Subject != nil:
+		return nullable(exchange.AccountPrincipal(*in.Subject))
+	case cred.Operator != nil:
+		return nullable(exchange.PersonPrincipal(*cred.Operator))
+	case machineCredential(cred):
+		return nullable(exchange.GooglePrincipal(exchange.ReadSubject(*cred.Subject).Account))
+	}
+	return nil
+}
+
+// adopt moves what every predecessor of this enrollment's (carry_principal, session_id) holds to
+// the enrollment createAttempt has just inserted, inside that same transaction, revoking none of
+// it. A predecessor is another enrollment of the same pair that still holds something for the
+// session — a live grant, a pending request or a withheld name — and it is one of two things: a
+// live enrollment, the box the session is moving off while that box is still up, or a dormant
+// one, a box whose end left what it held for the session to take (endEnrollment). Both kinds of
+// enrollment adopt, a session's and a pod's. An enrollment of the pair that holds nothing is no
+// predecessor and is left exactly as it is, which is what keeps a second live session of one
+// name from being ended by its neighbour's enrolment.
+//
+// What moves is every row keyed by the predecessor: grants.enrollment_id, requests.enrollment_id
+// and withheld_secrets.enrollment_id. The grants are what the session was approved for, the
+// requests are what it is still waiting on a person for — an approval must land on the session as
+// it stands when the answer comes, not on the box that asked — and the withholds are the one way
+// a person takes a secret back from a session, which a move must not undo. A withheld name the
+// successor already holds is kept once, since (enrollment_id, name) is that table's primary key.
+// Every row moves, the ended grants and decided requests beside the live ones, so the
+// predecessor is left holding nothing at all rather than a part of what it held.
+//
+// A dormant predecessor is then finished: dormant_since returns to null, because the row was
+// kept only for what it held and that is here now. Its revoked_at stands where its own end wrote
+// it, because the box ended then and not now. So it is no longer dormant, the carry sweep has
+// nothing of it to revoke (EndCarried) and it is a predecessor of nothing. A live predecessor is
+// left live: the box is still up and this is no end of it, and its own launcher ends it when the
+// session's process goes (Revoke), by which time there is nothing under it to revoke. Nothing is
+// revoked or cancelled here either way, which is why this does not go through endEnrollment,
+// whose terminal path would revoke grants the row no longer has.
+//
+// The trail names both enrollments: one enrollment.adopted row on the successor naming the
+// predecessor it took from and how much, and one grant.moved row per grant, naming the grant, the
+// successor it now hangs off and the predecessor it came from, so an operator asking why a
+// session reads a secret it never asked this box for lands on the box that did.
+//
+// Locks, in the order this transaction takes them: the launcher credential's row (for share,
+// taken by createAttempt before anything else), then the enrollments rows, then the grant,
+// request and withheld rows under them. The predecessors are taken for update, in id order, so
+// no end, revoke or sweep moves what they hold while it is moving, and two concurrent adoptions
+// of one pair cannot hold each other's first row. That is the order every other writer of these
+// tables takes them in — endCredential takes the credential, then its enrollments in id order;
+// Revoke, EndLapsed and EndCarried take an enrollment before the grants and requests under it;
+// and this package's enrollment-then-request writers take the enrollment first too (ApplyDecision
+// says so itself) — so none of them can deadlock with this one.
+func adopt(ctx context.Context, tx pgx.Tx, in Enrollment, actor string) error {
+	if in.carry == nil {
+		return nil
+	}
+	// A predecessor is an enrollment of the pair that has not been ended for good and holds
+	// something: the same reading of "holds something" that decides whether an end leaves a row
+	// dormant (endEnrollment), with the withheld names beside the grants and pending requests,
+	// since those follow the session too.
+	rows, err := tx.Query(ctx, `select e.id, e.dormant_since is not null from enrollments e
+		where e.carry_principal=$1 and e.session_id=$2 and e.id <> $3
+			and (e.revoked_at is null or e.dormant_since is not null)
+			and (exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
+				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')
+				or exists (select 1 from withheld_secrets w where w.enrollment_id=e.id))
+		order by e.id for update of e`, *in.carry, *in.SessionID, in.ID)
+	if err != nil {
+		return err
+	}
+	type predecessor struct {
+		ID      uuid.UUID
+		Dormant bool
+	}
+	predecessors, err := pgx.CollectRows(rows, pgx.RowToStructByPos[predecessor])
+	if err != nil {
+		return err
+	}
+	for _, from := range predecessors {
+		// One statement per table, each writing its own trail: every grant that moves gets its
+		// row, so the insert's own count is how many grants moved.
+		grants, err := tx.Exec(ctx, `with moved as (
+				update grants set enrollment_id=$2 where enrollment_id=$1 returning id
+			)
+			insert into audit (kind, enrollment_id, grant_id, actor, detail)
+			select 'grant.moved', $2, id, $3, jsonb_build_object('from',$1::uuid,'to',$2::uuid) from moved`,
+			from.ID, in.ID, actor)
+		if err != nil {
+			return err
+		}
+		requests, err := tx.Exec(ctx, `update requests set enrollment_id=$2 where enrollment_id=$1`, from.ID, in.ID)
+		if err != nil {
+			return err
+		}
+		// The delete and the insert are one statement over one snapshot, so a name the successor
+		// already holds leaves the predecessor's row deleted and the successor's as it was: the
+		// withhold is kept once, from when it was first made.
+		withheld, err := tx.Exec(ctx, `with moved as (
+				delete from withheld_secrets where enrollment_id=$1 returning name, created_at
+			)
+			insert into withheld_secrets (enrollment_id, name, created_at)
+			select $2, name, created_at from moved on conflict do nothing`, from.ID, in.ID)
+		if err != nil {
+			return err
+		}
+		if from.Dormant {
+			if _, err := tx.Exec(ctx, `update enrollments set dormant_since=null where id=$1`, from.ID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.adopted',$1,$2,
+			jsonb_build_object('from',$3::uuid,'to',$1::uuid,'dormant',$4::boolean,
+				'grants',$5::bigint,'requests',$6::bigint,'withheld_secrets',$7::bigint))`,
+			in.ID, actor, from.ID, from.Dormant, grants.RowsAffected(), requests.RowsAffected(), withheld.RowsAffected()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // recoverConflict resolves an insert that collided with an unrevoked enrollment of the same

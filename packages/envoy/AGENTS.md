@@ -4523,6 +4523,14 @@ A person's own machine ends their machine logins and grants through the operator
 `internal/broker/enroll` turns a launcher credential into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected service-account token).
 An operator credential's enrollment is its operator's, the email of the person who approved its machine login:
 a launcher may leave `operator` out of the enrollment, and one naming anyone else is `403 OPERATOR_MISMATCH`.
+An enrollment that names a session (`session_id`) also records the principal that session belongs to (`enrollments.carry_principal`, migration 0027), read from what the caller has already proved and never from anything it states:
+the service account a pod's own projected token proved, the person a credential carrying an `operator` acts for (a person's box, and that person's sign-in on a machine), or the Google account a machine's own credential names (`exchange.AccountPrincipal`, `PersonPrincipal` and `GooglePrincipal`, the broker's one spelling of each, which `oauth_session_bindings` holds a session name to as well).
+That name under that principal is what a grant binds to, rather than the enrollment row it was approved under:
+the next enrollment of the pair takes every grant, pending request and withheld name a predecessor still holds, in the transaction that creates it, and writes one `enrollment.adopted` audit row naming the predecessor and one `grant.moved` row per grant (`enroll.adopt`).
+A predecessor is an enrollment of that pair that still holds something, live or dormant (`BROKER_SESSION_CARRY_SECONDS`, below):
+a dormant one stops being dormant once it has been adopted from, so the carry sweep has nothing of it left to revoke, and a live one is left live, holding nothing.
+So a session reads the secret a person approved after a helper restart, a rebuilt machine, a second sign-in or a replaced Legion pod, with no second request and no second approval, while an enrollment of the same name under another principal takes none of it.
+An approval that lands after such a move is granted to the enrollment the `requests` row names then, which is why `requests.Machine.ApplyDecision` reads the enrollment from that row rather than from the `credential_requests` record the request was filed under, which is append-only and cannot be re-pointed.
 A live enrollment is unique per launcher credential, runtime id and slot:
 `POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a `session` enrollment is refused the same way) naming one of several independent identities in one pod.
 The launcher whose proof authenticates the enrollment chooses the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`).

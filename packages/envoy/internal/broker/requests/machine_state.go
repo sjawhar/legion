@@ -651,9 +651,24 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 // that login), the request transition and the audit row in one transaction. For its approver, a
 // record that expired undecided — expired by the sweeper, or past its pending_expires_at before
 // the sweeper got to it — is ErrExpired, and any other non-pending record ErrTerminal: a
-// duplicate or late decision changes nothing. The enrollment row is locked before the request row
-// — the same order every other enrollment-then-request writer in this package takes them in, so
-// none of them deadlock.
+// duplicate or late decision changes nothing.
+//
+// The enrollment the decision grants to is the one the `requests` row names, never the one
+// `credential_requests` recorded. The record is append-only (credential_requests_refuse_update,
+// migration 0005), so nothing can re-point it when a session moves to another box, while the
+// request row moves with the grant: enroll.Create hands what a predecessor held to the next
+// enrollment of that session name under the same principal. Reading the record's own column
+// would answer an approval given after a move with "the requesting enrollment is no longer live"
+// and mint nothing, which is the half of the incident dispatch://INFRA-1167 reports.
+//
+// The enrollment row is locked before the request row — the same order every other
+// enrollment-then-request writer in this package takes them in, so none of them deadlock — and
+// the join below is what keeps that order while reading the enrollment's id off the request: it
+// locks the enrollment alone (for share of e) and takes no lock on the request. An adoption
+// takes the predecessor's enrollment row for update before it moves any request off it, so one
+// that commits before this statement is already in what the join reads, and one that starts
+// after it waits on this share lock: the request cannot move to another enrollment between the
+// two reads.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -661,19 +676,22 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	defer tx.Rollback(ctx)
 
-	var enrollmentID, body string
+	var body string
 	var createdAt time.Time
-	if err := tx.QueryRow(ctx, `select enrollment_id, body, created_at from credential_requests where id=$1`, recordID).
-		Scan(&enrollmentID, &body, &createdAt); err != nil {
+	if err := tx.QueryRow(ctx, `select body, created_at from credential_requests where id=$1`, recordID).
+		Scan(&body, &createdAt); err != nil {
 		return Decision{}, err
 	}
+	var enrollmentID string
 	var live bool
-	enr := enrollmentRow{ID: enrollmentID}
-	if err := tx.QueryRow(ctx, `select e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service, c.host from enrollments e
-		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1 for share of e`, enrollmentID).
-		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
+	var enr enrollmentRow
+	if err := tx.QueryRow(ctx, `select e.id, e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service, c.host
+		from requests r join enrollments e on e.id = r.enrollment_id
+		left join launcher_credentials c on c.id = e.launcher_credential_id where r.record_id=$1 for share of e`, recordID).
+		Scan(&enrollmentID, &live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
 		return Decision{}, err
 	}
+	enr.ID = enrollmentID
 	var requestID, state string
 	var expired bool
 	if err := tx.QueryRow(ctx, `select id, state, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
