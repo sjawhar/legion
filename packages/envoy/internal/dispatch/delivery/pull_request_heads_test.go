@@ -40,18 +40,7 @@ func seedHeadIssue(t *testing.T, ctx context.Context, pool *store.Pool, number i
 func seedGadgetsIssue(t *testing.T, ctx context.Context, pool *store.Pool, number int) string {
 	t.Helper()
 	key := fmt.Sprintf("GDGT-%d", number)
-	if _, err := pool.Exec(ctx, `
-		insert into projects (key, name) values ('GDGT', 'Gadgets') on conflict (key) do nothing
-	`); err != nil {
-		t.Fatalf("seed the project: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-		insert into repo_projects (repo, project, created_by, is_default)
-		values ('acme/gadgets', 'GDGT', '{"kind":"system","id":"test"}'::jsonb, true)
-		on conflict (repo) do nothing
-	`); err != nil {
-		t.Fatalf("map the repository to the project: %v", err)
-	}
+	seedProjectRepository(t, ctx, pool, "GDGT", "Gadgets", "acme/gadgets")
 	if _, err := pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, status, created_by, rank)
 		values ($1, 'GDGT', $2, $1, 'todo', '{"kind":"system","id":"test"}'::jsonb, $1)

@@ -53,6 +53,22 @@ func resolvedKey(t *testing.T, ctx context.Context, pool *store.Pool, facts attr
 	return *key, source
 }
 
+// storedIssueKey is the issue delivery_pull_requests credits one stored pull request to, as a
+// failure message names it: "none" where the row credits nobody, which AttributePullRequests
+// writes as a null issue_key.
+func storedIssueKey(t *testing.T, ctx context.Context, pool *store.Pool, repo string, number int) string {
+	t.Helper()
+	var issue *string
+	if err := pool.QueryRow(ctx,
+		`select issue_key from delivery_pull_requests where repo = $1 and number = $2`, repo, number).Scan(&issue); err != nil {
+		t.Fatalf("read the stored pull request %s#%d: %v", repo, number, err)
+	}
+	if issue == nil {
+		return "none"
+	}
+	return *issue
+}
+
 // TestAttributionFallsBackToAnExternalLinkNamingThePullRequest: source (a), an issue whose
 // external link is the pull request's own URL.
 func TestAttributionFallsBackToAnExternalLinkNamingThePullRequest(t *testing.T) {

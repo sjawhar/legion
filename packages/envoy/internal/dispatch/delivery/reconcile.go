@@ -141,8 +141,10 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	now := time.Now()
 	headErr := r.reconcilePullRequestHeads(ctx, now)
 	// Where the pass returns before record() below exists, the head pass's failure can only be
-	// logged: r.fail writes last_error into the delivery_settings row, and a pass that returns
-	// here has no row to write it in, or could not read it.
+	// logged. At the GetSettings arm there is no delivery_settings row to write it in, or none
+	// that could be read; at the splitRepo and permission arms below, r.fail does write
+	// last_error into that row, but last_error holds the one failure that ended the pass and the
+	// step list that would carry a second one (failures, record) does not exist yet.
 	logHeadFailure := func() {
 		if headErr != nil {
 			slog.Error("dispatch delivery: reconcile pull request heads", "error", headErr)

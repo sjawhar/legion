@@ -116,23 +116,32 @@ const (
 	deployedIssueBand    = 2000
 )
 
-// seedDeliveryProject writes deliveryProject and maps deliveryRepo to it as its default, so
-// every issue the fixtures seed resolves to the repository their pull requests are in.
-// Idempotent: each fixture calls it, and the tests of this package share one database.
-func seedDeliveryProject(t *testing.T, ctx context.Context, pool *store.Pool) {
+// seedProjectRepository writes project key, named name, and maps repo to it as that project's
+// default, which is what makes an issue of the project resolve to repo (refs.IssueRepoTerms).
+// Idempotent: the fixtures that call it run per test, and the tests of this package share one
+// database.
+func seedProjectRepository(t *testing.T, ctx context.Context, pool *store.Pool, key, name, repo string) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
-		insert into projects (key, name) values ($1, 'Delivery') on conflict do nothing
-	`, deliveryProject); err != nil {
+		insert into projects (key, name) values ($1, $2) on conflict do nothing
+	`, key, name); err != nil {
 		t.Fatalf("seed the project: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 		insert into repo_projects (repo, project, created_by, is_default)
 		values ($1, $2, '{"kind":"system","id":"delivery-test"}'::jsonb, true)
 		on conflict do nothing
-	`, deliveryRepo, deliveryProject); err != nil {
+	`, repo, key); err != nil {
 		t.Fatalf("map the repository to the project: %v", err)
 	}
+}
+
+// seedDeliveryProject writes deliveryProject and maps deliveryRepo to it as its default, so
+// every issue the fixtures seed resolves to the repository their pull requests are in.
+// Idempotent: each fixture calls it, and the tests of this package share one database.
+func seedDeliveryProject(t *testing.T, ctx context.Context, pool *store.Pool) {
+	t.Helper()
+	seedProjectRepository(t, ctx, pool, deliveryProject, "Delivery", deliveryRepo)
 }
 
 // publishPullRequestEnvelope publishes one notifications.github.<owner>.<repo>.pr.<number>

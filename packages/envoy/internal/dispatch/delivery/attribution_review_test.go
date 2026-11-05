@@ -80,15 +80,7 @@ func TestAttributingStoredPullRequestsTakesEverySourceInOrder(t *testing.T) {
 		t.Fatalf("attribute: %v", err)
 	}
 	for _, row := range rows {
-		var issue *string
-		if err := pool.QueryRow(ctx, `select issue_key from delivery_pull_requests where repo = 'acme/widgets' and number = $1`, row.number).Scan(&issue); err != nil {
-			t.Fatalf("read #%d: %v", row.number, err)
-		}
-		if issue == nil || *issue != row.want {
-			got := "none"
-			if issue != nil {
-				got = *issue
-			}
+		if got := storedIssueKey(t, ctx, pool, "acme/widgets", row.number); got != row.want {
 			t.Errorf("#%d issue = %s, want %s", row.number, got, row.want)
 		}
 	}
@@ -122,16 +114,7 @@ func TestAttributingAStoredPullRequestTitledAfterAnotherRepositorysIssueKeepsIts
 	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
 		t.Fatalf("attribute: %v", err)
 	}
-	var issue *string
-	if err := pool.QueryRow(ctx,
-		`select issue_key from delivery_pull_requests where repo = 'acme/gadgets' and number = 220`).Scan(&issue); err != nil {
-		t.Fatalf("read the stored pull request: %v", err)
-	}
-	if issue == nil || *issue != own {
-		got := "none"
-		if issue != nil {
-			got = *issue
-		}
+	if got := storedIssueKey(t, ctx, pool, "acme/gadgets", 220); got != own {
 		t.Fatalf("the stored pull request's issue = %s, want %s: %s resolves to acme/widgets, %s to acme/gadgets",
 			got, own, foreign, own)
 	}
@@ -159,16 +142,7 @@ func TestAStoredPullRequestTitledAfterTwoOfItsOwnIssuesTakesTheFirst(t *testing.
 	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
 		t.Fatalf("attribute: %v", err)
 	}
-	var issue *string
-	if err := pool.QueryRow(ctx,
-		`select issue_key from delivery_pull_requests where repo = 'acme/widgets' and number = 221`).Scan(&issue); err != nil {
-		t.Fatalf("read the stored pull request: %v", err)
-	}
-	if issue == nil || *issue != "ATTR-221" {
-		got := "none"
-		if issue != nil {
-			got = *issue
-		}
+	if got := storedIssueKey(t, ctx, pool, "acme/widgets", 221); got != "ATTR-221" {
 		t.Fatalf("a title naming two issues of acme/widgets = %s, want ATTR-221, the first of them", got)
 	}
 }

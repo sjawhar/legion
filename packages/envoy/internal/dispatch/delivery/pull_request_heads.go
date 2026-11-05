@@ -255,9 +255,11 @@ type headAttributionResult struct {
 // messages could change anything, and as complete, since an answer naming no head repository at
 // all left a source unread and so may attribute nobody but delete nobody either.
 //
-// Each of the two log lines is written at most once per attribution: the fork's head names the
-// first candidate it refused, and a pull request that passed candidates over names them and the
-// issue it settled on, if any.
+// A log line is written per call, not per attribution: the fork's head names the first
+// candidate it refused, and a pull request that passed candidates over names them and the issue
+// it settled on, if any. attributeHead calls this a second time, after reading the commit
+// messages, whenever the first call held no candidate, so on that path both calls log and the
+// second line names the candidates the commit messages added.
 func headAttribution(ctx context.Context, pool *store.Pool, facts attributionFacts, headRepo string) (headAttributionResult, error) {
 	attributed := headAttributionResult{
 		source:   string(sourceNone),
@@ -276,12 +278,9 @@ func headAttribution(ctx context.Context, pool *store.Pool, facts attributionFac
 	// passedOver is every candidate ranked above the one taken, and every candidate when none
 	// was held: the keys the log line below names.
 	passedOver := candidates
-	for i := range candidates {
-		if candidates[i].held {
-			attributed.issueKey, attributed.source = &candidates[i].key, string(candidates[i].source)
-			passedOver = candidates[:i]
-			break
-		}
+	if i := firstHeldCandidate(candidates); i >= 0 {
+		attributed.issueKey, attributed.source = &candidates[i].key, string(candidates[i].source)
+		passedOver = candidates[:i]
 	}
 	if len(passedOver) > 0 {
 		keys := make([]string, 0, len(passedOver))

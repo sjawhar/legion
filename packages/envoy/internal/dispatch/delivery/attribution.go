@@ -129,13 +129,14 @@ func citedIssues(repo, body string) []string {
 	return urls
 }
 
-// attributionColumns are the SQL expressions attributionCandidates reads a pull request's own
-// repository, its URL and its four stored inputs from: bound parameters for one pull request
+// attributionColumns are the SQL expressions attributionCandidates reads a pull request's URL
+// and its four stored inputs from: bound parameters for one pull request
 // (resolveAttributionCandidates), or a stored row's own columns for every row
-// (AttributePullRequests). Named, so the two callers cannot hand the repository and the four
-// text[] inputs over in another order.
+// (AttributePullRequests). Named, so the two callers cannot hand the four text[] inputs over in
+// another order. The repository the candidates are held to is not read here: it reaches the SQL
+// through attributionHeld alone, from attributionOneRepo or the batch's own c.pr_repo.
 type attributionColumns struct {
-	Repo, URL, TitleKeys, CitedIssues, BranchKeys, CommitKeys string
+	URL, TitleKeys, CitedIssues, BranchKeys, CommitKeys string
 }
 
 // attributionCandidateBound is how many ranked candidates one attribution carries out of the
@@ -186,11 +187,15 @@ func attributionHeld(repo string) string {
 }
 
 // attributionOneColumns are the bound parameters one pull request's candidates are read from:
-// its URL, its four inputs and, last, the repository it is in.
+// its URL, then its four inputs; attributionOneRepo is the last parameter, the repository the
+// pull request is in, which attributionHeld reads. resolveAttributionCandidates binds the six
+// in that order.
 var attributionOneColumns = attributionColumns{
-	Repo: "$6", URL: "$1", TitleKeys: "$2::text[]", CitedIssues: "$3::text[]",
+	URL: "$1", TitleKeys: "$2::text[]", CitedIssues: "$3::text[]",
 	BranchKeys: "$4::text[]", CommitKeys: "$5::text[]",
 }
+
+const attributionOneRepo = "$6"
 
 // attributionCandidatesQuery is the one statement that resolves a pull request's candidates from
 // stored inputs: every candidate the five sources name, best first, each marked whether it is
@@ -205,11 +210,59 @@ var attributionCandidatesQuery = `with recursive candidates as (
 ), subjects as (
 	select distinct key from candidates
 ), ` + refs.IssueRepoTerms + `
-select c.key, c.source, ` + attributionHeld(attributionOneColumns.Repo) + ` as held
+select c.key, c.source, ` + attributionHeld(attributionOneRepo) + ` as held
 from candidates c
 	left join issues i on i.key = c.key
 	` + refs.IssueRepoJoin + `
 order by c.rank, c.n`
+
+// attributionBatchQuery is the statement AttributePullRequests resolves a whole batch of stored
+// rows with: the same five sources and the same holding as attributionCandidatesQuery above,
+// read from each row's own columns instead of bound parameters, with the batch's size the one
+// parameter. Built once, at start, for that statement's reason: the concatenation never differs
+// between passes, and pgx caches a prepared plan per statement text.
+var attributionBatchQuery = `
+		with recursive batch as (
+			select repo, number, url, issue_key, attribution_title_keys, attribution_cited_issues,
+				attribution_branch_keys, attribution_commit_keys
+			from delivery_pull_requests
+			where attribution_title_keys is not null
+			order by attribution_checked_at nulls first, repo, number
+			limit $1
+		), candidates as (
+			select src.repo as pr_repo, src.number as pr_number, f.key, f.rank, f.n
+			from batch src
+			left join lateral (` + attributionCandidates(attributionColumns{
+	URL: "src.url", TitleKeys: "src.attribution_title_keys",
+	CitedIssues: "src.attribution_cited_issues", BranchKeys: "src.attribution_branch_keys",
+	CommitKeys: "src.attribution_commit_keys",
+}) + `) f on true
+		), subjects as (
+			select distinct key from candidates where key is not null
+		), ` + refs.IssueRepoTerms + `, held as (
+			select c.pr_repo, c.pr_number, c.key, c.rank, c.n
+			from candidates c
+				left join issues i on i.key = c.key
+				` + refs.IssueRepoJoin + `
+			where ` + attributionHeld("c.pr_repo") + `
+		), picked as (
+			select distinct on (pr_repo, pr_number) pr_repo, pr_number, key
+			from held order by pr_repo, pr_number, rank, n
+		), resolved as (
+			select src.repo, src.number, p.key, src.issue_key is distinct from p.key as changed
+			from batch src
+			left join picked p on p.pr_repo = src.repo and p.pr_number = src.number
+		), written as (
+			update delivery_pull_requests pr
+			set issue_key = resolved.key,
+				updated_at = case when resolved.changed then now() else pr.updated_at end,
+				attribution_checked_at = now()
+			from resolved
+			where pr.repo = resolved.repo and pr.number = resolved.number
+			returning resolved.changed
+		)
+		select count(*) filter (where changed) from written
+	`
 
 // attributionCandidate is one issue a pull request's sources name: the key, the source that
 // named it, and whether it resolves to the repository the pull request is in. Only a held
@@ -254,13 +307,19 @@ func resolveStoredIssueKey(ctx context.Context, pool *store.Pool, repo, url stri
 	if err != nil {
 		return nil, sourceNone, err
 	}
-	for _, candidate := range candidates {
-		if candidate.held {
-			key := candidate.key
-			return &key, candidate.source, nil
-		}
+	if i := firstHeldCandidate(candidates); i >= 0 {
+		key := candidates[i].key
+		return &key, candidates[i].source, nil
 	}
 	return nil, sourceNone, nil
+}
+
+// firstHeldCandidate is the index of the first candidate held to the pull request's own
+// repository, -1 when none is: the rule's one scan, so resolveStoredIssueKey and
+// headAttribution (pull_request_heads.go), which also needs the index to name what it passed
+// over, cannot come to answer one ranked list differently.
+func firstHeldCandidate(candidates []attributionCandidate) int {
+	return slices.IndexFunc(candidates, func(candidate attributionCandidate) bool { return candidate.held })
 }
 
 // AttributionResolveBatch is how many stored rows one reconcile pass resolves again
@@ -283,48 +342,7 @@ const AttributionResolveBatch = 1000
 // AttributionResolveBatch of them a pass.
 func AttributePullRequests(ctx context.Context, pool *store.Pool, limit int) (int64, error) {
 	var changed int64
-	err := pool.QueryRow(ctx, `
-		with recursive batch as (
-			select repo, number, url, issue_key, attribution_title_keys, attribution_cited_issues,
-				attribution_branch_keys, attribution_commit_keys
-			from delivery_pull_requests
-			where attribution_title_keys is not null
-			order by attribution_checked_at nulls first, repo, number
-			limit $1
-		), candidates as (
-			select src.repo as pr_repo, src.number as pr_number, f.key, f.rank, f.n
-			from batch src
-			left join lateral (`+attributionCandidates(attributionColumns{
-		Repo: "src.repo", URL: "src.url", TitleKeys: "src.attribution_title_keys",
-		CitedIssues: "src.attribution_cited_issues", BranchKeys: "src.attribution_branch_keys",
-		CommitKeys: "src.attribution_commit_keys",
-	})+`) f on true
-		), subjects as (
-			select distinct key from candidates where key is not null
-		), `+refs.IssueRepoTerms+`, held as (
-			select c.pr_repo, c.pr_number, c.key, c.rank, c.n
-			from candidates c
-				left join issues i on i.key = c.key
-				`+refs.IssueRepoJoin+`
-			where `+attributionHeld("c.pr_repo")+`
-		), picked as (
-			select distinct on (pr_repo, pr_number) pr_repo, pr_number, key
-			from held order by pr_repo, pr_number, rank, n
-		), resolved as (
-			select src.repo, src.number, p.key, src.issue_key is distinct from p.key as changed
-			from batch src
-			left join picked p on p.pr_repo = src.repo and p.pr_number = src.number
-		), written as (
-			update delivery_pull_requests pr
-			set issue_key = resolved.key,
-				updated_at = case when resolved.changed then now() else pr.updated_at end,
-				attribution_checked_at = now()
-			from resolved
-			where pr.repo = resolved.repo and pr.number = resolved.number
-			returning resolved.changed
-		)
-		select count(*) filter (where changed) from written
-	`, limit).Scan(&changed)
+	err := pool.QueryRow(ctx, attributionBatchQuery, limit).Scan(&changed)
 	if err != nil {
 		return 0, fmt.Errorf("attribute stored pull requests: %w", err)
 	}
