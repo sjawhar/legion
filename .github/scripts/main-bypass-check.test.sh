@@ -220,4 +220,30 @@ check "a commit with no reading at all fails, rather than reading as untested" "
 check "names the commit" \
   "$(contains "$err" "^::error::RUNS and CI_OK need a reading for every commit of COMMITS, and one of them holds none for: $queued\$")"
 
+echo "case: the skip-checks words on a line no trailer block holds are no trailer"
+# GitHub reads skip-checks only as a trailer: at the end of the message, after two empty lines
+# (docs.github.com, "Skipping workflow runs"). A commit that quotes the words in the middle of
+# its body got every workflow GitHub starts, so it reached main past the queue like any other
+# commit and must be read here.
+mid_body=$(list "$(commit "$bypassed" "$(printf 'docs(ci): write the trailer down\n\nThe trailer is spelled\n\nskip-checks: true\n\nand GitHub reads it only where it is last. This paragraph comes after it.\n')")")
+run_bypass "$mid_body" "$(readings "$bypassed" '[]')" "$(readings "$bypassed" '[]')"
+check "the commit is read rather than passed over" "$(is "$out" "dispatch $bypassed")"
+
+echo "case: the workflow step that gathers the push runs under a shell with pipefail"
+# GitHub runs a `run:` step that names no shell as `bash -e {0}`, which has no `pipefail`, and
+# `shell: bash` as `bash --noprofile --norc -eo pipefail {0}` (docs.github.com, "Workflow syntax
+# for GitHub Actions", the default shell table). Every read this step makes ends in `jq -s`,
+# which exits 0 on an empty input, so without pipefail a `gh` that answers 502 hands the
+# decision below an empty push and the check goes green having started nothing — the one outcome
+# this backstop exists to prevent.
+bypass_workflow="$script_dir/../workflows/main-bypass-check.yaml"
+bypass_default_shell=$(yq -r '.defaults.run.shell // ""' "$bypass_workflow" 2>/dev/null)
+no_pipefail=$(SHELL_DEFAULT="$bypass_default_shell" yq -r '
+  [.jobs[].steps[]
+   | select(has("run"))
+   | select((.shell // strenv(SHELL_DEFAULT)) != "bash")
+   | (.name // "an unnamed step")] | join(", ")' "$bypass_workflow" 2>/dev/null)
+check "no run: step of main-bypass-check.yaml runs under a shell without pipefail" \
+  "$(is "$no_pipefail" "")"
+
 summary "the main bypass check's decision"
