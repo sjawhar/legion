@@ -1609,9 +1609,9 @@ test("the Inbox count, the banner and an Agents card count the reader's own work
   try {
     const page = await alice.newPage();
     // One count in the shell, wherever this width draws it: the sidebar's Inbox entry, or the
-    // compact top bar's own badge.
-    // The counts below follow the event feed, whose refetch the page holds to one per second
-    // (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+    // compact top bar's own badge. The counts below follow the event feed, whose refetch the
+    // page holds to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own
+    // clock fires.
     await page.clock.install();
     await page.goto("/");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(2);

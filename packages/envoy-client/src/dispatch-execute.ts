@@ -3590,10 +3590,13 @@ function dispatchAnswered(error: unknown, status: number): error is DispatchServ
   return error instanceof DispatchServiceError && error.fromDispatch && error.status === status;
 }
 
+/** What a side read settles into: the answer it gave, or the failure it ended in. */
+type SettledSideRead<T> = { answer: T } | { error: unknown };
+
 /** A read of the Inbox the command can do without, settled into its answer or its failure: the
  *  two reads it cannot do without throw first, and a rejection caught only after that would be
  *  an unhandled one. */
-function settleSideRead<T>(read: Promise<T>): Promise<{ answer: T } | { error: unknown }> {
+function settleSideRead<T>(read: Promise<T>): Promise<SettledSideRead<T>> {
   return read.then(
     (answer) => ({ answer }),
     (error: unknown) => ({ error })
@@ -3604,11 +3607,7 @@ function settleSideRead<T>(read: Promise<T>): Promise<{ answer: T } | { error: u
  *  asks are the greater part of the Inbox, so one failed read does not cost the caller the rest
  *  of it. A refusal for want of a scope is the exception: the credential itself is wrong, and
  *  reporting that as a missing section would hide it. */
-function sideRead<T>(
-  settled: { answer: T } | { error: unknown },
-  what: string,
-  warnings: string[]
-): T | undefined {
+function sideRead<T>(settled: SettledSideRead<T>, what: string, warnings: string[]): T | undefined {
   if (!("error" in settled)) return settled.answer;
   const error = settled.error;
   if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
@@ -3842,9 +3841,7 @@ export async function executeDispatchTool(
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
     // All four reads at once: they depend on nothing of each other, and the credential list is
-    // the slow one, since Dispatch relays it to the secrets broker. The two side reads have
-    // their rejections caught at the start so that a refusal of the other two, which throws
-    // first, leaves no unhandled one.
+    // the slow one, since Dispatch relays it to the secrets broker.
     const pending = settleSideRead(client.credentialPending());
     const unread = settleSideRead(client.myReplies());
     let identity: WhoamiResponse;

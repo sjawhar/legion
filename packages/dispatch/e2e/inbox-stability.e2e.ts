@@ -744,7 +744,9 @@ test("a travelling pointer keeps its destination when a P0 row arrives @phone", 
   }
 });
 
-// SLOW(>=2s): eleven seeded writes, a viewport resize and ~19 pointer-to-frame round trips.
+// SLOW(>=2s): seventeen seeded writes - the project, the banded issue with its priority and two
+// asks, and six more asks on issues of their own - a viewport resize, and a journey the page's
+// own timer walks the pointer along while the hand crosses it.
 test("a travelling pointer crosses a band of its own without losing its destination @phone", async ({
   browser,
 }) => {

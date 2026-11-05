@@ -427,9 +427,8 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		// replies sit under roots targeted at it, where this mark is the one the unread count
 		// reads. A Clear plays no part: it can move back.
 		//
-		// The dead rows are locked in one order before the delete reaches them, because a delete
-		// takes them in whatever order its plan reaches them and this prune has two writers: this
-		// route and the Inbox's mark-all, which runs it over several sessions at once
+		// The dead rows are locked in one order before the delete reaches them, for the reason
+		// written on pruneAgentReplies below, which this route and the Inbox's mark-all share
 		// (markInboxReadThreads names the lock order every writer here takes).
 		if _, err := tx.Exec(r.Context(), pruneAgentReplies,
 			model.CanonicalLogin(actor.ID), []string{sessionID},

@@ -752,7 +752,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
     await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", ask.id);
     await row.focus();
     await page.keyboard.press("x");
-    const bar = page.getByRole("group", { name: "Selected asks" });
+    const bar = page.getByRole("group", { name: "Selected rows" });
     await expect(bar).toContainText("1 selected");
 
     const dialog = page.getByRole("dialog", { name: "Search" });

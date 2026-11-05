@@ -155,20 +155,34 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
    *  for, so it must not be read as the reader looking somewhere new. */
   private pointerAt: { x: number; y: number } | null = null;
 
+  /** The box the host named, while it holds one: what this anchor reads its offset from and
+   *  what it moves. Null where the rows scroll in the document, which is the window's own
+   *  scroll and the browser's own anchoring. */
+  private scrollerElement(): HTMLElement | null {
+    return this.props.scroller?.current ?? null;
+  }
+
+  /** The group `row` is in, null where the host names none. A kept place belongs to one: a row
+   *  that is in another group was relocated rather than shifted, and the place no longer says
+   *  where the reader was looking. */
+  private groupOf(row: Element): string | null {
+    const { group } = this.props;
+    return group === undefined ? null : row.getAttribute(group);
+  }
+
   /** Records where the hand's row sits now as the place to keep it, with the box offset and the
    *  group that place belongs to. Called where the view is the reader's own: the pointer moving
    *  onto a row or off one, and a scroll they made. A host whose rows scroll in the document
    *  keeps nothing. */
   private readonly rememberHeld = (): void => {
-    const scroller = this.props.scroller?.current ?? null;
+    const scroller = this.scrollerElement();
     const current = scroller === null ? null : this.interacted();
     if (scroller === null || current === null) {
       this.held = null;
       return;
     }
-    const { group } = this.props;
     this.held = {
-      group: group === undefined ? null : current.row.getAttribute(group),
+      group: this.groupOf(current.row),
       id: current.id,
       scrollTop: scroller.scrollTop,
       top: current.row.getBoundingClientRect().top,
@@ -180,7 +194,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
    *  and the caller measures the row. */
   private heldTop(id: string, group: string | null): number | null {
     const held = this.held;
-    const scroller = this.props.scroller?.current ?? null;
+    const scroller = this.scrollerElement();
     if (held === null || scroller === null) return null;
     const holds = held.id === id && held.group === group && held.scrollTop === scroller.scrollTop;
     return holds ? held.top : null;
@@ -191,7 +205,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
    *  compensation would invalidate the kept place for every later one. */
   private restampHeld(id: string, top: number): void {
     const held = this.held;
-    const scroller = this.props.scroller?.current ?? null;
+    const scroller = this.scrollerElement();
     if (held === null || scroller === null || held.id !== id || held.top !== top) return;
     held.scrollTop = scroller.scrollTop;
   }
@@ -205,7 +219,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
 
   /** Moves the box this anchor owns and remembers that it did. */
   private scrollBy(delta: number): void {
-    const scroller = this.props.scroller?.current ?? null;
+    const scroller = this.scrollerElement();
     if (scroller === null) {
       const before = window.scrollY;
       window.scrollBy(0, delta);
@@ -218,7 +232,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   }
 
   private readonly viewScrolled = (event: Event): void => {
-    const scroller = this.props.scroller?.current ?? null;
+    const scroller = this.scrollerElement();
     const mine = scroller === null ? event.target === document : event.target === scroller;
     if (!mine) return;
     if (this.selfScrolled) {
@@ -235,7 +249,9 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   private readonly contentResized = (): void => {
     const held = this.held;
     const root = this.root;
-    if (this.props.scroller?.current == null || held === null || root === null) return;
+    // No box check of its own: nothing is ever held without one (`rememberHeld`), and `heldTop`
+    // below answers null where the host names none.
+    if (held === null || root === null) return;
     const element = root.querySelector<HTMLElement>(
       `[${this.props.item}="${CSS.escape(held.id)}"]`
     );
@@ -243,8 +259,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
       this.held = null;
       return;
     }
-    const { group } = this.props;
-    const top = this.heldTop(held.id, group === undefined ? null : element.getAttribute(group));
+    const top = this.heldTop(held.id, this.groupOf(element));
     if (top === null) return;
     const delta = element.getBoundingClientRect().top - top;
     if (delta === 0) return;
@@ -350,7 +365,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     if (interacted !== null) return interacted;
     const root = this.root;
     if (root === null) return null;
-    const scroller = this.props.scroller?.current ?? null;
+    const scroller = this.scrollerElement();
     if ((scroller === null ? window.scrollY : scroller.scrollTop) <= 0) return null;
     const row = rowAtCenter(root, `[${this.props.item}]`, scroller);
     return row === null ? null : { id: this.idOf(row), row, via: "center" };
@@ -365,11 +380,11 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   }
 
   getSnapshotBeforeUpdate(): Snapshot | null {
-    const { enabled, group } = this.props;
+    const { enabled } = this.props;
     if (enabled !== undefined && !enabled()) return null;
     const current = this.current();
     if (current === null) return null;
-    const at = group === undefined ? null : current.row.getAttribute(group);
+    const at = this.groupOf(current.row);
     // Where the reader last saw the row they have their hand on, while that place still holds:
     // a change no commit of this component's saw may already have moved it (`held`), and
     // measuring again there would take that drift for the place to keep.

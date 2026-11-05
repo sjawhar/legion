@@ -152,7 +152,7 @@ export function PaneFrame({
 
 /** What a column showing a document at one block holds: the refs it measures and scrolls, the
  *  document itself, where the section bar stands, and whether it could be placed at all. */
-export interface DocumentAtBlock {
+interface DocumentAtBlock {
   /** The document, once the read lands. */
   readonly artifact: Artifact | undefined;
   /** Whether the editor has drawn the block the column is opened at; undefined while it has

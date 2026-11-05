@@ -400,7 +400,7 @@ func (s *server) markInboxReadThreads(
 	if len(events) == 0 {
 		return 0, nil, tx.Rollback(ctx)
 	}
-	// Step 3 of the lock order above: every project this transaction announces in, taken in one
+	// Step 4 of the lock order above: every project this transaction announces in, taken in one
 	// sorted order after the rows it marked and before the first append. An agent reply's event
 	// names no owner, so it takes no lock here.
 	if err := s.deps.Events.LockOwners(ctx, tx, events...); err != nil {
@@ -571,11 +571,11 @@ func (s *server) markInboxReadAgentReplies(
 	}
 	touched := slices.Sorted(maps.Keys(sessions))
 	if len(touched) > 0 {
-		// The dead rows are taken in one order before the delete reaches them, as
-		// putUserAgentState takes them: nothing this request writes is ever dead (the insert
-		// above skips what the mark covers), so this clears only what an older write left
-		// behind, and two writers that crossed here would otherwise each hold a row the other
-		// waits on.
+		// Step 3 of the lock order above: the dead rows, taken in one order before the delete
+		// reaches them, as putUserAgentState takes them. Nothing this request writes is ever
+		// dead (the insert above skips what the mark covers), so this clears only what an older
+		// write left behind; why the statement locks them in that order is written on
+		// pruneAgentReplies (api/state.go).
 		if _, err := tx.Exec(ctx, pruneAgentReplies, login, touched); err != nil {
 			return nil, 0, fmt.Errorf("prune the agent replies the read marks cover: %w", err)
 		}
