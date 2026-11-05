@@ -23,7 +23,7 @@ type RequestTurnOutcome struct {
 	Claim      claim.Token
 	Generation uint64
 	Sequence   uint64
-	Outcome    string
+	Outcome    claim.TurnOutcome
 	Category   string
 }
 
@@ -32,7 +32,7 @@ type RequestTurnOutcome struct {
 type TurnOutcome struct {
 	Generation uint64
 	Sequence   uint64
-	Outcome    string
+	Outcome    claim.TurnOutcome
 	Category   string
 }
 

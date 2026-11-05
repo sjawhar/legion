@@ -129,7 +129,8 @@ const (
 	// session again (promptRetryDelay), armed on that task's own delivery id.
 	TimerPromptRetry TimerKind = "prompt_retry"
 	// TimerTurnOutcome is the wait for the turn-outcome report of a turn that ended in a provider
-	// error neither the error's own fields nor a report already settled (providerErrorWait).
+	// error neither the error's own fields nor a report already settled: turnOutcomeWait, armed by
+	// decideProviderError.
 	TimerTurnOutcome TimerKind = "turn_outcome"
 )
 

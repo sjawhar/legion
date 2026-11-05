@@ -3,6 +3,7 @@ package supervise
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func (h *harness) errorTurn(r StreamPromptResult, reports ...RequestTurnOutcome)
 }
 
 // report posts one turn-outcome report of the claim's current generation.
-func (h *harness) report(sequence uint64, outcome, category string) {
+func (h *harness) report(sequence uint64, outcome claim.TurnOutcome, category string) {
 	h.t.Helper()
 	h.must(RequestTurnOutcome{Claim: h.token, Generation: h.generation(), Sequence: sequence, Outcome: outcome, Category: category})
 }
@@ -92,13 +93,17 @@ func TestAProviderErrorTurnKeepsItsTaskAndSendsItAgainOnAGrowingLadder(t *testin
 }
 
 // promptRetryDelay is read by nothing else, and the step it is asked for comes from a persisted
-// count: an attempt a restart reads back past the ladder's top is still the top step.
+// count: an attempt a restart reads back past the ladder's top is still the top step. Attempts 29
+// to 31 are the ladder past the point where a shift of promptRetryFirst leaves int64: a wait the
+// claim would have taken as "send it again now".
 func TestThePromptRetryLadderStopsGrowingAtTenMinutes(t *testing.T) {
 	for _, tc := range []struct {
 		attempt int
 		want    time.Duration
 	}{{0, 30 * time.Second}, {1, 30 * time.Second}, {2, time.Minute}, {5, 8 * time.Minute},
-		{6, 10 * time.Minute}, {40, 10 * time.Minute}, {1 << 20, 10 * time.Minute}} {
+		{6, 10 * time.Minute}, {29, 10 * time.Minute}, {30, 10 * time.Minute},
+		{31, 10 * time.Minute}, {40, 10 * time.Minute}, {1 << 20, 10 * time.Minute},
+		{math.MaxInt, 10 * time.Minute}} {
 		if got := promptRetryDelay(tc.attempt); got != tc.want {
 			t.Errorf("promptRetryDelay(%d) = %s, want %s", tc.attempt, got, tc.want)
 		}

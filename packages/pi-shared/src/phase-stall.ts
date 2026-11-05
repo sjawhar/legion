@@ -1,3 +1,4 @@
+import { lastCustomEntry } from "./custom-entry";
 import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
 
 /**
@@ -272,24 +273,9 @@ function phaseStallFrom(
  * the one place the restore reads, so the state and the plugin's own report fields come from one
  * entry rather than two scans that could disagree. */
 function lastPhaseStallData(branch: readonly unknown[]): object | undefined {
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const entry = branch[index];
-    if (
-      typeof entry === "object" &&
-      entry !== null &&
-      "type" in entry &&
-      entry.type === "custom" &&
-      "customType" in entry &&
-      entry.customType === PHASE_STALL_ENTRY &&
-      "data" in entry &&
-      typeof entry.data === "object" &&
-      entry.data !== null &&
-      phaseStallFrom(entry.data) !== undefined
-    ) {
-      return entry.data;
-    }
-  }
-  return undefined;
+  return lastCustomEntry(branch, PHASE_STALL_ENTRY, (data) =>
+    phaseStallFrom(data) === undefined ? undefined : data
+  );
 }
 
 /** The head of the worker's last message the architect notice quotes, and so all of it the record

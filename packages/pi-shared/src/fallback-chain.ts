@@ -39,6 +39,12 @@ export interface FallbackChainContext {
   readonly log: FallbackChainLog;
 }
 
+/** The `provider/id` selector of a model, which is how a chain entry names one and how the
+ * cooldown keys a model's own doubling level (`./fallback-cooldown`). */
+export function modelSelector(model: HostModel): string {
+  return `${model.provider}/${model.id}`;
+}
+
 /**
  * The model below `model` in the deployment's chain, or undefined when there is none: when the
  * deployment turned `retry.enabled` or `retry.modelFallback` off, when no chain key covers this
@@ -69,7 +75,7 @@ export async function nextFallbackModel(
       getModelRole: (name) => settings.getModelRole(name),
       modelLookup: ctx.modelRegistry,
     };
-    const selector = `${model.provider}/${model.id}`;
+    const selector = modelSelector(model);
     // The chain matches the session's model by identity as well as by selector, so the resolution
     // is given both, as the host's own recovery gives them.
     const current = model as Model;
@@ -79,7 +85,7 @@ export async function nextFallbackModel(
     return next === undefined ? undefined : ctx.models.resolve(next.raw);
   } catch (error) {
     ctx.log.warn("legion: the model fallback chain did not resolve; staying on this model", {
-      model: `${model.provider}/${model.id}`,
+      model: modelSelector(model),
       error: messageFor(error),
     });
     return undefined;

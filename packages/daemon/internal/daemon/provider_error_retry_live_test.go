@@ -639,7 +639,7 @@ func (r *providerErrorLive) claim(token claim.Token) api.OperatorClaim {
 // turnOutcome is the class of the newest turn-outcome report the claim's plugin sent. A report is
 // the machine's memory and no store row (supervise/turnoutcome.go says why), so the daemon's own
 // log line for the report it kept is where a step reads it.
-func (r *providerErrorLive) turnOutcome(token claim.Token) string {
+func (r *providerErrorLive) turnOutcome(token claim.Token) claim.TurnOutcome {
 	r.t.Helper()
 	kept := r.lastLog(func(record loggedRecord) bool {
 		return record.Message == "supervise: the agent's plugin reported how a turn ended" &&
@@ -649,7 +649,7 @@ func (r *providerErrorLive) turnOutcome(token claim.Token) string {
 		r.t.Fatalf("the plugin of %s reported no turn outcome the daemon kept", token)
 	}
 	outcome, _ := kept.Attrs["outcome"].(string)
-	return outcome
+	return claim.TurnOutcome(outcome)
 }
 
 // awaitReady waits for the claim's real pane to start Oh My Pi, register and report ready. A claim

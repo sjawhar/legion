@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -397,16 +396,14 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, notice record
 	return a.enqueue(ctx, tx, issue, notice, dueAt)
 }
 
-// TellController queues notice on issue in a transaction of its own, for a caller that holds no
-// transaction of the admission's: the supervisor, whose machine decides inside its own lock and
-// outside any fact (supervise's Deps.ProviderErrorRunReached, wired in internal/daemon). It is
-// wakeController with its own transaction and nothing else: a controller that is not registered
-// is told nothing, and a notice of the same kind already waiting in the outbox stops this one,
-// so a run of the same cause is one wake.
-func (a *Admission) TellController(ctx context.Context, pool *pgxpool.Pool, notice record.ControllerNotice, issue string) error {
-	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return a.wakeController(ctx, tx, notice, issue, a.now())
-	})
+// TellController queues notice on issue in the caller's transaction, for a caller outside any
+// fact: the supervisor, whose machine decides inside its own lock (supervise's
+// Deps.ProviderErrorRunReached, wired in internal/daemon, which opens the transaction). It is
+// wakeController and nothing else: a controller that is not registered is told nothing, and a
+// notice of the same kind already waiting in the outbox stops this one, so a run of the same
+// cause is one wake.
+func (a *Admission) TellController(ctx context.Context, tx pgx.Tx, notice record.ControllerNotice, issue string) error {
+	return a.wakeController(ctx, tx, notice, issue, a.now())
 }
 
 // queuePersonHandover queues the todo write of a person's handover of key: a root a person handed

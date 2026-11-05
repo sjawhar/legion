@@ -3,6 +3,7 @@ package supervise
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -34,22 +35,16 @@ const (
 )
 
 // promptRetryDelay is the wait before the attempt-th send of a task a provider error took back,
-// from attempt 1: 30 s, 60 s, 120 s, and never more than 10 minutes. There is no jitter — the
-// ladder is one claim's own, not a herd's — and no attempt limit, so it flattens at the top
-// rather than ending.
+// from attempt 1: 30 s, 60 s, 120 s, 240 s, 480 s, and 10 minutes from the sixth send on. There
+// is no jitter — the ladder is one claim's own, not a herd's — and no attempt limit, so it
+// flattens at the top rather than ending.
+//
+// The shift is clamped before it is taken, as internal/backoff clamps its own: five doublings of
+// 30 seconds is already 16 minutes, past the cap, and a shift any wider than that leaves int64
+// and comes back a negative wait, which arms the timer to fire at once and sends the task with no
+// wait at all.
 func promptRetryDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	// Over this many doublings the shift overflows, and every one of them is past the cap.
-	if attempt > 32 {
-		return promptRetryMax
-	}
-	delay := promptRetryFirst << (attempt - 1)
-	if delay > promptRetryMax {
-		return promptRetryMax
-	}
-	return delay
+	return min(promptRetryFirst<<min(max(attempt-1, 0), 5), promptRetryMax)
 }
 
 // providerError is what the machine knows about the failed turn it is still deciding on: the
@@ -111,7 +106,7 @@ func (m *Machine) decideProviderError(ctx context.Context) error {
 	}
 	outcome := m.reportedOutcome()
 	switch {
-	case e.retryable, e.status == 429, e.status >= 500 && e.status <= 599, outcome == claim.TurnRefused:
+	case e.retryable, e.status == http.StatusTooManyRequests, e.status >= 500 && e.status <= 599, outcome == claim.TurnRefused:
 		return m.providerErrorClears(ctx)
 	case outcome == claim.TurnProviderError:
 		cause := m.providerErrorCause(*e)
@@ -180,7 +175,7 @@ func (m *Machine) thisGenerationsReport() *TurnOutcome {
 }
 
 // reportedOutcome is the class that report gives, "" when there is no such report.
-func (m *Machine) reportedOutcome() string {
+func (m *Machine) reportedOutcome() claim.TurnOutcome {
 	if r := m.thisGenerationsReport(); r != nil {
 		return r.Outcome
 	}

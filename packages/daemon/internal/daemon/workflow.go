@@ -1321,7 +1321,10 @@ func (w *workflowRuntime) providerErrorRunReached(c supervise.Claim, reason stri
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
 		defer cancel()
-		if err := w.admission.TellController(ctx, w.pool, notice, c.Issue); err != nil {
+		err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+			return w.admission.TellController(ctx, tx, notice, c.Issue)
+		})
+		if err != nil {
 			w.log.Warn("tell the controller of a run of provider errors", "claim", c.Token, "error", err)
 		}
 	}()

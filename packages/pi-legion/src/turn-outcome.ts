@@ -1,8 +1,12 @@
 import { messageFor } from "@legion/envoy-client/errors";
-import { type LegionDaemonClient, retryWhileDaemonRestarts } from "@legion/pi-shared/daemon-client";
+import {
+  type LegionDaemonClient,
+  retryWhileDaemonRestarts,
+  type TurnOutcomeInput,
+} from "@legion/pi-shared/daemon-client";
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
 import type { AgentEndEvent } from "@legion/pi-shared/pi-types";
-import { classifyProviderTurn, type ProviderTurnOutcome } from "@legion/pi-shared/provider-refusal";
+import { classifyTurnEnd, type ProviderTurnOutcome } from "@legion/pi-shared/provider-refusal";
 
 /**
  * The Oh My Pi half of the turn-outcome report (dispatch://INFRA-956). Every turn this pane
@@ -54,8 +58,10 @@ export interface TurnOutcomeReporter {
 /** The word the daemon reads for the class the provider ended the turn with
  * (`claim.TurnClean`, `claim.TurnRefused`, `claim.TurnProviderError`). A content filter is
  * `refused` because the same session takes that turn again on a weaker model; every other
- * provider failure is `provider-error`, which may not clear that way. */
-function outcomeWord(kind: ProviderTurnOutcome["kind"]): "clean" | "refused" | "provider-error" {
+ * provider failure is `provider-error`, which may not clear that way. The three words are the
+ * request schema's own (`TurnOutcomeInput`), so the contract stays the one place they are
+ * written. */
+function outcomeWord(kind: ProviderTurnOutcome["kind"]): TurnOutcomeInput["outcome"] {
   switch (kind) {
     case "clean":
       return "clean";
@@ -90,9 +96,7 @@ export function createTurnOutcomeReporter(deps: TurnOutcomeReporterDeps): TurnOu
       // The number this report owns: `sequence` moves on as the next turn ends, and the lines
       // below are written after an await.
       const mine = sequence;
-      const turn = classifyProviderTurn(
-        event.messages?.findLast((message) => message.role === "assistant")
-      );
+      const turn = classifyTurnEnd(event);
       const request = {
         claimToken: claim.claimToken,
         sessionId: claim.sessionID,

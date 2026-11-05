@@ -134,7 +134,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	var req claim.ReadyRequest
 	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
 		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
-	) || !requireGeneration(w, req.Generation) {
+	) || !requireCount(w, "generation", "", req.Generation) {
 		return
 	}
 	m, ok := s.authenticated(req.ClaimToken, req.Secret)
@@ -198,7 +198,7 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
 		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
 		field{"reason", req.Reason},
-	) || !requireGeneration(w, req.Generation) {
+	) || !requireCount(w, "generation", "", req.Generation) {
 		return
 	}
 	m, ok := s.authenticated(req.ClaimToken, req.Secret)
@@ -233,14 +233,13 @@ func (s *server) turnOutcome(w http.ResponseWriter, r *http.Request) {
 	var req claim.TurnOutcomeRequest
 	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
 		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID},
-		field{"secret", req.Secret}, field{"outcome", req.Outcome},
-	) || !requireGeneration(w, req.Generation) {
+		field{"secret", req.Secret}, field{"outcome", string(req.Outcome)},
+	) || !requireCount(w, "generation", "", req.Generation) {
 		return
 	}
-	if req.Sequence == 0 {
-		// Zero is how a body that named no sequence decodes, and the sequence is what says which
-		// of two reports is the newer, so a report without one is refused rather than kept.
-		writeJSON(w, http.StatusBadRequest, errorBody("sequence is required, counted from 1 within the generation"))
+	// Zero is how a body that named no sequence decodes, and the sequence is what says which of
+	// two reports is the newer, so a report without one is refused rather than kept.
+	if !requireCount(w, "sequence", ", counted from 1 within the generation", req.Sequence) {
 		return
 	}
 	if req.Outcome != claim.TurnClean && req.Outcome != claim.TurnRefused && req.Outcome != claim.TurnProviderError {
@@ -492,10 +491,12 @@ func requireFields(w http.ResponseWriter, fields ...field) bool {
 	return true
 }
 
-// requireGeneration refuses a request with no generation: a launch is generation 1 or later.
-func requireGeneration(w http.ResponseWriter, generation uint64) bool {
-	if generation == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("generation is required"))
+// requireCount refuses a request whose name is zero, where the field is a count from 1: a launch
+// generation, a plugin's turn sequence. hint is what that field's refusal says beyond the name,
+// and is empty for a field whose name is the whole of it.
+func requireCount(w http.ResponseWriter, name, hint string, value uint64) bool {
+	if value == 0 {
+		writeJSON(w, http.StatusBadRequest, errorBody(name+" is required"+hint))
 		return false
 	}
 	return true

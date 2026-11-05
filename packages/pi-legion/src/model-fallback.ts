@@ -1,5 +1,9 @@
 import { messageFor } from "@legion/envoy-client/errors";
-import type { FallbackChainContext, FallbackChainLog } from "@legion/pi-shared/fallback-chain";
+import {
+  type FallbackChainContext,
+  type FallbackChainLog,
+  modelSelector,
+} from "@legion/pi-shared/fallback-chain";
 import {
   type FallbackCooldownInput,
   type FallbackCooldownLimits,
@@ -9,13 +13,12 @@ import {
 } from "@legion/pi-shared/fallback-cooldown";
 import type {
   AgentEndEvent,
-  AgentEndMessage,
   HostModel,
   ModelChangeEntry,
   RetryFallbackAppliedEvent,
   SessionContext,
 } from "@legion/pi-shared/pi-types";
-import { classifyProviderError, classifyProviderTurn } from "@legion/pi-shared/provider-refusal";
+import { classifyProviderError, classifyTurnEnd } from "@legion/pi-shared/provider-refusal";
 
 /**
  * The session's model across a provider's refusal (INFRA-956 R1): a content filter that refuses a
@@ -110,20 +113,14 @@ function sameModel(a: HostModel | undefined, b: HostModel | undefined): boolean 
   return a !== undefined && b !== undefined && a.provider === b.provider && a.id === b.id;
 }
 
-function selectorOf(model: HostModel): string {
-  return `${model.provider}/${model.id}`;
-}
-
-/** The run's last assistant message, which says how the provider ended the turn. */
-function lastAssistantMessage(
-  messages: readonly AgentEndMessage[] | undefined
-): AgentEndMessage | undefined {
-  if (messages === undefined) return undefined;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role === "assistant") return message;
-  }
-  return undefined;
+/** The newest `model_change` the branch holds, or undefined when it holds none this build reads.
+ * `ownFallback` walks with `modelChangeBefore` itself: it needs the index, to read the change
+ * before the newest one. */
+function newestModelChange(ctx: ModelFallbackContext): ModelChangeEntry | undefined {
+  const branch = ctx.sessionManager.getBranch?.() ?? [];
+  const at = modelChangeBefore(branch, branch.length);
+  const entry = at < 0 ? undefined : branch[at];
+  return isModelChange(entry) ? entry : undefined;
 }
 
 export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
@@ -222,7 +219,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
    * pinned tag), so nothing on the branch would carry the host's claim at all.
    */
   const walkChain = async (ctx: ModelFallbackContext, current: HostModel): Promise<void> => {
-    const selector = selectorOf(current);
+    const selector = modelSelector(current);
     const chain = chainContext(ctx);
     if (chain === undefined) {
       deps.log.warn(
@@ -243,17 +240,15 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     if (!(await deps.setModel(next))) {
       deps.log.warn("legion: the next model of the chain could not be set; staying on this one", {
         model: selector,
-        next: selectorOf(next),
+        next: modelSelector(next),
       });
       return;
     }
-    const branch = ctx.sessionManager.getBranch?.() ?? [];
-    const at = modelChangeBefore(branch, branch.length);
-    const entry = at < 0 ? undefined : branch[at];
-    if (!isModelChange(entry)) {
+    const entry = newestModelChange(ctx);
+    if (entry === undefined) {
       deps.log.warn("legion: the model switch left no model_change entry to arm the return on", {
         model: selector,
-        next: selectorOf(next),
+        next: modelSelector(next),
       });
       return;
     }
@@ -274,7 +269,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     if (event.willContinue === true) return;
     const applied = appliedThisTurn;
     appliedThisTurn = undefined;
-    const outcome = classifyProviderTurn(lastAssistantMessage(event.messages));
+    const outcome = classifyTurnEnd(event);
     const current = ctx.models?.current?.();
     if (outcome.kind === "content-filter") {
       // The host walked the chain for this very refusal: the arming it left becomes a refusal's,
@@ -305,8 +300,8 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     save(
       step(
         outcome.kind === "provider-error"
-          ? { kind: "provider-error-turn", selector: selectorOf(current) }
-          : { kind: "clean-turn", selector: selectorOf(current) }
+          ? { kind: "provider-error-turn", selector: modelSelector(current) }
+          : { kind: "clean-turn", selector: modelSelector(current) }
       )
     );
   };
@@ -314,12 +309,18 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
   const restoreIfDue = async (ctx: ModelFallbackContext): Promise<void> => {
     const arming = state.arming;
     if (arming === undefined) return;
-    const branch = ctx.sessionManager.getBranch?.() ?? [];
-    const at = modelChangeBefore(branch, branch.length);
-    const newest = at < 0 ? undefined : branch[at];
+    // The clock before anything else: the host runs this before every provider request, and a
+    // refusal's arming waits an hour to eight hours. The reads below — the whole session branch,
+    // the whole model catalogue — would answer nothing for every one of those requests.
+    // `restoreDue` ignores the host's suppression for a refusal, so the wait is the whole of what
+    // decides it, and the `superseded` and `restored` bookkeeping this skips moves no model: it
+    // is read again at the first request after the wait is over. An `"other"` arming is due at
+    // once and takes the path below as it always did.
+    if (arming.cause === "refusal" && deps.now() < arming.dueAt) return;
+    const newest = newestModelChange(ctx);
     // Any model change since the fallback — the operator's `/model`, the host's own restore,
     // another session resumed in this process — is not this arming's to undo.
-    if (!isModelChange(newest) || newest.id !== arming.entryId) {
+    if (newest === undefined || newest.id !== arming.entryId) {
       save(step({ kind: "superseded" }));
       return;
     }

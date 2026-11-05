@@ -1,3 +1,4 @@
+import { lastCustomEntry } from "./custom-entry";
 import { integerSetting, type StallLimitsLog } from "./stall-limits";
 
 /**
@@ -178,16 +179,10 @@ export function fallbackCooldownLimits(
  * the daemon relaunches with `--resume` restores its due time and its levels from the branch. */
 export const LEGION_FALLBACK_ENTRY = "legion-model-fallback";
 
-/** What one recorded entry carries: the state's own two fields, and nothing the machine keeps in
- * memory only. */
-export interface RecordedFallbackCooldown {
-  readonly arming?: FallbackArming;
-  readonly levels: Readonly<Record<string, number>>;
-}
-
 /** The state as a record holds it, for the caller's `pi.appendEntry(LEGION_FALLBACK_ENTRY, …)`:
- * a state with no arming records none rather than a `null` field a reader would have to allow. */
-export function recordedFallbackCooldown(state: FallbackCooldownState): RecordedFallbackCooldown {
+ * a state with no arming records none rather than an `arming` key a reader would find present and
+ * undefined. */
+export function recordedFallbackCooldown(state: FallbackCooldownState): FallbackCooldownState {
   return state.arming === undefined
     ? { levels: state.levels }
     : { arming: state.arming, levels: state.levels };
@@ -237,22 +232,5 @@ function fallbackCooldownFrom(data: object): FallbackCooldownState | undefined {
 export function restoreFallbackCooldown(
   branch: readonly unknown[]
 ): FallbackCooldownState | undefined {
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const entry = branch[index];
-    if (
-      typeof entry === "object" &&
-      entry !== null &&
-      "type" in entry &&
-      entry.type === "custom" &&
-      "customType" in entry &&
-      entry.customType === LEGION_FALLBACK_ENTRY &&
-      "data" in entry &&
-      typeof entry.data === "object" &&
-      entry.data !== null
-    ) {
-      const state = fallbackCooldownFrom(entry.data);
-      if (state !== undefined) return state;
-    }
-  }
-  return undefined;
+  return lastCustomEntry(branch, LEGION_FALLBACK_ENTRY, fallbackCooldownFrom);
 }

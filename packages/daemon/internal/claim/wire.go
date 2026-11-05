@@ -98,6 +98,10 @@ type ExitRequest struct {
 	Reason     string `json:"reason"`
 }
 
+// TurnOutcome is the class a turn's outcome is reported under, as Role is the role a claim is on:
+// one of the three words below, or "" for a claim whose agent has reported no turn yet.
+type TurnOutcome string
+
 // TurnClean, TurnRefused and TurnProviderError are the three words a turn's outcome is reported
 // with, and the only values TurnOutcomeRequest.Outcome takes. They are three rather than two
 // because the daemon acts on a content filter and on any other provider failure differently: a
@@ -105,9 +109,9 @@ type ExitRequest struct {
 // taken, and a turn a 429 or a malformed request ended may not clear that way
 // (dispatch://INFRA-956).
 const (
-	TurnClean         = "clean"
-	TurnRefused       = "refused"
-	TurnProviderError = "provider-error"
+	TurnClean         TurnOutcome = "clean"
+	TurnRefused       TurnOutcome = "refused"
+	TurnProviderError TurnOutcome = "provider-error"
 )
 
 // TurnOutcomeRequest is how one turn of this claim's agent ended, reported by the agent's own
@@ -122,13 +126,13 @@ const (
 // newer one (supervise's turnOutcome). Category is the refusal's own category
 // (`reasoning_extraction`), left out of a clean turn and of a provider error.
 type TurnOutcomeRequest struct {
-	ClaimToken Token  `json:"claimToken"`
-	SessionID  string `json:"sessionId"`
-	Secret     string `json:"secret"`
-	Generation uint64 `json:"generation"`
-	Sequence   uint64 `json:"sequence"`
-	Outcome    string `json:"outcome"`
-	Category   string `json:"category,omitempty"`
+	ClaimToken Token       `json:"claimToken"`
+	SessionID  string      `json:"sessionId"`
+	Secret     string      `json:"secret"`
+	Generation uint64      `json:"generation"`
+	Sequence   uint64      `json:"sequence"`
+	Outcome    TurnOutcome `json:"outcome"`
+	Category   string      `json:"category,omitempty"`
 }
 
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence

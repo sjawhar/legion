@@ -16,6 +16,8 @@
  * `clean` rather than throwing inside an event handler.
  */
 
+import type { AgentEndEvent } from "./pi-types";
+
 export type ProviderTurnOutcome =
   | { kind: "clean" }
   | { kind: "content-filter"; category?: string; provider?: string }
@@ -81,6 +83,20 @@ export function classifyProviderTurn(message: unknown): ProviderTurnOutcome {
   if (!("stopReason" in message) || message.stopReason !== "error") return { kind: "clean" };
   const fromDetails = filterFromStopDetails(message);
   return fromDetails ?? classifyProviderError(errorText(message));
+}
+
+/**
+ * How the provider ended the turn an `agent_end` event settled: the class of its last assistant
+ * message, which is the message that says how the run ended, and `clean` for a run with no
+ * assistant message at all.
+ *
+ * This is the one reading of an `agent_end` event in this repository: the model fallback and the
+ * turn-outcome report are both handed the same event by the same handler
+ * (`packages/pi-legion/extensions/legion.ts`), and a turn either of them read differently from
+ * the other would send the daemon one word and move the session on another.
+ */
+export function classifyTurnEnd(event: AgentEndEvent): ProviderTurnOutcome {
+  return classifyProviderTurn(event.messages?.findLast((message) => message.role === "assistant"));
 }
 
 /**
