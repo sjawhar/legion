@@ -61,8 +61,9 @@ type providerError struct {
 	retryable bool
 	status    int
 	model     string
-	// after is the newest turn-outcome report the claim held when this error arrived, nil when it
-	// held none. The failed turn's own report is the first one to come above it (ownReport).
+	// after is the newest turn-outcome report the claim held when the failed turn **began**
+	// (Machine.turnOutcomeBefore), nil when it held none. The failed turn's own report is the
+	// first one to come above it (ownReport), whichever side of this error it lands on.
 	after *TurnOutcome
 }
 
@@ -73,7 +74,7 @@ type providerError struct {
 // and R2 forbids an attempt limit — so the claim counts its own run of such turns instead, and a
 // turn that ends with no error puts that run back to zero (promptResulted).
 func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) error {
-	e := providerError{retryable: r.Retryable, status: r.HTTPStatus, model: r.Model, after: m.lastTurnOutcome}
+	e := providerError{retryable: r.Retryable, status: r.HTTPStatus, model: r.Model, after: m.turnOutcomeBefore}
 	m.claim.ProviderErrorRun++
 	m.log.Warn("supervise: the turn this task's prompt ran ended in a provider error; the task is kept and sent again",
 		"delivery", r.DeliveryID, "retryable", r.Retryable, "httpStatus", r.HTTPStatus,

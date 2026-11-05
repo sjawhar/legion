@@ -1259,6 +1259,13 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	// flight and no turn awaited, the only thing left is askFirst, the turn an earlier daemon's
 	// process was already in. Every other start is one this daemon read (Machine.unseenTurn).
 	m.unseenTurn = own && start.DeliveryID == "" && m.send == nil && !awaiting
+	// What the claim had reported before this turn began. The failed turn's own report is the
+	// first one above it, whichever side of the turn's prompt_result it lands on: pi-legion posts
+	// it from the agent_end handler, which can beat Oh My Pi's own error through the shim by
+	// milliseconds (measured in scripts/e2e/provider-error-retry.sh: the report at 19:54:18.065,
+	// the error at .069) or follow it, and only the turn it began after tells the two apart
+	// (providererror.go's ownReport).
+	m.turnOutcomeBefore = m.lastTurnOutcome
 	m.takeBackSignal(own && !m.unseenTurn)
 	persist := m.persist
 	if own {

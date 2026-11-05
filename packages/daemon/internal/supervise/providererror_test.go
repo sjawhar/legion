@@ -157,6 +157,29 @@ func TestANotRetryableErrorARefusedReportNamesClears(t *testing.T) {
 	}
 }
 
+// The plugin's report of a turn can reach the daemon before Oh My Pi's own error does: pi-legion
+// posts it from the `agent_end` handler, and the shim carries the error behind the same settle.
+// Measured in scripts/e2e/provider-error-retry.sh: the report at 19:54:18.065 and the error at
+// .069, four milliseconds later. The turn the report belongs to is what decides, not which of the
+// two arrived first, so this refusal clears and the claim waits for no report it already has.
+func TestARefusalReportedBeforeItsOwnErrorArrivesStillDecidesIt(t *testing.T) {
+	h := workingClaim(t)
+
+	h.report(1, claim.TurnRefused, "reasoning_extraction")
+	h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help with that."})
+
+	if _, waiting := h.m.timers[TimerTurnOutcome]; waiting {
+		t.Error("the claim waits for a report it already holds for this turn")
+	}
+	if p := h.claim().Pending; p == nil || p.ProviderErrorRetries != 1 {
+		t.Fatalf("pending %+v, want the task kept and counted one send", p)
+	}
+	h.climbs(1, 30*time.Second)
+	if state := h.state(); state != StateWorking {
+		t.Fatalf("the claim is %s, want it working the task it was sent again", state)
+	}
+}
+
 // The one error that holds the issue for its architect: the provider marked it final and the
 // claim's own plugin classed the turn a provider error rather than a refusal.
 func TestANotRetryableErrorAProviderErrorReportNamesFailsTheClaim(t *testing.T) {

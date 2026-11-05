@@ -710,6 +710,10 @@ type Machine struct {
 	// lastTurnOutcome is the newest turn outcome the claim's plugin has reported, nil until one
 	// arrives (turnoutcome.go, which says why it is never written to the store).
 	lastTurnOutcome *TurnOutcome
+	// turnOutcomeBefore is what lastTurnOutcome held when the turn now running began
+	// (turnStarted), which is how a provider error finds its own turn's report among the claim's
+	// (providererror.go's ownReport). Memory only, as lastTurnOutcome is.
+	turnOutcomeBefore *TurnOutcome
 	// providerError is the turn that ended in a provider error whose decision is not yet made,
 	// nil for none (providererror.go, which says why it is never written to the store).
 	providerError *providerError
