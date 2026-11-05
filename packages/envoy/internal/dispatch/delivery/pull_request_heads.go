@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -130,6 +131,37 @@ func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullReque
 	)
 	if err != nil {
 		return fmt.Errorf("store the head of %s#%d: %w", head.Repo, head.Number, err)
+	}
+	return nil
+}
+
+// upsertHeadUnderCanonicalName writes head, which every caller has already keyed by the
+// canonical name of its repository (refs.CanonicalRepo), and drops the row the same pull
+// request is stored under as storedUnder when that is another name. A row keyed under a
+// repository's old name can be read at all only under the canonical one — the App answers 404
+// for the old name's installation, so nothing can refresh it and no issue is ever held to it
+// (attributionHeld) — so one pull request keeps one row and one attribution.
+//
+// Where both rows exist, because the pull request arrived under both names, the canonical row
+// wins and the old row goes: the write above lands on the canonical row and its own event-time
+// rule decides which facts stand there (UpsertPullRequestHead keeps the newest event either has
+// seen), and the old row's facts are dropped with it rather than merged, since they are the same
+// pull request read at some earlier moment.
+//
+// The write comes before the delete, so a failure between them leaves two rows rather than
+// none: the next pass is handed the old row's key again and re-keys it again, while losing the
+// row would leave the pull request unknown until another event arrived.
+func upsertHeadUnderCanonicalName(ctx context.Context, pool *store.Pool, head PullRequestHead, storedUnder string) error {
+	if err := UpsertPullRequestHead(ctx, pool, head); err != nil {
+		return err
+	}
+	if strings.EqualFold(storedUnder, head.Repo) {
+		return nil
+	}
+	if _, err := pool.Exec(ctx, `
+		delete from pull_request_heads where repo = $1 and number = $2
+	`, storedUnder, head.Number); err != nil {
+		return fmt.Errorf("drop the head of %s#%d, now %s#%d: %w", storedUnder, head.Number, head.Repo, head.Number, err)
 	}
 	return nil
 }
@@ -404,8 +436,21 @@ func attributePayload(ctx context.Context, pool *store.Pool, client *githubapp.C
 // even when the commit messages could not be read: this pass is itself the retry, so the next
 // one reads it again in PullRequestHeadStaleAfter rather than holding the front of every batch,
 // and that write, being incomplete, leaves any attribution the row already carries standing.
+//
+// repoFull is the key ListStalePullRequestHeads read off the row, which may be a name the
+// repository has been renamed away from, and every step here but the stamp works on the
+// canonical name instead (refs.CanonicalRepo): the token is minted for it, since GitHub answers
+// 404 for the installation of a name no longer in use; the attribution holds the pull request's
+// issue to it; and the row is written under it, with the row under the old key dropped in the
+// same step (upsertHeadUnderCanonicalName). The stamp stays on the key the batch handed over,
+// since that is the row the batch must stop offering: a canonical repository the App cannot
+// read teaches this row nothing under either name.
 func RefreshPullRequestHead(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull string, number int, now time.Time) error {
-	owner, repo, err := splitRepo(repoFull)
+	canonical, err := refs.CanonicalRepo(ctx, pool, repoFull)
+	if err != nil {
+		return err
+	}
+	owner, repo, err := splitRepo(canonical)
 	if err != nil {
 		return err
 	}
@@ -414,7 +459,7 @@ func RefreshPullRequestHead(ctx context.Context, pool *store.Pool, client *githu
 		if repositoryUnreadable(err) {
 			return MarkPullRequestHeadChecked(ctx, pool, repoFull, number, now)
 		}
-		return fmt.Errorf("mint installation token for %s PR #%d: %w", repoFull, number, err)
+		return fmt.Errorf("mint installation token for %s PR #%d: %w", canonical, number, err)
 	}
 	payload, err := fetchPullRequestPayload(ctx, client, token, owner, repo, number)
 	if err != nil {
@@ -423,11 +468,11 @@ func RefreshPullRequestHead(ctx context.Context, pool *store.Pool, client *githu
 		}
 		return err
 	}
-	attributed, err := attributePayload(ctx, pool, client, token, repoFull, payload)
+	attributed, err := attributePayload(ctx, pool, client, token, canonical, payload)
 	if err != nil {
 		return err
 	}
-	return UpsertPullRequestHead(ctx, pool, headRow(repoFull, payload, attributed, &now))
+	return upsertHeadUnderCanonicalName(ctx, pool, headRow(canonical, payload, attributed, &now), repoFull)
 }
 
 // repositoryUnreadable reports whether err is the App saying it cannot read a repository: it is
@@ -457,14 +502,25 @@ func repositoryUnreadable(err error) bool {
 // A row whose commit messages could not be read is written incomplete and unstamped instead: it
 // keeps the attribution the row holds (UpsertPullRequestHead), and the reconcile reads it again
 // rather than this read-through standing as the last word.
+//
+// repoFull comes from outside — the repository the check's issue resolves to — so it is
+// canonicalised before anything is asked of GitHub or written (refs.CanonicalRepo), and no row
+// is ever written under a name a repository was renamed away from. Its one caller has
+// canonicalised that name already (api/results_currency.go, currencyReader.repositoryOf), and
+// the rule reaches the canonical name in one step, so this read changes nothing there; it is
+// here because this function's key is its argument's, not its caller's.
 func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time) (int, error) {
-	owner, repo, err := splitRepo(repoFull)
+	canonical, err := refs.CanonicalRepo(ctx, pool, repoFull)
+	if err != nil {
+		return 0, err
+	}
+	owner, repo, err := splitRepo(canonical)
 	if err != nil {
 		return 0, err
 	}
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
-		return 0, fmt.Errorf("mint installation token for %s: %w", repoFull, err)
+		return 0, fmt.Errorf("mint installation token for %s: %w", canonical, err)
 	}
 	pulls, err := fetchCommitPullPayloads(ctx, client, token, owner, repo, sha)
 	if err != nil {
@@ -472,7 +528,7 @@ func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githu
 	}
 	written := 0
 	for _, pull := range pulls {
-		attributed, err := attributePayload(ctx, pool, client, token, repoFull, pull)
+		attributed, err := attributePayload(ctx, pool, client, token, canonical, pull)
 		if err != nil {
 			return written, err
 		}
@@ -480,7 +536,7 @@ func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githu
 		if attributed.complete {
 			checkedAt = &now
 		}
-		if err := UpsertPullRequestHead(ctx, pool, headRow(repoFull, pull, attributed, checkedAt)); err != nil {
+		if err := upsertHeadUnderCanonicalName(ctx, pool, headRow(canonical, pull, attributed, checkedAt), repoFull); err != nil {
 			return written, err
 		}
 		written++
@@ -511,8 +567,18 @@ func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githu
 // on its next pass, and it leaves any attribution an earlier, fuller read stored exactly where
 // it is rather than clearing it on the way through — on a merge, which nothing but that arm of
 // the reconcile ever revisits, clearing it would be for good.
+//
+// The envelope's own `repo` comes from outside — the topic a publisher built — so it is
+// canonicalised before anything is read or written (refs.CanonicalRepo), and no row is ever
+// written under a name a repository was renamed away from. It is also what the head is held to:
+// an envelope keyed by an old name carries a `head_repo` GitHub spells under the new one, and
+// comparing those two would make every such pull request a fork's (headInOwnRepository).
 func (in *Intake) recordPullRequestHead(ctx context.Context, payload map[string]string, number int) ([]string, error) {
-	repoFull := payload["repo"]
+	given := payload["repo"]
+	repoFull, err := refs.CanonicalRepo(ctx, in.pool, given)
+	if err != nil {
+		return nil, err
+	}
 	owner, repo, err := splitRepo(repoFull)
 	if err != nil {
 		return nil, err
@@ -535,14 +601,14 @@ func (in *Intake) recordPullRequestHead(ctx context.Context, payload map[string]
 		now := time.Now()
 		checkedAt = &now
 	}
-	return attributed.messages, UpsertPullRequestHead(ctx, in.pool, PullRequestHead{
+	return attributed.messages, upsertHeadUnderCanonicalName(ctx, in.pool, PullRequestHead{
 		Repo: repoFull, Number: number, HeadSHA: payload["head_sha"], HeadRef: payload["head_ref"],
 		BaseRef: payload["base_ref"], State: PullRequestHeadState(payload["action"], payload["merged"] == "true"),
 		IssueKey: attributed.issueKey, AttributionSource: attributed.source,
 		AttributionComplete: attributed.complete, AttributionRule: AttributionRuleVersion,
 		Title: payload["title"], URL: payload["url"],
 		EventAt: envelopeTime(payload["updated_at"]), CheckedAt: checkedAt,
-	})
+	}, given)
 }
 
 // envelopeTime reads an envelope's RFC3339 timestamp; an absent or malformed one is no time,

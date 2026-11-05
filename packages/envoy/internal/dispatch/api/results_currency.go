@@ -109,8 +109,16 @@ func (c *currencyReader) headOf(ctx context.Context, result model.CheckResult) (
 }
 
 // repositoryOf is the repository the check's issue resolves to: its own, the nearest one above
-// it, or its project's default (refs.IssueRepository); nil when none resolves or the read
-// failed, which is the unknown answer either way.
+// it, or its project's default (refs.IssueRepository), under the canonical name that repository
+// is called today (refs.CanonicalRepo); nil when none resolves or either read failed, which is
+// the unknown answer either way.
+//
+// The canonical name is taken here, before anything asks GitHub, because everything downstream
+// takes this answer: repositoryReadable, onDefaultBranch and the read-through a recorded result
+// makes (results.go's readThroughPullRequests). An issue recorded under a name that was renamed
+// away would otherwise have the App asked about that name, which GitHub answers 404 for, and
+// every result of that issue would read unknown. A repository with no rename is its own
+// canonical name, so this costs one read and changes no answer for it.
 func (c *currencyReader) repositoryOf(ctx context.Context, issueKey string) *string {
 	if repo, memoized := c.repos[issueKey]; memoized {
 		return repo
@@ -119,6 +127,15 @@ func (c *currencyReader) repositoryOf(ctx context.Context, issueKey string) *str
 	if err != nil {
 		slog.Warn("dispatch: resolve the repository of a check's issue", "issue", issueKey, "error", err)
 		repo = nil
+	}
+	if repo != nil {
+		canonical, err := refs.CanonicalRepo(ctx, c.server.deps.Store.Pool, *repo)
+		if err != nil {
+			slog.Warn("dispatch: canonical name of a check's repository", "issue", issueKey, "repo", *repo, "error", err)
+			repo = nil
+		} else {
+			repo = &canonical
+		}
 	}
 	c.repos[issueKey] = repo
 	return repo

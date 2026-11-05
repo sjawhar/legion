@@ -196,8 +196,16 @@ func attributionCandidates(c attributionColumns) string {
 // it drops exactly the candidates that are not held. The comparison is lowercased on both sides
 // because GitHub spells an owner and a repository as their owners do (`Acme/Widgets`), which is
 // why the code before this change used strings.EqualFold.
+//
+// Both sides go through the server's one repository-renaming rule first
+// (refs.CanonicalRepoSQL), so one repository under two names is one repository here: an issue
+// recorded under a name that was renamed away is held to a pull request on the new name, and an
+// issue recorded under the new name to a pull request Dispatch stored under the old one. A
+// repository with no rename is its own canonical name, so a repository Dispatch does not map
+// compares exactly as it did before.
 func attributionHeld(repo string) string {
-	return `coalesce(not ` + refs.IssueRepoTooDeep + ` and lower(` + refs.IssueRepoResolved + `) = lower(` + repo + `), false)`
+	return `coalesce(not ` + refs.IssueRepoTooDeep +
+		` and lower(` + refs.CanonicalRepoSQL(refs.IssueRepoResolved) + `) = lower(` + refs.CanonicalRepoSQL(repo) + `), false)`
 }
 
 // attributionOneColumns are the bound parameters one pull request's candidates are read from:

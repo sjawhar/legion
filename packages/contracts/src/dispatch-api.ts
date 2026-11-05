@@ -212,6 +212,14 @@ export interface RepoProject {
   /** The project's default repository: an issue with no repository of its own and none on its
    *  parent chain resolves to it. At most one mapping of a project is its default. */
   readonly default: boolean;
+  /** The full `owner/name` this repository is called today, null for one that was never
+   *  renamed. Dispatch holds both names of a renamed repository and canonicalises every
+   *  comparison through this field, so an issue recorded under the old name is held to a pull
+   *  request on the new one. `PUT /api/v1/settings/repo-projects/{owner}/{repo}` takes it:
+   *  absent or null leaves the stored pair alone, `""` clears it. Optional here because a
+   *  client written before the field existed builds this shape without it; Dispatch always
+   *  answers it. */
+  readonly renamed_to?: string | null;
   readonly created_by: Actor;
   readonly created_at: string;
 }

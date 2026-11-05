@@ -609,6 +609,80 @@ func TestAResultAtTheHeadOfAPullRequestTitledAfterAnotherRepositorysIssueReadsCu
 	}
 }
 
+// The same surface for a repository under two names. An issue is recorded under the name its
+// repository was renamed away from, and its pull request is on the name GitHub knows. Dispatch
+// holds both — repo_projects maps each, and the old name's row names what it was renamed to —
+// so the results route asks the App about the canonical name (refs.CanonicalRepo) and the
+// attribution holds the issue to it. Before that pair was read, the App was asked about the old
+// name, whose installation GitHub answers 404 for: the read-through learned no pull request and
+// Dispatch could see no repository at all, so the result read `unknown` rather than `older`.
+func TestAResultOfAnIssueRecordedUnderARepositorysOldNameReadsCurrent(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate fixture key: %v", err)
+	}
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	mux := http.NewServeMux()
+	// GitHub knows acme/gadgets and nothing of the name it was renamed away from, which is why
+	// Dispatch cannot resolve a rename by asking and is told it instead.
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("owner")+"/"+r.PathValue("repo") != "acme/gadgets" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found"}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":77,"app_slug":"dispatch-test","permissions":{"contents":"read","pull_requests":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"token":"ghs_fake_77","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"full_name":%q,"default_branch":"main"}`, r.PathValue("owner")+"/"+r.PathValue("repo"))
+	})
+	var title string
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `[{"number":44,"title":%q,"body":"","html_url":"https://github.com/acme/gadgets/pull/44",
+			"state":"open","merged":false,"updated_at":"2026-03-01T00:00:00Z",
+			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":"acme/gadgets"}},"base":{"ref":"main"}}]`, title, headCommit)
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[]`)
+	})
+	upstream := httptest.NewServer(mux)
+	t.Cleanup(upstream.Close)
+	handler, _, _ := newTestServer(t, testServerOptions{
+		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
+		githubAPIBase: upstream.URL,
+	})
+
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects",
+		map[string]string{"key": "RENM", "name": "Renamed"}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create RENM: status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, mapping := range []struct {
+		repo string
+		body map[string]any
+	}{
+		{"acme/gadgets", map[string]any{"project": "RENM", "default": true}},
+		{"oldco/gadgets", map[string]any{"project": "RENM", "renamed_to": "acme/gadgets"}},
+	} {
+		if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/"+mapping.repo,
+			mapping.body, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("map %s: status=%d body=%s", mapping.repo, response.Code, response.Body.String())
+		}
+	}
+	issue := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": "RENM", "title": "Recorded under the old name", "spec": "A spec\n", "repo": "oldco/gadgets"}, "alice"))
+	title = issue.Key + ": the work, on the new name"
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("a result of %s, recorded under oldco/gadgets, at the head of its pull request on acme/gadgets = %q, want current", issue.Key, got)
+	}
+}
+
 // The answer to a record carries the moment the row was written, not the zero time: created_at
 // is a declared field of the contract, and a reader takes it for when the run happened.
 func TestRecordedResultAnswersTheTimeItWasStored(t *testing.T) {

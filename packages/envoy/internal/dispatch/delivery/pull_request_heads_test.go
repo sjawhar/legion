@@ -34,19 +34,57 @@ func seedHeadIssue(t *testing.T, ctx context.Context, pool *store.Pool, number i
 	return key
 }
 
-// seedGadgetsIssue writes project GDGT, maps acme/gadgets to it as its default and writes
+// gadgetsRepo is the repository project GDGT owns and gadgetsOldRepo the name GitHub knew it by
+// before it was renamed: the pair INFRA-1240 is about, where Dispatch maps both names to one
+// project and the App can read only the new one.
+const (
+	gadgetsRepo    = "acme/gadgets"
+	gadgetsOldRepo = "oldco/gadgets"
+)
+
+// seedGadgetsIssue writes project GDGT, maps gadgetsRepo to it as its default and writes
 // GDGT-<number>: the second repository a two-key title needs, since repo_projects' primary key
 // is the repository and acme/widgets already belongs to another project.
 func seedGadgetsIssue(t *testing.T, ctx context.Context, pool *store.Pool, number int) string {
 	t.Helper()
 	key := fmt.Sprintf("GDGT-%d", number)
-	seedProjectRepository(t, ctx, pool, "GDGT", "Gadgets", "acme/gadgets")
+	seedProjectRepository(t, ctx, pool, "GDGT", "Gadgets", gadgetsRepo)
 	if _, err := pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, status, created_by, rank)
 		values ($1, 'GDGT', $2, $1, 'todo', '{"kind":"system","id":"test"}'::jsonb, $1)
 		on conflict do nothing
 	`, key, number); err != nil {
 		t.Fatalf("seed issue %s: %v", key, err)
+	}
+	return key
+}
+
+// seedRenamedGadgets maps gadgetsOldRepo to GDGT beside gadgetsRepo and records that it was
+// renamed to it, so both names canonicalise to gadgetsRepo (refs.CanonicalRepo). It is not the
+// project's default: GDGT's default stays gadgetsRepo, which is what an issue of the project
+// with no repository of its own resolves to.
+func seedRenamedGadgets(t *testing.T, ctx context.Context, pool *store.Pool) {
+	t.Helper()
+	seedProjectRepository(t, ctx, pool, "GDGT", "Gadgets", gadgetsRepo)
+	if _, err := pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by, is_default, renamed_to)
+		values ($1, 'GDGT', '{"kind":"system","id":"delivery-test"}'::jsonb, false, $2)
+		on conflict (repo) do update set renamed_to = excluded.renamed_to
+	`, gadgetsOldRepo, gadgetsRepo); err != nil {
+		t.Fatalf("record %s as renamed to %s: %v", gadgetsOldRepo, gadgetsRepo, err)
+	}
+}
+
+// seedGadgetsIssueUnderTheOldName is seedGadgetsIssue with the issue's own repo set to
+// gadgetsOldRepo: an issue recorded under the name its repository was renamed away from, which
+// 243 of INFRA's issues are. It sets the repository rather than leaving it, so the issue
+// resolves to the old name itself and not through its project's default.
+func seedGadgetsIssueUnderTheOldName(t *testing.T, ctx context.Context, pool *store.Pool, number int) string {
+	t.Helper()
+	seedRenamedGadgets(t, ctx, pool)
+	key := seedGadgetsIssue(t, ctx, pool, number)
+	if _, err := pool.Exec(ctx, `update issues set repo = $2 where key = $1`, key, gadgetsOldRepo); err != nil {
+		t.Fatalf("record %s under %s: %v", key, gadgetsOldRepo, err)
 	}
 	return key
 }
@@ -860,5 +898,176 @@ func TestAMergeEnvelopeNamingNoHeadRepositoryKeepsTheStoredAttribution(t *testin
 	}
 	if len(batch) != 0 {
 		t.Fatalf("the stale batch = %+v, want nothing: the merged row is attributed and stamped already", batch)
+	}
+}
+
+// gadgetsPullPayload is what GitHub answers about one open pull request of gadgetsRepo: the
+// shape both the per-pull read and the commit's pull listing carry.
+func gadgetsPullPayload(number int, title, sha string) map[string]any {
+	return map[string]any{
+		"number": number, "title": title, "body": "",
+		"html_url": fmt.Sprintf("https://github.com/%s/pull/%d", gadgetsRepo, number),
+		"state":    "open", "merged": false, "updated_at": "2026-03-01T00:00:00Z",
+		"head": map[string]any{"ref": "legion/work", "sha": sha, "repo": map[string]any{"full_name": gadgetsRepo}},
+		"base": map[string]any{"ref": "main"},
+	}
+}
+
+// gadgetsFake answers GitHub's reads of one pull request of gadgetsRepo, by number and by its
+// head commit, and 404s the installation lookup of gadgetsOldRepo, which is what GitHub answers
+// for a name a repository was renamed away from: a read that does not canonicalise that name
+// mints no token for it and learns nothing.
+func gadgetsFake(t *testing.T, number int, title, sha string) *fakeGitHub {
+	t.Helper()
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/oldco/gadgets/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(t, w, map[string]any{"message": "Not Found"})
+	})
+	fake.handle(fmt.Sprintf("GET /repos/acme/gadgets/pulls/%d", number), func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, gadgetsPullPayload(number, title, sha))
+	})
+	fake.handle(fmt.Sprintf("GET /repos/acme/gadgets/pulls/%d/commits", number), func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{})
+	})
+	fake.handle("GET /repos/acme/gadgets/commits/"+sha+"/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{gadgetsPullPayload(number, title, sha)})
+	})
+	return fake
+}
+
+// headRepos is every repository holding a row for one pull request number, in order: one
+// pull request has one row, and which name keys it is the whole of a rename.
+func headRepos(t *testing.T, ctx context.Context, pool *store.Pool, number int) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx, `select repo from pull_request_heads where number = $1 order by repo`, number)
+	if err != nil {
+		t.Fatalf("list the rows of #%d: %v", number, err)
+	}
+	defer rows.Close()
+	var repos []string
+	for rows.Next() {
+		var repo string
+		if err := rows.Scan(&repo); err != nil {
+			t.Fatalf("list the rows of #%d: %v", number, err)
+		}
+		repos = append(repos, repo)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list the rows of #%d: %v", number, err)
+	}
+	return repos
+}
+
+// A head row stored under the name its repository was renamed away from. The reconcile is
+// handed that key and can do nothing with it as it stands — the App answers 404 for the old
+// name's installation, so no token is minted and no pull request is read — so it canonicalises
+// the key first (refs.CanonicalRepo): one pass leaves one row, keyed by the name the App can
+// read, attributed to the issue, with the old row gone and a result at that head current.
+func TestReconcileRekeysAHeadStoredUnderARepositorysOldName(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	issue := seedGadgetsIssue(t, ctx, pool, 20)
+	seedRenamedGadgets(t, ctx, pool)
+
+	const head = "3131313131313131313131313131313131313131"
+	fake := gadgetsFake(t, 520, issue+": the renamed repository's work", head)
+	fake.handle("POST /graphql", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	noRuns(t, fake)
+
+	stale := time.Now().Add(-10 * time.Minute)
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: gadgetsOldRepo, Number: 520, HeadSHA: "2020202020202020202020202020202020202020",
+		HeadRef: "legion/work", BaseRef: "main", State: "open", CheckedAt: &stale,
+	}); err != nil {
+		t.Fatalf("store the head under the old name: %v", err)
+	}
+
+	NewReconcile(pool, fake.newTestClient(), events.NewBroker()).runOnce(ctx)
+
+	if repos := headRepos(t, ctx, pool, 520); len(repos) != 1 || repos[0] != gadgetsRepo {
+		t.Fatalf("#520 is stored under %v after one pass, want only %s: a row keyed by a name the App cannot read is a row nothing can refresh", repos, gadgetsRepo)
+	}
+	row := readHead(t, ctx, pool, gadgetsRepo, 520)
+	if row.HeadSHA != head || row.IssueKey == nil || *row.IssueKey != issue {
+		t.Fatalf("#520 after the pass = %+v, want %s at %s", row, issue, head)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, issue, head)
+	if err != nil || !attributed {
+		t.Fatalf("HeadAttributedTo(%s, %s) = %v, %v; want true", issue, head, attributed, err)
+	}
+}
+
+// The issue recorded under the old name, the pull request on the new one: the attribution
+// canonicalises both sides, so the issue is held to a pull request of the repository it names
+// under the name that repository had. Before the pair was recorded the two strings differed and
+// the pull request was attributed to nobody, which is what left every `before_merge` result of
+// such an issue unmarked.
+func TestAPullRequestIsAttributedToAnIssueRecordedUnderTheOldName(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	issue := seedGadgetsIssueUnderTheOldName(t, ctx, pool, 21)
+
+	const head = "4141414141414141414141414141414141414141"
+	fake := gadgetsFake(t, 521, issue+": the work, on the new name", head)
+	if err := RefreshPullRequestHead(ctx, pool, fake.newTestClient(), gadgetsRepo, 521, time.Now()); err != nil {
+		t.Fatalf("refresh %s#521: %v", gadgetsRepo, err)
+	}
+
+	row := readHead(t, ctx, pool, gadgetsRepo, 521)
+	if row.IssueKey == nil || *row.IssueKey != issue || row.AttributionSource != "title_body" {
+		t.Fatalf("%s#521 = %+v, want %s from its title: the issue's own repo is %s, which is %s under another name",
+			gadgetsRepo, row, issue, gadgetsOldRepo, gadgetsRepo)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, issue, head)
+	if err != nil || !attributed {
+		t.Fatalf("HeadAttributedTo(%s, %s) = %v, %v; want true", issue, head, attributed, err)
+	}
+}
+
+// One pull request that arrived under both names. The read-through writes it under the
+// canonical name while the older row still stands under the old one, and the reconcile's
+// per-row step, handed the old key, merges them: the canonical row wins, the old row goes, and
+// the facts that stand are the ones the upsert's event-time rule keeps.
+func TestOnePullRequestStoredUnderBothNamesEndsAsOneRow(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	issue := seedGadgetsIssue(t, ctx, pool, 22)
+	seedRenamedGadgets(t, ctx, pool)
+
+	const head = "5151515151515151515151515151515151515151"
+	// The row the old name left: an earlier head, read long enough ago to be stale, attributed
+	// to nobody, and its event older than the one GitHub answers with below.
+	earlier := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	stale := time.Now().Add(-10 * time.Minute)
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: gadgetsOldRepo, Number: 522, HeadSHA: "6262626262626262626262626262626262626262",
+		HeadRef: "legion/work", BaseRef: "main", State: "open", EventAt: &earlier, CheckedAt: &stale,
+	}); err != nil {
+		t.Fatalf("store the head under the old name: %v", err)
+	}
+
+	fake := gadgetsFake(t, 522, issue+": the work", head)
+	client := fake.newTestClient()
+	written, err := ReadThroughCommitPulls(ctx, pool, client, gadgetsRepo, head, time.Now())
+	if err != nil || written != 1 {
+		t.Fatalf("read through %s at %s = %d, %v; want one row written", gadgetsRepo, head, written, err)
+	}
+	if repos := headRepos(t, ctx, pool, 522); len(repos) != 2 {
+		t.Fatalf("#522 is stored under %v once it has arrived under both names, want both rows", repos)
+	}
+
+	if err := RefreshPullRequestHead(ctx, pool, client, gadgetsOldRepo, 522, time.Now()); err != nil {
+		t.Fatalf("refresh the row stored under the old name: %v", err)
+	}
+	if repos := headRepos(t, ctx, pool, 522); len(repos) != 1 || repos[0] != gadgetsRepo {
+		t.Fatalf("#522 is stored under %v after the refresh, want only %s: one pull request, one row, one attribution", repos, gadgetsRepo)
+	}
+	row := readHead(t, ctx, pool, gadgetsRepo, 522)
+	if row.HeadSHA != head || row.IssueKey == nil || *row.IssueKey != issue {
+		t.Fatalf("#522 after the refresh = %+v, want %s at %s: the newer event's facts stand", row, issue, head)
 	}
 }
