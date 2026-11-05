@@ -13,8 +13,9 @@ import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { useInboxCount } from "./features/inbox/useInboxCount";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
-import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
+import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
+import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
 import { AgentRegistryPoller } from "./features/refs/agent-registry";
 import { TextAskCard } from "./features/refs/markdown-cards";
 import { RefPreviewHost } from "./features/refs/RefPreview";
@@ -32,7 +33,6 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
-import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import {
@@ -147,6 +147,9 @@ const MachineLoginPage = lazy(() =>
 );
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
+);
+const SettingsPage = lazy(() =>
+  import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -831,7 +834,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </ErrorBoundary>
         </main>
         <ErrorBoundary region="the margin" resetKey={location.pathname}>
-          <Margin
+          <MarginColumn
             collapsed={marginHidden}
             onCollapsedChange={setMarginHidden}
             onWidthChange={setMarginWidth}

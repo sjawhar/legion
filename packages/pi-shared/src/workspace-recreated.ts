@@ -15,6 +15,15 @@
 export const WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
 
 /**
+ * How the same launcher says whether the pod's one workspace-bundle restore put the released
+ * workspace's unpushed work back (`LEGION_WORKSPACE_RESTORED`, `launcher.WorkspaceRestoredVariable`).
+ * A workspace recreated because the daemon released an idle pod holds the work its session
+ * remembers; one recreated by anything else holds only what was pushed, and the agent is told
+ * which of the two it has.
+ */
+export const WORKSPACE_RESTORED_VARIABLE = "LEGION_WORKSPACE_RESTORED";
+
+/**
  * One process's notice: its text, and the id every copy it sends carries (`details.id`), which
  * tells its copies from a notice an earlier recreation of the same session left in the history.
  */
@@ -40,6 +49,18 @@ export function workspaceRecreatedNotice(
   issue: string
 ): WorkspaceRecreatedNotice | undefined {
   if (!workspaceRecreated(environment)) return undefined;
+  if (environment[WORKSPACE_RESTORED_VARIABLE] === "true") {
+    return {
+      id: crypto.randomUUID(),
+      content:
+        `Your workspace was made again since your last turn: the daemon released this issue's idle ` +
+        `pod and gave its CPU and memory back. It holds what was pushed to legion/${issue} and the ` +
+        "tracked work you had not pushed, which the daemon saved and put back. What is gone is what " +
+        "no commit held: the files your scratch directory held, files git ignores, and anything you " +
+        "started that was running. Check the workspace against what you remember doing before you " +
+        "continue.",
+    };
+  }
   return {
     id: crypto.randomUUID(),
     content:

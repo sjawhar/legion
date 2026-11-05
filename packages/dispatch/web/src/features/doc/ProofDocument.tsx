@@ -55,7 +55,7 @@ import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AnchoredBlockHost, installTypedBlocks } from "./ask-block";
+import type { AnchoredBlockHost } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
@@ -566,18 +566,10 @@ export function ProofDocument({
       editor = undefined;
       document = undefined;
     };
-    // The editor's place in the page - its typed blocks, the margin, search highlights, a block
-    // link - for as long as it is this effect's editor. It returns what undoes it.
+    // The editor's place in the page - the margin, search highlights, a block link - for as long
+    // as it is this effect's editor. It returns what undoes it. The typed-block node views are
+    // installed by `createEditor`, with the editor library they are written against.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(
-        handle.view,
-        blockSchema,
-        setAskBlockHosts,
-        (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
-        anchoredBlockId === undefined
-          ? undefined
-          : { blockId: anchoredBlockId, onHostChange: setAnchoredHost }
-      );
       // The quote the host highlights is drawn as soon as the editor is there, whether the host
       // named its mark before this editor or while it was being built.
       handle.setActiveMarks(activeMarkIdRef.current === undefined ? [] : [activeMarkIdRef.current]);
@@ -771,6 +763,7 @@ export function ProofDocument({
                     ? null
                     : connection.awareness,
                 heatMapMode: "hidden",
+                onAskBlockHosts: setAskBlockHosts,
                 onMarkAction: (action) => {
                   switch (action.kind) {
                     case "comment":
@@ -803,6 +796,14 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
+                // The block the pane's thread hangs under: the node view it names publishes the
+                // host slot this page portals the thread into. A document's own page anchors no
+                // thread and passes none.
+                anchoredBlock:
+                  anchoredBlockId === undefined
+                    ? undefined
+                    : { blockId: anchoredBlockId, onHostChange: setAnchoredHost },
                 // The open document's own reference, never a version's: a pointer names a block
                 // of the document by it, so the editor refuses one to a block of a type the
                 // pointer's attribute does not allow.

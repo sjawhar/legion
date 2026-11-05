@@ -154,7 +154,9 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // was held, where sixteen connections served 3,853 such reads at a four-millisecond median.
 // The ceiling is picked here rather than derived from the task's CPU allotment or read out of
 // the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
-// request takes a connection per statement one after another (an issue read is about eleven),
+// request takes a connection per statement one after another (an issue read once took six
+// statements, two more when the issue had documents, two more when it had open asks, and one per
+// artifact; it now takes two batches),
 // so under ~240 agent requests a minute the API held all sixteen and every other request waited
 // seconds for one. The database bounds it from above. Dispatch's database is the gcp:Dispatch
 // component's Cloud SQL Postgres instance, whose default max_connections follows its tier's
