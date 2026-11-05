@@ -1,7 +1,7 @@
 import type { default as PhotoSwipe, SlideData } from "photoswipe";
 
 import { importWhenOnline } from "../shell/DeploymentResilience";
-import { pictureThumbnailClassName } from "./RefLink";
+import { pictureThumbnailClassName } from "./picture-classes";
 
 /** Whether a click on a picture is the plain primary click that opens it at full size. A click
  *  with a modifier key, or with another button, keeps the browser's own meaning (a new tab for

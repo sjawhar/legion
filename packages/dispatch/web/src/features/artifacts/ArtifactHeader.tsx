@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { artifactVersionPath } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import {
-  borderDefault,
   card,
   dangerText,
   highlightRing,
@@ -23,17 +23,32 @@ import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { AgentName } from "../refs/AgentName";
+import { ArtifactMedia } from "../refs/ArtifactMedia";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { isStoredVideo } from "../refs/reference-target";
 import {
   buildIssuePath,
   buildProjectPath,
   buildReferencePath,
   documentRoute,
+  referencedArtifact,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
+/** The address a version downloads from, by the artifact's id: what the three Download controls
+ *  (this page's, the Artifacts tab's row and the version list's) link to. It draws nothing - a
+ *  drawn picture or player loads from `artifactVersionPath`, the slug-form drawing address
+ *  (`api/client.ts`), which is the other of this app's two version addresses. */
 export function artifactVersionUrl(artifactID: string, version: number): string {
   return `/api/v1/artifacts/${encodeURIComponent(artifactID)}/versions/${version}`;
+}
+
+/** The drawing address of one of `artifact`'s versions: the slug form every drawn picture and
+ *  player loads (`artifactVersionPath`). Undefined for an artifact whose owner names no
+ *  reference, which nothing draws. */
+export function artifactVersionDrawPath(artifact: Artifact, version: number): string | undefined {
+  const named = referencedArtifact(documentRoute(artifact, version));
+  return named === undefined ? undefined : artifactVersionPath(named.owner, named.slug, version);
 }
 
 export function formatArtifactBytes(bytes: number | undefined): string {
@@ -243,15 +258,40 @@ export function ArtifactBlobView({
   }
 
   const download = artifactVersionUrl(artifact.id, selected.number);
+  const name = `${artifact.name} version ${selected.number}`;
+  // What the page draws this version as: the version's own stored type says a video, whatever
+  // kind the artifact is (an upload of one is a file), and an image artifact's version is a
+  // picture. Anything else is read here, listed and downloaded, never drawn.
+  const drawn = artifactVersionDrawPath(artifact, selected.number);
+  const kind = isStoredVideo(selected.mime)
+    ? "video"
+    : artifact.kind === "image"
+      ? "picture"
+      : undefined;
   return (
-    <section aria-label={`${artifact.name} version ${selected.number}`} className="space-y-3">
-      {artifact.kind === "image" ? (
-        <img
-          alt={`${artifact.name} version ${selected.number}`}
-          className={`h-auto w-full rounded-lg border ${borderDefault}`}
-          src={download}
+    <section aria-label={name} className="space-y-3">
+      {kind === undefined || drawn === undefined ? null : (
+        <ArtifactMedia
+          caption={name}
+          // The page's own width and rounding, over the drawing class's own: the reading size
+          // leaves a picture at its own width, and this page gives it the column.
+          className="w-full rounded-lg"
+          fallback={
+            <p className={`text-sm ${textMutedOnCanvas}`}>
+              This version cannot be shown here.{" "}
+              <Link
+                className={`font-medium underline ${linkText} ${linkHoverText}`}
+                to={buildReferencePath(documentRoute(artifact))}
+              >
+                {artifact.name}
+              </Link>
+            </p>
+          }
+          kind={kind}
+          src={drawn}
+          variant="block"
         />
-      ) : null}
+      )}
       <dl className="grid grid-cols-2 gap-3 text-sm">
         <div>
           <dt className={textMutedOnCanvas}>Version</dt>

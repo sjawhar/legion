@@ -1,0 +1,145 @@
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+
+import { pictureClassName, pictureThumbnailClassName } from "./picture-classes";
+import { isPlainClick, openPictureViewer, type PictureViewer } from "./picture-viewer";
+
+/**
+ * The one unit every React place draws an artifact's version with: a rendered body's picture
+ * line and its plain reference (`DispatchPicture`, `RefLink`), the artifact page
+ * (`ArtifactBlobView`) and the Artifacts tab's row. It owns the class of each size
+ * (`picture-classes.ts`), the lazy loading, the failure answer and the click that opens a
+ * picture at full size, so a place decides only what to draw and from where. The two document
+ * editors draw the same two things in plain DOM, through the same class declarations and the
+ * same failure answer, because a React component cannot be mounted in a ProseMirror node view
+ * (`features/doc/picture-view.ts`).
+ *
+ * `src` is the version's same-origin bytes route (`artifactVersionPath`, the drawing address;
+ * `artifactVersionUrl` is the download one), which the reader's browser loads with their own
+ * cookie. A video is `<video controls preload="metadata">`: the browser reads its first frames
+ * and its duration, and the reader asks for the rest. Once the browser refuses the address - a
+ * version it cannot decode, a version the server does not serve - the element goes and
+ * `fallback` is drawn in its place, so no place shows a broken-image glyph or an element
+ * reporting a `naturalWidth` of zero. The address that failed is kept, not a flag: a reference
+ * names the latest version, so a version uploaded since gets its own load instead of inheriting
+ * the last one's failure.
+ */
+export function ArtifactMedia({
+  caption,
+  className,
+  fallback,
+  host,
+  kind,
+  src,
+  variant,
+  words,
+}: {
+  /** The element's own accessible name: an `<img>`'s `alt`, a player's label. A thumbnail that
+   *  stands beside its `words` is named by them and carries `""` here, as a decorative picture
+   *  does; one that stands alone in a row of its own (the Artifacts tab) is named here. */
+  caption: string;
+  /** What the place adds to its size's own class: the artifact page's own width and border.
+   *  Left out everywhere else, so a thumbnail wears `pictureThumbnailClassName` and nothing
+   *  else, which is what `picture-viewer.ts` reads it by. */
+  className?: string;
+  /** What is drawn once the browser refuses the address: a link to the artifact, never a broken
+   *  element. */
+  fallback: ReactNode;
+  /** The element a rendered body portals this into, when it is one: the `<a>` to the artifact's
+   *  page that holds a picture line or a plain reference. */
+  host?: HTMLElement;
+  /** What the version is: a picture the browser draws, or a video it plays. A reference
+   *  answers it as `ReferenceMedia["kind"]` (`reference-target.ts`); the artifact page and the
+   *  Artifacts tab read it from the version's own stored type (`isStoredVideo`). */
+  kind: "picture" | "video";
+  src: string;
+  variant: "block" | "thumbnail";
+  /** The words a thumbnail stands beside - a picture line's caption, a reference's title - which
+   *  name it and go with it when the browser refuses it, since `fallback` then says it all. */
+  words?: ReactNode;
+}): ReactNode {
+  const [failedSrc, setFailedSrc] = useState<string>();
+  const picture = useRef<HTMLImageElement>(null);
+  const drawn = src !== failedSrc;
+  /** A plain click opens the picture at full size; the listener is the element's own, so it runs
+   *  before anything listening above the placeholder link (the browser's navigation, the body's
+   *  link handling) and keeps the click from them. A modified click is the link's, which opens
+   *  the artifact's page. The viewer it opened closes when the picture leaves the page (a body
+   *  re-rendered or gone, another page, a load that failed), whether or not its library has
+   *  arrived by then. The viewer reads the picture's address, its caption and the surface's
+   *  other pictures off the element itself, so none of them is a dependency of this effect. */
+  const opensViewer = variant === "block" && kind === "picture" && drawn;
+  useEffect(() => {
+    const element = picture.current;
+    if (element === null || !opensViewer) return;
+    let viewer: PictureViewer | undefined;
+    const open = (event: MouseEvent) => {
+      if (!isPlainClick(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      viewer = openPictureViewer(element) ?? viewer;
+    };
+    element.addEventListener("click", open);
+    return () => {
+      element.removeEventListener("click", open);
+      viewer?.close();
+    };
+  }, [opensViewer]);
+  usePlayerHost(host, kind === "video" && drawn);
+
+  if (!drawn) {
+    return <>{fallback}</>;
+  }
+  const sizeClassName = variant === "block" ? pictureClassName : pictureThumbnailClassName;
+  const classes = className === undefined ? sizeClassName : `${sizeClassName} ${className}`;
+  // The address that failed is what the element reports, so a load of a newer version that
+  // follows is its own.
+  if (kind === "video") {
+    return (
+      // Dispatch stores an uploaded video's bytes and nothing else, so there is no caption
+      // track for a `<track>` to point at.
+      // biome-ignore lint/a11y/useMediaCaption: an uploaded video has no caption track.
+      <video
+        aria-label={caption === "" ? undefined : caption}
+        className={classes}
+        controls
+        onError={() => setFailedSrc(src)}
+        preload="metadata"
+        src={src}
+      />
+    );
+  }
+  const image = (
+    <img
+      alt={caption}
+      className={classes}
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+      ref={picture}
+      src={src}
+    />
+  );
+  return words === undefined ? (
+    image
+  ) : (
+    <>
+      {image} {words}
+    </>
+  );
+}
+
+/** Keeps the link a player is drawn inside from navigating while the player is there: a rendered
+ *  body portals both reference forms into an `<a>` to the artifact's page, and a press on a
+ *  player's controls inside a link opens that page instead of playing. The anchor gets its
+ *  address back the moment the player goes - a load the browser refused, a reference that is a
+ *  picture again - so the link the reader is left with is the link it was. A host that is no
+ *  anchor (a preview puts a `<span>` where it keeps no link inside its own) is left alone. */
+function usePlayerHost(host: HTMLElement | undefined, playing: boolean): void {
+  useLayoutEffect(() => {
+    if (!playing || !(host instanceof HTMLAnchorElement)) return;
+    const href = host.getAttribute("href");
+    host.removeAttribute("href");
+    return () => {
+      if (href !== null) host.setAttribute("href", href);
+    };
+  }, [host, playing]);
+}

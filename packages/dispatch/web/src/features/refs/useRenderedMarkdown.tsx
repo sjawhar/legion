@@ -614,12 +614,18 @@ export function useRenderedMarkdown(
     isFallback,
     isPending,
     portals: [
-      ...referenceAnchors.map(({ anchor, key, route }) =>
-        createPortal(<RefLink anchor={anchor} route={route} />, anchor, key)
+      // A plain reference alone in its block draws a player for a video, where this surface
+      // draws its pictures at reading size: a one-line preview keeps the link.
+      ...referenceAnchors.map(({ alone, anchor, key, route }) =>
+        createPortal(
+          <RefLink alone={alone && pictures === "block"} anchor={anchor} route={route} />,
+          anchor,
+          key
+        )
       ),
       ...pictureAnchors.map(({ anchor, caption, key, route }) =>
         createPortal(
-          <DispatchPicture caption={caption} route={route} variant={pictures} />,
+          <DispatchPicture anchor={anchor} caption={caption} route={route} variant={pictures} />,
           anchor,
           key
         )

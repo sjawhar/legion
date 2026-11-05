@@ -19,7 +19,9 @@ import {
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { AgentName } from "../refs/AgentName";
+import { ArtifactMedia } from "../refs/ArtifactMedia";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { isStoredVideo } from "../refs/reference-target";
 import {
   buildIssuePath,
   buildProjectPath,
@@ -29,7 +31,12 @@ import {
   parseIssuePath,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { artifactVersionUrl, formatArtifactBytes, versionsNewestFirst } from "./ArtifactHeader";
+import {
+  artifactVersionDrawPath,
+  artifactVersionUrl,
+  formatArtifactBytes,
+  versionsNewestFirst,
+} from "./ArtifactHeader";
 import {
   ArtifactDropZone,
   ArtifactUploadRow,
@@ -163,6 +170,17 @@ function ArtifactRow({
 }): ReactNode {
   const versions = versionsNewestFirst(artifact.versions);
   const latestVersion = versions[0];
+  // The row's 40 px square, for an image artifact whose latest version is a picture. A video
+  // keeps a text row: a frame of it is a decode this app does not do. A version the browser
+  // refuses drops the square and leaves the row's own link to the artifact, never a broken
+  // glyph (`ArtifactMedia`).
+  const thumbnail =
+    latestVersion === undefined || artifact.kind !== "image" || isStoredVideo(latestVersion.mime)
+      ? undefined
+      : {
+          name: `${artifact.name} version ${latestVersion.number}`,
+          src: artifactVersionDrawPath(artifact, latestVersion.number),
+        };
 
   // The name keeps at least 8 rem; on a phone the trailing controls wrap under it rather than
   // squeezing the name to nothing.
@@ -174,14 +192,15 @@ function ArtifactRow({
       data-testid={`artifact-${artifact.slug}`}
     >
       <span className={`shrink-0 ${textSecondaryOnSurface}`}>{kindIcon(artifact.kind)}</span>
-      {artifact.kind === "image" && latestVersion !== undefined ? (
-        <img
-          alt={`${artifact.name} version ${latestVersion.number}`}
-          className={`h-10 w-10 shrink-0 rounded border object-cover ${borderDefault}`}
-          loading="lazy"
-          src={artifactVersionUrl(artifact.id, latestVersion.number)}
+      {thumbnail?.src === undefined ? null : (
+        <ArtifactMedia
+          caption={thumbnail.name}
+          fallback={null}
+          kind="picture"
+          src={thumbnail.src}
+          variant="thumbnail"
         />
-      ) : null}
+      )}
       <div className="min-w-32 flex-1">
         {/* `max-w-full`: below 1280 px the link is inline-flex rather than `block`, and an
             inline-flex box is as wide as its whole name unless something caps it. */}

@@ -507,7 +507,10 @@ function artifactsPath(owner: ArtifactOwner): string {
 
 /** The same-origin route of one stored version's bytes, addressed by the owner and the artifact's
  *  slug as a picture's `dispatch://` reference names it, so an `<img>` loads it with the reader's
- *  own cookie. A version never changes, so the server lets the browser keep it. */
+ *  own cookie. A version never changes, so the server lets the browser keep it. This is the
+ *  drawing address, the one every drawn picture and player loads from (`ArtifactMedia`, and the
+ *  editors' `picture-view.ts`); `artifactVersionUrl` (`features/artifacts/ArtifactHeader.tsx`),
+ *  which addresses a version by the artifact's id, is the downloading one and draws nothing. */
 export function artifactVersionPath(owner: ArtifactOwner, slug: string, version: number): string {
   return `${artifactsPath(owner)}/${pathSegment(slug)}/versions/${version}`;
 }

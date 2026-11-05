@@ -1,8 +1,8 @@
-import { type ReactNode, useLayoutEffect, useState } from "react";
+import { type ReactNode, useLayoutEffect } from "react";
 
-import { borderDefault } from "../../theme/classes";
+import { ArtifactMedia } from "./ArtifactMedia";
 import { referenceSpans } from "./reference-spans";
-import { useReferencePath, useReferenceTarget } from "./reference-target";
+import { usePinnedMedia, useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -14,6 +14,10 @@ import {
 } from "./routes";
 
 export interface ReferenceAnchor {
+  /** Whether the anchor is the only content of the paragraph it sits in: the form a plain
+   *  reference takes when its author wrote it on a line of its own, and the only one where a
+   *  reference to a video draws its player (`RefLink`). */
+  readonly alone: boolean;
   /** The element the `RefLink` portal renders into: the `<a>` itself, or whatever a surface put
    *  in its place (`MarkdownPreview` keeps no link inside the link it sits in). */
   readonly anchor: HTMLElement;
@@ -24,53 +28,66 @@ export interface ReferenceAnchor {
   readonly text: string;
 }
 
-/** The 40 px square a picture shows as beside its title, wherever a line holds it: the Artifacts
- *  tab's thumbnail. `not-prose` keeps Markdown's figure margins off it. */
-export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrink-0 rounded border object-cover align-middle ${borderDefault}`;
-
 /** Portal content for an inline reference anchor: the resolved title once
  * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
  * thumbnail when the reference names an image artifact. It shows no document text, so it reads
  * none. A thumbnail the browser cannot draw (a pinned version the server does not serve) is
  * dropped, leaving the title alone, so a stale or hand-written reference never shows a
- * broken-image glyph. When the element it renders into is a link, its href follows
- * `useReferencePath`, which a pinned block of a spec resolves only once its issue's summary is
- * read. */
+ * broken-image glyph. A reference to a video standing alone in its block is its player instead,
+ * drawn at reading size as a picture line's is, and the anchor stops being a link for as long
+ * as the player is there, so a press on its controls plays rather than opening the artifact's
+ * page (`ArtifactMedia`); inside a sentence it stays the link it has always been. When the
+ * element it renders into is a link, its href follows `useReferencePath`, which a pinned block
+ * of a spec resolves only once its issue's summary is read. */
 export function RefLink({
+  alone,
   anchor,
   route,
 }: {
+  alone?: boolean;
   anchor?: HTMLElement;
   route: DispatchReferenceRoute;
 }): ReactNode {
   const { picture, title } = useReferenceTarget(route, { text: false });
   const path = useReferencePath(route);
+  // What the reference draws: the summary's answer, which for a pinned reference carries the
+  // address the reference itself names, and until it is read the pinned read's own answer,
+  // which asks the cache and waits for nothing.
+  const pinned = usePinnedMedia(route);
+  const media = picture ?? pinned;
+  const player = alone === true && media?.kind === "video" ? media.src : undefined;
   useLayoutEffect(() => {
-    if (anchor instanceof HTMLAnchorElement) {
+    if (anchor instanceof HTMLAnchorElement && player === undefined) {
       anchor.setAttribute("href", path);
     }
-  }, [anchor, path]);
-  // The address that failed, not a flag: a plain reference names the latest version, so a version
-  // uploaded since gets its own load instead of inheriting the last one's failure.
-  const [failedPicture, setFailedPicture] = useState<string>();
-  // A video shows no thumbnail, as a target that is no picture shows none; a later task of
-  // INFRA-760 draws one for it.
+  }, [anchor, path, player]);
+  const label = title ?? shortForm(route);
+  if (player !== undefined) {
+    return (
+      <ArtifactMedia
+        caption={label}
+        fallback={label}
+        host={anchor}
+        kind="video"
+        src={player}
+        variant="block"
+      />
+    );
+  }
+  // A video inside a sentence shows no thumbnail, as a target that is no picture shows none.
   const thumbnail = picture?.kind === "picture" ? picture.src : undefined;
+  if (thumbnail === undefined) {
+    return <>{label}</>;
+  }
   return (
-    <>
-      {thumbnail === undefined || thumbnail === failedPicture ? null : (
-        <>
-          <img
-            alt=""
-            className={pictureThumbnailClassName}
-            loading="lazy"
-            onError={() => setFailedPicture(thumbnail)}
-            src={thumbnail}
-          />{" "}
-        </>
-      )}
-      {title ?? shortForm(route)}
-    </>
+    <ArtifactMedia
+      caption=""
+      fallback={label}
+      kind="picture"
+      src={thumbnail}
+      variant="thumbnail"
+      words={label}
+    />
   );
 }
 
@@ -200,8 +217,32 @@ export function collectReferenceAnchors(
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
     anchor.replaceChildren();
-    targets.push({ anchor, key: `${reference}:${index}`, route, text });
+    targets.push({
+      alone: isAloneInParagraph(anchor),
+      anchor,
+      key: `${reference}:${index}`,
+      route,
+      text,
+    });
     index += 1;
   }
   return targets;
+}
+
+/** Whether the anchor is the whole of the paragraph it sits in: the reference its author wrote
+ *  on a line of its own, which a video draws its player for. A paragraph is the block a plain
+ *  reference stands alone in - a reference inside a sentence has words beside it, and one
+ *  inside a heading, a table cell or a list item is in a line of other content - and whitespace
+ *  around it is no content. What the anchor itself holds says nothing here, so clearing its
+ *  words for the portal leaves the answer as it was. */
+function isAloneInParagraph(anchor: HTMLAnchorElement): boolean {
+  const block = anchor.parentElement;
+  if (block === null || block.tagName !== "P") {
+    return false;
+  }
+  return Array.from(block.childNodes).every(
+    (node) =>
+      node === anchor ||
+      (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim() === "")
+  );
 }

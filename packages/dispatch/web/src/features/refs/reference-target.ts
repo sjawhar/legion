@@ -520,9 +520,12 @@ export function useReferenceTarget(
   };
 }
 
-/** Whether a stored content type is a video's. A stored type may carry parameters
- *  (`video/mp4; codecs=…`), which name no other type, so the type before the first `;` decides. */
-function isStoredVideo(mime: string | null | undefined): boolean {
+/** Whether a stored content type is a video's: the one such test in the web app. A reference
+ *  asks it of the type its summary carries, and the artifact page and the Artifacts tab, which
+ *  read a `Version` record rather than a reference, ask it of the version's own stored type. A
+ *  stored type may carry parameters (`video/mp4; codecs=…`), which name no other type, so the
+ *  type before the first `;` decides. */
+export function isStoredVideo(mime: string | null | undefined): boolean {
   if (mime === null || mime === undefined) {
     return false;
   }

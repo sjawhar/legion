@@ -3,7 +3,7 @@ import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
 
 import { artifactVersionPath } from "../../api/client";
-import { pictureClassName } from "../refs/DispatchPicture";
+import { pictureClassName } from "../refs/picture-classes";
 import { isPlainClick, openPictureViewer, type PictureViewer } from "../refs/picture-viewer";
 import type { ReferenceMedia } from "../refs/reference-target";
 import {
@@ -46,10 +46,11 @@ function fallbackLink(
   return link;
 }
 
-/** Watches what a version-less picture's reference draws at its latest version: calls its
- *  listener at once and on every change, with undefined while the target is unread, unreadable
- *  or no picture the browser can draw, and returns the function that stops (`watchPicturePath`
- *  in `refs/reference-target.ts`, bound to the page's query client). */
+/** Watches what a picture's reference draws: calls its listener at once and on every change,
+ *  with the artifact's latest version for a source that pins none, the kind alone for a source
+ *  that pins one, and undefined while the target is unread, unreadable or neither a picture nor
+ *  a video (`watchPicturePath` in `refs/reference-target.ts`, bound to the page's query client).
+ *  The returned function stops it. */
 export type WatchPicture = (
   route: DispatchReferenceRoute,
   onPicture: (media: ReferenceMedia | undefined) => void
@@ -62,10 +63,16 @@ export type WatchPicture = (
  * or, for a source written without `@vN`, of the latest version `watchPicture` reports - which
  * follows a new version or a recovered read while the view lives - with the caption
  * `pictureReference` reads (`refs/routes.ts`, the rule it shares with `pictureSerializer`): the
- * `alt`, or the artifact's slug when that is empty. The picture is at its own size, scaled down to
- * the column (`pictureClassName`), and a plain click opens it at full size
+ * `alt`, or the artifact's slug when that is empty. An artifact stored under a video type is a
+ * `<video controls preload="metadata">` at the same address instead, with the same class, the
+ * same failure answer and the same events; it opens no full-size view, since a player is
+ * already the whole of what a video does here. The document's markdown is untouched by either:
+ * only this view's DOM differs, so a save writes the line it read.
+ *
+ * The picture is at its own size, scaled down to the column (`pictureClassName`, the reading
+ * size the React places draw with too), and a plain click opens it at full size
  * (`openPictureViewer`), a view the node view closes when it is destroyed. A version the browser
- * cannot draw (a document, another file, a missing version) errors, and the picture becomes
+ * cannot draw (a document, another file, a missing version) errors, and the element becomes
  * `fallbackLink`; a version-less source shows that link while no latest version is known, and a
  * source that names something other than an artifact is that link at once. `placeCaretAfter` puts
  * the editor's caret just after the node, which the link calls on a primary-button mousedown (the
@@ -92,54 +99,75 @@ export function pictureView(
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;
   let viewer: PictureViewer | undefined;
-  // The path the wrapper shows a picture of, undefined while it shows the link: a report of the
-  // same path is skipped, and one after a failed load draws again.
+  // What the wrapper shows: the address drawn and whether it is drawn as a picture or played,
+  // both undefined while it shows the link. A report of what is already shown is skipped, and
+  // one after a failed load draws again.
   let shown: string | undefined;
+  let shownKind: ReferenceMedia["kind"] | undefined;
   const showLink = () => {
     shown = undefined;
+    shownKind = undefined;
     link = fallbackLink(route, document, placeCaretAfter);
     dom.replaceChildren(link);
   };
-  const showPicture = (src: string) => {
-    const img = document.createElement("img");
-    img.setAttribute("alt", picture.caption);
-    img.setAttribute("loading", "lazy");
-    img.className = pictureClassName;
-    // The listener and the picture's place in the wrapper come before `src`, so an error the
-    // browser raises at once is caught and replaces the picture rather than preceding it. A
-    // picture a newer version already replaced falls back to nothing.
-    img.addEventListener("error", () => {
-      if (img.parentNode === dom) showLink();
-    });
-    // ProseMirror selects the node on mousedown and mouseup; the click after them opens it.
-    // Only the default is prevented: the editor still sees the click that follows its selection.
-    img.addEventListener("click", (event) => {
-      if (!isPlainClick(event)) return;
-      event.preventDefault();
-      viewer = openPictureViewer(img) ?? viewer;
+  const showMedia = (kind: ReferenceMedia["kind"], src: string) => {
+    let element: HTMLImageElement | HTMLVideoElement;
+    if (kind === "video") {
+      const player = document.createElement("video");
+      player.setAttribute("controls", "");
+      player.setAttribute("preload", "metadata");
+      if (picture.caption !== "") player.setAttribute("aria-label", picture.caption);
+      element = player;
+    } else {
+      const img = document.createElement("img");
+      img.setAttribute("alt", picture.caption);
+      img.setAttribute("loading", "lazy");
+      // ProseMirror selects the node on mousedown and mouseup; the click after them opens it.
+      // Only the default is prevented: the editor still sees the click that follows its
+      // selection. A player opens nothing, so it takes no click of its own.
+      img.addEventListener("click", (event) => {
+        if (!isPlainClick(event)) return;
+        event.preventDefault();
+        viewer = openPictureViewer(img) ?? viewer;
+      });
+      element = img;
+    }
+    element.className = pictureClassName;
+    // The listener and the element's place in the wrapper come before `src`, so an error the
+    // browser raises at once is caught and replaces it rather than preceding it. An element a
+    // newer version already replaced falls back to nothing.
+    element.addEventListener("error", () => {
+      if (element.parentNode === dom) showLink();
     });
     link = undefined;
     shown = src;
-    dom.replaceChildren(img);
-    img.setAttribute("src", src);
+    shownKind = kind;
+    dom.replaceChildren(element);
+    element.setAttribute("src", src);
   };
   let stopWatching = () => {};
   if (named === undefined) {
     showLink();
   } else if (named.version !== undefined) {
-    // A pinned source draws from the address it names, with no read behind it: a video pinned
-    // this way draws as a picture, fails to load and becomes the link, until a later task of
-    // INFRA-760 draws the player.
-    showPicture(artifactVersionPath(named.owner, named.slug, named.version));
+    // A pinned source draws from the address it names, with no wait on a read: the version is
+    // in the reference. Its type is not, so the watch is what tells a video from a picture - it
+    // reports what the page has already read in this same task, before anything is drawn, and a
+    // later report (the summary landing, a failed read recovering) turns a picture into a player
+    // where it says video. It never takes the element away: a pinned source has always drawn the
+    // bytes it names and fallen back to the link only where the browser refused them.
+    const src = artifactVersionPath(named.owner, named.slug, named.version);
+    stopWatching = watchPicture(route, (media) => {
+      const kind = media?.kind ?? "picture";
+      if (kind === shownKind && src === shown) return;
+      showMedia(kind, src);
+    });
+    if (shown === undefined) showMedia("picture", src);
   } else {
     showLink();
     stopWatching = watchPicture(route, (media) => {
-      // A video reads as the fallback link, as an unreadable target does; a later task of
-      // INFRA-760 draws the player.
-      const src = media?.kind === "picture" ? media.src : undefined;
-      if (src === shown) return;
-      if (src === undefined) showLink();
-      else showPicture(src);
+      if (media?.src === shown && media?.kind === shownKind) return;
+      if (media === undefined) showLink();
+      else showMedia(media.kind, media.src);
     });
   }
   return {

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
-import { pictureClassName } from "../refs/DispatchPicture";
+import { pictureClassName } from "../refs/picture-classes";
 import type { ReferenceMedia } from "../refs/reference-target";
 import type { DispatchReferenceRoute } from "../refs/routes";
-import { pictureView } from "./picture-view";
+import { pictureView, type WatchPicture } from "./picture-view";
 
 // Milkdown's `image` node: `src`/`alt`/`title` strings and a `toDOM` that writes them onto an
 // `<img>`.
@@ -28,9 +28,12 @@ function picture(src: string, alt = "") {
 }
 
 const noCaret = () => {};
-/** A watcher for tests whose source pins a version or names no artifact: it is never called. */
-const noWatch = () => {
-  throw new Error("watchPicture called for a pinned source");
+/** A watcher for tests whose source pins a version or names no artifact: it reports nothing, as
+ *  the page's does while the summary that would name the type is unread, so a pinned source
+ *  draws the address it names as a picture. */
+const noWatch: WatchPicture = (_route, onPicture) => {
+  onPicture(undefined);
+  return () => {};
 };
 
 /** A watcher the test drives: `report` sends the latest picture to the view, `reportVideo` a
@@ -223,14 +226,18 @@ test("a source that pins no version is its link until the latest version is know
   expect(pictureOf(dom).getAttribute("src")).toBe(
     "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
   );
-  // A video is drawn by nobody yet: it reads as the reference's link, as a target the browser
-  // cannot draw does, until a later task of INFRA-760 draws the player.
+  // A version stored under a video type is played where a picture is drawn, at the same
+  // address, with the same class and no full-size view of its own.
   latest.reportVideo("/api/v1/issues/CORE-1/artifacts/shot-png/versions/5");
   expect(dom.querySelector("img")).toBeNull();
-  expect(linkOf(dom).getAttribute("data-dispatch-href")).toBe(
-    "dispatch://CORE-1/artifact/shot-png"
-  );
+  const player = dom.querySelector("video");
+  expect(player?.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/5");
+  expect(player?.hasAttribute("controls")).toBe(true);
+  expect(player?.getAttribute("preload")).toBe("metadata");
+  expect(player?.getAttribute("aria-label")).toBe("shot.png");
+  expect(player?.className).toBe(pictureClassName);
   latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  expect(dom.querySelector("video")).toBeNull();
   expect(pictureOf(dom).getAttribute("src")).toBe(
     "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
   );
@@ -257,6 +264,40 @@ test("a source that pins no version draws at once when its latest version is alr
   expect(pictureOf(view.dom as HTMLElement).getAttribute("src")).toBe(
     "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
   );
+});
+
+test("a pinned source whose artifact is a video plays at the address it pins", () => {
+  const pinned = fakeWatch();
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/clip-webm@v2", "clip.webm"),
+    document,
+    noCaret,
+    pinned.watch
+  );
+  const dom = view.dom as HTMLElement;
+  const pinnedSrc = "/api/v1/issues/CORE-1/artifacts/clip-webm/versions/2";
+
+  // The reference names the version but not its type, so the watch is asked for the type; until
+  // it answers, the pinned address is drawn as the picture a pinned source has always drawn.
+  expect(pinned.asked).toEqual(["CORE-1/clip-webm"]);
+  expect(pictureOf(dom).getAttribute("src")).toBe(pinnedSrc);
+
+  // The report names the artifact's latest version; the address stays the one the source pins.
+  pinned.reportVideo("/api/v1/issues/CORE-1/artifacts/clip-webm/versions/9");
+  expect(dom.querySelector("img")).toBeNull();
+  const player = dom.querySelector("video");
+  expect(player?.getAttribute("src")).toBe(pinnedSrc);
+  expect(player?.hasAttribute("controls")).toBe(true);
+  expect(player?.getAttribute("preload")).toBe("metadata");
+
+  // A report of a target the summary calls neither picture nor video leaves the pinned bytes
+  // drawn: a pinned source has always drawn what it names and fallen back only on an error.
+  pinned.report(undefined);
+  expect(dom.querySelector("video")).toBeNull();
+  expect(pictureOf(dom).getAttribute("src")).toBe(pinnedSrc);
+
+  view.destroy?.();
+  expect(pinned.stopped).toBe(1);
 });
 
 test("destroying the view closes the full-size layer its picture opened", () => {
