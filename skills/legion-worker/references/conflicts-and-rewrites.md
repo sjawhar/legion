@@ -28,6 +28,10 @@ Every path it cites is in cybermonklabs/legion.
   the fingerprint at the current tip; after pushing the merged branch, record it at the new
   tip; post one PR comment (Legion footer):
   `forward merge <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
+  The fingerprint answers one question only: whether the branch's own diff changed. It cannot
+  show an instance the merge brought in from the base, so before you push the merge search its
+  head for the class of every finding of every earlier review round and record each search
+  beside the fingerprints.
   In a parent's last round, end that comment with `parent's last round: full test round`, the line
   the tester reads for a full round (`skill://legion-architect/references/acceptance.md`,
   "The last round").

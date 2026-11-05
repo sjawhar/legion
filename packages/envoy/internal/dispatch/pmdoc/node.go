@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -48,9 +49,20 @@ var markTypes = map[string]bool{
 // sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
 // one type (the record marks, which may overlap: anchorMarkTypes), by id, and by their attributes
 // only when the ids tie. Every positional comparison of two mark sets (marksEqual, run joining)
-// relies on it.
+// relies on it, and so does every reading of marks in writing order (visibleMarks). The sort is
+// unstable, which no output can see: two marks markLess orders neither way are equal in type, in
+// id and in the JSON of their canonical attributes, so each stands for the other wherever a mark
+// is read.
 func sortMarks(marks []Mark) {
-	sort.Slice(marks, func(i, j int) bool { return markLess(marks[i], marks[j]) })
+	slices.SortFunc(marks, func(left, right Mark) int {
+		switch {
+		case markLess(left, right):
+			return -1
+		case markLess(right, left):
+			return 1
+		}
+		return 0
+	})
 }
 
 func markLess(left, right Mark) bool {

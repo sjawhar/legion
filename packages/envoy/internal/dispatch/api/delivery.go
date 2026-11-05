@@ -789,8 +789,8 @@ type deliveryIssue struct {
 }
 
 // deliveryIssueFactsQuery is the pull-request timeline's read of the issues a delivery names,
-// with their components. The text is built once, at start, for the reason
-// issueWithProgressQuery gives.
+// with their components. The text is built once, at start, for the reason issueRowStatement
+// gives.
 var deliveryIssueFactsQuery = `
 		with recursive subjects as (select i.key from issues i where i.key = any($1)),
 		` + issueComponentsTerms + `

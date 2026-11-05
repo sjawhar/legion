@@ -3,6 +3,41 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.6.0] - 2026-11-05
+
+### Changed
+
+- Eight guidance rules, each closing one measured way a defect or a silent failure reached
+  review. `ce-simplify-code` now covers every file of its scope — documentation, workflow and
+  configuration files as much as code — runs on a scope with no code at all, and reports a
+  defect it sees with its file and line rather than dropping it as out of scope; its three
+  reviewer personas say the same, and its verification step runs only when a fix was applied.
+  `legion-worker`'s `pr-body.md` says a check that cannot fail is not a result and that a
+  documented procedure counts only when it ran, carries the class search in the forward-merge
+  re-check line, and records what the simplify pass reported in the `Thermo` line; its
+  `SKILL.md` has two roles wait rather than proceed, a planner on a decision the plan itself
+  needs and a reviewer on a half of the round with no review; `conflicts-and-rewrites.md` says
+  the unchanged-diff fingerprint cannot show an instance the merge brought in from the base;
+  `merge-gate.md` makes a review result with no report a failed run, refuses an approval while
+  a half of the round has no review, and points at the merger's prompt part for the causes of
+  `READY_UNREVIEWED_CHANGE`, as `legion-retro` now does too; `legion-architect`'s
+  `acceptance.md` adds the class search to the architect's reading of a forward-merge re-check.
+  The two thermonuclear agents open their result with the verdict and the findings and name no
+  other place the report lives; `deep-worker`, `plan-gap-analyst`, `plan-reviewer` and both
+  thermonuclear agents say how to read a piped command's status and never to pipe a write into
+  a pager; the three agents that may write, and both thermonuclear skills, say to make scratch
+  with `mktemp -d` and never to delete by a glob in the `$TMPDIR` every role of an issue
+  shares.
+
+## [18.5.0] - 2026-11-05
+
+### Added
+
+- Every claimed Oh My Pi session tells the Legion daemon what it is doing — whether it runs
+  background work, and for a phase worker when its next phase reminder is due — at each turn's
+  end and whenever the reading changes. That is what lets the daemon release an issue pod no
+  role of which has a turn in progress or a turn due, and bring it back on the next wake.
+
 ## [18.4.0] - 2026-11-05
 
 ### Changed
