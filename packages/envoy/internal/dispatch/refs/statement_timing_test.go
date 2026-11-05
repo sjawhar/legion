@@ -34,6 +34,12 @@ import (
 //     The before side is read with ask_followers_session_id present, the index migration
 //     20261101182419 adds for the followed_by arm, which only helps it, so each pair is the
 //     conservative reading of the head text's own gain.
+//
+// It is the one test of this package that does not call t.Parallel, for two of the three reasons
+// docs/testing.md gives: it measures the process - each reading is how long a statement took, and
+// a reading taken beside another test's work is that test's reading too - and it shares an
+// instance-wide resource, the one seeded measurement database DISPATCH_BENCH_DATABASE_URL names,
+// which it holds for the whole run rather than taking a database of its own from the harness.
 func TestStatementTimings(t *testing.T) {
 	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()

@@ -147,6 +147,7 @@ func closureStatementRows(t *testing.T, database *store.Store, statement, issueK
 // reports: a block its document still holds reaches that document, one no version holds reaches
 // nothing, and the tenth document of the chain is the ninth hop that is reported truncated.
 func TestTheClosureAnswersWhatMainsStatementDid(t *testing.T) {
+	t.Parallel()
 	fixture := newClosureFixture(t)
 	want := closureStatementRows(t, fixture.database, mainClosureQuery, "CORE-1")
 	if len(want) < 9 {
@@ -198,6 +199,7 @@ func TestTheClosureAnswersWhatMainsStatementDid(t *testing.T) {
 // of its own: with the block test moved above a join, that is the only clause the planner can
 // restrict the scan with.
 func TestTheClosureProbesDocumentBlocksThroughItsNodeIndex(t *testing.T) {
+	t.Parallel()
 	fixture := newClosureFixture(t)
 	ctx := context.Background()
 	tx, err := fixture.database.Pool.Begin(ctx)
