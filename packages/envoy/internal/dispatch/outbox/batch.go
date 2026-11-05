@@ -359,6 +359,10 @@ type chainSend struct {
 	fenced, connection bool
 	// heldBy is the event whose failed send held this one back.
 	heldBy *batchEvent
+	// standIn is the envelope this send carries once NATS refused the event's own
+	// (standInEnvelope): the same event with its payload left out. It is set once, so a
+	// stand-in NATS refuses too is the end of this send.
+	standIn *contracts.Envelope
 }
 
 // sent reports whether the send counts as one the batch made: its answer is in, it was not refused
@@ -367,6 +371,17 @@ type chainSend struct {
 func (s *chainSend) sent() bool {
 	skipped := s.dest.forward != nil && s.dest.forward.skip != ""
 	return s.state != unsent && s.state != held && !s.fenced && !skipped
+}
+
+// heldByHolder is the hold behind a send that sent nothing and failed nothing: a role forward its
+// holder's resolution held pending (roleForward.err), which never left this process, so it is a
+// wait for the holder to answer rather than a publish failure (Deps.RoleForwardsHeld,
+// waitForHolders). Every other send reports nil, a role forward NATS answered among them.
+func (s *chainSend) heldByHolder() *roleForward {
+	if forward := s.dest.forward; forward != nil && forward.err != nil {
+		return forward
+	}
+	return nil
 }
 
 // chain is the sends of one owner's events to one destination key, in id order. Its next send is
@@ -507,8 +522,15 @@ func planChains(events []*batchEvent) []*chain {
 // a send past the publisher hold's deadline) stops the batch: no further send of any chain is
 // made. So does ctx ending; the answers already in are still read, and every other send in flight
 // is lost. Each send that did not reach its destination is counted once as it settles, under the
-// reason it came to (deps.countPublishFailure); a send the hold's deadline fenced and one ctx's
-// end cut count nothing, neither being an outcome NATS gave.
+// reason it came to (deps.countPublishFailure), and a role forward its holder's resolution held
+// pending under that holder's state instead (deps.countRoleForwardHeld), being a wait and no
+// publish failure; a send the hold's deadline fenced and one ctx's end cut count nothing, neither
+// being an outcome NATS gave.
+//
+// A send NATS refuses (bus.ErrRefused) is made once more with the event's payload left out
+// (standInEnvelope), on the same chain and in the same place, so a reader hears which event it
+// is and reads the item itself; a stand-in refused in its turn ends that send as every refusal
+// ended before stand-ins.
 //
 // settled is called once per owner, as soon as the last chain of that owner has finished - its
 // sends all answered, or the rest of them held back or never made - so the batch can settle,
@@ -538,6 +560,9 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 		}
 		send := c.sends[c.next]
 		routed := send.event.item
+		if send.standIn != nil {
+			routed = *send.standIn
+		}
 		routed.Topic = send.dest.subject
 		switch forward := send.dest.forward; {
 		case forward == nil:
@@ -557,14 +582,40 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 		send.fenced = errors.Is(err, bus.ErrWindowDeadline)
 		switch {
 		case err == nil:
+			if send.standIn != nil {
+				// Logged here, where the stand-in is answered, rather than where it was made:
+				// only now has it reached NATS.
+				slog.Warn("dispatch outbox: a stand-in went out with the payload left out",
+					"event_id", send.event.event.ID, "topic", send.dest.subject)
+			}
 			send.state = reached
 		case errors.Is(err, bus.ErrRefused):
 			// Refused the same way however often it is retried (the envelope is past the server's
 			// max payload, or its subject past NATS's limit or holding whitespace, as an unbounded
-			// document slug or a bearer's session id can make it), so it is logged once and counts
-			// as reached. It did not reach NATS, so it is still counted a refusal.
+			// document slug or a bearer's session id can make it). It did not reach NATS, so it is
+			// counted a refusal and logged once per event: a stand-in refused in its turn is the
+			// same event's one refusal, already counted when NATS refused the payload it was made
+			// of, and counting it again would count one event twice.
+			if send.standIn != nil {
+				slog.Error("dispatch outbox: the stand-in was refused too",
+					"event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
+				send.state = reached
+				break
+			}
 			deps.countPublishFailure("refused")
 			slog.Error("dispatch outbox: destination refused", "event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
+			// An event whose payload NATS will not take still has readers waiting on it, so the
+			// same event goes out once more with that payload left out (standInEnvelope): the
+			// reader learns which event it is and reads the item itself. A stand-in refused in
+			// its turn, one this batch can no longer send, and an envelope no stand-in can be
+			// made of count as reached, as every refusal did before stand-ins.
+			if !stopped && ctx.Err() == nil {
+				if item, ok := standInEnvelope(send.event.item); ok {
+					send.standIn = &item
+					issue(c)
+					return
+				}
+			}
 			send.state = reached
 		case send.fenced, errors.Is(err, bus.ErrUnavailable):
 			// NATS unreachable is the outage the publish-failure metric exists for, so the send
@@ -580,17 +631,17 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			send.state = lost
 		default:
 			// Counted under the reason the send came to (countPublishFailure): a send the server
-			// refused under this connection's own publish permissions is a denial; a role forward
-			// its holder's resolution held pending sent nothing at all, and is counted under that
-			// holder rather than as a failure of the bus; a forward NATS took whose holder sent no
-			// receipt is unanswered, which the request reports as a receipt timeout with its
-			// publish confirmed; every other failure, an unconfirmed publish among them, is a
-			// failure.
-			switch forward := send.dest.forward; {
+			// refused under this connection's own publish permissions is a denial; a forward NATS
+			// took whose holder sent no receipt is unanswered, which the request reports as a
+			// receipt timeout with its publish confirmed; every other failure, an unconfirmed
+			// publish among them, is a failure. A role forward its holder's resolution held
+			// pending is none of them: it sent nothing and nothing failed, so it is counted a
+			// hold under that holder's state (countRoleForwardHeld) and is no publish failure.
+			switch hold := send.heldByHolder(); {
 			case errors.Is(err, bus.ErrPublishDenied):
 				deps.countPublishFailure("denied")
-			case forward != nil && forward.err != nil:
-				deps.countPublishFailure("holder")
+			case hold != nil:
+				deps.countRoleForwardHeld(hold.heldState)
 			case errors.Is(err, bus.ErrReceiptTimeout) && !errors.Is(err, bus.ErrPublishUnconfirmed):
 				deps.countPublishFailure("unanswered")
 			default:
@@ -663,4 +714,48 @@ func firstAnswered(inflight []*chain) (int, error, bool) {
 		}
 	}
 	return 0, nil, false
+}
+
+// standInPayloadFieldBytes is the most one top-level field of an event's payload may encode to
+// for a stand-in to keep it. It is small on purpose: a stand-in exists because the event was too
+// large to send, so it keeps the fields that name the item - its id, its issue, its author, when
+// it was written - and drops the body and the lists that made the event too large.
+const standInPayloadFieldBytes = 256
+
+// standInEnvelope is item with the event's payload left out: the same topic, event id and
+// payload_summary, and in place of the payload an object holding every top-level field of it
+// whose encoded value is at most standInPayloadFieldBytes, plus payload_omitted: true. A reader
+// then learns which event it is and reads the item itself for the rest, where today it learns
+// nothing at all.
+//
+// ok is false for an envelope no stand-in can be made of - one whose payload is not a JSON
+// object, or whose event carries no payload - which settles as a refusal settled before
+// stand-ins.
+func standInEnvelope(item contracts.Envelope) (contracts.Envelope, bool) {
+	var event map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(item.Payload), &event); err != nil {
+		return contracts.Envelope{}, false
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(event["payload"], &payload); err != nil {
+		return contracts.Envelope{}, false
+	}
+	kept := make(map[string]json.RawMessage, len(payload)+1)
+	for name, value := range payload {
+		if len(value) <= standInPayloadFieldBytes {
+			kept[name] = value
+		}
+	}
+	kept["payload_omitted"] = json.RawMessage("true")
+	short, err := json.Marshal(kept)
+	if err != nil {
+		return contracts.Envelope{}, false
+	}
+	event["payload"] = short
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return contracts.Envelope{}, false
+	}
+	item.Payload = string(encoded)
+	return item, true
 }

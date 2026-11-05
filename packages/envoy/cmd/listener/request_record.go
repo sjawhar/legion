@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 )
 
 // requestOutcome is what became of one inbound send or publish, in the fixed vocabulary those two
@@ -33,10 +34,6 @@ const (
 	// two say different things about the claim behind it.
 	outcomeRoleUnclaimed requestOutcome = "role_unclaimed"
 	outcomeRoleLapsed    requestOutcome = "role_lapsed"
-	// outcomeRoleHolderChanged is the publish route's lost race for a role's claim
-	// (errRoleHolderChanged): every bus read answered, so it is deliberately not
-	// outcomeBusUnavailable, which keeps its meaning of a bus that did not answer.
-	outcomeRoleHolderChanged requestOutcome = "role_holder_changed"
 	// outcomeRoleClaimUnreadable is the publish route's role claim record that the bus answered
 	// and no read can decode (store.ErrMalformedRoleClaim): a 500, not outcomeBusUnavailable,
 	// since the bus did answer and retrying reads the same record.
@@ -143,16 +140,6 @@ func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error)
 	rec.write(status, outcome)
 }
 
-// refuseRoleHolderChanged answers a publish whose role claim moved under the resolution
-// (errRoleHolderChanged) with the 503, Retry-After and body writeRoleHolderChanged writes for both
-// routes that resolve a role, and records it under its own outcome rather than bus_unavailable:
-// every bus read answered, so naming it bus_unavailable would send an operator after an outage
-// that never happened, and the route's record is where "never attempted" is told from "attempted
-// and refused" afterwards.
-func (rec *requestRecord) refuseRoleHolderChanged(w http.ResponseWriter, role string) {
-	rec.write(writeRoleHolderChanged(w, role, "publish"), outcomeRoleHolderChanged)
-}
-
 // refuseRoleClaimUnreadable answers a publish whose role claim record cannot be decoded
 // (store.ErrMalformedRoleClaim) with the 500 writeRoleClaimUnreadable writes for both routes that
 // resolve a role, and records it under its own outcome rather than bus_unavailable: the bus
@@ -165,13 +152,13 @@ func (rec *requestRecord) refuseRoleClaimUnreadable(w http.ResponseWriter, role 
 // refuseRoleHolder answers the publish route's two role-holder refusals. A lapsed holder is the
 // session the claim named, which the answer's own body names as well, so the record carries it;
 // an unclaimed role has no holder to carry.
-func (rec *requestRecord) refuseRoleHolder(w http.ResponseWriter, role string, result roleHolderResult) {
+func (rec *requestRecord) refuseRoleHolder(w http.ResponseWriter, role string, result roles.Resolution) {
 	writeRoleHolderError(w, role, result)
 	outcome := outcomeRoleUnclaimed
-	if result.state == roleHolderLapsed {
+	if result.State == roles.Lapsed {
 		outcome = outcomeRoleLapsed
 	}
-	rec.holder = result.holder
+	rec.holder = result.Holder
 	rec.write(http.StatusNotFound, outcome)
 }
 

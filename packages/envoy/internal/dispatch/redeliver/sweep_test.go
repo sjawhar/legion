@@ -18,6 +18,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -26,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -131,7 +133,7 @@ func openState(tb testing.TB) bus.KeyValue {
 	if err != nil {
 		tb.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js, 1)
+	state, err := redeliver.OpenState(nc, js, 1)
 	if err != nil {
 		tb.Fatalf("open redelivery state: %v", err)
 	}
@@ -204,12 +206,15 @@ func (h *harness) toTheLongestBackoff() {
 	}
 }
 
-// keys is every key the state bucket holds. A bucket with nothing in it answers ErrNoKeysFound
-// rather than an empty list, which is no key at all.
+// keys is every key the state bucket holds, read through the scan every listing of a bucket goes
+// through (kvwatch.ScanExistingKeys), since bus.KeyValue keeps its legacy handle to itself.
 func (h *harness) keys() []string {
 	h.t.Helper()
-	held, err := h.state.Keys()
-	if err != nil && !errors.Is(err, natsgo.ErrNoKeysFound) {
+	var held []string
+	if _, err := kvwatch.ScanExistingKeys(h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.Default(), func(entry kvwatch.Entry) error {
+		held = append(held, entry.Key)
+		return nil
+	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes()); err != nil {
 		h.t.Fatalf("read the state bucket: %v", err)
 	}
 	return held
@@ -857,9 +862,10 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 	h.fail("guid-newer", http.StatusServiceUnavailable, time.Minute)
 	h.webhook.Limit(http.MethodPost, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}})
 
-	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
+	paused := &pausedClaim{KeyValue: h.state.Legacy(), entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.Open = func() (bus.KeyValue, error) { return bus.KeyValue{KeyValue: paused}, nil }
+	pausedState := bus.NewKeyValue(paused, h.state.WatchHandle(), h.state.Streams())
+	second.Open = func() (bus.KeyValue, error) { return pausedState, nil }
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})
@@ -1283,8 +1289,12 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 	if got := h.requests(); len(got) != 0 {
 		t.Fatalf("a dry run requested %v", got)
 	}
-	if keys, err := h.state.Keys(); err == nil && len(keys) != 0 {
-		t.Fatalf("a dry run wrote state %v", keys)
+	var written []string
+	if _, err := kvwatch.ScanExistingKeys(h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.New(slog.DiscardHandler), func(entry kvwatch.Entry) error {
+		written = append(written, entry.Key)
+		return nil
+	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes()); err != nil || len(written) != 0 {
+		t.Fatalf("a dry run wrote state %v (listing: %v)", written, err)
 	}
 	if h.logs.count("webhook delivery expired undelivered") != 0 {
 		t.Fatalf("a dry run logged the alarm line:\n%s", h.logs)
@@ -1417,7 +1427,8 @@ func TestAFailedIndexWriteLeavesTheDeliveryForTheNextSweep(t *testing.T) {
 	refused := errors.New("nats: no responders available for request")
 	sweeper := h.sweeper()
 	sweeper.Open = func() (bus.KeyValue, error) {
-		return bus.KeyValue{KeyValue: refusingIndex{KeyValue: h.state, refused: refused}}, nil
+		refusing := refusingIndex{KeyValue: h.state.Legacy(), refused: refused}
+		return bus.NewKeyValue(refusing, h.state.WatchHandle(), h.state.Streams()), nil
 	}
 	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
@@ -1498,7 +1509,8 @@ func TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep(t *testing.T) {
 	refused := errors.New("nats: no responders available for request")
 	sweeper := h.sweeper()
 	sweeper.Open = func() (bus.KeyValue, error) {
-		return bus.KeyValue{KeyValue: refusingRecord{KeyValue: h.state, refused: refused}}, nil
+		refusing := refusingRecord{KeyValue: h.state.Legacy(), refused: refused}
+		return bus.NewKeyValue(refusing, h.state.WatchHandle(), h.state.Streams()), nil
 	}
 	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
@@ -1642,27 +1654,28 @@ func TestAStrayIndexEntryIsDeletedOnlyPastTheMargin(t *testing.T) {
 	}
 }
 
-// countingBucket is the sweep's state bucket, counting the two reads a sweep makes of it: the
-// scan of every record the bucket holds (Watch) and the index's own window (WatchFiltered).
+// countingBucket is the sweep's state bucket as its scans reach it, the jetstream handle, counting
+// the two reads a sweep makes of it: the scan of every record the bucket holds (Watch, one pattern)
+// and the index's own window (WatchFiltered, one watch carrying one pattern per minute of it).
 type countingBucket struct {
-	natsgo.KeyValue
+	jetstream.KeyValue
 	mu      sync.Mutex
 	scans   int
 	windows int
 }
 
-func (c *countingBucket) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+func (c *countingBucket) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 	c.mu.Lock()
 	c.scans++
 	c.mu.Unlock()
-	return c.KeyValue.Watch(keys, opts...)
+	return c.KeyValue.Watch(ctx, keys, opts...)
 }
 
-func (c *countingBucket) WatchFiltered(keys []string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+func (c *countingBucket) WatchFiltered(ctx context.Context, keys []string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 	c.mu.Lock()
 	c.windows++
 	c.mu.Unlock()
-	return c.KeyValue.WatchFiltered(keys, opts...)
+	return c.KeyValue.WatchFiltered(ctx, keys, opts...)
 }
 
 func (c *countingBucket) counts() (scans, windows int) {
@@ -1698,9 +1711,11 @@ func TestARecordWithNoIndexEntryIsBackfilledOnTheFirstSweep(t *testing.T) {
 		t.Fatalf("write the record an older build wrote: %v", err)
 	}
 
-	counting := &countingBucket{KeyValue: h.state}
+	counting := &countingBucket{KeyValue: h.state.WatchHandle()}
 	sweeper := h.sweeper()
-	sweeper.Open = func() (bus.KeyValue, error) { return bus.KeyValue{KeyValue: counting}, nil }
+	sweeper.Open = func() (bus.KeyValue, error) {
+		return bus.NewKeyValue(h.state.Legacy(), counting, h.state.Streams()), nil
+	}
 	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
 		t.Fatalf("the first sweep: %v", err)
@@ -1772,7 +1787,8 @@ func TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked(t *testing.T) 
 	refused := errors.New("nats: no responders available for request")
 	sweeper := h.sweeper()
 	sweeper.Open = func() (bus.KeyValue, error) {
-		return bus.KeyValue{KeyValue: refusingRecord{KeyValue: h.state, refused: refused}}, nil
+		refusing := refusingRecord{KeyValue: h.state.Legacy(), refused: refused}
+		return bus.NewKeyValue(refusing, h.state.WatchHandle(), h.state.Streams()), nil
 	}
 	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
@@ -1826,7 +1842,7 @@ func TestABackfillThatLosesItsRecordRaceLeavesTheIndexUnmarked(t *testing.T) {
 
 	sweeper := h.sweeper()
 	sweeper.Open = func() (bus.KeyValue, error) {
-		return bus.KeyValue{KeyValue: &conflictingRecord{KeyValue: h.state}}, nil
+		return bus.NewKeyValue(&conflictingRecord{KeyValue: h.state.Legacy()}, h.state.WatchHandle(), h.state.Streams()), nil
 	}
 	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
@@ -2042,7 +2058,8 @@ func TestABackfillLeavesALiveClaimToItsClaimant(t *testing.T) {
 
 	refusing := h.sweeper()
 	refusing.Open = func() (bus.KeyValue, error) {
-		return bus.KeyValue{KeyValue: refusingPending{KeyValue: h.state, refused: errors.New("nats: no responders available for request")}}, nil
+		refusing := refusingPending{KeyValue: h.state.Legacy(), refused: errors.New("nats: no responders available for request")}
+		return bus.NewKeyValue(refusing, h.state.WatchHandle(), h.state.Streams()), nil
 	}
 	refused, err := refusing.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
@@ -2137,9 +2154,11 @@ func TestAMarkerOlderThanTheLookbackIsBackfilledAgain(t *testing.T) {
 		t.Fatalf("write the record the older build wrote: %v", err)
 	}
 
-	counting := &countingBucket{KeyValue: h.state}
+	counting := &countingBucket{KeyValue: h.state.WatchHandle()}
 	sweeper := h.sweeper()
-	sweeper.Open = func() (bus.KeyValue, error) { return bus.KeyValue{KeyValue: counting}, nil }
+	sweeper.Open = func() (bus.KeyValue, error) {
+		return bus.NewKeyValue(h.state.Legacy(), counting, h.state.Streams()), nil
+	}
 	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
 	if err != nil {
 		t.Fatalf("the sweep past the stale marker: %v", err)

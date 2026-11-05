@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
 const output = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
-const daemonOutput = resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go");
 const blockSchemaOutput = resolve(
   import.meta.dir,
   "../../envoy/internal/dispatch/pmdoc/schema_generated.go"
@@ -12,7 +11,7 @@ const blockSchemaOutput = resolve(
 const blockSchemaTypes = resolve(import.meta.dir, "../src/block-schema.generated.ts");
 // Every file the generator writes, so a copy of the whole set is checked and only the hand-edit
 // below is stale.
-const generated = [output, daemonOutput, blockSchemaOutput, blockSchemaTypes];
+const generated = [output, blockSchemaOutput, blockSchemaTypes];
 const questionSchema = resolve(import.meta.dir, "../schemas/dispatch-question.schema.json");
 const generator = resolve(import.meta.dir, "gen-go.ts");
 const repoRoot = resolve(import.meta.dir, "../../..");
