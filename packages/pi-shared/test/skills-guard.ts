@@ -275,8 +275,32 @@ export function unresolvedAgentDispatches(
 /** The worker skill, the one file the release rule below is written over. */
 export const WORKER_SKILL = path.join(REPO_ROOT, "skills/legion-worker/SKILL.md");
 
-/** The worker skill's tool reference, the one file the two rules below are written over. */
+/** The worker skill's tool reference, the one file the shared-database rules are written over. */
 export const WORKER_TOOLS = path.join(REPO_ROOT, "skills/legion-worker/references/tools.md");
+
+/**
+ * What one skill file gets wrong about a rule pinned over the repository's own `skills/`: it
+ * still carries a claim the rule retired (`retired.claim`, matched rather than its one wording,
+ * so a reword is caught too), or it has lost the sentence the rule turns on (`required.sentence`,
+ * pinned whole and literally). Each fault is one sentence naming `file` and saying what a reader
+ * of the wrong text would believe. The text is whitespace-normalized first, because these files
+ * are wrapped and a sentence of one crosses lines.
+ */
+function prosePinFaults(
+  file: string,
+  markdown: string,
+  retired: { claim: RegExp; because: string },
+  required: { sentence: string; because: string }
+): string[] {
+  const text = markdown.replace(/\s+/g, " ");
+  const faults: string[] = [];
+  const found = text.match(retired.claim);
+  if (found !== null) faults.push(`${file} says "${found[0]}": ${retired.because}`);
+  if (!text.includes(required.sentence)) {
+    faults.push(`${file} does not say "${required.sentence}": ${required.because}`);
+  }
+  return faults;
+}
 
 /**
  * The claim the idle release retired (INFRA-945): that a role, or the pane it runs in, stays live
@@ -299,26 +323,21 @@ const ROLE_STAYS_LIVE =
  */
 const RELEASE_IS_NO_STOP = "A released pod is not a stop.";
 
-/**
- * What `markdown` — skills/legion-worker/SKILL.md — gets wrong about a released pod, each as one
- * sentence naming the file. Both halves are read over whitespace-normalized text, because the
- * skill is written with semantic line breaks and a sentence of it can cross lines.
- */
+/** What `markdown` — skills/legion-worker/SKILL.md — gets wrong about a released pod. */
 export function retiredWorkerLifecycleClaims(markdown: string): string[] {
-  const text = markdown.replace(/\s+/g, " ");
-  const faults: string[] = [];
-  const live = text.match(ROLE_STAYS_LIVE);
-  if (live !== null) {
-    faults.push(
-      `skills/legion-worker/SKILL.md says "${live[0]}": a released pod ends every role process of it, so no role stays live for as long as its issue is in the workflow`
-    );
-  }
-  if (!text.includes(RELEASE_IS_NO_STOP)) {
-    faults.push(
-      `skills/legion-worker/SKILL.md does not say "${RELEASE_IS_NO_STOP}": a worker told nothing about release reads its pod's deletion as a crash`
-    );
-  }
-  return faults;
+  return prosePinFaults(
+    "skills/legion-worker/SKILL.md",
+    markdown,
+    {
+      claim: ROLE_STAYS_LIVE,
+      because:
+        "a released pod ends every role process of it, so no role stays live for as long as its issue is in the workflow",
+    },
+    {
+      sentence: RELEASE_IS_NO_STOP,
+      because: "a worker told nothing about release reads its pod's deletion as a crash",
+    }
+  );
 }
 
 /**
@@ -342,24 +361,20 @@ const LOGIN_OWNS_DATABASES =
 const NO_READ_THROUGH_SESSION_URL =
   "Never read it through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names.";
 
-/**
- * What `markdown` — skills/legion-worker/references/tools.md — gets wrong about a shared database,
- * each as one sentence naming the file. Both halves are read over whitespace-normalized text,
- * because the file is hard-wrapped and a sentence of it crosses lines.
- */
+/** What `markdown` — skills/legion-worker/references/tools.md — gets wrong about a shared database. */
 export function brokenSharedDatabaseRules(markdown: string): string[] {
-  const text = markdown.replace(/\s+/g, " ");
-  const faults: string[] = [];
-  const owns = text.match(LOGIN_OWNS_DATABASES);
-  if (owns !== null) {
-    faults.push(
-      `skills/legion-worker/references/tools.md says "${owns[0]}": the session login is being split in two, so no role's login creates or drops a database on the shared server`
-    );
-  }
-  if (!text.includes(NO_READ_THROUGH_SESSION_URL)) {
-    faults.push(
-      `skills/legion-worker/references/tools.md does not say "${NO_READ_THROUGH_SESSION_URL}": a role told nothing about reads reaches the shared store through the write-capable session URL`
-    );
-  }
-  return faults;
+  return prosePinFaults(
+    "skills/legion-worker/references/tools.md",
+    markdown,
+    {
+      claim: LOGIN_OWNS_DATABASES,
+      because:
+        "the session login is being split in two, so no role's login creates or drops a database on the shared server",
+    },
+    {
+      sentence: NO_READ_THROUGH_SESSION_URL,
+      because:
+        "a role told nothing about reads reaches the shared store through the write-capable session URL",
+    }
+  );
 }

@@ -442,13 +442,18 @@ class NotReadOnlyError extends Error {}
 const READ_ONLY = "read only";
 
 /**
- * Confirms from the server, inside the transaction and before anything is read in it, that the
- * begin took. A deployment can point this script at a server or a route that dropped it, and
- * reading on a write-capable connection is what the shared store's pool cannot take.
+ * Runs `read` in one transaction begun read-only, after confirming from the server, inside that
+ * transaction and before anything is read in it, that the begin took. A deployment can point this
+ * script at a server or a route that dropped it, and reading on a write-capable connection is what
+ * the shared store's pool cannot take. Every read of the store goes through here, so a read added
+ * later cannot be the one that skips the confirmation.
  */
-async function confirmReadOnly(tx: TransactionSQL): Promise<void> {
-  const rows: { transaction_read_only: string }[] = await tx`show transaction_read_only`;
-  if (rows[0]?.transaction_read_only !== "on") throw new NotReadOnlyError();
+async function readOnly<T>(sql: SQL, read: (tx: TransactionSQL) => Promise<T>): Promise<T> {
+  return await sql.begin(READ_ONLY, async (tx) => {
+    const rows: { transaction_read_only: string }[] = await tx`show transaction_read_only`;
+    if (rows[0]?.transaction_read_only !== "on") throw new NotReadOnlyError();
+    return await read(tx);
+  });
 }
 
 /**
@@ -459,15 +464,13 @@ function liveStore(dsn: string): LiveStore {
   const sql = new SQL(dsn);
   return {
     async paths() {
-      return await sql.begin(READ_ONLY, async (tx) => {
-        await confirmReadOnly(tx);
+      return await readOnly(sql, async (tx) => {
         const rows: { path: string }[] = await tx`select path from omp_session_files order by path`;
         return rows.map((row) => row.path);
       });
     },
     async text(path) {
-      return await sql.begin(READ_ONLY, async (tx) => {
-        await confirmReadOnly(tx);
+      return await readOnly(sql, async (tx) => {
         const rows: { text: string | null }[] = await tx`
           select f.content || coalesce(
             (select string_agg(p.content, '' order by p.start_offset)
