@@ -20,8 +20,8 @@ import type { AgentEndEvent } from "./pi-types";
 
 export type ProviderTurnOutcome =
   | { kind: "clean" }
-  | { kind: "content-filter"; category?: string; provider?: string }
-  | { kind: "provider-error"; status?: number };
+  | { kind: "content-filter"; category?: string }
+  | { kind: "provider-error" };
 
 /** Anthropic's refusal text: `Refusal`, or `Refusal (<category>)`, either one optionally followed
  * by `: <explanation>` (`packages/ai/src/providers/anthropic.ts:3121-3126` at the pinned tag).
@@ -71,14 +71,6 @@ const BEDROCK_FILTER_TEXTS = [
   "Response blocked by Amazon Bedrock guardrail",
 ];
 
-/** An HTTP status leading the error text, as a provider error carries it (`429 Too Many
- * Requests`, `529 Overloaded`). */
-const LEADING_STATUS = /^(\d{3})\b/;
-
-/** The `status:<code>` form Oh My Pi writes for an error it knows only by its status
- * (`packages/coding-agent/src/extensibility/shared-events.ts:285` at the pinned tag). */
-const TAGGED_STATUS = /\bstatus:(\d{3})\b/;
-
 /** What the host puts in front of the provider's own error text when it names why it walked the
  * fallback chain: ``reason: `Request failed: ${message.errorMessage ?? "provider returned an
  * error without details"}` `` (`packages/coding-agent/src/session/turn-recovery.ts` at the
@@ -110,8 +102,8 @@ export function classifyTurnEnd(event: AgentEndEvent): ProviderTurnOutcome {
 
 /**
  * How the provider ended a turn, read from its error text alone: the content filter the text
- * names, and a provider error for every other text — with the status when the text carries one,
- * as `classifyProviderTurn` reads it. No text answers `clean`: a text is an error's.
+ * names, and a provider error for every other text, as `classifyProviderTurn` reads it. No text
+ * answers `clean`: a text is an error's.
  *
  * This is the entry point for a caller that holds a text and no message, which is what the
  * host's `retry_fallback_applied` hands one (`packages/pi-legion/src/model-fallback.ts`). A
@@ -119,11 +111,7 @@ export function classifyTurnEnd(event: AgentEndEvent): ProviderTurnOutcome {
  * the same whichever of the two a caller has.
  */
 export function classifyProviderError(text: string): ProviderTurnOutcome {
-  const error = text.replace(REQUEST_FAILED, "").trim();
-  const filter = filterFromText(error);
-  if (filter !== undefined) return filter;
-  const status = statusOf(LEADING_STATUS.exec(error)) ?? statusOf(TAGGED_STATUS.exec(error));
-  return status === undefined ? { kind: "provider-error" } : { kind: "provider-error", status };
+  return filterFromText(text.replace(REQUEST_FAILED, "").trim()) ?? { kind: "provider-error" };
 }
 
 /** The filter the message's own `stopDetails` names, when it names one: what Anthropic sends as a
@@ -157,15 +145,15 @@ function filterFromText(text: string): ProviderTurnOutcome | undefined {
   if (anthropic !== null) {
     const category = anthropic[1];
     return category === undefined || category.length === 0
-      ? { kind: "content-filter", provider: "anthropic" }
-      : { kind: "content-filter", provider: "anthropic", category };
+      ? { kind: "content-filter" }
+      : { kind: "content-filter", category };
   }
   if (OPENAI_FILTER_TEXTS.some((phrase) => text.includes(phrase)))
-    return { kind: "content-filter", provider: "openai" };
+    return { kind: "content-filter" };
   const google = googleFilter(text);
   if (google !== undefined) return google;
   if (BEDROCK_FILTER_TEXTS.some((phrase) => text.includes(phrase)))
-    return { kind: "content-filter", provider: "amazon-bedrock" };
+    return { kind: "content-filter" };
   return undefined;
 }
 
@@ -177,20 +165,12 @@ function googleFilter(text: string): ProviderTurnOutcome | undefined {
     const reason = finish[1];
     if (reason === undefined || !(GOOGLE_FILTER_REASONS[reason] || reason.startsWith("IMAGE_")))
       return undefined;
-    return { kind: "content-filter", provider: "google", category: reason };
+    return { kind: "content-filter", category: reason };
   }
   const blocked = GOOGLE_PROMPT_BLOCKED.exec(text) ?? GOOGLE_FILTERS_BLOCKED.exec(text);
   if (blocked === null) return undefined;
   const reason = blocked[1];
   return reason === undefined || reason.length === 0
-    ? { kind: "content-filter", provider: "google" }
-    : { kind: "content-filter", provider: "google", category: reason };
-}
-
-/** The matched digits as a status, or undefined when they are no HTTP status (100-599). */
-function statusOf(match: RegExpExecArray | null): number | undefined {
-  const digits = match?.[1];
-  if (digits === undefined) return undefined;
-  const status = Number.parseInt(digits, 10);
-  return status >= 100 && status <= 599 ? status : undefined;
+    ? { kind: "content-filter" }
+    : { kind: "content-filter", category: reason };
 }

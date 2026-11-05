@@ -66,17 +66,6 @@ describe("the wait a refusal earns", () => {
     expect(refused(clean, OPUS, 500).arming?.dueAt).toBe(500 + HOUR);
   });
 
-  test("a provider error that is no content filter leaves the level alone", () => {
-    const climbed = refused(EMPTY, OPUS, 0);
-    const errored = stepFallbackCooldown(
-      climbed,
-      { kind: "provider-error-turn", selector: OPUS },
-      DEFAULT_FALLBACK_COOLDOWN
-    );
-    expect(errored).toEqual(climbed);
-    expect(refused(errored, OPUS, 0).arming?.dueAt).toBe(2 * HOUR);
-  });
-
   test("two models keep their own levels", () => {
     const state = refused(refused(refused(EMPTY, OPUS, 0), OPUS, 0), GPT, 0);
     expect(state.levels).toEqual({ [OPUS]: 3, [GPT]: 2 });
@@ -86,12 +75,22 @@ describe("the wait a refusal earns", () => {
 });
 
 describe("when the session goes back", () => {
-  test("a refusal's arming is due only at its due time", () => {
+  /** The host's own suppression, as the runner reads it (`isSelectorSuppressed`). */
+  const held = () => true;
+  const free = () => false;
+
+  test("a refusal's arming is due only at its due time, and asks the host nothing", () => {
     const state = refused(EMPTY, OPUS, 1_000);
-    expect(restoreDue(state, 1_000 + HOUR - 1, false)).toBeUndefined();
-    expect(restoreDue(state, 1_000 + HOUR, false)).toEqual(state.arming);
+    let asked = 0;
+    const asking = () => {
+      asked += 1;
+      return false;
+    };
+    expect(restoreDue(state, 1_000 + HOUR - 1, asking)).toBeUndefined();
+    expect(restoreDue(state, 1_000 + HOUR, asking)).toEqual(state.arming);
     // A refusal waits out its own cooldown, whatever the host holds suppressed.
-    expect(restoreDue(state, 1_000 + HOUR, true)).toEqual(state.arming);
+    expect(restoreDue(state, 1_000 + HOUR, held)).toEqual(state.arming);
+    expect(asked).toBe(0);
   });
 
   test("any other fallback waits for the host to stop suppressing the model", () => {
@@ -107,8 +106,8 @@ describe("when the session goes back", () => {
       cause: "other",
     });
     expect(state.levels).toEqual({});
-    expect(restoreDue(state, 6_000, true)).toBeUndefined();
-    expect(restoreDue(state, 6_000, false)).toEqual(state.arming);
+    expect(restoreDue(state, 6_000, held)).toBeUndefined();
+    expect(restoreDue(state, 6_000, free)).toEqual(state.arming);
   });
 
   test("a restored session keeps its levels and is due nothing", () => {
@@ -118,7 +117,7 @@ describe("when the session goes back", () => {
       DEFAULT_FALLBACK_COOLDOWN
     );
     expect(state).toEqual({ levels: { [OPUS]: 2 } });
-    expect(restoreDue(state, 9 * HOUR, false)).toBeUndefined();
+    expect(restoreDue(state, 9 * HOUR, free)).toBeUndefined();
   });
 
   test("a superseded arming is dropped and nothing is undone", () => {
@@ -128,7 +127,7 @@ describe("when the session goes back", () => {
       DEFAULT_FALLBACK_COOLDOWN
     );
     expect(state).toEqual({ levels: { [OPUS]: 2 } });
-    expect(restoreDue(state, 9 * HOUR, false)).toBeUndefined();
+    expect(restoreDue(state, 9 * HOUR, free)).toBeUndefined();
   });
 });
 
@@ -179,7 +178,7 @@ describe("what a relaunch restores", () => {
       entry(recordedFallbackCooldown(state)),
     ]);
     expect(restored).toEqual(state);
-    expect(restoreDue(restored ?? EMPTY, 2_000 + 2 * HOUR, false)).toEqual(state.arming);
+    expect(restoreDue(restored ?? EMPTY, 2_000 + 2 * HOUR, () => false)).toEqual(state.arming);
   });
 
   test("a state with no arming records none and reads back with its levels", () => {

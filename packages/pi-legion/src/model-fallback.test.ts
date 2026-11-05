@@ -46,11 +46,20 @@ function fixture(startOn = OPUS) {
   const unresolvable = new Set<string>();
   const live = { now: 1_000_000_000, current: startOn, setModelAnswers: true };
 
-  /** One `model_change` as the host appends it, and its id. */
+  /** One `model_change` as the host appends it, and its id. Every entry carries the time it was
+   * written, as the host stamps them all (`SessionEntryBase`, `session/session-entries.ts` at
+   * the pinned tag). */
   const append = (to: string, role: string, fallback: boolean): string => {
     entries += 1;
     const id = `entry-${entries}`;
-    branch.push({ type: "model_change", id, model: to, role, resolvedModelIsFallback: fallback });
+    branch.push({
+      type: "model_change",
+      id,
+      timestamp: new Date(live.now).toISOString(),
+      model: to,
+      role,
+      resolvedModelIsFallback: fallback,
+    });
     live.current = to;
     return id;
   };
@@ -174,19 +183,35 @@ describe("a fallback the host applied", () => {
     expect(pane.setModelCalls).toEqual([OPUS]);
   });
 
-  test("whose reason names a filter is not armed a second time by the turn that settles on it", async () => {
+  // The reviewer's own case (dispatch://INFRA-956 R1, round 1): `opus-5-5` refused before any
+  // text, which the host walked itself, and then `opus-5` refused after text, which the host
+  // leaves where it is. Both refusals land in one turn, and the session must end up one step
+  // further down the chain with its return still pointing at the model it started on.
+  test("is stepped down again when the fallback model refuses too, and still returns to the model the session started on", async () => {
     const pane = fixture();
+    pane.chain.set(SONNET, GPT);
     pane.hostFallback(SONNET);
     pane.runner.armFromEvent(applied(OPUS, SONNET, "default", REFUSAL_REASON), pane.ctx);
-    const armed = pane.last();
 
-    // The host's replay was refused too, so this settled turn carries the filter the reason
-    // named: the same walk, which must not raise the selector's level twice.
+    // The host's replay of the turn was refused too, after the model had sent text: a second
+    // refusal, of the model the host had just moved the session to, which no fallback was
+    // applied for.
     await pane.runner.turnSettled(REFUSED, pane.ctx);
 
-    expect(pane.last()).toBe(armed);
-    expect(pane.setModelCalls).toEqual([]);
-    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+    expect(pane.setModelCalls).toEqual([GPT]);
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: `entry-${entries}`,
+      dueAt: pane.live.now + 2 * HOUR,
+      cause: "refusal",
+    });
+    // The walk continued the host's own, so the level that rose is the one of the model the
+    // session comes back to, and its wait had already doubled once.
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 3 });
+
+    pane.live.now += 2 * HOUR;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([GPT, OPUS]);
   });
 
   test("whose reason names no content filter is armed as any other fallback is", () => {
@@ -202,6 +227,26 @@ describe("a fallback the host applied", () => {
       cause: "other",
     });
     expect(pane.last()?.levels).toEqual({});
+  });
+
+  test("whose reason names a busy model is stepped down when a filter then ends the turn", async () => {
+    const pane = fixture();
+    pane.chain.set(SONNET, GPT);
+    pane.hostFallback(SONNET);
+    pane.runner.armFromEvent(applied(OPUS, SONNET, "default", BUSY_REASON), pane.ctx);
+
+    // The host walked for the overload, not for a filter, so the filter that ends this turn is
+    // the fallback model's own refusal and no fallback was applied for it.
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([GPT]);
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: `entry-${entries}`,
+      dueAt: pane.live.now + HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
   });
 
   test("becomes a refusal's when the turn settles on a content filter, and is not walked twice", async () => {
@@ -272,6 +317,46 @@ describe("a refusal the host did not walk", () => {
       cause: "refusal",
     });
     expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+  });
+
+  test("walked a second time keeps the model the session started on and raises that model's wait", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+    pane.chain.set(SONNET, GPT);
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    // The next turn, on the model the first walk moved the session to, is refused as well.
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([SONNET, GPT]);
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: `entry-${entries}`,
+      dueAt: pane.live.now + 2 * HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 3 });
+  });
+
+  test("walked after another model change arms a fresh return on the model it leaves", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+    pane.chain.set(GPT, SONNET);
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+    // The operator's own `/model` onto a third model, which is then refused: the walk that
+    // follows continues no walk of this plugin's, so it arms on the model it leaves.
+    pane.modelChange(GPT);
+
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([SONNET, SONNET]);
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: GPT,
+      entryId: `entry-${entries}`,
+      dueAt: pane.live.now + HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2, [GPT]: 2 });
   });
 
   test("leaves the session where it is when the chain names no next model", async () => {
@@ -397,10 +482,18 @@ describe("the return to the session's own model", () => {
   test("comes back from the transcript with its due time and its doubling level", async () => {
     const pane = fixture(SONNET);
     const entry = pane.hostFallback(SONNET);
-    pane.runner.restore({
-      arming: { restoreTo: OPUS, entryId: entry, dueAt: pane.live.now + 1_000, cause: "refusal" },
-      levels: { [OPUS]: 3 },
-    });
+    pane.runner.restore(
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: entry,
+          dueAt: pane.live.now + 1_000,
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 3 },
+      },
+      pane.ctx
+    );
 
     await pane.runner.maybeRestore(pane.ctx);
     expect(pane.setModelCalls).toEqual([]);
@@ -415,5 +508,130 @@ describe("the return to the session's own model", () => {
     await pane.runner.turnSettled(REFUSED, pane.ctx);
     expect(pane.last()?.arming?.dueAt).toBe(pane.live.now + 4 * HOUR);
     expect(pane.last()?.levels).toEqual({ [OPUS]: 4 });
+  });
+});
+
+// Plan answer 5 (dispatch://INFRA-956 R1): a session already sitting on a fallback when this
+// build starts — one applied before the plugin shipped, or a host walk `ownFallback` did not
+// claim — has no record of its own to restore, and nothing else would ever bring it back.
+describe("a session this runner finds already on a fallback", () => {
+  test("is armed from that entry's own time, on the model the change before it names", async () => {
+    const pane = fixture();
+    // The branch of a session the host walked down the chain: the model it ran on, then the
+    // fallback claim the walk wrote.
+    pane.modelChange(OPUS);
+    const entry = pane.hostFallback(SONNET);
+    const walkedAt = pane.live.now;
+    // The relaunch: half an hour after the walk, with nothing of this plugin's in the branch.
+    pane.live.now += HOUR / 2;
+
+    pane.runner.restore(undefined, pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: walkedAt + HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+
+    // The rest of the wait runs from the walk, not from the restore.
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([]);
+    pane.live.now += HOUR / 2;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([OPUS]);
+  });
+
+  test("keeps the levels a record carried and arms on top of them", () => {
+    const pane = fixture();
+    pane.modelChange(OPUS);
+    const entry = pane.hostFallback(SONNET);
+
+    pane.runner.restore({ levels: { [OPUS]: 3 } }, pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: pane.live.now + 4 * HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 4 });
+  });
+
+  test("whose entry carries no readable time waits the base cooldown from the restore", () => {
+    const pane = fixture();
+    pane.modelChange(OPUS);
+    // An entry a build that stamped none wrote, or one whose stamp is no date.
+    pane.branch.push({
+      type: "model_change",
+      id: "entry-unstamped",
+      model: SONNET,
+      role: "fallback",
+      resolvedModelIsFallback: true,
+    });
+
+    pane.runner.restore(undefined, pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: "entry-unstamped",
+      dueAt: pane.live.now + HOUR,
+      cause: "refusal",
+    });
+  });
+
+  test("is left alone when the record already holds an arming, and when no fallback is live", () => {
+    const armed = fixture();
+    armed.modelChange(OPUS);
+    const entry = armed.hostFallback(SONNET);
+    const own = {
+      arming: { restoreTo: GPT, entryId: entry, dueAt: armed.live.now + 5, cause: "refusal" },
+      levels: {},
+    } as const;
+    armed.runner.restore(own, armed.ctx);
+    expect(armed.saved).toEqual([]);
+
+    // A session whose newest model change is the operator's own, or the host's own restore, is
+    // on nobody's fallback.
+    const ordinary = fixture();
+    ordinary.modelChange(OPUS);
+    ordinary.modelChange(SONNET);
+    ordinary.runner.restore(undefined, ordinary.ctx);
+    expect(ordinary.saved).toEqual([]);
+  });
+
+  test("names the model it cannot come back to when the branch records no earlier change", () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+
+    pane.runner.restore(undefined, pane.ctx);
+
+    expect(pane.saved).toEqual([]);
+    expect(pane.warnings).toEqual([
+      "legion: this session runs on a fallback model and its branch does not say which model it came from",
+    ]);
+  });
+
+  test("takes the new session's own record when the pane is left on another session", async () => {
+    const pane = fixture(SONNET);
+    const entry = pane.hostFallback(SONNET);
+    pane.runner.restore(
+      {
+        arming: { restoreTo: OPUS, entryId: entry, dueAt: pane.live.now, cause: "refusal" },
+        levels: { [OPUS]: 2 },
+      },
+      pane.ctx
+    );
+
+    // The pane is switched to a session that never fell back: nothing of the old session's is
+    // armed on it, and the model it runs on is its own business.
+    const switched = fixture();
+    switched.modelChange(OPUS);
+    pane.runner.restore(undefined, switched.ctx);
+
+    await pane.runner.maybeRestore(switched.ctx);
+    expect(switched.setModelCalls).toEqual([]);
+    expect(pane.setModelCalls).toEqual([]);
   });
 });

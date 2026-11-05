@@ -63,10 +63,11 @@ export interface ModelFallbackDeps {
 }
 
 export interface ModelFallback {
-  /** `session_start`: the state the branch holds (`restoreFallbackCooldown`), or undefined when
-   * this session has never fallen back. A relaunched worker comes back with its due time and its
-   * doubling levels. */
-  readonly restore: (state: FallbackCooldownState | undefined) => void;
+  /** `session_start`, and every session change after it: the state the branch holds
+   * (`restoreFallbackCooldown`), or undefined when this session has never fallen back. A
+   * relaunched worker comes back with its due time and its doubling levels, and a session already
+   * sitting on a fallback the record does not hold is armed from the branch itself. */
+  readonly restore: (state: FallbackCooldownState | undefined, ctx: ModelFallbackContext) => void;
   /** The host's `retry_fallback_applied`: the host walked the chain itself, and its own reason
    * says whether a content filter is what it walked for. */
   readonly armFromEvent: (event: RetryFallbackAppliedEvent, ctx: ModelFallbackContext) => void;
@@ -84,6 +85,14 @@ interface OwnFallback {
   readonly entryId: string;
   /** The `model_change` before it, when the branch holds one. */
   readonly previousEntryId: string | undefined;
+}
+
+/** The newest `model_change` on the branch and the one before it. The entry before is read by
+ * every caller of `newestModelChange`: it says which model a fallback left, and whether a new
+ * step continues the walk a live arming began. */
+interface NewestChange {
+  readonly entry: ModelChangeEntry;
+  readonly previous: ModelChangeEntry | undefined;
 }
 
 /** A `model_change` as `getBranch()` hands it back (`ModelChangeEntry`, `src/pi-types.ts`). The
@@ -113,14 +122,25 @@ function sameModel(a: HostModel | undefined, b: HostModel | undefined): boolean 
   return a !== undefined && b !== undefined && a.provider === b.provider && a.id === b.id;
 }
 
-/** The newest `model_change` the branch holds, or undefined when it holds none this build reads.
- * `ownFallback` walks with `modelChangeBefore` itself: it needs the index, to read the change
- * before the newest one. */
-function newestModelChange(ctx: ModelFallbackContext): ModelChangeEntry | undefined {
+/** The newest `model_change` the branch holds with the one before it, or undefined when it holds
+ * none this build reads. */
+function newestModelChange(ctx: ModelFallbackContext): NewestChange | undefined {
   const branch = ctx.sessionManager.getBranch?.() ?? [];
   const at = modelChangeBefore(branch, branch.length);
-  const entry = at < 0 ? undefined : branch[at];
-  return isModelChange(entry) ? entry : undefined;
+  if (at < 0) return undefined;
+  const entry = branch[at];
+  if (!isModelChange(entry)) return undefined;
+  const beforeAt = modelChangeBefore(branch, at);
+  const before = beforeAt < 0 ? undefined : branch[beforeAt];
+  return { entry, previous: isModelChange(before) ? before : undefined };
+}
+
+/** When the branch says an entry was written, or undefined when this build cannot read it: the
+ * host stamps every entry with an ISO time (`SessionEntryBase`,
+ * `session/session-entries.ts:93-111` at the pinned tag). */
+function changedAt(entry: ModelChangeEntry): number | undefined {
+  const at = entry.timestamp === undefined ? Number.NaN : Date.parse(entry.timestamp);
+  return Number.isFinite(at) ? at : undefined;
 }
 
 export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
@@ -128,9 +148,10 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
   /** Every `model_change` entry an event has already claimed, so a second event — an advisor's
    * that follows the session's own onto the same model — does not claim it again. */
   const claimed = new Set<string>();
-  /** The entry of a fallback the host applied since the last settled turn, so a content filter
-   * that settles after it is known to be one the host already walked. */
-  let appliedThisTurn: string | undefined;
+  /** The fallback the host applied since the last settled turn: the `model_change` entry its walk
+   * wrote, and whether the event said what it walked for. An event that named a reason has
+   * already answered the refusal it walked, so a filter that settles after it is another one. */
+  let appliedThisTurn: { readonly entryId: string; readonly reasoned: boolean } | undefined;
 
   /** Keeps the state and persists it, and only when the step changed it: every unchanged step of
    * the machine answers the state it was given. */
@@ -167,17 +188,13 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
   ): OwnFallback | undefined => {
     const resolve = ctx.models?.resolve;
     if (resolve === undefined) return undefined;
-    const branch = ctx.sessionManager.getBranch?.() ?? [];
-    const at = modelChangeBefore(branch, branch.length);
-    const entry = at < 0 ? undefined : branch[at];
-    if (!isModelChange(entry)) return undefined;
+    const change = newestModelChange(ctx);
+    if (change === undefined) return undefined;
+    const { entry, previous } = change;
     if (entry.model === undefined) return undefined;
     if (entry.role !== "fallback" || entry.resolvedModelIsFallback !== true) return undefined;
     if (claimed.has(entry.id)) return undefined;
     if (!sameModel(resolve(event.to), resolve(entry.model))) return undefined;
-    const beforeAt = modelChangeBefore(branch, at);
-    const before = beforeAt < 0 ? undefined : branch[beforeAt];
-    const previous = isModelChange(before) ? before : undefined;
     const beforeModel = previous?.model === undefined ? undefined : resolve(previous.model);
     const fromModel = resolve(event.from);
     // Lenient when either side resolves to nothing: a missed fallback costs more than this race.
@@ -205,6 +222,25 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
       models,
       log: deps.log,
     };
+  };
+
+  /**
+   * The selector a new arming returns to: the live arming's own when this step continues the walk
+   * that arming began, and the model the session is leaving when the step starts a fresh walk.
+   *
+   * A step continues a walk when the `model_change` it arms on follows the arming's own entry:
+   * nothing moved the session's model in between, so this is the same chain walked one step
+   * further down and the model to come back to is still the one the session started on — the
+   * rule the reference extension states (sjawhar/dotfiles `omp/extensions/fallback-event.ts`).
+   * A walk after any other model change — the operator's `/model`, the host's own restore,
+   * another session — finds a different entry there and arms on the model it is leaving.
+   *
+   * The cooldown keys its doubling level by this selector, so a continued walk raises the level
+   * of the model the session will return to rather than one in the middle of the chain.
+   */
+  const restoreTarget = (previousEntryId: string | undefined, leaving: string): string => {
+    const arming = state.arming;
+    return arming !== undefined && previousEntryId === arming.entryId ? arming.restoreTo : leaving;
   };
 
   /**
@@ -244,8 +280,8 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
       });
       return;
     }
-    const entry = newestModelChange(ctx);
-    if (entry === undefined) {
+    const change = newestModelChange(ctx);
+    if (change === undefined) {
       deps.log.warn("legion: the model switch left no model_change entry to arm the return on", {
         model: selector,
         next: modelSelector(next),
@@ -255,8 +291,8 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     save(
       step({
         kind: "fallback-applied",
-        restoreTo: selector,
-        entryId: entry.id,
+        restoreTo: restoreTarget(change.previous?.id, selector),
+        entryId: change.entry.id,
         cause: "refusal",
         now: deps.now(),
       })
@@ -272,12 +308,15 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
     const outcome = classifyTurnEnd(event);
     const current = ctx.models?.current?.();
     if (outcome.kind === "content-filter") {
-      // The host walked the chain for this very refusal: the arming it left becomes a refusal's,
-      // so it waits out the growing cooldown rather than the host's own suppression. A host
-      // build whose event named the filter armed that already, and arming it twice would double
-      // the selector's level for one walk, so this is the path for a build that named nothing.
-      if (applied !== undefined && state.arming?.entryId === applied) {
-        if (state.arming.cause === "refusal") return;
+      // A host build whose `retry_fallback_applied` carried no reason: this settled turn is the
+      // one thing that says a filter is what the host walked for, so that same arming becomes a
+      // refusal's and waits out the growing cooldown rather than a suppression the host never
+      // applies for one. The walk already happened for it, so the session steps down no further.
+      if (
+        applied?.reasoned === false &&
+        state.arming?.entryId === applied.entryId &&
+        state.arming.cause === "other"
+      ) {
         save(
           step({
             kind: "fallback-applied",
@@ -289,6 +328,12 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         );
         return;
       }
+      // Every other filter that ended a settling turn is one no fallback was applied **for**,
+      // and the plugin steps the session down itself. A refusal of the fallback model after the
+      // host walked an earlier one in the same turn is one of those: the host's own event said
+      // what that walk was for, so this message is the session's second refusal, on the model it
+      // just moved to, and leaving it alone would send the next request to the model that had
+      // refused it.
       if (current === undefined) {
         deps.log.warn("legion: a content filter refused this turn and this host names no model");
         return;
@@ -296,31 +341,28 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
       await walkChain(ctx, current);
       return;
     }
-    if (current === undefined) return;
-    save(
-      step(
-        outcome.kind === "provider-error"
-          ? { kind: "provider-error-turn", selector: modelSelector(current) }
-          : { kind: "clean-turn", selector: modelSelector(current) }
-      )
-    );
+    // A provider error that is no content filter leaves every wait where it is: a rate limit is
+    // not the model refusing. Only a clean turn puts its model's wait back to the base.
+    if (outcome.kind === "provider-error" || current === undefined) return;
+    save(step({ kind: "clean-turn", selector: modelSelector(current) }));
   };
 
   const restoreIfDue = async (ctx: ModelFallbackContext): Promise<void> => {
     const arming = state.arming;
     if (arming === undefined) return;
-    // The clock before anything else: the host runs this before every provider request, and a
-    // refusal's arming waits an hour to eight hours. The reads below — the whole session branch,
-    // the whole model catalogue — would answer nothing for every one of those requests.
-    // `restoreDue` ignores the host's suppression for a refusal, so the wait is the whole of what
-    // decides it, and the `superseded` and `restored` bookkeeping this skips moves no model: it
-    // is read again at the first request after the wait is over. An `"other"` arming is due at
-    // once and takes the path below as it always did.
-    if (arming.cause === "refusal" && deps.now() < arming.dueAt) return;
+    // Whether the arming is due at all is decided in one place, the cooldown machine's
+    // `restoreDue`, and asked before anything else: the host runs this before every provider
+    // request, and a refusal's arming waits an hour to eight hours. The reads below — the whole
+    // session branch, the whole model catalogue — would answer nothing for every one of those
+    // requests, and the host is asked whether it suppresses the model only for an arming whose
+    // wait that is. The `superseded` and `restored` bookkeeping skipped while an arming waits
+    // moves no model: it is read again at the first request after the wait is over.
+    const suppressed = () => ctx.modelRegistry?.isSelectorSuppressed?.(arming.restoreTo) === true;
+    if (restoreDue(state, deps.now(), suppressed) === undefined) return;
     const newest = newestModelChange(ctx);
     // Any model change since the fallback — the operator's `/model`, the host's own restore,
     // another session resumed in this process — is not this arming's to undo.
-    if (newest === undefined || newest.id !== arming.entryId) {
+    if (newest === undefined || newest.entry.id !== arming.entryId) {
       save(step({ kind: "superseded" }));
       return;
     }
@@ -335,8 +377,6 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
       save(step({ kind: "restored" }));
       return;
     }
-    const suppressed = ctx.modelRegistry?.isSelectorSuppressed?.(arming.restoreTo) === true;
-    if (restoreDue(state, deps.now(), suppressed) === undefined) return;
     if (!(await deps.setModel(target))) {
       deps.log.warn("legion: the model this session fell back from could not be set again", {
         model: arming.restoreTo,
@@ -354,8 +394,46 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
   };
 
   return {
-    restore: (restored) => {
-      if (restored !== undefined) state = restored;
+    restore: (restored, ctx) => {
+      try {
+        state = restored ?? { levels: {} };
+        // A fallback applied in a turn of the session this pane has just left is no fallback of
+        // this one.
+        appliedThisTurn = undefined;
+        if (state.arming !== undefined) return;
+        // No record of an arming, and the session is sitting on a fallback: one written before
+        // this build ran, or a host walk `ownFallback` did not claim. Nothing else will ever arm
+        // it, so it is armed here from the entry's own time (dispatch://INFRA-956 R1, answer 5)
+        // and the session comes back when the wait from that moment is over.
+        const change = newestModelChange(ctx);
+        if (change === undefined) return;
+        const { entry, previous } = change;
+        if (entry.role !== "fallback" || entry.resolvedModelIsFallback !== true) return;
+        if (previous?.model === undefined) {
+          deps.log.warn(
+            "legion: this session runs on a fallback model and its branch does not say which model it came from",
+            { model: entry.model }
+          );
+          return;
+        }
+        // The entry says nothing about why the host stepped down, so it is armed as a refusal's:
+        // a cooldown the session comes back after, rather than a suppression that nothing here
+        // will ever see end. An entry whose own time this build cannot read is taken as written
+        // now, so the session waits the whole base cooldown from this moment: coming back late
+        // costs one wait, coming back early hands the session to a model that may refuse again.
+        claimed.add(entry.id);
+        save(
+          step({
+            kind: "fallback-applied",
+            restoreTo: previous.model,
+            entryId: entry.id,
+            cause: "refusal",
+            now: changedAt(entry) ?? deps.now(),
+          })
+        );
+      } catch (error) {
+        contained("read the fallback this session is already on", error);
+      }
     },
     armFromEvent: (event, ctx) => {
       try {
@@ -364,11 +442,7 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         if (event.role === "fireworks-fast") return;
         const own = ownFallback(event, ctx);
         if (own === undefined) return;
-        appliedThisTurn = own.entryId;
-        // A step that continues the same walk keeps the model the session started on rather than
-        // the one it has just left; a fallback after any other model change starts a new arming.
-        const previous = state.arming;
-        const continues = previous !== undefined && own.previousEntryId === previous.entryId;
+        appliedThisTurn = { entryId: own.entryId, reasoned: event.reason !== undefined };
         // What the host walked for, in the provider's own words: it names the reason as
         // `Request failed: ` and the error text of the message that failed
         // (`session/turn-recovery.ts` at the pinned tag `v18.16.0-sami.20261104-021732`), so
@@ -383,16 +457,18 @@ export function createModelFallback(deps: ModelFallbackDeps): ModelFallback {
         // (`session/turn-recovery.ts:3229` at the pinned tag) — and hand the session straight
         // back to the model that had just refused it, with no cooldown at all.
         //
-        // A host build that sends no reason arms `"other"`, as every arming did before: for it
-        // `settled` stays the path that re-arms the fallback as a refusal once the turn ends on
-        // the filter's own message. That is why both paths exist.
+        // A host build that sends no reason arms `"other"`, as every arming did before, and
+        // `settled` keeps the path that re-arms such a fallback as a refusal once the turn ends
+        // on the filter's own message. That is why both paths exist, and why `appliedThisTurn`
+        // carries which build this is: after an event that named its reason, a filter that ends
+        // the turn is a second refusal and `settled` steps the session down for it.
         const refusal =
           event.reason === undefined ? undefined : classifyProviderError(event.reason);
         save(
           step({
             kind: "fallback-applied",
             cause: refusal?.kind === "content-filter" ? "refusal" : "other",
-            restoreTo: continues ? previous.restoreTo : event.from,
+            restoreTo: restoreTarget(own.previousEntryId, event.from),
             entryId: own.entryId,
             now: deps.now(),
           })

@@ -14,6 +14,13 @@ body: |-
   daemon relaunches waits out the time that was left rather than coming back early. A fallback the
   host made for anything else — a rate limit, an overload, a spent quota window — carries no
   cooldown of its own and waits for the host's suppression of that model to end.
+  A refusal of the fallback model itself — the model a walk has just moved the session to — steps
+  the session one further down the same chain and still returns it to the model the session
+  started on, with the wait that model's own refusals have earned. A session that is already on a
+  fallback when this build starts, one applied before the plugin shipped or one the claim check
+  did not match, is armed from that model change's own timestamp, so it comes back as well, and a
+  session change — a switch, a branch, a tree navigation — reads the state of the branch the pane
+  is left on.
   A deployment sets `retry.fallbackRevertPolicy: never` beside its chains, which keeps the host from
   returning the session to a model it suppressed itself before the plugin's wait is over;
   `scripts/e2e/refusal-fallback-omp.sh` measures the whole window on real panes.

@@ -28,27 +28,44 @@ import {
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 
-/** The pane's own two models: the one every model role names, and the one its chain steps to. */
+/** The pane's own models: the one every model role names, the one its chain steps to, and the
+ * one in between, for the case whose chain has two steps. */
 const STRONG = "standin/strong-model";
+const MIDDLE = "standin/middle-model";
 const WEAK = "standin/weak-model";
 
-/** One stand-in serves both, so a case tells them apart by the `model` of the request it answers. */
+/** One stand-in serves them all, so a case tells them apart by the `model` of the request it
+ * answers. The first model of the first provider is what every model role runs on
+ * (`writeStandinProfile`), so the stronger model stays first. */
 const PROVIDERS: readonly StandinProvider[] = [
-  { provider: "standin", models: ["strong-model", "weak-model"] },
+  { provider: "standin", models: ["strong-model", "weak-model", "middle-model"] },
 ];
 
 /**
  * The pane's overlay, in the shape INFRA's own operator overlay carries
  * (deploy/kubernetes/operator-route/overlay.yml, docs/kubernetes.md "Operator configuration"):
- * the model fallback on, a chain from the stronger model to the weaker, and no revert of the
- * host's own — the return is the plugin's.
+ * the model fallback on, the chain the case runs under, and no revert of the host's own — the
+ * return is the plugin's.
  */
-const OVERLAY: readonly string[] = [
-  "retry:",
-  "  modelFallback: true",
-  "  fallbackRevertPolicy: never",
-  "  fallbackChains:",
-  `    ${STRONG}: [${WEAK}]`,
+function overlay(chains: readonly string[]): readonly string[] {
+  return [
+    "retry:",
+    "  modelFallback: true",
+    "  fallbackRevertPolicy: never",
+    "  fallbackChains:",
+    ...chains,
+  ];
+}
+
+/** One step: the chain every case but the two-refusal walk runs under. */
+const ONE_STEP: readonly string[] = [`    ${STRONG}: [${WEAK}]`];
+
+/** Two steps, each model keyed on its own: the host's own chain resolution keys a walk by the
+ * model the session runs now (`resolveRetryFallbackChainKey`, `session/retry-fallback-chains.ts`
+ * at the pinned tag), so the middle model needs a key of its own to be walked from. */
+const TWO_STEPS: readonly string[] = [
+  `    ${STRONG}: [${MIDDLE}, ${WEAK}]`,
+  `    ${MIDDLE}: [${WEAK}]`,
 ];
 
 /**
@@ -136,6 +153,8 @@ async function fallbackPane(
     readonly answer: (model: string, nth: number, request: Request) => Response;
     /** `LEGION_REFUSAL_COOLDOWN_MS`; `COOLDOWN_MS` by default. */
     readonly cooldownMs?: number;
+    /** The `fallbackChains` lines of the pane's overlay; `ONE_STEP` by default. */
+    readonly chains?: readonly string[];
   }
 ): Promise<FallbackPane> {
   const served: Served[] = [];
@@ -148,7 +167,7 @@ async function fallbackPane(
       tree: "FALL-1",
       issue: "FALL-1",
       prompt: options.prompt,
-      config: OVERLAY,
+      config: overlay(options.chains ?? ONE_STEP),
       providers: PROVIDERS,
       env: {
         LEGION_REFUSAL_COOLDOWN_MS: String(options.cooldownMs ?? COOLDOWN_MS),
@@ -224,6 +243,57 @@ test.skipIf(omp === undefined && !onActions)(
     expect(pane.returnedAt(dueAt)).toBeDefined();
   },
   180_000
+);
+
+test.skipIf(omp === undefined && !onActions)(
+  "a refusal of the fallback model after the host's own walk steps down again and comes back to the model the session started on",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    /** When the turn that pings the gateway every second must stop and let the run settle: past
+     * the doubled wait the second refusal bought. */
+    let until = 0;
+    const pane = await fallbackPane(omp, {
+      chains: TWO_STEPS,
+      prompt: ["Start FALL-1.", "Keep working."],
+      answer: (_model, nth) => {
+        // Refused before any output: the host walks its own chain to the middle model and
+        // replays the turn there.
+        if (nth === 1) return refuses("refusal_1");
+        // The replay is refused after text, which the host leaves where it is: the plugin's own
+        // walk takes it from the middle model to the weaker one.
+        if (nth === 2) {
+          until = Date.now() + 4 * COOLDOWN_MS;
+          return refuses("refusal_2", { text: "Looking at it." });
+        }
+        return Date.now() < until
+          ? replies([sleeps(1)], `ping_${nth}`)
+          : replies([{ type: "text", text: "Done." }], `msg_${nth}`);
+      },
+    });
+
+    expect(pane.models().slice(0, 3)).toEqual(["strong-model", "middle-model", "weak-model"]);
+    const states = await pane.cooldowns();
+    const armed = states.findLast((state) => state.arming !== undefined)?.arming;
+    // The defect this case is the proof of: the plugin's own walk armed the return on the model
+    // it was leaving, so the session came back to the middle of the chain and never to the model
+    // it started on. The second step continues the host's own walk, so the return still points
+    // at the stronger model, and the wait it bought is the doubled one of that model.
+    expect(armed).toMatchObject({ restoreTo: STRONG, cause: "refusal" });
+    expect(states.findLast((state) => state.arming !== undefined)?.levels).toEqual({
+      [STRONG]: 3,
+    });
+    const refusedAt = pane.served[1]?.at ?? 0;
+    const dueAt = armed?.dueAt ?? 0;
+    expect(dueAt - refusedAt).toBeGreaterThanOrEqual(2 * COOLDOWN_MS);
+    // Nothing went back before that wait, and what the session went back to is the stronger
+    // model: no request of this pane ever went to the middle model again.
+    const waiting = pane.served.slice(2).filter((turn) => turn.at < dueAt);
+    expect(waiting.length).toBeGreaterThan(1);
+    expect(waiting.map((turn) => turn.model)).not.toContain("strong-model");
+    expect(pane.returnedAt(dueAt)).toBeDefined();
+    expect(pane.models().slice(2)).not.toContain("middle-model");
+  },
+  240_000
 );
 
 test.skipIf(omp === undefined && !onActions)(

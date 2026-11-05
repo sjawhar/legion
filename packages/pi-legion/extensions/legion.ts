@@ -372,8 +372,10 @@ export default function legionExtension(pi: PiApi): void {
     // transcript is this host's store for that record; the runner is handed the record alone.
     phaseReminder.restore(restorePhaseStallEntry(branch));
     // The same for a session that fell back down the model chain before the relaunch: it comes
-    // back with the due time of its return and how often each model's wait has doubled.
-    modelFallback.restore(restoreFallbackCooldown(branch));
+    // back with the due time of its return and how often each model's wait has doubled, and a
+    // session sitting on a fallback no record of this plugin's holds is armed from the branch's
+    // own `model_change` (src/model-fallback.ts).
+    modelFallback.restore(restoreFallbackCooldown(branch), context);
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
@@ -501,6 +503,13 @@ export default function legionExtension(pi: PiApi): void {
     // and the new one is where the next is armed.
     paneContext = context;
     phaseReminder.sessionChanged();
+    // The model fallback follows the pane the same way: the arming, the doubling levels and the
+    // fallback this session may already be sitting on are the new branch's own, read as
+    // session_start reads them.
+    modelFallback.restore(
+      restoreFallbackCooldown(context.sessionManager.getBranch?.() ?? []),
+      context
+    );
     if (classifySession(process.env).kind === "controller") await titleSession(context);
     await controllerSession.reclaimAfterSessionChange(context);
   };

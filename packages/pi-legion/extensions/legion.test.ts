@@ -5737,6 +5737,82 @@ describe("the model fallback", () => {
     expect(armings(pane)).toEqual([{ levels: { [OPUS]: 3 } }]);
   });
 
+  /** The model the session ran on before that walk: what its return goes back to, as the branch
+   * records it. */
+  const ranOn = {
+    type: "model_change",
+    id: "mc-opus",
+    timestamp: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+    model: OPUS,
+    role: "default",
+    resolvedModelIsFallback: false,
+  };
+  /** The same walk as a branch written before this process started holds it: two hours back, so
+   * the base cooldown of one hour counted from that entry has run out. */
+  const walkedTwoHoursAgo = {
+    ...walked,
+    timestamp: new Date(Date.now() - 2 * 3_600_000).toISOString(),
+  };
+
+  test("a session already on a fallback when this build starts is armed from that entry and comes back", async () => {
+    const pane = await bootPane({
+      role: "implementer",
+      issue: "REPO-43",
+      branch: [ranOn, walkedTwoHoursAgo],
+    });
+    pane.models.current = SONNET;
+
+    // session_start found no record of this plugin's and a newest `model_change` that is a live
+    // fallback, so the return is armed from that entry's own time.
+    expect(armings(pane)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+
+    // Two hours have passed since that entry, so the first request of the session takes it back.
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+    expect(armings(pane).at(-1)).toEqual({ levels: { [OPUS]: 2 } });
+  });
+
+  test("a session change reads the fallback the branch the pane lands on records", async () => {
+    const pane = await bootPane({ role: "implementer", issue: "REPO-43" });
+    expect(armings(pane)).toEqual([]);
+    pane.models.current = SONNET;
+    // Whatever left the pane on another session — a switch, a branch, a tree navigation — that
+    // session's own branch is where the fallback state is read again.
+    const landed: SessionContext = {
+      ...pane.context,
+      sessionManager: {
+        ...pane.context.sessionManager,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...pane.models.changes],
+      },
+    };
+
+    await pane.handlers.get("session_switch")?.({ reason: "switch" }, landed);
+
+    expect(armings(pane)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+    await pane.handlers.get("context")?.({ messages: [] }, landed);
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+  });
+
   test("a session that holds no Legion claim moves no model", async () => {
     const pane = await claimPane({ role: "implementer", issue: "REPO-43", branch: [walked] });
     pane.models.current = SONNET;

@@ -12,25 +12,19 @@ function errorTurn(errorMessage: string): unknown {
 
 describe("a provider's own refusal text", () => {
   test("Anthropic's bare refusal is a content filter with no category", () => {
-    expect(classifyProviderTurn(errorTurn("Refusal"))).toEqual({
-      kind: "content-filter",
-      provider: "anthropic",
-    });
+    expect(classifyProviderTurn(errorTurn("Refusal"))).toEqual({ kind: "content-filter" });
   });
 
   test("Anthropic names the category in parentheses and the explanation after the colon", () => {
     expect(classifyProviderTurn(errorTurn("Refusal (csam): we cannot help with that"))).toEqual({
       kind: "content-filter",
-      provider: "anthropic",
       category: "csam",
     });
     expect(classifyProviderTurn(errorTurn("Refusal: we cannot help with that"))).toEqual({
       kind: "content-filter",
-      provider: "anthropic",
     });
     expect(classifyProviderTurn(errorTurn("Refusal (no details provided)"))).toEqual({
       kind: "content-filter",
-      provider: "anthropic",
       category: "no details provided",
     });
   });
@@ -38,11 +32,9 @@ describe("a provider's own refusal text", () => {
   test("OpenAI's two filter texts are a content filter", () => {
     expect(classifyProviderTurn(errorTurn("Provider finish_reason: content_filter"))).toEqual({
       kind: "content-filter",
-      provider: "openai",
     });
     expect(classifyProviderTurn(errorTurn("incomplete: content_filter"))).toEqual({
       kind: "content-filter",
-      provider: "openai",
     });
   });
 
@@ -60,7 +52,7 @@ describe("a provider's own refusal text", () => {
     ]) {
       expect(
         classifyProviderTurn(errorTurn(`Generation failed with finish reason: ${reason}`))
-      ).toEqual({ kind: "content-filter", provider: "google", category: reason });
+      ).toEqual({ kind: "content-filter", category: reason });
     }
   });
 
@@ -75,12 +67,11 @@ describe("a provider's own refusal text", () => {
   test("Google's two blocked texts carry their reason as the category", () => {
     expect(classifyProviderTurn(errorTurn("Request blocked by Google (SAFETY): hate"))).toEqual({
       kind: "content-filter",
-      provider: "google",
       category: "SAFETY",
     });
     expect(
       classifyProviderTurn(errorTurn("Generation was blocked by content filters (PROHIBITED)"))
-    ).toEqual({ kind: "content-filter", provider: "google", category: "PROHIBITED" });
+    ).toEqual({ kind: "content-filter", category: "PROHIBITED" });
   });
 
   test("Amazon Bedrock's filters and guardrails are a content filter", () => {
@@ -88,12 +79,12 @@ describe("a provider's own refusal text", () => {
       classifyProviderTurn(
         errorTurn("Response filtered by Amazon Bedrock content filters (stop reason: guardrail).")
       )
-    ).toEqual({ kind: "content-filter", provider: "amazon-bedrock" });
+    ).toEqual({ kind: "content-filter" });
     expect(
       classifyProviderTurn(
         errorTurn("Response blocked by Amazon Bedrock guardrail (stop reason: guardrail).")
       )
-    ).toEqual({ kind: "content-filter", provider: "amazon-bedrock" });
+    ).toEqual({ kind: "content-filter" });
   });
 });
 
@@ -120,36 +111,16 @@ describe("a structured stop the provider sent", () => {
 describe("a provider failure that is no refusal", () => {
   // The step-down exists for a model that refuses the prompt. A busy model answers the same prompt
   // a minute later, so a rate limit and an overload stay provider errors.
-  test("a 429 and a 529 are provider errors carrying their status", () => {
-    expect(classifyProviderTurn(errorTurn("429 Too Many Requests"))).toEqual({
-      kind: "provider-error",
-      status: 429,
-    });
-    expect(classifyProviderTurn(errorTurn("529 Overloaded"))).toEqual({
-      kind: "provider-error",
-      status: 529,
-    });
-  });
-
-  test("the status:<code> form Oh My Pi writes is read as the status", () => {
-    expect(classifyProviderTurn(errorTurn("Provider error (status:503)"))).toEqual({
-      kind: "provider-error",
-      status: 503,
-    });
-  });
-
-  test("an error naming no status is a provider error with none", () => {
-    expect(classifyProviderTurn(errorTurn("socket hang up"))).toEqual({ kind: "provider-error" });
+  test("a rate limit, an overload and every other failure are a provider error", () => {
+    for (const text of [
+      "429 Too Many Requests",
+      "529 Overloaded",
+      "Provider error (status:503)",
+      "socket hang up",
+    ]) {
+      expect(classifyProviderTurn(errorTurn(text))).toEqual({ kind: "provider-error" });
+    }
     expect(classifyProviderTurn({ stopReason: "error" })).toEqual({ kind: "provider-error" });
-  });
-
-  test("a number that is no HTTP status is not read as one", () => {
-    expect(classifyProviderTurn(errorTurn("999 tokens over the limit"))).toEqual({
-      kind: "provider-error",
-    });
-    expect(classifyProviderTurn(errorTurn("8080 refused the connection"))).toEqual({
-      kind: "provider-error",
-    });
   });
 });
 
@@ -173,37 +144,31 @@ describe("a turn no provider ended badly", () => {
 describe("an error text on its own", () => {
   /** Every filter text the module matches, and the outcome it reads as. */
   const FILTERS: readonly [string, ProviderTurnOutcome][] = [
-    ["Refusal", { kind: "content-filter", provider: "anthropic" }],
-    [
-      "Refusal (csam): we cannot help with that",
-      { kind: "content-filter", provider: "anthropic", category: "csam" },
-    ],
-    ["Refusal: we cannot help with that", { kind: "content-filter", provider: "anthropic" }],
-    ["Provider finish_reason: content_filter", { kind: "content-filter", provider: "openai" }],
-    ["incomplete: content_filter", { kind: "content-filter", provider: "openai" }],
+    ["Refusal", { kind: "content-filter" }],
+    ["Refusal (csam): we cannot help with that", { kind: "content-filter", category: "csam" }],
+    ["Refusal: we cannot help with that", { kind: "content-filter" }],
+    ["Provider finish_reason: content_filter", { kind: "content-filter" }],
+    ["incomplete: content_filter", { kind: "content-filter" }],
     [
       "Generation failed with finish reason: SAFETY",
-      { kind: "content-filter", provider: "google", category: "SAFETY" },
+      { kind: "content-filter", category: "SAFETY" },
     ],
     [
       "Generation failed with finish reason: IMAGE_SAFETY",
-      { kind: "content-filter", provider: "google", category: "IMAGE_SAFETY" },
+      { kind: "content-filter", category: "IMAGE_SAFETY" },
     ],
-    [
-      "Request blocked by Google (SAFETY): hate",
-      { kind: "content-filter", provider: "google", category: "SAFETY" },
-    ],
+    ["Request blocked by Google (SAFETY): hate", { kind: "content-filter", category: "SAFETY" }],
     [
       "Generation was blocked by content filters (PROHIBITED)",
-      { kind: "content-filter", provider: "google", category: "PROHIBITED" },
+      { kind: "content-filter", category: "PROHIBITED" },
     ],
     [
       "Response filtered by Amazon Bedrock content filters (stop reason: guardrail).",
-      { kind: "content-filter", provider: "amazon-bedrock" },
+      { kind: "content-filter" },
     ],
     [
       "Response blocked by Amazon Bedrock guardrail (stop reason: guardrail).",
-      { kind: "content-filter", provider: "amazon-bedrock" },
+      { kind: "content-filter" },
     ],
   ];
 
@@ -219,7 +184,6 @@ describe("an error text on its own", () => {
     // What `retry_fallback_applied` carried in the live pane proof of INFRA-956 R1.
     expect(classifyProviderError("Request failed: Refusal (cyber): Declined")).toEqual({
       kind: "content-filter",
-      provider: "anthropic",
       category: "cyber",
     });
     for (const [text, outcome] of FILTERS) {
@@ -227,23 +191,11 @@ describe("an error text on its own", () => {
     }
   });
 
-  test("reads a 429 and a 529 as provider errors carrying their status", () => {
-    expect(classifyProviderError("429 Too Many Requests")).toEqual({
-      kind: "provider-error",
-      status: 429,
-    });
-    expect(classifyProviderError("Request failed: 429 Too Many Requests")).toEqual({
-      kind: "provider-error",
-      status: 429,
-    });
-    expect(classifyProviderError("529 Overloaded")).toEqual({
-      kind: "provider-error",
-      status: 529,
-    });
-    expect(classifyProviderError("Request failed: 529 Overloaded")).toEqual({
-      kind: "provider-error",
-      status: 529,
-    });
+  test("reads a rate limit and an overload as a provider error, wrapped or not", () => {
+    for (const text of ["429 Too Many Requests", "529 Overloaded"]) {
+      expect(classifyProviderError(text)).toEqual({ kind: "provider-error" });
+      expect(classifyProviderError(`Request failed: ${text}`)).toEqual({ kind: "provider-error" });
+    }
   });
 
   test("reads anything else as a provider error, an empty text included", () => {
@@ -262,9 +214,9 @@ describe("an error text a provider chose the length of", () => {
   /** The text a provider error carries is the provider's own, and nothing bounds its length: the
    * host hands `message.errorMessage` through as it arrived, and the fallback reason is that text
    * behind `Request failed: `. A gateway that answers an error with its own page makes it long,
-   * so every pattern this module runs must stay linear in that length. CodeQL reports the two
-   * Google patterns as polynomial on this pull request's head (`js/polynomial-redos`, two high
-   * alerts at provider-refusal.ts:173). */
+   * so every pattern this module runs must stay linear in that length. CodeQL reported the two
+   * Google patterns as polynomial (`js/polynomial-redos`, two high alerts) at the head before the
+   * patterns were bounded, and reports neither since. */
 
   test("classifies a long text that almost matches a Google filter in linear time", () => {
     for (const prefix of [

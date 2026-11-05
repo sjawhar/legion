@@ -11,12 +11,12 @@ import { integerSetting, type StallLimitsLog } from "./stall-limits";
  *
  * A refusal waits out a cooldown that doubles each time the same model refuses again: one hour,
  * then two, four, and eight hours at most. A clean turn on a model puts its wait back to one hour;
- * a provider error that is no content filter leaves the wait as it is, because a rate limit is not
- * the model refusing. A fallback the host applied for any other reason carries no cooldown at all:
- * nothing reports when the host's own suppression of a model expires, and the host restores such a
- * fallback itself, so that arming waits for the suppression to end
- * (`modelRegistry.isSelectorSuppressed`, `src/pi-types.ts`) and `restoreDue` is told whether it
- * still holds. Which of the two a fallback is, the caller decides: the host's
+ * a turn that ended in a provider error which is no content filter is no input at all, because a
+ * rate limit is not the model refusing and nothing about the waits changes. A fallback the host
+ * applied for any other reason carries no cooldown at all: nothing reports when the host's own
+ * suppression of a model expires, and the host restores such a fallback itself, so that arming
+ * waits for the suppression to end (`modelRegistry.isSelectorSuppressed`, `src/pi-types.ts`),
+ * which `restoreDue` asks for. Which of the two a fallback is, the caller decides: the host's
  * `retry_fallback_applied` carries the reason it stepped down for
  * (`packages/pi-legion/src/model-fallback.ts`).
  */
@@ -58,10 +58,9 @@ export type FallbackCooldownInput =
   /** A model change that is not this arming's: the operator's `/model`, the host's own restore,
    * another session. Nothing the fallback did is undone. */
   | { readonly kind: "superseded" }
-  /** A turn on `selector` that ended with no provider error. */
-  | { readonly kind: "clean-turn"; readonly selector: string }
-  /** A turn on `selector` that ended in a provider error that was no content filter. */
-  | { readonly kind: "provider-error-turn"; readonly selector: string };
+  /** A turn on `selector` that ended with no provider error. A turn that ended in a provider
+   * error which is no content filter is no input: it changes nothing here. */
+  | { readonly kind: "clean-turn"; readonly selector: string };
 
 /** How long a refusal of a selector at `level` waits: the base doubled `level - 1` times, at most
  * the cap. */
@@ -109,22 +108,27 @@ export function stepFallbackCooldown(
       return levelOf(state, input.selector) === 1
         ? state
         : { ...state, levels: { ...state.levels, [input.selector]: 1 } };
-    case "provider-error-turn":
-      return state;
   }
 }
 
-/** The arming to act on now, or undefined: a refusal waits for its due time, any other fallback
- * waits for the host to stop suppressing the model. */
+/**
+ * The arming to act on now, or undefined: a refusal waits for its own due time, any other
+ * fallback waits for the host to stop suppressing the model.
+ *
+ * This is the one place the due time is decided, and the only thing the runner's `context` hook
+ * asks before it reads the session's branch at all, so `suppressed` is a function: a refusal's
+ * arming answers from the clock alone, and the host is asked nothing on the requests that wait
+ * (`packages/pi-legion/src/model-fallback.ts`).
+ */
 export function restoreDue(
   state: FallbackCooldownState,
   now: number,
-  suppressed: boolean
+  suppressed: () => boolean
 ): FallbackArming | undefined {
   const arming = state.arming;
   if (arming === undefined) return undefined;
   if (arming.cause === "refusal") return now >= arming.dueAt ? arming : undefined;
-  return suppressed ? undefined : arming;
+  return suppressed() ? undefined : arming;
 }
 
 export interface FallbackCooldownLimits {
