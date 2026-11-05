@@ -76,6 +76,7 @@ test("the phase ops' fields, as a host declares them, are every field of every o
     properties: {
       op: { enum: [...PHASE_OPS] },
       issue: { type: "string" },
+      since: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
       ready: { type: "boolean" },
@@ -132,6 +133,16 @@ test("each op refuses its arguments whole before any daemon request, naming ever
       'handoff_complete does not accept field "phase"; handoff_complete does not accept field "other"',
     ],
     [{ op: "read_record" }, "read_record requires issue"],
+    [{ op: "read_release_records" }, "read_release_records requires since"],
+    [{ op: "read_release_records", since: " " }, "read_release_records requires since"],
+    [
+      { op: "read_release_records", since: "yesterday" },
+      "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
+    ],
+    [
+      { op: "read_release_records", since: "2026-11-01T12:00:00Z", issue: "LEGION-208" },
+      'read_release_records does not accept field "issue"',
+    ],
     [{ op: "request_backward_move", reason: "r" }, "request_backward_move requires to"],
     [{ op: "request_backward_move", to: " ", reason: "r" }, "request_backward_move requires to"],
     [{ op: "request_backward_move", to: 44, reason: "r" }, "request_backward_move requires to"],
@@ -143,8 +154,11 @@ test("each op refuses its arguments whole before any daemon request, naming ever
       { op: "request_backward_move", to: "integrating", reason: "r" },
       `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}`,
     ],
-    [{ op: "set_status" }, "op is one of read_record, handoff_complete, request_backward_move"],
-    [{}, "op is one of read_record, handoff_complete, request_backward_move"],
+    [
+      { op: "set_status" },
+      "op is one of read_record, read_release_records, handoff_complete, request_backward_move",
+    ],
+    [{}, "op is one of read_record, read_release_records, handoff_complete, request_backward_move"],
   ] as const;
   for (const [input, message] of refusals) {
     await expect(executePhaseOp(ops, input)).rejects.toThrow(message);
@@ -394,6 +408,180 @@ test("read_record answers the issue's record, or names an issue the daemon has n
     })
   ).resolves.toEqual({});
   expect(routes.slice(2)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
+});
+
+/** A window the daemon served: three releases — one woken five minutes later, one woken three
+ * hours later and one still released — three resumes of them, the last with no first turn, and
+ * two holds of two reasons. */
+const RELEASE_RECORDS = {
+  releases: [
+    {
+      id: 1,
+      issue: "LEGION-208",
+      generation: 2,
+      roles: ["implementer"],
+      at: "2026-11-01T12:00:00Z",
+      bundleBytes: 1024,
+    },
+    {
+      id: 2,
+      issue: "LEGION-209",
+      generation: 1,
+      roles: ["implementer", "tester"],
+      at: "2026-11-01T13:00:00Z",
+      bundleBytes: 0,
+    },
+    {
+      id: 3,
+      issue: "LEGION-210",
+      generation: 1,
+      roles: ["planner"],
+      at: "2026-11-01T17:00:00Z",
+      bundleBytes: 512,
+    },
+  ],
+  resumes: [
+    {
+      id: 1,
+      release: 1,
+      issue: "LEGION-208",
+      role: "implementer",
+      kind: "task",
+      at: "2026-11-01T12:05:00Z",
+      podReadyAt: "2026-11-01T12:06:00Z",
+      firstTurnAt: "2026-11-01T12:07:00Z",
+      stuck: false,
+    },
+    {
+      id: 2,
+      release: 2,
+      issue: "LEGION-209",
+      role: "implementer",
+      kind: "message",
+      at: "2026-11-01T16:00:00Z",
+      podReadyAt: "2026-11-01T16:02:00Z",
+      firstTurnAt: "2026-11-01T16:06:00Z",
+      stuck: false,
+    },
+    {
+      id: 3,
+      release: 2,
+      issue: "LEGION-209",
+      role: "tester",
+      kind: "message",
+      at: "2026-11-01T16:00:30Z",
+      podReadyAt: "2026-11-01T16:02:00Z",
+      stuck: true,
+    },
+  ],
+  holds: [
+    {
+      id: 1,
+      issue: "LEGION-211",
+      reason: "background_work",
+      detail: "async-job",
+      firstAt: "2026-11-01T12:50:00Z",
+      at: "2026-11-01T13:00:00Z",
+      passes: 11,
+    },
+    {
+      id: 2,
+      issue: "LEGION-212",
+      reason: "turn_in_progress",
+      firstAt: "2026-11-01T13:10:00Z",
+      at: "2026-11-01T13:10:00Z",
+      passes: 1,
+    },
+  ],
+};
+
+/** A runtime whose daemon answers `records` on the release-records route and nothing else,
+ * recording what was posted, with the clock the open release is measured against. */
+function recordsRuntime(records: unknown) {
+  const posted: { readonly path: string; readonly body: unknown }[] = [];
+  const stub = (async (input, init) => {
+    posted.push({
+      path: new URL(input.toString()).pathname,
+      body: init?.body == null ? undefined : JSON.parse(init.body.toString()),
+    });
+    return Response.json(records);
+  }) as typeof fetch;
+  const ops: PhaseOpRuntime = {
+    daemon: createLegionDaemonClient("http://daemon.test", stub),
+    claim: implementer,
+    handoffReport: async () => {
+      throw new Error("no handoff report expected");
+    },
+    branchHead: async () => {
+      throw new Error("no branch-head lookup expected");
+    },
+    now: () => new Date("2026-11-01T18:00:00Z"),
+  };
+  return { ops, posted };
+}
+
+test("read_release_records posts the claim's own token and secret, and counts the window for a report", async () => {
+  const { ops, posted } = recordsRuntime(RELEASE_RECORDS);
+
+  await expect(
+    executePhaseOp(ops, { op: "read_release_records", since: "2026-11-01T00:00:00Z" })
+  ).resolves.toEqual({
+    since: "2026-11-01T00:00:00Z",
+    asOf: "2026-11-01T18:00:00.000Z",
+    ...RELEASE_RECORDS,
+    counts: {
+      releases: 3,
+      resumes: 3,
+      resumesByKind: { task: 1, message: 2 },
+      holds: 2,
+      holdsByReason: { background_work: 1, turn_in_progress: 1 },
+    },
+    // Five minutes, three hours, and the hour the third release has been open at `now`.
+    podHoursReleased: 4.08,
+    wokenWithinTenMinutes: { releases: 1, share: 0.333 },
+    // 120 and 360 seconds; the third resume has no first turn, so it is counted, not measured.
+    wakeToFirstTurnSeconds: {
+      measured: 2,
+      withoutFirstTurn: 1,
+      median: 120,
+      p90: 360,
+      max: 360,
+    },
+  });
+  expect(posted).toEqual([
+    {
+      path: "/legion/v1/claims/release-records",
+      body: {
+        claimToken: "legion-legion-legion-208-implementer",
+        secret: "U2VjcmV0",
+        since: "2026-11-01T00:00:00Z",
+      },
+    },
+  ]);
+});
+
+test("a window with nothing in it counts as nothing, and measures no wake", async () => {
+  const { ops } = recordsRuntime({ releases: [], resumes: [], holds: [] });
+
+  await expect(
+    executePhaseOp(ops, { op: "read_release_records", since: "2026-11-01T00:00:00Z" })
+  ).resolves.toEqual({
+    since: "2026-11-01T00:00:00Z",
+    asOf: "2026-11-01T18:00:00.000Z",
+    releases: [],
+    resumes: [],
+    holds: [],
+    counts: { releases: 0, resumes: 0, resumesByKind: {}, holds: 0, holdsByReason: {} },
+    podHoursReleased: 0,
+    wokenWithinTenMinutes: { releases: 0, share: 0 },
+    wakeToFirstTurnSeconds: {
+      measured: 0,
+      withoutFirstTurn: 0,
+      median: null,
+      p90: null,
+      max: null,
+    },
+  });
 });
 
 test("ready_for_update answers for the round its task named, with the branch head, and leaves the head out when the branch is not on the remote", async () => {

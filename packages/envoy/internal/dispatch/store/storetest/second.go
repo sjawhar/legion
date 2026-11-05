@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -16,9 +15,11 @@ import (
 // publisher hold (duty.Hold), a lease one of them runs a duty under (duty.Exclusive), a row both
 // write - has to give each of them a pool of its own too. Two callers sharing a store share one
 // process's pool and its connection limit, which is not the deployment such a test is about.
+// It is Reopened with the configuration unchanged, the second process being the same deployment
+// twice.
 func SecondProcess(t testing.TB, database *store.Store) *store.Store {
 	t.Helper()
-	return openStore(t, database.Pool.Config(), "open a second process's pool on the same database")
+	return Reopened(t, database, func(*pgxpool.Config) {})
 }
 
 // TracedStore opens a store of its own on the database database is already on, closed after t
@@ -28,16 +29,4 @@ func SecondProcess(t testing.TB, database *store.Store) *store.Store {
 func TracedStore(t testing.TB, database *store.Store, tracer pgx.QueryTracer) *store.Store {
 	t.Helper()
 	return &store.Store{Pool: Traced(t, database.Pool, tracer, nil)}
-}
-
-// openStore opens a store on a pool of config, closed after t ends, failing t with what on error.
-func openStore(t testing.TB, config *pgxpool.Config, what string) *store.Store {
-	t.Helper()
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("%s: %v", what, err)
-	}
-	pool := store.NewPool(opened)
-	t.Cleanup(pool.Close)
-	return &store.Store{Pool: pool}
 }

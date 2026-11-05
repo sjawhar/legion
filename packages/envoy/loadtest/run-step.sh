@@ -3,12 +3,12 @@
 #
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
-#     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
-#     [--editors 0] [--editor-rate 2] [--editor-docs 10]
+#     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--heap-samples]
+#     [--out <dir>] [--editors 0] [--editor-rate 2] [--editor-docs 10]
 #
 #   run-step.sh <name> --replay [--rate F] [--reads RHO] [--read-mix M] [--uploads U]
 #     [--rng-seed N] [--from D --to D] [--roster N] [--keys-file FILE] [--warmup D]
-#     [--gomaxprocs N] [--dispatch-commit REV] [--manifest FILE] [--out <dir>]
+#     [--gomaxprocs N] [--dispatch-commit REV] [--manifest FILE] [--heap-samples] [--out <dir>]
 #
 # From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
 # not part of a series: it rebuilds the binaries from this checkout (stack.sh setup, incremental) and
@@ -19,6 +19,12 @@
 # dispatch_seed, NATS on a fresh store, listener and Dispatch restarted), runs `loadgen run` and
 # renders `loadgen tables` in the step directory, $LOADTEST_ROOT/runs/<name>/ unless --out names
 # another (it must not exist or be empty). Dispatch's log is the step's dispatch.log.
+#
+# Every flag takes a value but --replay and --heap-samples, which take none. --heap-samples passes
+# -heap-samples to `loadgen run`: the sampler then reads Dispatch's heap profile every 15 s inside
+# the window. It is off by default, since Dispatch writes that profile itself, so the read is
+# charged to the CPU the step measures (README.md, "Why the harness reads no heap profile in the
+# window"); without it the heap columns of the tables show -.
 #
 # A --replay step replays the LINUX bundle (README.md, The replay) instead: stack.sh setup
 # (incremental; with --dispatch-commit, envoy-dispatch from that commit, a rev that names no commit
@@ -70,6 +76,12 @@ manifest="" gomaxprocs="" dispatch_rev=""
 while [ $# -gt 0 ]; do
   flag=$1
   if [ "$flag" = --replay ]; then
+    shift
+    continue
+  fi
+  # A switch, not a flag with a value: loadgen run takes it as a Go bool flag.
+  if [ "$flag" = --heap-samples ]; then
+    args+=(-heap-samples)
     shift
     continue
   fi

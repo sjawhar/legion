@@ -62,7 +62,7 @@ import (
 // update made of it (changedBy). Both are exact.
 // The write's rendering (publishedRendering) is taken only on the replica, epoch and foreign
 // count the operation's own fork read found, the replica's under its lock at the position that
-// read copied (readPoint): a replica still at both has consumed, through that read, every commit
+// read copied (warmFork): a replica still at both has consumed, through that read, every commit
 // the fork was read from, and since then only published live writes' commits, which under the
 // writer slot are this write's earlier updates, which the fork holds too - so the replica after
 // the update is the fork after the operation, and rendering is deterministic over one state. That
@@ -130,7 +130,7 @@ type renderedReplica struct {
 	// foreign counts the logged updates the replica has consumed - applied, or handed to recover -
 	// whose origin is not a published live write's (*liveWriteOrigin). A drain adds to it while it
 	// holds mu, update by update in commit order (consumed), and anyone may read it without mu. An
-	// exact read of the replica records epoch and foreign with the state it copies (readPoint), and
+	// exact read of the replica records epoch and foreign with the state it copies (atPoint), and
 	// a later reader that finds both unchanged knows that every commit the replica consumed since
 	// that read was a published live write's: under the writer slot, only the reader's own write's
 	// earlier updates. A race goes the safe way: a foreign commit the replica consumes after the
@@ -321,7 +321,7 @@ func (r *renderedReplica) lockForUpdate() {
 
 // observe is the update observer's turn with the replica: it waits for mu (lockForUpdate) and
 // drains the room's update log (drainLocked), classifying each update as it takes it (changedBy).
-// The observer and an exact read (readPoint) are the holders of mu that wait for it, and the ones
+// The observer and an exact read (atPoint) are the holders of mu that wait for it, and the ones
 // that drain the log: every committed update is classified exactly once, by whichever of them
 // reaches the log first. It reports whether any update it classified is one the room's settlement
 // follows, and whether any changed the content.
@@ -488,7 +488,7 @@ func (r *renderedReplica) consumed(update crdt.LoggedUpdate) (*liveWriteOrigin, 
 }
 
 // mark is the replica's epoch and foreign count as of now, epoch first: what an exact read of the
-// replica records beside the state it copies (readPoint, warmFork). An exact read holds mu while
+// replica records beside the state it copies (atPoint, warmFork). An exact read holds mu while
 // it reads both; a reader without mu sees counts that can only move on, the safe way.
 func (r *renderedReplica) mark() forkReadMark {
 	return forkReadMark{epoch: r.epoch.Load(), foreign: r.foreign.Load(), warm: true}
@@ -588,47 +588,56 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, not
 	}
 }
 
-// readPoint is live, the room document this replica follows, as of an exact commit position: its
-// state, encoded, seq, the position of the last commit that state holds, every update through
-// which has a class in the room's queue, and read, what the replica knows of that state beyond the
-// state itself (replicaRead). A durable writer that forks or versions the room from state stores
-// those updates first (flushThrough), so what it writes follows the room's commit order. It waits
-// for mu as the update observer does and drains the log as the observer would, classifying what it
-// drains, so the replica then holds the room through its last drained update. It takes the copy
-// and releases mu: its caller does its database work holding no replica lock.
+// atPoint reads live, the room document this replica follows, as of an exact commit position:
+// take reads the replica under mu, and the call answers seq, the position of the last commit the
+// state take read holds, every update through which has a class in the room's queue, read, what
+// the replica knows of that state beyond the state itself (replicaRead), and settles, for the
+// updates it classified, as observe does. A durable writer that forks or versions the room from
+// what take reads stores those updates first (flushThrough), so what it writes follows the room's
+// commit order.
+//
+// It waits for mu as the update observer does and drains the log as the observer would,
+// classifying what it drains, so the replica then holds the room through its last drained update.
+// take is handed that position and the replica's document - an encode (Service.readPoint), a
+// clone (Service.forkPoint) or a walk of its tree (Service.treePoint) - and a take that wants the
+// room at one position alone reads nothing where the drain left the replica elsewhere
+// (Service.forkPoint's at). mu is released as soon as take returns: the caller does its database
+// work holding no replica lock.
 //
 // A replica holding no state - the room has had no transaction since its load, or the replica is
-// in its recover state, waiting for the base the room's next commit records - has no copy to give,
-// so the copy is taken from live under live's document lock instead. That copy is exact when the
-// log hands over nothing after it: every commit before the log's last reset (or its opening) was
+// in its recover state, waiting for the base the room's next commit records - has no document for
+// take to read, so take does not run and copied is the room's state, taken from live under live's
+// document lock, for the caller to decode once mu is released. That copy is exact when the log
+// hands over nothing after it: every commit before the log's last reset (or its opening) was
 // handed over, and classified, before it (UpdateLog.Reset hands over every update it holds), and
 // the first commit after it records a base before its transaction runs, under the same document
 // lock the copy takes. A base the log hands over after the copy means a commit ran; the replica
-// then starts from it, and the read is taken again. It returns settles for the updates it
-// classified, as observe does. The caller must not hold live's document lock.
-func (r *renderedReplica) readPoint(room string, live *crdt.Doc) (state []byte, seq uint64, read replicaRead, settles bool) {
+// then starts from it, and the read is taken again. copied is nil for every read take ran on.
+// The caller must not hold live's document lock.
+func (r *renderedReplica) atPoint(room string, live *crdt.Doc, take func(seq uint64, doc *crdt.Doc)) (copied []byte, seq uint64, read replicaRead, settles bool) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
 	settles, _ = r.drainLocked(room)
 	for r.doc == nil {
-		copied := crdt.EncodeStateAsUpdateV1(live, nil)
+		state := crdt.EncodeStateAsUpdateV1(live, nil)
 		base, updates := r.log.Drain()
 		if base == nil && len(updates) == 0 {
 			// A replica holding no state rendered none, so nothing vouches for the copy's
 			// rendering; its mark still names the run of the replica the copy was taken in.
-			return copied, r.seq, replicaRead{mark: r.mark()}, settles
+			return state, r.seq, replicaRead{mark: r.mark()}, settles
 		}
 		took, _ := r.takeLocked(room, base, updates)
 		settles = settles || took
 	}
+	take(r.seq, r.doc)
 	read = replicaRead{mark: r.mark()}
 	if r.rendering != nil {
 		read.markdown = &r.rendering.markdown
 	}
-	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, read, settles
+	return nil, r.seq, read, settles
 }
 
-// replicaRead is what a read of the replica at an exact commit position (readPoint) knows of the
+// replicaRead is what a read of the replica at an exact commit position (atPoint) knows of the
 // state it copied beyond the state itself: mark, the replica's epoch and foreign count there, and
 // markdown, the replica's rendering of that very state, nil for a replica that rendered none - one
 // outside the schema, or one holding no state, whose copy was taken from the room itself. Both are
@@ -643,7 +652,7 @@ type replicaRead struct {
 	markdown *string
 }
 
-// drainedSeq is readPoint without the copy: it drains the room's log as the update observer would,
+// drainedSeq is atPoint without the read: it drains the room's log as the update observer would,
 // classifying what it drains, and returns the commit position the replica then stands at, every
 // update through which has a class in the room's queue, with whether an update it classified is
 // one the room's settlement follows. A position equal to an earlier read point's says the room has

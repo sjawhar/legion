@@ -144,7 +144,7 @@ function toolFor(
       kind: role === "architect" ? "architect" : "phase-worker",
       role,
       sessionID: "ses_208",
-      claimToken: `legion-legion-legion-208-${role}`,
+      claimToken: `legion-omp-legion-208-${role}`,
       generation: 5,
       tree,
       issue: "LEGION-208",
