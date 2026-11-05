@@ -2831,11 +2831,22 @@ jobs:
       # is a pass that proves nothing: TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway
       # prepares a transaction holding the lock an insert into events takes, which is the one
       # writer pg_locks shows with no backend pid (dispatch://INFRA-1075).
-      - name: Raise the Postgres connection and prepared-transaction limits for the parallel tests
+      # The two services of this job are containers that die with it, so nothing they hold has to
+      # survive a crash: fsync, full_page_writes and synchronous_commit are off, which is what
+      # makes a forced checkpoint cheap. They are the top wait of the whole step otherwise - a
+      # sample of pg_stat_activity beside the unit step found IPC/CheckpointDone and
+      # IPC/CheckpointStart outweighing every other wait event of an ACTIVE backend together by
+      # five times (run 42035294257), because `create database … strategy file_copy` forces two
+      # and a drop forces one. The harness changes no server setting; this step does, on servers
+      # the job owns, and a developer's own Postgres keeps its durability (dispatch://INFRA-1075).
+      - name: Set the disposable services up for the parallel tests
         run: |
           for id in "${{ job.services.postgres.id }}" "${{ job.services.horizon.id }}"; do
             docker exec "$id" psql -U postgres -c "alter system set max_connections = 500"
             docker exec "$id" psql -U postgres -c "alter system set max_prepared_transactions = 20"
+            docker exec "$id" psql -U postgres -c "alter system set fsync = off"
+            docker exec "$id" psql -U postgres -c "alter system set full_page_writes = off"
+            docker exec "$id" psql -U postgres -c "alter system set synchronous_commit = off"
             docker restart "$id"
             # The wait is on the new limit, not on a ready socket: pg_isready can answer from a
             # server the restart has not taken down yet, and a green step that left the limit at
@@ -2848,7 +2859,11 @@ jobs:
             [ "$limit" = "500" ] || { echo "::error::a Postgres service still reports max_connections=$limit"; exit 1; }
             prepared=$(docker exec "$id" psql -U postgres -Atc "show max_prepared_transactions")
             [ "$prepared" = "20" ] || { echo "::error::a Postgres service reports max_prepared_transactions=$prepared"; exit 1; }
-            echo "max_connections=$limit max_prepared_transactions=$prepared"
+            for setting in fsync full_page_writes synchronous_commit; do
+              value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+              [ "$value" = "off" ] || { echo "::error::a Postgres service reports $setting=$value"; exit 1; }
+            done
+            echo "max_connections=$limit max_prepared_transactions=$prepared fsync=off full_page_writes=off synchronous_commit=off"
           done
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
@@ -2916,6 +2931,7 @@ jobs:
           done
           samplers="$(jobs -p)"
           trap 'kill $samplers 2>/dev/null || true' EXIT
+          export PGCLONE_DISPOSABLE_SERVER=1  # both Postgres services die with the job, so pgclone need not drop what it made (dispatch://INFRA-1075)
           go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
             xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
           rest=$!

@@ -349,6 +349,7 @@ for port in 5432 5433; do
 done
 samplers="$(jobs -p)"
 trap 'kill $samplers 2>/dev/null || true' EXIT
+export PGCLONE_DISPOSABLE_SERVER=1  # both Postgres services die with the job, so pgclone need not drop what it made (dispatch://INFRA-1075)
 go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
   xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
 rest=$!
