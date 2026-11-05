@@ -1,9 +1,25 @@
 # Getting the tool your work needs
 
-Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
-not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
-anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
-cites is in cybermonklabs/legion.
+Part of `skill://legion-worker`. Read it before you run a build or a test suite in your pod; the
+moment your phase needs a tool the worker image may not carry — a database client, a linter, a
+one-off CLI — before you install, download, or vendor anything; before you measure Oh My Pi's
+binary; and when a test fails in your pod. Every path it cites is in cybermonklabs/legion.
+
+## What runs in your pod, and what runs on the pull request
+
+An issue pod runs no heavy build and no whole test suite. The pod's six roles share one memory
+limit, and one command that fills it ends every role's turn, not only yours.
+
+In the pod you compile and test the packages your change touches, build the program a check of
+your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet -tags e2e ./...`,
+which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
+your change touches by name (`go test -run`).
+
+A whole module's or whole package's test run goes to CI on the pull request, where a job of that
+pull request runs it: `go test ./...`, a whole Postgres-backed package such as
+`packages/envoy/internal/dispatch/docs` or `packages/envoy/internal/dispatch/api`, a browser suite
+run whole, and `make -j` or `lake build` in a repository your deployment sends you to. Every other
+heavy run goes where your deployment's instructions say.
 
 ## The database your tests use
 
@@ -223,8 +239,10 @@ tools a role's own work needs", carries the figure), and a sanctioned install is
 issue pod, on the issue's own disk, by the issue's roles together.
 
 **The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
-`packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector.
-On a digest carrying `legion-testpg`, use the pod's own server (the first section above) and
+`packages/dispatch` is proved in the pod by driving the specs it touches, one spec a command
+(`bun run e2e -- e2e/<one spec file>`); the whole browser suite runs in CI's `dispatch` job on the
+pull request. One spec needs the same stack as all of them: a Postgres with pgvector. On a digest
+carrying `legion-testpg`, use the pod's own server ("The database your tests use", above) and
 unpack nothing. On a digest without it, the way
 that stack is stood up here is Debian packages unpacked with `dpkg-deb -x` into one root on the
 issue's volume — the five packages and the start sequence are in
@@ -609,9 +627,15 @@ something to count.
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
   `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
   `internal/testpg` (unless `DISPATCH_TEST_DATABASE_URL` names a Postgres).
-- **The rest, by package.** For the Dispatch server's suites (a Postgres whose only collation is
-  byte order, which `internal/dispatch/api` refuses, and `@legion/proof-editor` missing until
-  `bun install` has run):
-  `docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`.
-  For the daemon's:
-  `docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-and-names-the-packages-the-pod-cannot-run-LEGION-630.md`.
+- **The rest, by package**, for a named run the pod does make. The pod's Postgres has only the
+  `C`, `C.utf8` and `POSIX` locales, so its default collation is byte order, and
+  `internal/dispatch/api`'s
+  `TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves` refuses such a database
+  by its own message; it runs in CI's `envoy-go` job, whose Postgres has `en_US.utf8`. Ten
+  minutes, `go test`'s per-package default, is short for `internal/dispatch/api` and
+  `internal/dispatch/docs` here, so give a run of either a `-timeout` of your own.
+  `internal/dispatch/pmdoc`'s browser-parity tests need `bun install` to have run for
+  `@legion/proof-editor`. In the daemon's module, never export `GOWORK=off` inside
+  `$LEGION_WORKSPACE`: `packages/daemon/go.mod` replaces `github.com/sjawhar/envoy => ../envoy`,
+  and the go.sum entries its packages need live in `packages/envoy/go.sum`, which only the
+  `go.work` workspace mode consults.
