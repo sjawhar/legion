@@ -339,10 +339,10 @@ UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
 go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
-  xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
+  xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
 rest=$!
 DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \\
-  go test -json -count=1 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
+  go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
 routes=$!
 rest_status=0
 routes_status=0
