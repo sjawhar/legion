@@ -1377,7 +1377,7 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	if err := m.interrupted(ctx, "the process died in the task's turn"); err != nil {
+	if err := m.interrupted(ctx, "the process died in the task's turn", observation.OutOfMemory); err != nil {
 		return err
 	}
 	if m.held != nil {

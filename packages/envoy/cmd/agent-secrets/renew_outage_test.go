@@ -197,7 +197,7 @@ func TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound(t *testing.T) {
 			client.http.Transport = rig
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if got := renewLoop(ctx, client, signer, enrollmentID, boxRenewal, io.Discard, rig.after(cancel, t)); got != c.wantExit {
+			if got := renewLoop(ctx, client, signer, enrollmentID, "", io.Discard, rig.after(cancel, t)); got != c.wantExit {
 				t.Fatalf("renew loop exit = %d, want %d", got, c.wantExit)
 			}
 			// The renewer reads its lease a few milliseconds after the broker granted it —

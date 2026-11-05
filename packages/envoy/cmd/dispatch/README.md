@@ -160,14 +160,14 @@ The server asks the broker what the token is (RFC 7662 introspection on `/v1/oau
 No setting of its own configures it.
 A revoked token therefore stops resolving within five seconds of the introspection that last called it live, not of the revocation:
 an introspection already in flight when the token is revoked is remembered from the moment it completes, and it may take up to five seconds to complete.
-A verified caller acts as the session the token names, for the person it names, and `actor` in the body does not decide that session:
+A verified caller acts as the session the token names, for the person it names, or, where the broker names none, for the service the machine holding it belongs to, and `actor` in the body does not decide that session:
 absent is accepted, one naming the same session is accepted and its `origin` kept, and one naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
 A token scoped to one project carries that project on every actor it writes, set from the token and never from the body;
 a token scoped to its person names no single project and carries none.
 Each refusal is its own code and none repeats the token:
 `401 BROKER_TOKEN_NOT_ACTIVE` (the broker does not hold the token live), `401 BROKER_TOKEN_PROOF_INVALID` (the proof did not meet RFC 9449 Section 4.3, a proof presented twice included
 — a proof is single use by its `jti` and target URI), `401 BROKER_TOKEN_KEY_MISMATCH` (a sound proof signed by a key that is not the token's), `401 BROKER_TOKEN_NOT_A_SESSION` (the token is live but is no session's credential:
-it names no session or no person, or it was issued to a client other than the exchange a session's token comes from, which a machine login's own access token is
+it names no session, it names neither a person nor a service, or it was issued to a client other than the exchange a session's token comes from, which a machine login's own access token is
 — Dispatch records a write under the session its credential proved, so it acts on none of these rather than letting a body name a session for a credential that names none), `429 BROKER_TOKEN_RATE_LIMITED` (this source address's introspection bucket is empty;
 nothing was asked of the broker) and `503 BROKER_UNAVAILABLE` (the broker answered nothing, so the token was never judged
 — a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is one).
@@ -182,7 +182,7 @@ a `GET` row declares nothing), in four classes:
 *a project the body names* — the issue create alone, whose project its address does not name, so `createIssue` makes the same check itself once that project is settled;
 *the calling session's* — an agent conversation's own artifact and messages, the two routes a session answers its own delivery on, and the caller-private `me` rows;
 and *the deployment's* — the project create, the repository-to-project map, the delivery settings and session groups, the broadcast, and the credential and machine-login decisions.
-`Register` wraps every mutating route in two checks (`internal/dispatch/api/project_scope.go`), which run after the caller is resolved and before the handler, so no route is left to check either for itself.
+`Register` wraps every mutating route in three checks (`internal/dispatch/api/project_scope.go`), which run after the caller is resolved and before the handler, so no route is left to check any of them for itself.
 
 The project check resolves the project the addressed object belongs to
 — an issue key, a project key, an artifact id, an ask id, a comment id or a message id, each by one read
@@ -204,7 +204,13 @@ addressing another session's conversation is `403 SESSION_SCOPE`, naming the ses
 Only a broker-issued token proves a session;
 a cookie, a personal token, a Kubernetes service-account token and the shared token prove none and are untouched, so a person still uploads into the conversation they name.
 
-Both checks are a no-op for a credential that carries no project and proves no session
+The sign-in check refuses every write by a credential that names a service and no person
+— an access token the broker issued to a machine nobody has signed in on — `403 SIGN_IN_REQUIRED`, naming that service and `agent-secrets login`, the command that signs a person in on the machine.
+It stands in front of every mutating route whatever its class, and outermost of the three, so such a caller is told it may make no write at all rather than which project the write it tried belongs to.
+Its reads are untouched: the machine reads everything its session may read, and what it may not do is write, because Dispatch records a write under the person who made it and this credential names none.
+A broker token that does name a person, and every other credential, reaches the handler as before.
+
+The project and session checks are a no-op for a credential that carries no project and proves no session
 — a browser cookie, a personal agent token, a Kubernetes service-account token, the shared token, and an access token the broker scoped to a person rather than to one project.
 That is the rule and not a transitional measure: every caller that exists today writes exactly what it wrote before.
 
@@ -1610,7 +1616,7 @@ A result for an `after_merge` or `default_branch` check is current only at such 
 A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
 A new table, as above; its census answers `0`.
 
-Migrations `20261103071942_user_threads_login_replied` through `20261105093505_user_agent_thread_dismissed` are the Inbox's dismissal: a thread stays in a person's Inbox, read or not, until they dismiss it.
+Migrations `20261103071942_user_threads_login_replied` through `20261105093507_user_agent_thread_dismissed_clear` are the Inbox's dismissal: a thread stays in a person's Inbox, read or not, until they dismiss it.
 `20261103071942` created `user_threads_login_replied` on `user_threads (login, replied_at desc, thread_id desc) where replied_at is not null` for the `?state=all` read of this branch's first shape, and `20261105093504` drops it again, since `state=all` is gone and nothing else ever read it; both the index and its reader are this branch's own and unreleased, so no running build reads it, and the drop takes `ACCESS EXCLUSIVE` on `user_threads` — brief, since it reads no row, but not nothing, since every read and every write of that table waits behind it.
 `20261105093500` adds `user_threads.dismissed_at`, nullable with no default and no backfill, so the statement writes the catalogue row and nothing else: no rewrite, no row read, and `ACCESS EXCLUSIVE` for that write alone.
 `20261105093501` replaces `user_threads_record` with the same function plus one assignment, so the statement that moves the other participants' `replied_at` on a write by somebody else clears their `dismissed_at` when that write is newer than it; `create or replace function` locks the function's own catalogue row and no table at all.
@@ -1620,7 +1626,11 @@ Building either takes `SHARE` on `user_threads`, so the writes its triggers make
 The window is one scan and sort of `user_threads` — a row per person per thread they have written in — with no row rewritten and none refused.
 Migrations run in one transaction, so `create index concurrently` is impossible here, as for `0148`.
 `20261105093505` creates `user_agent_thread_dismissed (login, message_id, dismissed_at)`, the same mark for an Agent thread, which has no `user_threads` row to carry one, with an index on `(login, dismissed_at desc, message_id desc)` for the Dismissed view's own read of it; the table holds no row until the migration commits, so no existing table is locked and nothing is backfilled.
-The Agent half has no trigger, so a thread is dismissed while its mark is at or after the newest reply the session wrote in it, which is a comparison each read makes.
+`20261105093506` adds `user_agent_thread_dismissed_message` on `(message_id)`, which is the read the next migration's trigger deletes through: the primary key is `(login, message_id)`, so a delete keyed on the root alone cannot use it, and every session reply would otherwise scan the table.
+`20261105093507` is the Agent half's own "a write by somebody else brings the thread back", which `user_threads_record` does for a Reply thread: a trigger on `messages` that clears a root's mark when a session replies in it after that mark, in the reply's own transaction.
+Somebody else on this half is the session, the only writer the Inbox reads in such a thread, so the person's own reply from the Dismissed view leaves the thread dismissed, exactly as their own reply leaves a Reply thread's mark where it stands; a mark at or after the new reply stays.
+With it, "dismissed" is what it is on the other half — a mark exists — so no read compares two times, and the Inbox's own reads leave a dismissed root out without reading its thread, which was 66 ms of the Inbox read's 69 at 10,000 dismissed Agent threads.
+`create function` takes no table lock and `create trigger ... after insert on messages` takes `SHARE ROW EXCLUSIVE` on `messages` for the one catalogue write, blocking that table's writers and no reader; neither reads or rewrites a row.
 Every census in the run answers `0`, and each up-file names the lock it takes and the row count its window was judged against.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
@@ -2502,8 +2512,8 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/whoami` (GET; cookie, trusted header, bearer, or a broker-issued DPoP token)
 
-  Who the server takes the caller for: `{kind: "user", login, scopes}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project, scopes}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
-  `service` is a verified service-account token's Kubernetes subject, null for every other credential;
+  Who the server takes the caller for: `{kind: "user", login, scopes}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project, scopes}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token and for a broker-issued token that names a service;
+  `service` is a verified service-account token's Kubernetes subject, or the fleet a broker-issued token naming no person belongs to, null for every other credential;
   `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise;
   `project` is the one project key that credential may write, null where it names none).
   `scopes` is the OAuth scopes the credential holds, `[]` for one that holds none, and every caller is answered it.

@@ -1,15 +1,16 @@
 -- 20261105093505_user_agent_thread_dismissed.up.sql
 --
 -- INFRA-450: the Inbox's Agent rows are one-off messages a person sent an agent session, read
--- straight from messages rather than from a row of their own (api/replies.go, myAgentRows), so a
+-- straight from messages rather than from a row of their own (api/replies.go, myAgentRootFilter), so a
 -- dismissal of one has nowhere to live. This table is that mark: one row per person per dismissed
 -- root message, keyed on the login the Inbox reads by (model.CanonicalLogin, as user_agent_read and
 -- user_agent_state are keyed) and the root message's id.
 --
--- The Agent half has no trigger, so nothing clears a mark: an Agent thread is dismissed while its
--- mark is at or after the newest reply the session wrote in it, and a later reply brings it back by
--- that comparison alone (api/replies.go, myAgentInboxRoots). A dismiss of a thread that came back
--- moves the mark forward rather than writing a second row.
+-- A later reply from the session brings the thread back: 20261105093507 clears the mark in that
+-- reply's own transaction, as user_threads_record clears a Reply thread's, so a mark existing is
+-- what "dismissed" means here and no read compares two times (api/replies.go,
+-- myAgentDismissedRoot). A dismiss of a thread that came back writes its row again, the one the
+-- trigger deleted.
 --
 -- The index is the Dismissed view's read: the login it narrows to, then the order it answers in and
 -- the cursor it resumes from (newest dismissal first, ties by message id descending), so one index

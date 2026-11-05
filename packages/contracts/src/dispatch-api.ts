@@ -1288,6 +1288,10 @@ export type MyReplyRow = MyReplyThreadRow | MyReplyAgentRow;
  *  `INBOX_DISMISSED_PAGE` rows at a time and names where the next page resumes in `next_cursor`. */
 export interface MyRepliesResponse {
   readonly rows: MyReplyRow[];
+  /** How many rows the state holds in all - except under `state=dismissed`, where it is how many
+   *  this page answers: that view reads a page at a time from `next_cursor`, which is what says
+   *  whether another follows, and counting every thread a person has ever dismissed is the most
+   *  expensive read the Inbox has. */
   readonly total: number;
   /** The page size the caller named, or 0 when they named none and the answer holds every row. */
   readonly limit: number;
@@ -1873,6 +1877,15 @@ export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
 /** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
  *  caller's: nothing ran. The page drops every write that login pressed. */
 export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
+/**
+ * The code of the `403` for a write by an access token the secrets broker issued that names a
+ * session and a service but no person: the machine holding it has signed nobody in, so Dispatch
+ * has nobody to record the write under. Its reads are unaffected. The message names
+ * `agent-secrets login`, the one command that makes the write possible, because whoever reads
+ * the refusal is whoever must run it.
+ */
+export const DISPATCH_SIGN_IN_REQUIRED = "SIGN_IN_REQUIRED";
 
 /** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
  *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */

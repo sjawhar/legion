@@ -249,7 +249,7 @@ func TestDismissTakesWhatTheFiltersMatchThroughTheMark(t *testing.T) {
 // A later write by somebody else brings a dismissed thread back, unread, and the person's own reply
 // does not: a reply sent from the Dismissed view leaves the thread there. That is
 // user_threads_record's one assignment (migration 20261105093501) for a Reply thread, and the
-// comparison of the mark against the newest reply for an Agent thread.
+// trigger of 20261105093507 for an Agent thread, whose own cases are the test below this one.
 func TestDismissEndsWhenSomebodyElseWritesAgain(t *testing.T) {
 	seed := seedInboxRead(t)
 	handler, database := seed.handler, seed.database
@@ -556,5 +556,90 @@ func TestDismissAppendsOneEventPerProjectAndSession(t *testing.T) {
 	}
 	if payload.Login != "alice" || payload.ThreadID != "" {
 		t.Fatalf("event payload = %#v, want the login alone, as a mark-all's event carries", payload)
+	}
+}
+
+// agentThreadDismissal is the caller's stored dismissal mark on one Agent thread, nil when the
+// thread is in their Inbox.
+func agentThreadDismissal(t *testing.T, database *store.Store, login, rootID string) *time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		select max(dismissed_at) from user_agent_thread_dismissed where login = $1 and message_id = $2
+	`, login, rootID).Scan(&at); err != nil {
+		t.Fatalf("read %s's dismissal of the agent thread %s: %v", login, rootID, err)
+	}
+	return at
+}
+
+// writeAgentReply writes one reply into an Agent thread at a time of the test's choosing, which no
+// route lets a caller name: the trigger that clears a dismissal compares the mark against the
+// reply's own created_at, so a test of that comparison has to write both sides of it. parent is
+// the message it replies to - the root, or a reply under it - and kind the author's kind, as the
+// Inbox reads it.
+func writeAgentReply(t *testing.T, database *store.Store, parent, kind, id string, at time.Time) string {
+	t.Helper()
+	var written string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into messages (issue_key, author, body, in_reply_to, target, created_at)
+		select null, jsonb_build_object('kind', $2::text, 'id', $3::text), 'Written at ' || $4::text,
+		       parent.id, parent.target, $4::text::timestamptz
+		from messages parent where parent.id = $1
+		returning id::text
+	`, parent, kind, id, at.UTC().Format(time.RFC3339Nano)).Scan(&written); err != nil {
+		t.Fatalf("write a %s reply under %s: %v", kind, parent, err)
+	}
+	return written
+}
+
+// The Agent half's dismissal is cleared by the trigger of migration 20261105093507, in the
+// transaction the reply is written in, which is what makes "dismissed" on this half a mark existing
+// and nothing else: no read compares the mark against the thread's newest reply, and none has to
+// read a dismissed thread at all.
+//
+// What clears it is a session's reply newer than the mark, at any depth. What does not: a reply the
+// person had already seen when they dismissed the thread - one older than the mark - and a reply of
+// their own, however new, since a reply they send from the Dismissed view leaves the thread there,
+// exactly as their own reply leaves a Reply thread's mark where it stands.
+func TestADismissedAgentThreadComesBackOnlyOnASessionReplyPastItsMark(t *testing.T) {
+	seed := seedInboxRead(t)
+	handler, database := seed.handler, seed.database
+	if dismissed := dismissRows(t, handler, "alice", inboxDismissAgentPrefix+seed.agent); dismissed != 1 {
+		t.Fatalf("dismissed = %d, want the agent thread", dismissed)
+	}
+	mark := agentThreadDismissal(t, database, "alice", seed.agent)
+	if mark == nil {
+		t.Fatal("the dismissal wrote no mark on the agent thread")
+	}
+
+	// A session reply older than the mark, and a reply of the caller's own newer than it: the mark
+	// stays, and the thread stays out of the Inbox.
+	writeAgentReply(t, database, seed.agent, "session", "s1", mark.Add(-time.Minute))
+	writeAgentReply(t, database, seed.agent, "user", "alice", mark.Add(time.Minute))
+	if at := agentThreadDismissal(t, database, "alice", seed.agent); at == nil {
+		t.Fatal("the agent thread's mark is gone after a reply older than it and a reply of the caller's own")
+	}
+	if away := threadsInState(t, handler, "alice", myRepliesStateDismissed); !slices.Contains(away, seed.agent) {
+		t.Fatalf("state=dismissed = %#v, want the agent thread still there", away)
+	}
+	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); slices.Contains(inbox, seed.agent) {
+		t.Fatalf("state=inbox = %#v, want the agent thread still out of it", inbox)
+	}
+
+	// A session reply newer than the mark, written two deep - under the reply already in the
+	// thread, which is where a follow-up lands - so the clear is the walk up in_reply_to and not a
+	// match on the root alone: the mark is gone and the thread is back, unread.
+	writeAgentReply(t, database, seed.agentReply, "session", "s1", mark.Add(2*time.Minute))
+	if at := agentThreadDismissal(t, database, "alice", seed.agent); at != nil {
+		t.Fatalf("the agent thread still carries the mark %s after a session replied past it", at)
+	}
+	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); !slices.Contains(inbox, seed.agent) {
+		t.Fatalf("state=inbox = %#v, want the agent thread back", inbox)
+	}
+	if away := threadsInState(t, handler, "alice", myRepliesStateDismissed); slices.Contains(away, seed.agent) {
+		t.Fatalf("state=dismissed = %#v, want the agent thread gone from it", away)
+	}
+	if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, seed.agent) {
+		t.Fatalf("state=unread = %#v, want the agent thread unread again", unread)
 	}
 }

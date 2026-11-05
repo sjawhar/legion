@@ -36,34 +36,45 @@ import (
 // The rows are matched first, as myRepliesCount matches them, so the planner reads them through
 // user_threads_unread rather than misjudging the stored flag; the narrowing this route adds is
 // applied over that set, where the issue join costs one lookup per matched row.
+//
+// The match reads the index and nothing else - the thread id it answers and the mark it narrows by
+// are both columns user_threads_unread holds - and each matched row's owner is then read by that
+// id, fenced from the planner as the list route's page read is (myRepliesPageRows, api/replies.go):
+// a one-step match reads the owner columns too, and the cheapest way to read a few columns of a
+// thousand rows out of a table one login owns is a scan of the whole table, which at INFRA-450's
+// a14 seed is 101,540 rows read to mark 1,300.
 const inboxReadReplyThreads = `
 	with matched as materialized (
-		select u.thread_id, u.replied_at, u.issue_key, u.artifact_id, u.project_key
+		select u.thread_id, u.replied_at
 		` + myRepliesUnread + `
 	)
-	select m.thread_id::text, m.issue_key, m.artifact_id::text
+	select m.thread_id::text, owner.issue_key, owner.artifact_id::text
 	from matched m
-	left join issues i on i.key = m.issue_key
+	join lateral (
+		select u.issue_key, u.artifact_id, u.project_key
+		from user_threads u
+		where u.login = $1 and u.thread_id = m.thread_id
+		offset 0
+	) owner on true
+	left join issues i on i.key = owner.issue_key
 	where m.replied_at <= least($4::text::timestamptz, now())
 	  and ($5::int[] is null or i.priority = any($5::int[]) or ($6::boolean and i.priority is null))
-	  and ($7::text[] is null or m.project_key = any($7::text[]))
+	  and ($7::text[] is null or owner.project_key = any($7::text[]))
 	order by m.thread_id`
 
 // inboxReadAgentRest is what this route selects over the Inbox's one-off agent roots: each root
 // holding a reply the caller has not read, whose newest reply is at or before the read mark ($4),
 // with the unread replies the mark writes by id.
-const inboxReadAgentRest = `
-	select r.root_id::text, r.session_id, c.unread_reply_ids
-	from roots r
-	join counted c on c.root_id = r.root_id
-	where r.replied_at <= least($4::text::timestamptz, now())
+var inboxReadAgentRest = `
+	select r.root_id::text, agent.session_id, agent.unread_reply_ids` + myAgentRootsWithFacts + `
+	where agent.replied_at <= least($4::text::timestamptz, now())
 	order by r.root_id`
 
-// inboxReadAgentThreads is the list route's own Agent read with that select over it: the head and
-// the roots holding a reply this login has not read are myAgentHead and myAgentUnreadRoots, the
-// constants myAgentRowsQuery is built from (api/replies.go), so a change to either moves the list
-// and this button together.
-const inboxReadAgentThreads = myAgentHead + myAgentUnreadRoots + inboxReadAgentRest
+// inboxReadAgentThreads is the list route's own Agent read with that select over it: the roots
+// holding a reply this login has not read, and each root's own facts, are myAgentUnreadRoots and
+// myAgentRootsWithFacts, the constants myAgentRowsQuery is built from (api/replies.go), so a
+// change to either moves the list and this button together.
+var inboxReadAgentThreads = myAgentUnreadRoots + inboxReadAgentRest
 
 // The lock statements of this transaction, which it takes in the order markInboxReadThreads
 // writes down: the owner rows of the threads it marks `for share`, then the caller's own

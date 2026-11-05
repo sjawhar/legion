@@ -1,0 +1,21 @@
+-- 20261105093506_user_agent_thread_dismissed_message.up.sql
+--
+-- INFRA-450: the index the next migration's trigger writes through. 20261105093507 clears an Agent
+-- thread's dismissal when the session replies in it again, and it has only the root's id to find
+-- that mark by: the thread it clears belongs to whoever dismissed it, which the reply does not
+-- name. The table's primary key is (login, message_id), so a delete keyed on message_id alone
+-- cannot read it, and every session reply would scan the table - one row per person per thread they
+-- have ever dismissed, 110,000 of them for one person at INFRA-450's a14 seed. This index is that
+-- delete's own read.
+--
+-- It is one index on one column of a table this change set created two migrations ago
+-- (20261105093505), so the rows it sorts are the dismissals written since that migration committed:
+-- none in production, since the route that writes them ships with this change.
+--
+-- Building it takes SHARE on user_agent_thread_dismissed, which blocks that table's writers - the
+-- dismiss route and the trigger below - and no reader, for one scan and sort of however many rows
+-- it holds. No row is rewritten and none is refused, and the census answers 0. Migrations run in
+-- one transaction, so create index concurrently is impossible here; it is a plain create index, as
+-- 20261105093502's and 20261105093503's are.
+create index user_agent_thread_dismissed_message
+  on user_agent_thread_dismissed (message_id);

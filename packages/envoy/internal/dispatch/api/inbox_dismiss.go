@@ -57,28 +57,40 @@ const (
 // event names is read back from the update rather than here.
 const inboxDismissReplyThreads = `
 	with matched as materialized (
-		select u.thread_id, u.replied_at, u.issue_key, u.artifact_id, u.project_key
+		select u.thread_id, u.replied_at
 		` + myRepliesInbox + `
 	)
-	select m.thread_id::text, m.issue_key, m.artifact_id::text
+	select m.thread_id::text, owner.issue_key, owner.artifact_id::text
 	from matched m
-	left join issues i on i.key = m.issue_key
+	join lateral (
+		select u.issue_key, u.artifact_id, u.project_key
+		from user_threads u
+		where u.login = $1 and u.thread_id = m.thread_id
+		offset 0
+	) owner on true
+	left join issues i on i.key = owner.issue_key
 	where m.replied_at <= least($4::text::timestamptz, now())
 	  and ($5::int[] is null or i.priority = any($5::int[]) or ($6::boolean and i.priority is null))
-	  and ($7::text[] is null or m.project_key = any($7::text[]))
+	  and ($7::text[] is null or owner.project_key = any($7::text[]))
 	order by m.thread_id`
 
 const inboxRestoreReplyThreads = `
 	with matched as materialized (
-		select u.thread_id, u.dismissed_at, u.issue_key, u.artifact_id, u.project_key
+		select u.thread_id, u.dismissed_at
 		` + myRepliesDismissed + `
 	)
-	select m.thread_id::text, m.issue_key, m.artifact_id::text
+	select m.thread_id::text, owner.issue_key, owner.artifact_id::text
 	from matched m
-	left join issues i on i.key = m.issue_key
+	join lateral (
+		select u.issue_key, u.artifact_id, u.project_key
+		from user_threads u
+		where u.login = $1 and u.thread_id = m.thread_id
+		offset 0
+	) owner on true
+	left join issues i on i.key = owner.issue_key
 	where m.dismissed_at <= least($4::text::timestamptz, now())
 	  and ($5::int[] is null or i.priority = any($5::int[]) or ($6::boolean and i.priority is null))
-	  and ($7::text[] is null or m.project_key = any($7::text[]))
+	  and ($7::text[] is null or owner.project_key = any($7::text[]))
 	order by m.thread_id`
 
 // inboxDismissNamedThreads reads the owners of the Reply threads a request named by id ($2), which
@@ -95,28 +107,23 @@ const inboxDismissNamedThreads = `
 // one-off agent roots: each root this request changes, its session - which one event names - and,
 // for a dismissal, the unread replies it marks read by id, since dismissing marks the thread read
 // too. The by-mark forms take the roots at or before the mark ($4); the by-id forms take the roots
-// the request named ($4 again, as the array).
-const (
+// the request named ($4 again, as the array). Each reads the root's own facts as the list route
+// reads them (myAgentRootsWithFacts, api/replies.go).
+var (
 	inboxDismissAgentRest = `
-	select r.root_id::text, r.session_id, coalesce(c.unread_reply_ids, '{}'::text[])
-	from roots r
-	left join counted c on c.root_id = r.root_id
-	where r.replied_at <= least($4::text::timestamptz, now())
+	select r.root_id::text, agent.session_id, agent.unread_reply_ids` + myAgentRootsWithFacts + `
+	where agent.replied_at <= least($4::text::timestamptz, now())
 	order by r.root_id`
 	inboxDismissAgentByIDRest = `
-	select r.root_id::text, r.session_id, coalesce(c.unread_reply_ids, '{}'::text[])
-	from roots r
-	left join counted c on c.root_id = r.root_id
+	select r.root_id::text, agent.session_id, agent.unread_reply_ids` + myAgentRootsWithFacts + `
 	where r.root_id = any($4::uuid[])
 	order by r.root_id`
 	inboxRestoreAgentRest = `
-	select r.root_id::text, r.session_id, '{}'::text[]
-	from roots r
+	select r.root_id::text, agent.session_id, '{}'::text[]` + myAgentRootsWithFacts + `
 	where r.dismissed_at <= least($4::text::timestamptz, now())
 	order by r.root_id`
 	inboxRestoreAgentByIDRest = `
-	select r.root_id::text, r.session_id, '{}'::text[]
-	from roots r
+	select r.root_id::text, agent.session_id, '{}'::text[]` + myAgentRootsWithFacts + `
 	where r.root_id = any($4::uuid[])
 	order by r.root_id`
 )
@@ -125,11 +132,11 @@ const (
 // over (api/replies.go): the Inbox's undismissed roots for a dismissal, the dismissed ones for a
 // restore. Reading them through the list's own constants is what keeps this route and the Dismissed
 // view from disagreeing about whether a thread is dismissed.
-const (
-	inboxDismissAgentThreads     = myAgentHead + myAgentInboxRoots + inboxDismissAgentRest
-	inboxDismissAgentByID        = myAgentHead + myAgentInboxRoots + inboxDismissAgentByIDRest
-	inboxRestoreAgentThreads     = myAgentHead + myAgentDismissedRoots + inboxRestoreAgentRest
-	inboxRestoreAgentThreadsByID = myAgentHead + myAgentDismissedRoots + inboxRestoreAgentByIDRest
+var (
+	inboxDismissAgentThreads     = myAgentInboxRoots + inboxDismissAgentRest
+	inboxDismissAgentByID        = myAgentInboxRoots + inboxDismissAgentByIDRest
+	inboxRestoreAgentThreads     = myAgentDismissedRoots + inboxRestoreAgentRest
+	inboxRestoreAgentThreadsByID = myAgentDismissedRoots + inboxRestoreAgentByIDRest
 )
 
 // inboxDismissMarkThreads writes the dismissal on every Reply thread it was given and answers the
@@ -157,10 +164,10 @@ const (
 
 // inboxDismissMarkAgentThreads writes one dismissal row per Agent thread, in the roots' sorted
 // order so two requests naming the same threads take the new rows in one order, as
-// inboxReadMarkAgentReplies sorts the replies it writes. A thread that came back - its mark older
-// than the newest reply the session wrote, which the read above counts as undismissed - keeps its
-// one row and has its mark moved forward; a row already at or after the mark is left alone and not
-// counted, which is what a request repeated against an unchanged thread answers 0 for.
+// inboxReadMarkAgentReplies sorts the replies it writes. A thread that came back carries no row at
+// all - the trigger of migration 20261105093507 deleted it when the session replied - so this
+// writes it again; a row already at or after the mark is left alone and not counted, which is what
+// a request repeated against an unchanged thread answers 0 for.
 //
 // inboxRestoreAgentThreadRows is the other direction, and inboxDismissLockAgentThreads takes the
 // rows it deletes in that same sorted order first, since a delete locks what its own plan reaches

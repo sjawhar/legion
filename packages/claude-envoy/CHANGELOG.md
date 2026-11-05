@@ -1,5 +1,24 @@
 # Changelog
 
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- The bundled `dispatch` command, `envoy-send`, the channel server and the session hook present
+  the secrets broker's DPoP-bound access token when no Dispatch or listener bearer is
+  configured, so a Claude Code session on a machine with an identity of its own needs no token
+  written anywhere. The bundles inline `@legion/broker-client`, which `scripts/build-inputs.txt`
+  now lists.
+
+
+### Fixed
+
+- A broker-minted token now names the Claude Code session using it. The channel server, the
+  session hook and `envoy-send` each pass their own session id, and the channel server passes it
+  as a function, since Claude Code mints a new id on `/clear` and one server drives both. Nothing
+  has to set `AGENT_SECRETS_SESSION`, a fleet entry that fixes no session accepts the trade, and
+  the listener accepts a call naming this session.
+
 ## [main@27c52d310319] - 2026-11-05
 
 ### Added

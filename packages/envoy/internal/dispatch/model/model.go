@@ -1532,12 +1532,15 @@ type MyReplyRow struct {
 }
 
 // MyRepliesResponse is the caller's Inbox threads in one state's own order, and how many there are
-// in all. AsOf is the database time of the one snapshot every row was read in, which is what a
-// mark-all passes back as its read mark. NextCursor is where the next state=dismissed page
-// resumes, empty when the page that answered it was the last.
+// in all - except under state=dismissed, where Total is the page it answers: that view reads 200
+// rows at a time from a cursor and nothing reads a total of it, and counting every thread a person
+// has ever dismissed is the most expensive read the Inbox has (INFRA-450's a14). AsOf is the
+// database time of the one snapshot every row was read in, which is what a mark-all passes back as
+// its read mark. NextCursor is where the next state=dismissed page resumes, empty when the page
+// that answered it was the last.
 type MyRepliesResponse struct {
-	Rows       []MyReplyRow `json:"rows"`
-	Total      int          `json:"total"`
+	Rows  []MyReplyRow `json:"rows"`
+	Total int          `json:"total"`
 	Limit      int          `json:"limit"`
 	Offset     int          `json:"offset"`
 	AsOf       time.Time    `json:"as_of"`

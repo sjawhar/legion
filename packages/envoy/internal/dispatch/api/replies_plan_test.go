@@ -17,15 +17,14 @@ import (
 // user_threads_dismissed (20261105093503) for state=dismissed, which is also the cursor the
 // Dismissed view resumes from.
 //
-// The Agent half of each state is here too. Its rows come from the messages themselves, through
-// the recursive read every Inbox state shares (myAgentRows), and the dismissal it tests is a row of
-// user_agent_thread_dismissed (20261105093505): the Inbox's own read asks that table whether a root
-// is dismissed, which is its primary key's question, and the Dismissed view reads the marks
-// themselves in the order it answers in, which is the other index's. Neither may scan that table,
-// and neither may sort it: the sorts those plans do carry are the list's own and older than this
-// change - the roots' newest reply (max(created_at)), the lateral that reads that newest reply, and
-// the ordered array_agg of the unread reply ids - so what each Agent case holds is that no sort
-// stands in for the dismissal, named by its column.
+// The Agent half of each state is here too. Its rows come from the messages themselves, read one
+// root at a time (api/replies.go), and the dismissal it tests is a row of
+// user_agent_thread_dismissed (20261105093505): the Inbox's own reads take the person's marks as
+// one set, which the login index answers, and the Dismissed view reads those marks in the order it
+// answers in, which is the same index's other half. Neither may scan that table,
+// and neither may sort it: the sorts those plans do carry are the list's own - the order the
+// Inbox's two states answer in, over the roots they found - so what each Agent case holds is that
+// no sort stands in for the dismissal, named by its column.
 //
 // Bitmap scans are off with sequential scans: on a fixture this small a bitmap scan of either index
 // is the cheapest plan, and a bitmap scan answers in heap order, which loses exactly the order
@@ -71,19 +70,23 @@ func TestMyRepliesQueriesReadTheirStatesIndex(t *testing.T) {
 		{"one issue's unread set", myRepliesPageQuery, append([]any{"alice", "TEST-1", nil}, &oneIssuesPage), "user_threads_unread", "user_threads", ""},
 		{"the inbox count", myRepliesInboxCountQuery, replyArgs(), "user_threads_inbox", "user_threads", ""},
 		{"every row under state=inbox", myRepliesInboxPageQuery, replyArgs(everyRow), "user_threads_inbox", "user_threads", ""},
-		{"the dismissed count", myRepliesDismissedCountQuery, replyArgs(), "user_threads_dismissed", "user_threads", ""},
+		// The Dismissed view has no count: its total is the page it answers (listMyReplies).
 		{"the first page under state=dismissed", myRepliesDismissedPageQuery, replyArgs(&dismissedPage), "user_threads_dismissed", "user_threads", ""},
 		{
 			"a page under state=dismissed from its cursor", myRepliesDismissedFromQuery,
 			replyArgs(&dismissedPage, cursorAt, cursorThread), "user_threads_dismissed", "user_threads", "",
 		},
+		// The Inbox's own states read the person's dismissal marks as one set rather than asking
+		// the table about one root at a time, so what answers them is the login index, not the
+		// primary key: the key is what a dismiss and a restore write by, and what the trigger of
+		// 20261105093507 deletes through is the message index 20261105093506 adds.
 		{
 			"the agent rows under state=inbox", myAgentInboxRowsQuery, agentArgs(everyRow),
-			"user_agent_thread_dismissed_pkey", "user_agent_thread_dismissed", "dismissed_at",
+			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at",
 		},
 		{
-			"the agent count under state=inbox", myAgentInboxCountQuery, agentArgs(),
-			"user_agent_thread_dismissed_pkey", "user_agent_thread_dismissed", "dismissed_at",
+			"the agent rows and total under state=inbox", myAgentCountedInboxRowsQuery, agentArgs(everyRow),
+			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at",
 		},
 		{
 			"the agent rows under state=dismissed", myAgentDismissedRowsQuery, agentArgs(&dismissedPage),
@@ -92,10 +95,6 @@ func TestMyRepliesQueriesReadTheirStatesIndex(t *testing.T) {
 		{
 			"an agent page under state=dismissed from its cursor", myAgentDismissedFromQuery,
 			agentArgs(&dismissedPage, cursorAt, cursorThread),
-			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at",
-		},
-		{
-			"the agent count under state=dismissed", myAgentDismissedCountQuery, agentArgs(),
 			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at",
 		},
 	} {
