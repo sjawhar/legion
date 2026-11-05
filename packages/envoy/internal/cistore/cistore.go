@@ -280,6 +280,13 @@ type Store struct {
 	// which re-establishes the watcher or exits for Docker to restart.
 	watcher *kvwatch.Watcher
 
+	// kv is the one seam a store reaches its bucket through: every record read and write takes
+	// its handle from it (write, casState, ClaimStillHeld, HasRecord). The listener's store
+	// (Open) takes the cache watcher's handle, which Rewatch moves to the new connection on every
+	// reconnect, so each attempt takes the handle installed last; a writer (OpenWriter) has no
+	// watcher and holds one bound handle instead.
+	kv func() bus.KeyValue
+
 	// The change feed, guarded by mu. feedAttached says a summary loop consumes it
 	// (attachSummary). While it is set, changed holds the keys whose cached record changed since
 	// the loop last took them (takeChanges), and cacheReset says the cache was emptied for a
@@ -364,8 +371,66 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		logger:         logger,
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache, kvwatch.WithLogger(logger.Slog()))
+	// The cache watcher holds the handle, so the seam asks it on every call: Rewatch moves the
+	// watcher's handle to the new connection on every reconnect. It reads the field rather than
+	// holding the watcher, as the calls it replaced did, so a watcher rebuilt over the same store
+	// is the one asked.
+	s.kv = func() bus.KeyValue { return s.watcher.KV() }
 	s.watcher.Start()
 	return s, nil
+}
+
+// OpenWriter binds the existing CI state bucket for a process that writes records and reads none
+// of them into a cache: no watcher, no cache, no change feed and no summary loop, and it creates
+// nothing — the listener's Open stays the one owner of the bucket, its TTL and its copies. It
+// fails with what bus.OpenKeyValue gives when the bucket does not exist, so a caller binds it
+// again later rather than making one of its own.
+//
+// A writer supports Record, RecordSuite and HasRecord. Everything else on Store belongs to the
+// listener's store and must not be called on a writer: the cache, the summary loop, Ping,
+// Rewatch, StopWatch, EndWatch, WaitForCacheReady and the settlement transitions all go through
+// the watcher this one has not got. Its writes touch no cached state either (only applyWatched
+// and casState write the cache, and a writer calls neither), so a writer holds nothing per head
+// and grows with nothing.
+//
+// A writer never calls Rewatch, so the channel nextRewatch hands its KV calls never closes and a
+// write of its own is never given up on for a rewatch (kvCall); it is given up on only when its
+// caller's context ends. The handle stays usable across a reconnect, since nats.go reconnects the
+// same *nats.Conn under it.
+func OpenWriter(nc *nats.Conn, logger *logging.Logger) (*Store, error) {
+	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+	if err != nil {
+		return nil, err
+	}
+	kv, err := bus.OpenKeyValue(js, bus.CIStateBucket)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{
+		combiners:   map[string]*keyCombiner{},
+		rewatched:   make(chan struct{}),
+		changedWake: make(chan struct{}, 1),
+		logger:      logger,
+	}
+	// One handle for the store's life: nothing moves it, since a writer has no watcher to
+	// rewatch. The cache maps stay nil, since nothing a writer calls reads or writes them.
+	s.kv = func() bus.KeyValue { return kv }
+	return s, nil
+}
+
+// HasRecord answers whether the bucket holds the record of one head, with one KV Get. A caller
+// that remembers what it last wrote cannot answer this from memory: the bucket's TTL expires a
+// key under an unchanged head, and a record may be deleted, after which the head must be read in
+// full again. It reads the bucket and never a cache, so on the listener's store it answers from
+// what the bucket holds rather than from this process's own writes.
+func (s *Store) HasRecord(owner, repo, number, sha string) (bool, error) {
+	if _, err := s.kv().Get(Key(owner, repo, number, sha)); err != nil {
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Ping verifies the KV bucket is reachable and its cache watcher is alive.
@@ -695,7 +760,7 @@ func isCASConflict(err error) bool {
 }
 
 func (s *Store) casState(key string, apply func(st *State) (ok bool, err error)) (State, bool, error) {
-	kv := s.watcher.KV()
+	kv := s.kv()
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
 		entry, err := kv.Get(key)
@@ -761,7 +826,7 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 // ClaimStillHeld verifies from durable KV that this exact snapshot retains the
 // settlement right immediately before an external publication.
 func (s *Store) ClaimStillHeld(key string, generation uint64, hash string) (bool, error) {
-	kv := s.watcher.KV()
+	kv := s.kv()
 	entry, err := kv.Get(key)
 	if err != nil {
 		return false, err

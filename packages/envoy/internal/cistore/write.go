@@ -77,7 +77,7 @@ func (s *Store) write(ctx context.Context, identity State, observations int, mut
 			}
 			time.Sleep(casBackoff(attempt - 1))
 		}
-		kv := s.watcher.KV()
+		kv := s.kv()
 		entry, err := kvCall(ctx, s.logger, s.nextRewatch(), func() (nats.KeyValueEntry, error) { return kv.Get(key) })
 		var st State
 		var rev uint64
