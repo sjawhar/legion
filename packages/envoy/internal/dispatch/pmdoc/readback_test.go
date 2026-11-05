@@ -11,19 +11,24 @@ import (
 // A document a caller writes is stored as its rendering, so one whose rendering does not read back
 // as the document is refused rather than stored: the next read of what was stored would give
 // another document, or refuse it. Each document here is read as the browser editor's engine reads
-// it, and its rendering reads back otherwise.
+// it; the first two read back as another document (ErrMisreadRendering) and the third's rendering
+// no reader of this package reads at all, which is refused by the shape's own name
+// (ErrRenderingRefused), since that is what its author can act on.
 func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.T) {
-	for _, markdown := range []string{
-		"> [^n]: -\n> -\n",
-		"> [^n]: *\n> 10. text x[^n]\n",
-		"2. [^N]:\n       12. *\n       --\n",
+	for markdown, want := range map[string]error{
+		"> [^n]: -\n> -\n":                    ErrMisreadRendering,
+		"> [^n]: *\n> 10. text x[^n]\n":       ErrMisreadRendering,
+		"2. [^N]:\n       12. *\n       --\n": ErrRenderingRefused,
 	} {
 		if _, err := Parse(markdown); err != nil {
 			t.Fatalf("Parse(%q) = %v, want it read", markdown, err)
 		}
 		_, err := ParseForWrite(markdown, nil)
-		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "reads back otherwise") {
-			t.Errorf("ParseForWrite(%q) = %v, want a schema refusal of a document that reads back otherwise", markdown, err)
+		if !errors.Is(err, want) {
+			t.Errorf("ParseForWrite(%q) = %v, want %v", markdown, err, want)
+		}
+		if want == ErrRenderingRefused && !strings.Contains(err.Error(), "an empty list item followed by a blank line") {
+			t.Errorf("ParseForWrite(%q) = %v, want it to name the shape its rendering holds", markdown, err)
 		}
 	}
 }
