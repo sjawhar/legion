@@ -266,11 +266,15 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 		return documentRebuilt()
 	}
 	if err != nil {
-		return refusedWith(documentUpdateRefused(), err)
+		refusal := documentUpdateRefused()
+		logRefusal(info, refusal, "dispatch: refused a browser's update its walk will not read", walkFigures(err)...)
+		return refusedWith(refusal, err)
 	}
 	if weighed.forged {
-		return refusedWith(documentUpdateRefused(),
-			&updateRefusal{rule: errUpdateNotFromEditor, reason: "a change to the retired clients' list, which only a rebuild writes"})
+		cause := &updateRefusal{rule: errUpdateNotFromEditor, reason: "a change to the retired clients' list, which only a rebuild writes"}
+		refusal := documentUpdateRefused()
+		logRefusal(info, refusal, "dispatch: refused a browser's update writing the retired clients' list only a rebuild writes", walkFigures(cause)...)
+		return refusedWith(refusal, cause)
 	}
 	bytes, _, measured := weighing.size()
 	if !measured {
@@ -280,13 +284,23 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	weighs := own > unweighedApplyHeapBytes
 	heap := own + weighed.roomApplyHeap(structs.roomStructs(info.Doc))
 	if tooHeavy := s.memory.ApplyTooHeavy; heap > uint64(tooHeavy) {
-		return refusedWith(documentTooLarge(), fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
+		refusal := documentTooLarge()
+		logRefusal(info, refusal, "dispatch: refused a browser's update whose apply is estimated past what the pod lets any apply hold",
+			"apply_heap", heap, "apply_heap_limit", tooHeavy)
+		return refusedWith(refusal, fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
 			errApplyTooHeavy, heap, tooHeavy))
 	}
 	atTheBound := bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
 	crept := measured && bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep
 	if atTheBound && (weighed.inserted >= maxPeerInsertAtTheBound || (crept && weighed.inserted > 0)) {
-		return documentTooLarge()
+		refusal := documentTooLarge()
+		// document_bytes is the room's last measured rendering, and 0 for a room no load
+		// measured, which the bound weighs the update's own bytes alone against (measured);
+		// crept says the creep cap has passed, where the insert that is admitted is none at all.
+		logRefusal(info, refusal, "dispatch: refused a browser's update inserting into a document already at its byte bound",
+			"document_bytes", bytes, "document_bound", pmdoc.MaxDocumentBytes,
+			"inserted", weighed.inserted, "insert_limit", maxPeerInsertAtTheBound, "crept", crept)
+		return refusal
 	}
 	// A heavy update waits for its share of the bound before it reserves its addition to the
 	// room's totals, so what the room admits on is weighed as it stands once the wait is over,
@@ -300,16 +314,43 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	// is in flight (roomTotals.reserve). No lock is held across the apply, so another browser
 	// of the room is weighed and applied while this apply runs, its observers included.
 	if !structs.reserve(info.Doc, added) {
-		return documentTooLarge()
+		refusal := documentTooLarge()
+		// Which of the three totals refused it is the only thing that tells a room at the decode
+		// cap from one at the unrendered bound or at F, so the line carries all three with what
+		// the update would have added to each. A room no load listed keeps no totals and its
+		// admission counted the room afresh (roomTotals.admits), as this line does.
+		var held roomCount
+		if structs != nil {
+			held, _ = structs.runningTotals()
+		} else {
+			held = countRoom(info.Doc)
+		}
+		logRefusal(info, refusal, "dispatch: refused a browser's update its room's totals cannot take",
+			"struct_total", held.structs, "structs_added", added.structs, "struct_cap", maxUpdateItems,
+			"unrendered_total", held.unrendered, "unrendered_added", added.unrendered, "unrendered_cap", maxUnrenderedBytes,
+			"frame_total", held.frame, "frame_added", added.frame, "frame_cap", heaviestHandoffBound,
+			"inserts", added.inserts)
+		return refusal
 	}
 	charged := false
 	if s.budget.full.Load() {
 		if s.refusedUnderPressure(&weighed, charge) {
 			structs.unreserve(added)
-			return &websocket.PeerClose{
+			refusal := &websocket.PeerClose{
 				Code:   contracts.DocumentBusyCloseCode,
 				Reason: contracts.DocumentBusyCloseReason,
 			}
+			// The transient refusal closes the socket as the permanent ones do, and said as
+			// little: what an operator needs of it is that the pressure refused it, and the
+			// charges it was refused against. The line is bounded as the others are: the refusal
+			// closes the browser's socket, so a browser logs at most one per connection, and its
+			// reconnect is refused at admission while the budget stays full (websocket.go's
+			// admission line), not here.
+			used, limit, _ := s.budget.figures()
+			logRefusal(info, refusal, "dispatch: refused a browser's update while the open rooms are past their budget",
+				"inserted", weighed.inserted, "structure", weighed.structureHeap(),
+				"charged", used, "limit", limit, "reserve", s.memory.PressureReserve)
+			return refusal
 		}
 		charged = true
 	}
@@ -417,9 +458,37 @@ func documentUpdateRefused() *websocket.PeerClose {
 // refusedWith is refusal, the close ygo answers the browser with - it reads it through errors.As
 // (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:142-149) - with cause behind it,
 // which no close frame carries: the rule that refused the update, its reason and the byte it
-// refused at, for the line ygo logs and for this package's tests.
+// refused at, for this package's tests. ygo logs that cause at Debug alone
+// (provider/websocket/peer_update.go:142-143, p.server.log().Debug("peer update refused", ...)),
+// which the pod's level drops, so what an operator reads of a refusal is the hook's own line
+// (logRefusal) and never this error.
 func refusedWith(refusal *websocket.PeerClose, cause error) error {
 	return fmt.Errorf("%w: %w", refusal, cause)
+}
+
+// logRefusal is the one line a refusal of a browser's update leaves. ygo logs a refused peer
+// update at Debug alone (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:142-143),
+// which the pod's level drops, so without this line an operator sees an editor's socket close and
+// nothing says why. message names the rule in plain words and figures are what refused it, beside
+// the room, the update's bytes and the close that browser is given. Neither the document's
+// content nor the update's bytes are ever logged: both are the person's own text.
+func logRefusal(info websocket.PeerUpdateInfo, refusal *websocket.PeerClose, message string, figures ...any) {
+	slog.Warn(message, append([]any{
+		"room", info.Room, "update_bytes", len(info.Update),
+		"close_code", refusal.Code, "close_reason", refusal.Reason,
+	}, figures...)...)
+}
+
+// walkFigures is what a refusal of the walk's says of the update: which rule refused it, why and
+// the byte it refused at (updateRefusal). walkUpdate returns no other error, and the hook makes
+// one of its own for a write of the retired clients' list; any other error is logged as its text,
+// so no refusal logs a line that says nothing.
+func walkFigures(err error) []any {
+	var refusal *updateRefusal
+	if !errors.As(err, &refusal) {
+		return []any{"error", err.Error()}
+	}
+	return []any{"rule", refusal.rule.Error(), "rule_reason", refusal.reason, "refused_at_byte", refusal.at}
 }
 
 // refusedUnderPressure is whether the room budget's pressure, while the budget is full and nothing
