@@ -164,7 +164,8 @@ thread with plain `gh`: the ones it answers and the bot threads the reviewer acc
 it. The reviewer resolves none. If the implementer reports that GitHub refused its
 `resolveReviewThread`, open a `dispatch ask` naming the thread's id or URL and GitHub's message, for
 a human to resolve it by hand, with options for resolved / could not. The merger does not complete
-while that ask is open; READY itself checks no thread state
+while that ask is open; READY itself checks no thread state, and the only gate that reads one is
+the base branch's own GitHub rules, which neither repository Legion runs in sets today
 (`skill://legion-worker/references/merge-gate.md`).
 
 ## The close

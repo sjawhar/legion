@@ -184,8 +184,20 @@ reviewing until you finish.
 
 ## The merger
 
-- The merger resolves no review thread: the reviewer's approval already judged them, and READY
-  requires no thread state beyond it. It quotes what sits above the approved head with
+- **Nothing in Legion holds the merge for an open review thread.** The merger resolves none and
+  reads none: the reviewer's approval already judged them, no Go code of the daemon reads a
+  thread's state, and READY requires no thread state beyond that approval. A repository that wants
+  that gate sets GitHub's `required_review_thread_resolution` on its base branch, which only a
+  repository administrator can set, and leaves `dismiss_stale_reviews_on_push` and
+  `require_last_push_approval` off, since either would void the approval when retro commits the
+  text fixes; neither cybermonklabs/legion nor theorem-labs/agent-infra sets it today. Where the
+  repository sets none, the rule itself is what holds a finding: the reviewer writes the thread
+  and retro closes it. In a repository that does set it, GitHub refuses the merge of a pull
+  request whose conversation is unresolved, and that refusal is the merger's to report: it does
+  not merge, tells the architect, and moves the issue back to `retro` with
+  `request_backward_move`, the reason naming each unresolved thread, because GitHub grants
+  `resolveReviewThread` to the pull request's author App and retro runs as that App.
+- The merger quotes what sits above the approved head with
   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon,
   not the merger, holds those commits to retro's: READY reads GitHub's compare of the round's
