@@ -227,4 +227,18 @@ dead_followers=$(yq -r '
 check "no job of ci.yaml reads a need's result behind an implicit success()" \
   "$(is "$dead_followers" "")"
 
+echo "case: the failed act finds its descendants when the list does not hold the asking run"
+# `gh run list` lags behind a run that has just started, which is why the started act above
+# refuses to guess. The failed act walks a candidate's chain of parents through the runs it was
+# given, so without the asking run's own entry it reaches no parent, misses its direct child and
+# states the absence as proven. HEAD_SHA and HEAD_BRANCH name this run, so the walk needs no
+# entry for it. `cancel-changes` is the most exposed caller: `changes` is the run's first job, so
+# its follower fires inside that lag window.
+lagging_child=$(runs \
+  "$(mg_run 41865489886 2734 "$head_2589" "$head_2734" in_progress "" 2026-11-04T18:09:44Z)")
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$lagging_child"
+check "it decides rather than failing" "$(is "$status" 0)"
+check "it cancels the descendant, then itself" \
+  "$(is "$out" "$(printf 'cancel 41865489886\nself')")"
+
 summary "the merge-group cancel decision"
