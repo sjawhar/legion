@@ -148,12 +148,22 @@ async function waitForFrame(
   return frame;
 }
 
+/** The Delivery page opens three subscriptions since INFRA-1077 folded the Pipeline page into it
+ *  and gave it a Legion section, and whichever answers first is no longer the timeline's. A spec
+ *  that means the timeline says so (isTimelineSnapshot): the Pipeline section's own view answers
+ *  a row this page never shows — a pull request entering its window moves its lead times — so a
+ *  spec reading the first snapshot would watch the wrong view and read its frames as the
+ *  timeline's. */
+function isTimelineSnapshot(frame: LiveFrame): boolean {
+  return frame.type === "snapshot" && isLiveRecord(frame.body) && "prs" in frame.body;
+}
+
 async function openLiveDelivery(page: Page): Promise<LiveSocket> {
   const live = watchDeliverySocket(page);
   await page.goto("/delivery?mode=list");
   await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
   await live.opened;
-  await waitForFrame(live.frames, (frame) => frame.type === "snapshot");
+  await waitForFrame(live.frames, isTimelineSnapshot);
   return live;
 }
 
@@ -294,7 +304,7 @@ test("a reconcile-style re-write sends no frame", async ({ browser }) => {
 
   try {
     const live = await openLiveDelivery(page);
-    const snapshot = await waitForFrame(live.frames, (frame) => frame.type === "snapshot");
+    const snapshot = await waitForFrame(live.frames, isTimelineSnapshot);
     const sub = snapshotSubscription(snapshot);
     // The snapshot's own trailing frames land first; a short margin of real time keeps them out
     // of the window this row reads.
@@ -325,7 +335,7 @@ test("each delta carries only what changed", async ({ browser }) => {
 
   try {
     const live = await openLiveDelivery(page);
-    const snapshot = await waitForFrame(live.frames, (frame) => frame.type === "snapshot");
+    const snapshot = await waitForFrame(live.frames, isTimelineSnapshot);
     await insertMergedPR(692, "feat: one narrow delta");
     const delta = await waitForFrame(live.frames, (frame) =>
       deltaIncludesPR(frame, "acme/widgets#692")
