@@ -484,3 +484,29 @@ test("every prompt and agent that may write says to make its own scratch and del
     ]
   );
 });
+
+// R9: a push moves the branch while the pull request can keep naming the old commit, so the new
+// commit gets no checks (dispatch://INFRA-1318). The worker skill carries the step and the
+// pr-body reference names it as the one bounded wait a role makes, so the "never wait on CI"
+// rule does not read as forbidding it. Each file is pinned by its own sentences, which are near
+// but not identical to the daemon prompt's. This shows the text ships, never that a role
+// follows it.
+test("the worker skill tells a role to read the pull request's head after its own push", () => {
+  const skill = collapsed(path.join(staged, "legion-worker", "SKILL.md"));
+  expect(skill).toContain(
+    "gh pr view <n> --repo <the issue's repository> --json headRefOid --jq .headRefOid"
+  );
+  expect(skill).toContain(
+    "about ten seconds after your push, again about ten seconds later, and a last time about thirty seconds after that, with only the last read deciding"
+  );
+  expect(skill).toContain(
+    "push a new commit — an empty one when the work is complete — since a push of a commit the branch already holds moves no ref"
+  );
+  expect(skill).toContain(
+    "tell the architect both commits and every read, and wait with a `WAITING` line instead of completing"
+  );
+  expect(skill).toContain("The merger pushes nothing, so the step never reaches it.");
+  expect(collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"))).toContain(
+    "the one bounded wait a role makes is the read of the pull request's own head after its own push, in `skill://legion-worker`, *Every role pushes its own commits*; it reads no check"
+  );
+});

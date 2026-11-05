@@ -47,7 +47,9 @@ order, each the line `dispatch result` printed when the result was recorded:
 
 The implementer runs the repository's fast local checks for the paths it changed before the push,
 then pushes and completes. It never waits for, watches or polls the pull request's remote CI
-(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
+(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop
+(the one bounded wait a role makes is the read of the pull request's own head after its own push,
+in `skill://legion-worker`, *Every role pushes its own commits*; it reads no check).
 Under the Go daemon a check or workflow the base branch requires that settles red on the head,
 before the completion or after it, sends the work back to `implementing` with the failing checks
 named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
