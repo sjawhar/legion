@@ -32,6 +32,7 @@ function sessionWith(followed: string[]): ChannelSession {
     onRoleRegained: () => undefined,
     capabilitiesChanged: () => undefined,
     observe: () => undefined,
+    messageOf: () => undefined,
     shutdown: async () => undefined,
   }
 }

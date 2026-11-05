@@ -125,8 +125,8 @@ export interface UserTurnRouter {
    * listener sends it again.
    */
   route(rendered: RenderInboundResult): Promise<boolean>
-  /** Takes one of the mod's events: the session's turn tracking, and the row each delivered
-   *  message turned out to be, which tags that row on the live view's frames. */
+  /** Takes one of the mod's events, to recognise the row each delivered message turned out to
+   *  be, which tags that row on the live view's frames. */
   observe(event: ModEvent): void
 }
 
@@ -166,6 +166,9 @@ function pickedEffort(value: string): ModEffort | undefined {
 
 export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRouter {
   const { reply, session, state, warn } = options
+  /** Whether this session is a Legion pane, which is exactly the session whose person messages
+   *  go to the bridge's inbox rather than to the mod. */
+  const inPane = options.inbox !== undefined
   const waitingMs = options.commandWaitingMs ?? COMMAND_WAITING_MS
   /** The pictures this session has been shown, so one is sent once (`withDeliveredPictures`). */
   const shownPictures = new Set<string>()
@@ -242,7 +245,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     // Expected before the message is handed over: the session reports the row as an event of its
     // own, which can reach this process before the call that delivered it answers.
     expectRow(turn.body, turn.messageId)
-    if (options.inbox === undefined) {
+    if (!inPane) {
       const row = await session.deliver({
         content: blocks,
         text: turn.body,
@@ -278,7 +281,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
       : value
     // A pane's Claude Code runs in print mode, where the model is the command's to change; a
     // terminal session's is a `/config` row.
-    if (options.inbox !== undefined) {
+    if (inPane) {
       await session.runCommand("model", model)
       return modelPicked(`${CLAUDE_PROVIDER}/${model}`)
     }
@@ -378,7 +381,8 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
       return true
     },
     observe(event) {
-      session.observe(event)
+      // The Claude Code session was handed this event before the router was (`startAgentStream`,
+      // `./envoy-channel-server`): its turn tracking must not depend on a router existing.
       if (event.kind !== "append" || awaited.length === 0) return
       const { message } = event
       if (message.type !== "user" && message.role !== "user") return

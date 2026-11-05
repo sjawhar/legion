@@ -16,11 +16,14 @@ import {
   MOD_ROUTE_REQUESTS,
   MOD_ROUTE_RESULTS,
   MOD_URL_BASE,
+  type ModAckBody,
   type ModCallArguments,
   type ModCallName,
   type ModCallResults,
   type ModEvent,
+  type ModHealthBody,
   type ModRequest,
+  type ModRequestsBody,
   type ModResult,
   type ModResultValue,
   resolveModSocketPath,
@@ -323,7 +326,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
   const serve = async (incoming: IncomingMessage, response: ServerResponse): Promise<void> => {
     const route = (incoming.url ?? "").split("?")[0]
     if (route === MOD_ROUTE_HEALTH && incoming.method === "GET") {
-      answerJson(response, 200, { link: MOD_HEALTH_MARKER })
+      answerJson(response, 200, { link: MOD_HEALTH_MARKER } satisfies ModHealthBody)
       return
     }
     if (
@@ -352,7 +355,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
         if (event.kind === "hello" || event.kind === "session-id") reportSessionId(event.sessionId)
         stream.push(event)
       }
-      answerJson(response, 200, { ok: true })
+      answerJson(response, 200, { ok: true } satisfies ModAckBody)
       return
     }
     if (route === MOD_ROUTE_RESULTS) {
@@ -369,21 +372,23 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
         if (result.ok) waiting.settle.resolve(result.value)
         else waiting.settle.reject(new Error(`the mod could not ${waiting.call}: ${result.error}`))
       }
-      answerJson(response, 200, { ok: true })
+      answerJson(response, 200, { ok: true } satisfies ModAckBody)
       return
     }
     lastPollAt = Date.now()
     if (queued.length > 0 || closed) {
-      answerJson(response, 200, { requests: queued.splice(0, queued.length) })
+      answerJson(response, 200, {
+        requests: queued.splice(0, queued.length),
+      } satisfies ModRequestsBody)
       return
     }
     // Held, not blocked: this handler returns and the server goes on serving, so a `GET /healthz`
     // on another connection is answered while the mod waits here.
     const poll: HeldPoll = {
-      answer: (requests) => answerJson(response, 200, { requests }),
+      answer: (requests) => answerJson(response, 200, { requests } satisfies ModRequestsBody),
       timer: setTimeout(() => {
         held.delete(poll)
-        answerJson(response, 200, { requests: [] })
+        answerJson(response, 200, { requests: [] } satisfies ModRequestsBody)
       }, MOD_POLL_HOLD_MS),
     }
     poll.timer.unref()

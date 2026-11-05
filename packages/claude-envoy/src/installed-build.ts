@@ -17,14 +17,6 @@ function pluginCacheSegments(bundlePath: string): string[] | undefined {
 }
 
 /**
- * The marketplace a plugin install path names (`…/plugins/cache/<marketplace>/<plugin>/…`), or
- * undefined for any other path.
- */
-export function installedMarketplace(bundlePath: string): string | undefined {
-  return pluginCacheSegments(bundlePath)?.[0]
-}
-
-/**
  * The version a plugin install path names (`…/plugins/cache/<marketplace>/<plugin>/<version>/…`,
  * the marketplace commit's first 12 characters for this plugin), or undefined for any other path.
  */

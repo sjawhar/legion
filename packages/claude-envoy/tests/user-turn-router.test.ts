@@ -166,7 +166,12 @@ async function harness(input: {
   return {
     accepts,
     directory,
-    observe: (event) => router.observe(event),
+    // As the live view taps the link (`startAgentStream`, `../src/agent-stream-runner`): the
+    // Claude Code session sees each event first, then the router.
+    observe: (event) => {
+      session.observe(event)
+      router.observe(event)
+    },
     order,
     replies,
     router,

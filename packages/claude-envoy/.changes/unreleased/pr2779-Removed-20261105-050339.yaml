@@ -1,0 +1,5 @@
+kind: Removed
+body: Claude Code's channel is gone, and with it the `--channels` flag a session needed at its start. A session with this plugin takes a person's message with no flag; `ENVOY_CHANNEL_LOADED`, the channel MCP capability and the channel smoke script are removed.
+time: 2026-11-05T05:03:39.705575663Z
+custom:
+    Issue: pr2779

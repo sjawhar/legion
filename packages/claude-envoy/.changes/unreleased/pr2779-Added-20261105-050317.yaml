@@ -1,0 +1,5 @@
+kind: Added
+body: 'A Claude Code session now shows its conversation on Dispatch''s Agents page as an Oh My Pi session does: each prompt, the agent''s text as it is written, its thinking where Claude Code keeps it, and each tool call with its arguments and its result. A new mod, loaded from the plugin''s source, sends what happens in the session to the plugin''s MCP server over a Unix socket, and the server publishes the live view''s frames and the session''s model, thinking level and slash commands.'
+time: 2026-11-05T05:03:17.565964828Z
+custom:
+    Issue: pr2779

@@ -1,0 +1,5 @@
+kind: Changed
+body: The live-conversation publisher and the helpers that make a person's Dispatch message the session's own turn now live in the shared package both plugins use, so the Claude Code plugin reuses them rather than copying them. Nothing an Oh My Pi session does changes.
+time: 2026-11-05T05:03:48.819319164Z
+custom:
+    Issue: pr2779

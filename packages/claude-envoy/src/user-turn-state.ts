@@ -18,11 +18,10 @@
 //
 // Both are bounded: a session that runs for weeks must not grow a file without end, and neither
 // record is worth keeping once it is thousands of messages old.
-import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { hasErrnoCode } from "@legion/envoy-client/errors"
 import { z } from "zod"
 import { pruneStateDirectory, writeAtomicStateFile, writtenLongAgo } from "./session-state"
+import { readStateFile } from "./state-file"
 
 /** The directory the records live in, named once for the writer, the reader and the sweep. */
 const TURNS_DIRECTORY = "turns"
@@ -63,22 +62,12 @@ export function userTurnStateFile(stateDirectory: string, sessionId: string): st
  * record it could not read is replaced by the next write.
  */
 export async function readUserTurnState(file: string): Promise<UserTurnStateFile> {
-  let text: string
-  try {
-    text = await readFile(file, "utf8")
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT")) return { handled: [], rows: [] }
-    throw error
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error(`${file} is not JSON`)
-  }
-  const state = UserTurnStateSchema.safeParse(parsed)
-  if (!state.success) throw new Error(`${file} holds no record of this session's turns`)
-  return state.data
+  return await readStateFile(
+    file,
+    UserTurnStateSchema,
+    { handled: [], rows: [] },
+    "holds no record of this session's turns",
+  )
 }
 
 /** One session's record, in memory and on disk. */
@@ -130,6 +119,10 @@ export function userTurnState(file: string, restored: UserTurnStateFile): UserTu
     },
     messageOf: (row) => rows.get(row),
     delivered(row, messageId) {
+      // The router records the same pair twice by design - the append event the session reported
+      // and the call that delivered it, whichever wins - and the second call has nothing to add.
+      // The write already running is the one putting this pair in place, so it is what resolves.
+      if (rows.get(row) === messageId) return writing
       rows.set(row, messageId)
       while (rows.size > DELIVERED_ROWS_MAX) {
         const oldest = rows.keys().next()

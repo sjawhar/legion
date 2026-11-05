@@ -44,10 +44,7 @@
         "label": "Switch models when a message is flagged",
         "kind": "choice",
         "value": "Switch automatically",
-        "options": [
-          "Switch automatically",
-          "Ask each time"
-        ],
+        "options": ["Switch automatically", "Ask each time"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -147,12 +144,7 @@
         "label": "Dynamic workflow size",
         "kind": "choice",
         "value": "medium",
-        "options": [
-          "unrestricted",
-          "small",
-          "medium",
-          "large"
-        ],
+        "options": ["unrestricted", "small", "medium", "large"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -197,12 +189,7 @@
         "label": "Time format",
         "kind": "choice",
         "value": "auto",
-        "options": [
-          "auto",
-          "12-hour",
-          "24-hour",
-          "24-hour-utc"
-        ],
+        "options": ["auto", "12-hour", "24-hour", "24-hour-utc"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -214,13 +201,7 @@
         "label": "Default permission mode",
         "kind": "choice",
         "value": "bypassPermissions",
-        "options": [
-          "default",
-          "plan",
-          "acceptEdits",
-          "auto",
-          "dontAsk"
-        ],
+        "options": ["default", "plan", "acceptEdits", "auto", "dontAsk"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -232,10 +213,7 @@
         "label": "Worktree base ref",
         "kind": "choice",
         "value": "fresh",
-        "options": [
-          "fresh",
-          "head"
-        ],
+        "options": ["fresh", "head"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -375,13 +353,7 @@
         "label": "Output style",
         "kind": "choice",
         "value": "default",
-        "options": [
-          "default",
-          "Proactive",
-          "Concise",
-          "Explanatory",
-          "Learning"
-        ],
+        "options": ["default", "Proactive", "Concise", "Explanatory", "Learning"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -404,10 +376,7 @@
         "label": "Editor mode",
         "kind": "choice",
         "value": "normal",
-        "options": [
-          "normal",
-          "vim"
-        ],
+        "options": ["normal", "vim"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -419,12 +388,7 @@
         "label": "Question auto-continue timeout",
         "kind": "choice",
         "value": "never",
-        "options": [
-          "never",
-          "60s",
-          "5m",
-          "10m"
-        ],
+        "options": ["never", "60s", "5m", "10m"],
         "provider": {
           "plugin": "engine",
           "tier": "core"
@@ -503,13 +467,7 @@
         "label": "Dialog expiry",
         "kind": "choice",
         "value": "default",
-        "options": [
-          "default",
-          "60s",
-          "5m",
-          "10m",
-          "never"
-        ],
+        "options": ["default", "60s", "5m", "10m", "never"],
         "provider": {
           "plugin": "engine",
           "tier": "core"

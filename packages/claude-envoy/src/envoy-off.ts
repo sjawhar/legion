@@ -24,10 +24,12 @@ export function inboundOffChannelSession(options: {
     },
     unfollow: async () => [],
     // No heartbeat runs, so no role is ever regained, nothing is advertised for a change to
-    // reach, and no mod event has a router here to read it.
+    // reach, no mod event has a router here to read it, and no row of a delivery was ever
+    // recorded: this session takes no inbound message at all.
     onRoleRegained: () => undefined,
     capabilitiesChanged: () => undefined,
     observe: () => undefined,
+    messageOf: () => undefined,
     async rememberRole(role) {
       await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
         session_id: identity.id,

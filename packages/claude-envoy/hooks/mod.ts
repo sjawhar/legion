@@ -59,8 +59,10 @@ import {
   type ModAppendDoor,
   type ModEffort,
   type ModEvent,
+  type ModEventsBody,
   type ModRequest,
   type ModResult,
+  type ModResultsBody,
   type ModResultValue,
   type ModStepPart,
   type ModStopReason,
@@ -247,7 +249,8 @@ function createLink(): SessionLink {
     try {
       while (connected && queued.length > 0) {
         const events = queued.splice(0, queued.length)
-        if ((await fetch(MOD_ROUTE_EVENTS, JSON.stringify({ events }))) === undefined) {
+        const body = { events } satisfies ModEventsBody
+        if ((await fetch(MOD_ROUTE_EVENTS, JSON.stringify(body))) === undefined) {
           connected = false
           return
         }
@@ -305,7 +308,8 @@ function createLink(): SessionLink {
     } catch (error) {
       result = { id: request.id, ok: false, error: errorText(error) }
     }
-    await fetch(MOD_ROUTE_RESULTS, JSON.stringify({ results: [result] }))
+    const body = { results: [result] } satisfies ModResultsBody
+    await fetch(MOD_ROUTE_RESULTS, JSON.stringify(body))
   }
 
   /** Connect, then poll for work until the server goes for good. */
@@ -313,6 +317,11 @@ function createLink(): SessionLink {
     while (!finished) {
       if (!connected && !(await connect())) {
         finished = true
+        // Dropped rather than kept: `send` refuses every later event now, and `flush` only posts
+        // while connected, so nothing will ever read these again. They are not free to hold - a
+        // queued `step` carries its whole accumulated text, so a step that streamed through the
+        // backoff leaves one full copy of itself per snapshot pinned for the session's life.
+        queued.length = 0
         return
       }
       const pollStartedAt = Date.now()

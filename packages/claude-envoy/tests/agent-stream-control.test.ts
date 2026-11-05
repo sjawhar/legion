@@ -1,6 +1,6 @@
 /**
  * The live view's control subject on a Claude Code session (`startAgentStream`,
- * `../src/envoy-channel-server`): what a viewer's `replay` is answered with, what a `watch` arms,
+ * `../src/agent-stream-runner`): what a viewer's `replay` is answered with, what a `watch` arms,
  * what a message that is neither does, and where both subjects go after a `/clear`.
  *
  * The mod is a fake here: the events it sends and the answers its `$` calls give are the two
@@ -14,13 +14,8 @@ import {
   agentStreamControlSubject,
   agentStreamFramesSubject,
 } from "@legion/contracts"
-import type {
-  ModCallArguments,
-  ModCallName,
-  ModCallResults,
-  ModEvent,
-} from "../hooks/mod-protocol"
-import { type AgentStreamRunner, startAgentStream } from "../src/envoy-channel-server"
+import type { ModCallArguments, ModCallName, ModCallResults, ModEvent } from "../hooks/mod-protocol"
+import { type AgentStreamRunner, startAgentStream } from "../src/agent-stream-runner"
 import type { ModLink } from "../src/mod-link"
 import { FakeNats } from "./channel-session-harness"
 
@@ -141,7 +136,7 @@ function running(): Running {
     connection: nats,
     followsSessionId: true,
     link: mod.link,
-    sessionID: SESSION,
+    sessionId: SESSION,
     warn: (text) => void warnings.push(text),
   })
   return {
@@ -228,9 +223,11 @@ test("an armed session publishes the model it runs and the commands it takes", a
   expect(settings?.kind === "settings" && settings.reported ? settings.model : undefined).toBe(
     "anthropic/claude-sonnet-5",
   )
-  expect(
-    settings?.kind === "settings" && settings.reported ? settings.models : undefined,
-  ).toEqual(["anthropic/default", "anthropic/sonnet", "anthropic/opus"])
+  expect(settings?.kind === "settings" && settings.reported ? settings.models : undefined).toEqual([
+    "anthropic/default",
+    "anthropic/sonnet",
+    "anthropic/opus",
+  ])
   const commands = published.findLast((frame) => frame.kind === "commands")
   expect(commands?.kind === "commands" ? commands.commands : undefined).toEqual([
     { description: "Compact the conversation", name: "compact", source: "builtin" },
@@ -274,7 +271,9 @@ test("a clear moves the control subject, and the new id replays nothing from bef
   const replay = live.answered("_INBOX.cleared")
   expect(replay?.session_id).toBe(CLEARED)
   expect(
-    (replay?.frames ?? []).filter((frame) => frame.kind === "message" || frame.kind === "tool-result"),
+    (replay?.frames ?? []).filter(
+      (frame) => frame.kind === "message" || frame.kind === "tool-result",
+    ),
   ).toEqual([])
 
   // The next turn is published under the new id.

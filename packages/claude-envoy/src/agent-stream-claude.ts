@@ -17,7 +17,11 @@
  * Nothing here opens a socket or knows about NATS: a subject is a string its caller passes in.
  */
 import { type AgentStreamCommand, isTypableCommandName } from "@legion/contracts"
-import type { AgentStreamPublisher, AgentStreamSettingsState } from "@legion/pi-shared/agent-stream"
+import {
+  type AgentStreamPublisher,
+  type AgentStreamSettingsState,
+  modelReference,
+} from "@legion/pi-shared/agent-stream"
 import type {
   ModAppendMessage,
   ModCommandInfo,
@@ -206,7 +210,9 @@ function callArguments(args: string): unknown {
 function listedModels(rows: readonly ModConfigRow[]): string[] {
   const row = rows.find((candidate) => candidate.key === "model")
   const options = row?.options ?? []
-  return options.map((option) => `${CLAUDE_PROVIDER}/${option}`)
+  // A nameless option is no reference a pick could send back, and `modelReference` is the rule
+  // for what a `provider/id` is.
+  return options.flatMap((option) => modelReference(CLAUDE_PROVIDER, option) ?? [])
 }
 
 /**
@@ -375,6 +381,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       rows: readonly ModConfigRow[] | undefined,
     ): AgentStreamSettingsState {
       if (rows === undefined) return { reported: false }
+      const reference = modelReference(CLAUDE_PROVIDER, model)
       return {
         models: listedModels(rows),
         reported: true,
@@ -388,7 +395,9 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
               ? null
               : { level: String(observed.effort), levels: CLAUDE_EFFORT_LEVELS }
             : { level: null, levels: CLAUDE_EFFORT_LEVELS },
-        ...(model === undefined ? {} : { model: `${CLAUDE_PROVIDER}/${model}` }),
+        // Absent when the session has no model selected, which is `modelReference`'s own answer
+        // for a name that is empty (`AgentStreamSettingsReported.model`).
+        ...(reference === undefined ? {} : { model: reference }),
       }
     },
     reset(): void {

@@ -52,8 +52,6 @@ export interface ModSession {
   connected(): boolean
   /** Take one of the mod's events. The live view hands over every event it reads, in order. */
   observe(event: ModEvent): void
-  /** Whether a turn is running now. */
-  inTurn(): boolean
   /** Add one row the model reads at its next request, and resolve with the row's id. Nothing is
    *  started by it: a card joins the conversation without a turn of its own. */
   show(content: readonly ModContentBlock[]): Promise<string>
@@ -169,7 +167,6 @@ export function modSession(options: ModSessionOptions): ModSession {
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
     },
-    inTurn: () => turn !== undefined,
     async show(content) {
       const result = await link.request("session.append", { message: { type: "user", content } })
       if (result.deny !== undefined) {
