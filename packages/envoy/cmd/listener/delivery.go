@@ -750,6 +750,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		return
 	}
 	if result.Err != nil {
+		// The interest path's resolution failed, which is the one outcome this delivery NAKs:
+		// the message is reported as a delivery exception and redelivered. The attempt recorded
+		// above is rolled back, since the redelivery must not be skipped as one already on its
+		// way.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -759,23 +763,18 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			},
 			exceptionReason: "delivery_failed",
 			origin:          exceptionOrigin(message),
-			clearAttempt:    result.ShouldNAK,
+			clearAttempt:    true,
 		})
-	} else {
-		// The resolution found no way the session receives this message and reported no error of
-		// its own, so there is nothing to deliver and nothing to report: the message is held and
-		// retried for the whole window before it is given up. A delivery of its own is no longer
-		// an outcome here - a session's own consumer is the one way a message reaches it, and
-		// the relay of that consumer carries it, which the Relayed branch above answers.
-		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
-		return
-	}
-	if result.ShouldNAK {
 		cfg.messagesNAKed.Inc()
 		message.finalize(true)
-	} else {
-		message.finalize(false)
+		return
 	}
+	// The resolution found no way the session receives this message and reported no error of
+	// its own, so there is nothing to deliver and nothing to report: the message is held and
+	// retried for the whole window before it is given up. A delivery of its own is no longer
+	// an outcome here - a session's own consumer is the one way a message reaches it, and
+	// the relay of that consumer carries it, which the Relayed branch above answers.
+	unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
 }
 
 // followedTopicRules is what a message on a topic a session follows is judged against
@@ -950,8 +949,8 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// One resolution per recipient decides every outcome below: it reads the entry the
 		// judgement above returned for every verdict, its refusals among them, and makes no call
 		// of its own.
-		delivery, err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
-		relayed := err == nil && delivery.Relayed
+		err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
+		relayed := err == nil
 		// Refusals are decided before the take case, since the session whose own consumer relays
 		// the message is one this path still reports a refusal of: that relay judges nothing it
 		// publishes, and the plugin drops a frame whose delivery mode it cannot read without a
@@ -963,7 +962,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			// entry at all records nothing -- the record would name a delivery this path never
 			// made -- and one of a session whose own consumer holds the message records nothing
 			// either: the relay of that consumer carries it, not this path.
-			recorded := target != nil && !delivery.Relayed
+			recorded := target != nil && !relayed
 			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, recorded))
 			continue
 		}

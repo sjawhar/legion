@@ -40,8 +40,7 @@ func newSessionRegistry(t *testing.T) *session.SessionRegistry {
 // own, under the core path's stream sequence of 0.
 func deliverThroughEntry(t *testing.T, sessions *session.SessionRegistry, item contracts.Envelope, interest store.Interest) error {
 	t.Helper()
-	_, err := session.Resolve(item, interest.SessionID, resolvedEntry(t, sessions, interest.SessionID), 0)
-	return err
+	return session.Resolve(item, interest.SessionID, resolvedEntry(t, sessions, interest.SessionID), 0)
 }
 
 func TestDeliver_NoRegistryEntry(t *testing.T) {
@@ -82,8 +81,8 @@ func TestDeliver_NoSessionRecord_whenSessionIsOnlySelfSubscribed(t *testing.T) {
 	}
 }
 
-// A session whose entry records consumer delivery takes every stored message from its consumer,
-// so no other path delivers it.
+// A session whose entry records consumer delivery takes every stored message from its own
+// consumer, so the resolution succeeds and no other path delivers it.
 func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T) {
 	// Given
 	sessions := newSessionRegistry(t)
@@ -96,7 +95,7 @@ func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T)
 	}
 
 	// When
-	stored, storedErr := session.Resolve(
+	storedErr := session.Resolve(
 		newTestEnvelope("agent", "notifications.agent.ses_consumer", "stored message"),
 		"ses_consumer",
 		resolvedEntry(t, sessions, "ses_consumer"),
@@ -104,7 +103,7 @@ func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T)
 	)
 
 	// Then
-	if storedErr != nil || !stored.Skipped {
-		t.Fatalf("stored message to a consumer-delivery session: result %+v, error %v; want skipped", stored, storedErr)
+	if storedErr != nil {
+		t.Fatalf("stored message to a consumer-delivery session: error %v; want the session's own consumer to relay it", storedErr)
 	}
 }

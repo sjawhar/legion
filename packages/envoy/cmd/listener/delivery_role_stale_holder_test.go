@@ -67,9 +67,9 @@ func assertOneKeptCopy(t *testing.T, client *bus.Client, role string, item contr
 // whose role is claimed by holder, whose session entry last heartbeated since ago, with the
 // holder's own subscription and the role topic's exception lane already subscribed.
 //
-// The holder answers the forward's receipt only after the message is recorded, so a forward the
-// lane reports delivered is on forwards by the time the handler returns
-// (bus.Client.RequestCoreTo waits for the receipt).
+// A forward the lane reports delivered is one the stream acknowledged storing on the holder's
+// agent subject (startRoleForward), which is a forward's whole answer; the rig's own core
+// subscription of that subject is what puts the copy on forwards, which settled waits for.
 type staleHolderRig struct {
 	harness    listenerDeliveryHarness
 	forwards   chan *natsgo.Msg

@@ -584,7 +584,7 @@ describe("gaps", () => {
 });
 
 describe("what the registration resumes at", () => {
-  test("nothing before the session has taken a frame: the consumer starts at the stream's end", () => {
+  test("nothing before the session has taken a frame: the registration carries no resume point", () => {
     const { delivery } = setup();
 
     expect(delivery.registration()).not.toHaveProperty("resume");

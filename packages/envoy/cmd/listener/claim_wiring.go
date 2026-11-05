@@ -43,8 +43,8 @@ type subscribeBody struct {
 	// written empty, clearing any id a previous registration stored, since the entry is built
 	// fresh from this body.
 	ClientInstanceID string `json:"client_instance_id"`
-	// Delivery asks for consumer delivery (subscribeDelivery). A registration with no serving port
-	// that carries none, an older plugin's, is refused (sessionDelivery.register).
+	// Delivery asks for consumer delivery (subscribeDelivery). A registration that carries none,
+	// an older plugin's, is refused (sessionDelivery.register).
 	Delivery *subscribeDelivery `json:"delivery"`
 }
 
@@ -63,7 +63,9 @@ type subscribeDelivery struct {
 // a sequence below which the plugin holds nothing unwritten, so a consumer created from it starts at
 // Seq+1 when StreamID is still the stream's. A Seq of 0 is a position too: the plugin holds nothing
 // of the stream, and its consumer starts at sequence 1. Seq is nil when the body carries no seq,
-// which names no position, so the consumer starts at the stream's end.
+// which names no position, so the consumer starts at the first message the stream holds on the
+// session's own agent subject, and at the stream's end only when it holds none
+// (bus.SessionConsumers.Ensure).
 type subscribeResume struct {
 	StreamID string  `json:"stream_id"`
 	Seq      *uint64 `json:"seq"`

@@ -136,27 +136,43 @@ type sessionDelivery struct {
 	marks atomic.Uint64
 	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
 	now func() time.Time
-	// beforeRegister runs at the top of each register call, before the consumer's filter is set;
-	// nil unless a test sets it. The window between a registration's plan and its filter is where
-	// another writer's row lands and makes the plan's compare-and-swap fail, and only a test that
-	// can write in that window can drive the re-plan, and the filter the pass after it sets, of
-	// registerSession's loop. It runs for every pass of one registration, so a test that counts
-	// its calls drives each pass of that registration on its own.
+	// beforeRegister runs at the top of each register call, before the session's lock is taken and
+	// the consumer's filter set; nil unless a test sets it. The window between a registration's
+	// plan and its filter is where another writer's row lands and makes the plan's
+	// compare-and-swap fail, and only a test that can write in that window can drive the re-plan,
+	// and the filter the pass after it sets, of registerSession's loop. It runs for every pass of
+	// one registration, so a test that counts its calls drives each pass of that registration on
+	// its own.
 	beforeRegister func()
+	// afterRegisterFilter runs at the end of each register call that was given a consumer, under
+	// the session's lock that call returns held and before registerSession writes the interest row
+	// the filter was set from; nil unless a test sets it. The window between a registration's
+	// filter and its row is the one that lock closes, and only a test that can run in that window
+	// can prove a relay restart never narrows the filter back to a row the registration has not
+	// written yet. It runs for every pass that holds a consumer, as beforeRegister runs for every
+	// pass. A call made in it that takes the same session's lock waits for the registration's pass
+	// to release it, so a test drives such a call from a goroutine of its own.
+	afterRegisterFilter func()
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
 	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
-	// deletes the consumer and creates it again when a message awaits an ack. Each reads the
-	// session's stored topics under the lock, so the filter the last of them writes is the stored
-	// set as it stood then, never a set read before another call wrote a newer one. A create landing
-	// between that delete and create would start the consumer at the stream's end and skip what the
-	// session has not acked. Under the lock a restart that read the floor and failed after its
+	// deletes the consumer and creates it again when a message awaits an ack. An unsubscribe and a
+	// restart read the session's stored topics under the lock; a registration filters on the plan
+	// it is about to store and holds the lock from that filter through the plan's write
+	// (registerSession). So the filter the last of them writes is the stored set as it stood then,
+	// never a set read before another call wrote a newer one, and no call reads the row between a
+	// registration's filter and that registration's write: a restart that did would set the filter
+	// back to a row without the topic the registration is answered 200 for, and every message
+	// published on that topic until the session's next heartbeat would be skipped. A create landing
+	// between that delete and create would start the consumer at that registration's own position -
+	// its resume point, or else what the stream holds for the session - rather than at the floor the
+	// restart read. Under the lock a restart that read the floor and failed after its
 	// delete or create leaves that floor pending, and the next call that finds the consumer missing,
 	// a registration's create or the relay's retry, creates it there
 	// (bus.SessionConsumers.RestartAtFloor), so in this process no restart loses the session's
 	// position. The lock and the pending start are this listener's alone: a second
 	// listener (a rolling deploy's other task, or the one a session re-registers through) can still
-	// create the consumer in that window at the session's resume point or the stream's end, or run
-	// its own restart's calls between this one's.
+	// create the consumer in that window at the session's resume point, or at what the stream holds
+	// for the session, or run its own restart's calls between this one's.
 	locks sessionLocks
 	// grantMu guards the refusal episode below.
 	grantMu sync.Mutex
@@ -217,22 +233,42 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 // register gives a registration the session consumer every session is delivered through,
 // filtered on topics, the topics the registration's interest row will hold. One this listener
 // cannot give a consumer is refused by name, and the handler then writes nothing.
-func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
+//
+// It returns the session's lock still held, as the func that releases it, and its caller
+// releases that func once it has written the row this filter was set from (registerSession): a
+// relay restart, which rebuilds the filter from the stored row, then runs wholly before or
+// wholly after a registration's pass and never between its filter and its row. The lock
+// (sessionLocks) is no re-entrant one, so the pass takes it once and the caller releases it once,
+// on every path out of the pass. A registration refused before the lock was taken returns
+// noUnlock, so the caller releases what it was given either way.
+func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal, func()) {
 	if m != nil && m.beforeRegister != nil {
 		m.beforeRegister()
 	}
-	return m.consumerFor(ctx, body, topics)
+	outcome, refusal, unlock := m.consumerFor(ctx, body, topics)
+	if refusal == nil && m != nil && m.afterRegisterFilter != nil {
+		m.afterRegisterFilter()
+	}
+	return outcome, refusal, unlock
 }
+
+// noUnlock releases nothing: it is the unlock a consumer call that refused a registration before
+// it took the session's lock hands back.
+func noUnlock() {}
 
 // consumerFor creates the session's consumer when the stream holds none and otherwise updates it
 // to the current filter, before the registration answers; it refuses a registration that asks for
 // none, or that this listener can give none. The consumer is created at the sequence after its
 // resume point's seq when that point carries a seq, 0 included (which gives sequence 1), and names
 // the stream's current identity. A registration with no resume point, or one with no seq or naming
-// another identity, creates it at the stream's end. The filter is the topics the registration is
-// about to store, so a message published on a newly followed topic once the registration is
-// answered is the consumer's to deliver.
-func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
+// another identity, creates it at the first message the stream holds on the session's own agent
+// subject, and at the stream's end only when it holds none (bus.SessionConsumers.Ensure). The
+// filter is the topics the registration is about to store, so a message published on a newly
+// followed topic once the registration is answered is the consumer's to deliver.
+//
+// It returns the session's lock held over that filter, which the caller releases (register); a
+// refusal decided before the lock was taken returns noUnlock.
+func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal, func()) {
 	if body.Delivery == nil || !body.Delivery.Consumer {
 		// A registration with no delivery field at all is a plugin older than consumer delivery.
 		// It receives nothing either way, so it is told so rather than left registered and silent.
@@ -241,7 +277,7 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 			Error: fmt.Sprintf("%s asked for no session consumer: a session receives only what its own consumer holds, so register with delivery.consumer true",
 				body.SessionID),
 			Reason: deliveryReasonNotRequested,
-		}
+		}, noUnlock
 	}
 	if _, ok := bus.SessionConsumerName(body.SessionID); !ok {
 		return sessionDeliveryOutcome{}, &deliveryRefusal{
@@ -249,23 +285,23 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 			Error: fmt.Sprintf("%q names no session consumer: a session id holds no dot, star, angle bracket, slash or whitespace",
 				body.SessionID),
 			Reason: deliveryReasonInvalidSessionID,
-		}
+		}, noUnlock
 	}
 	if m == nil || m.consumers == nil {
 		return sessionDeliveryOutcome{}, &deliveryRefusal{
 			status: http.StatusServiceUnavailable,
 			Error:  "this listener holds no session-consumer connection, so it can give " + body.SessionID + " no consumer",
 			Reason: deliveryReasonConsumerError,
-		}
+		}, noUnlock
 	}
 	if m.grantRefused() {
-		return sessionDeliveryOutcome{}, noGrantRefusal(body.SessionID)
+		return sessionDeliveryOutcome{}, noGrantRefusal(body.SessionID), noUnlock
 	}
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
 	streamID, err := m.consumers.StreamID(ctx)
 	if err != nil {
-		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err)
+		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err), noUnlock
 	}
 	var startSeq uint64
 	epoch := body.Delivery.Epoch
@@ -274,9 +310,8 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 	}
 	unlock := m.locks.lock(body.SessionID)
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)
-	unlock()
 	if err != nil {
-		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err)
+		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err), unlock
 	}
 	m.granted()
 	gap := start.Gap
@@ -290,7 +325,7 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 		epoch:         epoch,
 		consumerStart: start.StartSeq,
 		heard:         m.mark(),
-	}, nil
+	}, nil, unlock
 }
 
 // noGrantRefusal is the refusal of sessionID's registration for want of the grant that manages

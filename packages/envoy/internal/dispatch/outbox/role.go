@@ -144,9 +144,8 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 //   - otherwise a forward to the holder, stored on the holder's agent subject, which the stream
 //     captures, under its own Nats-Msg-Id (send), so one copy is stored however often it is
 //     sent; the stream's acknowledgement of that copy is what counts the forward as having
-//     reached the holder, for every holder alike - one with a serving port and one without -
-//     because every holder is delivered its copy from its own consumer by the listener's relay
-//     and answers the forward with nothing.
+//     reached the holder, for every holder alike, because every holder is delivered its copy
+//     from its own consumer by the listener's relay and answers the forward with nothing.
 //
 // A claim the restart grace retained is the one no-holder case that is not kept: that holder
 // keeps its claim and writes no new one, so a copy kept for it would wait for a claim that never

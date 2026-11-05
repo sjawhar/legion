@@ -113,9 +113,9 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 		t.Fatalf("keep the copy; the listener log says why:\n%s", harness.logs.String())
 	}
 	key := roleForwardDedupePrefix + item.DedupeKey
-	// This holder answers no receipt: no listener pushes to a session's port, so only a session
-	// consumer of its own reaches it. Its forward ends in bus.ErrReceiptTimeout with the stream's
-	// stored copy on its agent subject, which is the copy this test counts.
+	// No listener pushes to a session's port, so only a session consumer of its own reaches this
+	// holder and it answers the forward with nothing. The forward's whole answer is the stream's
+	// acknowledgement of the copy stored on its agent subject, which is the copy this test counts.
 	entry := session.SessionEntry{MachineID: "test-machine", Port: 1}
 	subject := contracts.AgentSubject(holder)
 

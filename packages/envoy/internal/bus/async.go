@@ -325,13 +325,13 @@ const requestReplies = 4
 // the channel when Request returns, before anything is sent. Otherwise the channel receives:
 //
 //   - nil on the stream's acknowledgement of a copy it holds, at a sequence and without an error,
-//     a duplicate's included (answers): the request is stored on a subject the stream captures,
+//     a duplicate's included (outcome): the request is stored on a subject the stream captures,
 //     and that acknowledgement is its whole outcome, since no receiver answers a request. A reply
 //     that is neither an acknowledgement nor a refusal is passed over and the wait goes on: the
 //     server's no-responders answer, and anything a subscriber of the subject sends;
 //   - the stream's refusal of the copy, the moment it comes back: an acknowledgement that carries
-//     an error settles the request as that error, a full stream's as ErrStreamFull
-//     (streamRefusal). It never wraps ErrNotAcknowledged, which says the stream gave no answer at
+//     an error settles the request as that error, a full stream's as ErrStreamFull (outcome,
+//     streamFull). It never wraps ErrNotAcknowledged, which says the stream gave no answer at
 //     all, and the request does not wait out opts.Timeout for an answer that is already in, as a
 //     window's PublishAsync (acknowledged) and Client.StartRequestStoredTo's Wait do not;
 //   - the outcome of the send the stream's acknowledgement of a duplicate with no sequence

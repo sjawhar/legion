@@ -849,6 +849,21 @@ await nc.flush();
 await nc.close();
 console.log("published");
 '
+# core_publish TOPIC SUMMARY: the run's one core NATS publish of an Envoy envelope, which window
+# g's agent subject and publish_rest's role subjects share. The envelope carries the marker the
+# caller has just taken as its source event id, so the counting finds the event in a transcript,
+# and every value goes in through jq. It prints what the publisher said, a failure included: the
+# caller records that answer beside the marker.
+core_publish() {
+  local topic=$1 summary=$2 id envelope
+  id=$(new_uuid)
+  envelope=$(jq -nc --arg id "$id" --arg src "$marker" --arg topic "$topic" \
+    --argjson at "$(date +%s%3N)" --arg summary "$summary" \
+    '{event_id: $id, source: "agent", source_event_id: $src, topic: $topic,
+      dedupe_key: ("envoy-session-delivery-" + $id), issued_at: $at, payload_summary: $summary, trace_id: $id}')
+  (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" LIVE_NATS_URL="$nats_url" \
+    LIVE_SUBJECT="$topic" LIVE_ENVELOPE="$envelope" -- bun -e "$core_publish_js") 2>&1 || true
+}
 text_for() { printf 'live delivery event %s (disruption %s, %s via %s)' "$marker" "$1" "$2" "$3"; }
 # stored_comments: one JSON line per message the stream holds on the followed issue's subjects,
 # {seq, stored, marker}, read with an ordered consumer from the stream's start.
@@ -907,7 +922,7 @@ publish_dispatch() {
   done
 }
 publish_rest() {
-  local d=$1 via=$2 label answer text envelope
+  local d=$1 via=$2 label answer text
   for label in pi cc; do
     next_marker
     text=$(text_for "$d" agent "POST /v1/messages/send to listener $via")
@@ -925,14 +940,7 @@ publish_rest() {
   for label in pi cc; do
     next_marker
     text=$(text_for "$d" role "a core publish on notifications.role.${role[$label]}")
-    local id
-    id=$(new_uuid)
-    envelope=$(jq -nc --arg id "$id" --arg src "$marker" --arg topic "notifications.role.${role[$label]}" \
-      --argjson at "$(date +%s%3N)" --arg summary "$text" \
-      '{event_id: $id, source: "agent", source_event_id: $src, topic: $topic,
-        dedupe_key: ("envoy-session-delivery-" + $id), issued_at: $at, payload_summary: $summary, trace_id: $id}')
-    answer=$( (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" LIVE_NATS_URL="$nats_url" \
-      LIVE_SUBJECT="notifications.role.${role[$label]}" LIVE_ENVELOPE="$envelope" -- bun -e "$core_publish_js") 2>&1) || true
+    answer=$(core_publish "notifications.role.${role[$label]}" "$text")
     record "$d" role core-publish "$label" 1 "$answer"
   done
   next_marker
@@ -1108,23 +1116,18 @@ run_window() {
     # that subject, and the session must then receive the message once. An agent subject is one
     # session's alone, so that start is never older than the session itself. This is the case
     # sjawhar/legion#2720's replay sweep covered for a brand-new session before it was deleted.
-    # The publish is a direct core publish rather than a POST /v1/messages/send because the
-    # listener refuses a send to a session it does not know, and that nothing knew the session yet
-    # is the whole point of the case.
-    local id envelope text answer cc_file
+    # The publish is a direct core publish (core_publish, the publish of publish_rest's role
+    # events) rather than a POST /v1/messages/send because the listener refuses a send to a
+    # session it does not know, and that nothing knew the session yet is the whole point of the
+    # case. Its subject is the session's own agent subject, which publish_rest never publishes on.
+    local text answer cc_file
     kill_label cc KILL
     close_fd cc
     sid[cc]=$(new_uuid)
     note "the Claude Code session was SIGKILLed; its replacement runs under ${sid[cc]}, an id that has never registered"
     next_marker
     text=$(text_for g agent "a core publish on notifications.agent.${sid[cc]}")
-    id=$(new_uuid)
-    envelope=$(jq -nc --arg id "$id" --arg src "$marker" --arg topic "notifications.agent.${sid[cc]}" \
-      --argjson at "$(date +%s%3N)" --arg summary "$text" \
-      '{event_id: $id, source: "agent", source_event_id: $src, topic: $topic,
-        dedupe_key: ("envoy-session-delivery-" + $id), issued_at: $at, payload_summary: $summary, trace_id: $id}')
-    answer=$( (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" LIVE_NATS_URL="$nats_url" \
-      LIVE_SUBJECT="notifications.agent.${sid[cc]}" LIVE_ENVELOPE="$envelope" -- bun -e "$core_publish_js") 2>&1) || true
+    answer=$(core_publish "notifications.agent.${sid[cc]}" "$text")
     record g agent core-publish cc 1 "$answer"
     note "one envelope stored on notifications.agent.${sid[cc]} before any session of that id ran: ${answer}"
     start_cc chosen
@@ -1190,21 +1193,40 @@ cat "$table"
 # first transcript line carrying it), prints one line per session naming what it compared, and
 # sets order_ok. A marker the stream does not hold and a comment missing from a transcript each
 # fail it, and so does a comparison with nothing in it while the run published comments, so the
-# run can never print the order as held having compared nothing. A run whose windows publish no
-# comment at all (--disruptions g alone, whose one event is neither a comment nor Dispatch's) has
-# nothing to compare, and says so.
+# run can never print the order as held having compared nothing.
 #
-# Which of those two an empty comparison is, the run's event record says, and only a run has one:
-# the function's own unit harness sets neither events nor disruptions, so both are read with a
-# default and an empty comparison without a record is the failure, which is the case that harness
-# drives. The function runs under set -u, where naming an unset variable ends the shell.
+# "Did this run publish a comment of the followed issue?" is asked once, as `written` being
+# empty, and everything that turns on the answer hangs off that one `if`: the empty side says why
+# nothing is compared, and the other side both names a published order that differs from the
+# written one (Dispatch's outbox decides it, and the run does not judge it) and compares.
+#
+# Of the empty side the run's event record says which case it is, and only a run has one. A
+# record that was read and holds no issue event is the run whose windows publish no comment at
+# all (--disruptions g alone, whose one event is neither a comment nor Dispatch's): there is
+# nothing to compare, and the run says so and passes. Everything else fails the run: no record
+# (the function's own unit harness sets neither events nor disruptions, so both are read with a
+# default), a record holding a comment no marker of which reached written_order, and a record jq
+# could not read at all, which is named with jq's own complaint rather than taken for an
+# exemption. The function runs under set -u, where naming an unset variable ends the shell.
 compare_issue_order() {
-  local m label line last shown
+  local m label line last shown event_record reason status
   local -a written
   read -r -a written <<<"$written_order"
   order_ok=1
   if ((${#written[@]} == 0)); then
-    if [[ -s "${events:-}" ]] && ! jq -se 'any(.[]; .kind == "issue")' "${events}" >/dev/null; then
+    event_record=${events:-}
+    reason=""
+    status=0
+    # jq -e: 0 the record holds an issue event, 1 it holds none, anything else it could not be
+    # read (a malformed line, no jq at all). An absent record answers nothing, and stays at 0.
+    if [[ -s "$event_record" ]]; then
+      reason=$(jq -se 'any(.[]; .kind == "issue")' "$event_record" 2>&1 >/dev/null) || status=$?
+    fi
+    if ((status > 1)); then
+      printf 'issue order: the event record %s could not be read (jq exit %s: %s), so whether this run published a comment of %s is unknown\n' \
+        "$event_record" "$status" "${reason//$'\n'/ }" "$followed_issue" | tee -a "$table"
+      order_ok=0
+    elif ((status == 1)); then
       printf 'issue order: no window of this run (--disruptions %s) publishes a comment of %s, so there is nothing to compare\n' \
         "${disruptions:-}" "$followed_issue" | tee -a "$table"
     else
@@ -1212,6 +1234,10 @@ compare_issue_order() {
       order_ok=0
     fi
     return
+  fi
+  if [[ "${published_order[*]} " != "$written_order" ]]; then
+    printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
+      "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
   fi
   for m in "${published_order[@]}"; do
     [[ -n "${stream_seq[$m]:-}" ]] || { printf 'the stream holds no comment carrying %s\n' "$m" | tee -a "$table"; order_ok=0; }
@@ -1241,8 +1267,8 @@ compare_issue_order() {
 }
 
 # The followed issue's comments, in each transcript, in their publish order: the order the stream
-# stored them in, read back from the stream. Dispatch's outbox decides that order; where it
-# differs from the order the comments were written in, the run says so, and does not judge it.
+# stored them in, read back from the stream. Dispatch's outbox decides that order, and
+# compare_issue_order says where it differs from the order the comments were written in.
 declare -A stream_seq=()
 while read -r seq_no m; do
   [[ -n "$m" ]] && stream_seq[$m]=$seq_no
@@ -1256,10 +1282,6 @@ written_order=$(jq -r 'select(.kind == "issue" and .expected == 1 and (.source |
 published_order=()
 while read -r m; do published_order+=("$m"); done < <(
   for m in $written_order; do printf '%s %s\n' "${stream_seq[$m]:-0}" "$m"; done | sort -n | cut -d' ' -f2)
-if [[ -n "$written_order" && "${published_order[*]} " != "$written_order" ]]; then
-  printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
-    "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
-fi
 compare_issue_order
 printf 'transcripts: pi %s; cc %s\n' "$(transcript_list pi)" "$(transcript_list cc)" | tee -a "$table"
 

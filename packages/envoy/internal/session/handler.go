@@ -5,23 +5,24 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// HandleAgentResult captures the outcome of agent message handling.
+// HandleAgentResult captures the outcome of agent message handling: the message the session's own
+// consumer holds and its relay delivers (Relayed), the session another listener owns
+// (OwnedElsewhere), a failure the caller NAKs (Err), or none of the three - the zero result - for
+// a session this listener answers for whose record says no way of receiving, which the caller
+// holds and retries rather than NAKs (cmd/listener/unplaceable_delivery.go).
 type HandleAgentResult struct {
-	// Delivered reports a resolution that succeeded (Resolve), which is now the one outcome
-	// besides an error: the session's own consumer holds the message. It is therefore set with
-	// Relayed and never without it, and it is false for every other outcome - a resolution that
-	// failed, with an error of its own or without one, and a session another listener owns.
-	Delivered bool
-	// Relayed is set with Delivered for a message the session's own consumer holds, which the
-	// relay of that consumer delivers (DeliveryResult.Relayed): the caller records nothing
-	// about it, neither an attempt nor a dedupe key.
+	// Relayed reports a message the session's own consumer holds, which the relay of that
+	// consumer delivers: the caller records nothing about it, neither an attempt nor a dedupe
+	// key, since it delivered nothing. A dedupe key says the session has the message, and only
+	// a delivery may say that.
 	Relayed bool
 	// OwnedElsewhere reports a session whose stored subscription names another listener. That
 	// listener reads the same inbox message from its own durable and delivers it, so this one
 	// acknowledges it with nothing to report: no delivery, no exception, no NAK.
 	OwnedElsewhere bool
-	ShouldNAK      bool
-	Err            error
+	// Err is a resolution the interest path made and failed (Resolve): the one outcome whose
+	// caller NAKs the message for redelivery.
+	Err error
 }
 
 // HandleAgentMessage handles delivery of an agent-to-agent message.
@@ -48,11 +49,10 @@ func HandleAgentMessage(
 ) HandleAgentResult {
 	// Interest path: the stored subscription names this listener, which owns the session.
 	if interest != nil && interest.MachineID == machineID {
-		delivery, err := Resolve(item, sessionID, entry, storedSeq)
-		if err != nil {
-			return HandleAgentResult{ShouldNAK: true, Err: err}
+		if err := Resolve(item, sessionID, entry, storedSeq); err != nil {
+			return HandleAgentResult{Err: err}
 		}
-		return delivered(delivery)
+		return HandleAgentResult{Relayed: true}
 	}
 	// A stored subscription naming another listener makes the session that listener's: the
 	// stored MachineID is the one its topics are fanned out on (store.Registry.Match), and that
@@ -66,18 +66,11 @@ func HandleAgentMessage(
 	// No stored subscription names an owner, so this listener answers for the session: there is
 	// nobody else the message can be left to. The entry is the one the caller resolved, delivered
 	// through directly rather than read a second time.
-	delivery, err := Resolve(item, sessionID, entry, storedSeq)
-	if err != nil {
-		// Resolve fails only with ErrNoSessionRecord. The result carries no error, so the
+	if err := Resolve(item, sessionID, entry, storedSeq); err != nil {
+		// Resolve fails only with ErrNoSessionRecord. The zero result carries no error, so the
 		// listener defers the message for its retry window (cmd/listener/unplaceable_delivery.go)
 		// rather than NAK it.
-		return HandleAgentResult{Delivered: false}
+		return HandleAgentResult{}
 	}
-	return delivered(delivery)
-}
-
-// delivered is the result of a resolution that succeeded: the session's own consumer holds the
-// message, and the relay of that consumer is what delivers it.
-func delivered(delivery DeliveryResult) HandleAgentResult {
-	return HandleAgentResult{Delivered: true, Relayed: delivery.Relayed}
+	return HandleAgentResult{Relayed: true}
 }

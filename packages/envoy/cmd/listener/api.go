@@ -1265,12 +1265,12 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 		claimantInstanceID := entry.ClientInstanceID
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
-		// The claim renews the claimant's registration, so it writes the serving port out of
-		// the entry: this listener delivers nothing to a port, and a renewed entry still
-		// carrying one an earlier registration stored is a session that Resolve passes over as
-		// self-subscribed while Dispatch's outbox counts the stream's ack as its delivery
-		// (internal/dispatch/outbox), so its messages are reported delivered when nobody
-		// delivered them.
+		// The claim renews the claimant's registration, so it writes the port out of the entry:
+		// no registration this build stores carries one (subscribeHandler refuses a registration
+		// that names a serving port) and no delivery opens a connection to a session, so a
+		// renewed entry still carrying the port an earlier build's listener stored would keep
+		// answering GET /v1/sessions with it (sessionInfo.Port) for as long as the claims keep
+		// refreshing the entry, where writing it out lets it lapse with the entry it came on.
 		entry.Port = 0
 		if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
 			writeStoreError(ctx, w, fmt.Errorf("refresh role claimant registration: %w", err), http.StatusServiceUnavailable)
@@ -1599,7 +1599,20 @@ type registeredSession struct {
 // a session nothing reaches, and the entry would say a session is here that receives nothing.
 // The consumer is created, or has its filter set to the topics about to be stored, before the
 // registration answers, so a message published on a newly followed stored topic after the answer
-// is the consumer's to deliver.
+// is the consumer's to deliver. That refusal is why the consumer call comes before the row and
+// not after it: a row written first would outlive a registration the consumer call then refuses.
+//
+// Each pass holds the session's consumer lock from the filter it sets to the write of the plan
+// that filter was set from: sessionDelivery.register returns the lock held, as the func that
+// releases it (noUnlock for a registration it refused before taking it), and this loop releases
+// that func on each path out of the pass - the refusal, and the write, whatever the write
+// answers. The lock is no re-entrant one, so each pass takes it once and releases it once. A
+// relay restart rebuilds the filter from the stored row (sessionRelays.restart), so one landing
+// between a pass's filter and its row would set the filter back to a row without the topic this
+// registration is answered 200 for, and every message published on that topic until the
+// session's next heartbeat would be skipped: the row write then matches its plan, so the loop
+// ends content and nothing restores the message. Under the lock that restart runs wholly before
+// or wholly after the pass.
 //
 // ctx bounds the store work (sendRequestBudget) and registerCtx the consumer calls, which take
 // the request's own context as they always have.
@@ -1626,8 +1639,9 @@ func (d *listenerDeps) registerSession(
 			return registeredSession{}, nil, err
 		}
 		registered.plan = plan
-		pass, refusal := d.consumers.register(registerCtx, body, plan.Topics)
+		pass, refusal, unlock := d.consumers.register(registerCtx, body, plan.Topics)
 		if refusal != nil {
+			unlock()
 			return registeredSession{}, refusal, nil
 		}
 		if pass.answer != nil && *pass.answer.Gap {
@@ -1639,6 +1653,7 @@ func (d *listenerDeps) registerSession(
 			MachineID: machineID,
 			Dir:       body.Dir,
 		}, plan)
+		unlock()
 		switch {
 		case err == nil:
 			registered.row = row

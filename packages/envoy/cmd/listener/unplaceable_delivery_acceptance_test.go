@@ -680,11 +680,12 @@ func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 
 // A redelivery this listener never deferred gives no slot back. Only a message this listener
 // deferred holds a slot, so only that message's next delivery may return one: a redelivery that
-// another branch's NAK produced - the interest path's ShouldNAK - or an expired AckWait is no
-// sign a slot was ever taken for it. Those redeliveries come in step with deferrals, too: a local
-// session whose server is down produces interest-path NAKs and direct-path deferrals at once. A
-// release on every redelivery gives back slots it never took, until the budget reads empty while
-// the listener is holding its whole cap, and the cap bounds nothing.
+// another branch's NAK produced - the interest path's NAK of a failed resolution - or an expired
+// AckWait is no sign a slot was ever taken for it. Those redeliveries come in step with
+// deferrals, too: a local session whose server is down produces interest-path NAKs and
+// direct-path deferrals at once. A release on every redelivery gives back slots it never took,
+// until the budget reads empty while the listener is holding its whole cap, and the cap bounds
+// nothing.
 //
 // The NAK here is the run's own, put in front of the listener's handler in place of those
 // branches: it takes the message's first delivery and asks for it again at once, so the handler's

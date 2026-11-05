@@ -622,6 +622,30 @@ func TestSessionConsumerRegistrationWithNothingStoredForTheSessionStartsAtTheStr
 	rig.awaitPending(t, sessionID, 0)
 }
 
+// A brand-new session receives once what the stream holds for it from before its first
+// registration: a message stored for its agent subject while no process of its own existed to
+// persist a resume point, because its NATS connection was down when the message was published or
+// because the send raced that first registration.
+func TestSessionConsumerABrandNewSessionReceivesAMessageStoredForItBeforeItRegistered(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_brand_new_sweep"
+	agent := contracts.AgentSubject(sessionID)
+
+	// Stored for the session before it ever registered, so no resume point names it.
+	stored, _ := rig.storeEvent(t, agent)
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+
+	// A brand-new registration: consumer mode, no resume point.
+	answer := rig.subscribe(t, consumerRegistration(sessionID, "e"))
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+
+	frames := standIn.collect(t, 1, 5*time.Second)
+	requireFrames(t, frames, stored)
+	standIn.none(t, time.Second)
+}
+
 func jsonUint(n uint64) string {
 	encoded, _ := json.Marshal(n)
 	return string(encoded)
@@ -727,6 +751,16 @@ func TestSessionConsumerRegistrationTellsTheRelayWhenTheEpochChanges(t *testing.
 	}
 }
 
+// lockUsers is how many callers hold or wait for sessionID's consumer lock.
+func lockUsers(locks *sessionLocks, sessionID string) int {
+	locks.mu.Lock()
+	defer locks.mu.Unlock()
+	if held := locks.locks[sessionID]; held != nil {
+		return held.users
+	}
+	return 0
+}
+
 // awaitLockUsers waits up to 10 s for exactly n callers to hold or wait for sessionID's consumer
 // lock: a test that holds it learns that the call it started waits for it (2), and that the call
 // is done with it (0).
@@ -734,12 +768,7 @@ func awaitLockUsers(t *testing.T, locks *sessionLocks, sessionID string, n int) 
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		locks.mu.Lock()
-		users := 0
-		if held := locks.locks[sessionID]; held != nil {
-			users = held.users
-		}
-		locks.mu.Unlock()
+		users := lockUsers(locks, sessionID)
 		if users == n {
 			return
 		}
@@ -828,6 +857,64 @@ func TestSessionConsumerUnsubscribeWritesTheTopicsStoredWhenItHoldsTheLock(t *te
 	}
 
 	requireFilters(t, rig, sessionID, followed)
+}
+
+// A relay restart that begins while a registration is between its filter and its interest row
+// waits for that row: the registration holds the session's consumer lock from the one to the other
+// (registerSession), so the restart rebuilds the filter from the row the registration wrote and
+// never from the row it was about to replace. A restart in that window sets the filter back to a
+// row without the topic the registration is answered 200 for, and nothing restores the messages
+// published on that topic meanwhile: the registration's own write then matches its plan, so it
+// answers 200 and plans no further pass, the session entry's ConsumerHoldsStored reads the mark
+// alone, and the session's next heartbeat puts the topic back but not the messages.
+func TestSessionConsumerRegistrationHoldsTheLockFromItsFilterToItsRow(t *testing.T) {
+	// Unowned: this task relays nothing, so the restart below is the session's only one and the
+	// filter it leaves is the filter this case reads.
+	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
+	const sessionID = "ses_register_row_lock"
+	const followed = "notifications.dispatch.issue.ROWLOCK.>"
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+
+	// The restart runs on a goroutine of its own because under the fix it waits for the lock this
+	// hook is called under, which a call made here would wait for for ever.
+	restarted := make(chan struct{})
+	started := false
+	rig.deps.consumers.afterRegisterFilter = func() {
+		if started {
+			return
+		}
+		started = true
+		go func() {
+			defer close(restarted)
+			if _, pull, _ := rig.relays.restart(context.Background(), &relayRun{sessionID: sessionID}); pull != nil {
+				pull.Stop()
+			}
+		}()
+		// The registration leaves this window only once the restart has reached it: waiting for
+		// the lock (two callers) with the fix, and done with it without one, which is the drop
+		// this case is about.
+		deadline := time.Now().Add(10 * time.Second)
+		for lockUsers(&rig.deps.consumers.locks, sessionID) != 2 {
+			select {
+			case <-restarted:
+				return
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("after 10s the restart of %s neither waits for the consumer lock nor is done with it", sessionID)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", followed))
+	rig.deps.consumers.afterRegisterFilter = nil
+	<-restarted
+
+	requireFilters(t, rig.sessionConsumerRig, sessionID, followed)
+	// A message on the topic the restart would have dropped is the consumer's to deliver.
+	rig.store(t, "notifications.dispatch.issue.ROWLOCK.comment")
+	rig.awaitPending(t, sessionID, 1)
 }
 
 // subscribeExceptionLanes subscribes over core NATS to every exception lane, through conn.

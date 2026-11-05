@@ -256,7 +256,8 @@ export interface ConsumerDelivery {
   /**
    * The registration's `delivery` field: the epoch, and the resume point. That is where this
    * session is up to; with none — a session that has never taken a frame from a consumer — the
-   * listener starts the consumer at the stream's end.
+   * listener starts the consumer at the first message the stream holds on this session's own
+   * agent subject, and at the stream's end only when it holds none.
    */
   registration(): DeliveryRequest;
   /**
@@ -601,10 +602,11 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     answered(answer) {
       if (answer.stream_id !== "" && answer.stream_id !== streamID) {
         // The stream the registration asked to resume on is not the one the listener answered:
-        // that stream was replaced, the consumer starts at the new stream's end, and what the
-        // old one held is gone. Told once: the switch below makes the answer's stream the
-        // current one, so a later answer naming it tells nothing, and a relay frame that came
-        // first already told it (`tellReplacedResume` in `receive`).
+        // that stream was replaced, so the resume point names no position in it — the consumer
+        // starts at the first message the new stream holds for this session, and at its end only
+        // when it holds none — and what the old one held is gone. Told once: the switch below
+        // makes the answer's stream the current one, so a later answer naming it tells nothing,
+        // and a relay frame that came first already told it (`tellReplacedResume` in `receive`).
         tellReplacedResume(answer.stream_id);
         switchStream(answer.stream_id);
       }

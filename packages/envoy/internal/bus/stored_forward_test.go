@@ -28,7 +28,7 @@ func TestStartRequestStoredToCountsTheStreamsAcknowledgementAlone(t *testing.T) 
 		Topic:          "notifications.role.stored-only",
 		DedupeKey:      "publish.stored-only",
 		IssuedAt:       contracts.NowMillis(),
-		PayloadSummary: "a forward to a serving port",
+		PayloadSummary: "a stored forward to a session's agent subject",
 		TraceID:        "trace_stored_only",
 	}
 	const window = 2 * time.Second

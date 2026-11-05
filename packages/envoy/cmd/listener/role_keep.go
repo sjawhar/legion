@@ -683,13 +683,12 @@ func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (kep
 // never reads its claim again, so without that it would spend its budget on a session that no
 // longer holds the role. The lane is left to the new holder, whose copies the next walk forwards.
 //
-// A forward that reached the server and drew no receipt (bus.ErrReceiptTimeout) counts as
-// forwarded and the walk goes on, and that copy is confirmed: its copy is stored on the holder's
-// agent subject, which a returning session replays. It is reported receipt_timeout all the same,
-// which is what the live role lane reports for the same outcome (finishRoleForward), so one event
-// is not counted delivered here and receipt_timeout there. Any other forward failure ends the walk
-// and is returned, with its copy released for the role's next walk and the rest of the lane behind
-// it. A cursor write the stream refused because another listener's walk has the lane
+// A forward's whole answer is the stream's acknowledgement that it stored the copy on the
+// holder's agent subject (startRoleForward), which the holder's own session consumer delivers:
+// no holder answers a receipt, so a forward is acknowledged or it failed, and there is no third
+// outcome the walk goes on past. A forward that failed ends the walk and is returned, with its
+// copy released for the role's next walk and the rest of the lane behind it. A cursor write the
+// stream refused because another listener's walk has the lane
 // (bus.ErrCursorMoved) is nothing wrong: that listener owns this role's lane now, and this walk
 // stops. A read or a write the listener's shutdown cancelled ends the walk with its error all
 // the same, which the handover around it is what quiets (handOverKeptRole).
