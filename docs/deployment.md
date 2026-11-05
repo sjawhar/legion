@@ -61,7 +61,9 @@ With no key, the daemon reads each App's bot login from GraphQL's `viewer` under
 tokens, refuses a token whose `GET /apps/<slug>` names an id other than `app_id`, and reads whether
 the App is installed on a repository from that owner's installation's repository list.
 A read-only token holds what the command's read-only release gives: the broker's holds
-`contents: read`, `metadata: read` and `pull_requests: read`.
+`contents: read`, `metadata: read`, `pull_requests: read` and `actions: read`, the same set a
+configured key mints, and the first three alone where the App's installation has not been granted
+Actions.
 The daemon passes the command's stderr through as it runs, with every GitHub token in it redacted,
 so `agent-secrets`' line naming the pending request appears in the daemon's log while the review
 App waits for its grant.
@@ -86,8 +88,8 @@ a set of files that binary reads, one directory per GitHub owner of the project:
 gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
 `<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
 token for the issue's repository's owner, and that App's token narrowed to reading contents, pull
-requests, Actions and metadata for every other owner — names the issue owner's directory as
-`GH_CONFIG_DIR`
+requests, Actions and metadata for every other owner (an owner whose installation has not been
+granted Actions gets the other three) — names the issue owner's directory as `GH_CONFIG_DIR`
 and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
 empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
 from its cached leases (the log lines `tmux runtime: github credential written` and `github
