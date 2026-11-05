@@ -3,9 +3,7 @@ package workflow
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -15,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -44,19 +41,12 @@ type checkRig struct {
 	apply  func(id string, fact intake.Fact) intake.Result
 }
 
-func newCheckRig(t *testing.T, builtFrom string) checkRig {
-	t.Helper()
-	return renamedCheckRig(t, builtFrom, ghrepo.Renames{})
-}
-
-// renamedCheckRig is newCheckRig under the deployment's repository equivalence renames
-// (Config.RepositoryRenames): the one line of Config a configured rename changes.
-func renamedCheckRig(t *testing.T, builtFrom string, renames ghrepo.Renames) checkRig {
+func newCheckRig(t *testing.T) checkRig {
 	t.Helper()
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
 	logged := &bytes.Buffer{}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, RepositoryRenames: renames, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }
@@ -64,9 +54,9 @@ func renamedCheckRig(t *testing.T, builtFrom string, renames ghrepo.Renames) che
 // childCheckRig is a running root (LEGION-208, implementing) whose child LEGION-209 merged
 // sjawhar/legion#43 at merge-43: the child is done with its check open at look 1 in the
 // implementer's live session.
-func childCheckRig(t *testing.T, builtFrom string) checkRig {
+func childCheckRig(t *testing.T) checkRig {
 	t.Helper()
-	rig := newCheckRig(t, builtFrom)
+	rig := newCheckRig(t)
 	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	rig.apply("merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"})
 	return rig
@@ -80,7 +70,7 @@ func childCheckRig(t *testing.T, builtFrom string) checkRig {
 // tests are about.
 func rootCheckRig(t *testing.T) checkRig {
 	t.Helper()
-	rig := newCheckRig(t, "")
+	rig := newCheckRig(t)
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
 	parent := "LEGION-208"
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
@@ -108,7 +98,7 @@ func TestACheckReportWhileTheRootLingersIsRecorded(t *testing.T) {
 // start row so the suspension's fences find no later start. The check stays open at look 1 with
 // its look closed.
 func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	starts := issueOutboxOf(t, rig.pool, "LEGION-209", "supervise")
 	start := starts[len(starts)-1]
 	if decodeSupervise(t, start).CheckLook != 1 {
@@ -144,7 +134,7 @@ func TestAPassOrFailOfAChildsCheckClosesItAndDeletesItsSandbox(t *testing.T) {
 		outcome record.CheckOutcome
 	}{{"pass", record.CheckRecorded}, {"fail", record.CheckDefect}} {
 		t.Run(tc.verdict, func(t *testing.T) {
-			rig := childCheckRig(t, "")
+			rig := childCheckRig(t)
 			rig.apply("report", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: tc.verdict, Summary: "seen"})
 			check := productionCheck(t, rig.pool, "LEGION-209")
 			if check == nil || check.Open() || check.Outcome != tc.outcome || check.LookOpen || !check.ClosedAt.Equal(checkOpened) {
@@ -184,7 +174,7 @@ func TestAPassOfARootsCheckClosesItsImplementerAndSuspendsTheIssue(t *testing.T)
 // on a look that is not the open one (ended by its bound or a hold, or an earlier look), and with
 // a verdict other than pass, pending or fail.
 func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	if got := refusalCode(rig.apply("no-check", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass"})); got != "CHECK_NOT_OPEN" {
 		t.Fatalf("a report on an issue with no check = %q, want CHECK_NOT_OPEN", got)
 	}
@@ -201,223 +191,18 @@ func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 	if got := refusalCode(rig.apply("old-look", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
 		t.Fatalf("a second report of look 1 = %q, want CHECK_LOOK_NOT_OPEN", got)
 	}
-	rig.apply("deployed", intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, RunID: 77, CompletedAt: checkOpened.Add(time.Hour)})
+	rig.clock.now = checkOpened.Add(checkBound)
+	rig.apply("bound", intake.CheckBound{Issue: "LEGION-209"})
 	rig.apply("pass", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})
 	if got := refusalCode(rig.apply("closed", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})); got != "CHECK_NOT_OPEN" {
 		t.Fatalf("a report on a closed check = %q, want CHECK_NOT_OPEN", got)
 	}
 }
 
-// Dispatch's issue.deployed wakes a check once: the first starts the next look, told what woke it;
-// a second changes nothing, as does one for a closed check or for another pull request.
-func TestIssueDeployedWakesTheCheckOnce(t *testing.T) {
-	rig := childCheckRig(t, "")
-	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
-	rig.apply("other-pr", intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 44, RunID: 76, CompletedAt: checkOpened})
-	rig.apply("other-repo", intake.IssueDeployed{Issue: "LEGION-209", Repo: "acme/widgets", Number: 43, RunID: 76, CompletedAt: checkOpened})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 1 || check.LookOpen {
-		t.Fatalf("the check after deploys of other pull requests = %+v, want it untouched", check)
-	}
-	rig.clock.now = checkOpened.Add(3 * time.Hour)
-	deployed := intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, RunID: 77, CompletedAt: checkOpened.Add(2 * time.Hour)}
-	rig.apply("deployed", deployed)
-	check := productionCheck(t, rig.pool, "LEGION-209")
-	if check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "issue.deployed" || check.LastWakeDetail != "run 77 completed 2026-10-19T06:00:00Z" || !check.LookWakeAt.Equal(rig.clock.now) {
-		t.Fatalf("the check after the deploy = %+v, want look 2 open, woken by issue.deployed run 77", check)
-	}
-	starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start")
-	if len(starts) != 2 || starts[1].CheckLook != 2 || !strings.Contains(starts[1].Task, "Look 2, woken by Dispatch's issue.deployed: run 77 completed 2026-10-19T06:00:00Z.") {
-		t.Fatalf("start rows = %+v, want look 2's naming its wake", starts)
-	}
-	if looks := issueOutboxOf(t, rig.pool, "LEGION-209", "check_look"); len(looks) != 2 || decodeLook(t, looks[1]) != 2 || !looks[1].nextAt.Equal(rig.clock.now.Add(CheckLookBound)) {
-		t.Fatalf("check_look rows = %+v, want look 2's due two hours after its wake", looks)
-	}
-	deployed.RunID = 78
-	rig.apply("deployed-again", deployed)
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || check.PendingCauseKind != "" {
-		t.Fatalf("the check after a second deploy = %+v, want it unchanged at look 2 with no cause kept", check)
-	}
-	rig.apply("pass", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})
-	deployed.RunID = 79
-	rig.apply("deployed-closed", deployed)
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Open() || check.Looks != 2 {
-		t.Fatalf("the closed check after a deploy = %+v, want it closed at look 2", check)
-	}
-	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 {
-		t.Fatalf("start rows = %d, want the two looks' alone", len(starts))
-	}
-}
-
-// A wake that arrives while a look is open is kept for the next look: the look proceeds, and its
-// pending report starts the next look with the cause kept, at once and with no suspension.
-func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
-	rig := childCheckRig(t, "")
-	rig.apply("deployed", intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, RunID: 77, CompletedAt: checkOpened})
-	check := productionCheck(t, rig.pool, "LEGION-209")
-	if check.Looks != 1 || !check.LookOpen || check.PendingCauseKind != "issue.deployed" || check.PendingCauseDetail != "run 77 completed 2026-10-19T04:00:00Z" {
-		t.Fatalf("the check after a deploy during look 1 = %+v, want look 1 still open with issue.deployed kept", check)
-	}
-	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
-	check = productionCheck(t, rig.pool, "LEGION-209")
-	if check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "issue.deployed" || check.PendingCauseKind != "" {
-		t.Fatalf("the check after pending = %+v, want look 2 open, woken by the kept issue.deployed", check)
-	}
-	if got := superviseRequests(t, rig.pool, "suspend"); len(got) != 0 {
-		t.Fatalf("suspend rows = %v, want none: the next look started at once", got)
-	}
-	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 0 {
-		t.Fatalf("issue suspensions = %+v, want none", got)
-	}
-	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 || starts[1].CheckLook != 2 {
-		t.Fatalf("start rows = %+v, want look 2's", starts)
-	}
-}
-
-// Dispatch's announcement of the build every server process serves queues a compare for each open
-// check of the repository the daemon is built from and no other, each naming the check it is of,
-// and none with no commit or with no repository configured.
-func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
-	rig := childCheckRig(t, "sjawhar/legion")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
-	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-300", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-300", HeadSHA: "w", Failing: []string{}})
-	rig.apply("widgets-merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 7, MergeSHA: "merge-w"})
-
-	rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
-	compares := checkCompares(t, rig.pool, "LEGION-209")
-	if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f0000", OpenedAt: checkOpened}) {
-		t.Fatalf("check_compare rows of the legion check = %+v, want one for look 1 of build b00f0000", compares)
-	}
-	if got := checkCompares(t, rig.pool, "LEGION-300"); len(got) != 0 {
-		t.Fatalf("check_compare rows of the widgets check = %+v, want none", got)
-	}
-	rig.apply("started-blank", intake.ServerStarted{})
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
-		t.Fatalf("check_compare rows after a start with no commit = %+v, want the one", got)
-	}
-	// A commit that is not a git SHA is refused before any row: it would reach the implement App's
-	// compare URL and the implementer's task text, and the listener takes a `source: dispatch`
-	// publish from any client, so the shape is the gate.
-	for i, commit := range []string{"main#../../x", "b00f", "B00F0000", "0" + strings.Repeat("a", 40), "deadbeef?per_page=100", "deadbee\n"} {
-		rig.apply(fmt.Sprintf("started-unshaped-%d", i), intake.ServerStarted{Commit: commit})
-		if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
-			t.Fatalf("check_compare rows after a start on commit %q = %+v, want the one", commit, got)
-		}
-	}
-	unbuilt := New(record.NewStore(), Config{Project: "LEGION", Clock: rig.clock.Now}, nil)
-	if _, err := intake.ApplyFact(context.Background(), rig.pool, "dispatch", "started-unbuilt", intake.ServerStarted{Commit: "c0de0000"}, unbuilt, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact: %v", err)
-	}
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
-		t.Fatalf("check_compare rows from a daemon built from no repository = %+v, want the one", got)
-	}
-}
-
-// A build is compared against an open check whose repository a configured rename pairs with the
-// one the daemon is built from (Config.BuiltFrom), from either side: the check of a tree recorded
-// before the transfer names the repository as it was while the daemon is built from the one it
-// moved to, and a tree recorded after it the other way round, and one build carries both their
-// merges. With no pair configured neither is the build's, as today, and a repository of neither
-// name is never the build's, pair or no pair.
-func TestABuildIsComparedAgainstAChecksRenamedRepository(t *testing.T) {
-	for _, tc := range []struct {
-		name, builtFrom, repo string
-	}{
-		{name: "built from the repository as it was, the check recorded on the one it moved to", builtFrom: "sjawhar/legion", repo: "cybermonklabs/legion"},
-		{name: "built from the repository it moved to, the check recorded on the one it was", builtFrom: "cybermonklabs/legion", repo: "sjawhar/legion"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Run("the pair configured", func(t *testing.T) {
-				rig := renamedCheckRig(t, tc.builtFrom, renamedLegion)
-				openRootCheck(t, rig, "LEGION-300", tc.repo, "main", 7)
-				openRootCheck(t, rig, "LEGION-301", "acme/widgets", "main", 8)
-				rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
-				compares := checkCompares(t, rig.pool, "LEGION-300")
-				if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f0000", OpenedAt: checkOpened}) {
-					t.Fatalf("check_compare rows of the check on %s = %+v, want one for look 1 of build b00f0000", tc.repo, compares)
-				}
-				if got := checkCompares(t, rig.pool, "LEGION-301"); len(got) != 0 {
-					t.Fatalf("check_compare rows of the acme/widgets check = %+v, want none: the pair widens nothing else", got)
-				}
-			})
-			t.Run("no pair configured", func(t *testing.T) {
-				rig := renamedCheckRig(t, tc.builtFrom, ghrepo.Renames{})
-				openRootCheck(t, rig, "LEGION-300", tc.repo, "main", 7)
-				rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
-				if got := checkCompares(t, rig.pool, "LEGION-300"); len(got) != 0 {
-					t.Fatalf("check_compare rows of the check on %s = %+v, want none: it is another repository's", tc.repo, got)
-				}
-			})
-		})
-	}
-}
-
-// A release build's boot compares its own revision and the build Dispatch reported; a boot with no
-// revision compares nothing, Dispatch's build included.
-func TestTheBootComparesItsRevisionAndDispatchsBuild(t *testing.T) {
-	rig := childCheckRig(t, "sjawhar/legion")
-	rig.apply("boot-1", intake.DaemonBooted{Boot: 1, Revision: "0000000a", DispatchBuild: "0000000d"})
-	want := []record.CheckCompare{{Look: 1, Cause: "daemon boot", Build: "0000000a", OpenedAt: checkOpened}, {Look: 1, Cause: "dispatch build", Build: "0000000d", OpenedAt: checkOpened}}
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("check_compare rows after a release boot = %+v, want %+v", got, want)
-	}
-	rig.apply("boot-2", intake.DaemonBooted{Boot: 2, DispatchBuild: "0000000e"})
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 2 {
-		t.Fatalf("check_compare rows after a boot with no revision = %+v, want the two", got)
-	}
-	rig.apply("boot-3", intake.DaemonBooted{Boot: 3, Revision: "0000000c"})
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 3 || got[2] != (record.CheckCompare{Look: 1, Cause: "daemon boot", Build: "0000000c", OpenedAt: checkOpened}) {
-		t.Fatalf("check_compare rows after a boot with no Dispatch build = %+v, want the daemon's alone added", got)
-	}
-}
-
-// A build wakes a check once, whichever of its three sources reports it: the daemon's boot, then
-// Dispatch's start and build on the same commit change nothing; another build wakes it again once
-// its look ended.
-func TestACheckWakeOnTheSameBuildWakesOnce(t *testing.T) {
-	rig := childCheckRig(t, "sjawhar/legion")
-	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
-	rig.apply("boot-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "daemon boot", Detail: "b00f"})
-	check := productionCheck(t, rig.pool, "LEGION-209")
-	if check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "daemon boot" || check.LastWakeDetail != "b00f" {
-		t.Fatalf("the check after the boot's wake = %+v, want look 2 open on build b00f", check)
-	}
-	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 || !strings.Contains(starts[1].Task, "woken by the Legion daemon's boot on build b00f.") {
-		t.Fatalf("start rows = %+v, want look 2's naming the daemon's boot", starts)
-	}
-	rig.apply("start-wake", intake.CheckWake{Issue: "LEGION-209", Look: 2, Cause: "dispatch start", Detail: "b00f"})
-	rig.apply("build-wake", intake.CheckWake{Issue: "LEGION-209", Look: 2, Cause: "dispatch build", Detail: "b00f"})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || check.PendingCauseKind != "" {
-		t.Fatalf("the check after the same build from Dispatch = %+v, want it unchanged with no cause kept", check)
-	}
-	rig.apply("pending-2", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pending"})
-	rig.apply("same-build-later", intake.CheckWake{Issue: "LEGION-209", Look: 2, Cause: "dispatch build", Detail: "b00f"})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || check.LookOpen {
-		t.Fatalf("the check after the same build once more = %+v, want it still at look 2 closed", check)
-	}
-	rig.apply("new-build", intake.CheckWake{Issue: "LEGION-209", Look: 2, Cause: "dispatch build", Detail: "c0de"})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 3 || !check.LookOpen || check.LastWakeDetail != "c0de" {
-		t.Fatalf("the check after another build = %+v, want look 3 open on c0de", check)
-	}
-}
-
-// A look Dispatch's server.started wakes tells the implementer what that announcement means: the
-// build every Dispatch server process serves, not one process's start.
-func TestADispatchStartWakeNamesTheBuildEveryServerProcessServes(t *testing.T) {
-	rig := childCheckRig(t, "sjawhar/legion")
-	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
-	rig.apply("start-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "dispatch start", Detail: "b00f"})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "dispatch start" {
-		t.Fatalf("the check after Dispatch's announcement = %+v, want look 2 open, woken by `dispatch start`", check)
-	}
-	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 || !strings.Contains(starts[1].Task, "woken by Dispatch serving build b00f on every server process.") {
-		t.Fatalf("start rows = %+v, want look 2's naming the build every Dispatch server process serves", starts)
-	}
-}
-
 // A look nobody reports ends at its bound as a pending report would: the implementer is suspended
 // and the Sandbox with it. A row naming a look already ended, or an earlier look, changes nothing.
 func TestCheckLookEndedEndsASilentLook(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	rig.apply("stale-look", intake.CheckLookEnded{Issue: "LEGION-209", Look: 2, Cause: "look bound"})
 	if check := productionCheck(t, rig.pool, "LEGION-209"); !check.LookOpen {
 		t.Fatalf("the check after a row of a look it has not reached = %+v, want look 1 still open", check)
@@ -443,10 +228,10 @@ func TestCheckLookEndedEndsASilentLook(t *testing.T) {
 // A fact of a check a later merge of the same issue replaced — the first check closed as not run
 // when the child was set back to todo, and the rerun's merge opened the second, which counts its
 // looks from one again — changes nothing of the second: a look bound naming the first check's
-// OpenedAt leaves the second's look 1 open, and a build wake naming it starts no look and keeps no
-// cause, where the same facts naming the second check end the look and start the next.
+// OpenedAt leaves the second's look 1 open, where the same fact naming the second check ends the
+// look.
 func TestAFactOfAReplacedCheckChangesNothingOfItsSuccessor(t *testing.T) {
-	rig := newCheckRig(t, "sjawhar/legion")
+	rig := newCheckRig(t)
 	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	firstOpened := checkOpened.Add(-24 * time.Hour)
 	firstClosed := firstOpened.Add(2 * time.Hour)
@@ -477,22 +262,13 @@ func TestAFactOfAReplacedCheckChangesNothingOfItsSuccessor(t *testing.T) {
 	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 {
 		t.Fatalf("suspend rows after the second check's look bound = %v, want the implementer's", got)
 	}
-
-	rig.apply("stale-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "daemon boot", Detail: "b00f", OpenedAt: firstOpened})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 1 || check.LookOpen || check.PendingCauseKind != "" {
-		t.Fatalf("the second check after a wake of the first = %+v, want it unchanged at look 1 closed with no cause kept", check)
-	}
-	rig.apply("wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "daemon boot", Detail: "b00f", OpenedAt: checkOpened})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || !check.LookOpen || check.LastWakeDetail != "b00f" {
-		t.Fatalf("the second check after its own wake = %+v, want look 2 open on build b00f", check)
-	}
 }
 
 // The implementer's claim failing inside a look ends the look as a pending report would and tells
 // the architect immediately. It holds nothing: a done issue has no phase to hold, and the next wake
 // starts the claim again. Another role's claim failing on the done issue changes nothing, as before.
 func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	rig.apply("tester-failed", intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleTester})
 	if check := productionCheck(t, rig.pool, "LEGION-209"); !check.LookOpen {
 		t.Fatalf("the check after the tester's claim failed = %+v, want look 1 still open", check)
@@ -519,9 +295,8 @@ func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
 // `admitted` with the reopen's status, no role's phase, and its production check untouched. Nothing
 // of the check moves the tree while it runs again: the implementer's failed claim takes the live
 // phase's path rather than ending the look (the look's own bound ends it, and that end starts no
-// look and suspends nothing, since the implementer and pod are the run's), a wake is kept for a
-// look after the run, and the bound closes the check as not run without an issue_close of the
-// implementer the run reuses.
+// look and suspends nothing, since the implementer and pod are the run's), and the bound closes
+// the check as not run without an issue_close of the implementer the run reuses.
 func TestAReopenedRootsCheckStartsNoLookWhileItRunsAgain(t *testing.T) {
 	rig := rootCheckRig(t)
 	if _, err := rig.pool.Exec(context.Background(), "update issues set phase = 'admitted', status = 'todo', linger_until = null where key = 'LEGION-208'"); err != nil {
@@ -550,15 +325,6 @@ func TestAReopenedRootsCheckStartsNoLookWhileItRunsAgain(t *testing.T) {
 		t.Fatalf("issue suspensions = %d, want %d: the pod is the run's", got, suspensions)
 	}
 
-	rig.apply("deployed", intake.IssueDeployed{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, RunID: 77, CompletedAt: rig.clock.now})
-	check = productionCheck(t, rig.pool, "LEGION-208")
-	if check.Looks != 1 || check.LookOpen || check.PendingCauseKind != "issue.deployed" {
-		t.Fatalf("the check after a wake while the root runs again = %+v, want the wake kept for a look after the run, none started", check)
-	}
-	if starts := superviseRowsOf(t, rig.pool, "LEGION-208", "start"); len(starts) != 1 || starts[0].CheckLook != 1 {
-		t.Fatalf("start rows = %+v, want look 1's alone", starts)
-	}
-
 	rig.clock.now = checkOpened.Add(checkBound)
 	rig.apply("bound", intake.CheckBound{Issue: "LEGION-208"})
 	check = productionCheck(t, rig.pool, "LEGION-208")
@@ -575,7 +341,7 @@ func TestAReopenedRootsCheckStartsNoLookWhileItRunsAgain(t *testing.T) {
 // second bound row queued, no look started. A rerun's merge, of another pull request after a
 // re-entry closed the check, still replaces it (openCheck).
 func TestADoneChildSetDoneAgainKeepsItsChecks(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	rig.apply("report", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass", Summary: "seen"})
 	recorded := productionCheck(t, rig.pool, "LEGION-209")
 	bounds := outboxKindCount(t, rig.pool, "LEGION-209", record.OutboxKindCheckBound)
@@ -607,7 +373,7 @@ func TestADoneChildSetDoneAgainKeepsItsChecks(t *testing.T) {
 // carry the merge within the bound; a pending report of the last look closes the check as not run,
 // and so does its silence. A look open at the bound defers the bound by the look bound, and a bound
 // row that comes due before the check's bound — an earlier check's of the same issue — is deferred
-// to it. The last look is compared against no build, since no look follows.
+// to it.
 func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -617,7 +383,7 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 		{name: "silence", end: intake.CheckLookEnded{Issue: "LEGION-209", Look: 2, Cause: "look bound"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rig := childCheckRig(t, "sjawhar/legion")
+			rig := childCheckRig(t)
 			rig.apply("early-bound", intake.CheckBound{Issue: "LEGION-209"})
 			if bounds := issueOutboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 2 || !bounds[1].nextAt.Equal(checkOpened.Add(checkBound)) {
 				t.Fatalf("check_bound rows after an early bound = %+v, want a second deferred to the check's bound", bounds)
@@ -642,14 +408,6 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 			if len(starts) != 2 || starts[1].CheckLook != 2 || !strings.Contains(starts[1].Task, "This is the last look: no look follows.") ||
 				!strings.Contains(starts[1].Task, "woken by the bound: production did not carry the merge within 2 days.") || !strings.Contains(starts[1].Task, "did not run") {
 				t.Fatalf("start rows = %+v, want the last look's task saying so", starts)
-			}
-			rig.apply("boot", intake.DaemonBooted{Boot: 1, Revision: "0000000a"})
-			if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 0 {
-				t.Fatalf("check_compare rows for a check in its last look = %+v, want none", got)
-			}
-			rig.apply("deployed-late", intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, RunID: 77, CompletedAt: rig.clock.now})
-			if check := productionCheck(t, rig.pool, "LEGION-209"); check.PendingCauseKind != "" {
-				t.Fatalf("the check after a deploy in its last look = %+v, want no cause kept", check)
 			}
 			rig.apply("end", tc.end)
 			check = productionCheck(t, rig.pool, "LEGION-209")
@@ -715,7 +473,7 @@ func TestTheTreesCloseWaitsForAnOpenCheckAndRunsOnceItCloses(t *testing.T) {
 // A done child set back to todo closes its open check as not run before its new run starts. The
 // implementer's live claim stays live: the closed check rejects its old look's report.
 func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	seedSlot(t, rig.pool, record.Slot{Issue: "LEGION-208", Index: 0})
 	rig.apply("todo", intake.DispatchIssue{Key: "LEGION-209", Seq: 3, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V"})
 	check := productionCheck(t, rig.pool, "LEGION-209")
@@ -746,7 +504,7 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 // and another project's, stay as they are. The boot writes its "closes" line only where it closed,
 // and no notice at all: the architect was told of the wait when the close entered it.
 func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t *testing.T) {
-	rig := newCheckRig(t, "")
+	rig := newCheckRig(t)
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-301", Project: "LEGION", Title: "alone", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "A"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-301", Repo: "sjawhar/legion", Number: 1, Branch: "legion/LEGION-301", HeadSHA: "h1", Failing: []string{}})
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-302", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-302", Project: "LEGION", Title: "parent", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1})
@@ -849,23 +607,6 @@ func TestTheCheckTaskAsksForARecordedResultAndNoRetiredLine(t *testing.T) {
 			}
 		}
 	}
-}
-
-// checkCompares decodes the check_compare rows of issue, oldest first, each OpenedAt in UTC so a
-// row compares equal to the time the test opened the check at, whatever location the row's JSON
-// decoded to.
-func checkCompares(t *testing.T, pool *pgxpool.Pool, issue string) []record.CheckCompare {
-	t.Helper()
-	var compares []record.CheckCompare
-	for _, row := range issueOutboxOf(t, pool, issue, "check_compare") {
-		var compare record.CheckCompare
-		if err := json.Unmarshal(row.payload, &compare); err != nil {
-			t.Fatalf("decode check_compare row %d: %v", row.id, err)
-		}
-		compare.OpenedAt = compare.OpenedAt.UTC()
-		compares = append(compares, compare)
-	}
-	return compares
 }
 
 // outboxKindCount is how many outbox rows of kind issue has, settled or not.

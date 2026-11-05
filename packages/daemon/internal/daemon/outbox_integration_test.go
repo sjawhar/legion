@@ -299,7 +299,6 @@ func (d *blockingDispatch) EventsAfter(context.Context, string, int64) ([]json.R
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -462,7 +461,6 @@ func (d *refusingDispatch) EventsAfter(context.Context, string, int64) ([]json.R
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -506,7 +504,6 @@ func (d *boardDispatch) EventsAfter(context.Context, string, int64) ([]json.RawM
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }

@@ -146,16 +146,6 @@ func (r *repositories) serving(recorded ghrepo.Repository) ghrepo.Repository {
 	return r.renames.Serving(recorded, r.ownsRepositoryOf)
 }
 
-// same is whether a and b name one repository: the same name, compared without case as GitHub
-// compares names, or the two names of a configured rename (ghrepo.Renames.Same). A nil mapping
-// compares without case alone.
-func (r *repositories) same(a, b string) bool {
-	if r == nil {
-		return strings.EqualFold(a, b)
-	}
-	return r.renames.Same(a, b)
-}
-
 // ownerAliases is the mapping's answer for ghrepo.Renames.OwnerAliases: each owner a configured
 // rename moved a repository away from, by the owner it moved to, and the pairs between two
 // owners of the project, which are no alias (logRenameOwnerConflicts).

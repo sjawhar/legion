@@ -2673,8 +2673,8 @@ cut_at_completion_call() {
 # ---- teardown ------------------------------------------------------------------------------------
 
 # The daemon's durable consumers are named by the Dispatch project key (intake's
-# dispatchConsumerName, githubConsumerName and dispatchServerConsumerName): legion-go-LEGSMOKE-dispatch,
-# -github and -dispatch-server. delete_consumers lists every consumer under that prefix and deletes
+# dispatchConsumerName, githubConsumerName and wakeConsumerName): legion-go-LEGSMOKE-dispatch,
+# -github and -wake. delete_consumers lists every consumer under that prefix and deletes
 # each, so a durable the daemon gains reaches the teardown without being named here: one left
 # behind fails hygiene and refuses the next run at prerequisites.
 consumers_prefix="legion-go-$project-"

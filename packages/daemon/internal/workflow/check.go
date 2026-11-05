@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -23,26 +22,11 @@ import (
 const CheckLookBound = 2 * time.Hour
 
 // The causes a look is woken by: what the check's record names as its last wake, and what the
-// check task tells the implementer woke it. A deploy run is a configured deploy workflow's job
-// whose named step succeeded after the merge (deployRunCompleted, then the check_compare row's
-// GitHub read). A Dispatch start is Dispatch's server.started, which announces the build every
-// Dispatch server process serves (intake.ServerStarted); the cause is named `dispatch start`
-// because check records and the daemon's state API carry that name.
+// check task tells the implementer woke it.
 const (
-	wakeMerge         = "merge"
-	wakeDeployed      = "issue.deployed"
-	wakeDaemonBoot    = "daemon boot"
-	wakeDispatchStart = "dispatch start"
-	wakeDispatchBuild = "dispatch build"
-	wakeDeployRun     = "deploy run"
-	wakeBound         = "bound"
+	wakeMerge = "merge"
+	wakeBound = "bound"
 )
-
-// buildWake says whether a wake cause is a build compare's: the three sources of one build wake
-// alike, so a build that woke a check from one wakes it from no other.
-func buildWake(cause string) bool {
-	return cause == wakeDaemonBoot || cause == wakeDispatchStart || cause == wakeDispatchBuild
-}
 
 // openCheck opens issue's production check on its merged pull request pr and starts its first
 // look, woken by the merge: the record (record.ProductionCheck, bound at the project's
@@ -154,16 +138,6 @@ func wokenBy(cause, detail string) string {
 	switch cause {
 	case wakeMerge:
 		return "the merge"
-	case wakeDeployed:
-		return "Dispatch's issue.deployed: " + detail
-	case wakeDaemonBoot:
-		return "the Legion daemon's boot on build " + detail
-	case wakeDispatchStart:
-		return "Dispatch serving build " + detail + " on every server process"
-	case wakeDispatchBuild:
-		return "Dispatch's build " + detail
-	case wakeDeployRun:
-		return "the deploy workflow's run: " + detail
 	case wakeBound:
 		return "the bound: " + detail
 	default:
@@ -341,185 +315,6 @@ func (e *Engine) checkIssue(ctx context.Context, tx pgx.Tx, check record.Product
 		return record.Issue{}, record.Issue{}, fmt.Errorf("production check of %s: its tree root %s is not recorded", check.Issue, check.Tree)
 	}
 	return *issue, *root, nil
-}
-
-// issueDeployed is Dispatch's issue.deployed for a pull request (intake.IssueDeployed): it wakes
-// the open check of that pull request (wake), and changes nothing for an issue with no open check
-// or a check of another pull request.
-func (e *Engine) issueDeployed(ctx context.Context, tx pgx.Tx, fact intake.IssueDeployed) (intake.Result, error) {
-	check, err := e.store.ProductionCheck(ctx, tx, fact.Issue)
-	if err != nil || check == nil || !check.Open() || !e.sameRepository(check.Repo, fact.Repo) || check.Number != fact.Number {
-		return intake.Result{}, err
-	}
-	return intake.Result{}, e.wake(ctx, tx, check, wakeDeployed, fmt.Sprintf("run %d completed %s", fact.RunID, fact.CompletedAt.UTC().Format(time.RFC3339)))
-}
-
-// wake is the one wake rule of an open check, for every cause but the merge and the bound. A check
-// whose last look has started is woken no more. issue.deployed wakes a check once: a second, after
-// one woke the latest look or is kept for the next, changes nothing. A build wakes a check once
-// whichever of its three sources reports it: a build that woke the latest look, or is kept for the
-// next, changes nothing again. A deploy run has no rule of its own: the executor applies one wake
-// per applying job under that job's event id, so the same job seen again is a duplicate fact that
-// never reaches here, and two jobs are two deploys. An issue back in the workflow (a root reopened
-// inside its linger) keeps the cause for its next look and starts none, and so does a check whose
-// look is open, where the look proceeds and a pending report starts the next look with the cause
-// kept (endLookPending); a cause already kept is kept over a later one, which the next look sees
-// in production as it is by then. Otherwise the cause starts the next look.
-func (e *Engine) wake(ctx context.Context, tx pgx.Tx, check *record.ProductionCheck, kind, detail string) error {
-	ignored := func(why string) error {
-		e.logOnCommit(ctx, "workflow: production check wake ignored", "issue", check.Issue, "mergeCommit", check.MergeSHA, "kind", kind, "detail", detail, "why", why)
-		return nil
-	}
-	switch {
-	case check.Last:
-		return ignored("the last look has started")
-	case kind == wakeDeployed && (check.LastWakeKind == wakeDeployed || check.PendingCauseKind == wakeDeployed):
-		return ignored("issue.deployed woke it once already")
-	case buildWake(kind) && (buildWake(check.LastWakeKind) && check.LastWakeDetail == detail || buildWake(check.PendingCauseKind) && check.PendingCauseDetail == detail):
-		return ignored("this build woke it already")
-	}
-	issue, err := e.store.Issue(ctx, tx, check.Issue)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return fmt.Errorf("production check of %s: its issue is not recorded", check.Issue)
-	}
-	runsAgain := InWorkflow(*issue)
-	if runsAgain || check.LookOpen {
-		why := "a look is open"
-		if runsAgain {
-			why = "the issue runs again"
-		}
-		if check.PendingCauseKind != "" {
-			return ignored(why + ", and " + check.PendingCauseKind + " is kept for the next look already")
-		}
-		check.PendingCauseKind, check.PendingCauseDetail = kind, detail
-		if err := e.store.PutProductionCheck(ctx, tx, *check); err != nil {
-			return err
-		}
-		e.logOnCommit(ctx, "workflow: production check wake kept for the next look", "issue", check.Issue, "mergeCommit", check.MergeSHA,
-			"kind", kind, "detail", detail, "why", why)
-		return nil
-	}
-	e.logOnCommit(ctx, "workflow: production check woken", "issue", check.Issue, "mergeCommit", check.MergeSHA, "kind", kind, "detail", detail)
-	return e.startLook(ctx, tx, *issue, check, kind, detail, false)
-}
-
-// checkWake is a compare that found a reason to wake the check (intake.CheckWake, the
-// check_compare row's finding: a build carrying the merge, or a deploy after it): the wake rule
-// applies (wake); a check no longer open changes nothing, and so does a wake of a check a later
-// merge has replaced, one the fact does not name (record.ProductionCheck.NamedBy), logged.
-func (e *Engine) checkWake(ctx context.Context, tx pgx.Tx, fact intake.CheckWake) (intake.Result, error) {
-	check, err := e.store.ProductionCheck(ctx, tx, fact.Issue)
-	if err != nil || check == nil || !check.Open() {
-		return intake.Result{}, err
-	}
-	if !check.NamedBy(fact.OpenedAt) {
-		e.logOnCommit(ctx, "workflow: production check wake ignored: it names a check a later merge replaced", "issue", check.Issue, "mergeCommit", check.MergeSHA,
-			"check", check.OpenedAt, "named", fact.OpenedAt, "kind", fact.Cause, "detail", fact.Detail)
-		return intake.Result{}, nil
-	}
-	return intake.Result{}, e.wake(ctx, tx, check, fact.Cause, fact.Detail)
-}
-
-// serverStarted is Dispatch's announcement that every live server process serves a build
-// (intake.ServerStarted): the build is compared against the open checks of the repository the
-// daemon is built from (compareBuilds), as the daemon's own build is at boot.
-func (e *Engine) serverStarted(ctx context.Context, tx pgx.Tx, fact intake.ServerStarted) (intake.Result, error) {
-	return intake.Result{}, e.compareBuilds(ctx, tx, wakeDispatchStart, fact.Commit)
-}
-
-// buildShape is what a build's commit must look like to be compared: a git SHA, abbreviated or
-// whole. The daemon's own revision and the build Dispatch's /healthz reports are release stamps of
-// that shape; Dispatch's server.started, the announcement of the build its whole server fleet
-// serves, is published on the bus by any client the listener takes a `source: dispatch` publish
-// from, so its commit is held to the shape here, where every build meets the compare path (the
-// implement App's GitHub compare URL) and the wake detail written into the implementer's task
-// text, and nothing else reaches either.
-var buildShape = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
-
-// compareBuilds queues one check_compare row, carrying cause, the build's commit and the check
-// it is of, for every open check of this project in the repository the daemon is built from
-// (Config.BuiltFrom, compared as sameRepository compares two names, so a check recorded on the
-// repository as it was is still the build's): the row's executor reads GitHub for whether the
-// build carries the check's merge and applies intake.CheckWake when it does. A check whose last
-// look has started gets none, since no look follows; no build, or no repository the daemon is
-// built from, compares nothing, and a build that is not a git SHA (buildShape) is refused, logged
-// with its cause and length and never its text.
-func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build string) error {
-	if build == "" || e.cfg.BuiltFrom == "" {
-		return nil
-	}
-	if !buildShape.MatchString(build) {
-		e.logOnCommit(ctx, "workflow: a build is not compared against the open production checks: its commit is not a git SHA", "cause", cause, "length", len(build), "repo", e.cfg.BuiltFrom)
-		return nil
-	}
-	open, err := e.store.OpenProductionChecks(ctx, tx)
-	if err != nil {
-		return err
-	}
-	compared := 0
-	for _, check := range open {
-		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, e.cfg.BuiltFrom) || check.Last {
-			continue
-		}
-		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: cause, Build: build, OpenedAt: check.OpenedAt}); err != nil {
-			return err
-		}
-		compared++
-	}
-	if compared > 0 {
-		e.logOnCommit(ctx, "workflow: a build is compared against the open production checks", "cause", cause, "build", build, "repo", e.cfg.BuiltFrom, "checks", compared)
-	}
-	return nil
-}
-
-// deployRunCompleted is a completed run of a workflow (intake.WorkflowRunCompleted): for the
-// project's deploy (Config.Deploys, which names a repository and workflow file at most once) whose
-// repository and workflow file are the run's (intake.DeployOf, the rule the decoder already dropped
-// every other run by, read here again for the deploy's step), it queues one check_compare row
-// carrying the run and the deploy's step for every open check of this project in that repository
-// whose issue's recorded default branch is the run's branch. The row's executor reads the run
-// attempt and its jobs from GitHub, holds them to the row, and applies intake.CheckWake for each
-// job whose step succeeded after the pull request merged; the envelope is trusted for nothing more
-// than choosing what to read. A check whose last look has started gets none, since no look follows,
-// and a run of no deploy, or of another branch, queues nothing and costs no GitHub read.
-func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.WorkflowRunCompleted) (intake.Result, error) {
-	deploy, ok := intake.DeployOf(e.cfg.Deploys, e.cfg.RepositoryRenames, fact.Repo, fact.Path)
-	if !ok {
-		return intake.Result{}, nil
-	}
-	open, err := e.store.OpenProductionChecks(ctx, tx)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	compared := 0
-	for _, check := range open {
-		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, fact.Repo) || check.Last {
-			continue
-		}
-		issue, err := e.store.Issue(ctx, tx, check.Issue)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		if issue == nil {
-			return intake.Result{}, fmt.Errorf("production check of %s: its issue is not recorded", check.Issue)
-		}
-		if issue.DefaultBranch != fact.HeadBranch {
-			continue
-		}
-		run := &record.DeployRun{Run: fact.RunID, Attempt: fact.Attempt, Workflow: deploy.Workflow, Step: deploy.Step, Branch: fact.HeadBranch}
-		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: wakeDeployRun, Deploy: run, OpenedAt: check.OpenedAt}); err != nil {
-			return intake.Result{}, err
-		}
-		compared++
-	}
-	if compared > 0 {
-		e.logOnCommit(ctx, "workflow: a deploy run is compared against the open production checks", "repo", fact.Repo, "workflow", deploy.Workflow,
-			"run", fact.RunID, "attempt", fact.Attempt, "branch", fact.HeadBranch, "checks", compared)
-	}
-	return intake.Result{}, nil
 }
 
 // checkLookEnded is a look ending with no report (intake.CheckLookEnded: the look's bound, an

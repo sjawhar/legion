@@ -49,17 +49,8 @@ type Config struct {
 	// project that opens none. It decides the checks opened under this configuration, never one
 	// already open, whose role its own row holds.
 	ProductionCheckRole claim.Role
-	// BuiltFrom is the repository the daemon's binary is built from (`cybermonklabs/legion` in a release
-	// build): a build the daemon boots on, or Dispatch announces every server process serves
-	// (server.started), is compared only against the open production checks of that repository,
-	// since no other repository's merge can be in it. Empty, no build is compared.
-	BuiltFrom string
-	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
-	// a completed run of one on the default branch of its repository is read from GitHub for each
-	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
-	Deploys        []config.Deploy
-	MergeQueueRole string
-	Clock          func() time.Time
+	MergeQueueRole      string
+	Clock               func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -199,14 +190,6 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.booted(ctx, tx, fact)
 	case intake.CheckReport:
 		return e.checkReported(ctx, tx, fact)
-	case intake.IssueDeployed:
-		return e.issueDeployed(ctx, tx, fact)
-	case intake.ServerStarted:
-		return e.serverStarted(ctx, tx, fact)
-	case intake.WorkflowRunCompleted:
-		return e.deployRunCompleted(ctx, tx, fact)
-	case intake.CheckWake:
-		return e.checkWake(ctx, tx, fact)
 	case intake.CheckLookEnded:
 		return e.checkLookEnded(ctx, tx, fact)
 	case intake.CheckBound:

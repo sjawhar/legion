@@ -508,12 +508,11 @@ type SlotView struct {
 }
 
 // CheckView is an issue's open production check as the state shows it: the repository, pull
-// request and merge commit the check looks for in production (MergeCommit is empty until the first
-// build compare fills it for a pull request merged before the daemon recorded merge commits), when
-// it opened, how many looks the implementer has taken and whether the latest is still open, what
-// woke the latest look (LastWake, absent before the first look wakes), the check's bound
-// (NextWakeAt: the moment its last look starts, which is the one wake the record promises; the
-// deploy and build wakes before it are events, not timers), and whether the last look has started.
+// request and merge commit the check looks for in production (MergeCommit is empty for a pull
+// request merged before the daemon recorded merge commits), when it opened, how many looks the
+// implementer has taken and whether the latest is still open, what woke the latest look
+// (LastWake, absent before the first look wakes), the check's bound (NextWakeAt: the moment its
+// last look starts), and whether the last look has started.
 type CheckView struct {
 	Repo        string         `json:"repo"`
 	PullRequest int            `json:"pullRequest"`
@@ -526,10 +525,9 @@ type CheckView struct {
 	Last        bool           `json:"last"`
 }
 
-// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
-// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
-// job and step success, or the build's commit), and At when.
+// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge` or
+// `bound`; a check whose look was woken before the daemon stopped reading production can hold one
+// of the causes that are gone), Detail the cause's own detail, and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`

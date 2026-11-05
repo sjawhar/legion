@@ -198,9 +198,8 @@ const legionSlotView = z.object({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or
- * `bound`), `detail` the cause's own detail (the run and its completion, the deploy workflow's run,
- * attempt, job and step success, or the build's commit), `at` when. */
+ * (`merge` or `bound`; a check whose look was woken before the daemon stopped reading production
+ * can hold one of the causes that are gone), `detail` the cause's own detail, `at` when. */
 const legionCheckWakeView = z.object({
   kind: nonEmptyString,
   detail: z.string(),
@@ -209,13 +208,12 @@ const legionCheckWakeView = z.object({
 
 /** `api.CheckView` — an issue's open production check, the implementer's work after the merge
  * closed the issue (contract 33): the repository, pull request and merge commit the check looks
- * for in production (`mergeCommit` is empty until the first build compare fills it for a pull
- * request merged before the daemon recorded merge commits), when it opened, how many looks the
- * implementer has taken and whether the latest is still open, what woke the latest look
- * (`lastWake`, absent before the first look wakes), the check's bound (`nextWakeAt`: when its last
- * look starts, the one wake the record promises; the deploy and build wakes before it are events,
- * not timers), and whether the last look has started. Present on the issue record only while the
- * check is open; absent once it closed or while none was opened. */
+ * for in production (`mergeCommit` is empty for a pull request merged before the daemon recorded
+ * merge commits), when it opened, how many looks the implementer has taken and whether the latest
+ * is still open, what woke the latest look (`lastWake`, absent before the first look wakes), the
+ * check's bound (`nextWakeAt`: when its last look starts), and whether the last look has started.
+ * Present on the issue record only while the check is open; absent once it closed or while none
+ * was opened. */
 const legionCheckView = z.object({
   repo: nonEmptyString,
   pullRequest: z.number().int().positive(),

@@ -136,7 +136,7 @@ func TestTheBootsResumeMintsNoAssignment(t *testing.T) {
 // start mints no assignment. So the implementer's claim goes on serving whatever assignment its
 // last phase gave it, and nothing of the check is weighed against a phases row.
 func TestAProductionChecksLookMintsNoAssignment(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start")
 	if len(starts) == 0 {
 		t.Fatal("no start for the check's first look")
