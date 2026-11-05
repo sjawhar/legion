@@ -326,12 +326,27 @@ func pinsAMessageBlock(raw, serverURL string) bool {
 	return ok && ref.Kind == "block" && ref.Item == "message"
 }
 
+// parseRequestRef reads one reference a request names - a ?to= or ?from=, or one ?ref= of the
+// batched read - by text.ParseRef, so a node is read whatever the length of its name: the target
+// bound decides only what text indexes, and a node no index holds an edge to simply has fewer
+// edges. Anything else is 400 INVALID_REFERENCE naming the value, with its own sentence for a
+// pinned block of a message, which the grammar reads as no reference at all.
+func parseRequestRef(raw, serverURL string) (text.Ref, error) {
+	ref, ok := text.ParseRef(raw, serverURL)
+	if ok {
+		return ref, nil
+	}
+	if pinsAMessageBlock(raw, serverURL) {
+		return text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q pins a block of a message, which never changes; name the block without @v<N>", raw)
+	}
+	return text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, block, ask, comment, message, or component", raw)
+}
+
 // parseReferencesQuery turns ?to=|?from=, ?kind=, and ?since= into an edge query addressed the
 // way graph_edges stores the node (refs.TargetOf): text.TargetID for the to side (ref_key for
 // artifacts; an ask's part and a comment's or message's block under its storage kind), the
 // item id for the from side (the caller swaps an artifact's ref_key for its uuid). The reference
-// is read by text.ParseRef, so a node is read whatever the length of its name: the target bound
-// decides only what text indexes, and a node no index holds an edge to simply has fewer edges.
+// itself is read by parseRequestRef, as the batched read reads each of its own.
 func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.Ref, error) {
 	values := r.URL.Query()
 	to, from := strings.TrimSpace(values.Get("to")), strings.TrimSpace(values.Get("from"))
@@ -342,12 +357,9 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	if from != "" {
 		raw, direction = from, "out"
 	}
-	ref, ok := text.ParseRef(raw, serverURL)
-	if !ok {
-		if pinsAMessageBlock(raw, serverURL) {
-			return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q pins a block of a message, which never changes; name the block without @v<N>", raw)
-		}
-		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, block, ask, comment, message, or component", raw)
+	ref, err := parseRequestRef(raw, serverURL)
+	if err != nil {
+		return refs.Query{}, text.Ref{}, err
 	}
 	// The node as graph_edges stores it: an ask's part and a comment's or message's block under
 	// its storage kind.

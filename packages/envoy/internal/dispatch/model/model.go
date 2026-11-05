@@ -2125,6 +2125,24 @@ type GraphReferences struct {
 	Edges []GraphEdge `json:"edges"`
 }
 
+// ReferenceTarget is what one reference of a batched reference read points at: Ref, the
+// reference as the request named it, Kind, the kind of node it names (a GraphNode kind), Name,
+// the words a reader is shown for the target in place of its text (refs.TargetNames), and Gone,
+// whether nothing answers to that reference now. A gone target carries no name: its node was
+// deleted, so there is nothing left to name it by.
+type ReferenceTarget struct {
+	Ref  string `json:"ref"`
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	Gone bool   `json:"gone"`
+}
+
+// ReferenceTargets is GET /api/v1/reference-targets: one member per ?ref= the request named, in
+// the request's order, a reference named twice answered twice.
+type ReferenceTargets struct {
+	Targets []ReferenceTarget `json:"targets"`
+}
+
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,
 // both block nodes, and when and in which version of its document the source block first held
 // it.

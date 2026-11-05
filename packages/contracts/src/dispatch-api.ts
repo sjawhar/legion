@@ -2433,6 +2433,27 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+// ReferenceTarget is what one reference of GET /api/v1/reference-targets points at: `ref`, the
+// reference as the request wrote it, `kind`, the kind of node it names, `name`, the words a
+// reader is shown for the target in place of its text (an issue's title, a document's name, an
+// ask's question, a comment's or a message's body, a component's title, a block's text, each cut
+// as an edge's excerpt is), and `gone`, whether nothing answers to that reference now. A gone
+// target carries no name: its node was deleted, so nothing is left to name it by. No reference
+// names a session, the one node kind with no address.
+export interface ReferenceTarget {
+  readonly ref: string;
+  readonly kind: "issue" | "artifact" | "block" | "ask" | "comment" | "message" | "component";
+  readonly name: string;
+  readonly gone: boolean;
+}
+
+// ReferenceTargets is GET /api/v1/reference-targets?ref=<dispatch ref>&ref=…: one member per
+// `ref` the request named, in the request's order, a reference named twice answered twice, under
+// an ETag over the whole answer. It answers no edges: GET /api/v1/references reads one node's.
+export interface ReferenceTargets {
+  readonly targets: ReferenceTarget[];
+}
+
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,
 // both block nodes, and when and in which version of its document the source block first held
 // it.
