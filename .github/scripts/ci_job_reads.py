@@ -611,6 +611,8 @@ GATES = [
     ], reads=reads(
         ("packages/pi-legion/**", f"{at('pi-legion', 'Lint pi-legion')}, typecheck, test and pack in packages/pi-legion"),
         ("packages/pi-envoy/**", "packages/pi-legion/extensions/legion.test.ts:143 and legion-role-claim.test.ts:61 import ../../pi-envoy/extensions/envoy; packages/pi-shared/test/omp-harness.ts:662"),
+        ("packages/claude-envoy/**", "packages/pi-legion/src/skills-guard.test.ts:24,275 spawns packages/claude-envoy/scripts/build.ts and asserts an exact file list over the tree it writes, so that script and everything it reads - its BUNDLE_ENTRYPOINTS at scripts/build.ts:41-46 among them - are read by this job through a spawn, which carries no import and which no derivation sees"),
+        ("packages/envoy-client/bin/dispatch.ts", "the fourth entry of that builder's BUNDLE_ENTRYPOINTS (packages/claude-envoy/scripts/build.ts:41-46), outside the package it builds"),
         ("packages/pi-shared/src/**", "packages/pi-legion/tsconfig.json paths @legion/pi-shared/* and include ../pi-shared/src/omp-host.d.ts"),
         ("packages/pi-shared/test/**", "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts:12, legion-role-tools-omp.test.ts:12, src/skills-guard.test.ts:14, scripts/prepack.test.ts:4"),
         # envoy-client's sources, and broker-client's with them, are the shared read below.

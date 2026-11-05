@@ -150,6 +150,20 @@ go list -deps -test [-tags <tags>] -f '{{.Dir}}' <the packages the job's go comm
   every module it binds (the `go_workspace` anchor), since they move the versions the build
   compiles.
 
+For a job whose steps typecheck TypeScript, the program is derived rather than listed:
+`.github/scripts/check-ts-filters.sh` runs `bunx tsc -p <project> --noEmit --listFilesOnly` for
+each pair of a filter and a project (`ci_ts_programs.py`) and holds every file of the program to
+that filter, so an import that reaches a new package fails on the pull request that writes it.
+Add the pair when a job gains a typecheck; the files need no list.
+It runs in `ci.yaml`'s lint job, which installs the dependencies and is gated by no `changes`
+output; the `ci-filters` job has neither Bun nor `node_modules`.
+
+What a job reaches by **spawning** a program is in neither derivation: a spawn carries no import,
+so neither `go list` nor `tsc` sees it, and the reach is hand-kept on both sides.
+`packages/pi-legion`'s `src/skills-guard.test.ts` spawns `packages/claude-envoy/scripts/build.ts`
+and asserts the tree it writes, which is why the `pi_legion` filter names that whole package and
+the one `BUNDLE_ENTRYPOINTS` entry outside it.
+
 For every job, add:
 
 - the composite actions it uses (`.github/actions/<name>/**`) and what they read, but for the
@@ -255,9 +269,12 @@ fails the pull request that adds it.
   `envoy_smoke` is a gate for its job's go commands and other step reads; its image inputs are
   `check-image-trigger-paths.sh`'s too.
 
-The non-Go reads and `RULES` are what the check is told, not what it finds: it proves the filters
+The `RULES` entries, the reads of a job that spawns a program, and every read of a file a test
+reaches by relative path are what the check is told, not what it finds: it proves the filters
 cover them, not that they are complete, and a new file under a glob a filter names only in part
-runs the check only when the change also touches one of its triggers. It runs go with
+runs the check only when the change also touches one of its triggers. A Go job's own closure and
+a Bun job's typecheck program are the two halves it does find, from `go list` and from
+`check-ts-filters.sh`. It runs go with
 `GOPROXY=off` over an empty module cache, so it downloads nothing and gives the same answer on a
 cold runner as on a warm machine; third-party packages fail to load, which loses no first-party
 package. Run it locally from anywhere: `.github/scripts/check-ci-filters.sh`.
