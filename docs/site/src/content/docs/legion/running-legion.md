@@ -478,12 +478,14 @@ What each part is for:
   decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
   a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
   an update round runs before the controller is told it is not finishing, decimals allowed),
-  `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
-  the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
-  `prompt_retire_limit` (2). `controller_wake_interval_seconds` also sets the period of the
-  daemon's status repair, which puts back the Dispatch status of every issue it works whose status
-  is not the status of the phase that issue stands in, so raising it to quiet the controller slows
-  that repair with it.
+  `pod_update_max_open_rounds` (how many issues may hold an open pod-update round at once) and
+  `pod_update_rounds_per_minute` (how many rounds one sweep opens), each a positive integer whose
+  absent key is no limit at all, `review_round_cap` (3), `max_fix_attempts` (3),
+  `controller_wake_interval_seconds` (3600), and the supervision budgets `launch_failure_limit`
+  (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+  `controller_wake_interval_seconds` also sets the period of the daemon's status repair, which
+  puts back the Dispatch status of every issue it works whose status is not the status of the
+  phase that issue stands in, so raising it to quiet the controller slows that repair with it.
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,

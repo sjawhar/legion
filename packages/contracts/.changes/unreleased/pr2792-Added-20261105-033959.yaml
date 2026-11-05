@@ -1,0 +1,5 @@
+kind: Added
+body: 'LegionOperatorClaimsResponse carries pod_update_rounds: what the daemon''s last pod-update sweep decided under the two new legion.yaml limits on opening pod-update rounds — each limit or null for no limit, the issues holding an open round, and the issues each limit held back.'
+time: 2026-11-05T03:39:59.385347682Z
+custom:
+    Issue: pr2792
