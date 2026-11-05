@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -45,8 +45,8 @@ type inboxShadowReport struct {
 
 type inboxMembership map[[3]string]struct{}
 
-func readInboxMembership(ctx context.Context, q queryer, sql string, actorID string) (inboxMembership, error) {
-	rows, err := q.Query(ctx, sql, unreadDirectRepliesArgs(actorID, nil)...)
+func readInboxMembership(ctx context.Context, q queryer, sql string, args ...any) (inboxMembership, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +60,28 @@ func readInboxMembership(ctx context.Context, q queryer, sql string, actorID str
 		items[[3]string{cause, kind, id}] = struct{}{}
 	}
 	return items, rows.Err()
+}
+
+func readLegacyInboxMembership(ctx context.Context, q queryer, actorID string) (inboxMembership, error) {
+	login := model.CanonicalLogin(actorID)
+	items := inboxMembership{}
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{legacyInboxAsksQuery, []any{"", "login", login}},
+		{legacyInboxThreadsQuery, []any{login, "", nil}},
+		{legacyInboxDirectRepliesQuery, unreadDirectRepliesArgs(actorID, nil)},
+	} {
+		rows, err := readInboxMembership(ctx, q, query.sql, query.args...)
+		if err != nil {
+			return nil, err
+		}
+		for item := range rows {
+			items[item] = struct{}{}
+		}
+	}
+	return items, nil
 }
 
 func compareInboxMembership(person string, want, got inboxMembership) inboxShadowUser {
@@ -85,10 +107,8 @@ func addInboxCounts(into, from map[string]int) {
 	}
 }
 
-// observeInboxShadow is the only writer of observation tables. A row lock, not
-// another lease connection, serializes the scheduled pass and the visible read.
-// Compare both implementations in one snapshot, including every signed-in person
-// (a superset of active users) and every raw Clear identity that belongs to them.
+// A row lock serializes background passes. Both sides see the same snapshot,
+// including every signed-in person and their historical raw Clear identities.
 func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
@@ -137,10 +157,10 @@ func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error
 		}
 		user := compareInboxMembership(p.login, inboxMembership{}, inboxMembership{})
 		for _, raw := range p.aliases {
-			want, readErr := readInboxMembership(ctx, tx, legacyInboxMembershipQuery, raw)
+			want, readErr := readLegacyInboxMembership(ctx, tx, raw)
 			var got inboxMembership
 			if readErr == nil {
-				got, readErr = readInboxMembership(ctx, tx, unifiedInboxCandidates+` select cause,kind,id::text from delivered`, raw)
+				got, readErr = readInboxMembership(ctx, tx, unifiedInboxMembershipQuery, unifiedInboxArgs(raw)...)
 			}
 			if readErr != nil {
 				if _, err := tx.Exec(ctx, `rollback to savepoint inbox_person`); err != nil {
@@ -159,12 +179,12 @@ func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error
 			// The optional expansion is counted independently and cannot make the legacy
 			// diff red. Only public issue/document content is eligible for this arm.
 			var count int
-			err := tx.QueryRow(ctx, unifiedInboxCandidates+` select count(*) from (
+			err := tx.QueryRow(ctx, `with`+unifiedInboxDelivered+` select count(*) from (
     select distinct g.from_kind,g.from_id from `+refs.AllEdgesSQL+` g
     where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
       and `+inboxMentionVisibleSQL+`
-      and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id::text=g.from_id)
-   ) expansions`, p.login, p.login, nil).Scan(&count)
+      and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id=g.from_id)
+   ) expansions`, unifiedInboxArgs(p.login)...).Scan(&count)
 			if err != nil {
 				if _, rollbackErr := tx.Exec(ctx, `rollback to savepoint inbox_person`); rollbackErr != nil {
 					return rollbackErr
@@ -286,16 +306,8 @@ func readInboxShadowReport(ctx context.Context, q queryer) (inboxShadowReport, e
 }
 
 func (s *server) getInboxShadow(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireOwnInbox(w, r); !ok {
-		return
-	}
-	safe, err := s.horizon().Safe(r.Context())
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := observeInboxShadow(r.Context(), s.deps.Store.Pool, safe); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("observe inbox shadow: %w", err))
+	actor, ok := s.requireOwnInbox(w, r)
+	if !ok {
 		return
 	}
 	report, err := readInboxShadowReport(r.Context(), s.deps.Store.Pool)
@@ -303,7 +315,14 @@ func (s *server) getInboxShadow(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, 200, report)
+	users := report.Users[:0]
+	for _, user := range report.Users {
+		if user.Person == model.CanonicalLogin(actor.ID) {
+			users = append(users, user)
+		}
+	}
+	report.Users = users
+	WriteJSON(w, http.StatusOK, report)
 }
 
 // RunInboxShadowSweep checks all signed-in people once a minute, even when

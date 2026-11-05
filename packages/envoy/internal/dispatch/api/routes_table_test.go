@@ -316,6 +316,8 @@ func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
 		"GET /api/v1/issues/{key}/subscribers",
 		"DELETE /api/v1/issues/{key}/subscribers/{session_id}",
 		"GET /api/v1/inbox",
+		"GET /api/v1/me/inbox",
+		"GET /api/v1/me/inbox/shadow",
 		"GET /api/v1/me/answers",
 		"GET /api/v1/me/replies",
 		"PUT /api/v1/me/threads/{id}/read",

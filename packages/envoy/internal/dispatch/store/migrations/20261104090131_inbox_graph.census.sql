@@ -1,3 +1,2 @@
--- Creates one derived sibling view and empty observation-only tables.
--- No existing table/view changes, row backfill, new index, or rejected source row.
-select 0
+-- The partial index scans messages while holding the index-build lock.
+select count(*) from messages

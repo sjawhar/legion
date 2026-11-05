@@ -47,7 +47,7 @@ func TestUnifiedInboxPlansAndP99OnRealisticVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	var raw []byte
-	args := append(unreadDirectRepliesArgs("alice", nil), 50, 0)
+	args := append(unifiedInboxArgs("alice"), 50, 0)
 	if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+unifiedInboxQuery, args...).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
