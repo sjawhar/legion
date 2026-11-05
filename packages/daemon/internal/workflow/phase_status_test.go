@@ -1,11 +1,8 @@
 package workflow
 
 import (
-	"context"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -65,7 +62,6 @@ func TestEveryPhaseHasAStatusEntry(t *testing.T) {
 // shows, and it keeps it.
 func TestATransitionWritesTheStatusOfThePhaseItEnters(t *testing.T) {
 	pool := migratedPool(t)
-	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208",
 		Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
@@ -76,39 +72,19 @@ func TestATransitionWritesTheStatusOfThePhaseItEnters(t *testing.T) {
 	// one fact.
 	applyRefusingNothing(t, pool, engine, intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 1, Type: "issue.updated",
 		Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V"})
-	assertChildPhase(t, pool, phase.Planning)
-	var status, observed string
-	if err := pool.QueryRow(ctx, "select payload->>'status', payload->>'observedStatus' from outbox where kind = 'dispatch_status' and issue = 'LEGION-209'").
-		Scan(&status, &observed); err != nil {
-		t.Fatalf("read the child's status write: %v", err)
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
+		t.Fatalf("the child = %s once the gate's tree recorded it, want planning", got)
 	}
-	if status != "in_progress" || observed != "todo" {
-		t.Fatalf("the move into planning wrote %q over %q, want in_progress over the todo Dispatch showed", status, observed)
-	}
-	assertOutboxCount(t, pool, "dispatch_status", 1)
+	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-209", "in_progress", "todo"})
 
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "planner-claim"})
 	applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "planner-claim",
 		Summary: "the plan", HandoffRecord: "plan", HandoffVersion: 1})
-	assertChildPhase(t, pool, phase.Implementing)
-	var carried string
-	if err := pool.QueryRow(ctx, "select status from issues where key = 'LEGION-209'").Scan(&carried); err != nil {
-		t.Fatalf("read the child's status: %v", err)
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Implementing {
+		t.Fatalf("the child = %s once its planner completed, want implementing", got)
 	}
-	if carried != "in_progress" {
-		t.Fatalf("the child in implementing carries status %q, want in_progress", carried)
+	if got := issueRecord(t, pool, "LEGION-209"); got.Status != "in_progress" {
+		t.Fatalf("the child in implementing carries status %q, want in_progress", got.Status)
 	}
-	assertOutboxCount(t, pool, "dispatch_status", 1)
-}
-
-// assertChildPhase requires LEGION-209, the child of this file's tree, to stand in want.
-func assertChildPhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
-	t.Helper()
-	var got string
-	if err := pool.QueryRow(t.Context(), "select phase from issues where key = 'LEGION-209'").Scan(&got); err != nil {
-		t.Fatalf("read the child's phase: %v", err)
-	}
-	if got != string(want) {
-		t.Fatalf("the child is in phase %q, want %q", got, want)
-	}
+	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-209", "in_progress", "todo"})
 }

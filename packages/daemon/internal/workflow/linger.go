@@ -213,6 +213,29 @@ func InWorkflow(issue record.Issue) bool {
 	return !record.OutOfWorkflow(issue.Status) && issue.Phase != phase.Done
 }
 
+// runningTree is issue's tree's root, and whether the daemon is running that tree: the root is
+// recorded, holds an admission slot, and does not linger. byKey and slotted are one read of the
+// issues and one of the slots, indexed (indexIssues). The boot's resume and the status repair both
+// ask it, so the rule is stated once: a root waiting for a slot can carry a workflow phase of its
+// own, and a lingering tree runs nothing.
+func runningTree(byKey map[string]record.Issue, slotted map[string]bool, issue record.Issue) (record.Issue, bool) {
+	root, ok := byKey[issue.Tree]
+	return root, ok && slotted[root.Key] && !root.Lingers()
+}
+
+// indexIssues is issues by key and the keys slots holds, the pair runningTree reads.
+func indexIssues(issues []record.Issue, slots []record.Slot) (map[string]record.Issue, map[string]bool) {
+	byKey := make(map[string]record.Issue, len(issues))
+	for _, issue := range issues {
+		byKey[issue.Key] = issue
+	}
+	slotted := make(map[string]bool, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = true
+	}
+	return byKey, slotted
+}
+
 // beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold
 // if it has one, as a child's leave does. Its one caller (leave) calls it once per close: a root
 // that already lingers leaves no second time.

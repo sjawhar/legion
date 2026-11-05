@@ -72,14 +72,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 	if err != nil {
 		return intake.Result{}, err
 	}
-	byKey := make(map[string]record.Issue, len(issues))
-	for _, issue := range issues {
-		byKey[issue.Key] = issue
-	}
-	slotted := make(map[string]bool, len(slots))
-	for _, slot := range slots {
-		slotted[slot.Issue] = true
-	}
+	byKey, slotted := indexIssues(issues, slots)
 	if err := e.correctStatuses(ctx, tx, issues, byKey, slotted, "boot"); err != nil {
 		return intake.Result{}, err
 	}
@@ -88,8 +81,8 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		if issue.Project != e.cfg.Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
 			continue
 		}
-		root, ok := byKey[issue.Tree]
-		if !ok || !slotted[root.Key] || root.Lingers() {
+		root, running := runningTree(byKey, slotted, issue)
+		if !running {
 			continue
 		}
 		project, err := claim.ProjectToken(issue.Project)

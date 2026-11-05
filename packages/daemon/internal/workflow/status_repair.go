@@ -55,16 +55,16 @@ import (
 // arriving a moment before its event.
 func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record.Issue,
 	byKey map[string]record.Issue, slotted map[string]bool, trigger string) error {
-	pending, err := e.store.PendingStatusWrites(ctx, tx, e.cfg.Project)
+	pendingWrites, err := e.store.PendingStatusWrites(ctx, tx, e.cfg.Project)
 	if err != nil {
 		return err
 	}
-	queued := make(map[string]bool, len(pending))
-	for _, row := range pending {
-		queued[row.Issue] = true
+	hasPendingWrite := make(map[string]bool, len(pendingWrites))
+	for _, row := range pendingWrites {
+		hasPendingWrite[row.Issue] = true
 	}
-	passedOver, waiting := []string{}, []string{}
-	written := 0
+	passedOver, pending := []string{}, []string{}
+	queued := 0
 	for _, issue := range issues {
 		if issue.Project != e.cfg.Project || !InWorkflow(issue) {
 			continue
@@ -73,13 +73,12 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 		if want == "" || issue.DispatchStatus == "" || record.OutOfWorkflow(issue.DispatchStatus) || issue.DispatchStatus == want {
 			continue
 		}
-		root, ok := byKey[issue.Tree]
-		if !ok || !slotted[root.Key] || root.Lingers() {
+		if _, running := runningTree(byKey, slotted, issue); !running {
 			passedOver = append(passedOver, issue.Key)
 			continue
 		}
-		if queued[issue.Key] {
-			waiting = append(waiting, issue.Key)
+		if hasPendingWrite[issue.Key] {
+			pending = append(pending, issue.Key)
 			continue
 		}
 		// The row is enqueued here rather than through Engine.status, which returns without
@@ -96,31 +95,41 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 		// daemon's own write echoes back from Dispatch. Writing it here would say the board shows
 		// the new status before anything wrote it there, and the next run would then find nothing
 		// to repair for a write that never left the outbox.
-		issue.Status = want
-		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
-			return err
+		if issue.Status != want {
+			issue.Status = want
+			if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+				return err
+			}
 		}
-		written++
+		queued++
 		e.logOnCommit(ctx, "workflow: the status repair queues the status of the issue's phase", "issue", issue.Key,
 			"phase", issue.Phase, "recorded", recorded, "wrote", want)
 	}
 	// Both lists are sorted so that the same state writes the same line, whatever order the store
 	// returned the issues in.
 	slices.Sort(passedOver)
-	slices.Sort(waiting)
-	e.logOnCommit(ctx, "workflow: the status repair ran", "trigger", trigger, "queued", written,
-		"passedOver", passedOver, "pending", waiting)
+	slices.Sort(pending)
+	e.logOnCommit(ctx, "workflow: the status repair ran", "trigger", trigger, "queued", queued,
+		"passedOver", passedOver, "pending", pending)
 	return nil
 }
 
 // statusRepairTick runs the status repair on the controller's periodic tick, which is what puts a
 // lost status write back without a daemon restart. Its period is controller_wake_interval_seconds,
-// an hour by default, with the first tick a minute after the runtime starts.
+// an hour by default, with the first tick a minute after the runtime starts. It returns the zero
+// intake.Result: the workflow owns no other part of the tick.
 //
-// It returns the zero intake.Result, which is what Apply's default case returned for this fact
-// before, so the tick is unchanged in every other way: the workflow owns no other part of it.
+// It reads the project's live records (LiveIssues), not every record the project keeps, because a
+// fact's cost must not grow with the done records a project holds for good
+// (admit's TestAFactReadsAsManyRowsWhateverNumberOfFinishedRecordsTheProjectKeeps, which the tick
+// is one of the facts of). The repair selects the same issues from either list: every issue it can
+// act on is short of phase done, which LiveIssues holds, and every root that could pass the
+// tree-runs rule holds a slot, which LiveIssues holds too — a root it leaves out is done and holds
+// none, so the issue under it is passed over either way, by the missing root rather than by the
+// missing slot. The boot reads the whole table once for its resume and hands the repair that list
+// (booted).
 func (e *Engine) statusRepairTick(ctx context.Context, tx pgx.Tx) (intake.Result, error) {
-	issues, err := e.store.Issues(ctx, tx)
+	issues, err := e.store.LiveIssues(ctx, tx, e.cfg.Project)
 	if err != nil {
 		return intake.Result{}, err
 	}
@@ -128,13 +137,6 @@ func (e *Engine) statusRepairTick(ctx context.Context, tx pgx.Tx) (intake.Result
 	if err != nil {
 		return intake.Result{}, err
 	}
-	byKey := make(map[string]record.Issue, len(issues))
-	for _, issue := range issues {
-		byKey[issue.Key] = issue
-	}
-	slotted := make(map[string]bool, len(slots))
-	for _, slot := range slots {
-		slotted[slot.Issue] = true
-	}
+	byKey, slotted := indexIssues(issues, slots)
 	return intake.Result{}, e.correctStatuses(ctx, tx, issues, byKey, slotted, "tick")
 }

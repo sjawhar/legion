@@ -49,7 +49,7 @@ func TestTheStatusRepairKeepsQueuingARowTheOutboxWillNotWrite(t *testing.T) {
 	if len(client.statuses) != 0 {
 		t.Fatalf("Dispatch was written %v, want nothing: it already shows the phase's status", client.statuses)
 	}
-	if got := statusRepairRecord(t, pool, records); got.Status != "in_progress" || got.DispatchStatus != "todo" {
+	if got := readIssue(t, pool, "LEGION-208"); got == nil || got.Status != "in_progress" || got.DispatchStatus != "todo" {
 		t.Fatalf("the record = %+v, want status in_progress and the stale todo it held for Dispatch", got)
 	}
 }
@@ -85,7 +85,7 @@ func TestTheStatusRepairWritesNothingOverAStatusTheDaemonNeverSaw(t *testing.T) 
 	if client.issue.Status != "testing" {
 		t.Fatalf("Dispatch shows %q, want the testing a person moved the issue to", client.issue.Status)
 	}
-	if got := statusRepairRecord(t, pool, records); got.Status != "in_progress" || got.DispatchStatus != "todo" {
+	if got := readIssue(t, pool, "LEGION-208"); got == nil || got.Status != "in_progress" || got.DispatchStatus != "todo" {
 		t.Fatalf("the record = %+v, want status in_progress and the todo it held for Dispatch", got)
 	}
 }
@@ -117,16 +117,16 @@ func TestNoOutboxFinishWritesTheRecordsDispatchStatus(t *testing.T) {
 	if got := outboxRows(t, pool); got != 0 {
 		t.Fatalf("outbox rows after the write = %d, want the row finished", got)
 	}
-	if got := statusRepairRecord(t, pool, records); got.Status != "in_progress" || got.DispatchStatus != "todo" {
+	if got := readIssue(t, pool, "LEGION-208"); got == nil || got.Status != "in_progress" || got.DispatchStatus != "todo" {
 		t.Fatalf("the record = %+v, want status in_progress and the todo Dispatch last told the daemon", got)
 	}
 }
 
-// staleStatusIssue is the one issue of these tests, a root of its own tree, standing in standing
-// with the record's own status and the status the record holds for Dispatch.
-func staleStatusIssue(standing phase.Phase, status, shown string) record.Issue {
+// staleStatusIssue is the one issue of these tests, a root of its own tree, standing in at, with
+// the record's own status and the status the record holds for Dispatch.
+func staleStatusIssue(at phase.Phase, status, shown string) record.Issue {
 	return record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Project: "LEGION", Tree: "LEGION-208", Title: "the issue whose status write was lost", Phase: standing,
+		Project: "LEGION", Tree: "LEGION-208", Title: "the issue whose status write was lost", Phase: at,
 		Generation: 1, Status: status, DispatchStatus: shown, Rank: "U", HandedOver: true, LastDispatchSeq: 1}
 }
 
@@ -137,20 +137,4 @@ func putStatusRepairSlot(t *testing.T, pool *pgxpool.Pool, records record.Store,
 	}); err != nil {
 		t.Fatalf("seed the slot of %s: %v", issue, err)
 	}
-}
-
-func statusRepairRecord(t *testing.T, pool *pgxpool.Pool, records record.Store) record.Issue {
-	t.Helper()
-	var issue *record.Issue
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		var err error
-		issue, err = records.Issue(context.Background(), tx, "LEGION-208")
-		return err
-	}); err != nil {
-		t.Fatalf("read the record of LEGION-208: %v", err)
-	}
-	if issue == nil {
-		t.Fatal("the record of LEGION-208 is missing")
-	}
-	return *issue
 }

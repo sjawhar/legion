@@ -26,7 +26,7 @@ func TestTheStatusRepairQueuesTheStatusWriteTheDaemonLost(t *testing.T) {
 	seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Implementing, "todo", "todo"))
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
 
-	applyRepairFact(t, pool, testEngine(config.DesignGateRootIssues, nil), "tick", intake.ControllerTick{})
+	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.ControllerTick{})
 
 	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-208", "in_progress", "todo"})
 	got := issueRecord(t, pool, "LEGION-208")
@@ -46,7 +46,7 @@ func TestTheStatusRepairWritesThePhasesStatusAndNotTheRecords(t *testing.T) {
 	seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Reviewing, "in_progress", "in_progress"))
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
 
-	applyRepairFact(t, pool, testEngine(config.DesignGateRootIssues, nil), "tick", intake.ControllerTick{})
+	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.ControllerTick{})
 
 	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-208", "needs_review", "in_progress"})
 }
@@ -117,7 +117,7 @@ func TestTheStatusRepairSkipsEveryIssueItsRulesExclude(t *testing.T) {
 			pool := migratedPool(t)
 			tc.seed(t, pool)
 
-			applyRepairFact(t, pool, testEngine(config.DesignGateRootIssues, nil), "tick", intake.ControllerTick{})
+			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.ControllerTick{})
 
 			assertQueuedStatusWrites(t, pool, tc.want...)
 		})
@@ -134,7 +134,7 @@ func TestTheStatusRepairSkipsARecordedStatusOutOfTheWorkflow(t *testing.T) {
 			seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Implementing, "in_progress", shown))
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
 
-			applyRepairFact(t, pool, testEngine(config.DesignGateRootIssues, nil), "tick", intake.ControllerTick{})
+			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.ControllerTick{})
 
 			assertQueuedStatusWrites(t, pool)
 		})
@@ -147,7 +147,7 @@ func TestTheBootQueuesTheStatusWriteTheDaemonLost(t *testing.T) {
 	seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Testing, "testing", "in_progress"))
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
 
-	applyRepairFact(t, pool, testEngine(config.DesignGateRootIssues, nil), "boot:LEGION:1", intake.DaemonBooted{Boot: 1})
+	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.DaemonBooted{Boot: 1})
 
 	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-208", "testing", "in_progress"})
 }
@@ -171,7 +171,7 @@ func TestTheStatusRepairLogsEachRepairAndEveryRun(t *testing.T) {
 
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))
-	applyRepairFact(t, pool, engine, "tick-1", intake.ControllerTick{})
+	applyRefusingNothing(t, pool, engine, intake.ControllerTick{})
 
 	for _, want := range []string{
 		`msg="workflow: the status repair queues the status of the issue's phase" issue=LEGION-208 phase=implementing recorded=todo wrote=in_progress`,
@@ -185,7 +185,7 @@ func TestTheStatusRepairLogsEachRepairAndEveryRun(t *testing.T) {
 	// The second run queues nothing: the row the first run wrote for LEGION-208 is still
 	// unfinished, so that issue joins the pending list. The run line is written all the same.
 	logged.Reset()
-	applyRepairFact(t, pool, engine, "tick-2", intake.ControllerTick{})
+	applyRefusingNothing(t, pool, engine, intake.ControllerTick{})
 
 	want := `msg="workflow: the status repair ran" trigger=tick queued=0 passedOver=[LEGION-300] pending="[LEGION-208 LEGION-400]"`
 	if !strings.Contains(logged.String(), want) {
@@ -196,23 +196,16 @@ func TestTheStatusRepairLogsEachRepairAndEveryRun(t *testing.T) {
 	}
 }
 
-// repairIssue is one issue of the status repair's tests: key, a member of tree, standing in
-// standing with the record's own status and the status Dispatch last showed.
-func repairIssue(key, tree string, standing phase.Phase, status, shown string) record.Issue {
+// repairIssue is one issue of the status repair's tests: key, a member of tree, standing in at,
+// with the record's own status and the status Dispatch last showed.
+func repairIssue(key, tree string, at phase.Phase, status, shown string) record.Issue {
 	return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: tree,
-		Project: "LEGION", Title: key, Phase: standing, Generation: 1, Status: status, DispatchStatus: shown,
+		Project: "LEGION", Title: key, Phase: at, Generation: 1, Status: status, DispatchStatus: shown,
 		Rank: "U", HandedOver: true, LastDispatchSeq: 1}
 }
 
 // statusRow is one queued Dispatch status write, as the repair's tests read it back.
 type statusRow struct{ issue, status, observed string }
-
-func applyRepairFact(t *testing.T, pool *pgxpool.Pool, engine *Engine, eventID string, fact intake.Fact) {
-	t.Helper()
-	if _, err := intake.ApplyFact(t.Context(), pool, "daemon", eventID, fact, engine, admissionStub{}); err != nil {
-		t.Fatalf("apply %s: %v", eventID, err)
-	}
-}
 
 // seedStatusWrite queues a Dispatch status write for issue, as a write the outbox has not finished.
 func seedStatusWrite(t *testing.T, pool *pgxpool.Pool, issue string, write record.StatusWrite) {
