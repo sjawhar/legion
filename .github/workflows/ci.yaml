@@ -201,13 +201,14 @@ jobs:
           # flattens into the list that names it.
           filters: |
             # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
-            # root manifest, the lockfile, the patches package.json:45-49 applies, and the manifest
+            # root manifest, the lockfile, the patches package.json:50-59 applies, and the manifest
             # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
             # Bun .bun-version pins.
             bun_install: &bun_install
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
+              - 'packages/broker-client/package.json'
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
@@ -1365,6 +1366,8 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
+              # ci_job_reads.py reads the workspace list from the root manifest.
+              - 'package.json'
               # The check holds docs-pages.yaml's on.push.paths equal to the docs filter, and it
               # reads docs-site.yaml to find the steps the docs gate cites.
               - '.github/workflows/docs-pages.yaml'
