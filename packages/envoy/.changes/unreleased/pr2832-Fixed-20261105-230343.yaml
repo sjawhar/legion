@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'The migration census redacts a query whatever the holding session''s `standard_conforming_strings` is: a backslash in a plain, bit-string, hex, national or Unicode-escaped literal no longer ends the literal early and leaves the rest of its value in the report and the service log. A failed migration''s holder diagnosis returns within a bound of its own, so a transport that stops answering during its rollback or its connection close no longer holds the runner. The `0127_asks_block_id_key` and `0128_comments_anchor_block_id_key` entries of `cmd/dispatch/README.md` say that each index rebuild is a plain `create index` inside the runner''s one transaction, so neither runs `concurrently`, and that the duration of each under production-scale data is unmeasured.'
+time: 2026-11-05T23:03:43.057932219Z
+custom:
+    Issue: pr2832
