@@ -20,6 +20,7 @@ import {
   DISPATCH_ITEM_BLOCKS,
 } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
+import { bearerCredential } from "../bearer";
 import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
@@ -81,7 +82,12 @@ function repoExec(repo: string): ExecFn {
   };
 }
 
-const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+const config = {
+  enabled: true,
+  url: "http://dispatch.test",
+  credential: bearerCredential("secret"),
+  error: null,
+};
 const releaseQuestion = "The release is ready. How should we proceed?";
 const changedReleaseQuestion =
   "The change is ready but needs a release decision. How should we proceed?";
@@ -4263,6 +4269,36 @@ describe("executeDispatchTool", () => {
     });
     expect(result.text).toContain("Session session-1 acts for alice");
     expect(result.text).not.toContain("which is not this host session");
+  });
+
+  // A token that names a service and no person is refused every Dispatch write with
+  // SIGN_IN_REQUIRED, whose message names `agent-secrets login`. whoami is where a person asks
+  // what their credential may do, so its sentence for that caller must not describe the issue
+  // creation the server refuses, and must name the command that gets them a write.
+  test("dispatch_whoami tells a service-only caller its writes need a sign-in", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: null,
+        service: "example-fleet",
+        session: "session-1",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.text).toContain("runs as service example-fleet");
+    expect(result.text).not.toMatch(/issues? you create/);
+    expect(result.text).toContain("agent-secrets login");
   });
 
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
@@ -13111,7 +13147,11 @@ test("an issue document reference resolves to the document's id as the Dispatch 
       ],
     });
   };
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  const client = new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
   for (const [reference, id] of [
     ["spec", "artifact-42"],
     ["spec-md", "artifact-42"],
@@ -13150,7 +13190,11 @@ test("a reference that is one document's slug and another's filename is the slug
         },
       ],
     });
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  const client = new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
   for (const [reference, id] of [
     ["spec-v2", "artifact-v2"],
     ["spec v2", "artifact-v2"],

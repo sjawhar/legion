@@ -30,6 +30,7 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import { DispatchClient } from "./dispatch-http";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
@@ -120,12 +121,13 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
  * and throws Dispatch's refusal as a `DispatchServiceError`.
  */
 export async function postDeliveryReply(
-  config: { readonly url: string; readonly token: string },
+  config: Pick<ActiveDispatchConfig, "url" | "credential">,
   sessionId: string,
   delivery: DispatchDelivery,
   result: { readonly body?: string; readonly error?: string }
 ): Promise<void> {
-  await new DispatchClient(config.url, config.token).deliveryReply(delivery.resource, delivery.id, {
+  const client = new DispatchClient(config.url, config.credential);
+  await client.deliveryReply(delivery.resource, delivery.id, {
     actor: { kind: "session", id: sessionId },
     attempt: delivery.attempt,
     ...delivery.replyFields,

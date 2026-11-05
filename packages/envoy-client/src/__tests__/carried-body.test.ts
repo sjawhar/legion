@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Event } from "@legion/contracts";
 
+import { bearerCredential } from "../bearer";
 import { type CarriedItem, renderInbound, wholeCarriedBody } from "../delivery";
 import { DispatchClient } from "../dispatch-http";
 import { eventTextsWhole } from "../dispatch-picture-tools";
@@ -34,7 +35,10 @@ function dispatch(fail = false) {
     }
     return json({ code: "NOT_FOUND", error: "not found" }, 404);
   };
-  return { requests, client: new DispatchClient(SERVER, "token", fetchImpl as typeof fetch) };
+  return {
+    requests,
+    client: new DispatchClient(SERVER, bearerCredential("token"), fetchImpl as typeof fetch),
+  };
 }
 
 const comment = {

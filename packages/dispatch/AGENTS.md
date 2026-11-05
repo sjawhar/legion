@@ -958,6 +958,32 @@ confirm for a service's login says every session it started, its worker pods inc
 service needs a new login approval. Revoking ends the login and every session it enrolled, so it
 also invalidates the Live grants list.
 
+`SignInsSection.tsx` renders on `/settings` beside Live grants, under the same `null`-pending
+gate, as **Sign-ins**: the machines the viewer has signed in on with `agent-secrets login` and
+has not revoked (`GET /api/v1/signins`, `signins.ts`'s `signInsQuery`), over the same
+`RevocableList.tsx`. Nobody sees anyone else's — Dispatch names the person from its own session
+and the broker lists that person's alone, and a revoke of another person's id is the broker's
+`404 NOT_FOUND`. One row per sign-in with the machine's fleet account, the first twelve
+characters of the box key's RFC 7638 thumbprint under it (the full value in the cell's `title`),
+which is what tells two boxes of one fleet apart, when the person signed in there and when that
+box last used the sign-in, and a Revoke button that asks `window.confirm` first and then POSTs
+`{}` to `/api/v1/signins/{id}/revoke`. Revoking ends that box's trades and every access token
+already minted under the sign-in, so the sessions running there lose Dispatch and its secrets at
+once; the viewer's other machines are untouched. It sits on Settings rather than on
+`/credentials/machine` because that page is itself conditional (below), and a deployment whose
+machines sign in with their own cloud identity is exactly the one with sign-ins to manage.
+
+`/credentials/machine` is served only while the broker still serves RFC 8628's device grant,
+which is the only thing that makes a machine print a code. A browser reaches no broker, so
+Dispatch relays the one fact: `GET /api/v1/credentials/capabilities` answers
+`{"machine_code_page": <bool>}` from `agentsecrets.Client.ServesDeviceGrant`, a cached read of
+the broker's RFC 8414 metadata (`/.well-known/oauth-authorization-server`), and
+`capabilities.ts`'s `credentialCapabilitiesQuery` is what `app.tsx`'s `MachineLoginRoute` and
+`CredentialRequestsSection`'s machine row read: a false answer renders `NotFoundPage` and leaves
+the Inbox row unlinked, and while the answer is still out the route renders nothing rather than
+"not found". No Dispatch setting says any of this — the deployment turns the device grant off in
+one place, the broker.
+
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's named-caller API (`DISPATCH_AGENT_SECRETS_URL`, and
 `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, the file holding Dispatch's own projected Kubernetes
@@ -976,14 +1002,19 @@ as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
 `packages/envoy/internal/dispatch/api/credential_requests.go` mounts
-the eight proxy rows every page above calls, each held to the `person` scope:
+the eleven proxy rows every page above calls, each held to the `person` scope:
 `GET /api/v1/credential-requests`, `POST /api/v1/credential-requests/{id}/approve|deny`,
 `POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
-`POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
-`POST /api/v1/machine-logins/{id}/revoke`; each decision and revoke needs `approve` as well. Every
-handler is reached only past that scope gate (`gateRouteScopes`), then needs a
+`POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins`,
+`POST /api/v1/machine-logins/{id}/revoke`, `GET /api/v1/signins`,
+`POST /api/v1/signins/{id}/revoke` and `GET /api/v1/credentials/capabilities`;
+each decision and revoke needs `approve` as well.
+Every handler is reached only past that scope gate (`gateRouteScopes`), then needs a
 configured client (`404 FEATURE_OFF` on a nil one), except the pending list, which answers `null`
-without a broker once its input is checked; the two `?approver=` routes accept only the
+without a broker once its input is checked, and the capabilities row, which answers
+`{"machine_code_page": false}` for a Dispatch with no broker, since a 404 would leave the page
+unable to tell a deployment without a broker from a route it failed to reach;
+the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
 canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
 broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); a call

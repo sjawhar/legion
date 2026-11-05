@@ -116,8 +116,8 @@ func TestStateRouteServesTheRecord(t *testing.T) {
 	if got.Daemon.Project != "legion" || got.Daemon.Boots != 7 || got.Admission.Cap != 2 {
 		t.Fatalf("state = %+v, want the source's project, boots and cap", got)
 	}
-	// The plugin's reader is strict: a nil Go slice or map on the wire is `null`, which its
-	// schema refuses. The empty record must still be an array and an object.
+	// A nil Go slice or map on the wire is `null`, which the plugin's schema refuses. The empty
+	// record must still be an array and an object.
 	body := recorder.Body.String()
 	for _, want := range []string{`"active":[]`, `"waiting":[]`, `"issues":{}`} {
 		if !strings.Contains(body, want) {
