@@ -462,20 +462,41 @@ export function routeWithWholeIds(
   return resolved.unresolved ? undefined : resolved.route;
 }
 
-/** The reference an address as written names, with the whole ids `items` names put in: the
- *  value the reader stores for it, resolved or not. Undefined where the value is no address. */
-function addressReference(
+/** One address as read: the reference the reader stores for it, the route behind that
+ *  reference, and `written`, the reference its short ids are asked about under (undefined where
+ *  the address writes every id whole). */
+interface AddressReading {
+  readonly reference: string;
+  readonly route: DispatchReferenceRoute;
+  readonly unresolved: boolean;
+  readonly written: string | undefined;
+}
+
+/** The one reading of an address, written once so no caller can read one differently: the route
+ *  it parses to, that route with the whole ids `items` names put in, and the reference built
+ *  from the result. The reader runs it twice over a span - as the author wrote it and without
+ *  the trailing `_` or `-` - and compares the two references, which is only an answer while
+ *  both come from the same chain. `items` is called only where the address writes a short id,
+ *  since naming the kind of every resolved item costs a pass over them.
+ *  Undefined where the value is no address. */
+function readAddress(
   value: string,
   origin: string,
-  items: readonly { id: string; kind: ReferenceTargetKind }[]
-): string | undefined {
+  items: () => readonly { id: string; kind: ReferenceTargetKind }[]
+): AddressReading | undefined {
   const route = referenceRouteFromHref(value, origin);
   if (route === undefined) {
     return undefined;
   }
-  return buildDispatchReference(
-    prefixReference(route) === undefined ? route : resolvePrefixIds(route, items).route
-  );
+  const written = prefixReference(route);
+  const resolved =
+    written === undefined ? { route, unresolved: false } : resolvePrefixIds(route, items());
+  return {
+    reference: buildDispatchReference(resolved.route),
+    route: resolved.route,
+    unresolved: resolved.unresolved,
+    written,
+  };
 }
 
 /**
@@ -495,47 +516,42 @@ export function readTextReferences(text: string, facts: TextReferenceFacts = {})
   const bare: BareCandidate[] = [];
   let questions = false;
   let kinds: readonly { id: string; kind: ReferenceTargetKind }[] | undefined;
+  // The kind of every item a prefix resolved to, read on the first address that writes a short
+  // id and kept for the rest of the text.
+  const items = () => (kinds ??= itemKinds(facts.items ?? {}, origin));
 
   const spans = referenceSpans(text);
   let from = 0;
   for (const span of spans) {
     bareCandidates(text, from, span.start, bare);
     from = span.end;
-    const route = referenceRouteFromHref(span.value, origin);
-    if (route === undefined) {
+    const address = readAddress(span.value, origin, items);
+    if (address === undefined) {
       continue;
     }
     // An address writing every id whole is the route it parsed to; one writing any short is
     // that route with the ids `facts` resolved put in, and is asked about either way.
-    const written = prefixReference(route);
-    let resolved = { route, unresolved: false };
-    if (written !== undefined) {
-      if (!seenPrefixes.has(written)) {
-        seenPrefixes.add(written);
-        prefixes.push(written);
-      }
-      kinds ??= itemKinds(facts.items ?? {}, origin);
-      resolved = resolvePrefixIds(route, kinds);
+    if (address.written !== undefined && !seenPrefixes.has(address.written)) {
+      seenPrefixes.add(address.written);
+      prefixes.push(address.written);
     }
-    const reference = buildDispatchReference(resolved.route);
     // The trailing `_` or `-` an author left on an address is theirs where the address names
     // the same thing without it.
     const shortened = trimmedMention(span.value);
-    let named: number | undefined;
-    if (shortened !== undefined) {
-      kinds ??= itemKinds(facts.items ?? {}, origin);
-      named =
-        addressReference(shortened, origin, kinds) === reference ? shortened.length : undefined;
-    }
+    const named =
+      shortened !== undefined &&
+      readAddress(shortened, origin, items)?.reference === address.reference
+        ? shortened.length
+        : undefined;
     references.push({
       end: span.start + span.value.length,
       form: "address",
       named,
-      reference,
-      route: resolved.route,
+      reference: address.reference,
+      route: address.route,
       start: span.start,
       text: span.value,
-      unresolved: resolved.unresolved,
+      unresolved: address.unresolved,
     });
   }
   bareCandidates(text, from, text.length, bare);

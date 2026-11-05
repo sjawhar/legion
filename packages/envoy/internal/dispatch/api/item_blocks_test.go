@@ -176,6 +176,23 @@ func TestACommentsEditKeepsItsBlockIDs(t *testing.T) {
 	requireCommentBlocks(t, database, comment.ID, "same body", "b1@1 b2@4 b3@1", 4)
 }
 
+// oweBlockGrammar enqueues one source in the block grammar's queue, as the trigger of a write an
+// older build made does, and answers the row a drain lists it as. A test that re-indexes a source
+// must owe it first: refs.ReindexOwed settles the listed row before it writes, so a source the
+// queue holds no row for is indexed by nothing.
+func oweBlockGrammar(t *testing.T, database *store.Store, kind, id string) refs.Owed {
+	t.Helper()
+	owed := refs.Owed{Queue: refs.BlockGrammarOwed, Kind: kind, ID: id}
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into block_grammar_owed (kind, id) values ($1, $2::uuid)
+		on conflict (kind, id) do update set enqueued_at = now()
+		returning enqueued_at
+	`, kind, id).Scan(&owed.EnqueuedAt); err != nil {
+		t.Fatalf("owe %s %s an index with the block grammar: %v", kind, id, err)
+	}
+	return owed
+}
+
 // A comment edited before blocks existed has its blocks indexed for the first time by the
 // reconciliation (refs.ReindexOwed): nothing recorded when those blocks were made, so each
 // has no making time, while a block a later edit adds is made at that edit.
@@ -194,7 +211,7 @@ func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
 			t.Fatalf("%s: %v", statement, err)
 		}
 	}
-	owed := refs.Owed{Queue: refs.BlockGrammarOwed, Kind: "comment", ID: comment.ID, EnqueuedAt: time.Now()}
+	owed := oweBlockGrammar(t, database, "comment", comment.ID)
 	if indexed, err := refs.ReindexOwed(context.Background(), database.Pool, owed, "https://dispatch.example"); err != nil || !indexed {
 		t.Fatalf("reindex the comment = %v (%v), want it indexed", indexed, err)
 	}

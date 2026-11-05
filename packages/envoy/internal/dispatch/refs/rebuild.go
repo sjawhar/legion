@@ -210,18 +210,11 @@ func sourceText(ctx context.Context, q Queryer, kind, id string, forUpdate bool)
 // OwedQueue is one queue of text owed a re-index: a table of (kind, id, enqueued_at) a trigger
 // upserts a row into for every source a write left indexed with a grammar older than the one
 // this build reads it with, which a drain lists oldest first (ListOwed), settles (SettleOwed)
-// and re-indexes (ReindexOwed). Dispatch holds the two below, and the fields are the whole of
-// the difference between them.
+// and re-indexes (ReindexOwed). Dispatch holds the two below, and the table each names is the
+// whole of the difference between them: one drain, one order, for both.
 type OwedQueue struct {
 	// table is the queue's table, which every statement of the drain names.
 	table string
-	// stopIfMoved is what the queue does with a row a write moved between the listing and the
-	// re-index: the whole-grammar queue writes nothing for one and leaves it owed, so the next
-	// pass reads the newer text, and the block-grammar queue indexes the text it read under the
-	// source row's lock - which is that newer text - and leaves the row owed all the same, for
-	// the pass that settles it. Either way the row stays owed and the index converges; this is
-	// which of the two passes writes it.
-	stopIfMoved bool
 }
 
 // BlockGrammarOwed is the queue of comments, asks and issue messages an older build indexed
@@ -231,7 +224,7 @@ var BlockGrammarOwed = OwedQueue{table: "block_grammar_owed"}
 // RefsGrammarOwed is the queue of sources an older build indexed without this build's whole
 // grammar (migration 20261103205037, refs_grammar_owed). A queue of its own rather than a row
 // in the block grammar's: that migration says why.
-var RefsGrammarOwed = OwedQueue{table: "refs_grammar_owed", stopIfMoved: true}
+var RefsGrammarOwed = OwedQueue{table: "refs_grammar_owed"}
 
 // Owed is one source a queue owes an index, as of the write that last owed it (EnqueuedAt).
 //
@@ -313,10 +306,10 @@ func SettleOwed(ctx context.Context, q Execer, source Owed) (bool, error) {
 // with the grammar this build reads it with, and settles its owed row, in one transaction. It
 // takes the source row first (sourceText, forUpdate) and the owed row after, the order a write
 // takes them in (the row's update, then its trigger's upsert), so the two never deadlock. The
-// owed row is settled only while it holds the enqueued_at source was listed with (SettleOwed):
-// one a write moved meanwhile is left owed, and whether its newer text is indexed by this pass
-// or the next is the queue's (OwedQueue.stopIfMoved). It reports whether it re-indexed the
-// source.
+// owed row is settled only while it holds the enqueued_at source was listed with (SettleOwed),
+// and it is settled before the text is written: one a write moved meanwhile is left owed with
+// nothing written for it, and the next pass, which reads its newer text, writes it. It reports
+// whether it re-indexed the source.
 //
 // A new edge takes the time the text was written (sourceText) and no source_seq, since no event
 // introduced it, as a rebuild's does; a re-index of text no one rewrote appends no event, as
@@ -338,19 +331,12 @@ func ReindexOwed(ctx context.Context, pool Pool, source Owed, serverURL string) 
 	if err != nil {
 		return false, err
 	}
-	if source.Queue.stopIfMoved {
-		settled, err := SettleOwed(ctx, tx, source)
-		if err != nil || !settled {
-			return false, err
-		}
+	settled, err := SettleOwed(ctx, tx, source)
+	if err != nil || !settled {
+		return false, err
 	}
 	if err := reindexText(ctx, tx, source.Kind, source.ID, body, serverURL, writtenAt, found); err != nil {
 		return false, err
-	}
-	if !source.Queue.stopIfMoved {
-		if _, err := SettleOwed(ctx, tx, source); err != nil {
-			return false, err
-		}
 	}
 	return true, tx.Commit(ctx)
 }
