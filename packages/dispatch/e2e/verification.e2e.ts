@@ -117,7 +117,7 @@ A check nobody has run yet reads no result.
     // The result recorded through the API sits under its own check, and the check reads passed.
     const passed = checks.filter({ hasText: "The tab lists every check of the document." });
     await expect(passed).toHaveAttribute("data-check-state", "passed");
-    await expect(passed.getByTestId("verification-check-when")).toHaveText("before_merge");
+    await expect(passed.getByTestId("verification-check-when")).toHaveText("before the merge");
     await expect(passed.getByTestId("verification-check-surface")).toHaveText("browser");
     const result = passed.getByTestId("verification-result");
     await expect(result).toHaveCount(1);

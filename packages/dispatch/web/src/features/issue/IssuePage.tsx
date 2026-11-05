@@ -35,6 +35,7 @@ import { ChildrenTab } from "./ChildrenTab";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { IssueHeader } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
+import { NODE_TYPE_NAMES, sentenceCase } from "./page-words";
 import { stateForIssue } from "./pins";
 import { SpecRequirements } from "./SpecRequirements";
 import { SpecToolbar } from "./SpecToolbar";
@@ -54,14 +55,9 @@ export function IssuePage(): ReactNode {
   return <IssueDetail key={route.key} route={route} />;
 }
 
-const itemNoun: Record<ItemRoute["kind"], string> = {
-  ask: "Ask",
-  comment: "Comment",
-  message: "Message",
-};
-
 /** An item deep link the SPA could not resolve: the id names nothing on this issue, or the
- *  lookup failed. Either way the reader is told which item, inside the issue page. */
+ *  lookup failed. Either way the reader is told which item, inside the issue page. The item's
+ *  name is the page's own word for that kind of node (`page-words.ts`). */
 function ItemLandingFailure({
   landing,
   route,
@@ -69,24 +65,24 @@ function ItemLandingFailure({
   landing: Extract<ItemLanding, { kind: "missing" | "unavailable" }>;
   route: ItemRoute;
 }): ReactNode {
-  const noun = itemNoun[route.kind];
+  const noun = NODE_TYPE_NAMES[route.kind];
   if (landing.kind === "missing") {
     return (
       <NotFoundPage
         backLabel={`Back to ${route.key}`}
         backTo={`/issues/${route.key}`}
-        detail={`That link doesn't name ${route.kind === "ask" ? "an" : "a"} ${noun.toLowerCase()} on ${route.key} — it may have been deleted.`}
-        title={`${noun} not found`}
+        detail={`That link doesn't name ${route.kind === "ask" ? "an" : "a"} ${noun} on ${route.key} — it may have been deleted.`}
+        title={`${sentenceCase(noun)} not found`}
       />
     );
   }
   return (
     <section>
       <h1 className={`text-xl font-semibold ${textPrimaryOnCanvas}`}>
-        Couldn&apos;t load this {noun.toLowerCase()}
+        Couldn&apos;t load this {noun}
       </h1>
       <div className="mt-2">
-        <QueryError message={`Couldn't load this ${noun.toLowerCase()}.`} onRetry={landing.retry} />
+        <QueryError message={`Couldn't load this ${noun}.`} onRetry={landing.retry} />
       </div>
     </section>
   );
