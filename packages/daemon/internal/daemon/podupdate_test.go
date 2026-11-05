@@ -805,10 +805,15 @@ func TestPodUpdateReplacesThePodWithoutWaitingForAFailedClaim(t *testing.T) {
 	}
 }
 
-// A worker that read the round's ask and ended its turn without answering is asked again, and
-// only once pod_update_retask_hours has passed since the last ask: the round's own clock never
-// postpones the notice, and the worker is not asked at every tick. Each ask is a delivery of its
-// own, so the second one reaches a worker the shim would answer for under the first ask's id.
+// A worker the round asked and that answered nothing is asked again, and only once
+// pod_update_retask_hours has passed since the last ask: the round's own clock never postpones
+// the notice, and the worker is not asked at every tick. Each ask is a delivery of its own, so
+// the second one reaches a worker the shim would answer for under the first ask's id.
+//
+// What leaves a worker asked and unanswered, now that the end of the ask's own turn is the
+// answer (supervise's answerByTurnEnd), is a prompt Oh My Pi ran inside a turn of the worker's
+// own: the daemon matched no turn to the ask, so its end answered nothing, and the prompt's
+// result is what ends the ask and leaves the claim holding no task for the next ask to be.
 func TestPodUpdateAsksAgainAfterTheRetaskBound(t *testing.T) {
 	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer))
 	rig.drifts(podUpdateDrift)
@@ -816,10 +821,8 @@ func TestPodUpdateAsksAgainAfterTheRetaskBound(t *testing.T) {
 	rig.tick()
 	asked := rig.awaitRound(claim.RoleImplementer, podUpdateRound)
 	first := asked.UpdateTaskedAt
-	// The ask's own turn starts and ends with no answer, which is what leaves the claim holding
-	// no task for the next ask to be.
 	token := rig.tokens[claim.RoleImplementer]
-	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token})
+	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: "a-delivery-of-the-worker-s-own"})
 	rig.endTurn(claim.RoleImplementer, asked.Pending.ID)
 	rig.awaitClaim(claim.RoleImplementer, "the unanswered ask to end with its turn", func(c supervise.Claim) bool {
 		return c.Pending == nil
@@ -2034,6 +2037,11 @@ func (r *podUpdateRig) notDue() []fake.Call { return r.rt.CallsOf("ReplacePodNot
 // round keeps — is in no group of this tick and in no re-read of it either: every claim the
 // group holds is re-read, and a claim it never held is re-read nowhere. Deciding the replacement
 // from the group alone would end that role's turn and delete the issue's disk under it.
+//
+// The role is started here inside the pod's launch turn, which the sweep's own read of the
+// claims before the call is already behind (replacePodForRound): that read is what catches a
+// claim admitted before the sweep reached this replacement, and this last word is what catches
+// one admitted while the runtime waits the pod out.
 func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	rig := newPodUpdateRig(t,
 		readyWorker(claim.RoleImplementer),
@@ -2048,9 +2056,6 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// The group this tick carries: the one worker the issue had when the sweep read its claims,
 	// and it has answered.
 	group := rig.snapshotWithout(claim.RoleTester)
-	// Minutes later in that same tick, the next phase's role is started into the kept pod. It
-	// registers there, holds a session from that moment, and has answered nothing.
-	rig.startInPod(claim.RoleTester, podUpdatePod)
 
 	// The call below is the one sweep the test makes, over a group it built by hand, so nothing
 	// may still be deciding when it reads the claims: a machine mid-decision reads as not having
@@ -2058,6 +2063,14 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// refuse the replacement — under the race detector, 4 runs in 30 on the base this change sits
 	// on.
 	rig.settleAll()
+	// The next phase's role is started into the kept pod from inside the pod's launch turn,
+	// where the runtime waits: it registers there, holds a session from that moment, and has
+	// answered nothing. One hold only: the sweeps after this one find the runtime as this one
+	// left it.
+	rig.rt.HoldReplacePod(func() {
+		rig.rt.HoldReplacePod(nil)
+		rig.startInPod(claim.RoleTester, podUpdatePod)
+	})
 	rig.s.reconcilePodUpdates(rig.ctx, group)
 
 	if calls := rig.replacements(); len(calls) != 0 {
@@ -2098,14 +2111,15 @@ func TestPodUpdateDoesNotCutATurnThatStartsWhileTheReplacementWaits(t *testing.T
 	rig.drifts(podUpdateDrift)
 
 	rig.tick()
-	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+	asked := rig.awaitRound(claim.RoleImplementer, podUpdateRound)
 	rig.awaitRound(claim.RoleTester, podUpdateRound)
-	// Each worker answers from the turn of the round's own ask, and the implementer's ends: a
-	// turn it starts after that is one the daemon sent nothing for.
+	// Each worker answers from the turn of the round's own ask, and the implementer's ends with
+	// the result of the prompt that ask was, which is what retires it: a turn it starts after
+	// that is one the daemon sent nothing for, and reads none of the round's words.
 	token := rig.tokens[claim.RoleImplementer]
 	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token})
 	rig.signal(claim.RoleImplementer, "a1b2c3d")
-	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
+	rig.endTurn(claim.RoleImplementer, asked.Pending.ID)
 	rig.signal(claim.RoleTester, "e4f5a6b")
 
 	// The runtime holds where it waits for the pod's launch turn, and an Envoy notice starts a

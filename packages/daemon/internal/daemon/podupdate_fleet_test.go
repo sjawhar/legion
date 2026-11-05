@@ -18,8 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,14 +57,34 @@ const (
 	fleetDrift = "the session store volume, now postgres key=session-dsn"
 )
 
+// fleetStart is where a fleet rig's clock stands when a test begins, and what a round seeded on
+// its claims records as its own clock.
+var fleetStart = time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+
 // fleetIssue is one issue the fleet round covers: its key, the phase its record stands in, the pod
 // every role of it runs in, and the roles that run there. Every role is a registered worker on
-// this daemon's contract, which is what a fleet-wide drift finds.
+// this daemon's contract, which is what a fleet-wide drift finds, but for the roles the two
+// lists below name.
+//
+// unregistered is each role seeded launching in the issue's pod with no session of its own, as a
+// role whose process has started and whose agent has not registered yet. Such a claim blocks no
+// round (blockingClaims), so the sweep's ask never reaches it, and it records the issue's pod
+// all the same. failed is each role seeded failed — its launches or prompts ran out — with the
+// session its agent registered and no locator, as supervise's fail leaves one: such a claim
+// blocks the round (blockingClaims) and the round asks it nothing (askedClaims), because its
+// machine ignores the round's post (supervise's table).
+//
+// pluginRound seeds each role of the issue in a plugin round instead, the round supervise's
+// refreshPlugin opens over a worker whose process speaks a plugin contract this daemon does not:
+// one process to replace rather than a pod, as an earlier release left it.
 type fleetIssue struct {
-	key   string
-	phase phase.Phase
-	pod   string
-	roles []claim.Role
+	key          string
+	phase        phase.Phase
+	pod          string
+	roles        []claim.Role
+	unregistered []claim.Role
+	failed       []claim.Role
+	pluginRound  bool
 }
 
 // fleetClaim names one claim of the fleet: the issue it is of and the role it runs.
@@ -87,6 +109,8 @@ type fleetRig struct {
 	handoffs *fleetHandoffs
 	tokens   map[fleetClaim]claim.Token
 	pods     map[string]string
+	// noPod is every issue whose claims a sweep reads as recording no pod (podless).
+	noPod map[string]bool
 }
 
 func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
@@ -102,13 +126,27 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 		for _, role := range issue.roles {
 			token := mustClaimToken(t, issue.key, role)
 			tokens[fleetClaim{issue: issue.key, role: role}] = token
-			claims = append(claims, supervise.Claim{
+			seeded := supervise.Claim{
 				Token: token, Project: podUpdateProject, Tree: issue.key, Issue: issue.key, Role: role,
 				Generation: 1, State: supervise.StateReady, PluginContract: api.DaemonAPIVersion,
 				Session: "ses_" + issue.key + "_" + string(role), SessionFile: "/sessions/" + issue.key + "-" + string(role) + ".jsonl",
 				CapabilityHash: []byte(issue.key + ":" + string(role)), ServingGeneration: 1,
 				Locator: podUpdateLocator(token, issue.key, issue.pod),
-			})
+			}
+			switch {
+			case slices.Contains(issue.unregistered, role):
+				seeded.State, seeded.Session, seeded.SessionFile = supervise.StateLaunching, "", ""
+				seeded.PluginContract, seeded.CapabilityHash, seeded.ServingGeneration = 0, nil, 0
+			case slices.Contains(issue.failed, role):
+				seeded.State, seeded.Locator = supervise.StateFailed, nil
+			}
+			if issue.pluginRound {
+				opened := fleetStart
+				seeded.PluginContract = api.DaemonAPIVersion - 1
+				seeded.UpdateRound, seeded.UpdateReasons = supervise.PluginRound(api.DaemonAPIVersion), podUpdatePluginReasons
+				seeded.UpdateOpenedAt, seeded.UpdateTaskedAt = &opened, &opened
+			}
+			claims = append(claims, seeded)
 		}
 		seedWorkflowTree(t, dsn, podUpdateProject, record.Issue{
 			Key: issue.key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
@@ -122,7 +160,7 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 		t.Fatalf("open the store: %v", err)
 	}
 	t.Cleanup(st.Close)
-	clock := &heldClock{at: time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)}
+	clock := &heldClock{at: fleetStart}
 	rt := fake.NewRuntime()
 	rt.Now = clock.Now
 	conns := fake.NewConns()
@@ -148,7 +186,7 @@ func newFleetRig(t *testing.T, issues ...fleetIssue) *fleetRig {
 	records := record.NewStore()
 	rig := &fleetRig{t: t, ctx: ctx, sup: sup, rt: rt, pool: pool, records: records, clock: clock,
 		grants: credential.New(nil), handoffs: &fleetHandoffs{handoffs: map[string]dispatch.Handoff{}},
-		tokens: tokens, pods: pods}
+		tokens: tokens, pods: pods, noPod: map[string]bool{}}
 	rig.s = &supervision{
 		cfg: config.Config{Project: "LEGION", PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
 		log: quietLogger(), plan: plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
@@ -176,14 +214,72 @@ func (r *fleetRig) drifts(issue string, reasons ...string) {
 }
 
 // tick is one orphan sweep over every claim the store holds, which is what the daemon's own tick
-// puts to the round.
+// puts to the round. The claims of an issue podless says records no pod are read with none, as
+// every sweep between an operator's suspension and the next launch reads them (supervise's
+// letGo).
 func (r *fleetRig) tick() {
 	r.t.Helper()
 	claims, err := r.sup.Claims(r.ctx)
 	if err != nil {
 		r.t.Fatalf("read the claims for the sweep: %v", err)
 	}
+	for i := range claims {
+		if r.noPod[claims[i].Issue] {
+			claims[i].Locator = nil
+		}
+	}
 	r.s.reconcilePodUpdates(r.ctx, claims)
+}
+
+// podless makes every later sweep read the claims of issue as recording no pod, which is what a
+// suspension leaves behind and what a claim minutes into a relaunch records.
+func (r *fleetRig) podless(issue string) {
+	r.t.Helper()
+	r.noPod[issue] = true
+}
+
+// restart is a second daemon over the same Postgres: new machines, a new runtime, and nothing of
+// the first daemon's memory, which is where the sweep keeps the openings it has made
+// (reconcilePodUpdates). The new runtime has been scripted no drift, as a daemon that boots
+// knows nothing of what the one before it read, so a caller that wants an issue still drifted
+// scripts it again.
+func (r *fleetRig) restart() *fleetRig {
+	r.t.Helper()
+	r.sup.stop()
+	st, err := store.Open(r.ctx, r.pool.Config().ConnString())
+	if err != nil {
+		r.t.Fatalf("open the store again: %v", err)
+	}
+	r.t.Cleanup(st.Close)
+	rt := fake.NewRuntime()
+	rt.Now = r.clock.Now
+	conns := fake.NewConns()
+	sup := newSupervisor(r.ctx, st, podUpdateProject, r.t.TempDir(), quietLogger())
+	sup.deps = r.sup.deps
+	sup.deps.Runtime, sup.deps.Conns, sup.deps.Store = rt, conns, st
+	r.t.Cleanup(sup.stop)
+	stored, err := sup.Claims(r.ctx)
+	if err != nil {
+		r.t.Fatalf("read the stored claims: %v", err)
+	}
+	if _, err := sup.restore(r.ctx, stored); err != nil {
+		r.t.Fatalf("restore the stored claims: %v", err)
+	}
+	for _, token := range r.tokens {
+		conns.Register(token, fake.NewConn())
+	}
+	next := &fleetRig{t: r.t, ctx: r.ctx, sup: sup, rt: rt, pool: r.pool, records: r.records, clock: r.clock,
+		grants: r.grants, handoffs: r.handoffs, tokens: r.tokens, pods: r.pods, noPod: maps.Clone(r.noPod)}
+	next.s = &supervision{
+		cfg: r.s.cfg, log: quietLogger(), plan: r.s.plan, runtime: rt, supervisor: sup, enqueue: r.s.enqueue,
+	}
+	engine := workflow.New(r.records, workflow.Config{Project: podUpdateProject, Repositories: testRepositories}, quietLogger())
+	next.api = api.NewServer("127.0.0.1", 0, api.Options{
+		Supervisor: sup, Project: podUpdateProject, DispatchProject: "LEGION", PluginRelaunchable: true,
+		Pool: r.pool, Handlers: []intake.Handler{engine}, Record: r.records, Grants: next.grants, Log: quietLogger(),
+		Dispatch: next.handoffs,
+	}).Handler
+	return next
 }
 
 func (r *fleetRig) token(issue string, role claim.Role) claim.Token {

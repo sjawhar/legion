@@ -14687,7 +14687,9 @@ var ArtifactReviewEventPayloadSchema = object({
   version: number2().int().optional(),
   actor: object({ kind: string2(), id: string2() }).passthrough().optional(),
   reason: string2().nullish(),
-  ask_id: string2().nullish()
+  ask_id: string2().nullish(),
+  content_sha256: string2().optional(),
+  content_sha256_source: _enum2(["insert", "backfill"]).optional()
 });
 var askEventPayloadFields = {
   id: string2().optional(),
@@ -15540,7 +15542,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "A comment reply chain names the comment each nested reply answers as `Answers: <comment id>`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -19995,17 +19997,18 @@ function approvalLine(artifact) {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft")
     return;
+  const content = approval.content_sha256 === undefined ? "" : `, content sha256:${approval.content_sha256}${approval.content_sha256_source === "backfill" ? " (hashed after approval)" : ""}`;
   switch (approval.state) {
     case "awaiting": {
       const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
       return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
     }
     case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}${content}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
   }
 }
 function componentsLine(components) {
@@ -20515,6 +20518,7 @@ function commentSummary({ comment, replies }, graph) {
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
     ...replyBlockLines(reply),
+    ...reply.answers != null && reply.answers !== comment.id ? [`Answers: ${reply.answers}`] : [],
     `Body: ${reply.body}`
   ]);
   return [
@@ -21722,6 +21726,7 @@ Document token: ${listed.token}`,
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
+        ..."sha256" in document && document.sha256 !== undefined ? [`Content: sha256:${document.sha256}`] : [],
         ...approval === undefined ? [] : [approval]
       ];
       return {
