@@ -306,6 +306,12 @@ const DispatchLoginChanged = "LOGIN_CHANGED"
 // lists its candidates cannot drift apart.
 const IDAmbiguous = "ID_AMBIGUOUS"
 
+// DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
+// names a session and a service but no person: the machine holding it has signed nobody in.
+// Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
+// every client's reading of it cannot drift apart.
+const DispatchSignInRequired = "SIGN_IN_REQUIRED"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

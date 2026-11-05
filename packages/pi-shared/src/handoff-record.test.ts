@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { lstat, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import {
   findHandoffReport,
@@ -207,6 +208,7 @@ const scratch: string[] = [];
 afterEach(async () => {
   for (const directory of scratch.splice(0)) await rm(directory, { recursive: true, force: true });
 });
+afterEach(forgetBrokerClients);
 
 test("the pane's Dispatch reads the phase's newest record as the session's config names it", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-record-"));
@@ -226,7 +228,7 @@ test("the pane's Dispatch reads the phase's newest record as the session's confi
     DISPATCH_URL: "http://dispatch.test",
     DISPATCH_TOKEN: "pane-dispatch-token",
   };
-  const latestHandoff = paneLatestHandoff(file, paneEnv, root, dispatch);
+  const latestHandoff = paneLatestHandoff(file, paneEnv, root, "pane-session", dispatch);
   const report = () =>
     findHandoffReport({ phase: "reviewing", role: "reviewer", env: paneEnv, latestHandoff });
 
@@ -263,13 +265,64 @@ test("the pane's Dispatch reads the phase's newest record as the session's confi
   );
 
   // A pane whose Dispatch is off says so, and asks nothing.
-  const off = paneLatestHandoff(file, env, root, dispatch);
+  const off = paneLatestHandoff(file, env, root, "pane-session", dispatch);
   await expect(
     findHandoffReport({ phase: "reviewing", role: "reviewer", env, latestHandoff: off })
   ).rejects.toThrow(
     /^handoff_complete could not read LEGION-208's newest review handoff from Dispatch: Dispatch is off for this pane: .*Dispatch is off; complete again once Dispatch answers$/
   );
   expect(requests).toHaveLength(2);
+});
+
+// The route the reviewer's `handoff_complete` failure came from: a pane whose Dispatch has no
+// bearer at all and trades its own identity at the secrets broker. There is one credential field,
+// so this pane presents the DPoP token the trade minted rather than an empty bearer.
+test("a pane whose Dispatch is the broker's reads the record under its own session's token", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-broker-"));
+  scratch.push(root);
+  const file = { path: path.join(root, "envoy.json"), error: null } as const;
+  const trades: URLSearchParams[] = [];
+  const broker = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: async (request) => {
+      trades.push(new URLSearchParams(await request.text()));
+      return Response.json({
+        access_token: "broker-access-token",
+        issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        token_type: "DPoP",
+        expires_in: 3600,
+      });
+    },
+  });
+  const identityFile = path.join(root, "projected-token");
+  await Bun.write(identityFile, "projected.service.account.token\n");
+  const asked: Array<{ authorization: string | null; proof: string | null }> = [];
+  const dispatch = (async (_input, init) => {
+    const headers = new Headers(init?.headers);
+    asked.push({
+      authorization: headers.get("authorization"),
+      proof: headers.get("dpop"),
+    });
+    return Response.json(RECORD);
+  }) as typeof fetch;
+  const paneEnv = {
+    ...env,
+    DISPATCH_URL: "http://dispatch.test",
+    AGENT_SECRETS_URL: `http://127.0.0.1:${broker.port}`,
+    AGENT_SECRETS_MACHINE_IDENTITY: "kubernetes",
+    AGENT_SECRETS_MACHINE_TOKEN_FILE: identityFile,
+  };
+  try {
+    const latest = paneLatestHandoff(file, paneEnv, root, "pane-session", dispatch);
+    await latest("LEGION-208", "review");
+  } finally {
+    broker.stop(true);
+  }
+
+  expect(trades.map((form) => form.get("session"))).toEqual(["pane-session"]);
+  expect(asked.map((one) => one.authorization)).toEqual(["DPoP broker-access-token"]);
+  expect(asked[0]?.proof).toBeString();
 });
 
 // The revsets are jj's, so a fake cannot prove them: one real repository with a bare origin, the

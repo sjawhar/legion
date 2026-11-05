@@ -5,9 +5,10 @@
 // approves the user code the device authorization minted. Machine-login records are decided here,
 // not in requests.Machine: ApplyDecision takes the deciding human's Dispatch login and the typed
 // code and, on approval, mints the credential directly — there is no Dispatch ask anywhere in this
-// flow, and no bearer token in any response. A service (the Legion daemon, whose pods it enrolls,
-// or a Google VM of a fleet, which enrolls itself) logs in with its own token instead, a projected
-// Kubernetes ServiceAccount token or a VM's identity token (TokenLogin), and no person approves it.
+// flow, and no bearer token in any response. A service (the Legion daemon, whose pods it
+// enrolls) logs in with its own projected Kubernetes ServiceAccount token instead (TokenLogin),
+// and no person approves it. A machine holding a Google identity token logs in nowhere here: the
+// RFC 8693 token exchange mints its launcher credential when it trades that token.
 package machine
 
 import (
