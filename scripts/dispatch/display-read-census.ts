@@ -77,6 +77,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  rmSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -883,21 +884,49 @@ function textPlaces(corpus: string): TextPlace[] {
   return places;
 }
 
-/** Writes the texts `wanted` names as the readers take them: one `{id, md}` a line, in the
- * corpus's own order, which all three readers' outputs then follow line for line. */
-function writeReaderCorpus(path: string, corpus: string, wanted: ReadonlySet<string>): void {
-  const handle = openSync(path, "w");
+/** One shard of a batch: where its three readings are written, and the texts they follow. */
+interface Shard {
+  readonly dir: string;
+  readonly places: TextPlace[];
+}
+
+/** How much markdown one shard of the reader corpus holds. The browser's reader takes its whole
+ * input file into one string, which a corpus of gigabytes cannot be, and the dump test's output
+ * runs to about ten times the markdown it reads, which this disk cannot hold for the whole
+ * corpus; a shard is read, classed and deleted before the next is read. */
+const SHARD_BYTES = 64 << 20;
+
+/**
+ * Writes the texts `wanted` names as the readers take them - one `{id, md}` a line, in the
+ * corpus's own order, which all three readers' outputs then follow line for line - in shards of
+ * at most SHARD_BYTES of markdown.
+ */
+function writeShards(batch: string, corpus: string, wanted: ReadonlySet<string>): Shard[] {
+  const shards: Shard[] = [];
+  let handle: number | undefined;
+  let bytes = 0;
   try {
     for (const stored of storedTexts(corpus)) {
       if (!wanted.has(stored.id)) continue;
+      if (handle === undefined || bytes >= SHARD_BYTES) {
+        if (handle !== undefined) closeSync(handle);
+        const dir = join(batch, `shard-${String(shards.length).padStart(3, "0")}`);
+        mkdirSync(dir, { recursive: true });
+        shards.push({ dir, places: [] });
+        handle = openSync(join(dir, "reader-corpus.jsonl"), "w");
+        bytes = 0;
+      }
       const line = `${JSON.stringify({ id: stored.id, md: stored.markdown })}\n`;
-      const written = writeSync(handle, line);
+      const length = Buffer.byteLength(line);
       // On a full disk writeSync writes what fits and returns the short count instead of throwing.
-      if (written !== Buffer.byteLength(line)) throw new Error(`short write to ${path}`);
+      if (writeSync(handle, line) !== length) throw new Error("short write to a shard");
+      bytes += length;
+      shards[shards.length - 1].places.push({ id: stored.id, group: stored.group });
     }
   } finally {
-    closeSync(handle);
+    if (handle !== undefined) closeSync(handle);
   }
+  return shards;
 }
 
 /** One line of an engine's output: the reading of the `md` field, `{pm}` or `{err}`, under the
@@ -975,8 +1004,9 @@ function readVerdicts(path: string): Map<string, TextClass> {
 
 /**
  * Classes every text of the corpus, running both engines and Go's display read over the texts no
- * pass has classed yet. Each such batch gets a directory of its own under `work`, so the readings
- * of the texts already classed stay where they are and can be read again.
+ * pass has classed yet. Those are read in shards: each shard's readings are written under the
+ * batch's own directory, classed, appended to the verdicts and deleted before the next shard is
+ * read, so the disk holds one shard's readings and a run that dies loses at most one shard.
  */
 export async function classifyCorpus(corpus: string, work: string): Promise<ClassedText[]> {
   const verdictsPath = join(work, "verdicts.jsonl");
@@ -988,47 +1018,52 @@ export async function classifyCorpus(corpus: string, work: string): Promise<Clas
   );
   if (pending.length > 0) {
     const batch = join(work, `batch-${new Date().toISOString().replace(/[:.]/gu, "-")}`);
-    mkdirSync(batch, { recursive: true });
-    const readerCorpus = join(batch, "reader-corpus.jsonl");
-    const editing = join(batch, "engine.jsonl");
-    writeReaderCorpus(readerCorpus, corpus, new Set(pending.map((place) => place.id)));
-    await run(["bun", ENGINE_READER, readerCorpus, editing, "md"], REPO, join(batch, "engine.log"));
-    console.error("readers: the editing engine is done");
-    await run(
-      [
-        "bun",
-        ENGINE_READER,
-        "--read-only",
-        readerCorpus,
-        join(batch, "engine-readonly.jsonl"),
-        "md",
-      ],
-      REPO,
-      join(batch, "engine-readonly.log")
-    );
-    console.error("readers: the read-only engine is done");
-    // The display read is only reachable from inside its own module, so it is run through the
-    // differential's dump test, which writes ReadForDisplay's two readings with the block ids
-    // dropped. It is one package, never ./... : packages/daemon holds a test that pushes this
-    // pod's workspace.
-    await run(
-      ["go", "test", GO_PACKAGE, "-run", "^TestDifferentialDump$", "-count=1", "-timeout", "0"],
-      GO_MODULE,
-      join(batch, "go.log"),
-      {
-        PMDOC_DIFF_CORPUS: readerCorpus,
-        PMDOC_DIFF_ENGINE: editing,
-        PMDOC_DIFF_OUT: join(batch, "go-dump.jsonl"),
-      }
-    );
-    console.error("readers: the display read is done");
-    const read = classifyBatch(pending, batch);
-    appendFileSync(verdictsPath, read.map((one) => `${JSON.stringify(one)}\n`).join(""));
-    for (const one of read) verdicts.set(one.id, one.class);
+    const shards = writeShards(batch, corpus, new Set(pending.map((place) => place.id)));
+    console.error(`readers: ${pending.length} texts in ${shards.length} shards under ${batch}`);
+    for (const [index, shard] of shards.entries()) {
+      const readerCorpus = join(shard.dir, "reader-corpus.jsonl");
+      const editing = join(shard.dir, "engine.jsonl");
+      await run(
+        ["bun", ENGINE_READER, readerCorpus, editing, "md"],
+        REPO,
+        join(shard.dir, "engine.log")
+      );
+      await run(
+        [
+          "bun",
+          ENGINE_READER,
+          "--read-only",
+          readerCorpus,
+          join(shard.dir, "engine-readonly.jsonl"),
+          "md",
+        ],
+        REPO,
+        join(shard.dir, "engine-readonly.log")
+      );
+      // The display read is only reachable from inside its own module, so it is run through the
+      // differential's dump test, which writes ReadForDisplay's two readings with the block ids
+      // dropped. It is one package, never ./... : packages/daemon holds a test that pushes this
+      // pod's workspace.
+      await run(
+        ["go", "test", GO_PACKAGE, "-run", "^TestDifferentialDump$", "-count=1", "-timeout", "0"],
+        GO_MODULE,
+        join(shard.dir, "go.log"),
+        {
+          PMDOC_DIFF_CORPUS: readerCorpus,
+          PMDOC_DIFF_ENGINE: editing,
+          PMDOC_DIFF_OUT: join(shard.dir, "go-dump.jsonl"),
+        }
+      );
+      const read = classifyBatch(shard.places, shard.dir);
+      appendFileSync(verdictsPath, read.map((one) => `${JSON.stringify(one)}\n`).join(""));
+      for (const one of read) verdicts.set(one.id, one.class);
+      rmSync(shard.dir, { recursive: true, force: true });
+      console.error(`readers: shard ${index + 1} of ${shards.length}, ${read.length} texts classed`);
+    }
   }
   return places.map((place) => ({
     ...place,
-    // Every text is either in the verdicts already or in the batch just classed.
+    // Every text is either in the verdicts already or in a shard just classed.
     class: verdicts.get(place.id) as TextClass,
   }));
 }
