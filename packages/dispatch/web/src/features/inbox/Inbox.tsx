@@ -744,9 +744,13 @@ export function Inbox({
    *  reader comes back in on after an unmount inside the column left the record standing, both
    *  leave it alone, where either would otherwise write the row the column is showing over the
    *  row the reader came from. That is what makes re-entry by key and re-entry by click, which
-   *  writes nothing at all, leave the same record. It is read by one accessor, `paneWayBack`,
-   *  which both halves of Escape ask, so the `when` and the `run` cannot disagree about where
-   *  the key goes.
+   *  writes nothing at all, leave the same record. The test is the record alone, with no check
+   *  of where the focus is, because none is needed: a press from inside the column with no
+   *  record standing finds no focused row there (`focusedRow()` is null in the column), so it
+   *  writes the row of the question the column shows, or null where that question has no listed
+   *  row, and either sends Escape exactly where `paneWayBack`'s fallback already would. It is
+   *  read by one accessor, `paneWayBack`, which both halves of Escape ask, so the `when` and the
+   *  `run` cannot disagree about where the key goes.
    *
    *  The record stands exactly while two facts hold of the reader, each with its own drops;
    *  between them no route can outlive the record.
