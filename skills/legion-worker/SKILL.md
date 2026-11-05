@@ -38,7 +38,7 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | You write or edit the PR body, record a result against a check, read another phase's results, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
 | Before a push, to check your commits' App identity | `skill://legion-worker/references/default-branch-check.md` |
 | You reply on, list or resolve review threads, or judge a bot's finding | `skill://legion-worker/references/review-threads.md` |
-| A conflict, a need only the base meets, a retarget, a parent's last round, comparing heads after a forward merge, a push refused after the handoff import moved the branch, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
+| A conflict, a need only the base meets, a retarget, a parent's last round, comparing heads after a forward merge, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
 | You review or approve, build READY, or run the production check | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
@@ -50,7 +50,6 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 
 - Before a push, read `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'` (earlier phases' commits in it are expected) and run the identity check (`skill://legion-worker/references/default-branch-check.md`). Add no attribution trailer: the pane's jj adds `Omp-Session:`.
 - Only work is pushed: code, red tests, a forward merge, a rewrite. No commit message carries a line or bracket keyword that stops GitHub's workflows (`[skip ci]` and its kin), since every head needs its own checks and a base that requires a check will not merge a head whose checks never ran. Retro pushes nothing: it records what the work taught with `dispatch comment` on the issue.
-- A push refused because `legion handoffs import` moved `legion/<KEY>@origin` (its commit's message is `chore(legion): <KEY>'s handoffs are on its Dispatch issue now`) is cured by `jj -R "$LEGION_WORKSPACE" git fetch`, a forward merge with `legion/<KEY>@origin`, and the push (`skill://legion-worker/references/conflicts-and-rewrites.md`, *After the handoff import moved the branch*): never a rewrite.
 - A planner whose issue moved back from implementing starts on the remote tip, `jj -R "$LEGION_WORKSPACE" new legion/<KEY>@origin`, so a commit it makes never sits on the implementer's unpushed commits.
 
 ## PR body, review, and the merge gate

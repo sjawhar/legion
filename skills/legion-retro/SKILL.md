@@ -22,9 +22,10 @@ The head the merger names is the head the reviewer approved.
 - **A change after the approved head** (`READY_UNREVIEWED_CHANGE`): the
   daemon diffs the reviewer's approved head against the head on GitHub, and the issue goes back to
   the reviewer for another review. READY still lets through a commit that changes only
-  `docs/solutions/`, which no role writes any more, and a file under `.legion/` that GitHub lists
-  as removed: the commit `legion handoffs import` makes, never one of yours. Since retro commits
-  nothing, an ordinary head carries neither.
+  `docs/solutions/`, which no role writes any more, and a change whose every path is under
+  `.legion/`, where handoffs lived before they moved to the Dispatch issue and which nothing
+  writes or reads now, so nobody reviews a path there. Since retro commits nothing, an ordinary
+  head carries neither.
 - `READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own. Every one of them
   sends the head back to review and none is an error to retry; the complete list, with each
   remedy, is the merger's own role prompt part.
