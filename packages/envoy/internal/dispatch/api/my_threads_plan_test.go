@@ -22,7 +22,7 @@ func TestMyThreadsPlansKeepExistingReadAndUserThreadsIndex(t *testing.T) {
  select md5(n::text)::uuid,'TVOL-1',jsonb_build_object('kind','user','id',case when n%1000=0 then 'alice' when n%10=0 then 'busy' else 'user-'||(n%1000)::text end),'Thread '||n::text,now()-interval '1 hour'
  from generate_series(1,20000) n;
  insert into comments(id,issue_key,author,body,reply_to)
- select md5(('reply-'||n::text))::uuid,'TVOL-1','{"kind":"session","id":"bot","owner":"alice"}','A newer reply',md5(n::text)::uuid
+ select md5(('reply-'||n::text))::uuid,'TVOL-1','{"kind":"session","id":"bot","owner":"alice","session_verified":true}','A newer reply',md5(n::text)::uuid
  from generate_series(1,20000) n;
  insert into comment_mentions(comment_id,target,delivery,resolved_session_id)
  select md5(n::text)::uuid,'session:bot','aside','bot' from generate_series(1,20000) n where n%1000=1;

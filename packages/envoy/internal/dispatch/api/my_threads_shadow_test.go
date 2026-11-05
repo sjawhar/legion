@@ -19,7 +19,7 @@ func TestParticipationShadowChecksEachCauseAndDetectsProjectionCorruption(t *tes
  update issues set assignee='alice' where key=$1;
  insert into comments(id,issue_key,author,body) values
  ('30000000-0000-0000-0000-000000000001',$1,'{"kind":"user","id":"alice"}','Authored root'),
- ('30000000-0000-0000-0000-000000000002',$1,'{"kind":"session","id":"alice-session","owner":"alice"}','A verified session'),
+ ('30000000-0000-0000-0000-000000000002',$1,'{"kind":"session","id":"alice-session","owner":"alice","session_verified":true}','A verified session'),
  ('30000000-0000-0000-0000-000000000003',$1,'{"kind":"user","id":"bob"}','Mentioned-only root'),
  ('30000000-0000-0000-0000-000000000004',$1,'{"kind":"user","id":"bob"}','Addressed-only root');
  insert into comment_mentions(comment_id,target,delivery,resolved_session_id) values
