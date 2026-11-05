@@ -3,6 +3,7 @@ package docs
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -448,16 +449,36 @@ func updatesAdd(updates [][]byte) (uint64, bool) {
 	return adds, true
 }
 
-// clockSum is the sum of doc's state vector. It bounds the structs doc has integrated from above,
-// since every one takes at least one clock, and says nothing past that: a struct of typed text
-// takes a clock for each character (crdt/store.go:410-421, crdt/content.go:113 in sjawhar/ygo
-// v1.55.1-sami.1).
+// clockSum is the sum of doc's state vector, capped at the largest uint64 rather than wrapped
+// (plusCapped). It bounds the structs doc has integrated from above, since every one takes at
+// least one clock, and says nothing past that: a struct of typed text takes a clock for each
+// character (crdt/store.go:410-421, crdt/content.go:113 in sjawhar/ygo v1.55.1-sami.1).
+//
+// The cap is what keeps that bound a bound. A clock length in a V1 update is a varuint, so one
+// GC run of a client the room has never seen can claim every clock up to 2^53, the most ygo
+// takes (structEnd, crdt/update.go:1633-1638) and the most the walk takes from a browser
+// (maxEditorClock), for about twelve bytes; 2,048 of them, a 34,819-byte frame of 2,048 client
+// groups that the hook admits, sum to exactly 2^64, and summed in a uint64 they wrapped to the
+// handful the room's own text holds: a ceiling of 45 over a room of 2,058 structs, its 10 and the
+// frame's 2,048 (TestNoFrameOfClaimedClocksPutsTheStructTotalCeilingBelowTheTotal). A ceiling below
+// the total is a server write let through without the count that answers for it
+// (leavesPastDecodeCap), and a room left past the decode cap is a stored document that will not
+// load again.
 func clockSum(doc *crdt.Doc) uint64 {
 	var clocks uint64
 	for _, clock := range doc.StateVector() {
-		clocks += clock
+		clocks = plusCapped(clocks, clock)
 	}
 	return clocks
+}
+
+// plusCapped is a + b, capped at the largest uint64 rather than wrapped: a sum of the clocks a
+// room holds can pass 2^64 (clockSum), and a bound that wrapped would read as a small one.
+func plusCapped(a, b uint64) uint64 {
+	if sum := a + b; sum >= a {
+		return sum
+	}
+	return math.MaxUint64
 }
 
 // structCeiling bounds doc's struct total (countRoomStructs) from above without an encode: the
@@ -470,11 +491,12 @@ func clockSum(doc *crdt.Doc) uint64 {
 // encoded state holds at most the clock sum and two structs for each parked one, and the splits
 // are splitsAStructCanCause for each parked struct and each parked delete range
 // (crdt.Doc.PendingStats, crdt/doc.go:1183-1200). A room may park up to maxUpdateItems structs
-// (Server.MaxPendingItems, which New sets), none of which the clock sum sees.
+// (Server.MaxPendingItems, which New sets), none of which the clock sum sees. Every sum here is
+// capped rather than wrapped, for the reason clockSum gives.
 func structCeiling(doc *crdt.Doc) uint64 {
 	parked := doc.PendingStats()
 	items, ranges := uint64(parked.Items), uint64(parked.DeleteRanges)
-	return clockSum(doc) + 2*items + splitsAStructCanCause*(items+ranges)
+	return plusCapped(clockSum(doc), 2*items+splitsAStructCanCause*(items+ranges))
 }
 
 // serverWrite is one of the server's writes into a room's live document outside applyLive - the
@@ -554,7 +576,7 @@ type serverWrite struct {
 // unmarkExpired), and each of settlement's repairs lands on the one block its id names
 // (repairLive).
 func (s *Service) leavesPastDecodeCap(doc *crdt.Doc, write serverWrite) bool {
-	if write.bounded && structCeiling(doc)+write.adds <= maxUpdateItems {
+	if write.bounded && plusCapped(structCeiling(doc), write.adds) <= maxUpdateItems {
 		return false
 	}
 	return s.measurer.structsAfter(doc, write) > maxUpdateItems

@@ -754,6 +754,46 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 	}
 }
 
+// The ceiling the decode cap's cheap filter answers on (structCeiling) is never below the struct
+// total, whatever clocks a browser's frame claims. A clock length in a V1 update is a varuint, so
+// one GC run of a client the room has never seen claims every clock up to 2^53 - the most ygo
+// takes (structEnd, sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1633-1638) and the most the walk
+// takes from a browser (maxEditorClock) - in about twelve bytes, and the hook admits it: a GC run
+// renders nothing and costs the room one struct with its two splits (peerWeighing.added). One
+// frame of 2,048 such groups, 34,819 bytes, is three structs each against the cap and sums to
+// exactly 2^64 clocks, which the sum of the room's state vector held in a uint64 wrapped away:
+// before plusCapped the room held 2,058 structs and its ceiling read 45, the clocks of its own
+// text alone. A ceiling below the total is a server write let through without the exact count
+// that answers for it (leavesPastDecodeCap), which is how a room is left past the decode cap and
+// its stored document left one no load decodes.
+//
+// The clocks are claimed, not held: the room holds one struct for each run, so nothing here is
+// proportional to the span. What the test holds is only that the ceiling stays a ceiling.
+func TestNoFrameOfClaimedClocksPutsTheStructTotalCeilingBelowTheTotal(t *testing.T) {
+	// The groups' clocks sum to 2^64, the first value a uint64 wraps to nothing: 2^11 runs of
+	// 2^53 clocks each.
+	const groups, run = 1 << 11, uint64(1) << 53
+	service, room, replica, _ := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
+	frame := newV1Frame(groups)
+	for client := range uint64(groups) {
+		frame = frame.group(1, 1<<40+7*client, 0).gc(run)
+	}
+	update := frame.noDeletes()
+	if err, called := weighInto(service, room, update); err != nil || !called {
+		t.Fatalf("the %d-byte frame of %d GC runs of 2^53 clocks was answered %v (applied %t), want it admitted", len(update), groups, err, called)
+	}
+	runtime.KeepAlive(replica)
+	if held := len(room.StateVector()); held < groups {
+		t.Fatalf("the room holds %d clients, want the %d the frame named and the room's own", held, groups)
+	}
+	structs, ceiling := countRoomStructs(room), structCeiling(room)
+	t.Logf("after a %d-byte frame of %d GC runs of 2^53 clocks the room holds %d structs, its clocks sum to %d and its ceiling is %d",
+		len(update), groups, structs, clockSum(room), ceiling)
+	if ceiling < structs {
+		t.Fatalf("the room's struct total is %d and its ceiling %d, want the ceiling at or above it", structs, ceiling)
+	}
+}
+
 // typedRoom is a room's live document whose state holds about structs structs, of which runs come
 // to a few hundred structs in a decoded copy of it: a browser's text typed at the front of a text
 // one character at a time in one edit, each character a struct of its own in any copy
