@@ -13,24 +13,57 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// reopenedPool opens a second pool on pool's database, from the configuration pool was opened
+// with and whatever change configure makes to a copy of it, and closes it after t ends. The
+// production pool is built in store.Open and is not a seam a test may configure, so every test
+// that needs a pool of its own shape opens it here: Traced, Reopened, SingleConnection and
+// SecondProcess.
+func reopenedPool(t testing.TB, pool *store.Pool, configure func(*pgxpool.Config)) *store.Pool {
+	t.Helper()
+	config := pool.Config()
+	configure(config)
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open a second pool on the same database: %v", err)
+	}
+	reopened := store.NewPool(opened)
+	t.Cleanup(reopened.Close)
+	return reopened
+}
+
+// Reopened is a store on database's own database whose pool reopenedPool opens with configure's
+// change to its configuration.
+func Reopened(t testing.TB, database *store.Store, configure func(*pgxpool.Config)) *store.Store {
+	t.Helper()
+	return &store.Store{Pool: reopenedPool(t, database.Pool, configure)}
+}
+
+// SingleConnection is a Reopened store of one connection, which every read on it takes, so a test
+// reads one connection's own state - the statements it has prepared (pg_prepared_statements) - as
+// the reads it drives leave it.
+func SingleConnection(t testing.TB, database *store.Store) *store.Store {
+	t.Helper()
+	return Reopened(t, database, func(config *pgxpool.Config) {
+		config.MaxConns = 1
+		config.MinConns = 0
+		config.MinIdleConns = 0
+	})
+}
+
 // Traced opens a pool on pool's database whose every statement tracer sees, with params set on
 // each of its connections, closed after t ends. The lease and listener connections opened from its
 // configuration (store.Pool.Leases, store.Pool.Listener) are traced too. Only the code under test
-// is given it, so everything tracer sees is that code's.
+// is given it, so everything tracer sees is that code's. pgx reports one query start per statement
+// sent on its own and one batch start per batch, whatever that batch holds, so a tracer that also
+// implements pgx.BatchTracer counts a read's round trips.
 func Traced(t testing.TB, pool *store.Pool, tracer pgx.QueryTracer, params map[string]string) *store.Pool {
 	t.Helper()
-	config := pool.Config()
-	config.ConnConfig.Tracer = tracer
-	for name, value := range params {
-		config.ConnConfig.RuntimeParams[name] = value
-	}
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open a traced pool: %v", err)
-	}
-	traced := store.NewPool(opened)
-	t.Cleanup(traced.Close)
-	return traced
+	return reopenedPool(t, pool, func(config *pgxpool.Config) {
+		config.ConnConfig.Tracer = tracer
+		for name, value := range params {
+			config.ConnConfig.RuntimeParams[name] = value
+		}
+	})
 }
 
 // StatementCounter counts every statement started on the pool it traces (Traced).

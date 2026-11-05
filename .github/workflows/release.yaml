@@ -91,26 +91,28 @@ env:
   # The Envoy Oh My Pi plugin. The seed before the first pi-envoy-v* tag is the version line this
   # package continues, @sjawhar/pi-legion-envoy, which it was split from: its own name on npm holds
   # only a placeholder 0.0.0 until its first publish, so reading it would restart the line at 0.x.
-  # scripts/pi-plugin-prepack.sh copies this plugin's seven skills into dist/skills, which every Oh
+  # scripts/pi-plugin-prepack.sh copies this plugin's eight skills into dist/skills, which every Oh
   # My Pi session loads as the plugin's skills, so a commit there releases whatever its type. Its
   # notices generator, the prepack itself and patches/ (the bundle inlines nats.js with
   # patches/nats@2.29.3.patch applied) are shipped build inputs too, so they get the same patch
   # release.
   PI_ENVOY_VERSION_ARGS: >-
     --package-dir packages/pi-envoy --first-npm @sjawhar/pi-legion-envoy
-    --patch-path skills/asd-ste100/ --patch-path skills/dispatch/ --patch-path skills/dispatch-first/
+    --patch-path skills/agent-secrets/ --patch-path skills/asd-ste100/
+    --patch-path skills/dispatch/ --patch-path skills/dispatch-first/
     --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/
     --patch-path skills/outside-message/ --patch-path skills/plain-words/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
-    skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/ skills/dispatch-writing-specs/ skills/envoy/
-    skills/outside-message/ skills/plain-words/
+    skills/agent-secrets/ skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/
+    skills/dispatch-writing-specs/ skills/envoy/ skills/outside-message/ skills/plain-words/
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Legion Oh My Pi plugin, seeded as the Envoy one is. scripts/pi-plugin-prepack.sh copies
   # this plugin's nine skills into dist/skills, which a Legion pane's prompts load, so a commit
-  # there releases whatever its type. Its notices generator and the prepack itself are shipped
-  # build inputs too, so they get the same patch release.
+  # there releases whatever its type. Its notices generator, the prepack itself and patches/ (the
+  # bundle inlines nats.js through envoy-client, with its patch applied) are shipped build inputs
+  # too, so they get the same patch release.
   PI_LEGION_VERSION_ARGS: >-
     --package-dir packages/pi-legion --first-npm @sjawhar/pi-legion-envoy
     --patch-path skills/legion-architect/ --patch-path skills/legion-controller/
@@ -119,11 +121,12 @@ env:
     --patch-path skills/ce-simplify-code/
     --patch-path skills/thermonuclear-code-quality/ --patch-path skills/thermonuclear-deep-review/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
+    --patch-path patches/
     -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
     skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/
     skills/legion-worker/ skills/leading-a-work-stream/ skills/ce-simplify-code/
     skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/
-    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh
+    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Go `legion`. The binary embeds its prompts (internal/prompts/roles and go), so a docs:
   # commit there still releases. The notices scripts and the target list are runtime inputs of the
   # release archives and worker image, so any change to one needs a new tag rather than a CI-only
@@ -873,8 +876,8 @@ jobs:
       # against SHA256SUMS, which sits in the same mutable release. `--repo` alone accepts an
       # archive any workflow of this repository attested, so the check pins the signer as
       # docs/kubernetes.md ("Pin by digest, never by tag") does:
-      #   gh attestation verify legion-<os>-<arch>.tar.gz --repo sjawhar/legion \
-      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+      #   gh attestation verify legion-<os>-<arch>.tar.gz --repo cybermonklabs/legion \
+      #     --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release.yaml@refs/heads/main \
       #     --source-ref refs/heads/main --deny-self-hosted-runners
       # and adds `--source-digest <the legion-v<version> tag's commit>` to pin the commit as well.
       # It runs after "legion: Tag release", so a run whose tag step refuses (the tag already names

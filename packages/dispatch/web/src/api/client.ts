@@ -39,6 +39,7 @@ import type {
   CommentDelivery,
   CommentRead,
   CreateAgentMessageInput,
+  CreateAgentTokenInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateBroadcastInput,
@@ -58,6 +59,7 @@ import type {
   DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
+  DispatchScope,
   DispatchUser,
   DocumentRead,
   DocumentReferenceSummary,
@@ -70,6 +72,8 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
+  IssueCheckResults,
+  IssueCoverage,
   IssueDecisions,
   IssueDetails,
   IssueReferenceSummary,
@@ -466,6 +470,16 @@ export function threadReadRequest(threadId: string, readThrough: string): WriteR
   };
 }
 
+/** `PUT /api/v1/me/documents/{id}/read`: the person's last read version of a document
+ *  (`putDocumentRead`). */
+export function documentReadRequest(id: string, version: number): WriteRequest<DocumentRead> {
+  return {
+    body: { version },
+    method: "PUT",
+    path: `/api/v1/me/documents/${pathSegment(id)}/read`,
+  };
+}
+
 /** `PUT /api/v1/me/issues/{key}/state`: the person's state of an issue (`putIssueState`). */
 export function issueStateRequest(
   key: string,
@@ -836,13 +850,15 @@ export class DispatchApiClient {
     await this.remove(`/api/v1/settings/repo-projects/${repoPath(repo)}`, bounds);
   }
 
-  /** Only the projects that name a default; a project left out names nobody. Human-only. */
+  /** Only the projects that name a default; a project left out names nobody. Needs the
+   *  `person` scope. */
   listProjectDefaultAssignees(): Promise<ProjectDefaultAssignee[]> {
     return this.json<ProjectDefaultAssignee[]>("/api/v1/settings/project-default-assignees");
   }
 
   /** Sets the person a project's unowned work lands on, or clears it with `{assignee: null}`.
-   *  Human-only, and a login nobody has signed in as is refused `400 ASSIGNEE_NOT_ALLOWED`. */
+   *  Needs the `person` scope, and a login nobody has signed in as is refused
+   *  `400 ASSIGNEE_NOT_ALLOWED`. */
   putProjectDefaultAssignee(
     project: string,
     input: ProjectDefaultAssigneeInput,
@@ -918,8 +934,22 @@ export class DispatchApiClient {
     return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
   }
 
-  createAgentToken(input: { name: string }, bounds: WriteBounds): Promise<CreatedAgentToken> {
+  createAgentToken(input: CreateAgentTokenInput, bounds: WriteBounds): Promise<CreatedAgentToken> {
     return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input, bounds);
+  }
+
+  /** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set of scopes the token is to hold, which
+   *  replaces the set it holds now, answering the updated token. A scope the caller does not hold
+   *  itself is refused, as it is at the mint. */
+  setAgentTokenScopes(
+    id: string,
+    scopes: DispatchScope[],
+    bounds: WriteBounds
+  ): Promise<AgentToken> {
+    return this.send<AgentToken>(
+      { body: { scopes }, method: "PATCH", path: `/api/v1/me/agent-tokens/${pathSegment(id)}` },
+      bounds
+    );
   }
 
   async revokeAgentToken(id: string, bounds: WriteBounds): Promise<void> {
@@ -989,12 +1019,26 @@ export class DispatchApiClient {
     );
   }
 
+  /** `GET /api/v1/issues/{key}/results`: the checks of the issue's Verification document in
+   *  document order, each with every result recorded against it from any issue, newest first,
+   *  and each result's currency as the server judged it against the repository. */
+  getIssueResults(key: string): Promise<IssueCheckResults> {
+    return this.json<IssueCheckResults>(`/api/v1/issues/${pathSegment(key)}/results`);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. The
+   *  server decides the gaps - a requirement with no plan task is no gap until the issue has a
+   *  plan document - so a reader draws its answer rather than judging again. */
+  getIssueCoverage(key: string): Promise<IssueCoverage> {
+    return this.json<IssueCoverage>(`/api/v1/issues/${pathSegment(key)}/coverage`);
+  }
+
   getInbox(project?: string): Promise<InboxRow[]> {
     return this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
   }
 
   /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
-   *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
+   *  `snoozedUntil` (RFC3339). Needs the `person` scope, like the inbox itself. */
   snoozeAsk(id: string, snoozedUntil: string, bounds: WriteBounds): Promise<AskSnooze> {
     return this.send<AskSnooze>(askSnoozeRequest(id, snoozedUntil), bounds);
   }
@@ -1041,14 +1085,14 @@ export class DispatchApiClient {
   }
 
   /** `GET /api/v1/me/answers`: the signed-in person's answers and ask replies, newest first,
-   *  one page at a time. Human-only. */
+   *  one page at a time. Needs the `person` scope. */
   listMyAnswers(page: { limit: number; offset: number }): Promise<MyAnswersResponse> {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
   /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
    *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
-   *  owner. Human-only. */
+   *  owner. Needs the `person` scope. */
   listMyReplies(page: {
     artifact?: string;
     issue?: string;
@@ -1302,11 +1346,7 @@ export class DispatchApiClient {
   /** Record the caller's last read version of a document: the Spec tab marks each block that
    *  changed since it. */
   putDocumentRead(id: string, version: number, bounds: WriteBounds): Promise<DocumentRead> {
-    return this.put<DocumentRead>(
-      `/api/v1/me/documents/${pathSegment(id)}/read`,
-      { version },
-      bounds
-    );
+    return this.send(documentReadRequest(id, version), bounds);
   }
 
   /** One version's bytes. A large file on a slow line can take longer than any read deadline, so
@@ -1384,8 +1424,12 @@ export class DispatchApiClient {
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
-  getReferences(reference: string): Promise<GraphReferences> {
-    return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
+  /** The edges at a node; `kind` keeps those of one kind - `part_of` lists a document's blocks,
+   *  which a document's read otherwise leaves out. */
+  getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
+    return this.json<GraphReferences>(
+      pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */

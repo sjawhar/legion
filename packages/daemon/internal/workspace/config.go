@@ -265,7 +265,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	// leaving Wait (and so Run) never returning. procgroup.Configure's Setpgid plus Cancel signals
 	// the whole process group instead, killing the helper too; after that, Wait normally returns
 	// an ordinary *exec.ExitError for the signaled process.
-	procgroup.Configure(child)
+	killed := procgroup.Configure(child)
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
@@ -275,10 +275,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		return result, runErr
 	}
 	result.ExitCode = child.ProcessState.ExitCode()
-	var exited *exec.ExitError
-	if errors.As(err, &exited) {
-		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
-	}
+	result.TimedOut = killed() && errors.Is(bounded.Err(), context.DeadlineExceeded)
 	return result, nil
 }
 
@@ -398,7 +395,7 @@ func refuseSymlinkedLayout(root, dir string) error {
 //
 // jj has no ceiling option: it searches upward from the directory it runs in for the closest
 // `.jj` and opens that repository, which is how a test in a Legion issue pod came to write the
-// pod's shared clone at /legion/repos/github.com/sjawhar/legion. The walk counts only a `.jj`
+// pod's shared clone at /legion/repos/github.com/cybermonklabs/legion. The walk counts only a `.jj`
 // that is a directory, because that is all jj counts: a regular file named `.jj` is not jj's
 // workspace pointer — that is the file `.jj/repo` inside a `.jj` directory — and jj 0.45.1 run
 // below a directory holding a regular file named `.jj` answers `Error: There is no jj repo in

@@ -510,6 +510,8 @@ test("issue routes select Spec and artifact routes select Artifacts unless prima
   expect(issueTabForRoute({ key: "CORE-1", kind: "children" }, undefined)).toBe("children");
   expect(issueTabForRoute({ key: "CORE-1", kind: "artifacts" }, undefined)).toBe("artifacts");
   expect(issueTabForRoute({ key: "CORE-1", kind: "activity" }, undefined)).toBe("activity");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "verification" }, undefined)).toBe("verification");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "plan" }, undefined)).toBe("plan");
   expect(
     issueTabForRoute(
       { key: "CORE-1", kind: "artifact", slug: "diagram", version: 2 },
@@ -618,6 +620,56 @@ test("the activity tab owns its path, its reference and its short form", () => {
   expect(
     referenceRouteFromHref("https://dispatch.test/issues/CORE-1/activity", "https://dispatch.test")
   ).toEqual(route);
+});
+
+test("the verification tab owns its path, its reference and its short form", () => {
+  const route = { key: "CORE-1", kind: "verification" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/verification")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/verification");
+  expect(shortForm(route)).toBe("CORE-1 verification");
+  expect(parseIssuePath("/issues/CORE-1/verification")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/verification"));
+  expect(
+    referenceRouteFromHref(
+      "https://dispatch.test/issues/CORE-1/verification",
+      "https://dispatch.test"
+    )
+  ).toEqual(route);
+});
+
+test("the plan tab owns its path, its reference and its short form", () => {
+  const route = { key: "CORE-1", kind: "plan" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/plan")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/plan");
+  expect(shortForm(route)).toBe("CORE-1 plan");
+  expect(parseIssuePath("/issues/CORE-1/plan")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/plan"));
+  expect(
+    referenceRouteFromHref("https://dispatch.test/issues/CORE-1/plan", "https://dispatch.test")
+  ).toEqual(route);
+});
+
+// The Decisions tab is a view of the issue's decisions.md: its page is the tab's own route, and
+// the reference it names, as every reader of a dashboard URL reads it, is that document.
+test("the decisions tab owns its path and names the issue's decisions.md", () => {
+  const route = { key: "CORE-1", kind: "decisions" as const };
+  const document = { key: "CORE-1", kind: "artifact" as const, slug: "decisions-md" };
+
+  expect(parseIssuePath("/issues/CORE-1/decisions")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/decisions"));
+  expect(issueTabForRoute(route, undefined)).toBe("decisions");
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/artifact/decisions-md");
+  expect(shortForm(route)).toBe("CORE-1 decisions");
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read("https://dispatch.test/issues/CORE-1/decisions", "https://dispatch.test")).toEqual(
+      document
+    );
+    expect(
+      read("https://dispatch.test/issues/CORE-1/decisions#b-x", "https://dispatch.test")
+    ).toEqual(document);
+  }
 });
 
 test("parses and builds project, documents, and document routes with version and item query", () => {

@@ -49,8 +49,9 @@ const (
 	maxNewArtifactKeyBytes = 2692
 )
 
-// artifactColumns is the canonical artifact column list scanArtifact reads.
-const artifactColumns = `id::text, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, created_by, created_at`
+// artifactColumns is the canonical artifact column list scanArtifact reads. role is read through
+// coalesce because model.Artifact carries it as "" when the document plays no role.
+const artifactColumns = `id::text, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, coalesce(role, ''), created_by, created_at`
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -481,10 +482,10 @@ func (s *server) storeArtifact(
 			return
 		}
 		artifact, err = scanArtifact(tx.QueryRow(r.Context(), `
-			insert into artifacts (issue_key, project_key, session_id, slug, name, kind, is_primary, created_by)
-			values ($1, $2, $3, $4, $5, $6, false, $7)
+			insert into artifacts (issue_key, project_key, session_id, slug, name, kind, is_primary, role, created_by)
+			values ($1, $2, $3, $4, $5, $6, false, $7, $8)
 			returning `+artifactColumns,
-			target.IssueKey, project, session, slug, input.name, kind, actorJSON))
+			target.IssueKey, project, session, slug, input.name, kind, documentRole(target, kind, slug), actorJSON))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -495,6 +496,22 @@ func (s *server) storeArtifact(
 	} else if artifact.Kind != kind {
 		s.writeHandlerError(w, artifactKindMismatch(input.name, artifact, kind))
 		return
+	}
+	// A document the release before this one created during the rolling deploy carries no role:
+	// migration 20261102110000 backfills the rows that existed when it ran, and that release
+	// writes none of its own. Until the role is set the document is invisible to every reader
+	// that looks for an issue's Verification or plan document by it, so the next version written
+	// under the row repairs it from the same slug that would have set it. The slug is unique
+	// within the owner, so at most one row per issue can take either role and the partial unique
+	// index artifacts_issue_role holds.
+	if !created && artifact.Role == "" {
+		if role := documentRole(target, artifact.Kind, artifact.Slug); role != nil {
+			if _, err := tx.Exec(r.Context(), `update artifacts set role = $2 where id = $1 and role is null`, artifact.ID, *role); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			artifact.Role = *role
+		}
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
 	// has not locked it: the issue branch above locks its issue, but this one only read its
@@ -1164,14 +1181,33 @@ func participantsOrEmpty(participants []model.Actor) []model.Actor {
 	return participants
 }
 
-func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
-	rows, err := q.Query(ctx, `
-		select `+artifactColumns+`
+// issueArtifactsStatement lists an issue's artifacts, $1 the issue key, in the order every
+// reader of the issue shows them; collectArtifacts reads its rows. The issue read queues it in
+// a batch with its other reads (getIssue), so the statement and the scan live apart from the
+// sequential loader that every other route calls.
+const issueArtifactsStatement = `
+		select ` + artifactColumns + `
 		from artifacts where issue_key = $1 order by created_at, id
-	`, issueKey)
+	`
+
+func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
+	rows, err := q.Query(ctx, issueArtifactsStatement, issueKey)
 	if err != nil {
 		return nil, err
 	}
+	artifacts, err := collectArtifacts(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := loadArtifactDetails(ctx, q, artifactPointers(artifacts)); err != nil {
+		return nil, err
+	}
+	return artifacts, nil
+}
+
+// collectArtifacts reads the rows issueArtifactsStatement returns. An issue with no artifact
+// keeps a non-nil empty list, which the response carries as [].
+func collectArtifacts(rows pgx.Rows) ([]model.Artifact, error) {
 	artifacts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Artifact, error) {
 		return scanArtifact(row)
 	})
@@ -1181,19 +1217,65 @@ func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) 
 	if artifacts == nil {
 		artifacts = []model.Artifact{}
 	}
+	return artifacts, nil
+}
+
+// artifactPointers addresses each artifact in place, which the version and approval loaders fill.
+func artifactPointers(artifacts []model.Artifact) []*model.Artifact {
 	pointers := make([]*model.Artifact, len(artifacts))
 	for index := range artifacts {
-		versions, err := s.loadVersions(ctx, q, artifacts[index].ID)
-		if err != nil {
-			return nil, err
-		}
-		artifacts[index].Versions = versions
 		pointers[index] = &artifacts[index]
 	}
-	if err := s.attachApprovals(ctx, q, pointers); err != nil {
-		return nil, err
+	return pointers
+}
+
+// artifactIDs is every listed artifact's id, the argument artifactVersionsStatement takes.
+func artifactIDs(artifacts []*model.Artifact) []string {
+	ids := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		ids = append(ids, artifact.ID)
 	}
-	return artifacts, nil
+	return ids
+}
+
+// queueArtifactDetails queues in b what a list of artifacts carries beside its rows - every
+// artifact's versions in one statement rather than a query per artifact, and every document's
+// latest review and open approval request (queueApprovals) - and returns the apply that fills
+// them in once the batch is closed. The statements are queued in that order wherever artifacts
+// are read with their details: the issue read queues them beside its other reads
+// (readIssueDetails), and a read of its own sends them as a batch of its own (loadArtifactDetails).
+// The apply fills the versions first, since an approval's state reads them (applyApprovals), and
+// leaves an artifact with no version a non-nil empty list (applyVersions). No artifact queues
+// nothing and its apply fills nothing.
+func queueArtifactDetails(b *pgx.Batch, artifacts []*model.Artifact) func() {
+	versions := map[string][]model.Version{}
+	if ids := artifactIDs(artifacts); len(ids) > 0 {
+		b.Queue(artifactVersionsStatement, ids).Query(func(rows pgx.Rows) error {
+			return scanVersionsByArtifact(rows, versions)
+		})
+	}
+	approvals := queueApprovals(b, artifacts)
+	return func() {
+		applyVersions(artifacts, versions)
+		approvals()
+	}
+}
+
+// loadArtifactDetails sends queueArtifactDetails's statements as a batch of their own on q, for a
+// read that queues nothing else: an issue's artifacts (loadArtifacts), a project's
+// (listProjectArtifacts) and one artifact read by id or by ref_key (loadArtifactRow). The batch
+// holds q's connection until its results close, so nothing else reads the database in between.
+func loadArtifactDetails(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
+	batch := &pgx.Batch{}
+	apply := queueArtifactDetails(batch, artifacts)
+	if batch.Len() == 0 {
+		return nil
+	}
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
+		return err
+	}
+	apply()
+	return nil
 }
 
 func validateArtifactRequestRef(r *http.Request) error {
@@ -1491,6 +1573,9 @@ func (s *server) loadArtifactByRefKey(ctx context.Context, q queryer, refKey str
 	`, refKey))
 }
 
+// loadArtifactRow reads one artifact from the row a lookup by id or by ref_key returns, with the
+// details every artifact read carries - its versions, and its approval when it is a document - in
+// one batch (loadArtifactDetails), so the read costs that lookup and one round trip more.
 func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (model.Artifact, error) {
 	artifact, err := scanArtifact(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1499,12 +1584,7 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 	if err != nil {
 		return model.Artifact{}, err
 	}
-	versions, err := s.loadVersions(ctx, q, artifact.ID)
-	if err != nil {
-		return model.Artifact{}, err
-	}
-	artifact.Versions = versions
-	if err := s.attachApproval(ctx, q, &artifact); err != nil {
+	if err := loadArtifactDetails(ctx, q, []*model.Artifact{&artifact}); err != nil {
 		return model.Artifact{}, err
 	}
 	return artifact, nil
@@ -1517,7 +1597,7 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	var createdBy []byte
 	if err := row.Scan(
 		&artifact.ID, &artifact.IssueKey, &project, &artifact.SessionID, &artifact.RefKey, &artifact.Slug,
-		&artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
+		&artifact.Name, &artifact.Kind, &artifact.Primary, &artifact.Role, &createdBy, &artifact.CreatedAt,
 	); err != nil {
 		return model.Artifact{}, err
 	}
@@ -1572,6 +1652,60 @@ func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactT
 // sha256. The size never reads a document's markdown (model.VersionSize).
 const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256`
 
+// artifactVersionsStatement reads the versions of every artifact in $1 at once, so a list of
+// artifacts costs one statement rather than one per artifact. Ordering by the artifact first
+// leaves each artifact's own versions in `order by v.number`, the order one artifact's read
+// answers; scanVersionsByArtifact keys them by the artifact id the columns end on.
+const artifactVersionsStatement = `
+		select ` + versionColumns + `, v.artifact_id::text
+		from artifact_versions v where v.artifact_id = any($1::uuid[]) order by v.artifact_id, v.number
+	`
+
+// scanVersion reads versionColumns from row; extra receives the columns after them.
+func scanVersion(row pgx.Row, extra ...any) (model.Version, error) {
+	var version model.Version
+	var authors []byte
+	targets := make([]any, 0, 8+len(extra))
+	targets = append(targets,
+		&version.Number, &version.Named, &version.Summary, &authors,
+		&version.CreatedAt, &version.Size, &version.MIME, &version.SHA256,
+	)
+	targets = append(targets, extra...)
+	if err := row.Scan(targets...); err != nil {
+		return model.Version{}, err
+	}
+	if err := json.Unmarshal(authors, &version.Authors); err != nil {
+		return model.Version{}, fmt.Errorf("decode version authors: %w", err)
+	}
+	return version, nil
+}
+
+// scanVersionsByArtifact reads the rows artifactVersionsStatement returns into versions, keyed by
+// artifact id.
+func scanVersionsByArtifact(rows pgx.Rows, versions map[string][]model.Version) error {
+	for rows.Next() {
+		var artifactID string
+		version, err := scanVersion(rows, &artifactID)
+		if err != nil {
+			return err
+		}
+		versions[artifactID] = append(versions[artifactID], version)
+	}
+	return rows.Err()
+}
+
+// applyVersions fills each artifact's versions from what the statement returned; an artifact with
+// none keeps a non-nil empty list, which the response carries as [].
+func applyVersions(artifacts []*model.Artifact, byArtifact map[string][]model.Version) {
+	for _, artifact := range artifacts {
+		versions := byArtifact[artifact.ID]
+		if versions == nil {
+			versions = []model.Version{}
+		}
+		artifact.Versions = versions
+	}
+}
+
 func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string) ([]model.Version, error) {
 	rows, err := q.Query(ctx, `
 		select `+versionColumns+`
@@ -1583,13 +1717,9 @@ func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string)
 	defer rows.Close()
 	versions := []model.Version{}
 	for rows.Next() {
-		var version model.Version
-		var authors []byte
-		if err := rows.Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &version.Size, &version.MIME, &version.SHA256); err != nil {
+		version, err := scanVersion(rows)
+		if err != nil {
 			return nil, err
-		}
-		if err := json.Unmarshal(authors, &version.Authors); err != nil {
-			return nil, fmt.Errorf("decode version authors: %w", err)
 		}
 		versions = append(versions, version)
 	}
@@ -1660,6 +1790,73 @@ func artifactSlug(name string) string {
 	}
 	return result
 }
+
+// roleSlugs pairs each role a document plays with the slug that names it: the one place the two
+// spellings are written. Everything that asks what part a document plays is built from it —
+// documentRole, which writes the role on a new row, the SQL predicates that hold a row to a role
+// (documentRolePredicate), and documentPlays, which asks the same of a row already read.
+var roleSlugs = map[string]string{
+	model.ArtifactRoleVerification: "verification-md",
+	model.ArtifactRolePlan:         "plan-md",
+}
+
+// documentRole is the role a document takes when its row is created: an issue's markdown
+// document whose slug roleSlugs names plays that role; every other new artifact plays none. The
+// slug decides, not the name, because the slug is the unique key the upload already took within
+// the owner (nextArtifactSlug), so a second document whose name gives a slug already in use -
+// verification-md-2 - plays no role rather than colliding with the one that holds it. The role
+// is written once, as is_primary is: a later upload of the same name is that document's next
+// version, under the row this made, and the only write that ever sets it afterwards is the
+// repair of a row the rolling deploy left with none (storeArtifact).
+func documentRole(target artifactTarget, kind, slug string) *string {
+	if target.IssueKey == nil || kind != "doc" {
+		return nil
+	}
+	for role, named := range roleSlugs {
+		if named == slug {
+			return &role
+		}
+	}
+	return nil
+}
+
+// documentPlays reports whether an artifact already read plays role: it carries that role, or it
+// carries none and its slug is the role's, for a row a rolling deploy left with no role because
+// the build that created it did not know the column. It is documentRolePredicate's answer about
+// one row, so every reader — the queries that find a document by its role and the routes that
+// judge the document in hand — agrees about the same row.
+func documentPlays(artifact model.Artifact, role string) bool {
+	return artifact.Role == role || (artifact.Role == "" && artifact.Slug == roleSlugs[role])
+}
+
+// isSpecDocument reports whether an artifact already read is an issue's spec: the primary
+// document of an issue. Both readers that ask it about an approval ask it here — the coverage
+// an approval request's answer carries (approvalCoverage), which only a spec has, and
+// include_verification, which names the spec and its issue's Verification document together
+// (requestArtifactApproval).
+func isSpecDocument(artifact model.Artifact) bool {
+	return artifact.Primary && artifact.IssueKey != nil
+}
+
+// documentRolePredicate holds the artifacts row of the table aliased `alias` to the issue's
+// document of one role: the role itself, or the slug a document of that name carries, for a row
+// a rolling deploy left with no role. `alias` is empty where the query names no alias.
+func documentRolePredicate(alias, role string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return `(` + alias + `role = '` + role + `' or (` + alias + `role is null and ` + alias + `slug = '` + roleSlugs[role] + `'))`
+}
+
+// verificationRolePredicate is documentRolePredicate for the Verification document of a query
+// that names no alias, since the queries that hold a row to it are written as string literals.
+var verificationRolePredicate = documentRolePredicate("", model.ArtifactRoleVerification)
+
+// aliasedVerificationRole and aliasedPlanRole are the same two predicates for a query whose
+// artifacts table is aliased `a`: the issue read, the coverage read and the check resolver all
+// join it that way.
+var aliasedVerificationRole = documentRolePredicate("a", model.ArtifactRoleVerification)
+var aliasedPlanRole = documentRolePredicate("a", model.ArtifactRolePlan)
 
 // artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
 // artifact, the one the name or slug finds, whose kind is another.

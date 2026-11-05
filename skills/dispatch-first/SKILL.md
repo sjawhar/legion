@@ -27,7 +27,6 @@ dispatch search --query 'reviewer threads OR review comments'
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
 - **Duplicate found:** keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
-- In Legion, file no finding outside your issue (`skill://legion-worker/references/findings.md`).
 
 ## Reach a person only through Dispatch
 

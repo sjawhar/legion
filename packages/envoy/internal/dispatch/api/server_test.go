@@ -52,6 +52,9 @@ func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
 type testServerOptions struct {
 	defaultProject string
 	testHooks      bool
+	// store is the database the server runs on; nil opens one of its own (storetest.Open). A
+	// test that counts a read's round trips passes a traced store (storetest.Traced).
+	store *store.Store
 	// app and githubAPIBase wire the GitHub App access-check client at a fake
 	// GitHub; both nil/empty leaves the client in its "no app credentials"
 	// state (every check answers ErrNoAppKey).
@@ -197,7 +200,10 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if lifetime == nil {
 		lifetime = t.Context()
 	}
-	database := storetest.Open(t)
+	database := options.store
+	if database == nil {
+		database = storetest.Open(t)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
@@ -1348,9 +1354,10 @@ func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
 		})
 	}
 
+	// The inbox is one of the rows the person scope opens, and the shared token holds no scope.
 	inbox := agentRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "agent-token")
-	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's inbox: status=%d body=%s, want 403 %s", inbox.Code, inbox.Body.String(), codeScopeRequired)
 	}
 	anonymous := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "")
 	if anonymous.Code != http.StatusUnauthorized {
@@ -1389,8 +1396,8 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 		t.Fatalf("Bob state leaked Alice pin: status=%d body=%s", bob.Code, bob.Body.String())
 	}
 	session := agentRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "agent-token")
-	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("session state: status=%d body=%s", session.Code, session.Body.String())
+	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's state: status=%d body=%s, want 403 %s", session.Code, session.Body.String(), codeScopeRequired)
 	}
 }
 

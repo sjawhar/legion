@@ -80,7 +80,7 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		}
 		// Options.Project is the legion.dev/project label's value (its own doc comment), not
 		// necessarily already a claim.ProjectToken: a deployment's own project name may carry
-		// characters ProjectToken drops (its doc: "sjawhar/legion" names the same role topics
+		// characters ProjectToken drops (its doc: "cybermonklabs/legion" names the same role topics
 		// under either daemon), and go through it before naming a claim.
 		project, err := claim.ProjectToken(r.project)
 		if err != nil {
@@ -90,7 +90,10 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		if err != nil || SandboxName(token) != hello.Sandbox {
 			return nil, "launcher credential does not name this pod's role"
 		}
-		return r.launchers.accept(token, hello), ""
+		// The pod the connection is accepted for carries the instant the API server created it,
+		// which decides whether a release's saved work is this pod's to restore
+		// (launchers.restoreWorkspace).
+		return r.launchers.accept(token, credential.issue, view.pod.CreationTimestamp.Time, hello), ""
 	}
 }
 

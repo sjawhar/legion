@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
-const workerImage = "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const workerImage = "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // kubernetesFile is the smallest file `runtime: kubernetes` loads: every key a pod needs to reach
 // the daemon, Envoy, NATS, and Dispatch, and the required members of the block. The App
@@ -71,6 +71,7 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     setup: [/bin/sh, -c, 'omp plugin marketplace add acme/agent-skills']
+    idle_release: {idle_minutes: 20, backstop_minutes: 120}
     repository_cache:
       volume: 50Gi
       refresh_minutes: 5
@@ -178,6 +179,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 			Volume: "50Gi", RefreshMinutes: 5, RetainHours: 24,
 			Resources: Reservation{CPU: "2", CPURequest: "2", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
 		},
+		IdleRelease: IdleReleaseConfig{IdleMinutes: 20, BackstopMinutes: 120},
 	}}
 	if cfg.Runtime.Name != want.Name || cfg.Runtime.Kubernetes == nil {
 		t.Fatalf("Runtime = %+v, want %q with its block", cfg.Runtime, want.Name)
@@ -569,12 +571,12 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "image by tag",
-			body: kubernetesWith(workerImage, "ghcr.io/sjawhar/legion-worker:latest"),
+			body: kubernetesWith(workerImage, "ghcr.io/cybermonklabs/legion-worker:latest"),
 			want: "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
 		},
 		{
 			name: "image with a short digest",
-			body: kubernetesWith(workerImage, "ghcr.io/sjawhar/legion-worker@sha256:0"),
+			body: kubernetesWith(workerImage, "ghcr.io/cybermonklabs/legion-worker@sha256:0"),
 			want: "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
 		},
 		{

@@ -2,7 +2,7 @@ name: Docs (main)
 
 # Builds the documentation site (docs/site) on every push to main whose change could change it, and
 # publishes it to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the
-# repository this runs in (https://sjawhar.github.io/legion/ today). The build is docs-site.yaml's,
+# repository this runs in (https://cybermonklabs.github.io/legion/ today). The build is docs-site.yaml's,
 # which holds those steps once. Pull requests and merge groups call the same workflow from
 # ci.yaml's docs job; this workflow is main's half.
 #
@@ -58,7 +58,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 60 patterns:
+      # ci.yaml's *legion_command, 62 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -93,6 +93,7 @@ on:
       - 'packages/daemon/internal/omplaunch/*'
       - 'packages/daemon/internal/ompsessions/*'
       - 'packages/daemon/internal/phase/*'
+      - 'packages/daemon/internal/pods/**'
       - 'packages/daemon/internal/podsafety/**'
       - 'packages/daemon/internal/procgroup/*'
       - 'packages/daemon/internal/projection/*'
@@ -102,6 +103,7 @@ on:
       - 'packages/daemon/internal/registry/*'
       - 'packages/daemon/internal/repocache/*'
       - 'packages/daemon/internal/requiredchecks/*'
+      - 'packages/daemon/internal/rescue/*'
       - 'packages/daemon/internal/runtime/*'
       - 'packages/daemon/internal/runtime/sandbox/*'
       - 'packages/daemon/internal/runtime/shellprefix/*'
@@ -185,6 +187,7 @@ on:
       - 'packages/envoy/internal/broker/enroll/*'
       - 'packages/envoy/internal/broker/exchange/*'
       - 'packages/envoy/internal/broker/helper/*'
+      - 'packages/envoy/internal/broker/leasetime/*'
       - 'packages/envoy/internal/broker/machine/*'
       - 'packages/envoy/internal/broker/oauth/*'
       - 'packages/envoy/internal/broker/oauthstore/*'

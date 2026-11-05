@@ -150,7 +150,7 @@ func TestTheExecFormReleasesANarrowedGitHubAppTokenEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(tokens[0].body), &body); err != nil {
 		t.Fatalf("the access_tokens body %q: %v", tokens[0].body, err)
 	}
-	if want := map[string]any{"repositories": []any{"proofs"}, "permissions": map[string]any{"contents": "read", "metadata": "read"}}; !reflect.DeepEqual(body, want) {
+	if want := map[string]any{"repositories": []any{"proofs"}, "permissions": map[string]any{"actions": "read", "contents": "read", "metadata": "read", "pull_requests": "read"}}; !reflect.DeepEqual(body, want) {
 		t.Fatalf("the access_tokens body = %v, want %v", body, want)
 	}
 

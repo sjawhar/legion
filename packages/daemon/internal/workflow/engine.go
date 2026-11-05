@@ -27,7 +27,15 @@ import (
 // head's own CI turns red or it starts conflicting with its base before the merge; empty, the
 // READY is posted only.
 type Config struct {
-	Project        string
+	// Project is the project key, which is what the record's own tables hold: an issue's
+	// `project`, a production check's, the Dispatch mirror's.
+	Project string
+	// Pods is the daemon's record of the project's released pods, which the wakes read and write
+	// (Pods, wake.go). It holds the project as the claim-keyed tables spell it, derived from
+	// Project once where it is built (store.Store.PodRecordsOf), so this configuration carries
+	// one spelling of the project and a wake can file no row under another. Nil, as in every
+	// engine built without the pod tables, wakes nothing and records no listener report.
+	Pods           Pods
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int
@@ -36,7 +44,7 @@ type Config struct {
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
-	// BuiltFrom is the repository the daemon's binary is built from (`sjawhar/legion` in a release
+	// BuiltFrom is the repository the daemon's binary is built from (`cybermonklabs/legion` in a release
 	// build): a build the daemon boots on, or Dispatch announces every server process serves
 	// (server.started), is compared only against the open production checks of that repository,
 	// since no other repository's merge can be in it. Empty, no build is compared.
@@ -81,9 +89,7 @@ var _ intake.Handler = (*Engine)(nil)
 
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
-	if cfg.DesignGate == "" {
-		cfg.DesignGate = config.DesignGateRootIssues
-	}
+	cfg.DesignGate = cfg.DesignGate.OrDefault()
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
 	}
@@ -149,6 +155,12 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 	case intake.Push:
 		return e.push(ctx, tx, fact)
 	case intake.PullRequestChecks:
+		// A settlement on the head of a released pod's pull request wakes that pod before the
+		// settlement is applied, so the woken role's task names the settlement this very
+		// transaction records (wakeOnSettlement).
+		if err := e.wakeOnSettlement(ctx, tx, fact); err != nil {
+			return intake.Result{}, err
+		}
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:
 		return e.requiredChecks(ctx, tx, fact)
@@ -194,6 +206,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checkLookEnded(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
+	case intake.ListenerWake:
+		return e.listenerWake(ctx, tx, fact)
+	case intake.PodBackstopDue:
+		return e.podBackstopDue(ctx, tx, fact)
 	default:
 		return intake.Result{}, nil
 	}

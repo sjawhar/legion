@@ -61,7 +61,7 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_TEST_HOOKS`
 
   Set to `1` to mount test-only routes: `POST /api/v1/live/_test/disconnect` closes every open live socket with 1012 (restart), and `POST /api/v1/live/_test/rotate` closes every one with 4001 (`max age`);
-  `POST /api/v1/agents/{session_id}/stream/_test/publish` (human only) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`;
+  `POST /api/v1/agents/{session_id}/stream/_test/publish` (needs the `person` scope) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`;
   `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements;
   `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses;
   and `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms` once its key is claimed.
@@ -97,14 +97,25 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_FILE_STORE_BUCKET`
 
   Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres.
-  The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
-  without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
-  The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+  The value chooses the store (`files.Open`), and the server and `backfill-files` both open it there, so they never read one value as two stores:
+
+  - `gs://<bucket>` is a Google Cloud Storage bucket, reached through the JSON API with Application Default Credentials (on GKE, the pod's Workload Identity principal; elsewhere `GOOGLE_APPLICATION_CREDENTIALS` or a gcloud login).
+    The principal needs `storage.objects.create` and `storage.objects.get` on the bucket and nothing more (`roles/storage.objectCreator` and `roles/storage.objectViewer`):
+    an upload reads the key's metadata first and writes nothing when the bucket already holds it, then writes in one request with `ifGenerationMatch=0`, carrying the body's CRC32C and MD5, which GCS checks, so no object is ever overwritten and none is deleted;
+    a write that loses that precondition to a concurrent writer of the same key is an object already held.
+    A value after `gs://` that is not a Cloud Storage bucket name (a path after the bucket among them) refuses the boot.
+
+  - Any other value is an S3 bucket's name.
+    The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
+    without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
+    The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+
+  An image whose Dispatch does not know `gs://` reads the value as an S3 bucket's name and fails every call, so a deployment sets a `gs://` value only on an image that carries it.
   An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version.
   The version route serves a row still holding bytes from the row and any other from the bucket:
   it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes;
   a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole.
-  `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`;
+  `/healthz` reports `files`: null when unset, else whether the bucket answered within two seconds (S3: a `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, whose absence is a healthy answer, so `storage.objects.get` alone serves it, while a bucket that does not exist or a refused grant fails it);
   it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down.
   `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below).
 
@@ -313,7 +324,7 @@ a run against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket;
 the files uploaded before it stay in their rows until `backfill-files` moves them, oldest first, one row at a time:
-it writes the object under the row's hash (a write S3 verifies against that hash, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
+it writes the object under the row's hash (a write the bucket verifies, S3 against that hash and Cloud Storage against its CRC32C and MD5, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
 A row it cannot move (a store failure, bytes that do not hash to the row's hash, a row with no hash) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;
 the run exits 1 when any row failed, and can be run again at any time, since each row is done or untouched and the server serves a row until its bytes are cleared.
 Two writing passes at once (`backfill-files` and `--restore`, in any pairing) are refused by an advisory lock (`another backfill-files pass holds the
@@ -334,7 +345,7 @@ envoy-dispatch backfill-files --verify-only   # read back every moved row; exit 
 envoy-dispatch backfill-files --restore       # the rollback: write every moved row's bytes back from the bucket
 ```
 
-It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, refuses a bucket it cannot `HeadBucket` before touching a row, and reads nothing else of the server's configuration.
+It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, which it opens as the server does (`gs://<bucket>` or an S3 bucket's name, with the same credentials and grant), refuses a bucket whose health probe fails (the one `/healthz` runs) before touching a row, and reads nothing else of the server's configuration.
 Clearing a row's bytes leaves dead tuples behind:
 the table shrinks on disk only after `VACUUM FULL` or `pg_repack`, while the nightly dump shrinks at once; measure the dump, or vacuum first.
 
@@ -458,6 +469,58 @@ pgvector on PostgreSQL 18, whose `vector` extension the migrations need.
 It refuses a `dispatch-pg` on any other image or major and prints the commands that dump that container's databases and restore them into a new container on the pinned image.
 The database retains the migrated schema; tests only truncate rows they create.
 
+## A large test database
+
+`go run ./cmd/dispatch-seed` fills an empty database with the data set a statement measurement is taken on:
+ten times production's row counts at `--scale 1` — 10 projects, 20,000 issues over parent chains and `blocked_by` links, 40,000 documents with 200,000 versions, 80,000 asks, 370,000 comments, 60,000 messages, 1,250,000 events beside the `ask.opened` event every ask is written with, and a vector for half the issues, documents, asks, comments and messages
+— and the same shape times the scale at any other.
+It is deterministic: one fixed base time, one fixed random seed, and a fixed block id generator (`pmdoc.SetBlockIDGenerator`), so two runs at one scale write the same rows and a reading taken before a change and one taken after it read the same data.
+The text is drawn from a Zipf list of 20,000 words, so the `tsvector` columns carry real lexemes at known frequencies.
+
+```sh
+cd packages/envoy
+go run ./cmd/dispatch-seed --database-url <url> [--scale <f>] [--no-migrate]
+```
+
+`--database-url` is required.
+`--scale` defaults to 1 and multiplies every row count, keeping the proportions and the text sizes;
+`--scale 0.01` is about 200 issues and is what the CI test runs.
+The command migrates the database itself with `store.Migrate`, as the other subcommands do, and never by booting a server, whose background loops would write to the data set it is building;
+`--no-migrate` skips that step for a database somebody else migrated from another commit, which is what a before-and-after measurement across two commits needs.
+It refuses a database that already holds a `projects` or an `issues` row, naming what it found:
+it writes fixed keys, so a second run over the same rows would fail halfway through.
+
+It calls the server's own indexers over what it writes
+— `refs.IndexBlocks` for each document's latest version, `refs.IndexItem` for each comment's and message's blocks, `refs.IndexAskParts` for each ask's parts (its question, its options and the answer it holds)
+— and then settles the state those writes leave owed, so a Dispatch server started on the seeded database rewrites nothing:
+the block index, the item blocks, the task counts, the reference excerpts and the event publication are all already done, and the per-owner `last_seq` counters match the seeded events, so the first comment, ask, message, upload or title edit written to a seeded issue does not fail the unique `(issue_key, seq)`.
+Every ask is written with its `ask.opened` event, in the ask's own transaction as the create route writes it, because every read of an ask resolves that event (`events.OpenedEventIDs`) and fails the whole request when the ask has none, which would answer 500 on the ask lists, the ask read, the Inbox and an issue's `open_asks`.
+It ends with one full `search_term_stats` build for every project, so no measured related-terms pass is a first-use full build, and with `vacuum (analyze)`, not `analyze`:
+a freshly loaded table has no all-visible pages, so the planner avoids an index-only scan on it however good the statistics are.
+
+That build is the one the database's own schema carries, read once from the catalogue rather than by running a build and catching its error, which could not tell a missing column from a real failure:
+a database holding `search_term_totals.snapshot` (migration `20261101182515_search_term_totals_snapshot`) is built by the server's own pass (`api.RefreshEverySearchTermStats`, which the command's `buildEverySearchTermStats` calls), so the row carries the snapshot that makes the first measured pass a step pass;
+a database migrated from an older commit, which is what `--no-migrate` seeds for the "before" side of a two-commit measurement, is built by that release's four statements, which write `items` and `refreshed_at` alone.
+Either way the step fails the command when it built fewer projects than the seed wrote.
+
+The command prints every table's row count;
+every figure the sizes are stated as a distribution rather than a count (the issues per project, the parent chain depths, the issues with three or more blockers, the documents with 28 versions, the markdown size bands, the anchored comments and asks, the open asks, the root messages, the events with a session actor, the rows with an embedding, and the edges of `graph_edges` by kind);
+a rare, a medium and a common word with the number of documents each is in, measured rather than assumed;
+and the subjects a measurement binds — the largest project, the heavily linked issue, the deepest parent chain, the document carrying anchored comments and a table-row anchor, the head of the longest mention chain, one of the large documents, the session ids for the agent activity read, the `model` value on every vector and the row whose embedding is the query vector to bind.
+
+Measurements are taken with durability on and memory pinned, and every number is recorded beside those settings:
+`fsync=on`, `synchronous_commit=on`, `full_page_writes=on`, and a `shared_buffers`, `maintenance_work_mem` and `effective_cache_size` the run names.
+A cluster with the write settings off leaves no page all-visible, and a small `shared_buffers` decides a share-of-plan reading on its own.
+A full run at `--scale 1` takes about an hour and twenty minutes and leaves a database of about 14 GB.
+
+**What the seeded documents do not carry.**
+The seed writes `artifact_versions`, the block index and the reference rows, and it does not build the ygo document state that a version written through the API carries.
+Two things follow, and a measurement has to work around both:
+an upload over a seeded document (`POST /api/v1/issues/{key}/artifacts` under its name) answers `404`, where an upload over a document the API itself made answers `201`;
+and `GET /api/v1/issues/{key}/artifacts/{slug}/text` answers an empty markdown for one, however large its latest version is.
+`dispatch census` and every statement this tool exists to measure read the rows and are unaffected.
+A write-route measurement therefore creates its own document through the API on the seeded database and writes over that;
+the triggers a version insert fires, which is what such a measurement is about, do not depend on who wrote the document's earlier versions.
 
 ## Running locally
 
@@ -1260,7 +1323,7 @@ the no-write related route records nothing):
 its project and source, the actor, the outcome (`found`, `none` or `not_made`), how it searched (`meaning_and_keywords` or `keywords_only`, none when not made), the reason it was not made (`timeout` for the check's own allowance running out, apart from `cancelled` for the request that ran it ending first:
 its client leaving for a write sent without an `Idempotency-Key`, the keyed run's own 10-minute bound for a keyed one) or searched by keywords alone, the lexemes it searched for, its keyword, meaning and total milliseconds and how many items it listed.
 `search_term_stats` (how many of a project's searchable items hold each lexeme) and `search_term_totals` (how many searchable items the project has, and when they were counted) are the statistics the check picks its keywords from;
-the term-statistics refresh, added with it, rebuilds a project's rows at boot and every 10 minutes, and the check only reads them.
+the term-statistics refresh, added with it, rebuilt a project's rows whole at boot and every 10 minutes, where `20261101182508`-`20261101182522` have it apply what changed, and the check only reads them.
 Every row names its project with `on
 delete cascade`, and a check's row also cascades from its issue, document or ask.
 The tables are new, so the migration rewrites and refuses no row and its census answers `0`;
@@ -1379,13 +1442,173 @@ any), creates the function `block_ref_listed(to_types, to_id)`, true when `to_ty
 The column is added with no default, so no row is rewritten, and the previous release, which neither reads nor writes it, keeps writing rows that hold null and so are listed as before.
 The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
 It refuses and rewrites no row; its census answers `0`.
-No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+The shipped `plan_task` and `check` declare the `block[]` attributes `serves` and `needs`, so a document written since they shipped holds pointer rows, which a build that does not read `to_types` lists as it lists every other `block_refs` row.
+
+Migration `20261101182419_ask_followers_session` creates `ask_followers_session_id` on `ask_followers (session_id)`, for the `followed_by` arm of `graph_edges`, which `refs.BacklinkCounts` now reads directly rather than leaving the planner the whole view.
+The arm reads `ask_followers` by `session_id` and had no index for it:
+the table's primary key leads with `ask_id`, which cannot serve that predicate, and its only other index, `ask_followers_ask_id_text` (`0032`), is on the ask as well, so every count of a session's backlinks scanned the table.
+A plain `create index` inside the runner's transaction, it holds `SHARE` on `ask_followers` while it builds:
+the build waits out a write of a follower already open and holds off a new one for that moment, while reads are not held, and the table is small.
+Its census answers `0`: one index on an existing column, refusing no row and rewriting none.
+
+Migration `20261101182426_asks_issue_key` creates `asks_issue_key` on `asks (issue_key)`, for the read of every ask of one issue that `GET /api/v1/issues/{key}/asks` makes with no state filter (`api/asks.go` `listIssueAsksQueryAll`) and for the reference closure's read of an issue's asks.
+No index served either: `asks_open` (`0001`) is partial on `state = 'open'`, which a read asking for every state cannot use, and every other index of `asks` is keyed on something else, so both scanned the table.
+The read orders by `created_at, id` within the issue, so `(issue_key, created_at, id)` would be strictly better
+— the index would answer the order too and leave the plan no sort
+— and this migration keeps the plain key the spec names, because the sort is over one issue's asks and this release does not change the statement.
+A plain `create index` inside the runner's transaction, it holds `SHARE` on `asks` while it builds: ask writes wait, reads do not.
+Its census answers `0`: one index on an existing column, refusing no row and rewriting none.
+
+Migration `20261101182433_messages_issue_roots` creates `messages_issue_roots` on `messages (issue_key, created_at, id)`, for the read of an issue's root messages that `GET /api/v1/issues/{key}/messages` makes, `where issue_key = $1 and in_reply_to is null order by created_at, id` (`api/messages.go` `listIssueRootMessagesQuery`).
+No index of `messages` led with `issue_key` — `messages_in_reply_to` (`0033`) leads with the parent and `messages_search` (`0061`) is the text index
+— so every read of an issue's threads scanned the table, 15.8 s of database time in the 24 hours to 2026-10-30 22:00Z.
+The key is the read's predicate and then its order, so the plan takes one range of the index and sorts nothing.
+It is deliberately not partial on `in_reply_to is null`:
+the reference closure reads an issue's messages whatever they reply to, and one whole index serves both reads.
+A plain `create index` inside the runner's transaction, it holds `SHARE` on `messages` while it builds:
+message writes wait, reads do not, and the census of 2026-10-30 gives `messages` 5,810 rows and 20 MiB.
+Its census answers `0`.
+
+Migration `20261101182440_drop_asks_open_artifact` drops `asks_open_artifact`, `asks (artifact_id) where state = 'open' and artifact_id is not null` (`0009`).
+It was built for the one read that lists a document's open asks (`api/asks.go` `listArtifactAsksQueryOpen`), and that read uses `asks_artifact_id` (`0032`) instead, which a plan test holds it to;
+the index audit of 2026-10-25 found `asks_open_artifact` unused from 2026-10-16 to 2026-10-25.
+An index nothing reads is write cost on every ask that opens, closes or changes its document, and one more plan for the planner to cost on every read of `asks`.
+The drop is a contracting change, and the expand-then-contract rule does not hold it to the next release:
+an index is not a shape the running code reads, so the release before this one and the release after it both keep working over this schema, with one plan choice fewer.
+`drop index` takes `ACCESS EXCLUSIVE` on `asks` for the instant it unlinks the index, inside the runner's transaction, so every read and write of an ask waits behind it for that moment.
+Its census answers `0`: the drop reads no row, refuses none and rewrites none, and the census report still names `asks`, the table behind the index, so a deployment sees what it locks.
+No operator follow-up: nothing is left to rebuild, and a rollback past it is an image rollback alone, since no release reads the index.
+
+Migration `20261101182447_document_search` creates `document_search`, one row for each document holding its latest version's `search` vector (`artifact_id`, `number`, `created_at`, `search`), and `document_search_vector`, the GIN index over that vector.
+Search's document arm, the related-item check's and the related-terms probe's each read every document's latest version through a lateral join and tested `v.search @@ q.tsq` on it before this release, because `artifact_versions.search` has no index and can have none:
+`0010` left it out, since an index over every version would also find a word only an old version holds, and `artifact_versions` is 5.2 GiB, above the size the pre-deploy census lets a migration touch.
+One row per document is an index over exactly the versions search reads.
+The table declares no foreign key to `artifacts` or to `artifact_versions`:
+a `references` makes the census size the table it points at, so a key to `artifact_versions` would refuse every deploy carrying this migration.
+Nothing is lost by leaving it out, because every reader joins `artifacts` on `a.kind = 'doc'`, so a row whose document no longer exists cannot surface;
+there is no delete path and no trigger for one, since no production code path deletes an artifact or a version.
+Both statements lock only the table this same migration creates, which no other session can reach before the commit, so the transaction holds nothing of `artifacts` or `artifact_versions` and takes milliseconds.
+Its census answers `0`: the table is new and holds no row, and the migration reads no other table.
+No operator follow-up — `20261101182454` keeps the table in step and the boot's fill (`20261101182501` below) covers the documents already stored, both in the same boot.
+
+Migration `20261101182454_artifact_versions_document_search_trigger` creates `artifact_versions_document_search`, the function and the `after insert or update of markdown, search` trigger on `artifact_versions` that writes each version into `20261101182447`'s table under `on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a late write of an older version and an edit of an old version both leave the latest version's vector in place.
+It fires after `0058`'s BEFORE trigger has filled `search`, and `when (new.markdown is not null)` keeps a version with no markdown
+— an image or a file upload, whose vector is null — from blanking the document's row, exactly as `0122`'s trigger guards itself.
+`update of search` is in the column list so that a writer setting the vector directly cannot leave the table behind.
+A function and a trigger are the migration's only two statements, which is what exempts it from the census's table-size limit (`internal/pgmigrate/exempt.go`):
+neither reads a row, so the time they hold their lock does not grow with the table.
+Its census answers `0`: a trigger runs only on later writes and rewrites no row already stored.
+
+The risk `20261101182454` carries is its lock.
+`create trigger` takes `SHARE ROW EXCLUSIVE` on `artifact_versions`, the 5.2 GiB table every document save writes and every search page still reads for its snippet:
+a read is not held, since `ACCESS SHARE` does not conflict with it, but every version write waits for the commit, and the migration waits for every version write already in flight.
+Every migration runs with `lock_timeout` at `pgmigrate.LockTimeout`, five seconds, and the runner applies one whose lock wait outlasts it `pgmigrate.LockTimeoutAttempts` times, three, pausing two seconds between attempts and holding nothing meanwhile.
+A holder that outlives all three fails the migration and the boot with it:
+that pod never serves, the release before it keeps serving every request, and the deployment reports the new pod crash-looping.
+A retry is safe — the failed attempt's transaction rolled back, so nothing of it is in the database and no version record was written, and the next boot applies the migration again from the same state.
+
+Migration `20261101182501_document_search_backfill` creates `document_search_backfill`, the one row that records how far the fill of `20261101182447`'s table has got: the keyset cursor (`artifact_id`, the highest document the pass has covered, the all-zero uuid before its first batch) and `done`.
+It writes no `document_search` row and reads no large table, so it locks only the table it creates and commits in milliseconds.
+Its census answers `0`: a new table, whose one row the migration inserts.
+
+The fill itself is `store.FillDocumentSearch`, which the boot runs immediately after the migrations and before the server serves (`cmd/dispatch/main.go`), not a migration.
+A migration is one transaction, and the single statement this used to be — `insert … select distinct on (artifact_id) … from artifact_versions where markdown is not null order by artifact_id, number desc` — measured 35.5 s on a production-shaped database (`artifact_versions` 3337 MB, 200,000 versions, 40,000 documents), with every row it wrote uncommitted for those 35.5 s.
+`20261101182454`'s trigger is live by then, so a version write to a document the statement had already written ran its own `insert … on conflict (artifact_id) do update` on that key and waited for the whole statement; that writer holds its issue row (`for no key update`) and its document's room for the whole wait, every other write on that issue queues behind it, and an API writer sets no `lock_timeout`.
+Each batch is instead one short transaction that takes the next `store.DocumentSearchFillBatch` documents by keyset above the cursor, writes their latest versions under the same write guard as `20261101182454`'s trigger (`on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a row the trigger wrote while the pass runs is never replaced by an older one), moves the cursor and commits.
+The batch is 1,000 documents, about 0.9 ms a document on the shape above, so a batch is about a second and the pass about forty of them, and a writer that meets a key the pass holds waits for one batch rather than for the whole fill.
+The cursor is taken from the ids the batch read and never from the insert's `returning`, because a row the guard skips returns nothing and the cursor would stall on it; the pass is finished when a batch takes no further id, and each batch is idempotent, so running it twice, or from two processes at once, writes the same table.
+A boot after the pass has finished reads that one row and stops, so it costs no read of `artifact_versions` at all.
+A failure stops the boot (`slog.Error`, then exit 1), unlike the `asks_anchor_artifact_id` count beside it: this release's search reads `document_search` alone, so a process serving with the table unfilled would answer a search with documents missing.
+The rolling deploy keeps that correct — the release before this one serves every request until the new process has filled the table and begins serving — and the operator follow-up is that wait: a pod of this release takes the fill's time (about 35 s on production's shape) to become ready on the first boot after the deploy, and the boot logs each batch and the total.
+
+Migration `20261101182508_search_term_queue` creates `search_term_queue`, the items whose search text has changed since each project's word counts were last written.
+The related-terms refresh counted every issue, document, comment, ask and message of every project every ten minutes, 1,882 s of database time in the 24 hours to 2026-10-30;
+with this table it applies what changed and counts a project again only where no pass of this build has counted it.
+Each row names the kind of item, the item
+— a comment, an ask and a message by their own id, an issue by its key, a document by its artifact
+— and the issue or the artifact whose project it takes, all copied from the row the trigger was handed, so a pass finds the project of an item that has since been deleted.
+It carries the vector the item held before the change, which is what a pass subtracts, and the `pg_current_xact_id()` of the transaction that wrote it, which is what tells a change a pass's own snapshot sees from one committed after it.
+The table declares no foreign key, to any table:
+a `references` makes the census size the table it points at, and a key to an item would refuse the very row a delete queues.
+Both statements lock only the table this migration creates, which no other session can reach before the commit, so it takes milliseconds.
+Its census answers `0`: the table is new and the migration reads no other.
+No operator follow-up — the queue starts empty, and the first pass of this release counts every project in full, so nothing is owed for the writes made before it.
+
+Migration `20261101182515_search_term_totals_snapshot` adds `snapshot pg_snapshot` and `snapshot_at timestamptz` to `search_term_totals`, both nullable and with no default.
+Every pass of this release writes `items`, `refreshed_at`, `snapshot` and `snapshot_at` in the one statement that counts, `refreshed_at` and `snapshot_at` from that statement's `statement_timestamp()` and `snapshot` from the `pg_current_snapshot()` it takes there, and then drops exactly the queue rows that snapshot sees.
+A later pass applies the queue on top of those counts only where the row is its own work, which is `snapshot is not null and refreshed_at is not distinct from snapshot_at`; otherwise it counts the project again.
+The signal is that comparison and not a null snapshot, because the release before this one updates `items` and `refreshed_at` alone and leaves this release's snapshot in place, so during a roll a rule keyed on a null snapshot would apply the queue on top of counts that rebuild already held.
+Adding a nullable column with no default writes `pg_attribute` and rewrites no row;
+the `ACCESS EXCLUSIVE` it takes on `search_term_totals`, one row per project, is held for that catalog write alone.
+Its census answers `0`: it reads no row, rewrites none and refuses none, and every row already there reads as the null snapshot of a project this release has not counted yet.
+No operator follow-up.
+
+Migration `20261101182522_search_term_queue_triggers` creates the five functions and the five triggers that fill `20261101182508`'s queue:
+`asks` on `insert or delete or update of question, options, answer, search`, `comments` on `body, search`, `issues` on `key, title, search`, `messages` on `body, search` — the columns each item's search vector is built from (`0057`–`0061`) and the vector itself, since a write that sets `search` directly is a change to what the project holds and nothing else would see it
+— and `document_search` on `insert or update of search`, which is where a document's change is taken from, because `20261101182447`'s table already holds exactly the vector the refresh counts and `20261101182454`'s trigger writes it inside the `artifact_versions` write.
+The event broker advances `issues.last_seq` and `artifacts.last_seq` on every event and neither column is in a list here, so an event append queues nothing.
+Each trigger is one insert that reads no row, which is what holds the writes to the 10% this change allows them.
+Eleven statements, a `set` and then each a `create function` or a `create trigger`, which is what exempts the migration from the census's table-size limit (`internal/pgmigrate/exempt.go`):
+the exemption is per migration and not per table, so one migration carries all five where five would have taken five lock windows and four more migrations.
+`create trigger` takes `SHARE ROW EXCLUSIVE` on its table
+— reads are not held, writes wait for the commit
+— and the five are taken in one fixed order, `asks`, `comments`, `issues`, `messages`, then `document_search`, so two migrations written to this rule cannot each hold a lock the other waits for.
+The four item tables are small (the census of 2026-10-30 gives `comments` 110 MiB and `messages` 20 MiB), and the functions, which lock no table, are created first, so the lock window is the five `create trigger` statements alone.
+The migration still holds each table's lock while it waits for the next, and a live writer that writes two of these tables in the other order closes a cycle with it:
+a comment write that goes on to write `asks`, as for `0066`, or a version write, whose insert takes `document_search` through `20261101182454`'s trigger and whose task-progress update then takes `issues`.
+So it sets its own `lock_timeout` of 500 ms, shorter than `deadlock_timeout` (1 s by default), as `0066` does:
+it gives up first (`55P03`, nothing applied), the writer finishes, and the runner applies it again, `pgmigrate.LockTimeoutAttempts` times, three, two seconds apart, then at the next boot.
+The cost is `0066`'s too: a holder that outlasts half a second on every attempt fails that boot, an autovacuum of `asks`, `comments`, `issues` or `messages` among them where `deadlock_timeout` is not shorter, which the census refuses (below);
+the release before keeps serving, and a retry is safe because the failed attempt's transaction rolled back.
+Its census answers `0`: a trigger runs only on later writes and rewrites no row already stored.
+The operator follow-up is the queue itself:
+each row carries a copy of an item's old vector, a 660 KB document's included, so if the refresh loop stops, `select count(*) from search_term_queue` grows, and the recovery is a full build, which the refresh already runs for a project whose snapshot is null.
 
 Migration `20261101183525_graph_edges_ask_parts_and_block_pointers` re-states `graph_edges` once with the arms of both migrations of this release that wrote it.
 `20261101143211` added an ask's parts and `20261101144855` filtered the `block_refs` arm by `block_ref_listed`, each from `0142`'s arms, and timestamps sort them, so the later one replaced the view the earlier one wrote.
 This states every arm of both, and is the arm list a later migration re-states from.
 It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
 It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
+
+Migration `20261102110000_artifact_document_roles` gives `artifacts` a nullable `role`, `verification` for the document an issue holds as `verification.md` and `plan` for its `plan.md`, null for every other document.
+The upload route sets it from the slug when it creates the row and never changes it, as `is_primary` never changes, and the Verification and Plan tabs find their document by it rather than by reading names back.
+Two checks hold it to those two values and to a markdown document of an issue, and the partial unique index `artifacts_issue_role` holds an issue to one document per role.
+The backfill gives the role to the issue documents already stored under those slugs, so the Plan tab works on a plan written before this deploy;
+`artifacts_ref_key_key` (`0009`) makes `<issue key>/<slug>` unique, so no issue holds two of either.
+The column is nullable with no default, so the previous release keeps writing documents with no role, and the add and the backfill take `artifacts` `ACCESS EXCLUSIVE` in the migration's transaction.
+It refuses and rewrites no row; its census answers `0`.
+
+Migration `20261102110100_asks_approval_documents` lets one approval request name more than one document: a spec and its issue's Verification document are approved in one Inbox card, and the human's answer records a review on each.
+`asks.approval` grows a `documents` array, one entry per document with its `artifact_id`, `name`, `version` and `requested_version`, whose first entry is the document the request was opened on;
+`approval.artifact_id`, `name`, `version` and `requested_version` go on holding that first document's four values, so the previous release reads such a request as the one-document request it has always read.
+The backfill writes the array every stored approval already implies, and the trigger `asks_normalize_approval_documents` writes it for a row the previous release inserts or rewrites during a rolling deploy;
+the rebuilt `asks_approval_kind_check` then requires the array, each entry held to the bounds the top-level four have always been held to.
+`asks_open_approvals` (`0014`) still indexes the first document alone, and the new `asks_open_approval_documents` indexes every document of an open request, so a read by any of them seeks.
+Every statement locks `asks` alone, the index build taking `SHARE`, so an ask write waits for it; it refuses no stored row and rewrites only the approval blobs it fills in, and its census answers `0`.
+
+Migration `20261102110200_artifact_review_kinds` gives `artifact_reviews` a not-null `kind` defaulted `person`, the other value being `plan_review`: the approval a plan review records of a plan version (`POST /api/v1/artifacts/{id}/plan-reviews`), which no human is ever asked to give.
+A plan review's state is `approved`, so `0120`'s trigger gives its row a sequence as it gives every other review one, and the approval goes stale at a later version exactly as a spec's does.
+The constant default rewrites no row, so the statement holds `artifact_reviews` `ACCESS EXCLUSIVE` for the catalog change alone; its census answers `0`.
+
+Migration `20261102122200_check_results` creates `check_results`, one row per result recorded against a `check` block of an issue's Verification document (`dispatch result`).
+A row names the issue the result was recorded on, the check's own issue, document, block id, that block's `changed_version` and `text_sha256` when the result was recorded, the `role` that ran it, the `surface`, `run`, `observed`, `commit_sha`, `negative_control`, the `failed`, `skipped` and `excluded` counts, the `verdict`, the `screenshots`, the session and actor, and the `event_seq` of the `result.recorded` event on the check's issue.
+The stored digest is what makes a result older when the check's words change: a read compares it with the block's digest now.
+Nothing updates a row — another run is another row — and a table check refuses a `pass` that counts a failed, skipped or excluded case.
+`check_results_check` serves the Verification tab's read of one check's results newest first, and `check_results_issue` an issue's own reads.
+A new table: nothing existing is read, locked or rewritten, the previous release neither reads nor writes it, and its census answers `0`.
+
+Migration `20261102122300_pull_request_heads` creates `pull_request_heads`, the current head of every pull request Dispatch has seen an event for, so a recorded result can say whether it ran at the commit the work stands at.
+This is not `delivery_pull_requests`, which keeps the merged pull requests of the delivery population and no head commit: this table holds open ones too, by any author and in any repository, one row per pull request.
+A row names the `repo` and `number`, the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile last read it through the App.
+An older event arriving after a newer one leaves the row as it is, and the reconcile re-reads an open row older than five minutes.
+It also reads, once each, the merged rows no read of GitHub has ever reached that are attributed to nobody: a `pull_request` envelope naming no head repository attributes nobody, and nothing else looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
+`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread` its merged arm.
+A new table, as above; its census answers `0`.
+
+Migration `20261102122400_default_branch_commits` creates `default_branch_commits`, what Dispatch's GitHub App answered about one commit of one repository: whether the repository's default branch carries it.
+A result for an `after_merge` or `default_branch` check is current only at such a commit, and the answer is read when the results are read, never written by a push, so this cache keeps those reads off GitHub.
+A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
+A new table, as above; its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1450,8 +1673,8 @@ It refuses:
 
 - a table a migration names above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST), whose rows it then does not count:
   a migration that locks a table that size needs another shape (`CONCURRENTLY`, batches).
-  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, or a `create trigger`, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
-  each does its work in the catalog and reads no row of the table, so the time it holds its lock does not grow with the table.
+  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, a `create trigger`, or a `set` or `reset` of a run-time parameter, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
+  each does its work in the catalog or in the session's settings and reads no row of the table, so the time it holds its lock does not grow with the table, and a migration that bounds its own lock wait with `set local lock_timeout` keeps the exemption its other statements earn.
   A function in another language is not exempt, since creating a C function loads its library, which can run any code;
   and no migration is exempt while an enabled event trigger runs on `create function`, `create procedure` or `create trigger`, since it runs code of its own, and the size refusal then names it.
   The report still prints the table's size beside the limit and says why the migration is exempt, and its lock holders refuse it as they refuse any other.
@@ -1473,7 +1696,7 @@ It refuses:
 - an autovacuum worker holding a lock on a touched table, only when Postgres will not cancel it for the migration.
   Postgres cancels an autovacuum that holds a lock another session waits for once that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or without (to a role without it, autovacuum is the holder that runs as no role), except an anti-wraparound vacuum, which Postgres does not cancel, or one on a server whose `deadlock_timeout` is not shorter than a lock timeout the migration waits under:
   the runner's five seconds, or the one its own `SET LOCAL lock_timeout` sets, which Postgres reads in a savepoint of the census's (a value it refuses there refuses the migration).
-  `0066` sets 500 ms, so an autovacuum on `asks` or `comments` refuses it at the default one second.
+  `0066` sets 500 ms, so an autovacuum on `asks` or `comments` refuses it at the default one second, and `20261101182522_search_term_queue_triggers` sets the same, so an autovacuum on `asks`, `comments`, `issues` or `messages` refuses it.
   Postgres marks a vacuum anti-wraparound when it launches it, in its activity, which only a role with `pg_read_all_stats` can read, and which Postgres records only with `track_activities` on;
   where the census cannot read it, it refuses every vacuum of a table past its freeze age (`age(relfrozenxid)` or the multixact age at its `autovacuum_freeze_max_age`), one launched before the table passed it included;
 
@@ -1544,7 +1767,9 @@ An argument `envoy-dispatch` does not know is refused with exit 2, never served,
 
 ## Stored-order check
 
-`envoy-dispatch stored-order [--artifact <uuid>]... [--since <RFC 3339 time>]` reads, and never writes, whether each document's stored history replays: folding its `doc_updates` rows in version order must give every row's `content_changed` (measured against the render the rows before it fold to, true when either side does not render) and every version's markdown at its `doc_update_version`, and no row may leave the fold holding parked structs.
+`envoy-dispatch stored-order [--artifact <uuid>]... [--since <RFC 3339 time>]` reads, and never writes, whether each document's stored history replays: folding its `doc_updates` rows in version order must give every row's `content_changed` (measured against the render the rows before it fold to, true when either side does not render) and every version's markdown at its `doc_update_version`, and no row may be stored ahead of one it depends on.
+A row after which the fold parks structs is that only when no later row carries what it parked again: the room stores a peer's edit that arrives ahead of the edit it builds on at once, so a restart keeps it, and the commit that integrates it once that edit arrives stores it again, so the check folds the history a second time without such rows and reports them as `pending` only when that fold differs.
+A row still parked when the history ends is counted as `awaiting`, not a mismatch: the store alone cannot tell an edit whose predecessor has not arrived from a dependency never stored, and a dependency the room held and the store lost also leaves every later version rendering text the fold lacks.
 It reads `DATABASE_URL` as the other subcommands do and runs no migration; with no `--artifact` it checks every document.
 Each document is read in one repeatable-read transaction, which stays open while the check renders the document at every checked update: tens of thousands of updates hold one snapshot for minutes, and an open snapshot on the primary holds back vacuum.
 On production, pass `--since` or point `DATABASE_URL` at a read replica.
@@ -1560,7 +1785,7 @@ A history a prune rewrote after the base (a checkpoint standing, a gap, a versio
 The check holds only for one renderer: run it from the same commit as the Dispatch whose history it reads.
 A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from this build's render of the same state.
 
-Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=… mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its base and `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
+Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=… mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its base, `awaiting="<reason>"` for one holding rows still parked, and `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
 It prints no document text.
 A document whose check compared no update and no version, one whose versions inside the window all sit below the base included, is `unchecked`, never clean.
 Exit 0 when every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`, unchecked document `--artifact` names, or a run that checked no document at all (an empty database included), 2 on a usage error.
@@ -1749,8 +1974,15 @@ It searches the write's own project in two stages started together:
   if the request that ran it ends first (its client leaving, for a write sent without an `Idempotency-Key`;
   for a keyed write, which no client's leaving ends, the keyed run's own 10-minute bound), it was not made, cancelled (reason `cancelled`), which says nothing of the search's time.
 
-df and N come from `search_term_stats` and `search_term_totals` (`0139`), which the term-statistics refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) rebuilds for every project at boot and every 10 minutes; the check only reads them.
-A word written since the last refresh is counted live, at most 50 per check, and a project with no statistics yet starts a refresh of its own in the background and has every word counted live meanwhile.
+df and N come from `search_term_stats` and `search_term_totals` (`0139`), which the term-statistics refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) keeps up to date for every project at boot and every 10 minutes; the check only reads them.
+Each pass applies what changed: the triggers of `20261101182522` queue every item whose search text a write changed, with the vector it held before, and a pass subtracts that vector, adds what the item holds now, and moves the item count by the items that appeared less those that were there
+— the counts a rebuild from every item would write, for a fraction of its work.
+A pass counts a project from its items again where no pass of this build has counted it:
+a project created since the last pass, a project whose row another writer touched (`20261101182515`), and every project on the first pass after this release is deployed.
+A pass drains a project's whole queue, every row its own snapshot sees, before it moves `refreshed_at`;
+a change committed after that snapshot waits for the next pass, so no change is applied twice and none is lost.
+Each project a pass changes is logged on a line of its own, with `mode=step` or `mode=full` and how many items it applied.
+A word written since the last pass is counted live, at most 50 per check, and a project with no statistics yet starts a refresh of its own in the background and has every word counted live meanwhile.
 
 The result, under `advice.suggestions` (for a decision block, in `advice.decision_block_checks`, one `{block_id, question, suggestions}` per block in document order), always says what the check did.
 `outcome` is `found`, `none` or `not_made`;
@@ -2063,7 +2295,7 @@ Each item below names a path with its method and identity, then its purpose.
   Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`):
   `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus;
   the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds;
-  `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
+  `files`, whether the file store's bucket answers its two-second probe (S3: `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, which a missing object answers healthy) where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
   `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured).
   Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five.
   The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`;
@@ -2082,7 +2314,7 @@ Each item below names a path with its method and identity, then its purpose.
 
   The process's metrics in the Prometheus text format:
   `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
-  the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
+  the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 
@@ -2102,7 +2334,7 @@ Each item below names a path with its method and identity, then its purpose.
 
   Close every open live socket on every process with 4001 (`max age`); not mounted otherwise.
 
-- `/api/v1/agents/{session_id}/stream/_test/publish` (POST; cookie or trusted header (human only); `DISPATCH_TEST_HOOKS=1`)
+- `/api/v1/agents/{session_id}/stream/_test/publish` (POST; cookie, trusted header, or bearer; needs the `person` scope; `DISPATCH_TEST_HOOKS=1`)
 
   Feed every process's in-memory agent relay;
   `as=drop` ends agent views as `dropped`, so the page subscribes again and rebuilds from the replay; not mounted otherwise.
@@ -2122,26 +2354,26 @@ Each item below names a path with its method and identity, then its purpose.
   A socket rotates with 4001 at a random age from 30 to 60 minutes;
   it closes with 1012 on restart, 1008 when its caller stops resolving, and 1013 when the hub queue fills.
 
-- `/api/v1/inbox?project=&assignee=` (GET; cookie or trusted header (human only))
+- `/api/v1/inbox?project=&assignee=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List open asks newest-first, including their issue key, title, and assignee.
   `assignee=me|unassigned|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person;
   an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`.
 
-- `/api/v1/me/answers?limit=&offset=` (GET; cookie or trusted header (human only))
+- `/api/v1/me/answers?limit=&offset=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List the caller's answers and replies on asks, newest first.
   A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link.
   Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row.
   `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`.
 
-- `/api/v1/me/replies?limit=&offset=&issue=|artifact=` (GET; cookie or trusted header (human only))
+- `/api/v1/me/replies?limit=&offset=&issue=|artifact=` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists.
   A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time.
   `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50).
 
-- `/api/v1/me/threads/{id}/read` (PUT; cookie or trusted header (human only))
+- `/api/v1/me/threads/{id}/read` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 
   Move the caller's read mark on one thread forward to `{read_through}`;
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
@@ -2191,17 +2423,17 @@ Each item below names a path with its method and identity, then its purpose.
   `503 GITHUB_APP_UNCONFIGURED` when Dispatch holds no App key, `502 GITHUB_UNREADABLE` naming the repository and GitHub's error on any other failure.
   The Legion daemon asks it for every repository it serves, for `legion state`.
 
-- `/api/v1/settings/project-default-assignees` (GET; cookie or trusted header (human only))
+- `/api/v1/settings/project-default-assignees` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out.
-  Human-only, since the default names a person.
+  It needs the `person` scope, since the default names a person.
 
-- `/api/v1/projects/{key}/default-assignee` (PUT; cookie or trusted header (human only))
+- `/api/v1/projects/{key}/default-assignee` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 
   Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it):
   who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain.
   `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project.
-  Human-only: no agent surface sets it.
+  It needs the `person` scope too, and no agent surface sets it.
 
 - `/api/v1/delivery/session-groups` (POST; cookie, trusted header, or bearer)
 
@@ -2215,24 +2447,27 @@ Each item below names a path with its method and identity, then its purpose.
   or delete it, its sessions showing as themselves again.
   `400 SESSION_GROUP_ID_INPUT` for an id that is not a UUID, `404 NOT_FOUND` for one no group has.
 
-- `/api/v1/me/agent-tokens` (GET, POST; cookie or trusted header (human only))
+- `/api/v1/me/agent-tokens` (GET, POST; cookie, trusted header, or bearer; GET needs the `person` scope, POST `person` and `approve`)
 
-  List personal-token metadata or mint a personal agent token.
+  List personal-token metadata, each row with the `scopes` its token holds, or mint a personal agent token `{name, scopes?}`.
+  `scopes` defaults to the set the caller's own credential holds; a scope this deployment does not know, or `approve` without `person`, is `400 TOKEN_SCOPES_INPUT`, and a scope the caller does not hold itself is `403 OAUTH_SCOPE_REQUIRED`.
 
-- `/api/v1/me/agent-tokens/{id}` (DELETE; cookie or trusted header (human only))
+- `/api/v1/me/agent-tokens/{id}` (PATCH, DELETE; cookie, trusted header, or bearer; needs the `person` and `approve` scopes)
 
-  Revoke a personal agent token.
+  PATCH sets the token's scopes `{scopes}` — the whole set it is to hold, refused as the mint's are — and answers the token; DELETE revokes it.
+  Another person's token, or none, is `404 NOT_FOUND`.
 
-- `/api/v1/users` (GET; cookie or trusted header (human only))
+- `/api/v1/users` (GET; cookie, trusted header, or bearer; needs the `person` scope)
 
   Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options.
 
 - `/api/v1/whoami` (GET; cookie, trusted header, bearer, or a broker-issued DPoP token)
 
-  Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
+  Who the server takes the caller for: `{kind: "user", login, scopes}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project, scopes}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token;
   `service` is a verified service-account token's Kubernetes subject, null for every other credential;
   `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise;
   `project` is the one project key that credential may write, null where it names none).
+  `scopes` is the OAuth scopes the credential holds, `[]` for one that holds none, and every caller is answered it.
 
 - `/api/v1/dashboard/builds` (GET; cookie, trusted header, or bearer)
 
@@ -2314,16 +2549,26 @@ Each item below names a path with its method and identity, then its purpose.
   The answer is `{node, edges}`, the node read and its edges.
   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
-  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
-  and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
-  a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
-  A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
-  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
-  `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
-  `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
-  A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
-  when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
+  What is listed, and from where:
+
+  - A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
+    a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
+    and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
+    a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
+
+  - A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
+    pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
+
+  - `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
+    `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
+
+  - A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
+    when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
+    A caller with no cursor starts from `since=0`, which lists every mention committed before the read that carries a `source_seq`, and after that reads again from the highest `source_seq` an answer showed it.
+    A mention written with no event (a rebuild, a backfill, an older build) carries no `source_seq` until a later write of its source stamps it with that write's event, and until then only a read without `since` lists it.
+    A signed-in page may start from `GET /auth/whoami`'s `event_head` instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from `0`.
+    Never take a `since` from `max(events.id)` read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later.
+    An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.
 
 - `/api/v1/block-links?from=&to=` (GET; cookie, trusted header, or bearer)
 
@@ -2388,7 +2633,7 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/asks/{id}` (PATCH; cookie, trusted header, or bearer)
 
   Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask.
-  A bearer caller must be the asking session; a human may edit any open ask.
+  A credential holding the `person` scope may edit any open ask, and somebody else's is recorded as the person with the agent beside them; every other must be the asking session, whose own reword is recorded as that session, as it always was.
   The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`.
   Anchors are selected when the ask is created and cannot be changed by this route.
   On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it.
@@ -2401,7 +2646,7 @@ Each item below names a path with its method and identity, then its purpose.
   Text past what one write's markdown may make - weighed before it is rendered, an element for each backslash, `*`, `_`, `~`, backtick, `[`, `]` and `<` and two for each line feed, then as its markdown parses - is `413 CAP_EXCEEDED`.
   An edit of a block ask that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and the ask keeps its text.
 
-- `/api/v1/asks/{id}/answer` (POST; cookie or trusted header)
+- `/api/v1/asks/{id}/answer` (POST; cookie, trusted header, or bearer; needs the `person` scope, and `approve` besides for an ask of kind `approval`)
 
   Answer an open ask, or change the current answer with `expected_answer_at` set to that answer's `at`.
   Without it an answered ask is `409 ASK_CLOSED`.
@@ -2451,7 +2696,7 @@ Each item below names a path with its method and identity, then its purpose.
   While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing.
   `400 COMMENT_ID_INPUT` for a non-uuid id.
 
-- `/api/v1/comments/{id}` (PATCH; cookie or trusted header)
+- `/api/v1/comments/{id}` (PATCH; cookie, trusted header, or bearer; needs the `person` scope)
 
   Edit a comment body.
   Human authors only.
@@ -2464,18 +2709,18 @@ Each item below names a path with its method and identity, then its purpose.
 
   Resolve a comment.
 
-- `/api/v1/comments/{id}/reopen` (POST; cookie or trusted header)
+- `/api/v1/comments/{id}/reopen` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Reopen a resolved thread-root comment.
 
-- `/api/v1/comments/{id}/accept` (POST; cookie or trusted header)
+- `/api/v1/comments/{id}/accept` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Apply and accept an anchored suggestion.
   An accept that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and leaves the suggestion open.
   A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open;
   one removed after it answers `200` with `lost: true`.
 
-- `/api/v1/comments/{id}/reject` (POST; cookie or trusted header)
+- `/api/v1/comments/{id}/reject` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Reject a suggestion.
 
@@ -2498,6 +2743,41 @@ Each item below names a path with its method and identity, then its purpose.
   Read under `GET /api/v1/messages/{id}`'s rule:
   a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`).
   While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing.
+
+- `/api/v1/issues/{key}/results` (GET, POST; cookie, trusted header, or bearer)
+
+  GET lists the `check` blocks of the issue's Verification document in document order:
+  `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
+  Each result carries `currency`: `current`, `older`, or `unknown`.
+  It is `unknown` whenever Dispatch cannot see the repository the check's issue resolves to — it resolves to none, or the App cannot read it — whatever the check's `when`, and whenever a read of Dispatch's own fails:
+  a commit there may head a pull request Dispatch was never able to learn, so it is marked neither current nor older.
+  A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue, and the check's words are the ones it proved.
+  The issue a result was recorded on is read for nothing here, so a child's pull request never makes a result against a check above it current.
+  An `after_merge` or `default_branch` result is current while its commit is on the default branch of that repository.
+  Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
+  An issue with no Verification document answers no checks.
+
+  POST records one result: `{check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?, actor?}`.
+  `{key}` is the issue the result is recorded on; `check` names a check of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical block reference (`409 CHECK_AMBIGUOUS`); any other id is `400 UNKNOWN_CHECK`.
+  `role` is at most 32 characters of `[a-z-]`, `verdict` is `pass` or `fail`, `commit` is 40 lowercase hex, and absent counts are 0; a `pass` counting any failed, skipped or excluded case is `400 RESULT_CONTRADICTS`, and any other malformed field `400 RESULT_INPUT`.
+  A screenshot names an image document of the recording issue or of the check's issue.
+  The result is appended as `result.recorded` on the check's own issue, naming the recording issue.
+  A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.
+  The answer is `{result, line}`, `line` the pull-request body line the result implies, which carries no link to Dispatch.
+
+- `/api/v1/issues/{key}/coverage` (GET; cookie, trusted header, or bearer)
+
+  What each requirement of the issue's spec lacks: `{issue, spec_artifact_id, has_plan, requirements, gaps}`.
+
+  A requirement is a `requirement` block of the spec, and `requirements` lists them in document order, each with its block reference, its words, and how many `check` and `plan_task` blocks name it in `serves`.
+
+  A block counts when it is in any document of the issue or of any descendant issue, at any status; the descendants are one recursive `child_of` walk bounded by `refs.IssueDepthCap` (`refs.IssueDescendants`).
+
+  `gaps` is one line per gap, `<block id> has no check` and `<block id> has no plan task`, the second only once the issue has a plan document, or the single line `the spec marks no requirements` for a spec that marks none.
+
+  Nothing is ever refused for a gap.
+
+  This is not `GET /api/v1/search/coverage`, which reports how much of what meaning search ranks carries a vector.
 
 - `/api/v1/issues/{key}/handoffs/{phase}` (POST; bearer (an agent session naming itself in `actor`))
 
@@ -2527,6 +2807,9 @@ Each item below names a path with its method and identity, then its purpose.
   Any other file's kind is read from its bytes, never from the part's declared `Content-Type`:
   it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image.
   An upload's name finds the issue's artifact whose name or slug it is, so a name that is an artifact's slug (`plan-md` for `plan.md`) is that artifact's next version, never a second artifact the same reference would also name.
+  A document an issue first holds under `verification.md` or `plan.md` carries that role (`artifacts.role`, `verification` or `plan`), which the row keeps for good: a later upload of the same name is that document's next version, and no upload moves a role.
+  An issue holds at most one document of each role, and the issue read names both (`verification_artifact_id` and `plan_artifact_id`), as the Verification and Plan tabs find them.
+  A role decides what a document is for: `POST /api/v1/artifacts/{id}/plan-reviews` takes only a `plan`, `POST /api/v1/artifacts/{id}/approval-requests` refuses one, and `--include-verification` and `GET .../results` read the `verification` document's `check` blocks.
   A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`, naming the artifact's slug, name and kind.
   A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text;
   an upload under an existing artifact's name, one stored longer included, is never refused for its length.
@@ -2557,7 +2840,7 @@ Each item below names a path with its method and identity, then its purpose.
   Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`:
   the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history.
 
-- `/api/v1/artifacts/{id}/rebuild` (POST; cookie or trusted header (human only))
+- `/api/v1/artifacts/{id}/rebuild` (POST; cookie, trusted header, or bearer; needs the `person` scope)
 
   Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads):
   deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`.
@@ -2603,7 +2886,11 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/artifacts/{id}/approval-requests` (POST; cookie, trusted header, or bearer)
 
   Ask a human to approve a document's latest settled version.
-  The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`;
+  With `include_verification` it asks for the issue's Verification document (`role` `verification`) in the same request, each document at its own current settled version, and the answer records the human's review on each;
+  an issue with no Verification document is `409 NO_VERIFICATION_DOCUMENT`, and one whose Verification document has no settled version is `409 NO_VERSION`.
+  The flag is for the issue's spec alone: on any other document it is `409 NOT_SPEC_DOCUMENT`.
+  A document whose role is `plan` is `409 PLAN_APPROVED_BY_REVIEW`: a plan is approved by its plan review, never by a person.
+  The question is `Approve <name> (version <N>)?`, or `Approve <name> (version <N>) and <name> (version <N>)?` for a request naming two documents, followed by the optional `summary` (blank is `400 SUMMARY_INPUT`;
   past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`).
   A request on a document a human approved earlier names that approval in `ask.approval.approved` (`{version, at, by}`);
   a first request carries no `approved` key.
@@ -2617,6 +2904,17 @@ Each item below names a path with its method and identity, then its purpose.
   an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was.
   While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading.
   It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting).
+  Every answer carries `coverage`, one line per requirement of the issue's spec with no check, or the single line `the spec marks no requirements` for a spec that marks none (`GET /api/v1/issues/{key}/coverage`), and no line at all for a covered spec; it is empty for a document that is not a spec.
+
+  It never names a missing plan task, since the plan comes after the approval; a spec with gaps still opens the request, and a coverage read that failed answers `coverage_unread: true` with no lines.
+
+- `/api/v1/artifacts/{id}/plan-reviews` (POST; cookie, trusted header, or bearer)
+
+  Record a plan review's approval of a plan version: `{version}`, the version the review read.
+  It writes an `approved` review of kind `plan_review` and emits `artifact.approved`, so every read of the document shows it approved and a later version makes it stale, as a spec's approval goes stale.
+  It is `409 NOT_PLAN_DOCUMENT` on any document that is not the issue's plan, the issue's spec included — a document whose `role` is `plan`, or one a rolling deploy left with no role whose slug is `plan-md`, is the plan — `409 NO_VERSION` on a plan with no settled version, and `400 INVALID_REVIEW` for a version the plan does not have.
+  No person is ever asked to approve a plan, which is why `/api/v1/artifacts/{id}/approval-requests` refuses one.
+  A review Dispatch carries to a later version keeps the `kind` of the review it carries, so a plan version restored to the text its plan review approved is still `plan_review` and no carry ever records a plan's approval as a person's.
 
 - `/api/v1/artifacts/{id}/asks?state=` (GET, POST; cookie, trusted header, or bearer)
 
@@ -2809,7 +3107,7 @@ What each node type weighs:
 | `table_header_row`, `table_row` | a row | 3 | block id |
 | `table_header`, `table_cell` | a cell and its paragraph | 4 | block id, alignment, spans |
 | `footnote_definition` | a footnote definition | 3, and 3 when empty | block id, label |
-| `callout`, `ask` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
+| `callout`, `ask`, `requirement`, `plan_task`, `check` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
 | `text` | a run of text; each mark a run carries is the inline syntax that opens it | 1 | none (marks) |
 | `hardbreak` | a hard line break | 3, beside its line's 1 | isInline |
 | `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |

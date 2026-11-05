@@ -750,7 +750,27 @@ type tableAnchorSnapshot struct {
 	markIDs   []string
 }
 
-func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, []pmdoc.MarkRef, bool, error) {
+// tableRowMarks and tableColumnMarks are the marks a row or column deletion would remove, read
+// over the batch's one validation of its tree (batchTree.validated): the pmdoc functions they
+// replaced validated that tree for themselves, and refuse a tree that is no document with the
+// same words this validation gives it.
+func tableRowMarks(tree *batchTree, blockID string, index int) ([]pmdoc.MarkRef, error) {
+	valid, err := tree.validated("TableRowMarks")
+	if err != nil {
+		return nil, err
+	}
+	return valid.TableRowMarks(blockID, index)
+}
+
+func tableColumnMarks(tree *batchTree, blockID string, index int) ([]pmdoc.MarkRef, error) {
+	valid, err := tree.validated("TableColumnMarks")
+	if err != nil {
+		return nil, err
+	}
+	return valid.TableColumnMarks(blockID, index)
+}
+
+func tableAnchorCheck(tree *batchTree, op model.EditOp) (tableAnchorSnapshot, []pmdoc.MarkRef, bool, error) {
 	var (
 		axis  string
 		index int
@@ -762,18 +782,18 @@ func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, [
 		if op.Block == "" {
 			return tableAnchorSnapshot{}, nil, false, nil
 		}
-		index, err = tableIndex(tree, op.Block, "row", op.Index)
+		index, err = tableIndex(tree.node, op.Block, "row", op.Index)
 		if err == nil {
-			marks, err = pmdoc.TableRowMarks(tree, op.Block, index)
+			marks, err = tableRowMarks(tree, op.Block, index)
 		}
 		axis = "row"
 	case "delete_column":
 		if op.Block == "" {
 			return tableAnchorSnapshot{}, nil, false, nil
 		}
-		index, err = tableIndex(tree, op.Block, "column", op.Index)
+		index, err = tableIndex(tree.node, op.Block, "column", op.Index)
 		if err == nil {
-			marks, err = pmdoc.TableColumnMarks(tree, op.Block, index)
+			marks, err = tableColumnMarks(tree, op.Block, index)
 		}
 		axis = "column"
 	default:
@@ -804,7 +824,7 @@ func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, [
 func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
 	snapshots := make([]tableAnchorSnapshot, 0)
 	_, err := applyBatch(newBatchTree(tree), ops, func(current *batchTree, op model.EditOp) error {
-		snapshot, marks, table, err := tableAnchorCheck(current.node, op)
+		snapshot, marks, table, err := tableAnchorCheck(current, op)
 		if err != nil || !table {
 			return err
 		}
@@ -823,7 +843,23 @@ func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, 
 	return snapshots, nil
 }
 
-func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+// tableAnchorRecordsQuery lists the mark ids that the asks and comments anchored on the document
+// bound to $1 record, among the marks bound to $2. Each arm finds its table's rows through that
+// table's anchor index (anchorTarget.anchoredOn), so neither arm scans a table that holds every
+// ask or comment of the instance. The text is built once, at start: it carries no value of its
+// own, and pgx caches a prepared plan per statement text.
+var tableAnchorRecordsQuery = `
+		select anchor->>'mark_id' from asks
+		where ` + asksAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+		union
+		select anchor->>'mark_id' from comments
+		where ` + commentsAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+	`
+
+// tableAnchorMarkIDs are the ids of the marks a table anchor can record: an ask's, a comment's
+// and a suggestion's. A mark of any other type is recorded on no row, so it is left out and the
+// two readers below answer at once when nothing is left.
+func tableAnchorMarkIDs(marks []pmdoc.MarkRef) []string {
 	markIDs := make([]string, 0, len(marks))
 	for _, mark := range marks {
 		switch mark.Type {
@@ -831,16 +867,15 @@ func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axi
 			markIDs = append(markIDs, mark.ID)
 		}
 	}
+	return markIDs
+}
+
+func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := tableAnchorMarkIDs(marks)
 	if len(markIDs) == 0 {
 		return nil
 	}
-	rows, err := s.queryFrom(ctx).Query(ctx, `
-		select anchor->>'mark_id' from asks
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-		union
-		select anchor->>'mark_id' from comments
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-	`, artifactID, markIDs)
+	rows, err := s.queryFrom(ctx).Query(ctx, tableAnchorRecordsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("list table anchor records: %w", err)
 	}
@@ -872,7 +907,7 @@ func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axi
 func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots []tableAnchorSnapshot, before string) error {
 	index := 0
 	_, err := applyBatch(newBatchTree(tree), ops, func(current *batchTree, op model.EditOp) error {
-		snapshot, _, table, err := tableAnchorCheck(current.node, op)
+		snapshot, _, table, err := tableAnchorCheck(current, op)
 		if err != nil || !table {
 			return err
 		}
@@ -893,11 +928,11 @@ func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots 
 
 func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *batchTree, ops []model.EditOp) (editBatch, error) {
 	return applyBatch(tree, ops, func(tree *batchTree, op model.EditOp) error {
-		return s.validateTableEditAnchors(ctx, artifactID, tree.node, op)
+		return s.validateTableEditAnchors(ctx, artifactID, tree, op)
 	}, "")
 }
 
-func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID string, tree *pmdoc.Node, op model.EditOp) error {
+func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID string, tree *batchTree, op model.EditOp) error {
 	var (
 		axis  string
 		index int
@@ -909,18 +944,18 @@ func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID strin
 		if op.Block == "" {
 			return nil
 		}
-		index, err = tableIndex(tree, op.Block, "row", op.Index)
+		index, err = tableIndex(tree.node, op.Block, "row", op.Index)
 		if err == nil {
-			marks, err = pmdoc.TableRowMarks(tree, op.Block, index)
+			marks, err = tableRowMarks(tree, op.Block, index)
 		}
 		axis = "row"
 	case "delete_column":
 		if op.Block == "" {
 			return nil
 		}
-		index, err = tableIndex(tree, op.Block, "column", op.Index)
+		index, err = tableIndex(tree.node, op.Block, "column", op.Index)
 		if err == nil {
-			marks, err = pmdoc.TableColumnMarks(tree, op.Block, index)
+			marks, err = tableColumnMarks(tree, op.Block, index)
 		}
 		axis = "column"
 	default:
@@ -932,27 +967,28 @@ func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID strin
 	return s.rejectLiveTableAnchors(ctx, artifactID, axis, index, marks)
 }
 
-func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
-	markIDs := make([]string, 0, len(marks))
-	for _, mark := range marks {
-		switch mark.Type {
-		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
-			markIDs = append(markIDs, mark.ID)
-		}
-	}
-	if len(markIDs) == 0 {
-		return nil
-	}
-	rows, err := s.queryFrom(ctx).Query(ctx, `
+// activeTableAnchorsQuery names every open ask and unresolved comment that is anchored on the
+// document bound to $1 and records one of the marks bound to $2 - the anchors an edit would
+// take with the table row it removes. Each arm finds its table's rows through that table's
+// anchor index (anchorTarget.anchoredOn) and holds the row open by that table's own predicate
+// (anchorTarget.open), and the text is built once, as tableAnchorRecordsQuery's is.
+var activeTableAnchorsQuery = `
 		select 'ask', id::text, anchor->>'mark_id'
 		from asks
-		where anchor->>'artifact_id' = $1 and state = 'open' and anchor->>'mark_id' = any($2::text[])
+		where ` + asksAnchorTarget.anchoredOn() + ` and ` + asksAnchorTarget.open + ` and anchor->>'mark_id' = any($2::text[])
 		union all
 		select 'comment', id::text, anchor->>'mark_id'
 		from comments
-		where anchor->>'artifact_id' = $1 and not resolved and anchor->>'mark_id' = any($2::text[])
+		where ` + commentsAnchorTarget.anchoredOn() + ` and ` + commentsAnchorTarget.open + ` and anchor->>'mark_id' = any($2::text[])
 		order by 1, 2
-	`, artifactID, markIDs)
+	`
+
+func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := tableAnchorMarkIDs(marks)
+	if len(markIDs) == 0 {
+		return nil
+	}
+	rows, err := s.queryFrom(ctx).Query(ctx, activeTableAnchorsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("list active table anchors: %w", err)
 	}
@@ -1181,7 +1217,11 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		if err != nil {
 			return nil, err
 		}
-		out, err := pmdoc.DeleteTableRow(tree.node, op.Block, index)
+		valid, err := tree.validated("DeleteTableRow")
+		var out *pmdoc.Node
+		if err == nil {
+			out, err = valid.DeleteTableRow(op.Block, index)
+		}
 		return out, invalidTableIndexOp(err)
 	case "delete_column":
 		if op.Block == "" {
@@ -1191,7 +1231,11 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		if err != nil {
 			return nil, err
 		}
-		out, err := pmdoc.DeleteTableColumn(tree.node, op.Block, index)
+		valid, err := tree.validated("DeleteTableColumn")
+		var out *pmdoc.Node
+		if err == nil {
+			out, err = valid.DeleteTableColumn(op.Block, index)
+		}
 		return out, invalidTableIndexOp(err)
 	case "move":
 		if op.Block == "" {
@@ -1218,7 +1262,11 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		case "end":
 			after = true
 		}
-		out, err := pmdoc.MoveBlock(tree.node, op.Block, target, after)
+		valid, err := tree.validated("MoveBlock")
+		var out *pmdoc.Node
+		if err == nil {
+			out, err = valid.MoveBlock(op.Block, target, after)
+		}
 		if errors.Is(err, pmdoc.ErrMoveInsideItself) {
 			return nil, &ErrInvalidOp{Field: field, Reason: err.Error()}
 		}
@@ -1645,7 +1693,11 @@ func insertTarget(tree *batchTree, field, anchor string, occurrence *int) (pmdoc
 		if title == "" {
 			return pmdoc.Range{}, false, invalidOp("heading")
 		}
-		r, err := pmdoc.FindHeading(tree.node, title, occurrence)
+		valid, err := tree.validated("FindHeading")
+		if err != nil {
+			return pmdoc.Range{}, false, err
+		}
+		r, err := valid.FindHeading(title, occurrence)
 		var ambiguous *pmdoc.ErrTargetAmbiguous
 		if errors.As(err, &ambiguous) {
 			return pmdoc.Range{}, false, &ErrAnchorAmbiguous{

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -86,6 +87,12 @@ type Options struct {
 	// serve it on the contract it speaks (staleClaim). Nil is a daemon whose every claim a
 	// relaunch can carry.
 	NoPluginInstall func(c supervise.Claim) bool
+	// CallerPod is the runtime's pod at a request's address: the uid of the project's pod that
+	// holds addr, and false for an address no pod of the project holds (the Sandbox runtime's
+	// PodAt). GET /legion/v1/state authenticates nobody, so this is how it knows which claims'
+	// plugin asked (stateFor). Nil is a runtime that runs no pods, whose every caller is served
+	// the state as this contract writes it.
+	CallerPod func(addr netip.Addr) (string, bool)
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -163,6 +170,14 @@ type Options struct {
 	// store — on a context that outlives the agent's connection, and the route answers the agent
 	// once it has returned.
 	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	// ReleaseRecords is the store's record of what the idle release has done (store.Store), which
+	// the claim route `POST /legion/v1/claims/release-records` serves a pod. Nil answers that route
+	// 500 and changes nothing else.
+	ReleaseRecords ReleaseRecordStore
+	// ClaimActivity records what a claim's session reports it is doing (store.Store), which the
+	// claim route `POST /legion/v1/claims/activity` writes. Nil answers that route 500 and
+	// changes nothing else.
+	ClaimActivity ClaimActivityStore
 }
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
@@ -174,10 +189,26 @@ type TreeLifecycles interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
+// ReleaseRecordStore is the store's idle-release records (store.Store) as the claim route reads
+// them: every release, resume and hold of the project recorded at or after a time.
+type ReleaseRecordStore interface {
+	PodReleaseRecords(ctx context.Context, project string, since time.Time) (store.PodReleaseRecords, error)
+}
+
+// ClaimActivityStore is the store's write of a session's activity report (store.Store) as the
+// claim route makes it: the report lives on the claim's row and nowhere in the claim's machine,
+// so the route reaches it here rather than through the daemon's pool. It answers whether the
+// store holds the claim at all; a report older than the one recorded is dropped and still
+// answers true.
+type ClaimActivityStore interface {
+	PutClaimActivity(ctx context.Context, token claim.Token, activity claim.SessionActivity) (bool, error)
+}
+
 type server struct {
 	state             StateSource
 	stateTransactions StateTransactions
 	consumerLag       func(ctx context.Context) []intake.ConsumerLag
+	callerPod         func(addr netip.Addr) (string, bool)
 	supervisor        Supervisor
 	bootTokens        *BootTokens
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
@@ -216,9 +247,12 @@ type server struct {
 	records    record.Store
 	dispatch   dispatch.Client
 	claimReady func(c supervise.Claim)
-	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
+	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported,
+	// releaseRecordStore Options.ReleaseRecords and claimActivity Options.ClaimActivity.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	releaseRecordStore ReleaseRecordStore
+	claimActivity      ClaimActivityStore
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -241,6 +275,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
 		consumerLag:        opts.ConsumerLag,
+		callerPod:          opts.CallerPod,
 		supervisor:         opts.Supervisor,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
@@ -269,6 +304,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		claimReady:         opts.ClaimReady,
 		promptAgents:       opts.PromptAgents,
 		capabilityReported: opts.CapabilityReported,
+		releaseRecordStore: opts.ReleaseRecords,
+		claimActivity:      opts.ClaimActivity,
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
@@ -303,6 +340,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/ready-for-update", s.readyForUpdate)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
+	mux.HandleFunc("POST /legion/v1/claims/activity", s.activity)
+	mux.HandleFunc("POST /legion/v1/claims/release-records", s.releaseRecords)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)
@@ -475,7 +514,102 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	if s.consumerLag != nil {
 		state.Consumers = ConsumerLagViewsOf(s.consumerLag(r.Context()))
 	}
-	writeJSON(w, http.StatusOK, state)
+	writeJSON(w, http.StatusOK, s.stateFor(r, state))
+}
+
+// stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
+// the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
+// record the plugin contract each registration declared. A plugin reads the state with a strict
+// schema and refuses the whole body for one key it does not know, and an update round serves a
+// claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
+// whose claims record a contract below supervise.PodUpdateContract, the contract that added
+// `updateRound` and `updateHead` to the claim views, is served the state without them
+// (withoutUpdateRounds), which is the body that contract's schema describes. Every later reader
+// takes the two as optional, so the body this serves when the claims cannot be read is the one
+// both read. Any other caller — a pod at this contract, the operator's `legion state`, a tmux
+// pane — is served the state as this contract writes it.
+func (s *server) stateFor(r *http.Request, state State) State {
+	// A state with no update round on any claim view is the body every contract reads, so it is
+	// served as it is with no read of the claims: outside a roll, that is every request.
+	if s.callerPod == nil || s.supervisor == nil || !carriesUpdateRounds(state) {
+		return state
+	}
+	caller, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return state
+	}
+	pod, inPod := s.callerPod(caller.Addr().Unmap())
+	if !inPod {
+		return state
+	}
+	claims, err := s.supervisor.Claims(r.Context())
+	if err != nil {
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round fields, which every plugin contract since 45 reads",
+			"pod", pod, "error", err)
+		return withoutUpdateRounds(state)
+	}
+	if contract := podContract(claims, pod); contract == 0 || contract >= supervise.PodUpdateContract {
+		return state
+	}
+	return withoutUpdateRounds(state)
+}
+
+// carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
+func carriesUpdateRounds(state State) bool {
+	carries := func(v ClaimView) bool { return v.UpdateRound != "" || v.UpdateHead != "" }
+	for _, issue := range state.Issues {
+		if issue.Architect != nil && carries(*issue.Architect) {
+			return true
+		}
+		for _, worker := range issue.Workers {
+			if carries(worker.Claim) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
+// none records one: every role of a pod is served by the plugin that pod runs, and the body the
+// lowest of them reads is one every higher contract reads too.
+func podContract(claims []supervise.Claim, pod string) int {
+	lowest := 0
+	for _, c := range claims {
+		if c.Locator == nil || c.Locator.Sandbox == nil || c.Locator.Sandbox.PodUID != pod || c.PluginContract == 0 {
+			continue
+		}
+		if lowest == 0 || c.PluginContract < lowest {
+			lowest = c.PluginContract
+		}
+	}
+	return lowest
+}
+
+// withoutUpdateRounds is state with no claim view carrying `updateRound` or `updateHead`, the two
+// fields supervise.PodUpdateContract added to the state; nothing else of that contract is on the
+// route but `settings` keys, which every plugin reads loosely. The issue maps are copied, so the
+// state the source answered is left as it was.
+func withoutUpdateRounds(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		if issue.Architect != nil {
+			architect := *issue.Architect
+			architect.UpdateRound, architect.UpdateHead = "", ""
+			issue.Architect = &architect
+		}
+		if issue.Workers != nil {
+			workers := make(map[claim.Role]PhaseView, len(issue.Workers))
+			for role, worker := range issue.Workers {
+				worker.Claim.UpdateRound, worker.Claim.UpdateHead = "", ""
+				workers[role] = worker
+			}
+			issue.Workers = workers
+		}
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

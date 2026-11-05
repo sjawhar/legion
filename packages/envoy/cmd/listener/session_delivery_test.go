@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -42,9 +43,7 @@ func newSessionConsumerRig(t *testing.T) *sessionConsumerRig {
 
 func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sessionConsumerRig {
 	t.Helper()
-	harness := newListenerDeliveryHarnessOn(t, client, listenerTransport(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("unexpected prompt_async request")
-	}))
+	harness := newListenerDeliveryHarnessOn(t, client)
 	delivery := connectSessionDelivery([]string{url}, harness.config.logger)
 	t.Cleanup(delivery.close)
 	if delivery.consumers == nil {
@@ -56,7 +55,7 @@ func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sess
 	}
 	t.Cleanup(observer.Close)
 	delivery.relay = &recordingRelay{}
-	deps := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions, consumers: delivery}
+	deps := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions, consumers: delivery, delivery: &harness.config}
 	mux := http.NewServeMux()
 	registerV1Routes(mux, deps, "test-machine", harness.config.logger)
 	return &sessionConsumerRig{harness: harness, deps: deps, mux: mux, consumers: observer}
@@ -115,6 +114,16 @@ func (rig *sessionConsumerRig) filters(t *testing.T, sessionID string) []string 
 	}
 	slices.Sort(filters)
 	return filters
+}
+
+// startSeq is the stream sequence sessionID's consumer was created at.
+func (rig *sessionConsumerRig) startSeq(t *testing.T, sessionID string) uint64 {
+	t.Helper()
+	info, err := rig.consumers.Info(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the consumer of %s: %v", sessionID, err)
+	}
+	return info.Config.OptStartSeq
 }
 
 // awaitPending waits until sessionID's consumer has want messages pending, and fails the test
@@ -222,8 +231,8 @@ func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {
 
 func TestSessionConsumerResumePointOfTheCurrentStreamSeedsTheNewConsumer(t *testing.T) {
 	rig := newSessionConsumerRig(t)
-	// A resume point names a sequence the session wrote; 0 names none, so the first stream
-	// sequence goes to a message of another session's.
+	// A message of another session's takes the first stream sequence, so the resume point below
+	// names a positive sequence (a resume point at 0 has a test of its own).
 	rig.store(t, contracts.AgentSubject("ses_bystander"))
 	resumed := rig.store(t, contracts.AgentSubject("ses_resumed"))
 	foreign := rig.store(t, contracts.AgentSubject("ses_foreign"))
@@ -238,30 +247,86 @@ func TestSessionConsumerResumePointOfTheCurrentStreamSeedsTheNewConsumer(t *test
 	}
 	// The earlier message to the resumed session is pending: its consumer starts after the resume
 	// point. A resume point of another stream starts the consumer at the stream's end.
+	if start := rig.startSeq(t, "ses_resumed"); start != resumed {
+		t.Fatalf("the consumer of ses_resumed starts at %d, want %d, the sequence after its resume point", start, resumed)
+	}
+	if start := rig.startSeq(t, "ses_foreign"); start != foreign+1 {
+		t.Fatalf("the consumer of ses_foreign starts at %d, want %d, the stream's end", start, foreign+1)
+	}
 	rig.awaitPending(t, "ses_resumed", 1)
 	rig.awaitPending(t, "ses_foreign", 0)
+}
+
+// A resume point at 0 of the current stream is a session that holds nothing of the stream, such
+// as a cursor at 0 on a stream that was empty: its new consumer starts at sequence 1, and the
+// session receives every message stored for it before it registered, from the first, once and in
+// stream order.
+func TestSessionConsumerResumePointAtZeroOfTheCurrentStreamDeliversFromTheFirstSequence(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_resumed_at_zero"
+	agent := contracts.AgentSubject(sessionID)
+	var stored []contracts.Envelope
+	for want := uint64(1); want <= 3; want++ {
+		item, seq := rig.storeEvent(t, agent)
+		if seq != want {
+			t.Fatalf("the stream stored the session's message %d at sequence %d, want %d", want, seq, want)
+		}
+		stored = append(stored, item)
+	}
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+
+	answer := rig.subscribe(t, `{"session_id":"`+sessionID+`","self_subscribed":true,"topics":[],
+		"delivery":{"consumer":true,"epoch":"e","resume":{"stream_id":"`+rig.streamID(t)+`","seq":0}}}`)
+
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" || answer.Delivery.Gap == nil || *answer.Delivery.Gap {
+		t.Fatalf("answer %s, want delivery mode consumer with gap false", answer.raw)
+	}
+	if start := rig.startSeq(t, sessionID); start != 1 {
+		t.Fatalf("the consumer of %s starts at %d, want 1, the sequence after its resume point at 0", sessionID, start)
+	}
+	if start := rig.entry(t, sessionID).ConsumerStart; start != 1 {
+		t.Fatalf("the session entry of %s records consumer start %d, want 1", sessionID, start)
+	}
+	frames := standIn.collect(t, len(stored), 5*time.Second)
+	requireFrames(t, frames, stored...)
+	if frames[0].seq != 1 {
+		t.Fatalf("the first frame carries stream sequence %d, want 1: %v", frames[0].seq, frameEvents(frames))
+	}
+	standIn.none(t, time.Second)
+}
+
+// A registration with no resume point it can use creates the session's consumer at the stream's
+// end, so a message stored for the session before it registered is in no consumer: one with no
+// resume point, one whose resume point carries no seq, and one whose resume point at 0 names
+// another stream.
+func TestSessionConsumerRegistrationWithoutAUsableResumePointStartsAtTheStreamsEnd(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	sessions := []struct{ sessionID, resume string }{
+		{"ses_no_resume", ``},
+		{"ses_resume_without_seq", `,"resume":{"stream_id":"` + rig.streamID(t) + `"}`},
+		{"ses_resume_of_another_stream", `,"resume":{"stream_id":"another-stream","seq":0}`},
+	}
+	var end uint64
+	for _, registration := range sessions {
+		end = rig.store(t, contracts.AgentSubject(registration.sessionID))
+	}
+
+	for _, registration := range sessions {
+		answer := rig.subscribe(t, `{"session_id":"`+registration.sessionID+`","self_subscribed":true,"topics":[],
+			"delivery":{"consumer":true,"epoch":"e"`+registration.resume+`}}`)
+		if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+			t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+		}
+		if start := rig.startSeq(t, registration.sessionID); start != end+1 {
+			t.Fatalf("the consumer of %s starts at %d, want %d, the stream's end", registration.sessionID, start, end+1)
+		}
+		rig.awaitPending(t, registration.sessionID, 0)
+	}
 }
 
 func jsonUint(n uint64) string {
 	encoded, _ := json.Marshal(n)
 	return string(encoded)
-}
-
-// A session on a serving port gets a consumer at registration with no delivery field, since a
-// session registered with a port asks nothing; its answer says so.
-func TestSessionConsumerServingPortRegistrationGetsAConsumer(t *testing.T) {
-	rig := newSessionConsumerRig(t)
-	const sessionID = "ses_serving"
-
-	answer := rig.subscribe(t, `{"session_id":"ses_serving","port":4096,"host":"127.0.0.1","topics":["notifications.github.acme.repo.pr.1"]}`)
-
-	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" || answer.Delivery.Subject != bus.DeliverSubject(sessionID) {
-		t.Fatalf("answer %s, want delivery mode consumer on the session's relay subject", answer.raw)
-	}
-	want := []string{"notifications.agent." + sessionID, "notifications.github.acme.repo.pr.1"}
-	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
-		t.Fatalf("consumer filters %v, want %v", got, want)
-	}
 }
 
 func TestSessionConsumerInvalidSessionIDAnswersCore(t *testing.T) {
@@ -325,7 +390,7 @@ type recordingRelay struct {
 	calls []string
 }
 
-func (r *recordingRelay) registered(sessionID string, epochChanged bool) {
+func (r *recordingRelay) registered(sessionID string, epochChanged bool, _ uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	call := sessionID + " same epoch"
@@ -354,6 +419,109 @@ func TestSessionConsumerRegistrationTellsTheRelayWhenTheEpochChanges(t *testing.
 	if !slices.Equal(relay.calls, want) {
 		t.Fatalf("relay heard %v, want %v", relay.calls, want)
 	}
+}
+
+// awaitLockUsers waits up to 10 s for exactly n callers to hold or wait for sessionID's consumer
+// lock: a test that holds it learns that the call it started waits for it (2), and that the call
+// is done with it (0).
+func awaitLockUsers(t *testing.T, locks *sessionLocks, sessionID string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		locks.mu.Lock()
+		users := 0
+		if held := locks.locks[sessionID]; held != nil {
+			users = held.users
+		}
+		locks.mu.Unlock()
+		if users == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d callers hold or wait for the consumer lock of %s after 10s, want %d", users, sessionID, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// followWhileLocked stores topic as sessionID's interest and sets its consumer's filter to it, as a
+// registration following topic does under the session's consumer lock, which the caller holds.
+func followWhileLocked(t *testing.T, rig *sessionConsumerRig, sessionID, topic string) {
+	t.Helper()
+	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+		t.Fatalf("store %s's interest in %s: %v", sessionID, topic, err)
+	}
+	if err := rig.deps.consumers.consumers.UpdateFilter(context.Background(), sessionID, sessionConsumerFilter(sessionID, []string{topic})); err != nil {
+		t.Fatalf("set the filter of %s's consumer: %v", sessionID, err)
+	}
+}
+
+// requireFilters fails the test unless sessionID's consumer filters on its agent subject and topic.
+func requireFilters(t *testing.T, rig *sessionConsumerRig, sessionID, topic string) {
+	t.Helper()
+	want := []string{contracts.AgentSubject(sessionID), topic}
+	slices.Sort(want)
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("the consumer of %s filters on %v, want %v: the stored topics as they stood when its filter was last written", sessionID, got, want)
+	}
+}
+
+// postAsync posts body to path on rig's routes on a goroutine of its own and returns the channel
+// its status arrives on.
+func postAsync(rig *sessionConsumerRig, path, body string) <-chan int {
+	status := make(chan int, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+		status <- recorder.Code
+	}()
+	return status
+}
+
+// A registration sets its consumer's filter to the session's stored topics as they stand under the
+// session's consumer lock, not as it stored them: a registration that waited for the lock while
+// another call stored a newer topic set and wrote its filter does not put its older set back over
+// it.
+func TestSessionConsumerRegistrationWritesTheTopicsStoredWhenItHoldsTheLock(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const sessionID = "ses_register_stale"
+	const followed = "notifications.dispatch.issue.REGISTERSTALE.>"
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+
+	unlock := rig.deps.consumers.locks.lock(sessionID)
+	answered := postAsync(rig, "/v1/interests/subscribe", consumerRegistration(sessionID, "epoch-1"))
+	// The registration has stored its topics, none, and waits for the lock to write its filter.
+	awaitLockUsers(t, &rig.deps.consumers.locks, sessionID, 2)
+	followWhileLocked(t, rig, sessionID, followed)
+	unlock()
+	if status := <-answered; status != http.StatusOK {
+		t.Fatalf("the registration answered %d, want 200", status)
+	}
+
+	requireFilters(t, rig, sessionID, followed)
+}
+
+// An unsubscribe sets the consumer's filter to the session's stored topics as they stand under the
+// session's consumer lock, not as it read them before it took the lock: a registration that stored
+// a topic and wrote its filter while the unsubscribe waited keeps that topic.
+func TestSessionConsumerUnsubscribeWritesTheTopicsStoredWhenItHoldsTheLock(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const sessionID = "ses_refollow_stale"
+	const dropped = "notifications.dispatch.issue.REFOLLOWDROPPED.>"
+	const followed = "notifications.dispatch.issue.REFOLLOWSTALE.>"
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", dropped))
+
+	unlock := rig.deps.consumers.locks.lock(sessionID)
+	answered := postAsync(rig, "/v1/interests/unsubscribe", `{"session_id":"`+sessionID+`","topics":["`+dropped+`"]}`)
+	// The unsubscribe has removed its topic and waits for the lock to write the filter.
+	awaitLockUsers(t, &rig.deps.consumers.locks, sessionID, 2)
+	followWhileLocked(t, rig, sessionID, followed)
+	unlock()
+	if status := <-answered; status != http.StatusOK {
+		t.Fatalf("the unsubscribe answered %d, want 200", status)
+	}
+
+	requireFilters(t, rig, sessionID, followed)
 }
 
 // subscribeExceptionLanes subscribes over core NATS to every exception lane, through conn.

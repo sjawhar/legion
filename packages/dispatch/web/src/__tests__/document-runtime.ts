@@ -1,6 +1,8 @@
+import type { BlockMark } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
+import { installTypedBlocks } from "../features/doc/ask-block";
 import type {
   ConnectDocument,
   ConnectionCallbacks,
@@ -18,6 +20,8 @@ import type { PendingState } from "../features/doc/pending-sync";
 import type { DocumentRuntimeValue } from "../features/doc/runtime";
 
 export interface FakeEditor {
+  /** Each set of block marks the host handed the editor (`setBlockMarks`), in order. */
+  blockMarks: BlockMark[][];
   /** How many times the host asked to comment on the selection. */
   commented: number;
   destroyed: boolean;
@@ -98,6 +102,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       root.setAttribute(name, value);
     }
     const editor: FakeEditor = {
+      blockMarks: [],
       commented: 0,
       destroyed: false,
       focused: [],
@@ -144,6 +149,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         return { refused: "missing" as const };
       },
       setActiveBlocks() {},
+      setBlockMarks(marks: readonly BlockMark[]) {
+        editor.blockMarks.push([...marks]);
+      },
       setActiveMarks() {},
       setMarkdown(markdown: string) {
         editor.markdown = markdown;
@@ -173,6 +181,15 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         },
       },
     } as unknown as EditorHandle;
+    // The real `createEditor` installs Dispatch's node views once the editor library has
+    // loaded (`features/doc/editor.ts`); the fake stands in for that call too, so a test reads
+    // the same `viewProps.nodeViews` the host would.
+    installTypedBlocks(
+      handle.view,
+      options.blockSchema,
+      options.onAskBlockHosts,
+      options.watchPicture
+    );
     editors.push(editor);
     return handle;
   };

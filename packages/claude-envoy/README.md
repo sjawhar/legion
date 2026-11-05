@@ -261,13 +261,14 @@ human approval surface.
 
 ## Skills
 
-The plugin ships seven skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
+The plugin ships eight skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
 `claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs`, `claude-envoy:asd-ste100`,
-`claude-envoy:outside-message` and `claude-envoy:plain-words`.
+`claude-envoy:outside-message`, `claude-envoy:plain-words` and `claude-envoy:agent-secrets`.
 The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
 ASD-STE100 rules for text a person reads; `outside-message` holds the steps and the approval before text
-reaches a person outside the company, and `plain-words` the empty verb phrases to delete from any text a
-person reads.
+reaches a person outside the company; `plain-words` the empty verb phrases to delete from any text a
+person reads, and `agent-secrets` the secrets broker's client, which gives a credential to one command
+in that command's environment, so no value reaches your shell or your transcript.
 `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
 stays their only source; Claude Code copies each target into the plugin cache at install. With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
@@ -275,7 +276,7 @@ on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentSta
 `hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
 reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message` and `plain-words` are the seven a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message`, `plain-words` and `agent-secrets` are the eight a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
 skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the
@@ -556,7 +557,7 @@ To exercise an unmerged checkout the way the marketplace would install it, regis
 marketplace with a `command` source in copy mode whose command builds a copy of the plugin with
 `bun packages/claude-envoy/scripts/build.ts --out <dir>` (a new or empty directory outside the
 repository, without `node_modules`) and prints it, install `claude-envoy@<dev-marketplace>`, and
-run the smoke against that entry. Never `claude plugin marketplace add sjawhar/legion#<branch>`: the
+run the smoke against that entry. Never `claude plugin marketplace add cybermonklabs/legion#<branch>`: the
 marketplace name comes from the repository's `marketplace.json` and would replace the real
 `legion-plugins` registration.
 

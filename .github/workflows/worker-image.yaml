@@ -59,12 +59,12 @@ on:
   workflow_dispatch:
     inputs:
       pi_legion_version:
-        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary
+        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary and to set as /opt/legion/pi-legion's manifest version in the image
         type: string
         required: false
         default: ""
       pi_envoy_version:
-        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary
+        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary and to set as /opt/legion/pi-envoy's manifest version in the image
         type: string
         required: false
         default: ""
@@ -197,11 +197,11 @@ jobs:
           # the mechanism behind the job-log leak the env block below already guards against.
           # provenance: false keeps this build's own attestation empty, but not that; false here
           # too is what actually stops the event payload reaching a predicate at all. image= is the
-          # driver's own default BuildKit image: ghcr.io/sjawhar/legion/ci, the copy of
+          # driver's own default BuildKit image: ghcr.io/cybermonklabs/legion/ci, the copy of
           # moby/buildkit:buildx-stable-1 (.github/ci-images.yaml).
           driver-opts: |
             provenance-add-gha=false
-            image=ghcr.io/sjawhar/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+            image=ghcr.io/cybermonklabs/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -317,7 +317,7 @@ jobs:
   # It attests this run's own build, or, in an attest-only call, the digest attest_digest names,
   # which this call did not build; a build-only call (skip_attest) skips it. Any repository can call
   # this public reusable workflow with any attest_digest, but such an attestation names the caller's
-  # repository as its source and is stored there, so that command (`--repo sjawhar/legion`,
+  # repository as its source and is stored there, so that command (`--repo cybermonklabs/legion`,
   # `--cert-identity …/worker-image.yaml@refs/heads/main`, `--source-ref refs/heads/main`) refuses
   # it. release.yaml's own attest-only call attests only the digest its build-only call pushed in
   # the same run. `!cancelled()` lets it run past the build job an attest-only call skips.

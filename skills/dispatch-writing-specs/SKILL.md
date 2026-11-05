@@ -1,15 +1,15 @@
 ---
 name: dispatch-writing-specs
-description: "Use in a session with Dispatch before you write or change a spec, and before an ask, comment or message a person reads. It replaces superpowers' brainstorming there."
+description: "Use in a session with Dispatch before you write or change a spec, ask, comment or message a person reads. It replaces superpowers' brainstorming there."
 ---
 
 # Writing specs
 
 ## The conversation
 
-Reach shared understanding at the least cost of the person's time. A spec is a conversation with them, not a document you write and then ask about. A Legion phase worker writes none (`skill://legion-worker`). In order:
+Reach shared understanding with the person at the least cost of their time. A spec is a conversation, not a document you write and then ask about. A Legion phase worker writes none (`skill://legion-worker`). In order:
 
-1. Research: read the issue, the code and what the person has written.
+1. Read the issue, the code and what the person wrote.
 2. Send what you found and the questions it leaves open, a few at a time, before the spec states a design.
 3. Write each part only after the answers it rests on.
 4. A wrong premise or a changed request changes the request first.
@@ -23,12 +23,12 @@ Part | Content
 `Summary` | The change in the reader's terms, at most 100 words
 `Problem` | What goes wrong, for whom, with counts
 `Goals and non-goals` | What is in and out of scope
-`Requirements` | `**R1.**` on, each naming its source (`From:`)
-`Design` | How it meets them; a value and reason for each limit, size and time
-`Decisions` | One line naming `decisions.md`
-`Acceptance` | `**A1.**` on, each naming the requirements it tests
+`Requirements` | a `:::requirement` block each, `**R1.**` on, its source (`From:`)
+`Verification` | the issue's `verification.md`, a `:::check` block each: `serves`, `surface`, `run`, `when`, `negative_control`
+`Design` | How it meets them; a value and its reason for each limit, size and time
+`Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
 
-Another agent can build and check the work from the spec alone; a small change gets a few sentences per part.
+`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into children.
 
 ## Rules for the text
 
@@ -38,7 +38,7 @@ For each spec, ask, comment and message:
 - Write about the current design, never the person or how people reached it, and never quote or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence citing a gate that passed (test, review, check, proof) says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
+- A sentence citing a gate that passed (test, review, check) says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name a new reader may not know, and what each issue you name does for them.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
@@ -47,7 +47,7 @@ For each spec, ask, comment and message:
 
 - Name the concrete case and its numbers, then the choice in those terms, never "Which option?".
 - A choice inside what the person asked for, or one their messages favour, is yours.
-- Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
+- Ask only for the person's authority, taste or risk appetite, when the options differ on what they care about.
 - Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options, answerable on a phone.
 
 ## Each version
@@ -59,7 +59,7 @@ For each spec, ask, comment and message:
 
 ## Decisions
 
-Each choice you made alone, and each a person made in an answered ask, is a `##` section of `decisions.md`; the spec's line is `The decisions are in dispatch://KEY/artifact/decisions-md.`
+Choices—answered asks included—earn `decisions.md` `##` sections only if a disagreeing reader would act differently; keep others to one spec line each.
 
 - The heading names the choice; the text gives the reason and the options weighed.
 - Link each spec block it shaped, `dispatch://KEY/spec#b-<id>`, and a person's decision its ask, `dispatch://KEY/ask/<id>`.
@@ -72,9 +72,9 @@ Rewrite a spec outside the outline whole in one version, its ask blocks moved wi
 
 ## Approval
 
-- Request approval once: each ask block answered or waived, each claim checked, this version unapproved. Unbuilt acceptance checks never delay it.
-- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment.
+- Request approval of the spec and `verification.md` (`--include-verification`): each ask block answered or waived, each claim checked, this version unapproved. An unrun check never delays it.
+- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment. An exact undo restores approval.
 
 ## The plan
 
-Write the plan with `writing-plans` as the issue's `plan.md`, never a repository file.
+Write the plan with `writing-plans` as the issue's `plan.md`, not a repository file. Each task is a `:::plan_task` block with `serves` and `needs`.

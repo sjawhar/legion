@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AgentStreamResponder } from "./agent-stream";
+import type { BlockAttributeKind } from "./block-schema.generated";
 import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
@@ -20,8 +21,31 @@ export interface ActorOrigin {
   readonly session_title?: string;
 }
 
+/** The OAuth scopes a Dispatch credential can hold, mirroring Go's `model.ScopePerson` and
+ *  `model.ScopeApprove` and the `agent_tokens.scopes` check that stores them: `person` acts as
+ *  the credential's own person on every route a person reaches through the dashboard, and
+ *  `approve` settles what a person settles — a document review, the answer of an approval ask, a
+ *  machine-login decision or revoke, and minting, changing or revoking a personal token. A
+ *  credential holding `approve` holds `person` too. */
+export const DISPATCH_SCOPES = ["person", "approve"] as const;
+export type DispatchScope = (typeof DISPATCH_SCOPES)[number];
+
+/** The agent that made an act for the person it acts for: the session a broker-issued token
+ *  proved, and the personal token presented, by id and name. It is absent wherever the person
+ *  acted themselves, which is every act made at a browser.
+ *
+ *  `scopes` is the set that credential held at the act, recorded with it and never read back
+ *  from the token: a person who narrows a token afterwards narrows what it may do next, and
+ *  does not un-approve what it approved while it held `approve`. */
+export interface ActorAct {
+  readonly session?: string;
+  readonly token_id?: string;
+  readonly token_name?: string;
+  readonly scopes?: DispatchScope[];
+}
+
 export type Actor =
-  | { readonly kind: "user"; readonly id: string }
+  | { readonly kind: "user"; readonly id: string; readonly act?: ActorAct }
   | {
       readonly kind: "session";
       readonly id: string;
@@ -65,45 +89,13 @@ export function serviceSubjectLabel(subject: string): string {
   return subject;
 }
 
-export type BlockAttributeKind =
-  | "string"
-  | "bool"
-  | "enum"
-  | "string[]"
-  | "block[]"
-  | "actor"
-  | "timestamp";
-
-export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
-
-// A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in
-// dispatch-block-ref.ts), each making an edge of the attribute's name (GraphEdgeKind). `targets`,
-// which only a `block[]` attribute carries, limits the types of the blocks it points at; absent
-// or empty, it points at any block.
-export interface BlockAttributeSchema {
-  readonly kind: BlockAttributeKind;
-  readonly choices?: readonly string[];
-  readonly default?: string | boolean | readonly string[];
-  readonly server?: boolean;
-  readonly targets?: readonly string[];
-}
-
-export interface BlockTypeSchema {
-  readonly name: string;
-  readonly content: BlockContentRule;
-  readonly render: "host";
-  readonly attributes: Readonly<Record<string, BlockAttributeSchema>>;
-}
-
-export interface BlockSchema {
-  readonly version: number;
-  readonly types: readonly BlockTypeSchema[];
-}
-
 export interface AgentToken {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
+  /** The OAuth scopes the token holds (`DISPATCH_SCOPES`). A token holding `approve` holds
+   *  `person` too; `[]` is a token that acts as nobody. */
+  readonly scopes: DispatchScope[];
   readonly created_at: string;
   readonly last_used_at: string | null;
   readonly revoked_at: string | null;
@@ -111,6 +103,59 @@ export interface AgentToken {
 
 export interface CreatedAgentToken extends AgentToken {
   readonly token: string;
+}
+
+/** `POST /api/v1/me/agent-tokens`: the new token's name, and the scopes it is to hold. Omitting
+ *  `scopes` gives it the set the minting credential holds itself; `[]` gives it none. A scope the
+ *  minter does not hold is 403 OAUTH_SCOPE_REQUIRED, and `approve` without `person` is 400
+ *  TOKEN_SCOPES_INPUT. The answer is the one time the token's plaintext is shown. */
+export interface CreateAgentTokenInput {
+  readonly name: string;
+  readonly scopes?: DispatchScope[];
+}
+
+/** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set the token is to hold, with the mint's
+ *  refusals. It is required, since it replaces the set rather than adding to it. */
+export interface UpdateAgentTokenScopesInput {
+  readonly scopes: DispatchScope[];
+}
+
+/** What a credential request's kind is, as the secrets broker names it: a secret an agent asked
+ *  its person for, or a machine login a launcher asked to enrol. */
+export type CredentialRequestKind = "agent_secret" | "launcher_credential";
+
+/** A credential request's two possibly-differing session ids, read independently by the broker:
+ *  `request` is the id the request itself stated (an unsigned override in its body at create
+ *  time), `enrollment` is the id its requesting enrollment stated when it enrolled. Either is
+ *  null when that id was never set; a machine login (`launcher_credential`, which has no request
+ *  row and no requesting enrollment) always answers both null. Optional so an older broker's
+ *  response, with no `session` field at all, resolves the same as a request that names neither
+ *  id. */
+export interface CredentialSession {
+  readonly request: string | null;
+  readonly enrollment: string | null;
+}
+
+/** One row of `GET /api/v1/credential-requests?approver=me`: a request the caller may decide,
+ *  as the dashboard's Inbox and `dispatch inbox` both read it. */
+export interface CredentialPendingRow {
+  readonly record_id: string;
+  readonly kind: CredentialRequestKind;
+  /** Secret rule keys, or `[hostname]` for a `launcher_credential`. */
+  readonly identifiers: string[];
+  /** RFC3339. */
+  readonly requested_at: string;
+  readonly session?: CredentialSession;
+  /** An `agent_secret` row's page on the secrets broker, where a person signed in to the broker
+   *  decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's row, and on
+   *  every row from a broker older than that page. */
+  readonly approve_url?: string;
+}
+
+/** `GET /api/v1/credential-requests?approver=me`, which answers null where the deployment has no
+ *  secrets broker. */
+export interface CredentialPendingResponse {
+  readonly pending: CredentialPendingRow[];
 }
 
 export interface Anchor {
@@ -361,6 +406,11 @@ export interface Issue {
   readonly updated_at: string;
   readonly closed_at: string | null;
   readonly primary_artifact_id: string;
+  /** The issue's Verification document, the one created as `verification.md`, and its Plan, the
+   *  one created as `plan.md` (`Artifact.role`); `""` when the issue holds none. Absent from a
+   *  Dispatch older than document roles. */
+  readonly verification_artifact_id?: string;
+  readonly plan_artifact_id?: string;
   readonly last_seq: number;
 }
 
@@ -629,6 +679,11 @@ export interface Artifact {
   readonly name: string;
   readonly kind: "doc" | "image" | "file";
   readonly primary: boolean;
+  /** The part an issue's document plays beside its spec: `verification` for the document created
+   *  as `verification.md`, `plan` for the one created as `plan.md`. It is set when the document
+   *  is created and never changes; absent for every other document and from a Dispatch older
+   *  than document roles. */
+  readonly role?: DocumentRole;
   readonly created_by: Actor;
   readonly created_at: string;
   readonly versions: Version[];
@@ -637,6 +692,15 @@ export interface Artifact {
 }
 
 export type ArtifactReviewState = "approved" | "changes_requested";
+
+/** The part an issue's document plays beside its spec. */
+export type DocumentRole = "verification" | "plan";
+
+/** Who gave a review: `person` for one a person gave, `plan_review` for a plan review's approval
+ *  of a plan version. A review Dispatch carried forward to a later version keeps the kind of the
+ *  review it carried, so a plan version restored to its approved text is still `plan_review`.
+ *  Absent from a Dispatch older than review kinds, which wrote people's reviews alone. */
+export type ArtifactReviewKind = "person" | "plan_review";
 
 /** One human review of a document, pinned to the version it was given on. A review is given one
  *  of three ways: by answering an approval request (`ask_id` names the request), from the
@@ -658,6 +722,7 @@ export interface ArtifactReview {
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
+  readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
 }
 
@@ -687,6 +752,14 @@ export interface ArtifactApproval {
    *  version moved it past the one its agent last handed to the human, or a reply left it with the
    *  agent; `human` otherwise. */
   readonly waiting_on?: AskTurn;
+  /** The latest review's kind, so a reader can say an approval is a plan review's rather than a
+   *  person's; absent while no review stands, and from a Dispatch older than review kinds. */
+  readonly kind?: ArtifactReviewKind;
+  /** Every document the open request covers, each at the version the request names, this one
+   *  included; absent when it covers this document alone. It is the request's own list
+   *  (`AskApprovalDocument`), so each entry carries the `requested_version` the request records
+   *  as well as the version it names. */
+  readonly documents?: AskApprovalDocument[];
 }
 
 /** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
@@ -697,6 +770,46 @@ export interface ApprovalRequestResponse {
   readonly artifact_id: string;
   readonly version: number;
   readonly approval: ArtifactApproval;
+  /** One line per requirement of the issue's spec with no check, or the single line `the spec
+   *  marks no requirements` for a spec that marks none, as `IssueCoverage.gaps` writes them; no
+   *  line at all for a spec every requirement of which has a check, empty for a document that is
+   *  not a spec, and never a missing plan task, since the plan comes after the approval. Absent
+   *  from a Dispatch older than requirement coverage. */
+  readonly coverage?: readonly string[];
+  /** True when the spec's coverage could not be read, so the empty `coverage` is no answer about
+   *  it. The request is recorded either way: a coverage read refuses nothing. Absent otherwise. */
+  readonly coverage_unread?: boolean;
+}
+
+/** What each requirement of an issue's spec lacks, from `GET /api/v1/issues/{key}/coverage`. A
+ *  requirement is a `requirement` block of the spec; it has a check when a `check` block of any
+ *  document of that issue or of any descendant issue, at any status, names it in `serves`, and a
+ *  plan task when a `plan_task` block of that set does. Nothing is ever refused for a gap. */
+export interface IssueCoverage {
+  readonly issue: string;
+  /** The issue's spec document, `""` for an issue that has none. */
+  readonly spec_artifact_id: string;
+  /** Whether the issue has a plan document. Before it has one, a requirement with no plan task
+   *  is no gap. */
+  readonly has_plan: boolean;
+  readonly requirements: readonly RequirementCoverage[];
+  /** One line per gap, `<block id> has no check` and `<block id> has no plan task`, or the
+   *  single line `the spec marks no requirements` for a spec that marks none. */
+  readonly gaps: readonly string[];
+}
+
+/** One `requirement` block of an issue's spec and what serves it. */
+export interface RequirementCoverage {
+  readonly block_id: string;
+  /** The block's reference, `dispatch://<KEY>/spec#b-<id>`. */
+  readonly ref: string;
+  /** The requirement's words, with every link and `dispatch://` reference dropped. */
+  readonly text: string;
+  readonly checks: number;
+  readonly plan_tasks: number;
+  /** This requirement's own gap lines, the ones `IssueCoverage.gaps` carries for it, so a
+   *  reader draws them beside the requirement without parsing the sentence back. */
+  readonly gaps: readonly string[];
 }
 
 export interface ArtifactBlock {
@@ -710,9 +823,26 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+  /** A typed block's attributes in the order its type declares them, which is the order its
+   *  opening line writes them, each value unescaped and unquoted; absent on a block of no
+   *  declared type, on a typed block that carries none, and on every block from a Dispatch
+   *  server older than the listing. */
+  readonly attributes?: readonly BlockAttributeValue[];
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+}
+
+/** One attribute a typed block carries: the name its type declares it under, the value the
+ *  block holds, and the kind the block schema declares that attribute (`BlockAttributeSchema`).
+ *  A reader follows a `block[]` attribute's value as the block references it holds and reads
+ *  every other kind as text, rather than taking a value for a pointer because it reads like
+ *  one: a `check`'s `run` may quote a `dispatch://` URL. Absent from a Dispatch server older
+ *  than the kinds, whose attributes say nothing about what they hold. */
+export interface BlockAttributeValue {
+  readonly name: string;
+  readonly value: string;
+  readonly kind?: BlockAttributeKind;
 }
 
 /** A table block's rows in child order, the header row first, each row and cell placed as
@@ -841,17 +971,33 @@ export interface AskApprovalApproved {
   readonly by: Actor;
 }
 
-/** The document and version an approval ask names. `requested_version` is the version the agent
- *  last handed to the human; a lower value means the agent is revising the moved request.
- *  `approved` names the document's newest approval when the request was opened, so a request to
- *  approve again says which approval it follows; it is absent on a request for a document nobody
- *  has approved. A version move re-encodes the whole approval, so it survives unchanged. */
+/** What an approval ask names: `documents`, one entry per document the request covers, each at
+ *  the version it names. A request opened on a spec with `include_verification` names the spec
+ *  and the issue's Verification document; every other request names one. A document's
+ *  `requested_version` is the version of it the agent last handed to the human; a lower value
+ *  means the agent is revising the moved request. `approved` names the first document's newest
+ *  approval when the request was opened, so a request to approve again says which approval it
+ *  follows; it is absent on a request for a document nobody has approved. A version move
+ *  re-encodes the whole approval, so it survives unchanged.
+ *
+ *  `artifact_id`, `name`, `version` and `requested_version` repeat `documents[0]`, the document
+ *  the request was opened on, so a client that reads one document reads that one. `documents` is
+ *  absent from a Dispatch older than the list. */
 export interface AskApproval {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: number;
   readonly requested_version: number;
   readonly approved?: AskApprovalApproved;
+  readonly documents?: AskApprovalDocument[];
+}
+
+/** One document an approval request names. */
+export interface AskApprovalDocument {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly requested_version: number;
 }
 
 export interface Ask extends AnchorPosition {
@@ -1194,6 +1340,9 @@ export interface AskAnswer {
   readonly selected: string[];
   readonly text: string | null;
   readonly at: string;
+  /** The agent that answered for the person `user` names, absent where the person answered
+   *  themselves. Whether the answer can carry an approval is read from its `scopes`. */
+  readonly act?: ActorAct;
 }
 
 export interface AskResolution {
@@ -2413,9 +2562,120 @@ export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: number;
+  /** Who gave the review; absent from a Dispatch older than review kinds. */
+  readonly kind?: ArtifactReviewKind;
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
+}
+
+/** Whether a recorded result still speaks for the work as it stands: `current` at the commit the
+ *  work stands at and the words the result proved, `older` at an earlier commit or against words
+ *  that have changed since, and `unknown` when the check's issue resolves to no repository or
+ *  Dispatch's GitHub App cannot read it. */
+export type CheckResultCurrency = "current" | "older" | "unknown";
+
+/** One result recorded against a `check` block of an issue's Verification document.
+ *  `issue_key` is the issue it was recorded on, which may be a descendant of `check_issue_key`,
+ *  the issue whose Verification document holds the check. `check_version` and `check_sha256` are
+ *  the block's version and digest when the result was recorded, so a reworded check makes its
+ *  earlier results older. `currency` is computed when the results are read and is absent from
+ *  the record's own answer. */
+export interface CheckResult {
+  readonly id: string;
+  readonly issue_key: string;
+  readonly check_issue_key: string;
+  readonly check_artifact_id: string;
+  readonly check_block_id: string;
+  readonly check_version: number;
+  readonly check_sha256: string;
+  readonly role: string;
+  readonly surface: string;
+  readonly run: string;
+  readonly observed: string;
+  readonly commit_sha: string;
+  readonly negative_control: string;
+  readonly failed: number;
+  readonly skipped: number;
+  readonly excluded: number;
+  readonly verdict: "pass" | "fail";
+  readonly screenshots: readonly string[];
+  readonly session: string;
+  readonly actor: Actor;
+  readonly created_at: string;
+  readonly event_seq?: number;
+  readonly currency?: CheckResultCurrency;
+}
+
+/** When a check runs: before the merge, after it, or against the default branch. The closed
+ *  enum `pmdoc/schema/blocks.json` declares under the `when` attribute's `choices`. */
+export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
+
+/** One `check` block of a Verification document with every result recorded against it, newest
+ *  first. */
+export interface CheckBlock {
+  readonly block_id: string;
+  readonly ref: string;
+  readonly issue_key: string;
+  readonly artifact_id: string;
+  readonly text: string;
+  readonly when: CheckWhen;
+  readonly surface: string;
+  readonly run: string;
+  readonly negative_control: string;
+  readonly version: number;
+  readonly sha256: string;
+  readonly results: readonly CheckResult[];
+}
+
+/** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
+ *  document order. An issue with no Verification document answers no checks. */
+export interface IssueCheckResults {
+  readonly issue: string;
+  /** The issue's Verification document, `""` for an issue that has none. */
+  readonly verification_artifact_id: string;
+  readonly checks: readonly CheckBlock[];
+}
+
+/** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line it
+ *  implies, which Dispatch writes so every writer writes one grammar and which carries no link
+ *  to Dispatch. */
+export interface CheckResultRecorded {
+  readonly result: CheckResult;
+  readonly line: string;
+}
+
+/** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
+ *  them is refused `400 RESULT_CONTRADICTS`. */
+export interface RecordCheckResultInput {
+  readonly actor?: Actor;
+  readonly check: string;
+  readonly role: string;
+  readonly verdict: "pass" | "fail";
+  readonly commit: string;
+  readonly surface?: string;
+  readonly run?: string;
+  readonly observed?: string;
+  readonly negative_control?: string;
+  readonly failed?: number;
+  readonly skipped?: number;
+  readonly excluded?: number;
+  readonly screenshots?: readonly string[];
+}
+
+/** `result.recorded`: one result recorded against a check, appended on the **check's** issue and
+ *  naming in `issue` the issue it was recorded on. */
+export interface CheckResultEventPayload {
+  readonly result_id: string;
+  readonly issue: string;
+  readonly check_issue: string;
+  readonly check_artifact_id: string;
+  readonly check_block_id: string;
+  readonly check_version: number;
+  readonly when: CheckWhen;
+  readonly verdict: "pass" | "fail";
+  readonly role: string;
+  readonly commit_sha: string;
 }
 
 /** A server-owned typed-block attribute was restored from its indexed row. */
@@ -2779,6 +3039,10 @@ export type DispatchEvent =
       readonly payload: BlockInvalidEventPayload;
     })
   | (DispatchEventBase & {
+      readonly type: "result.recorded";
+      readonly payload: CheckResultEventPayload;
+    })
+  | (DispatchEventBase & {
       readonly type: "comment.created";
       readonly payload: CommentEventPayload;
     })
@@ -3007,15 +3271,22 @@ export interface ListUsersResponse {
  *  session the credential itself proved, which only an access token the secrets broker issued
  *  does, and `project` the one project key that credential lets the caller write, null where it
  *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
- *  reads as an older build rather than as null. */
+ *  reads as an older build rather than as null.
+ *
+ *  `scopes` is the OAuth scopes the caller's own credential holds, which decide the routes it may
+ *  call: both of them for a person at a browser, the set its row names for a personal token, and
+ *  `[]` for the shared token and a verified service token, which act as nobody. The kind stays
+ *  `agent` for a personal token holding `person`, because the kind names the credential and not
+ *  the act; the person it acts for is `owner`. */
 export type WhoamiResponse =
-  | { readonly kind: "user"; readonly login: string }
+  | { readonly kind: "user"; readonly login: string; readonly scopes: DispatchScope[] }
   | {
       readonly kind: "agent";
       readonly owner: string | null;
       readonly service: string | null;
       readonly session?: string | null;
       readonly project?: string | null;
+      readonly scopes: DispatchScope[];
     };
 
 export interface CreateAskInput {

@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
 // client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
-// HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
+// HTTP API reference (https://cybermonklabs.github.io/legion/broker/reference/api/) defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
 // per call through a Signer (proofsource.go: an agent box or pod's own key, or a machine session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -67,8 +68,12 @@ var terminalRenewal = struct {
 	LegacyMessage: "not live",
 }
 
+// newClient is the HTTP client every agent-secrets call goes out on, renewals among them. Its
+// whole-call timeout is leasetime.RenewClientTimeout, the same figure the broker's lease bound
+// charges a renewal an outage black-holes: a connection a front door accepts with nothing
+// behind it costs this renewer the whole of it.
 func newClient(baseURL string) *client {
-	return &client{baseURL: baseURL, http: &http.Client{Timeout: 30 * time.Second}}
+	return &client{baseURL: baseURL, http: &http.Client{Timeout: leasetime.RenewClientTimeout}}
 }
 
 // apiError is the broker's {"code":...,"error":...} error envelope, plus the HTTP status it came

@@ -29,6 +29,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -55,6 +56,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -105,6 +107,7 @@ type Runtime struct {
 	adoptTimeout                   time.Duration
 	tokens                         ProvisionTokens
 	gitHubCredential               runtime.GitHubCredential
+	gitHubOwners                   func() []string
 	store                          Store
 	conns                          runtime.Conns
 	launchers                      *launchers
@@ -216,9 +219,10 @@ func configure(opts Options) (*Runtime, error) {
 
 // checkSupervision refuses opts that lack what only supervision reads — launching, relaunching,
 // adopting and sweeping a claim's pod, and making, refreshing and sweeping the repository caches:
-// the provisioning token source, the roles' gh-files function, the store, the connection
-// directory, a worker stream address a pod can dial, the repository caches' configuration and the
-// mapping they follow. A runtime that runs the image probe alone (newProber) reads none of them.
+// the provisioning token source, the roles' gh-files function and the owners it serves them for,
+// the store, the connection directory, a worker stream address a pod can dial, the repository
+// caches' configuration and the mapping they follow. A runtime that runs the image probe alone
+// (newProber) reads none of them.
 func checkSupervision(opts Options) error {
 	refuse := func(format string, args ...any) error { return fmt.Errorf("sandbox runtime: "+format, args...) }
 	switch {
@@ -226,6 +230,8 @@ func checkSupervision(opts Options) error {
 		return refuse("no provisioning token source")
 	case opts.GitHubCredential == nil:
 		return refuse("no github credential function for the roles' gh files")
+	case opts.GitHubOwners == nil:
+		return refuse("no github owners function for the pods' gh directories")
 	case opts.Store == nil:
 		return refuse("no store")
 	case opts.Conns == nil:
@@ -346,9 +352,10 @@ func configureProber(opts Options) (*Runtime, error) {
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
 		testPostgres: opts.TestPostgres,
-		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
+		store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
-		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
+		cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
 	}
 	if len(r.agent) == 0 {
@@ -360,6 +367,9 @@ func configureProber(opts Options) (*Runtime, error) {
 	if r.log == nil {
 		r.log = slog.Default()
 	}
+	// The launchers carry one pod's saved workspace bundle to it before any of its roles start,
+	// and log what they could not carry, so they are built once the runtime's log is settled.
+	r.launchers = newLaunchers(opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored, r.log)
 	// Last, after the logger a failed encoding is reported through: every input is settled above
 	// and none is written again, so each kind's shape is encoded here and only read afterwards.
 	r.podShapes = map[podKind]string{issuePod{}: podShape(r, issuePod{}), controllerPod{}: podShape(r, controllerPod{})}
@@ -651,6 +661,27 @@ func (r *Runtime) storedPod(name string) *corev1.Pod {
 		return nil
 	}
 	return obj.(*corev1.Pod)
+}
+
+// PodAt is the uid of the project's pod whose address is addr, as the synced store holds it, and
+// false for an address no running pod of the project holds: the operator's machine, the daemon
+// itself. A pod's traffic to the daemon's Service keeps the pod's own address, so this is the pod
+// a request from addr came from (api's Options.CallerPod). A pod that has run to its end is passed
+// over, since the address it last held may already be a new pod's.
+func (r *Runtime) PodAt(addr netip.Addr) (string, bool) {
+	for _, obj := range r.pods.GetStore().List() {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		held := append([]corev1.PodIP{{IP: pod.Status.PodIP}}, pod.Status.PodIPs...)
+		for _, ip := range held {
+			if parsed, err := netip.ParseAddr(ip.IP); err == nil && parsed.Unmap() == addr.Unmap() {
+				return string(pod.UID), true
+			}
+		}
+	}
+	return "", false
 }
 
 // ownedBy reports whether p is controller-owned by the Sandbox with uid: the one relationship
@@ -953,6 +984,93 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 		return fmt.Errorf("adopt %s's working copy for %s <%s>: %w", loc.Claim, id.Name, id.Email, err)
 	}
 	return nil
+}
+
+var _ runtime.WorkspaceBundler = (*Runtime)(nil)
+
+// BundleWorkspace has role's shim bundle the unpushed work of the issue workspace every role of
+// the issue shares, over that claim's connection, for a release about to take the pod and its
+// disk away. The role named must be one whose process runs in the issue's own running pod: its
+// shim builds the bundle in the workspace it already works in, so a claim with no locator, one
+// whose pod is not the recorded one, and one with no connection are each a refusal rather than an
+// empty bundle.
+//
+// It is the role's shim that answers, never its launcher, so a release has to ask before it stops
+// the role's process: the idle release's save is a row of its own ahead of its role stops
+// (record.IssueBundle, the daemon's idleReleaseRows), and asking after them refuses with "holds
+// no role process to bundle it".
+func (r *Runtime) BundleWorkspace(ctx context.Context, issue string, role claim.Role) (runtime.WorkspaceBundle, error) {
+	token, err := claim.NewToken(r.project, issue, role)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	claims, err := r.store.Claims(ctx)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	index := slices.IndexFunc(claims, func(c supervise.Claim) bool { return c.Token == token })
+	if index < 0 || claims[index].Locator == nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %s holds no role process to bundle it", issue, token)
+	}
+	loc := *claims[index].Locator
+	if err := r.checkLocator(loc); err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	view, err := r.view(loc.Sandbox.Name)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	if view.pod == nil || string(view.pod.UID) != loc.Sandbox.PodUID || terminal(view.pod) {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %s's recorded role process %s is not in its running issue pod", issue, token, loc.Incarnation)
+	}
+	conn, ok := r.conns.Conn(token)
+	if !ok {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %s has no connection to ask over", issue, token)
+	}
+	bundle, err := conn.BundleWorkspace(ctx, issue, runtime.WorkspaceBundleTimeout)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace over %s: %w", issue, token, err)
+	}
+	// The shim knows nothing of the pod it runs in, and the row the save writes has to: the pod
+	// this work came off is the one pod the restore refuses by name, so that a role relaunched
+	// in it before the teardown is answered nothing and leaves the bundle's one attempt for the
+	// pod that replaces it (store.TakeWorkspaceBundleForRestore). It is the pod checked above,
+	// the running pod the claim's locator records.
+	bundle.PodUID = loc.Sandbox.PodUID
+	return bundle, nil
+}
+
+// RescueUnpushed has the claim's shim run the push check of its issue pod's disk over the claim's
+// connection (internal/rescue): the shim runs git and jj as the role, with the role's gh files
+// answering the clone's credential helper, so no credential leaves the pod and none reaches the
+// daemon. The recorded process must still be the claim's running pod: the connection is its.
+func (r *Runtime) RescueUnpushed(ctx context.Context, k runtime.Known, request runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	if err := k.Validate(); err != nil {
+		return nil, fmt.Errorf("sandbox runtime: push check: %w", err)
+	}
+	if k.Locator == nil {
+		return nil, fmt.Errorf("push check of %s: the claim records no process to ask", k.Claim)
+	}
+	loc := *k.Locator
+	if err := r.checkLocator(loc); err != nil {
+		return nil, err
+	}
+	view, err := r.view(loc.Sandbox.Name)
+	if err != nil {
+		return nil, fmt.Errorf("push check of %s's pod: %w", loc.Claim, err)
+	}
+	if view.pod == nil || string(view.pod.UID) != loc.Sandbox.PodUID || terminal(view.pod) {
+		return nil, fmt.Errorf("push check of %s: its recorded role process %s is not in its running issue pod", loc.Claim, loc.Incarnation)
+	}
+	conn, ok := r.conns.Conn(loc.Claim)
+	if !ok {
+		return nil, fmt.Errorf("push check of %s's pod: the claim has no connection to ask over", loc.Claim)
+	}
+	report, err := conn.RescueUnpushed(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("push check of %s's pod: %w", loc.Claim, err)
+	}
+	return report, nil
 }
 
 // ReconcileOrphans deletes the project's Sandboxes nothing owns, once older than grace. An issue

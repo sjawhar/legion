@@ -16,6 +16,7 @@ import {
   isDocumentSchemaError,
   isDocumentUnloadable,
 } from "../../api/client";
+import { artifactBlocksQuery } from "../../api/queries";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -27,6 +28,7 @@ import {
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
+  textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import {
@@ -52,7 +54,6 @@ import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
-import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
@@ -73,6 +74,7 @@ import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
+import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
@@ -291,9 +293,8 @@ export function ProofDocument({
   const rebuildError = page && admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
   const blockReferencesQuery = useQuery({
+    ...artifactBlocksQuery(artifact.id),
     enabled: version === undefined,
-    queryKey: ["artifact", artifact.id, "blocks"],
-    queryFn: () => api.getArtifactBlocks(artifact.id),
   });
   const versionQuery = useQuery({
     enabled: version !== undefined,
@@ -356,6 +357,21 @@ export function ProofDocument({
     () => versionsNewestFirst(artifactQuery.data?.versions ?? artifact.versions),
     [artifactQuery.data?.versions, artifact.versions]
   );
+  // An issue's live spec on its own page marks the blocks its decisions and the person's last
+  // read call out, and records what it shows as read.
+  const specMarks = useSpecMarks({
+    artifact,
+    enabled: page && version === undefined && artifact.primary && owner.kind === "issue",
+    issueKey: owner.kind === "issue" ? owner.key : "",
+    shownVersion: versions[0]?.number,
+  });
+  // The editor takes the marks when it binds, and every set after that, through its handle:
+  // a class Dispatch wrote into the editor's DOM would be read back as an edit.
+  const blockMarksRef = useRef(specMarks.marks);
+  blockMarksRef.current = specMarks.marks;
+  useEffect(() => {
+    editorRef.current?.setBlockMarks(specMarks.marks);
+  }, [specMarks.marks]);
   isClosedRef.current = isClosed;
   const blockSchema: BlockSchema | undefined = runtimeBlockSchema ?? blockSchemaQuery.data;
   userRef.current = user;
@@ -528,12 +544,11 @@ export function ProofDocument({
       editor = undefined;
       document = undefined;
     };
-    // The editor's place in the page - its typed blocks, the margin, search highlights, a block
-    // link - for as long as it is this effect's editor. It returns what undoes it.
+    // The editor's place in the page - the margin, search highlights, a block link - for as long
+    // as it is this effect's editor. It returns what undoes it. The typed-block node views are
+    // installed by `createEditor`, with the editor library they are written against.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
-        watchPicturePath(queryClient, route, onPicture)
-      );
+      handle.setBlockMarks(blockMarksRef.current);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -723,6 +738,7 @@ export function ProofDocument({
                     ? null
                     : connection.awareness,
                 heatMapMode: "hidden",
+                onAskBlockHosts: setAskBlockHosts,
                 onMarkAction: (action) => {
                   switch (action.kind) {
                     case "comment":
@@ -755,6 +771,7 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
                 // The open document's own reference, never a version's: a pointer names a block
                 // of the document by it, so the editor refuses one to a block of a type the
                 // pointer's attribute does not allow.
@@ -928,6 +945,11 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
+      {specMarks.changed === undefined ? null : (
+        <p className={`text-sm ${textSecondaryOnCanvas}`} role="status">
+          {readLineText(specMarks.changed)}
+        </p>
+      )}
       {shownLoadError === undefined ||
       repairError !== undefined ||
       rebuildError !== undefined ? null : (

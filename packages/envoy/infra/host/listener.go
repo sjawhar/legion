@@ -33,17 +33,12 @@ const (
 type ListenerArgs struct {
 	MachineID     string                  `pulumi:"machineId"`
 	NatsUrls      pulumi.StringArrayInput `pulumi:"natsUrls"`               // may come from another stack's output
-	Image         string                  `pulumi:"image"`                  // e.g. ghcr.io/sjawhar/legion/envoy:<tag>
+	Image         string                  `pulumi:"image"`                  // e.g. ghcr.io/cybermonklabs/legion/envoy:<tag>
 	ContainerName *string                 `pulumi:"containerName,optional"` // default "envoy-listener"
 	Port          *int                    `pulumi:"port,optional"`          // default core.DefaultListenerPort, 9020
-	HostBridge    *string                 `pulumi:"hostBridge,optional"`
-	// default false; true renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, for a listener whose NATS user holds
-	// HostPermissions or ListenerHostPermissions (a plain notifications.> subscribe): the
-	// listener's start ends on any other grant, which refuses the subscription
-	SubscribeAllTopics *bool              `pulumi:"subscribeAllTopics,optional"`
-	Seed               pulumi.StringInput `pulumi:"seed,optional" provider:"secret"`
-	Watchdog           *WatchdogArgs      `pulumi:"watchdog,optional"`
-	Adopt              *AdoptArgs         `pulumi:"adopt,optional"`
+	Seed          pulumi.StringInput      `pulumi:"seed,optional" provider:"secret"`
+	Watchdog      *WatchdogArgs           `pulumi:"watchdog,optional"`
+	Adopt         *AdoptArgs              `pulumi:"adopt,optional"`
 	// default true; false for a listener whose NATS is not reachable from where the stack is
 	// applied (the container is created and Docker restarts it until it connects)
 	WaitForHealthy *bool `pulumi:"waitForHealthy,optional"`
@@ -93,9 +88,9 @@ type listenerPlan struct {
 //
 // It refuses first a name or one of its own string inputs that holds an nkey seed
 // (bus.HoldsSeed), naming it and never the value: the name reaches every refusal and every
-// child's name, and each string input a refusal, a resource's inputs or an alias. machineId and
-// hostBridge are core.ListenerConfig.Check's to refuse, natsUrls Env's, and seed is the one input
-// that is a seed.
+// child's name, and each string input a refusal, a resource's inputs or an alias. machineId is
+// core.ListenerConfig.Check's to refuse, natsUrls Env's, and seed is the one input that is a
+// seed.
 func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 	if bus.HoldsSeed(name) {
 		return listenerPlan{}, fmt.Errorf("%s: %w", listenerType, core.SeedRefusal("the listener's name"))
@@ -115,12 +110,6 @@ func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 	}
 	if args.Port != nil {
 		plan.plain.Port = *args.Port
-	}
-	if args.HostBridge != nil {
-		plan.plain.HostBridge = *args.HostBridge
-	}
-	if args.SubscribeAllTopics != nil {
-		plan.plain.SubscribeAllTopics = *args.SubscribeAllTopics
 	}
 	if args.Adopt != nil {
 		plan.adopt = *args.Adopt
@@ -166,7 +155,7 @@ func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 type namedInput struct{ input, value string }
 
 // stringInputs are the listener's own string inputs that are given, by their names in the schema.
-// machineId and hostBridge are core's, natsUrls and seed are outputs.
+// machineId is core's, natsUrls and seed are outputs.
 func stringInputs(args *ListenerArgs) []namedInput {
 	inputs := []namedInput{{"image", args.Image}}
 	add := func(input string, value *string) {

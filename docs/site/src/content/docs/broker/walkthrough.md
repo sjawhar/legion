@@ -68,7 +68,7 @@ The link opens the request's page on the broker. The browser in the video holds 
 yet, so the link passes through the broker's sign-in, which signs alice in and brings her to the
 page; with a session already held it opens at once. The page prints, from the broker's own record,
 what was asked for, by which enrollment, why, for how long, who may approve it and its state. The
-request named no `--ttl`, so its grant lasts until the session ends.
+request named no `--ttl`, so its grant lasts 12 hours, or less if the session ends first.
 
 ![The secrets broker's page Approve a secret request, signed in as alice@example.com: the secret ALICE_DEPLOY_KEY, requested by a pod enrollment the broker verified, its reason, lasting until the session ends, its requested and expiry times, approver alice@example.com, state pending, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
 
@@ -95,5 +95,5 @@ keeps the value it was given.
 ![Live grants in Settings: the example-host-build session holding DEMO_API_KEY, approved by alice@example.com, expiring when the session ends, with a Revoke button](/legion/media/broker/live-grants.png)
 
 The rig that records the screenshots and the narrated recording, and the scripts that record them
-again, are in [`docs/site/media/broker/`](https://github.com/sjawhar/legion/tree/main/docs/site/media/broker).
+again, are in [`docs/site/media/broker/`](https://github.com/cybermonklabs/legion/tree/main/docs/site/media/broker).
 [The Secrets Broker's introduction](/legion/broker/) says what the broker is for.

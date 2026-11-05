@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { ROLE_TOPIC_PREFIX, roleForPhase, roleToken } from "@legion/contracts";
 import type { LegionIssue, LegionState } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
-import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
+import {
+  EnvoyApiError,
+  type PublishInput,
+  type PublishResult,
+} from "@legion/envoy-client/transport";
 import type { ClaimCapability } from "./legion-phase-ops";
 import {
   LAST_MESSAGE_LIMIT,
@@ -13,6 +17,7 @@ import {
   reminderText,
   stepPhaseStall,
 } from "./phase-stall";
+import type { SessionActivityPhase } from "./session-activity";
 import type { StallLimits } from "./stall-limits";
 
 /**
@@ -31,8 +36,15 @@ import type { StallLimits } from "./stall-limits";
  * that makes an armed timer stale, is the whole defence against two timers sending two reminders.
  */
 
-/** Publishes one Envoy message (`EnvoyClient.publish`). */
-export type EnvoyPublish = (input: PublishInput) => Promise<unknown>;
+/**
+ * Publishes one Envoy message (`EnvoyClient.publish`), typed as the part of the listener's answer
+ * this reminder reads: `kept` alone. This sender publishes with `keep: false`, so every listener
+ * this code knows answers an unheld or lapsed role 404 and keeps nothing, and a kept answer is
+ * one none of them gives. It is read all the same (`tellArchitect`), because a listener that
+ * ignored the flag would otherwise have the run record an architect as told that no architect was
+ * ever handed the notice; reading it costs one field.
+ */
+export type EnvoyPublish = (input: PublishInput) => Promise<Pick<PublishResult, "kept">>;
 
 export interface PhaseReminderLog {
   readonly debug: (message: string, context?: Record<string, unknown>) => void;
@@ -92,6 +104,13 @@ export interface PhaseReminder {
   ) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;
+  /** The phase half of the session's activity report (`src/session-activity.ts`): when the
+   * reminder this session armed last is due. This is the one statement of that moment — the
+   * delay each arming picks comes from the limits here, so nothing outside recomputes it.
+   * `nextReminderAt` is null when no armed timer is still live: none was armed, the phase has
+   * closed, or something has happened since that made it stale, which is the same generation
+   * guard the armed callback applies to itself. */
+  readonly phaseWake: () => SessionActivityPhase;
 }
 
 /** How long the record check waits for the daemon. `createLegionDaemonClient` puts no deadline on
@@ -99,9 +118,23 @@ export interface PhaseReminder {
  * aborts it at the bound. */
 export const RECORD_READ_BOUND_MS = 5_000;
 
-/** The listener's "no live session holds that role": a 404 whose body names `unclaimed` or
- * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`). The next delivered reminder tries the
- * same notice again, under the same idempotency key. */
+/**
+ * The listener's "no live session holds that role": a 404 whose body names `unclaimed` or
+ * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`). Nobody was told, so `reported` stays
+ * false and the next delivered reminder publishes the same notice again, under the same
+ * idempotency key, until a session holding the role takes it.
+ *
+ * It is the only answer an unheld or lapsed architect role gets here, because this notice is
+ * published with `keep: false` (INFRA-839). That is what the kept lane reserves the flag for: a
+ * sender that holds a retry of its own, as the daemon's notice publisher does
+ * (`packages/daemon/internal/notify/notify.go`). This sender's retry is the reminding itself —
+ * reminders never stop while the phase is open, so every one after this one tries the notice
+ * again — while a kept copy waits out the listener's window and is then dropped with nothing
+ * left to send it again.
+ *
+ * It stays a debug line rather than a warning because an architect that is away is not this
+ * worker's doing, and the retry is already in hand.
+ */
 function roleUnheld(error: unknown): boolean {
   if (!(error instanceof EnvoyApiError) || error.details.status !== 404) return false;
   let body: unknown;
@@ -159,6 +192,10 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   let lastMessage = "";
   /** The entry last saved or restored, so only a change of the recorded value is saved. */
   let recorded = "";
+  /** The wake the last `armReminder` set: the moment its timer is due, and the generation it was
+   * armed at, so a stale one is reported as no wake at all. The host's timer cannot be cancelled,
+   * so this is dropped by the same guard the callback is. */
+  let armed: { readonly at: number; readonly generation: number } | undefined;
 
   const entryOf = (): PhaseStallEntry => ({
     // The machine's own wait that the record does not hold (`recordedPhaseStall`): a session
@@ -261,7 +298,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       const topic =
         ROLE_TOPIC_PREFIX +
         roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");
-      await publish({
+      const answer = await publish({
         topic,
         message:
           `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` +
@@ -278,16 +315,34 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
         }),
         idempotencyKey: key,
         sourceSessionID: claim.sessionID,
+        // This sender keeps its own retry, so the listener is to keep nothing: an unheld or
+        // lapsed role is answered 404 (`roleUnheld`) and the next reminder tries again, rather
+        // than a kept copy that is dropped when its window passes and that this run would read
+        // as the architect having been told.
+        keep: false,
       });
       // The publish has no deadline of its own, so the worker's own turn may have reset the count
       // while it was in flight, and a later run may have begun. That run has a key of its own, or
       // none yet: this acceptance is not its notice.
       if (reportKey !== key) return;
+      // A listener that kept the notice all the same (202, `PublishResult.kept`) has told no
+      // architect, and its copy is dropped once the kept window passes. It is read as the 404 is:
+      // nobody was told, so the run's next reminder publishes the same notice again under the
+      // same key. No listener this code knows answers it, since the publish above sends
+      // `keep: false`; it is read because one that ignored the flag would otherwise have this run
+      // record an architect as told that no architect was ever handed the notice.
+      if (answer.kept === true) {
+        deps.log.debug("legion: the listener kept the architect notice; telling it again later", {
+          issue: claim.issue,
+          reminders,
+        });
+        return;
+      }
       reported = true;
       writeEntry();
     } catch (error) {
       if (roleUnheld(error)) {
-        deps.log.debug("legion: no live session holds the architect role; telling it again later", {
+        deps.log.debug("legion: no session holds the architect role; telling it again later", {
           issue: claim.issue,
           reminders,
         });
@@ -341,6 +396,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
    */
   const armReminder = (reminder: string, delayMs: number): void => {
     const armedAt = generation;
+    armed = { at: Date.now() + delayMs, generation: armedAt };
     deps.armTimer(async () => {
       if (generation !== armedAt || stall.state === "closed" || turnRunning) return;
       const check = await recordCheck();
@@ -433,6 +489,12 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     },
     sessionChanged: () => {
       generation += 1;
+    },
+    phaseWake: () => {
+      if (stall.state === "closed" || armed === undefined || armed.generation !== generation) {
+        return { nextReminderAt: null };
+      }
+      return { nextReminderAt: new Date(armed.at).toISOString() };
     },
   };
 }

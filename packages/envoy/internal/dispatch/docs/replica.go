@@ -30,21 +30,23 @@ import (
 // to the live document instead took in every commit since the last one rendered: a published
 // write's observer that ran first counted a browser's edit in its own change, which credits no
 // one, and the browser's own observer then found nothing changed and credited no one either. The
-// update an observer is handed cannot stand in for the log: each update carries the room's whole
-// delete set, so the later update applied first deletes what the earlier one replaced while its
-// own insertions wait for the earlier one's - a tree no transaction left.
+// update an observer is handed cannot stand in for the log: the later of two updates applied first
+// deletes what its transaction deleted while its own insertions wait for the earlier one's - a
+// tree no transaction left.
 //
 // A logged commit is two parts, and the replica takes both: the update ygo handed the room's
 // observers (crdt.LoggedUpdate.Update), what the transaction integrated, and what it parked
 // (Parked) - the structs and deletions waiting for something the document lacks, which the room
 // holds and the update leaves out, as Yjs's update event does. So the replica is the room's copy,
 // what the room holds parked included, and when the commit that fills a gap arrives the replica
-// integrates what waited behind it just as the room does. The copy would converge on the room's
-// tree without the parked part - a logged update is the room's whole store past the commit's
-// beginning with the room's whole delete set, so the commit that fills the gap carries what it
-// integrates from the queue too - but until then the replica would not be the room: what a reader
-// takes from it (readLive) and its encoded state, which carries parked structs
-// (crdt.EncodeStateAsUpdateV1), would both leave out what the room is holding.
+// integrates what waited behind it just as the room does. Without the parked part the replica
+// would not be the room: what a reader takes from it (readLive) and its encoded state, which
+// carries parked structs (crdt.EncodeStateAsUpdateV1), would both leave out what the room is
+// holding, and the commit that fills the gap - whose update carries only what that commit's own
+// transaction integrated - would integrate nothing of what waited, so the replica would never
+// hold it. A commit that only parked has no update observer (ygo calls none for a transaction
+// that changes nothing), so the room drains its entry right after the transaction instead, from
+// ygo's after-transaction callback (onLoadDocument), whatever path the update reached the room by.
 //
 // Applying the parked part integrates nothing, so it renders nothing new: its transaction names
 // no changed type (crdt.Transaction.ChangedTypes), so it touches no block of the record the
@@ -56,25 +58,20 @@ import (
 //
 // The observer renders the replica after an update only when it can neither know the update is a
 // margin write's publish into the room its fork was warm-built from (liveWriteOrigin.marginOnly
-// says why that changes no text), nor reuse the rendering the published live write that made the
-// update made of it, nor know the update was already in the room (changedBy). All three are exact.
+// says why that changes no text) nor reuse the rendering the published live write that made the
+// update made of it (changedBy). Both are exact.
 // The write's rendering (publishedRendering) is taken only on the replica, epoch and foreign
 // count the operation's own fork read found, the replica's under its lock at the position that
-// read copied (readPoint): a replica still at both has consumed, through that read, every commit
+// read copied (warmFork): a replica still at both has consumed, through that read, every commit
 // the fork was read from, and since then only published live writes' commits, which under the
 // writer slot are this write's earlier updates, which the fork holds too - so the replica after
-// the update is the fork after the operation, and rendering is deterministic over one state. ygo
-// puts the room's whole delete set in every update, so an update means that only on the room
-// instance the fork was read from: a cold fork, read from the store, records no rendering, and a
-// room reloaded since the read has a replica of its own at another epoch. An update already in
-// the room (liveWriteOrigin.inRoom) has a version at or below the head its room instance's load
-// folded (roomInstance.loadedHead), so the loaded document held it, and the replica, which
-// starts from the room as of its first logged commit, holds the load: applying it changed
-// nothing. Nothing makes that history other than what the load folded: RebuildDocument, the one
-// writer that replaces a document's history, runs only on a history that cannot load
-// (rebuild.go), and the write's own refuseUndecodable proved the history through its version
-// decodes; PruneAfter has no production caller. A replica outside the schema (one holding no
-// rendering) renders the update, so such an update still logs and counts as changed.
+// the update is the fork after the operation, and rendering is deterministic over one state. That
+// holds only on the room instance the fork was read from: a cold fork, read from the store, holds
+// what the room may not and records no rendering, and a room reloaded since the read has a replica
+// of its own at another epoch. A published update the room's load already holds is no commit: ygo
+// calls no update observer for it and logs nothing, so there is nothing to classify. A replica
+// outside the schema (one holding no rendering) renders the update, so such an update still logs
+// and counts as changed.
 //
 // Where the observer does measure an update itself (updateChangesMarkdown), it renders no more of
 // the replica than the update can have changed, and each of its three paths is exact too. The
@@ -133,7 +130,7 @@ type renderedReplica struct {
 	// foreign counts the logged updates the replica has consumed - applied, or handed to recover -
 	// whose origin is not a published live write's (*liveWriteOrigin). A drain adds to it while it
 	// holds mu, update by update in commit order (consumed), and anyone may read it without mu. An
-	// exact read of the replica records epoch and foreign with the state it copies (readPoint), and
+	// exact read of the replica records epoch and foreign with the state it copies (atPoint), and
 	// a later reader that finds both unchanged knows that every commit the replica consumed since
 	// that read was a published live write's: under the writer slot, only the reader's own write's
 	// earlier updates. A race goes the safe way: a foreign commit the replica consumes after the
@@ -175,9 +172,6 @@ type renderPathCounts struct {
 	// observerReused counts the logged updates the update observer classified with the rendering
 	// a published live write made of the very state the update left, in place of one of its own.
 	observerReused atomic.Uint64
-	// observerInRoom counts the logged updates the update observer classified as unchanged without
-	// rendering, since the room's load already held them (roomInstance.loadedHead).
-	observerInRoom atomic.Uint64
 	// observerRendered counts the logged updates the update observer applied and then rendered the
 	// replica whole for (updateChangesMarkdown's whole path).
 	observerRendered atomic.Uint64
@@ -272,7 +266,7 @@ func (r *renderedReplica) lockForUpdate() {
 
 // observe is the update observer's turn with the replica: it waits for mu (lockForUpdate) and
 // drains the room's update log (drainLocked), classifying each update as it takes it (changedBy).
-// The observer and an exact read (readPoint) are the holders of mu that wait for it, and the ones
+// The observer and an exact read (atPoint) are the holders of mu that wait for it, and the ones
 // that drain the log: every committed update is classified exactly once, by whichever of them
 // reaches the log first. It reports whether any update it classified is one the room's settlement
 // follows, and whether any changed the content.
@@ -382,7 +376,7 @@ func noteChangedTypes(txn *crdt.Transaction, fragment *crdt.YXmlFragment, into *
 // rendering of it: whether it changed the room's rendered markdown, and the ask blocks it left
 // when it did (drainClassifier). It measures the update against the replica
 // (updateChangesMarkdown) only when nothing else tells. A published live write's update can tell
-// in three ways, tried in this order:
+// in two ways, tried in this order:
 //
 //   - it is a margin write's publish into the room instance its fork was warm-built from
 //     (liveWriteOrigin.marginOnly, which says why that changes no text), so it changed nothing,
@@ -393,35 +387,27 @@ func noteChangedTypes(txn *crdt.Transaction, fragment *crdt.YXmlFragment, into *
 //     replica is then the fork the operation rendered, so the rendering is the replica's, and the
 //     update changed the markdown exactly when it differs from the replica's before it. The
 //     replica takes that rendering, markdown and layout together (replicaRendering). A change the
-//     operation did not see as one carries no ask blocks, so it is measured after all;
-//   - its room instance's load already held it (liveWriteOrigin.inRoom), so applying it changed
-//     nothing, while the replica renders at all: one outside the schema renders the update, so it
-//     still logs and counts as changed.
+//     operation did not see as one carries no ask blocks, so it is measured after all.
 //
-// renderedReplica says why the last two are exact. The caller holds mu.
+// renderedReplica says why the last one is exact. The caller holds mu.
 func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, rendering publishedRendering) (bool, func() map[string]struct{}) {
 	if published != nil && published.marginOnly && r.rendering != nil {
 		r.paths.observerMarginOnly.Add(1)
 		return false, nil
 	}
-	if published != nil {
-		if r.standsAt(rendering.forkReadMark) {
-			if rendered := rendering.rendered; rendered != nil {
-				if r.rendering != nil && r.rendering.markdown == rendered.markdown {
-					r.paths.observerReused.Add(1)
-					return false, nil
-				}
-				if askBlocks := rendering.askBlocks; askBlocks != nil {
-					// The operation's rendering is its own value, which the replica takes
-					// whole: it holds nothing of the ask block ids beside it.
-					r.rendering = rendered
-					r.paths.observerReused.Add(1)
-					return true, func() map[string]struct{} { return askBlocks }
-				}
+	if published != nil && r.standsAt(rendering.forkReadMark) {
+		if rendered := rendering.rendered; rendered != nil {
+			if r.rendering != nil && r.rendering.markdown == rendered.markdown {
+				r.paths.observerReused.Add(1)
+				return false, nil
 			}
-		} else if published.inRoom && r.rendering != nil {
-			r.paths.observerInRoom.Add(1)
-			return false, nil
+			if askBlocks := rendering.askBlocks; askBlocks != nil {
+				// The operation's rendering is its own value, which the replica takes
+				// whole: it holds nothing of the ask block ids beside it.
+				r.rendering = rendered
+				r.paths.observerReused.Add(1)
+				return true, func() map[string]struct{} { return askBlocks }
+			}
 		}
 	}
 	return r.updateChangesMarkdown(room)
@@ -444,7 +430,7 @@ func (r *renderedReplica) consumed(update crdt.LoggedUpdate) (*liveWriteOrigin, 
 }
 
 // mark is the replica's epoch and foreign count as of now, epoch first: what an exact read of the
-// replica records beside the state it copies (readPoint, warmFork). An exact read holds mu while
+// replica records beside the state it copies (atPoint, warmFork). An exact read holds mu while
 // it reads both; a reader without mu sees counts that can only move on, the safe way.
 func (r *renderedReplica) mark() forkReadMark {
 	return forkReadMark{epoch: r.epoch.Load(), foreign: r.foreign.Load(), warm: true}
@@ -534,47 +520,56 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, not
 	}
 }
 
-// readPoint is live, the room document this replica follows, as of an exact commit position: its
-// state, encoded, seq, the position of the last commit that state holds, every update through
-// which has a class in the room's queue, and read, what the replica knows of that state beyond the
-// state itself (replicaRead). A durable writer that forks or versions the room from state stores
-// those updates first (flushThrough), so what it writes follows the room's commit order. It waits
-// for mu as the update observer does and drains the log as the observer would, classifying what it
-// drains, so the replica then holds the room through its last drained update. It takes the copy
-// and releases mu: its caller does its database work holding no replica lock.
+// atPoint reads live, the room document this replica follows, as of an exact commit position:
+// take reads the replica under mu, and the call answers seq, the position of the last commit the
+// state take read holds, every update through which has a class in the room's queue, read, what
+// the replica knows of that state beyond the state itself (replicaRead), and settles, for the
+// updates it classified, as observe does. A durable writer that forks or versions the room from
+// what take reads stores those updates first (flushThrough), so what it writes follows the room's
+// commit order.
+//
+// It waits for mu as the update observer does and drains the log as the observer would,
+// classifying what it drains, so the replica then holds the room through its last drained update.
+// take is handed that position and the replica's document - an encode (Service.readPoint), a
+// clone (Service.forkPoint) or a walk of its tree (Service.treePoint) - and a take that wants the
+// room at one position alone reads nothing where the drain left the replica elsewhere
+// (Service.forkPoint's at). mu is released as soon as take returns: the caller does its database
+// work holding no replica lock.
 //
 // A replica holding no state - the room has had no transaction since its load, or the replica is
-// in its recover state, waiting for the base the room's next commit records - has no copy to give,
-// so the copy is taken from live under live's document lock instead. That copy is exact when the
-// log hands over nothing after it: every commit before the log's last reset (or its opening) was
+// in its recover state, waiting for the base the room's next commit records - has no document for
+// take to read, so take does not run and copied is the room's state, taken from live under live's
+// document lock, for the caller to decode once mu is released. That copy is exact when the log
+// hands over nothing after it: every commit before the log's last reset (or its opening) was
 // handed over, and classified, before it (UpdateLog.Reset hands over every update it holds), and
 // the first commit after it records a base before its transaction runs, under the same document
 // lock the copy takes. A base the log hands over after the copy means a commit ran; the replica
-// then starts from it, and the read is taken again. It returns settles for the updates it
-// classified, as observe does. The caller must not hold live's document lock.
-func (r *renderedReplica) readPoint(room string, live *crdt.Doc) (state []byte, seq uint64, read replicaRead, settles bool) {
+// then starts from it, and the read is taken again. copied is nil for every read take ran on.
+// The caller must not hold live's document lock.
+func (r *renderedReplica) atPoint(room string, live *crdt.Doc, take func(seq uint64, doc *crdt.Doc)) (copied []byte, seq uint64, read replicaRead, settles bool) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
 	settles, _ = r.drainLocked(room)
 	for r.doc == nil {
-		copied := crdt.EncodeStateAsUpdateV1(live, nil)
+		state := crdt.EncodeStateAsUpdateV1(live, nil)
 		base, updates := r.log.Drain()
 		if base == nil && len(updates) == 0 {
 			// A replica holding no state rendered none, so nothing vouches for the copy's
 			// rendering; its mark still names the run of the replica the copy was taken in.
-			return copied, r.seq, replicaRead{mark: r.mark()}, settles
+			return state, r.seq, replicaRead{mark: r.mark()}, settles
 		}
 		took, _ := r.takeLocked(room, base, updates)
 		settles = settles || took
 	}
+	take(r.seq, r.doc)
 	read = replicaRead{mark: r.mark()}
 	if r.rendering != nil {
 		read.markdown = &r.rendering.markdown
 	}
-	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, read, settles
+	return nil, r.seq, read, settles
 }
 
-// replicaRead is what a read of the replica at an exact commit position (readPoint) knows of the
+// replicaRead is what a read of the replica at an exact commit position (atPoint) knows of the
 // state it copied beyond the state itself: mark, the replica's epoch and foreign count there, and
 // markdown, the replica's rendering of that very state, nil for a replica that rendered none - one
 // outside the schema, or one holding no state, whose copy was taken from the room itself. Both are
@@ -589,7 +584,7 @@ type replicaRead struct {
 	markdown *string
 }
 
-// drainedSeq is readPoint without the copy: it drains the room's log as the update observer would,
+// drainedSeq is atPoint without the read: it drains the room's log as the update observer would,
 // classifying what it drains, and returns the commit position the replica then stands at, every
 // update through which has a class in the room's queue, with whether an update it classified is
 // one the room's settlement follows. A position equal to an earlier read point's says the room has
@@ -629,8 +624,8 @@ func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, loaded *repli
 // never waits for that lock: the update observer takes it for each peer update before ygo
 // broadcasts the update to the room's other browsers, so a read queued behind it would stall their
 // keystrokes for its walk, and every read queued behind that one too. It opens no transaction on
-// live, since ygo hands the room's persistence an update for every transaction it commits, even one
-// that only reads. The caller must not hold live's document lock - be inside a Yjs transaction on
+// live, which would hold live's document lock, and so every browser's update to the room, for the
+// whole walk. The caller must not hold live's document lock - be inside a Yjs transaction on
 // it - since the copy encodes under that lock, and read must not keep doc past its return.
 func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)) error {
 	doc, release, err := s.holdLive(room, live)
@@ -723,8 +718,8 @@ func (r *renderedReplica) hold() *crdt.Doc {
 // item label the browser editor derives - is no content change. A document that does not render
 // counts as changed, with no ask blocks, and leaves the replica no rendering. It is the
 // observer's measure of every update, which changedBy reaches without it only where it already
-// knows the answer this would give: a published write's own rendering of the same state, or an
-// update the room's load already held.
+// knows the answer this would give: a margin write's publish into the room its fork was built
+// from, or a published write's own rendering of the same state.
 func (r *renderedReplica) updateChangesMarkdown(room string) (bool, func() map[string]struct{}) {
 	if !r.touched.whole && r.rendering != nil {
 		if len(r.touched.blocks) == 0 {

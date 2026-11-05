@@ -53,6 +53,8 @@ function refusal(page: Page, issueKey: string, status: number) {
 // the send's success would close it as saved, and a refusal's Retry would post to the newer mark.
 // It is refused instead, the editor takes back the mark it wrote, and the margin brings the open
 // composer back on screen saying why.
+// SLOW(>=2s): one live document's connect plus two selection-bar cycles on a desktop and a phone
+// layout; no timer is waited on.
 test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark @phone", async ({
   browser,
 }) => {
@@ -92,6 +94,8 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
 // Each compose names its own send: the reader leaving a document with its send out takes that
 // compose's composer off screen with them, so a bar Comment on the next document opens a composer
 // of its own, which the earlier send's answer neither closes nor settles.
+// SLOW(>=2s): two live documents - the send is left on the first and the composer opened on the
+// second, each waiting for its own collaboration connect.
 test("a bar Comment on another document while a margin send is out opens its own composer @phone", async ({
   browser,
 }) => {

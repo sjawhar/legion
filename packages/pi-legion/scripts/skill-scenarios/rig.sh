@@ -259,9 +259,9 @@ judge_model=anthropic/$route_model_id
 [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] || judge_model=${LEGION_E2E_MODEL_PROVIDER:-}/$route_model_id
 judge_thinking=high
 # The container every judge runs in (cmd_judge_omp), by digest: Ubuntu 24.04, whose glibc runs the
-# pinned omp binary. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+# pinned omp binary. Every image a CI job fetches is a copy in ghcr.io/cybermonklabs/legion/ci, named by
 # digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
-judge_image=ghcr.io/sjawhar/legion/ci@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+judge_image=ghcr.io/cybermonklabs/legion/ci@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 # The superpowers skills a spec run's profile holds as its own user skills (cmd_profile).
 superpowers_skills=(writing-plans brainstorming)
 
@@ -727,7 +727,7 @@ services_env=$work/services/env
 # start_listener serves the Envoy listener on a port the kernel chose, held from that choice until
 # the listener serves on it (lib/rig.sh's start_held), and sets envoy_port.
 start_listener() {
-  ENVOY_API_TOKEN="$(<"$S/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_HOST_BRIDGE=127.0.0.1 \
+  ENVOY_API_TOKEN="$(<"$S/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 \
     ENVOY_MACHINE_ID="$tag" NATS_URLS="nats://127.0.0.1:$nats_port" \
     start_held listener envoy_port ENVOY_LISTEN_FD --env 'PORT={port}' -- "$S/envoy-listener"
   await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
@@ -768,14 +768,14 @@ lock_services() {
 # servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
 services_up() {
   evidence=$S
-  # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+  # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
   docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
     -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
   pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
   [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
-  # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
+  # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
   nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
   [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
   until_true 60 "Postgres to accept TCP connections" docker exec "$tag-pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres
@@ -1315,7 +1315,9 @@ cmd_judge() {
 # run's index in its batch, and the commits are dated <index> seconds after <start>, the batch's
 # start, so no two runs of a batch share a PR number or a head (two runs can meet in a scratch file
 # in the shared /tmp), and each batch's heads carry its own start time.
-# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run that
+# The CLI must meet every requirement the seeded spec marks, and the issue's Verification document
+# holds the check that the implementer's seeded result and the tester's own run are against.
+# testerProof fails a run that
 # pushes a change to legion/<key>, and it cannot tell a tester that pinned a real defect with a red
 # test, which roles/core/tester.md asks for, from one that went off-task. A defect left in the
 # fixture turns correct testing into a fail.
@@ -1372,13 +1374,12 @@ EOF
   : >"$R/pushes.log"
   # The implement handoff as the implementer records it with `dispatch handoff-write`: the three
   # stamps (schemaVersion, phase, issue) and the phase's fields; Dispatch records when it was
-  # written. The PR's head is the implementer's code commit, since no handoff commit sits above it.
-  jq -n --arg key "$worker_key" --arg head "$C1" '
+  # written. What the implementer ran is no part of it: seed.ts implement-handoff records that as a
+  # result against the issue's check k1. The PR's head is the implementer's code commit, since no
+  # handoff commit sits above it.
+  jq -n --arg key "$worker_key" '
     {schemaVersion:1, phase:"implement", issue:$key,
-     filesChanged:["greet.ts","greet.test.ts"],
-     proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
-       surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
-       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$R/implement.json"
+     filesChanged:["greet.ts","greet.test.ts"]}' >"$R/implement.json"
   # Isolated from the operator's own jj configuration (fsmonitor.backend = "watchman" on a devbox
   # that runs it): a bare JJ_CONFIG naming only fsmonitor.backend = "none" and this fixture's own
   # identity, so jj falls back to its built-in defaults and `jj new`'s working-copy snapshot never
@@ -1395,12 +1396,8 @@ Adds \`greet(name)\` and \`bun greet.ts <name>\`.
 
 **Threads:** 0 resolved, 0 unresolved.
 
-**E2E (implementer):** the CLI — ran \`bun greet.ts Ada\`, observed \`Hello, Ada!\` exit 0, at head $C1.
-Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name>\` on stderr.
-
-**E2E (tester):** pending.
-
-**Production:** pending the merge.
+**Checks:**
+- Check k1 (before_merge): pass at ${C1:0:12}, recorded by implementer. \`bun greet.ts <name>\` prints the greeting, trims the name, and exits 2 with a usage line when no name is given.
 
 **Fast-follow:** none.
 
@@ -1436,7 +1433,7 @@ run_tester_proof() {
   seed_ts tester-proof "$R/fixture.json"
   worker_key=$(jq -r .issue "$R/fixture.json")
   worker_fixture "$index" "$start" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
-  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json"
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json" "$(jq -r .head "$R/world.json")"
   version=$(jq -r .implement.version "$R/fixture.json")
   read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
   # The architect's assignment, with the Handoff line the daemon's task names the predecessor's

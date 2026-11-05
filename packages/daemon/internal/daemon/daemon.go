@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -129,6 +130,10 @@ type overrides struct {
 	// controllerFirstWake is how soon after the workflow runtime starts it applies its first
 	// controller tick (workflowRuntime.controllerFirstWake); zero is firstControllerTick.
 	controllerFirstWake time.Duration
+	// idleTick is how often the daemon decides every pod of its project and fires the backstops
+	// that came due (workflowRuntime.idleTick, both ticks); zero is the production minute. A test
+	// of release and wake shortens it, so it waits out its own period rather than the daemon's.
+	idleTick time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -289,14 +294,15 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		var cancelAfterMint context.CancelFunc
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
-		workflow.controllerFirstWake = o.controllerFirstWake
+		workflow.controllerFirstWake, workflow.idleTick = o.controllerFirstWake, o.idleTick
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
 		plan.ensureWorkspace = workflow.ensureWorkspace
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
-		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		plan.phaseHolds, plan.rootHears, plan.treeClosable = workflow.phaseHolds, workflow.rootHears, workflow.treeClosable
+		plan.rootTask = workflow.rootTask
 		plan.taskConfirmed = workflow.taskConfirmed
 	}
 	if cfg.Runtime.Name == "tmux" {
@@ -560,9 +566,12 @@ type plan struct {
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
 	repositories *repositories
-	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
-	// nil without a workflow, where every delivery holds and every tree closes.
+	// phaseHolds, rootHears, rootTask and treeClosable are the workflow's answers to the
+	// supervisor's predicates; nil without a workflow, where every delivery is sent as it was
+	// queued and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
+	rootHears    func(ctx context.Context, c supervise.Claim, d supervise.Delivery) (bool, error)
+	rootTask     func(ctx context.Context, c supervise.Claim, d supervise.Delivery) (string, []byte, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
@@ -1089,6 +1098,8 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,
 		PhaseHolds:    p.phaseHolds,
+		RootHears:     p.rootHears,
+		RootTask:      p.rootTask,
 		TreeClosable:  p.treeClosable,
 		TaskConfirmed: p.taskConfirmed,
 		Clock:         p.clock,
@@ -1565,6 +1576,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		},
 		StateTransactions:  st,
 		ConsumerLag:        consumerLag,
+		CallerPod:          callerPodOf(s.runtime),
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,
@@ -1598,6 +1610,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		ClaimReady:         claimReadyHook(keeper, claimReady),
 		PromptAgents:       promptAgents(p.roleReferences),
 		CapabilityReported: s.capabilityReported,
+		ReleaseRecords:     st,
+		ClaimActivity:      st,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -1751,6 +1765,17 @@ func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.Outbo
 	return nil
 }
 
+// EnqueueID wakes the row's lane as Enqueue does: a start or catch-up naming kept decisions is
+// written with its id (workflow.EnqueueNaming), so the row it claims them for waits for no sweep.
+func (s projectRecords) EnqueueID(ctx context.Context, tx pgx.Tx, row record.OutboxRow) (int64, error) {
+	id, err := s.Store.EnqueueID(ctx, tx, row)
+	if err != nil {
+		return 0, err
+	}
+	s.wakeOnCommit(ctx, row)
+	return id, nil
+}
+
 func (s projectRecords) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row record.OutboxRow, now time.Time) error {
 	if err := s.Store.ExpediteOutbox(ctx, tx, row, now); err != nil {
 		return err
@@ -1802,7 +1827,12 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	now := time.Now().UTC()
+	resumes, err := strandedReleaseWakes(ctx, s.store, s.projectToken, claims, now)
+	if err != nil {
+		return api.State{}, err
+	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims, resumes, now)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -1866,6 +1896,15 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
 	if keeper, ok := rt.(*sandbox.Runtime); ok {
 		return keeper.RepositoryCaches
+	}
+	return nil
+}
+
+// callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that runs
+// pods, and nil under any other (api's Options.CallerPod).
+func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
+	if pods, ok := rt.(*sandbox.Runtime); ok {
+		return pods.PodAt
 	}
 	return nil
 }

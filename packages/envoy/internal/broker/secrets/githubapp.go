@@ -78,8 +78,27 @@ type githubAccessTokensBody struct {
 }
 
 // readOnlyPermissions are the permissions a read-only narrowing asks GitHub for, and the most a
-// token minted for one may hold.
-var readOnlyPermissions = map[string]string{"contents": "read", "metadata": "read"}
+// token minted for one may hold. They are the Legion daemon's own read set (its appauth
+// readPermissions), so a caller reading a repository over a broker-released token reads what one
+// minted from a configured key reads: its contents, its pull requests and the Actions runs, jobs
+// and job logs its merges produced.
+var readOnlyPermissions = map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read", "actions": "read"}
+
+// optionalReadOnlyPermission is the one permission of readOnlyPermissions an installation may not
+// hold: an App is granted Actions only once each installation's account approves that grant,
+// while the other three are a GitHub App's ordinary repository reads. GitHub answers a token
+// request naming a permission its installation does not hold HTTP 422 and mints nothing rather
+// than leaving that one out, so a read-only narrowing GitHub refuses is asked for again without
+// it (Mint): an App that is not granted Actions releases the other three rather than nothing.
+const optionalReadOnlyPermission = "actions"
+
+// readOnlyPermissionsWithoutActions is the body of that second request. It is built once and
+// never written to, as readOnlyPermissions is.
+var readOnlyPermissionsWithoutActions = func() map[string]string {
+	reduced := maps.Clone(readOnlyPermissions)
+	delete(reduced, optionalReadOnlyPermission)
+	return reduced
+}()
 
 // narrowsToken reports whether n narrows the token GitHub mints, not only which installation it is
 // minted for: whether it sends GitHub an access_tokens body.
@@ -89,15 +108,17 @@ func (n *GitHubNarrowing) narrowsToken() bool {
 
 // accessTokensBody is narrowing as GitHub's access_tokens body, nil for a narrowing that names
 // neither repositories nor read-only (it narrows to its owner alone) and for none, whose tokens
-// are asked for with no body, as before narrowing existed. Marshalling a struct of a string slice
-// and a string map cannot fail, so its error is dropped.
-func (n *GitHubNarrowing) accessTokensBody() []byte {
+// are asked for with no body, as before narrowing existed. permissions is what a read-only
+// narrowing asks GitHub for: readOnlyPermissions, or readOnlyPermissionsWithoutActions for the
+// second request Mint makes of an installation that holds no actions. Marshalling a struct of a
+// string slice and a string map cannot fail, so its error is dropped.
+func (n *GitHubNarrowing) accessTokensBody(permissions map[string]string) []byte {
 	if !n.narrowsToken() {
 		return nil
 	}
 	body := githubAccessTokensBody{Repositories: n.Repositories}
 	if n.ReadOnly {
-		body.Permissions = readOnlyPermissions
+		body.Permissions = permissions
 	}
 	encoded, _ := json.Marshal(body)
 	return encoded
@@ -120,7 +141,9 @@ const accessTokensResponseLimit = mintResponseLimit + MaxNarrowedRepositories*gi
 // gives a narrowed token it cannot mint: that is the caller's narrowing (ErrMintNarrowingRefused),
 // named by what it likely got wrong, since GitHub's own text is never quoted. A 422 to a request
 // that sent no body narrowed nothing, and stays the App's; a 422 that is a rate limit is no verdict
-// on the narrowing, and stays the upstream's.
+// on the narrowing, and stays the upstream's. A read-only narrowing reaches it only once the
+// token was asked for again without actions (Mint, optionalReadOnlyPermission), so the one grant
+// an App is not always given is not among the causes it names.
 func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
 	var status *mintStatusError
 	if !n.narrowsToken() || !errors.As(err, &status) || status.code != http.StatusUnprocessableEntity || status.rateLimited {
@@ -131,9 +154,19 @@ func (n *GitHubNarrowing) refusal(err error, appID, owner string) error {
 		causes = append(causes, fmt.Sprintf("a repository it names (%s) that the installation does not reach, such as a misspelled name", strings.Join(n.Repositories, ", ")))
 	}
 	if n.ReadOnly {
-		causes = append(causes, "contents: read, which the App does not hold")
+		causes = append(causes, "contents: read, metadata: read or pull_requests: read, which the App does not hold")
 	}
 	return fmt.Errorf("%w: github app %s: GitHub answered HTTP 422 to the narrowed token for %s: likely %s; the caller fixes the narrowing", ErrMintNarrowingRefused, appID, owner, strings.Join(causes, ", or "))
+}
+
+// refusedPermissions reports GitHub refusing the permissions a read-only narrowing's token
+// request named (a 422): the installation holds fewer than the body asked for, and GitHub minted
+// nothing. A 422 that is a rate limit is the upstream's trouble and no verdict on the
+// permissions, and a narrowing that is not read-only named none to be refused.
+func (n *GitHubNarrowing) refusedPermissions(err error) bool {
+	var status *mintStatusError
+	return n != nil && n.ReadOnly && errors.As(err, &status) &&
+		status.code == http.StatusUnprocessableEntity && !status.rateLimited
 }
 
 // heldBy checks that token, as GitHub describes it, holds no more than n asked: for repositories, a
@@ -167,10 +200,10 @@ func (n *GitHubNarrowing) heldBy(token githubInstallationToken) error {
 		}
 		for _, permission := range slices.Sorted(maps.Keys(token.Permissions)) {
 			if _, asked := readOnlyPermissions[permission]; !asked {
-				return errors.New("GitHub's token holds a permission past contents and metadata")
+				return errors.New("GitHub's token holds a permission past contents, metadata, pull requests and actions")
 			}
 			if token.Permissions[permission] != readOnlyPermissions[permission] {
-				return errors.New("GitHub's token holds more than read access to contents or metadata")
+				return errors.New("GitHub's token holds more than read access to contents, metadata, pull requests or actions")
 			}
 		}
 	}
@@ -184,6 +217,11 @@ const revokeTimeout = 10 * time.Second
 // token it minted wider than asked, followed by app=, installation=, expires_at= (when the token
 // lapses at GitHub without the revoke) and error=, which never holds the token.
 const revokedWiderMessage = "broker: GitHub did not revoke a narrowed token it minted wider than asked; it lapses at its expiry"
+
+// missingActionsMessage is logged, at WARN, when GitHub refuses the permissions a read-only
+// narrowing asked for and the token is minted without actions, followed by app= and
+// installation=. It never holds the token.
+const missingActionsMessage = "broker: a GitHub App installation does not hold actions, so the read-only token released for it reads no Actions runs, jobs or job logs; grant the App Actions: Read and approve it on that account"
 
 // revokeInstallationToken asks GitHub to revoke token, as the token itself
 // (DELETE /installation/token), for a token Mint minted and will not release. It runs to its own
@@ -232,7 +270,7 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		}
 		owners = []string{owner}
 	}
-	body := narrowing.accessTokensBody()
+	body := narrowing.accessTokensBody(readOnlyPermissions)
 	key, err := githubappjwt.ParseKey(secret.PrivateKey)
 	if err != nil {
 		return "", fmt.Errorf("%w: parse GitHub App private key: %w", ErrMintStoredValue, err)
@@ -263,6 +301,16 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 			continue
 		}
 		token, err := m.installationToken(ctx, jwt, installation.ID, body)
+		if narrowing.refusedPermissions(err) {
+			// The installation holds fewer permissions than the body named, and actions is the
+			// one of them an App is not always granted: ask once more without it, so an App that
+			// reads contents, metadata and pull requests releases those rather than nothing
+			// (optionalReadOnlyPermission). heldBy still bounds what the answer may hold.
+			token, err = m.installationToken(ctx, jwt, installation.ID, narrowing.accessTokensBody(readOnlyPermissionsWithoutActions))
+			if err == nil {
+				slog.Warn(missingActionsMessage, "app", secret.AppID, "installation", installation.ID)
+			}
+		}
 		if err != nil {
 			return "", narrowing.refusal(err, secret.AppID, owner)
 		}

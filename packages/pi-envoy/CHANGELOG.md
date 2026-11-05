@@ -1,5 +1,250 @@
 # Changelog
 
+## [16.4.0] - 2026-11-05
+
+### Added
+
+- The plugin ships an `agent-secrets` skill, so every session with Dispatch learns the secrets
+  broker's client from one place: the `agent-secrets NAME… -- <command>` form, why a `$NAME` the
+  calling shell expands sends an empty value, that a 200 answer can still hold `"ok": false`,
+  what each exit status means, where a secret name comes from and how it may be used, what to do
+  before reporting a service out of reach, and what a person does on their own machine. The
+  plugin's skill partition is eight.
+
+## [16.3.1] - 2026-11-04
+
+### Fixed
+
+- Keep decisions documents limited to choices that change a disagreeing reader's action; record other choices as single spec lines.
+
+## [16.3.0] - 2026-11-04
+
+### Changed
+
+- The package `repository.url`, which is the repository link on its npm page, names `cybermonklabs/legion`.
+
+## [16.2.1] - 2026-11-04
+
+### Fixed
+
+- A new session that registers while its NATS connection is down is shown, once it reconnects,
+  every message stored for it during the outage. The listener stores those messages and pushes none
+  of them, and the session's first sweep used to start its replay cursor past them. Before that
+  registration the session now starts its cursors at the stream's end. If the stream's position
+  cannot be read either, its own inbox is read from the stream's oldest message once it reconnects,
+  and it asks for no consumer delivery until that read has run. The session still registers at
+  once, so a Legion worker's role claim is not held up by the outage.
+
+## [16.2.0] - 2026-11-04
+
+### Changed
+
+- `envoy_publish` to a role nobody holds now reports that Envoy kept the message for the session
+  that claims the role next, instead of failing.
+
+## [16.1.0] - 2026-11-04
+
+### Changed
+
+- The Dispatch skills teach the three typed blocks: a spec marks each requirement as a `requirement` block, an issue's checks live in its Verification document as `check` blocks, and a plan's tasks are `plan_task` blocks that say which requirements they serve and which tasks they need first.
+  A spec no longer carries an Acceptance section of prose, and `dispatch result` records what a check saw.
+- The `dispatch` skill now says `--turn agent` needs `--reply-to-ask`: it marks a progress
+  note on an open ask's thread. It read as if `--turn agent` suited any comment, and the CLI
+  refuses `--turn` without `--reply-to-ask`.
+
+### Fixed
+
+- A session whose NATS connection answers nothing still registers with the listener and claims its
+  role. Since 16.0.0 a pass whose agent subject was open but unanswered was refused its
+  registration outright, and the claim that follows the registration never ran, so for as long as
+  that connection stayed silent - a reconnecting client answers no round trip and, reconnecting
+  without limit, is never closed - the listener did not know the session, no role was held and
+  nothing was delivered to it. The session now registers and claims as it did before any of this,
+  while the server's answer is asked for in the background; the wait for it is paid once per
+  connection, and what was waited for is asked again until the connection answers, is closed for
+  good, the session shuts down, or ten minutes pass. A reconnect, which re-sends every live
+  subscription, also puts the next open back on a wait of its own.
+
+  Two subjects are now safe that were not. An open the server did not answer used to leave its
+  subjects open while its caller read the failure as "nothing opened": a notice subject a role had
+  been marked for was unmarked by that caller, confirmed by a later pass, and then carried into the
+  next registration as an ordinary interest, which the end of the role never closed, so a
+  controller that had been replaced went on taking its topic's wakes. An open is all or nothing
+  now: it closes every subject it opened before it fails, and it fails only on a connection closed
+  for good or a session shutting down. The relay's delivery subject, which took no round trip at
+  all, now takes the same one as every other subject, so the listener's first relayed frames are no
+  longer published to a subscription the server has yet to take.
+
+## [16.0.0] - 2026-11-03
+
+### Fixed
+
+- A subscription is confirmed by the NATS server before the session is registered on it. Opening a
+  subject only wrote SUB into the connection's out buffer, so a message published between that
+  write and the connection's next flush was dropped by core NATS while the listener and the daemon
+  already routed to the session: a Legion notice on the controller topic, a card on a session's
+  agent subject, or a viewer's first ping could be lost with nothing reported. Every open now ends
+  with the connection's round trip, bounded at 10 seconds, and a subject whose round trip failed is
+  confirmed by the next open rather than skipped as already open.
+
+## [15.6.1] - 2026-11-03
+
+### Fixed
+
+- A session moved into an agent box can post its gated Dispatch writes again. Its Oh My Pi process
+  runs in the box's own pid namespace, and the `dispatch` command on the host, or in another box,
+  took it for a gone process: its daily prune removed the process's AskGate marker store, and the
+  box's command then refused every gated write, saying the record names a marker store that cannot
+  be read. The record and the store now name the process's pid namespace, and a process of another
+  namespace counts live while its store changed within two hours. While it keeps a record,
+  pi-envoy touches its store every ten minutes, and it makes the store again, empty, before each
+  write of its record, so a store another process removed is back by the next call. A store made
+  again holds no marker, so a write AskGate did not review is still refused. A process started on
+  an earlier pi-envoy keeps its old record, which names no namespace, until it restarts; the prune
+  keeps such a process's store for 14 days rather than two hours, and its next reviewed write
+  makes a store that was already removed again.
+
+## [15.5.1] - 2026-11-03
+
+### Changed
+
+- An exact undo of an edit to an approved document restores its approval when no decision block
+  in it was decided since, and the plugin says so: the `dispatch-writing-specs` skill's "Approval"
+  ends "An exact undo can restore approval.", the `dispatch request-approval` help says that such
+  a version needs no request and that a document that then does not read approved needs one, and
+  the line a write prints when it superseded an approval says when a later write brings it back.
+  The three Dispatch skills stay under their 2,000-word budget.
+
+## [15.3.0] - 2026-11-03
+
+### Fixed
+
+- A session keeps the `dispatch` command when its plugins root is a symlink that a new version re-points and whose old target is removed. The manifest declares `omp.bin`, so an Oh My Pi that supports the field puts `bin/` on `PATH` under the plugin's installed path, which follows the link; the extension adds `bin/` itself only when no `PATH` entry already resolves to it. It used to add the realpath it gets from `import.meta.url`, an entry that died with the old version's directory.
+
+## [15.2.0] - 2026-11-03
+
+### Changed
+
+- An ask a person said to keep open now stays open: the `dispatch` skill's "Close what you
+  opened" tells a session that finds such an ask needless to say why in its thread and leave
+  the close to that person. The skill told a session to resolve any needless ask that turn and
+  named no exception, so a session retracted an ask a person had just said not to dismiss.
+  The three Dispatch skills keep the same word count: the line on replacing an ask joins the
+  same bullet.
+
+### Fixed
+
+- The list of what people wrote to a session goes after a request's last message only on the
+  request where it first shows an item, or an answer or comment a person changed. On later
+  requests it stays right after the message it followed then, so each request ends with its own
+  last message and the model no longer answers an unchanged list on every turn. While the session
+  compacts, the list stays after the last message. A list an older copy of the extension added
+  is moved without a second read. A retry after an aborted tool call carries the list again.
+
+## [15.1.3] - 2026-11-02
+
+### Fixed
+
+- A `dispatch comment --reply-to-ask` that hands the turn to the human but lands on an approval request a newer version moved now says why the request still waits on the agent. It names the version the request is for and the document's current version, and gives the `dispatch request-approval` call that hands it back. The `dispatch` skill says that such a request needs `request-approval` again.
+
+## [15.1.2] - 2026-11-02
+
+### Fixed
+
+- A `dispatch` write that Dispatch may still be running (an attempt cut off after 20 s without
+  progress, or answered `409 KEY_IN_FLIGHT`) is asked again under its `Idempotency-Key` every
+  3 s at most (longer only when a `Retry-After` asks) until 55 s, inside the command's 60 s
+  deadline, so it ends in the answer Dispatch stores for it. Before, it stopped asking 30 s after
+  the first attempt, so a write Dispatch took 50 s to finish, or two silent attempts in a row,
+  was reported as perhaps taken effect although it landed. An upload of a megabyte or more keeps
+  the five-attempt schedule, since each repeat sends its whole file again. When a write still
+  ends with no answer after the command saw the keyed layer, the message says Dispatch finishes
+  it and to read it back before sending it again, since a new command sends it under a new key.
+  A picture upload that ends that way, or with any answer that may come after Dispatch stored it
+  (a gateway's page, Dispatch's own 5xx, a transport failure), says the picture may or may not
+  have been uploaded, rather than that it was not.
+- `dispatch artifact` refuses `--content` and `--content-file` under a `--name` whose extension
+  is not `.md` or `.markdown` (`rows.jsonl`, `sizes.tsv`), before it sends anything, and the
+  refusal names `--path`. Inline content is always stored as a Markdown document, so such an
+  upload was accepted and came back altered, a JSONL file's lines joined into one paragraph.
+  A name with no extension, such as a document title, is still taken.
+- AskGate binds no file of a write it did not review. A session whose model is on another
+  provider than the gate's, and a halted gate, now mint an argv-only marker, as the other
+  unreviewed outcomes do, so a file edited earlier in the same message posts instead of being
+  refused as "changed after AskGate reviewed it". A reviewed file that changes is still refused.
+
+## [15.1.1] - 2026-11-02
+
+### Fixed
+
+- AskGate no longer lets a `dispatch` write post unreviewed the first time its `--dry-run` takes
+  more than 10 s. The dry run contacts no Dispatch server, so a slow one most likely means a busy
+  machine. The first run of each read script (the dry run, and the `pwd -P` probe after a leading
+  `cd`) now gets up to 20 s, and the reads use at most half the call's deadline, so the review
+  keeps the other half. A run cut at its limit runs once more with what is left of that half
+  (25 s at the 90 s default), when at least 2 s of it is left. A dry run that still does not
+  finish tells the agent that the likely cause is a busy machine, not Dispatch, and to read back
+  what the write posted.
+
+## [15.0.3] - 2026-11-02
+
+### Fixed
+
+- `envoy_send` no longer ends in a bare `The operation timed out.`: a send that is not confirmed
+  delivered says so and names its `idempotency_key`, and `envoy_send` takes that key, so the same
+  message sent again within 72 hours is dropped as a repeat if the first copy arrived. A send whose
+  key Envoy already held says it was sent once.
+- The Dispatch tools resolve a bare document reference that is one document's slug and another's filename (a `plan-md-2`
+  named `plan-md` beside `plan.md`) as the slug's document, as Dispatch's own document routes
+  resolve it, instead of refusing it as naming two documents. Only a filename two documents share
+  is still refused.
+
+## [15.0.2] - 2026-11-02
+
+### Fixed
+
+- `dispatch <command> --help` lists the keys a JSON flag's value takes, from the schema the
+  call is checked against: each key with whether it is required, its type or its values, and
+  its description, and the keys of a nested object or list of objects below it.
+  `dispatch doc-edit --help` said an operation in `--ops-json` takes "only the keys below"
+  and listed none, so a caller learned the field names only from a refusal.
+  `--precondition-json`, `--components-json`, `--anchor-json` and `--options-json` list
+  their keys too.
+
+## [15.0.1] - 2026-11-02
+
+### Fixed
+
+- AskGate reviews a Dispatch write whose body is a quoted here-document in a double-quoted
+  command substitution (`--body "$(cat <<'EOF' … EOF)"`), which posted unreviewed before. The
+  text is written out in the command, so the gate reads it rather than naming the value an
+  expansion it cannot read. Unquoted, where bash splits the output into words and expands each
+  as a glob, it is not read, and neither is an unquoted delimiter, a second operand, a `cat` on
+  its own line, a double-quoted delimiter holding a backslash, or anything but blanks between
+  the closing delimiter and the parenthesis.
+- A `dispatch` write that stalls (cut off after 20 s without progress, or failed in transport)
+  is sent again under its `Idempotency-Key` when an earlier call of the same session saw,
+  within the last five minutes, that the Dispatch runs the keyed layer. Each call is a new
+  process, so before this fix every such write probed `/healthz`, and under load the probe's
+  5 s bound ran out, so the write was reported as perhaps taken effect instead. The session's
+  `state.json` now carries that sighting (`keyedLayer`), and it still expires five minutes
+  after the answer that showed it.
+- AskGate's rules check reads an upload named after a document's slug as a new version of that
+  document, as Dispatch now stores it, so the ask blocks that document already holds are no longer
+  judged as new asks.
+
+## [15.0.0] - 2026-11-02
+
+### Added
+
+- The `dispatch` command records and reads Legion phase handoffs on their Dispatch issue:
+  `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records the file's
+  text, one JSON object of at most 262144 bytes, exactly as written, as this session's next version
+  of the phase's handoff, and `dispatch handoff-read --issue <KEY> --phase <phase>` prints a line
+  naming the record's version, id, session and time, then the body exactly as stored;
+  `--version <n>` reads an earlier version. The README says so, and to keep the file outside the
+  workspace, since jj snapshots every file in it.
+
 ## [14.1.0] - 2026-11-01
 
 ### Added

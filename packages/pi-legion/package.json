@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-legion",
-  "version": "17.4.0",
+  "version": "18.6.0",
   "license": "Apache-2.0",
   "type": "module",
   "omp": {
@@ -12,11 +12,11 @@
     ]
   },
   "legion": {
-    "daemonApiVersion": 46
+    "daemonApiVersion": 48
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sjawhar/legion"
+    "url": "https://github.com/cybermonklabs/legion"
   },
   "files": [
     "dist",

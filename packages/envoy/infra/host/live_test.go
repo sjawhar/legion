@@ -202,7 +202,6 @@ func TestLiveAdoptionPreviewsClean(t *testing.T) {
 					fmt.Sprintf("PORT=%d", port),
 					"ENVOY_MACHINE_ID=live-test",
 					"NATS_URLS=" + natsURL,
-					"ENVOY_HOST_BRIDGE=127.0.0.1",
 				},
 				"healthcheck": map[string]any{
 					"tests":       []string{"CMD", "curl", "-f", healthURL},
@@ -228,7 +227,6 @@ func TestLiveAdoptionPreviewsClean(t *testing.T) {
 			"image":         image,
 			"port":          port,
 			"containerName": name,
-			"hostBridge":    "127.0.0.1",
 			"adopt":         map[string]any{"container": "listener-live", "image": "envoy-image-live"},
 		}),
 	}})
@@ -321,7 +319,7 @@ func main() {
 		_, err := host.NewListener(ctx, "example-host-a", &host.ListenerArgs{
 			MachineId: "example-host-a",
 			NatsUrls:  pulumi.StringArray{pulumi.String("nats://127.0.0.1:4222")},
-			Image:     "ghcr.io/sjawhar/legion/envoy:example",
+			Image:     "ghcr.io/cybermonklabs/legion/envoy:example",
 			Seed:      pulumi.String("SUEXAMPLESEED"),
 			Adopt:     host.AdoptArgs{Container: pulumi.String("listener-example-host-a")},
 		})

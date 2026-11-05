@@ -30,7 +30,7 @@ expect(read.arrivedAt).toBeLessThan(releasedAt);
 Nothing waits between them but the host's own work, which takes well under a millisecond, so both
 stamps are the same number and `toBeLessThan` fails on an order that is right.
 `legion-background-subagent-omp.test.ts` failed that way in the `pi-legion` job of
-[#2391](https://github.com/sjawhar/legion/pull/2391) — `Expected: < 1793505745827, Received:
+[#2391](https://github.com/cybermonklabs/legion/pull/2391) — `Expected: < 1793505745827, Received:
 1793505745827` — and `pi-legion` is an input of the required `ci-ok` check, so the tie takes any
 pull request red. Repeated at two cores, the case failed 6 times in 200 runs.
 

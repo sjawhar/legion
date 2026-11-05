@@ -1,8 +1,9 @@
 # Pi Envoy Extension
 
 Tracked Oh My Pi extension package `@sjawhar/pi-envoy`: the Envoy messaging and Dispatch tools
-every session loads, in one entry, `extensions/envoy.ts`, with the five skills every session with
-Dispatch reads (`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `envoy`) staged into
+every session loads, in one entry, `extensions/envoy.ts`, with the eight skills every session with
+Dispatch reads (`agent-secrets`, `asd-ste100`, `dispatch`, `dispatch-first`,
+`dispatch-writing-specs`, `envoy`, `outside-message`, `plain-words`) staged into
 `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. The Legion entry, its
 modules, agents and skills are `@sjawhar/pi-legion` (`packages/pi-legion`, its `AGENTS.md`), which a
 Legion pane loads beside this plugin and which reaches it through the interface in
@@ -643,13 +644,21 @@ owner-only file for its own process into the `askgate/` record directory of the 
 directory of every session id it binds (`bindDispatchSession`), keeps each until shutdown (a shell
 or kernel started before a switch still acts as the old session), and on a clean exit removes its
 own files and its marker store; the CLI's daily prune (`sweepStores`) removes the store of a
-process that crashed. `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when it is unset, so a
-command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it cannot
-write after a switch is a UI notice at once. For each literal call it lets run, the gate mints one
-single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review or a
-deliberate pass (a rebuttal, a breaker trip) to the dry run's arguments and to the sha256 of each
-file the argv names (`fileOperands`), as the gate read it in place; argv-only for a call no verdict
-stands behind (`UNREVIEWED_OUTCOMES`, a halt and another provider among them) and
+process that crashed. The owner names its pid namespace (`pidNamespace`, in the file and in the
+store's name), since the host and every agent box share one state directory: a reader looks up by
+pid only an owner of its own namespace, and counts one of another namespace live while its store
+changed within `MARKER_MAX_AGE_MS`. So the instance touches its store every `STORE_BEAT_MS`
+(`keepStore`) while it keeps a record, and every write of its owner file (`writeAskgateRecord`,
+`setRecordMode`) makes the store first, so a record never names a store another process removed
+for longer than one call. A store an earlier pi-envoy named without a namespace may be a live
+process's of another namespace, so the prune keeps it for 14 days
+(`UNNAMESPACED_STORE_MAX_AGE_MS`). `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when it is
+unset, so a command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it
+cannot write after a switch is a UI notice at once. For each literal call it lets run, the gate
+mints one single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review
+or a deliberate pass (a rebuttal, a breaker trip) to the dry run's arguments and to the sha256 of
+each file the argv names (`fileOperands`), as the gate read it in place; argv-only for a call no
+verdict stands behind (`UNREVIEWED_OUTCOMES`, a halt and another provider among them) and
 for a `task` subagent's literal call. A marker goes when its call ends or at shutdown, and the CLI
 refuses one older than two hours (`MARKER_MAX_AGE_MS`). The CLI reads each named file once,
 consumes one matching marker by unlinking it before it posts a gated write under a live record,
@@ -1113,7 +1122,7 @@ state never nudges.
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts`, `package.json`'s `omp.bin` | The extension registers no Dispatch tool: Oh My Pi puts the plugin's `bin/` on `PATH` from `omp.bin`, and at load the extension puts it first on `PATH` itself only when no entry already resolves to it, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
 | AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules-check.ts`, `breaker.ts`, `decision-record.ts` (the Dispatch record of each rule decision, each override and each unmarked write that carries an ask) and `text.ts` its modules, the seven prompt files (`*.md`), `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and the report: `scripts/askgate-report.ts` over the `advisor-gate` entries on disk (`--sessions`), which also reads the command line of both modes, `scripts/askgate-report-dispatch.ts` over a project's decision documents (`--dispatch-project`), and `scripts/askgate-report-common.ts` what the two count with. The gate's own Dispatch, like the extension's, is built by `src/dispatch-session.ts` |
-| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
+| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The eight skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |

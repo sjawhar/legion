@@ -470,19 +470,32 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
-// bundle (gitHubCredential, a directory for each of owners), with the workflow's mapping as the
-// repositories its repository caches follow (mapped), and registers its launcher acceptor on the
-// stream listener. A daemon with no GitHub Apps hands it neither tokens nor a mapping, and
-// sandbox.New's own refusal names what is missing. Boot has already run the cluster check
-// (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
-// per-claim pods, or issue pods on one tree volume — remains.
+// bundle (gitHubCredential, a directory for each of owners) and the owner set those directories
+// are built from (appauth.GitHubOwners), which the runtime reads a running pod's gh projection
+// against, with the workflow's mapping as the repositories its repository caches follow (mapped),
+// with the store's own workspace bundles as what a replacement pod's launcher is sent and what
+// its restore drops, and registers its launcher acceptor on the stream listener. A daemon with no
+// GitHub Apps hands it neither tokens nor a mapping, and sandbox.New's own refusal names what is
+// missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed
+// and no Sandbox of a layout before this one — per-claim pods, or issue pods on one tree volume —
+// remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
+		// The two halves of the release's saved work: an idle release puts the issue's unpushed
+		// work here (outbox's release), and the runtime hands it to the launcher of the pod that
+		// replaces the released one before any role of that pod starts. The confirmation deletes
+		// the bundle of the release the launcher's report names and no other, so a report that
+		// arrives late takes no newer release's work with it. The read is the bundle's one restore
+		// attempt: the first pod that is not the one the work came off takes it, whether the
+		// bundle is sent or that pod is refused as no newer than the save, and nothing is
+		// answered for that bundle again.
+		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
 			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
+			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {

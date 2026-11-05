@@ -102,6 +102,13 @@ test("the three Dispatch skills total fewer than 2,000 words", () => {
   expect(words).toBeLessThan(2_000);
 });
 
+test("the staged decisions rule separates material choices from spec details", () => {
+  const skill = readFileSync(path.join(staged, "dispatch-writing-specs/SKILL.md"), "utf8");
+  expect(skill).toContain("only if a disagreeing reader would act differently");
+  expect(skill).toContain("keep others to one spec line each");
+  expect(skill).not.toContain("Each choice you made alone, and each a person made");
+});
+
 // Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
 // to call a native tool it no longer has: each names the command (`dispatch ask`) instead.
 test("no skill or daemon prompt names a native Dispatch tool", () => {
