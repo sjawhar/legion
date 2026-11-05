@@ -78,9 +78,9 @@ type Deps struct {
 	// store.Pool.Listener.
 	Listen func(ctx context.Context) (*pgx.Conn, error)
 	// RoleClaims and Sessions are where a role route's holder is resolved (roles.ResolveHolder,
-	// resolveRoleHolders): role claims read from the role bucket, released there when their holder
-	// is gone, and holders read from the session bucket. cmd/dispatch passes one roles.Buckets for
-	// both, reading on Publisher's connection.
+	// resolveRoleHolders): role claims read from the role bucket and holders read from the
+	// session bucket, neither of which the resolution writes to. cmd/dispatch passes one
+	// roles.Buckets for both, reading on Publisher's connection.
 	RoleClaims roles.ClaimStore
 	Sessions   roles.SessionLookup
 	// KeptLanes is where the handover behind a keep reads the role's kept lane and its drain
@@ -92,10 +92,13 @@ type Deps struct {
 	// no stream behind it leave it to.
 	KeptLanes KeptLaneReader
 	// PublishFailures counts a destination of a publish attempt that did not reach it, by
-	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
-	// registry, so a denied or refused destination shows on /metrics rather than only in the
-	// log.
-	PublishFailures *metrics.Counter
+	// reason (countPublishFailure), and RoleForwardsHeld a role forward its holder's resolution
+	// held pending, by that holder's state (countRoleForwardHeld). cmd/dispatch registers both
+	// on the process's metrics registry, so a denied or refused destination shows on /metrics
+	// rather than only in the log, and a holder that stopped answering is read as the wait it is
+	// rather than paging whoever alerts on publish failures.
+	PublishFailures  *metrics.Counter
+	RoleForwardsHeld *metrics.Counter
 	// lanes is what the batches of one scan share: the owners they hold in flight, the outbox
 	// pool's one statement at a time, and the wake a released owner gives the scan (Outbox.scan).
 	// A batch run with none - one by itself, as this package's tests run it - holds no owner,
@@ -105,17 +108,31 @@ type Deps struct {
 
 // countPublishFailure counts one destination of a publish attempt that did not reach it, under
 // reason: "denied" for a send the server refused under this connection's own publish permissions,
-// "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
-// holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
-// answer never came - the holder's receipt, or the stream's acknowledgement of the stored copy
-// for a holder whose entry records a port (roleForward.send) - and "failed" for every other
-// failure (sendChains). Every increment goes through here: a Deps built without a counter - the
-// package's own tests - then counts nothing instead of dereferencing nil.
+// "refused" for one NATS refuses however often it is retried, "unanswered" for a forward NATS
+// took whose answer never came - the holder's receipt, or the stream's acknowledgement of the
+// stored copy for a holder whose entry an earlier listener stored with a port (roleForward.send) -
+// and "failed" for every other failure
+// (sendChains). A role forward held pending is counted by countRoleForwardHeld and under none of
+// these. Every increment goes through here: a Deps built without a counter - the package's own
+// tests - then counts nothing instead of dereferencing nil.
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return
 	}
 	d.PublishFailures.Inc([2]string{"reason", reason})
+}
+
+// countRoleForwardHeld counts one role forward its holder's resolution held pending with nothing
+// sent, under the holder's state it was held on: session.Unresponsive, or heldStateUndated or
+// heldStateUnresolved where the resolution reached no state of the holder's (forwardOf). It is no
+// publish failure: nothing left this process, so nothing of the bus failed, and the event waits
+// for the session to answer (sendChains, waitForHolders). A Deps built without the counter counts
+// nothing, as countPublishFailure does.
+func (d Deps) countRoleForwardHeld(holderState string) {
+	if d.RoleForwardsHeld == nil {
+		return
+	}
+	d.RoleForwardsHeld.Inc([2]string{"holder_state", holderState})
 }
 
 // fence is what a batch checks before each act it may make only while this process holds the
@@ -471,7 +488,9 @@ type outcome struct {
 // too. One with a send that met the hold's deadline settles as released as well, but its batch is
 // left unrecorded, not released (scanBatch): that outcome is never written. One whose destinations
 // could not all be resolved otherwise, or a send of which NATS answered with a failure, is backed
-// off. Otherwise one with a destination held back, or a session's copy held back for a mention
+// off - below ERROR when every failure behind it is a role forward its holder's resolution held
+// pending (waitForHolders), since such an event is waiting for a session, not failing. Otherwise
+// one with a destination held back, or a session's copy held back for a mention
 // still being sent (batchEvent.mentionPending), is blocked: on its blockers (holdBack), and for
 // mentionPendingDelay at most when its copy waits on a mention; and one with neither is published.
 // A held-back copy so blocks the event only when no send of it failed or was lost: a denied or
@@ -483,6 +502,9 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 		return backOff(result, event.pendingEvent, event.failureLog, event.failure)
 	}
 	var failures []error
+	// holds are the forwards behind those failures that are a holder's hold and nothing else: an
+	// event all of whose failures are holds is a wait rather than a failure.
+	var holds []*roleForward
 	if event.resolveErr != nil {
 		failures = append(failures, event.resolveErr)
 	}
@@ -497,6 +519,9 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 				release = true
 				continue
 			}
+			if hold := send.heldByHolder(); hold != nil {
+				holds = append(holds, hold)
+			}
 			failures = append(failures, fmt.Errorf("%s %q: %w", send.dest.label, send.dest.id, send.err))
 		case held:
 			blockers = append(blockers, blocker{event: send.heldBy})
@@ -510,6 +535,9 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 		result.state = released
 		return result
 	case len(failures) > 0:
+		if len(holds) == len(failures) {
+			return waitForHolders(result, event.pendingEvent, holds, errors.Join(failures...))
+		}
 		return backOff(result, event.pendingEvent, "dispatch outbox: publish event", errors.Join(failures...))
 	case len(blockers) > 0 || event.mentionPending:
 		if len(blockers) > 0 {
@@ -527,10 +555,35 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	return result
 }
 
-// backOff reports item's failure under what and returns result backed off by retry.Delay of the
-// attempt it now counts, which the record adds to the database's clock.
+// backOff reports item's failure under what, at ERROR, and backs it off (backOffAttempt).
 func backOff(result outcome, item pendingEvent, what string, cause error) outcome {
 	slog.Error(what, "event_id", item.event.ID, "error", cause)
+	return backOffAttempt(result, item, cause)
+}
+
+// waitForHolders reports an event every failure of which is a role forward its holder's
+// resolution held pending, and backs it off exactly as backOff does. Nothing was sent and nothing
+// failed: the event is waiting for each holder to answer, so the line is below ERROR and names
+// the holders and the states they were held on, and an operator who greps ERROR or alerts on the
+// publish-failure counter is not paged for an agent that stopped typing (dispatch://INFRA-392).
+// An event with one hold and one real failure is a failure and goes through backOff.
+func waitForHolders(result outcome, item pendingEvent, holds []*roleForward, cause error) outcome {
+	holders := make([]string, 0, len(holds))
+	states := make([]string, 0, len(holds))
+	for _, hold := range holds {
+		holders = append(holders, hold.holder)
+		states = append(states, hold.heldState)
+	}
+	slog.Info("dispatch outbox: event waits for its role's holder", "event_id", item.event.ID,
+		"holder", strings.Join(holders, ","), "holder_state", strings.Join(states, ","), "error", cause)
+	return backOffAttempt(result, item, cause)
+}
+
+// backOffAttempt returns result backed off by retry.Delay of the attempt it now counts, which the
+// record adds to the database's clock. Reaching the dead-letter threshold is reported at ERROR
+// however the attempt itself was reported: an event given up on is a failure, one held for a
+// holder that never answered among them.
+func backOffAttempt(result outcome, item pendingEvent, cause error) outcome {
 	result.state = backedOff
 	result.attempts = item.attempts + 1
 	if result.attempts == retry.DeadLetterAttempts {

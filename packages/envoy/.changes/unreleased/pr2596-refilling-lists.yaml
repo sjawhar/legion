@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    A listener no longer serves a short agent list while it is reading its bucket again. Each KV
+    cache now follows its bucket by reading the whole bucket and sweeping at the end of the read,
+    so a row stays listed until a complete read gives evidence that the bucket no longer holds it,
+    and a row renewed mid-read is kept. While a copy cannot be stood behind — before its first
+    complete read, or once a re-read has been outstanding longer than its bound —
+    `GET /v1/sessions` and `GET /v1/interests/` answer `503` with `Retry-After` and the code
+    `refilling` instead of a partial list, and `envoy_active_sessions` publishes no sample at all
+    rather than a low one. Dispatch shows that state as refilling in every view that reads the
+    list, and never turns a list it could not read into an absent agent.
