@@ -24,7 +24,7 @@ later phase keeps it current rather than replacing it:
 
 ## Verification
 
-**Threads:** <n> resolved, 0 unresolved. Each answered and resolved individually by the implementer, the pull request's author, never in bulk (the reviewer names the bot threads it accepted; it resolves none itself):
+**Threads:** <n> resolved, <n> unresolved. Each answered and resolved individually by the implementer, the pull request's author, never in bulk (the reviewer names the bot threads it accepted and resolves none itself; it writes the unresolved count and one entry per open thread when it approves, and retro brings both to zero):
 - Thread <node id>: fixed in <commit-sha> — <one line>; resolved at <head-sha>.
 - Thread <node id>: not a defect — <reason>; resolved at <head-sha>.
 - Thread <node id>: accepted by the reviewer — <its reason, one line>; resolved at <head-sha>.
@@ -80,6 +80,17 @@ word for word, and `none` is a finding while one stands. The merger quotes `Outc
 (*The READY packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
 longer describes the diff is a finding against the implementer, not a line the merger rewrites.
 
+When the reviewer approves with text threads open, it writes the `Threads:` count and one entry
+per open thread into that same body, in the form the template carries: `- Thread <node id>: still
+open — <what remains>; unresolved at <head-sha>.` Nothing updates that section between the
+approval and retro, and the architect reads it through the whole of `accepting`, so what the
+approval leaves there is what the body says until retro — which commits the text fixes, replies on
+each thread, resolves it, and brings the count and those entries to zero at the head its own
+commit made (`skill://legion-retro`). `Fast-follow:` stays `none` for such a thread: its fix is in
+a file this pull request touches and is committed before the merge, which is not what that line is
+for. An open text thread is not an unproven claim, so `Not proven / risk` gains nothing from it
+and the merger quotes nothing new.
+
 ## What a result is
 
 **A check** is a `check` block of the issue's Verification document (`verification.md`). It names
@@ -114,6 +125,13 @@ makes every result at the old head older, with no Dispatch write of anyone's, so
 recorded again at the new head. `dispatch results --issue <issue>` prints each check with its
 latest result and whether that result is current, and `dispatch read --issue <issue>` names each
 requirement of the spec no check serves.
+
+**A result goes stale at a new head whoever made the commit** — the implementer's push, the
+tester's, the one commit of text fixes retro pushes before READY — so the commits that move the
+head are batched and each result is recorded after them rather than before, and a proof too
+expensive to re-run carries to a new head only on a diff that shows no code changed; otherwise it
+is run again (the retro of dispatch://INFRA-1306, dispatch://INFRA-1306/comment/9a86f976, whose
+evidence is sjawhar/legion#2210).
 
 **An issue is proved by its own checks.** Its approval is gated by the `before_merge` checks of
 its own Verification document, read at its own head, so a child's pull request never makes a
@@ -190,9 +208,12 @@ gap and decides there, which is the only gate on such an issue.
   Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
-  is made in the running round, because a later round costs a CI pass and a re-read of the whole
-  change (the operator's answer on that case: fix it while you are there, and defer no fix to
-  another issue). The `Fast-follow:` line reads
+  is made in this pull request and before it merges, and deferred to no other issue (the
+  operator's answer on that case: fix it while you are there, and defer no fix to another issue).
+  The implementer makes the ones it finds in the round it is running, because a second round costs
+  a CI pass and a re-read of the whole change. One the reviewer raises as a text finding is made
+  by retro, the role that closes the thread it left open: the same pull request, before the same
+  merge, and every such fix in the one commit retro pushes. The `Fast-follow:` line reads
   `none`, or names only cleanup in files this pull request does not touch.
   A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
