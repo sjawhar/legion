@@ -65,8 +65,15 @@ example `https://envoy.internal.example/webhook/slack`, and subscribe it to the 
 event (its `app_mentions:read` scope). The listener answers Slack's `url_verification` challenge,
 and checks every other delivery's signature against `ENVOY_SLACK_SIGNING_SECRET`, the app's
 signing secret, answering `401` to one that does not match. The repository's
-`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read` and
-`chat:write` bot scopes and the `app_mention` bot event.
+`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read`,
+`chat:write`, `channels:history` and `groups:history` bot scopes and the `app_mention` bot event.
+
+The two history scopes are what a thread read needs: Slack's `conversations.replies`, which the
+Legion controller calls to read the thread of a mention posted inside one, needs
+`channels:history` in a public channel and `groups:history` in a private one, and answers
+`missing_scope` without them. An app made from an earlier version of the manifest, which listed
+only `app_mentions:read` and `chat:write`, does not hold them: an operator adds them to the app's
+bot scopes and reinstalls the app to the workspace.
 
 A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
 thread a second time under the thread's root, its timestamp's dot written `_`:

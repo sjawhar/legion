@@ -1,5 +1,11 @@
 # Changelog
 
+## [16.3.1] - 2026-11-04
+
+### Fixed
+
+- Keep decisions documents limited to choices that change a disagreeing reader's action; record other choices as single spec lines.
+
 ## [16.3.0] - 2026-11-04
 
 ### Changed
