@@ -324,21 +324,21 @@ test("no skill, agent or plugin file keeps work in the foreground, and each that
 // shipped-agents.test.ts collapses it, so a pin survives a rewrap of the file it reads.
 const collapsed = (file: string) => readFileSync(file, "utf8").replace(/\s+/g, " ");
 
+// A `skills/…` path is read from the staged partition, as every other skill pin here is, so what
+// a pin reads is the copy the plugin ships; every other path is read from the repository.
+const pinnedFile = (relative: string) =>
+  relative.startsWith("skills/")
+    ? path.join(staged, relative.slice("skills/".length))
+    : path.join(REPO_ROOT, relative);
+
 // A sentence copied into several files is counted once per file, never over a composed prompt,
 // where a sentence in both roles/<role>.md and go/worker-common.md would appear twice. A file
 // that lost the sentence and a file that gained a second copy both fail, and the files are listed
 // rather than counted, so one that stopped carrying it fails as loudly as one that started.
-// A `skills/…` path is read from the staged partition, as every other skill pin here is, so what
-// is counted is the copy the plugin ships.
 function countedOncePerFile(rule: string, relativePaths: string[]) {
   const counts = relativePaths.map((relative) => ({
     file: relative,
-    found:
-      collapsed(
-        relative.startsWith("skills/")
-          ? path.join(staged, relative.slice("skills/".length))
-          : path.join(REPO_ROOT, relative)
-      ).split(rule).length - 1,
+    found: collapsed(pinnedFile(relative)).split(rule).length - 1,
   }));
   expect(counts).toEqual(relativePaths.map((file) => ({ file, found: 1 })));
 }
@@ -492,32 +492,23 @@ test("every prompt and agent that may write says to make its own scratch and del
 // sentence from a file or writes it twice; it does not show that an agent follows it, which the
 // issue's two rig scenarios measure.
 test("one verdict rule for the reviewer, in every copy", () => {
-  countedOncePerFile(
-    "A reviewer submits `REQUEST_CHANGES` only when a behavioural finding stands — one whose closing changes code that runs — and otherwise approves the head it read, named by SHA, leaving every text finding as the inline review thread it already writes.",
-    [
-      "skills/legion-worker/SKILL.md",
-      "skills/legion-worker/references/merge-gate.md",
-      "skills/legion-worker/references/review-threads.md",
-      "packages/daemon/internal/prompts/roles/reviewer.md",
-      "packages/daemon/internal/prompts/roles/core/reviewer.md",
-      "packages/daemon/internal/prompts/go/reviewer.md",
-    ]
-  );
-  for (const file of [
+  const carriers = [
     "skills/legion-worker/SKILL.md",
     "skills/legion-worker/references/merge-gate.md",
+    "skills/legion-worker/references/review-threads.md",
     "packages/daemon/internal/prompts/roles/reviewer.md",
     "packages/daemon/internal/prompts/roles/core/reviewer.md",
     "packages/daemon/internal/prompts/go/reviewer.md",
-  ]) {
-    const text = collapsed(
-      file.startsWith("skills/")
-        ? path.join(staged, file.slice("skills/".length))
-        : path.join(REPO_ROOT, file)
-    );
-    expect(text, `${file} still has the reviewer fix a prose-only finding itself`).not.toContain(
-      "prose-only"
-    );
+  ];
+  countedOncePerFile(
+    "A reviewer submits `REQUEST_CHANGES` only when a behavioural finding stands — one whose closing changes code that runs — and otherwise approves the head it read, named by SHA, leaving every text finding as the inline review thread it already writes.",
+    carriers
+  );
+  for (const file of carriers) {
+    expect(
+      collapsed(pinnedFile(file)),
+      `${file} still has the reviewer fix a prose-only finding itself`
+    ).not.toContain("prose-only");
   }
 });
 
