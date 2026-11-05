@@ -26,6 +26,10 @@ bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
+pod_update_max_open_rounds: 2          # issues holding an open pod-update round at once; a round asks every
+                                       # worker of its issue to push and wait. Leave the key out for no limit
+pod_update_rounds_per_minute: 1        # pod-update rounds one sweep of the daemon opens; a sweep within 50
+                                       # seconds of the last opening opens none. Leave the key out for no limit
 controller: operator                   # who runs the controller: operator (legion controller start,
                                        # the default) or daemon (a pod this daemon launches and keeps;
                                        # under runtime: tmux, a pane in a window of its own)
@@ -50,6 +54,29 @@ projects:
   #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
   #                                    # whose Apply step succeeds after a merge wakes that pull
   #                                    # request's open production check
+  #   memory:                          # optional: what each tree this project opens runs with:
+  #     mode: on                       # off (the default, and what a project with no memory block
+  #                                    # gets), on, or random, a fair coin for each tree. The draw is
+  #                                    # made once, when the tree's lifecycle row is first created,
+  #                                    # and the tree keeps it for its whole life; a tree first
+  #                                    # opened before this release has no group and runs without
+  #                                    # memory, and a change of mode reaches only the trees opened
+  #                                    # after it: a tree already drawn into the memory group keeps
+  #                                    # these files under any mode, and only taking them out of
+  #                                    # the block takes them away
+  #     config_files: [/etc/legion-memory/memory.yml] # Oh My Pi overlays every role of a
+  #                                    # memory-group tree names in PI_CONFIG_FILES after pod.env's
+  #                                    # and the role's own (role_config_files), so they outrank
+  #                                    # both; required when mode is on or random. Under runtime:
+  #                                    # kubernetes each file must be in a pod.volume_mounts mount
+  #                                    # below: uncomment the operator-memory volume and mount there
+  #                                    # too, a ConfigMap legion-operator-memory mounted at
+  #                                    # /etc/legion-memory
+  #     instructions: /etc/legion-daemon/memory-instructions.md # optional: a markdown file on the
+  #                                    # daemon's own disk, not a pod mount: the daemon reads it at
+  #                                    # boot and appends its text to every memory-group role's
+  #                                    # system prompt, after the deployment's own instructions.
+  #                                    # mode: on with no instructions appends nothing
 # repository_renames:                  # optional: a repository that moved, which the daemon then
 #   - from: acme/widgets-legacy        # treats as one repository wherever it compares a name —
 #     to: acme/widgets                 # GitHub's events name the new repository while every tree
@@ -201,6 +228,8 @@ runtime:
         #   nfs: {server: nas.internal.example, path: /exports/builds}
         # - name: operator-roles       # role_config_files' overlays (above)
         #   config_map: {name: legion-operator-roles}
+        # - name: operator-memory      # the project's memory.config_files overlays (above)
+        #   config_map: {name: legion-operator-memory}
       volume_mounts:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
@@ -209,6 +238,7 @@ runtime:
         # - {volume: team-share, mount_path: /mnt/team}                    # read-only by default
         # - {volume: nas, mount_path: /mnt/nas, read_only: false}          # writable
         # - {volume: operator-roles, mount_path: /etc/legion-operator-roles} # role_config_files' overlays
+        # - {volume: operator-memory, mount_path: /etc/legion-memory} # memory.config_files' overlays
 
 # The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
 # capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets

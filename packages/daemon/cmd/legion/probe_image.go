@@ -354,8 +354,19 @@ func envValue(environ []string, name string) string {
 // after printing the role's RoleOverlaysRefusedLine, for the first role check refuses, else 0. A
 // run check reports as unanswered (a timeout) is printed and does not stop the role's own verdict:
 // a refusal found after it still refuses.
+//
+// A value two roles share is read once: every workflow role of a project whose memory overlays
+// reach it and that names no overlays of its own is given one and the same list, and reading it
+// again asks Oh My Pi the same question for the same answer. The refusal still names the first
+// role holding the refused value, since the loop reaches it before any other role of that value.
 func checkRoleOverlays(entries []roleOverlays, check func(files []string) (string, error), stderr io.Writer) int {
+	read := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
+		value := strings.Join(entry.files, ":")
+		if _, done := read[value]; done {
+			continue
+		}
+		read[value] = struct{}{}
 		why, err := check(entry.files)
 		if err != nil {
 			fmt.Fprintf(stderr, "legion probe-image: role %s's overlays were read but Oh My Pi did not answer on some of them: %v\n", entry.role, err)

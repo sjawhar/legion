@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -65,8 +69,9 @@ type OperatorClaim struct {
 	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit,
 	// released (its idle pod was released), or unknown (a suspension recorded before migration
 	// 0038); absent otherwise. These routes are the one surface that serves it: a session parses
-	// every body it reads with the strict schema of its own contract, so a key an older contract
-	// does not know refuses the whole body (api.StrandedClaim).
+	// every body it reads with the schema of its own contract, so a key an older contract does not
+	// know refuses the whole body at a plugin whose answer side predates INFRA-1048, and is dropped
+	// at every plugin after it (api.StrandedClaim).
 	SuspendedBy string `json:"suspendedBy,omitempty"`
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.
@@ -110,17 +115,73 @@ type DeliveryView struct {
 	Interrupted bool `json:"interrupted,omitempty"`
 }
 
-// OperatorClaims is the list route's answer, in token order.
+// OperatorClaims is the list route's answer, in token order, with what the daemon's last
+// pod-update sweep decided beside the claims.
 type OperatorClaims struct {
 	Claims []OperatorClaim `json:"claims"`
+	// PodUpdateRounds is the sweep's own last word, which no claim row carries: a claim shows the
+	// round it is in, and nothing on it says why the drifted issue beside it was given none. It
+	// is a pointer so that a reader can tell an answer that carries no record at all — a daemon
+	// of a release before this field — from one whose first sweep has not run, which carries the
+	// zero record and says so in `swept` (cmd/legion's podUpdateRoundsLine). The list route
+	// fills it on every answer, so only a daemon too old to know the field serves one without it.
+	PodUpdateRounds *PodUpdateRounds `json:"pod_update_rounds"`
 }
 
-// MarshalJSON keeps `claims` an array on the wire, empty rather than `null`.
+// MarshalJSON keeps `claims` an array on the wire, empty rather than `null`, and
+// `pod_update_rounds` an object, the zero record rather than `null`: the field is nil only where
+// nobody filled it, and the readers on the other side of this wire take it as required
+// (packages/contracts's LegionOperatorClaimsResponse). The sweep's record normalises its own
+// lists, which this carries rather than repeats: `type wire` drops the methods of OperatorClaims
+// alone, so the field keeps its own (PodUpdateRounds.MarshalJSON).
 func (c OperatorClaims) MarshalJSON() ([]byte, error) {
 	type wire OperatorClaims
 	out := wire(c)
 	if out.Claims == nil {
 		out.Claims = []OperatorClaim{}
+	}
+	if out.PodUpdateRounds == nil {
+		out.PodUpdateRounds = &PodUpdateRounds{}
+	}
+	return json.Marshal(out)
+}
+
+// PodUpdateRounds is what this daemon's last pod-update sweep decided under the project's two
+// limits on how fast one pod template change reaches the fleet (internal/daemon's podUpdateSweep):
+// the limits as the configuration holds them, the issues that hold an open round, and the issues
+// each limit held back at that sweep. The claims alone cannot say it — a claim carries the round
+// it is in, and an issue a limit held back is posted nothing at all — so an operator reading them
+// could not tell a fleet the limits are pacing from one the daemon has stopped carrying.
+//
+// Swept is false for a daemon whose first sweep has not run, where every other field is empty and
+// states nothing. Each limit is nil for a key legion.yaml does not set, which is no limit rather
+// than a limit of none. Every list is in issue-key order.
+type PodUpdateRounds struct {
+	Swept bool `json:"swept"`
+	// MaxOpenRounds and RoundsPerMinute are `pod_update_max_open_rounds` and
+	// `pod_update_rounds_per_minute` as the configuration holds them.
+	MaxOpenRounds   *int `json:"max_open_rounds"`
+	RoundsPerMinute *int `json:"rounds_per_minute"`
+	// InRound is every issue that held one of the project's open-round slots at that sweep, the
+	// issues the sweep opened a round for among them.
+	InRound []string `json:"in_round"`
+	// WaitingOnMaxOpenRounds and WaitingOnRoundsPerMinute are the drifted issues each limit held
+	// back at that sweep. An issue both limits held back is under the limit on open rounds alone:
+	// that is the one which will still hold it back at the next sweep.
+	WaitingOnMaxOpenRounds   []string `json:"waiting_on_max_open_rounds"`
+	WaitingOnRoundsPerMinute []string `json:"waiting_on_rounds_per_minute"`
+}
+
+// MarshalJSON keeps the three lists arrays on the wire, empty rather than `null`, so a reader
+// takes a sweep that held nothing back as the empty list it is rather than as a daemon that said
+// nothing of it.
+func (r PodUpdateRounds) MarshalJSON() ([]byte, error) {
+	type wire PodUpdateRounds
+	out := wire(r)
+	for _, list := range []*[]string{&out.InRound, &out.WaitingOnMaxOpenRounds, &out.WaitingOnRoundsPerMinute} {
+		if *list == nil {
+			*list = []string{}
+		}
 	}
 	return json.Marshal(out)
 }
@@ -215,7 +276,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		if _, err := s.trees.OpenOperatorTreeLifecycle(ctx, s.project, req.Tree, s.drawMemory(req.Tree)); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
 			return
 		} else if err != nil {
@@ -246,6 +307,18 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	s.operatorDone(r, token)
 	writeJSON(w, status, operatorView(m.Claim()))
+}
+
+// drawMemory is the draw of tree's memory group, for the open that creates the tree's lifecycle
+// row to run in its own transaction (store.Store.OpenOperatorTreeLifecycle): the group this
+// project's mode gives the tree, recorded on the tree's root (memorygroup.DrawAndRecord, which
+// admission's own path draws through too). An operator's tree usually has no issue record at all,
+// and then the draw writes nothing (record.Store.DrawMemory) — nothing is refused and no record
+// is invented.
+func (s *server) drawMemory(tree string) func(ctx context.Context, tx pgx.Tx) error {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		return memorygroup.DrawAndRecord(ctx, tx, s.records, tree, s.memory, s.coin, s.now())
+	}
 }
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
@@ -377,7 +450,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := m.Claim()
-	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.records == nil || s.roleFor == nil {
+	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
 		s.claimRequest("retry", retryEvent)(w, r)
 		return
 	}
@@ -542,6 +615,12 @@ func treeOthers(claims []supervise.Claim, tree string, root claim.Token) []claim
 // machine's is what knows whether a suspension is held. It never waits on a decision in flight: a
 // relaunch holds its machine for as long as the runtime waits out its pods, and with many claims
 // one is nearly always relaunching.
+//
+// What the last pod-update sweep decided is answered beside them (Options.PodUpdateRounds), and a
+// daemon with no sweep behind it answers the zero record, which says so: an operator who is served
+// no record at all cannot tell a daemon that holds no issue back from one too old to say. Every
+// answer this route writes carries the record, so an answer without it is an older daemon's and
+// nothing else (OperatorClaims.PodUpdateRounds).
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
@@ -557,7 +636,11 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 		}
 		views[i] = operatorView(c)
 	}
-	writeJSON(w, http.StatusOK, OperatorClaims{Claims: views})
+	rounds := PodUpdateRounds{}
+	if s.podUpdateRounds != nil {
+		rounds = s.podUpdateRounds()
+	}
+	writeJSON(w, http.StatusOK, OperatorClaims{Claims: views, PodUpdateRounds: &rounds})
 }
 
 // operatorFailure answers an operator request its machine did not take: 409 with the machine's
