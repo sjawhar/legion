@@ -40,7 +40,8 @@ test("the comment composer takes a whole body of the limit, and holds a longer o
     // The composer's cap is DISPATCH_BODY_MAX: a body of exactly that many characters stays whole
     // in the field. A composer still capped at 2,000 keeps 2,000 of them.
     await field.fill(whole);
-    await expect.poll(async () => (await field.inputValue()).length).toBe(DISPATCH_BODY_MAX);
+    // One readback, not two: `fill` resolves once the page has taken the text, and this one
+    // proves its length and its content together.
     expect(await field.inputValue()).toBe(whole);
 
     // And the cap still holds: one character more than the limit is cut back to it.

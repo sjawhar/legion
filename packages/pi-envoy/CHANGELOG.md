@@ -1,5 +1,28 @@
 # Changelog
 
+## [16.4.0] - 2026-11-05
+
+### Added
+
+- The plugin ships an `agent-secrets` skill, so every session with Dispatch learns the secrets
+  broker's client from one place: the `agent-secrets NAME… -- <command>` form, why a `$NAME` the
+  calling shell expands sends an empty value, that a 200 answer can still hold `"ok": false`,
+  what each exit status means, where a secret name comes from and how it may be used, what to do
+  before reporting a service out of reach, and what a person does on their own machine. The
+  plugin's skill partition is eight.
+
+## [16.3.1] - 2026-11-04
+
+### Fixed
+
+- Keep decisions documents limited to choices that change a disagreeing reader's action; record other choices as single spec lines.
+
+## [16.3.0] - 2026-11-04
+
+### Changed
+
+- The package `repository.url`, which is the repository link on its npm page, names `cybermonklabs/legion`.
+
 ## [16.2.1] - 2026-11-04
 
 ### Fixed

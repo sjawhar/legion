@@ -73,14 +73,16 @@ type rig struct {
 }
 
 // roleConn is the daemon end of one role's launcher connection: the frames it reads, the hello
-// that opened it and the last state the role reported on it.
+// that opened it, the last state the role reported on it and the last report it made of the
+// pod's workspace restore.
 type roleConn struct {
-	t      *testing.T
-	conn   net.Conn
-	reader *bufio.Reader
-	writer *shimwire.Writer
-	hello  shimwire.LauncherHello
-	latest shimwire.LauncherState
+	t        *testing.T
+	conn     net.Conn
+	reader   *bufio.Reader
+	writer   *shimwire.Writer
+	hello    shimwire.LauncherHello
+	latest   shimwire.LauncherState
+	restored *shimwire.LauncherRestored
 }
 
 // lockedBuffer is a bytes.Buffer the launcher and its children can write while a test reads it.
@@ -220,6 +222,9 @@ func (g *roleConn) next() shimwire.Frame {
 	if state, ok := frame.(shimwire.LauncherState); ok {
 		g.latest = state
 	}
+	if report, ok := frame.(shimwire.LauncherRestored); ok {
+		g.restored = &report
+	}
 	return frame
 }
 
@@ -230,19 +235,21 @@ func (g *roleConn) send(frame shimwire.Frame) {
 	}
 }
 
-// answer sends command and returns its answer, skipping state frames.
+// answer sends command and returns its answer, skipping the frames the launcher reports of its
+// own accord: its state, and what became of the pod's workspace restore.
 func (g *roleConn) answer(command shimwire.Frame) shimwire.Frame {
 	g.t.Helper()
 	g.send(command)
 	return g.reply()
 }
 
-// reply is the next answer the launcher sends, skipping state frames.
+// reply is the next answer the launcher sends, skipping the frames it reports of its own accord.
 func (g *roleConn) reply() shimwire.Frame {
 	g.t.Helper()
 	for {
-		frame := g.next()
-		if _, state := frame.(shimwire.LauncherState); !state {
+		switch frame := g.next(); frame.(type) {
+		case shimwire.LauncherState, shimwire.LauncherRestored:
+		default:
 			return frame
 		}
 	}
@@ -273,6 +280,14 @@ func (g *rig) generationDir(generation uint64) string {
 // childStart is a start of the stand-in child for generation, reading its Envoy credential
 // through the pointer the daemon names, looking for its generation's session socket where the
 // launcher binds it, and publishing both to marker.
+//
+// Every start names a LEGION_WORKSPACE of the test's own. The launcher merges a start's
+// environment over the process's (launcher.go's mergeEnv) and a restore reads the workspace from
+// the merged one (restore.go's bundleRestore.apply), so a start that named none would restore
+// into whatever workspace the process holds — in an issue pod, the live one its roles work in.
+// The package's guard takes that variable out of the test process (main_test.go), and this makes
+// the guard the second line rather than the only one: the start names a directory of this test,
+// so even an unguarded run reaches nothing of the pod's.
 func (g *rig) childStart(generation uint64, marker string, files map[string]string) shimwire.LauncherStart {
 	g.t.Helper()
 	self, err := os.Executable()
@@ -284,6 +299,7 @@ func (g *rig) childStart(generation uint64, marker string, files map[string]stri
 		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
 		Argv: []string{self, "-test.run=^TestLauncherChild$"},
 		Env: []string{launcherChildEnv + "=1", "LEGION_LAUNCHER_MARKER=" + marker,
+			"LEGION_WORKSPACE=" + filepath.Join(g.t.TempDir(), "workspace"),
 			"ENVOY_TOKEN_FILE=" + filepath.Join(dir, "ENVOY_TOKEN"),
 			"LEGION_LAUNCHER_SOCKET=" + filepath.Join(dir, ompsessions.SocketName)},
 		Files: files,

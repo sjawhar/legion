@@ -1,5 +1,17 @@
 # Changelog
 
+## [29.6.0] - 2026-11-04
+
+### Changed
+
+- The Envoy image the compose files and `deploy/scripts/autodeploy.sh` pull by default is `ghcr.io/cybermonklabs/legion/envoy`, and the broker's refusal of a `BROKER_DATABASE_URL` with no password links its RDS IAM-token guide at `https://cybermonklabs.github.io/legion/`: this repository moved to that owner.
+- Dispatch no longer refuses a bearer token on the 43 routes only a browser could call. Two OAuth scopes decide instead: `person`, which acts as the credential's person on every route the dashboard reaches, and `approve`, which adds beside it the acts that approve work or control a credential - a document review, the answer of an approval ask, a machine-login decision or revoke, and minting, changing or revoking a personal token. A browser sign-in, a personal token and a broker token the broker scoped to its person hold both; the shared agent token, a service-account token and a broker token scoped to a project hold none, and are refused `403 OAUTH_SCOPE_REQUIRED` naming the scope under `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"`. `GET /api/v1/whoami` answers every caller's scopes, `GET /api/v1` and `envoy-dispatch routes` carry each route's, `POST /api/v1/me/agent-tokens` takes the set a new token holds, and the new `PATCH /api/v1/me/agent-tokens/{id}` changes it; a credential gives a token only scopes it holds itself, and no token holds `approve` without `person`. An act an agent makes for its person is recorded with the person as the actor and an `act` field naming the acting session or token and the scopes it held, so the person can still change their own answer and every notice still reaches them; a new document version carries its approval only when every answer the carry counts was made at a browser or under an act holding `approve`, and a message an agent sent for its person is refused `409 ACCEPT_WRITTEN_BY_AGENT` by the accept route, reaching the session as a card that names the agent.
+
+### Fixed
+
+- Dispatch's offline stored-order checker reuses the prefix before each parked row instead of replaying the old history for every comparison. It copies prefixes through encoded snapshots, keeps three document copies, and replays each row's unresolved span separately. Pending-state comparison still uses encoded bytes: the document server exposes no decoded pending structs, and content identifiers alone cannot distinguish different payloads at the same clocks.
+- Two-process document tests wait until the newly connected editor's metadata marker is stored before another process writes. Rendering the document is no longer used as evidence that the editor's append is complete.
+
 ## [29.5.1] - 2026-11-04
 
 ### Changed
