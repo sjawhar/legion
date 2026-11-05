@@ -120,14 +120,18 @@ func newSession(pid int, ticks uint64, runtimeID, sessionID string, key *ecdsa.P
 	}, nil
 }
 
-// rename replaces the session's identity under its own mutex and bumps the generation, so an
-// enroll or a renew already in flight cannot install its result afterwards. Only
-// Registry.Rename calls it, having already decided the name is free.
-func (s *Session) rename(sessionID, runtimeID string, key *ecdsa.PrivateKey) bool {
+// rename replaces the session's identity AND retires the enrollment that identity had, in one
+// critical section, bumping the generation so an enroll or a renew already in flight cannot
+// install its result afterwards. Both halves must be one step: between a new key and a cleared
+// enrollment id, an identity() reading would pair the replacement key with the old enrollment,
+// and sign and Renew would make a proof that enrollment's key cannot verify. Only
+// Registry.Rename calls it, having already decided the name is free. It returns the id the
+// caller must revoke before the session enrols again, if there is one.
+func (s *Session) rename(sessionID, runtimeID string, key *ecdsa.PrivateKey, reason string) (lapsed string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessionID != "" {
-		return false
+		return "", false
 	}
 	s.sessionID, s.runtimeID, s.generation = sessionID, runtimeID, s.generation+1
 	if key != nil {
@@ -135,7 +139,8 @@ func (s *Session) rename(sessionID, runtimeID string, key *ecdsa.PrivateKey) boo
 			s.key, s.thumbprint = key, tp
 		}
 	}
-	return true
+	s.lapseLocked(reason)
+	return s.lapsedID, true
 }
 
 // wakeEnroll tells the session's loops to enrol again now; wakeCh is what they wait on.
@@ -226,13 +231,24 @@ func (s *Session) setError(msg string) {
 func (s *Session) markLapsed(reason string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lapsedID, s.enrollmentID, s.lastError = s.enrollmentID, "", reason
+	s.lapseLocked(reason)
+	return s.lapsedID
+}
+
+// lapseLocked is markLapsed's body, for a caller already holding s.mu. An enrollment id this
+// session holds becomes the lapsed one; an EMPTY one leaves the lapsed id where it is, since
+// overwriting it with nothing would drop an enrollment the helper has promised to revoke and
+// leave it to its lease.
+func (s *Session) lapseLocked(reason string) {
+	if s.enrollmentID != "" {
+		s.lapsedID = s.enrollmentID
+	}
+	s.enrollmentID, s.lastError = "", reason
 	select {
 	case <-s.ready:
 		s.ready = make(chan struct{})
 	default:
 	}
-	return s.lapsedID
 }
 
 // setLapsed gives a re-pinned session its recorded enrollment as the lapsed id.
@@ -428,12 +444,12 @@ func (r *Registry) Rename(s *Session, sessionID, runtimeID string, key *ecdsa.Pr
 		r.mu.Unlock()
 		return false
 	}
-	renamed := s.rename(sessionID, runtimeID, key)
+	_, renamed := s.rename(sessionID, runtimeID, key,
+		"this session has been named "+sessionID+"; enrolling it under that name")
 	r.mu.Unlock()
 	if !renamed {
 		return false
 	}
-	s.markLapsed("this session has been named " + sessionID + "; enrolling it under that name")
 	s.wakeEnroll()
 	return true
 }

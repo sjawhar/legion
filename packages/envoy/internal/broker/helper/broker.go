@@ -1116,10 +1116,16 @@ func (b *Broker) logger() *slog.Logger {
 // Enroll registers the session's key. 201 is a new enrollment; 200 is the live one for the same
 // credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
 func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
-	// One reading: the runtime id and the thumbprint must be the same generation's, or the
-	// broker is asked to enrol one identity's key under another's name.
-	id := s.identity()
-	return b.enroll(ctx, id.RuntimeID, id.Thumbprint, nil, "host")
+	return b.EnrollIdentity(ctx, s.identity())
+}
+
+// EnrollIdentity enrols ONE reading of a session's identity, so the caller decides which
+// generation the attempt belongs to rather than the broker rereading a session a rename may
+// have moved on. The answer of an attempt that began under an identity the session no longer
+// has must not be installed on the one it does, and must not be revoked either, since it may
+// be the very enrollment the new identity is about to be handed back (dispatch://INFRA-1167).
+func (b *Broker) EnrollIdentity(ctx context.Context, cur identity) (string, time.Time, error) {
+	return b.enroll(ctx, cur.RuntimeID, cur.Thumbprint, nil, "host")
 }
 
 // EnrollSessionKey registers a key the helper does not hold, one a launcher enrolls for a session

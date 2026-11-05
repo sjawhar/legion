@@ -676,10 +676,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		}
 		var id string
 		var lease time.Time
-		// The generation this attempt belongs to, read before it starts: a rename landing while
-		// the broker call is in flight makes the answer the OLD identity's, which this session
-		// must not take (setEnrolledAt).
-		generation := sess.identity().Generation
+		var generation uint64
 		// A login wakes the retry, so a session registered before it enrolls within about a second
 		// rather than when a backoff of up to a minute comes round.
 		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
@@ -690,8 +687,16 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 			}
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID(), "error", err, "in", delay)
 		}, func() error {
+			// ONE reading per attempt, and the generation of that very reading: the loop can
+			// retry across a rename, and an attempt that enrolled the NEW identity must be
+			// recognised as the new one's. Reading the generation once outside this closure
+			// would make such an answer look superseded, and the id it carries — which may be
+			// the enrollment the new identity was just handed back — would be lapsed and
+			// revoked, destroying the grant this change exists to keep.
+			cur := sess.identity()
+			generation = cur.Generation
 			var err error
-			id, lease, err = s.Broker.Enroll(ctx, sess)
+			id, lease, err = s.Broker.EnrollIdentity(ctx, cur)
 			return err
 		})
 		if !enrolled {
@@ -841,7 +846,11 @@ func (s *Server) retire(ctx context.Context, sess *Session, why string) {
 	// One reading, so the record cannot pair one generation's name with another's key.
 	cur := sess.identity()
 	id := cur.EnrollmentID
-	if cur.SessionID != "" && id != "" {
+	// A named session is parked whether or not it has an enrollment yet. One that went away
+	// while it was still enrolling — the helper holding no launcher credential, a resume
+	// interrupted — would otherwise have its KEY dropped here, and the identity the broker
+	// still holds could never be reclaimed by the session coming back.
+	if cur.SessionID != "" {
 		gone := time.Now()
 		s.Registry.Park(Record{
 			PID: sess.PID, StartTicks: sess.StartTicks, RuntimeID: cur.RuntimeID,
