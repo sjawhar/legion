@@ -29,6 +29,23 @@ func writeAmbiguousID(w http.ResponseWriter, ambiguous *refs.ErrPrefixAmbiguous)
 	})
 }
 
+// canonicalizeUUIDPath rewrites a path value that is a whole uuid written in one of the other
+// spellings uuid.Parse reads - `urn:uuid:<uuid>`, the braced one, and 32 hex digits - to the
+// canonical spelling, so every layer behind it reads one spelling of the id the path names.
+// Such a value is no id prefix (text.IsIDPrefix refuses its colons, braces, and a whole uuid
+// alike), so the prefix layer would otherwise leave it as written and it would reach a `::uuid`
+// column as the caller spelled it. Postgres reads the braced and 32-digit spellings and refuses
+// `urn:uuid:` ("invalid input syntax for type uuid"), so that one address, which this server
+// reads, would answer 500; it is why documentRefKey sends the canonical form too. A value that
+// is no uuid at all is left alone for the route to refuse.
+func canonicalizeUUIDPath(r *http.Request, name, value string) {
+	parsed, err := uuid.Parse(value)
+	if err != nil || parsed.String() == value {
+		return
+	}
+	r.SetPathValue(name, parsed.String())
+}
+
 // resolveIDPrefixes rewrites a route's {id}, and the {block_id} of a document block, from an id
 // written short to the whole id it names, before anything behind it reads that value: register
 // wraps it around every route outside the two scope checks, so the check that decides whether a
@@ -39,9 +56,11 @@ func writeAmbiguousID(w http.ResponseWriter, ambiguous *refs.ErrPrefixAmbiguous)
 // nothing.
 //
 // A value that is no id written short (text.IsIDPrefix — at least eight hex digits and hyphens,
-// never a whole uuid) is left exactly as written with no query, so a whole id, a slug, a
-// numbered id, a seven-character stub and a block id such as b1 or ship_it cost nothing and get
-// the answer they always got, the 400 of a route that parses its id included.
+// never a whole uuid) is left as written with no query, so a whole id, a slug, a numbered id, a
+// seven-character stub and a block id such as b1 or ship_it cost nothing and get the answer they
+// always got, the 400 of a route that parses its id included. The one such value this does
+// rewrite is a whole uuid an {id} spells another of uuid.Parse's ways, which is rewritten to the
+// canonical spelling and still costs no query (canonicalizeUUIDPath).
 //
 // A value that is one is looked for among the items of its kind, within the owner the route
 // names — the issue of /issues/{key}/messages/{id}, the document of
@@ -67,6 +86,8 @@ func (s *server) resolveIDPrefixes(route apiRoute, handler http.HandlerFunc) htt
 		if entry.Kind != "" {
 			if value := r.PathValue("id"); text.IsIDPrefix(value) {
 				id = value
+			} else {
+				canonicalizeUUIDPath(r, "id", value)
 			}
 		}
 		if entry.Blocks {
