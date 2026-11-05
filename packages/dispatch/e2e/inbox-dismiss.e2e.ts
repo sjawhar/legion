@@ -119,9 +119,20 @@ function nextDismiss(page: Page): Promise<Request> {
   );
 }
 
-/** What the reader has dismissed out of their Inbox, read back from the route. */
+/** What the reader has dismissed out of their Inbox, read back from the route a page at a time.
+ *  Under `state=dismissed` the answer's `total` is the page it holds rather than the whole pile -
+ *  nothing counts that view, and counting it is the most expensive read the Inbox has (a14) - so
+ *  the count is the rows, followed through `next_cursor` to the last page. */
 async function dismissedThreads(): Promise<number> {
-  return (await listMyReplies({ kind: ["reply", "agent"], state: "dismissed" })).total;
+  let counted = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await listMyReplies({ cursor, kind: ["reply", "agent"], state: "dismissed" });
+    counted += page.rows.length;
+    cursor =
+      page.next_cursor === undefined || page.next_cursor === "" ? undefined : page.next_cursor;
+  } while (cursor !== undefined);
+  return counted;
 }
 
 /** What the reader's Inbox holds, read or not, read back from the route. */

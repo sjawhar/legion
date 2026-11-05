@@ -447,9 +447,13 @@ export function listMyAnswers(
  *  route's own default, `reply` alone; an absent `state` is `unread`; an absent `limit` is every
  *  row, which is what the Inbox itself reads. `inbox` is every row of the caller's Inbox, read or
  *  not, less what they have dismissed, and `dismissed` is what they dismissed out of it, newest
- *  dismissal first and `INBOX_DISMISSED_PAGE` rows at a time. */
+ *  dismissal first and `INBOX_DISMISSED_PAGE` rows at a time, `cursor` reading the next page from
+ *  the `next_cursor` of the page before it. Under `dismissed` the answer's `total` is the page it
+ *  holds rather than the whole pile, which nothing counts, so a caller that wants the pile pages
+ *  through `next_cursor`. */
 export function listMyReplies(
   page: {
+    cursor?: string;
     kind?: readonly ("reply" | "agent")[];
     limit?: number;
     offset?: number;
@@ -458,6 +462,7 @@ export function listMyReplies(
   options: ApiOptions = {}
 ): Promise<MyRepliesResponse> {
   const query = new URLSearchParams();
+  if (page.cursor !== undefined) query.set("cursor", page.cursor);
   if (page.kind !== undefined) query.set("kind", page.kind.join(","));
   if (page.limit !== undefined) query.set("limit", String(page.limit));
   if (page.offset !== undefined) query.set("offset", String(page.offset));
