@@ -1,7 +1,42 @@
-import { expect, type Page, type Request, test } from "@playwright/test";
+import {
+  type Browser,
+  type BrowserContext,
+  expect,
+  type Page,
+  type Request,
+  test,
+} from "@playwright/test";
 
-import { createAsk, createIssue, createProject, getIssue, patchIssue } from "./api";
-import { barAction, selectEditorText } from "./editor";
+import { CONTROL_LABELS, PRESET_NAMES } from "../web/src/features/issue/page-words";
+import { createAsk, createIssue, createProject, getArtifact, getIssue, patchIssue } from "./api";
+import { barAction, selectEditorText, selectTextIn } from "./editor";
+import { seedWholeIssue, type WholeIssueSeed } from "./issue-layout-seed";
+import { requirementBlockId } from "./issue-layout-seed-text";
+import {
+  activePreset,
+  blockNodeId,
+  caretInNode,
+  childrenSection,
+  conversationStateControl,
+  drawnRows,
+  filterBox,
+  focusedNodeId,
+  focusInside,
+  focusThePage,
+  gotoIssue,
+  identityBlockBottom,
+  issuePage,
+  marginSlot,
+  nodeBodies,
+  nodeMenuButton,
+  nodeRow,
+  onScreen,
+  openMenu,
+  pinnedBodies,
+  rowBody,
+  tree,
+  treeActiveDescendant,
+} from "./issue-page";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -666,4 +701,425 @@ test.describe("issue page", () => {
       await context.close();
     }
   });
+});
+
+/**
+ * The tree's own keyboard, which is c-keyboard of dispatch://INFRA-1196: every row of the key
+ * table in the spec's Design section, the eight chords the page bound before the redesign, the
+ * one Tab stop, the arrows, the focused row clear of the sticky header, `t f`, `$mod+Alt+m`, and
+ * the WAI-ARIA tree pattern. Each row reads the page through `e2e/issue-page.ts` and spells no
+ * selector of its own. The rows above about the project List and the Board are untouched: they
+ * are not about this page.
+ */
+
+interface OpenedTree {
+  readonly context: BrowserContext;
+  readonly page: Page;
+  readonly seeded: WholeIssueSeed;
+}
+
+/** The whole issue, opened by one signed-in reader with the focus on the page itself, which is
+ *  where reading mode is. A key pressed before this returns reaches no handler, because the
+ *  keymap binds only once sign-in resolves. It asserts nothing: each row below asserts the key
+ *  or the tree property it is about first, and `expectTreeDrawn` after it. */
+async function openTree(browser: Browser): Promise<OpenedTree> {
+  const seeded = await seedWholeIssue();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.setViewportSize({ height: 900, width: 1280 });
+  await gotoIssue(page, `/issues/${seeded.key}`);
+  await focusThePage(page);
+  return { context, page, seeded };
+}
+
+/** The redesigned page and its tree are on the screen, which every row asserts after its own
+ *  subject: a page that answers a key but draws no tree fails here. */
+async function expectTreeDrawn(page: Page): Promise<void> {
+  expect(
+    await issuePage(page).count(),
+    "the page draws no [data-issue-page] root, so this is not the redesigned issue page"
+  ).toBe(1);
+  expect(await tree(page).count(), 'the page draws no role="tree" named "Issue tree"').toBe(1);
+}
+
+/** The ids of the rows a reader can see, in the order the keys move through them. */
+async function visibleIds(page: Page): Promise<string[]> {
+  return (await drawnRows(page)).filter((row) => row.visible).map((row) => row.id ?? "<no id>");
+}
+
+/** Where the keys have left the reader: the row holding the focus, or the one the tree names with
+ *  `aria-activedescendant`. */
+async function focusedRow(page: Page): Promise<string | null> {
+  return (await focusedNodeId(page)) ?? (await treeActiveDescendant(page));
+}
+
+/** The focused row is on screen and clear of the sticky identity block, which R9 requires after
+ *  every move and not only at the end. */
+async function expectFocusedRowClear(page: Page, after: string): Promise<void> {
+  const id = await focusedRow(page);
+  expect(id, `${after} left the focus on no row`).not.toBeNull();
+  const row = (await drawnRows(page)).find((candidate) => candidate.id === id);
+  const box = row?.box ?? null;
+  expect(box, `${after} left the focus on a row with no box`).not.toBeNull();
+  const header = (await identityBlockBottom(page)) ?? 0;
+  expect(
+    box?.y ?? -1,
+    `after ${after} the focused row sits under the sticky header`
+  ).toBeGreaterThanOrEqual(header - 1);
+  expect(
+    (box?.y ?? 0) + (box?.height ?? 0),
+    `after ${after} the focused row is below the viewport`
+  ).toBeLessThanOrEqual(900);
+}
+
+test("the tree's keys move, fold, zoom and open the focused node", async ({ browser }) => {
+  const { context, page, seeded } = await openTree(browser);
+  try {
+    const order = await visibleIds(page);
+    expect(
+      order.length,
+      "the keys have no rows to move through: the tree draws none"
+    ).toBeGreaterThan(3);
+    await expectTreeDrawn(page);
+
+    // j, k and the arrows move to the next and previous visible row.
+    await page.keyboard.press("Tab");
+    expect(await focusedRow(page), "Tab did not put the reader on the first row").toBe(order[0]);
+    for (const [index, step] of [
+      [1, "j"],
+      [2, "ArrowDown"],
+      [1, "k"],
+      [0, "ArrowUp"],
+    ] as const) {
+      await page.keyboard.press(step);
+      expect(await focusedRow(page), `${step} did not move to row ${index}`).toBe(order[index]);
+      await expectFocusedRowClear(page, step);
+    }
+
+    // Home and End reach the first and last visible row.
+    await page.keyboard.press("End");
+    expect(await focusedRow(page), "End did not reach the last visible row").toBe(
+      order[order.length - 1]
+    );
+    await expectFocusedRowClear(page, "End");
+    await page.keyboard.press("Home");
+    expect(await focusedRow(page), "Home did not reach the first visible row").toBe(order[0]);
+
+    // The right arrow unfolds the focused node and then moves into its first child; the left
+    // arrow moves back to the parent and then folds it.
+    const folded = (await drawnRows(page)).find((row) => row.expanded === "false");
+    expect(
+      folded,
+      "no branch of the tree is folded, so the arrows have nothing to unfold"
+    ).toBeDefined();
+    const branch = folded?.id ?? "";
+    await nodeRow(page, branch).first().focus();
+    await page.keyboard.press("ArrowRight");
+    expect(
+      (await drawnRows(page)).find((row) => row.id === branch)?.expanded,
+      "the right arrow did not unfold the focused node"
+    ).toBe("true");
+    expect(
+      await focusedRow(page),
+      "the right arrow left the focused node before unfolding it"
+    ).toBe(branch);
+    await page.keyboard.press("ArrowRight");
+    expect(
+      await focusedRow(page),
+      "the second right arrow did not move into the branch's first child"
+    ).not.toBe(branch);
+    await page.keyboard.press("ArrowLeft");
+    expect(await focusedRow(page), "the left arrow did not move to the parent").toBe(branch);
+    await page.keyboard.press("ArrowLeft");
+    expect(
+      (await drawnRows(page)).find((row) => row.id === branch)?.expanded,
+      "the second left arrow did not fold the focused node"
+    ).toBe("false");
+
+    // o pins the focused node's body open, and again closes it.
+    await page.keyboard.press("o");
+    expect(await pinnedBodies(page).count(), "o pinned no body open").toBe(1);
+    await page.keyboard.press("o");
+    expect(await pinnedBodies(page).count(), "o did not close the pinned body").toBe(0);
+
+    // . zooms into the focused node and , comes back out one level.
+    const whole = await visibleIds(page);
+    await page.keyboard.press(".");
+    const zoomed = await visibleIds(page);
+    expect(
+      zoomed.length,
+      "the zoom key drew the same rows, so it zoomed into nothing"
+    ).toBeLessThan(whole.length);
+    expect(zoomed[0], "the zoom key did not make the focused node the tree's root").toBe(branch);
+    await page.keyboard.press(",");
+    expect(await visibleIds(page), "the key back out did not restore the level above").toEqual(
+      whole
+    );
+
+    // q moves to the next open question, whatever its depth.
+    await page.keyboard.press("q");
+    const question = await focusedRow(page);
+    expect(
+      (await drawnRows(page)).find((row) => row.id === question)?.type,
+      "the next-question key reached a row that is no open question"
+    ).toBe("ask");
+
+    // w moves into the decision behind the focused node.
+    const specSlug = (await getArtifact(seeded.specArtifactId)).slug;
+    const decisionsSlug = (await getArtifact(seeded.decisionsArtifactId)).slug;
+    await nodeRow(page, blockNodeId(specSlug, requirementBlockId(1)))
+      .first()
+      .focus();
+    await page.keyboard.press("w");
+    expect(await focusedRow(page), "w did not move into the decision behind the node").toBe(
+      blockNodeId(decisionsSlug, seeded.decisions[0] ?? "")
+    );
+
+    // z cycles the whole tree: first lines, first lines with bodies to depth two, everything.
+    await focusThePage(page);
+    const firstLines = await visibleIds(page);
+    await page.keyboard.press("z");
+    expect(
+      await nodeBodies(page).count(),
+      "the second state of the cycle draws no bodies"
+    ).toBeGreaterThan(1);
+    await page.keyboard.press("z");
+    expect(
+      (await visibleIds(page)).length,
+      "the third state of the cycle draws no more rows than the first"
+    ).toBeGreaterThan(firstLines.length);
+    await page.keyboard.press("z");
+    expect(await visibleIds(page), "the cycle did not come back to the first lines").toEqual(
+      firstLines
+    );
+
+    // Enter puts the caret in the focused node; Escape leaves the caret for the row, then the
+    // tree. This extends the binding the page already has and adds none.
+    const second = blockNodeId(specSlug, requirementBlockId(2));
+    await nodeRow(page, second).first().focus();
+    await page.keyboard.press("Enter");
+    expect(await caretInNode(page), "Enter did not put the caret in the focused node").toBe(true);
+    await page.keyboard.press("Escape");
+    expect(await caretInNode(page), "Escape did not leave the caret").toBe(false);
+    expect(await focusedRow(page), "Escape left the row as well as the caret").toBe(second);
+    await page.keyboard.press("Escape");
+    expect(await focusedRow(page), "the second Escape did not leave the tree").toBeNull();
+  } finally {
+    await context.close();
+  }
+});
+
+test("Tab enters and leaves the tree at one stop and every move keeps the row on screen", async ({
+  browser,
+}) => {
+  const { context, page } = await openTree(browser);
+  try {
+    const order = await visibleIds(page);
+
+    // One stop in: Tab reaches the tree, and the next Tab leaves it rather than stepping through
+    // its rows, as the WAI-ARIA tree pattern requires.
+    await page.keyboard.press("Tab");
+    expect(await focusInside(tree(page)), "Tab did not enter the tree").toBe(true);
+    await expectTreeDrawn(page);
+    await page.keyboard.press("j");
+    const inside = await focusedRow(page);
+    expect(inside, "j moved to no row inside the tree").toBe(order[1]);
+    await page.keyboard.press("Tab");
+    expect(
+      await focusInside(tree(page)),
+      "Tab stepped to another row of the tree instead of leaving it"
+    ).toBe(false);
+    await page.keyboard.press("Shift+Tab");
+    expect(await focusInside(tree(page)), "Shift+Tab did not come back into the tree").toBe(true);
+    expect(await focusedRow(page), "Shift+Tab came back to another row than the one left").toBe(
+      inside
+    );
+
+    // The focused row is inside the viewport and clear of the sticky header after every move,
+    // including the ones that scroll the page.
+    for (let step = 0; step < Math.min(order.length - 1, 12); step += 1) {
+      await page.keyboard.press("j");
+      await expectFocusedRowClear(page, `move ${step + 1} with j`);
+    }
+    await page.keyboard.press("End");
+    await expectFocusedRowClear(page, "End");
+    await page.keyboard.press("Home");
+    await expectFocusedRowClear(page, "Home");
+  } finally {
+    await context.close();
+  }
+});
+
+test("every chord the page bound before the redesign brings a target on screen with the focus in it", async ({
+  browser,
+}) => {
+  const { context, page } = await openTree(browser);
+  try {
+    // The preset chords of the key table, which hold five of the eight the page bound before this
+    // change: `t d`, `t k`, `t s` and `t p`, with `t t` the table's own addition.
+    const chords = [
+      { preset: PRESET_NAMES.tree, second: "t" },
+      { preset: PRESET_NAMES.decisions, second: "d" },
+      { preset: PRESET_NAMES.checks, second: "k" },
+      { preset: PRESET_NAMES.spec, second: "s" },
+      { preset: PRESET_NAMES.plan, second: "p" },
+    ] as const;
+    for (const chord of chords) {
+      await focusThePage(page);
+      await page.keyboard.press("t");
+      await expect(page.getByTestId("chord-indicator")).toHaveText(/t/);
+      await page.keyboard.press(chord.second);
+      expect(
+        await activePreset(page),
+        `t ${chord.second} does not open the ${chord.preset} preset`
+      ).toBe(chord.preset);
+      await expectTreeDrawn(page);
+      expect(
+        await onScreen(tree(page)),
+        `t ${chord.second} does not bring the preset's content on screen`
+      ).toBe(true);
+      expect(
+        await focusInside(tree(page)),
+        `t ${chord.second} does not put the focus in the preset's content`
+      ).toBe(true);
+    }
+
+    // The conversation in its words state and in its everything state: `t c` and `t v`.
+    for (const [second, state] of [
+      ["c", "words"],
+      ["v", "everything"],
+    ] as const) {
+      await focusThePage(page);
+      await page.keyboard.press("t");
+      await page.keyboard.press(second);
+      expect(
+        await conversationStateControl(page, state).getAttribute("aria-selected"),
+        `t ${second} does not open the conversation in its ${state} state`
+      ).toBe("true");
+      expect(await onScreen(marginSlot(page)), `t ${second} leaves the panel off screen`).toBe(
+        true
+      );
+      expect(
+        await focusInside(marginSlot(page)),
+        `t ${second} does not put the focus in the panel`
+      ).toBe(true);
+    }
+
+    // The children section: `t h`.
+    await focusThePage(page);
+    await page.keyboard.press("t");
+    await page.keyboard.press("h");
+    expect(await onScreen(childrenSection(page)), "t h leaves the children off screen").toBe(true);
+    expect(
+      await focusInside(childrenSection(page)),
+      "t h does not put the focus in the children section"
+    ).toBe(true);
+
+    // The node menu: `t a`, which named the Artifacts tab before this change.
+    await focusThePage(page);
+    await page.keyboard.press("t");
+    await page.keyboard.press("a");
+    expect(await openMenu(page).count(), "t a opens no menu").toBe(1);
+    expect(await focusInside(openMenu(page)), "t a does not put the focus in the node menu").toBe(
+      true
+    );
+    expect(
+      await nodeMenuButton(page).count(),
+      `the menu t a opened is not the one named "${CONTROL_LABELS.other_nodes}" beside the presets`
+    ).toBe(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("t f filters inside the preset, $mod+Alt+m comments on a selection, and / stays the global search", async ({
+  browser,
+}) => {
+  const { context, page, seeded } = await openTree(browser);
+  try {
+    // t f filters inside the preset: the filter takes the focus and narrows the rows.
+    const before = await visibleIds(page);
+    await page.keyboard.press("t");
+    await page.keyboard.press("f");
+    expect(await filterBox(page).count(), "t f opens no filter").toBe(1);
+    await expectTreeDrawn(page);
+    expect(await focusInside(filterBox(page)), "t f does not put the focus in the filter").toBe(
+      true
+    );
+    await page.keyboard.type("Requirement 2");
+    await expect.poll(async () => (await visibleIds(page)).length).toBeLessThan(before.length);
+    expect(
+      (await drawnRows(page))
+        .filter((row) => row.visible && !row.context && !row.text.includes("Requirement 2"))
+        .map((row) => row.id),
+      "the filter kept rows that do not match what was typed"
+    ).toEqual([]);
+
+    // `/` is the application's global search, which this page does not shadow.
+    await page.keyboard.press("Escape");
+    await focusThePage(page);
+    await page.keyboard.press("/");
+    await expect(page.getByRole("dialog", { name: /search/i })).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    // $mod+Alt+m still comments on a selection inside a node's own text.
+    const specSlug = (await getArtifact(seeded.specArtifactId)).slug;
+    const requirement = nodeRow(page, blockNodeId(specSlug, requirementBlockId(2))).first();
+    await requirement.focus();
+    await page.keyboard.press("Enter");
+    expect(await caretInNode(page), "Enter did not put the caret in the node").toBe(true);
+    await selectTextIn(page, rowBody(requirement), "requirement");
+    await page.keyboard.press("ControlOrMeta+Alt+m");
+    await expect(page.getByRole("form", { name: "Comment composer" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("the tree answers the WAI-ARIA tree pattern's roles and properties", async ({ browser }) => {
+  const { context, page } = await openTree(browser);
+  try {
+    const rows = await drawnRows(page);
+    expect(
+      rows.length,
+      'the tree pattern has nothing to answer for: no role="treeitem" row is drawn'
+    ).toBeGreaterThan(0);
+    await expectTreeDrawn(page);
+    expect(
+      rows.filter((row) => row.role !== "treeitem").map((row) => row.id),
+      "these rows of the tree are no treeitem"
+    ).toEqual([]);
+    expect(
+      rows.filter((row) => !/^[1-9]\d*$/.test(row.level ?? "")).map((row) => row.id),
+      "these rows carry no aria-level"
+    ).toEqual([]);
+
+    // A row that holds children says whether it is open; a row that holds none says nothing.
+    const levels = rows.map((row) => Number(row.level ?? "0"));
+    const holdsChildren = rows.map(
+      (row, index) => (levels[index + 1] ?? 0) > (levels[index] ?? 0) || row.foldedCount !== null
+    );
+    expect(
+      rows
+        .filter((row, index) => holdsChildren[index] === true && row.expanded === null)
+        .map((row) => row.id),
+      "these rows hold children and carry no aria-expanded"
+    ).toEqual([]);
+    expect(
+      rows
+        .filter((row, index) => holdsChildren[index] !== true && row.expanded !== null)
+        .map((row) => row.id),
+      "these rows hold no children and carry aria-expanded all the same"
+    ).toEqual([]);
+
+    // The tree is one tab stop: it roves with one tabbable row, or it names the row it is on.
+    const tabbable = rows.filter((row) => row.tabIndex === 0);
+    const named = await treeActiveDescendant(page);
+    expect(
+      `${tabbable.length}/${named === null ? "none" : "named"}`,
+      `the tree has ${tabbable.length} tabbable rows and ${named === null ? "no" : "an"} aria-activedescendant, so it is not one stop`
+    ).toMatch(/^(1\/none|0\/named|1\/named)$/);
+  } finally {
+    await context.close();
+  }
 });
