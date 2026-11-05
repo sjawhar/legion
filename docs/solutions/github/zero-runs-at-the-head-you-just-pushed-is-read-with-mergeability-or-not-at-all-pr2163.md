@@ -47,7 +47,7 @@ Round 2 pushed head `eb4e98d5da36fde43138c19b1e31710c34f127c2`, read
 body's `CI` line on the reasoning that the push had landed seconds earlier. It had not landed
 seconds earlier into a mergeable pull request: `main` had moved under the branch and GitHub showed
 the pull request `CONFLICTING`/`DIRTY`, so it queued no `on: pull_request` run and
-`gh api repos/sjawhar/legion/commits/eb4e98d5…/check-runs --jq .total_count` answered `0`. The whole
+`gh api repos/cybermonklabs/legion/commits/eb4e98d5…/check-runs --jq .total_count` answered `0`. The whole
 round — a harness fix and its three tests — was judged by no lane.
 
 The tester found it and failed the round for exactly that: "No workflow run exists at head

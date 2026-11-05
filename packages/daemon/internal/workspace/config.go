@@ -395,7 +395,7 @@ func refuseSymlinkedLayout(root, dir string) error {
 //
 // jj has no ceiling option: it searches upward from the directory it runs in for the closest
 // `.jj` and opens that repository, which is how a test in a Legion issue pod came to write the
-// pod's shared clone at /legion/repos/github.com/sjawhar/legion. The walk counts only a `.jj`
+// pod's shared clone at /legion/repos/github.com/cybermonklabs/legion. The walk counts only a `.jj`
 // that is a directory, because that is all jj counts: a regular file named `.jj` is not jj's
 // workspace pointer — that is the file `.jj/repo` inside a `.jj` directory — and jj 0.45.1 run
 // below a directory holding a regular file named `.jj` answers `Error: There is no jj repo in

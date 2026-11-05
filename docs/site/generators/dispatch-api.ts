@@ -13,10 +13,6 @@ const CALLERS: Record<string, { label: string; meaning: string }> = {
     label: "Human or agent",
     meaning: "a signed-in human (browser session) or an agent (bearer token).",
   },
-  human: {
-    label: "Human only",
-    meaning: "a signed-in human; an agent's bearer token is refused with 403 `HUMAN_ONLY`.",
-  },
   bearer: {
     label: "Agent only",
     meaning: "an agent's bearer token; a browser session is refused.",
@@ -28,10 +24,20 @@ const CALLERS: Record<string, { label: string; meaning: string }> = {
   },
 };
 
+/** What each OAuth scope a route can name lets the credential holding it do (`routeScopes` in
+ *  the source, `model.ScopePerson` and `model.ScopeApprove`). */
+const SCOPES: Record<string, string> = {
+  person:
+    "this credential acts as its person. A browser sign-in holds it, and so does a personal token unless its owner took it away.",
+  approve:
+    "beside `person`, this credential may do what settles work or controls a credential: a document review, the answer of an ask of kind `approval`, a machine-login decision, a credential-grant or machine-login revoke, and minting, changing or revoking a personal token. No credential holds `approve` without `person`.",
+};
+
 interface Route {
   method: string;
   path: string;
   auth: string;
+  scopes?: string[];
   description: string;
 }
 
@@ -41,9 +47,26 @@ function readRoutes(): Route[] {
       if (!Object.hasOwn(CALLERS, route.auth as string)) {
         throw new Error(`route ${route.method} ${route.path} has unknown auth ${route.auth}`);
       }
+      // A route that needs no scope leaves the field out, so only a present one is read.
+      if (route.scopes !== undefined) {
+        if (!Array.isArray(route.scopes) || route.scopes.length === 0) {
+          throw new Error(`route ${route.method} ${route.path} has unreadable scopes`);
+        }
+        for (const scope of route.scopes) {
+          if (typeof scope !== "string" || !Object.hasOwn(SCOPES, scope)) {
+            throw new Error(`route ${route.method} ${route.path} needs unknown scope ${scope}`);
+          }
+        }
+      }
       return route as unknown as Route;
     }
   );
+}
+
+/** The scopes of one route as its line names them: `` `person` `` or `` `person` and `approve` ``. */
+function scopeNames(scopes: readonly string[]): string {
+  const names = scopes.map((scope) => `\`${scope}\``);
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
 function render(routes: Route[]): string {
@@ -57,6 +80,12 @@ function render(routes: Route[]): string {
     "",
     ...Object.values(CALLERS).map(({ label, meaning }) => `- **${label}**: ${meaning}`),
     "",
+    "## The scopes a route needs",
+    "",
+    'A route can need OAuth scopes of the credential that calls it, and the credential must hold every one it names. A credential that holds none — the shared agent token a deployment configures, a Kubernetes service-account token, a broker-issued token scoped to a project — is refused `403 OAUTH_SCOPE_REQUIRED` naming the scope, under `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"` (RFC 6750 section 3.1).',
+    "",
+    ...Object.entries(SCOPES).map(([scope, meaning]) => `- \`${scope}\`: ${meaning}`),
+    "",
     "Path parameters are the `{name}` segments of a path.",
     "",
   ];
@@ -67,6 +96,9 @@ function render(routes: Route[]): string {
     for (const route of groups.get(resource) ?? []) {
       lines.push(`### ${route.method} ${route.path}`, "", inline(route.description), "");
       lines.push(`- **Who may call:** ${CALLERS[route.auth]?.label}`);
+      if (route.scopes !== undefined) {
+        lines.push(`- **Needs the scope:** ${scopeNames(route.scopes)}`);
+      }
       const parameters = [...route.path.matchAll(/\{([^}]+)\}/g)].map((match) => `\`${match[1]}\``);
       if (parameters.length > 0) {
         lines.push(`- **Path parameters:** ${parameters.join(", ")}`);
@@ -81,7 +113,7 @@ writePage({
   path: "dispatch/reference/api.md",
   title: "HTTP API",
   description:
-    "Every route Dispatch serves under /api/v1: method, path, who may call it, and what it does.",
+    "Every route Dispatch serves under /api/v1: method, path, who may call it, the OAuth scopes it needs, and what it does.",
   sources: ["packages/envoy/internal/dispatch/api/routes_table.go"],
   body: () => render(readRoutes()),
 });

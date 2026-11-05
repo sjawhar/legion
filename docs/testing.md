@@ -50,7 +50,7 @@ runs it only under the race detector, in its race step, once per job; the plain 
 daemon") leaves it out, and `go vet -tags e2e ./...` in the `typecheck` job still compiles it
 without the detector. On CI's runners, while the plain step still ran it, it took at most 625 s
 there over the 49 green main `test` jobs of 2026-11-01 to 2026-11-03, and up to 733.581 s in the
-jobs whose race step timed out (job 125688799071). Under `-race` it took 306 to 570 s over the 51
+jobs whose race step timed out (job 125688799071). Under `-race` it took up to 570 s over the 51
 green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709 measured, on main and on
 pull requests, and ran go test's own ten minutes out on main at 2201840998; the race step gives it
 30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared devbox), so a

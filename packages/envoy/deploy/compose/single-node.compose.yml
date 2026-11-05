@@ -29,7 +29,7 @@ services:
       - nats-data:/data
 
   listener:
-    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see single-node.env.example)}
+    image: ghcr.io/cybermonklabs/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see single-node.env.example)}
     network_mode: host
     depends_on:
       nats:
