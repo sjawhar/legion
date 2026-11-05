@@ -3,6 +3,15 @@
 This file is history: every entry after the last section below stays as a fragment file under
 `.changes/unreleased/`, since this package has no release of its own to carry it.
 
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- The bundled `dispatch` command and tools carry no length bound of their own: a question, a
+  body, an option, a closing reason and a reply are sent as written, and Dispatch's refusal,
+  which names the block or the field that passed the bound, is what a session reads. The
+  bundled `dispatch limits` prints the bounds the server holds a write to.
+
 ## [main@f06073fb9ef4] - 2026-11-05
 
 ### Changed
