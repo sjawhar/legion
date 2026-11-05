@@ -1034,7 +1034,7 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
 test("the controller reads the whole state without a grant and sets an issue's status with its own", async () => {
   const state = {
     daemon: { project: "OMP" },
-    admission: { cap: 2, active: ["LEGION-208"], waiting: [] },
+    admission: { cap: 2, active: ["LEGION-208"], waiting: [], trees: ["LEGION-208"] },
     issues: { "LEGION-208": { key: "LEGION-208", phase: "held", holdReason: "escalated" } },
     capabilities: [],
   };
