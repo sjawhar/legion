@@ -195,11 +195,12 @@ async function openAsks(raw: unknown): Promise<void> {
   )
   const { dispatch, warnings, missing } = sessionDispatchSettings(chosen, process.env, {
     cwd: directory,
+    session: input.session_id,
   })
   for (const warning of warnings) process.stdout.write(`envoy: ${warning}\n`)
   if (dispatch.enabled) {
     try {
-      const snapshot = await new DispatchClient(dispatch.url, dispatch.token, fetch, {
+      const snapshot = await new DispatchClient(dispatch.url, dispatch.credential, fetch, {
         signal: AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
       }).openAsks(input.session_id)
       process.stdout.write(
@@ -369,7 +370,11 @@ async function answersMessage(
   by: number,
 ): Promise<{ readonly text: string | undefined; readonly notice?: string | undefined }> {
   const file = sessionConfigFile("claude", process.env)
-  let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" })
+  let { dispatch } = sessionDispatchSettings(file, process.env, {
+    cwd,
+    commands: "kept",
+    session,
+  })
   let dispatchUrl: string | undefined
   if (!dispatch.enabled && dispatch.error !== null) {
     // The configured URL alone, no command run. With none (envoy.json unreadable, Dispatch off or
@@ -463,7 +468,7 @@ async function answersRefresh(session: string, cwd: string): Promise<never> {
       // hook carries what it read, and when the token command fails, the hook for the same URL
       // carries this refresher's failure line naming why.
       const dispatchUrl = sessionDispatchUrl(file, process.env, { cwd }) ?? null
-      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd })
+      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd, session })
       const read = await readSessionAnswers({
         session,
         dispatch,

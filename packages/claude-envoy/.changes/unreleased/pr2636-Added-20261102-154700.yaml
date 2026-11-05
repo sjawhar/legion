@@ -1,0 +1,10 @@
+kind: Added
+body: |
+  The bundled `dispatch` command, `envoy-send`, the channel server and the session hook present
+  the secrets broker's DPoP-bound access token when no Dispatch or listener bearer is
+  configured, so a Claude Code session on a machine with an identity of its own needs no token
+  written anywhere. The bundles inline `@legion/broker-client`, which `scripts/build-inputs.txt`
+  now lists.
+time: 2026-11-02T15:47:00.000000000Z
+custom:
+  Issue: pr2636

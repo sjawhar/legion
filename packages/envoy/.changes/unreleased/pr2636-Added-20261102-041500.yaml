@@ -1,0 +1,28 @@
+kind: Added
+body: |
+  Dispatch now admits an access token the secrets broker issued that names a session and a
+  service and no person: a machine nobody has signed in on. Such a caller reads as any session
+  does, and `whoami` names its session and its service, but every write it makes is refused
+  `403 SIGN_IN_REQUIRED` naming `agent-secrets login`, the command that signs a person in on
+  that machine, because Dispatch records a write under the person who made it and this
+  credential names none. The refusal sits in front of every mutating route rather than in each
+  one, so a route added later is covered by the table it joins. Such a token names no project
+  either, since a fleet whose entry names no person names no project for it: its scope is
+  `person`, Dispatch's project check leaves it alone, and the write refusal is the whole of what
+  holds it. The access-log line records the service it acts for where it names no person.
+  Dispatch relays two more of the broker's routes to the page a person reads:
+  `GET /api/v1/signins` lists the machines the caller has signed in on and
+  `POST /api/v1/signins/{id}/revoke` ends one, which stops that machine trading for them and
+  ends the access tokens already minted under it. Dispatch names the person from its own
+  session, so nobody reads or revokes another's; the Settings page renders them as **Sign-ins**,
+  beside Live grants.
+  `GET /api/v1/credentials/capabilities` answers `{"machine_code_page": <bool>}` from a cached
+  read of the broker's RFC 8414 metadata, and the web app serves the page where a person types a
+  machine's code only while that answer is true. A broker that serves no device grant prints no
+  code for anyone to type, so there is no page; no Dispatch setting changes, since the broker is
+  where that is decided. A broker Dispatch cannot read keeps the answer it last gave, or, with
+  none, keeps the page: a page that vanishes because one read timed out is worse than one that
+  lingers.
+time: 2026-11-02T04:15:00.000000000Z
+custom:
+  Issue: pr2636

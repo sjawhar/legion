@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
@@ -17,12 +19,19 @@ import (
 // and a typed fence whose label opens a run of brackets. Each is stored or refused here as the
 // browser's own suites expect it to be, so the two read the same body the same way.
 //
-// Each shape is asserted three ways: the verdict a write of it gets; the CPU time the parse spends
+// Each shape is asserted four ways: the verdict a write of it gets; the CPU time the parse spends
 // on it, under heavyBodyCPUBudget outside -race (heavy_body_budget.go, and no time bound under it,
 // where the race detector's own per-access instrumentation costs 2-8 s on these same bodies and
 // bounds nothing about this package's own work); and, for every stored shape, growth in proportion
 // to its length, measured at an eighth of what it grows to and then at the whole of it
-// (growsLinearly, linear_test.go), in both builds.
+// (growsLinearly, linear_test.go), in both builds - of the parse alone, and of the parse and the
+// encode of the document a write makes of the body together.
+//
+// The Playwright specs that write these same shapes through the API hold each write to a second
+// and to nothing about its growth: a ratio between two wall times a shared CI runner took, a
+// doubling of the body apart, cannot separate a regression from the runner's own noise, which is
+// what made that bound fail at random (INFRA-985). The growth claim is made here instead, in this
+// process's own CPU time and at an eightfold step.
 //
 // These pass as they are written: every shape here already parses in under a second of CPU time.
 // They are the bound the browser's own parse is held to on the same bodies, and the guard over the
@@ -181,6 +190,59 @@ func TestHeavyBodiesAtTheBodyCapParseInTimeProportionalToTheirLength(t *testing.
 				took, measureErr := cpuTimeOf(again(func() { _, err = ParseForWrite(body, nil) }))
 				if err != nil {
 					return 0, fmt.Errorf("parsing %d characters of %s: %w", size, shape.name, err)
+				}
+				return took, measureErr
+			})
+		})
+	}
+}
+
+// Every shape a write stores is parsed and encoded into a document in time proportional to its
+// length, at the sizes the parse alone is measured at above: this is the whole of what a document
+// write does with a body before it reaches Postgres - the parse of the markdown a caller sent and
+// the write of that tree into a fresh document, encoded as the document's first durable update
+// (parseReplacing and encodeDocumentTree, internal/dispatch/docs/tree.go). The parse is the part
+// that has grown quadratically before (linear_test.go holds the shapes that did), and the encode
+// is measured beside it because it is the rest of the time an API write spends on a body, which
+// the end-to-end bound this test replaced used to cover (INFRA-985).
+//
+// Each run gets a document of its own, since a write changes the document it writes into, and the
+// body it writes is built before the window opens (cpuTimeOf).
+func TestHeavyBodiesAtTheBodyCapParseAndEncodeInTimeProportionalToTheirLength(t *testing.T) {
+	for _, shape := range heavyBodyShapes() {
+		if shape.refusal != "" {
+			continue
+		}
+		t.Run(shape.name, func(t *testing.T) {
+			sizes := []int{shape.grown / growthStep, shape.grown}
+			growsLinearly(t, "writing "+shape.name, sizes, linearSlack, func(size int) (time.Duration, error) {
+				body := shape.body(size)
+				var err error
+				var update []byte
+				took, measureErr := cpuTimeOf(func() func() {
+					// "prosemirror" is the fragment the document service writes a document's
+					// blocks into (fragmentName, internal/dispatch/docs/tree.go).
+					doc := crdt.New()
+					fragment := doc.GetXmlFragment("prosemirror")
+					return func() {
+						tree, parseErr := ParseForWrite(body, nil)
+						if parseErr != nil {
+							err = parseErr
+							return
+						}
+						if err = doc.TransactE(func(txn *crdt.Transaction) error {
+							return Update(txn, fragment, tree)
+						}); err != nil {
+							return
+						}
+						update = crdt.EncodeStateAsUpdateV1(doc, nil)
+					}
+				})
+				if err != nil {
+					return 0, fmt.Errorf("writing %d characters of %s: %w", size, shape.name, err)
+				}
+				if len(update) == 0 {
+					return 0, fmt.Errorf("writing %d characters of %s encoded no update", size, shape.name)
 				}
 				return took, measureErr
 			})

@@ -7,6 +7,7 @@ import {
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_KEY_PATTERN,
 } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import {
   DISPATCH_WRITE_RETRY,
   DispatchClient,
@@ -153,7 +154,7 @@ const posted = {
 } as unknown as CommentWriteResponse;
 
 function client(fetchImpl: typeof fetch, retry: DispatchWriteRetry, signal?: AbortSignal) {
-  return new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+  return new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl, {
     signal,
     writeRetry: retry,
   });
@@ -1142,7 +1143,7 @@ describe("DispatchClient's uploads on a real connection", () => {
   beforeEach(forgetKeyedLayerMemory);
 
   const upload = (url: string, silenceMs: number, size: number) =>
-    new DispatchClient(url, "secret", fetch, {
+    new DispatchClient(url, bearerCredential("secret"), fetch, {
       writeRetry: { ...DISPATCH_WRITE_RETRY, silenceMs },
     }).artifact("DSP-1", {
       name: "build.tar",

@@ -1,0 +1,15 @@
+kind: Fixed
+body: |
+  The revoke guide now says how long a revoked access token is still served: Dispatch asks the
+  broker whether a token is live and reuses that answer for five seconds
+  (`AffirmativeCacheTTL`, `internal/brokertoken/brokertoken.go`) rather than asking once per
+  request, so the sessions on a box whose sign-in was revoked lose Dispatch within that window
+  rather than at the instant of the revoke.
+
+  Trimming the trailing slashes off a configured URL reads the string once, in the broker token
+  client's broker URL and in the Dispatch URL a session resolves when its credential is traded
+  at the broker. A `/\/+$/` replace reads it once for every position its unanchored search can
+  start at, which costs a URL of n slashes O(n²).
+time: 2026-11-04T03:00:00.000000000Z
+custom:
+  Issue: pr2636

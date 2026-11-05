@@ -515,7 +515,7 @@ export async function readSessionAnswers(
     // The client runs the read once: an answer of no route is this read's own (`isNoAnswersRoute`,
     // `NO_ROUTE_BACKOFF_MS`), and that 5-minute back-off, not the client's waits, is what carries
     // the request past a release rolling out, within this call's deadline.
-    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch, {
+    const client = new DispatchClient(url, dispatch.credential, options.fetchImpl ?? fetch, {
       retryNoRoute: false,
     });
     const started = client
