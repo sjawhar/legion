@@ -173,6 +173,29 @@ func TestTheLauncherStartsTheSamplerWithThePodsOwnFlags(t *testing.T) {
 	}
 }
 
+// The sampler is the launcher's own child, and the launcher is PID 1 of the roles container, so
+// its orphan reaper must leave this one alone: a reaper that waited on it would take the exit
+// status runSampler reads, and the restart that answers a sampler which died would never run.
+// The guard is what keeps the reaper off it, which is why the pid is held while it runs and let
+// go once its wait has read it (process.go's reapOrphans skips every pid the guard holds).
+func TestTheSamplersPidIsHeldAgainstTheOrphanReaper(t *testing.T) {
+	stub := stubSampler(t)
+	samplerInterval = time.Hour
+	t.Cleanup(func() { samplerInterval = 5 * time.Second })
+	guard := &pidGuard{}
+	var log lockedBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := serveSampler(ctx, Config{RolesDir: t.TempDir(), Sampler: samplerTestConfig()}, &roleLog{stdout: &log, stderr: &log}, guard)
+	t.Cleanup(func() { cancel(); <-done })
+	running := stub.await(1)[0]
+	guard.mu.Lock()
+	held := guard.held()
+	guard.mu.Unlock()
+	if !slices.Contains(held, running.pid) {
+		t.Fatalf("the guard holds %v, want the sampler's own %d; its log: %s", held, running.pid, log.String())
+	}
+}
+
 // A sampler that dies is replaced: the launcher waits its interval and starts another, telling
 // it how often it has had to, so the pod's own series say that its readings were interrupted.
 func TestTheLauncherStartsTheSamplerAgainAfterItIsKilled(t *testing.T) {
