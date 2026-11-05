@@ -41,10 +41,13 @@ const MCPServer = "legion"
 // Argv is the agent command a Legion phase worker's Claude Code runs under: `legion claude-bridge`
 // around `claude -p` in stream-json both ways, re-emitting each user message it takes from stdin
 // (`--replay-user-messages`, which is how the bridge answers an Envoy delivery once Claude Code
-// has taken it), with every permission granted (a headless worker has no one to ask), only the MCP
-// server mcpConfig names (an operator's own servers never load), the claude-envoy plugin and the
-// generated Legion plugin for their skills, agents and the `dispatch` command, and the session —
-// `--session-id` for a fresh one, `--resume` to continue the one ResumeSession read.
+// has taken it), with its thinking summarized rather than withheld
+// (`--thinking-display summarized`, so a worker's thinking reaches the pane and the Agents page
+// as text; the default, `updates`, writes a thinking block with no text in it), with every
+// permission granted (a headless worker has no one to ask), only the MCP server mcpConfig names
+// (an operator's own servers never load), the claude-envoy plugin and the generated Legion
+// plugin for their skills, agents and the `dispatch` command, and the session — `--session-id`
+// for a fresh one, `--resume` to continue the one ResumeSession read.
 //
 // It ends there: `--append-system-prompt` and its value are the caller's, since the runtimes pass
 // the prompt differently. A pane's shell reads the prompt files itself
@@ -59,6 +62,7 @@ func Argv(paths Paths, mcpConfig, session string, resume bool) []string {
 		paths.Legion, "claude-bridge", "--", paths.Claude,
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--replay-user-messages",
+		"--thinking-display", "summarized",
 		"--permission-mode", "bypassPermissions",
 		"--strict-mcp-config", "--mcp-config", mcpConfig,
 		"--plugin-dir", paths.PluginDir,

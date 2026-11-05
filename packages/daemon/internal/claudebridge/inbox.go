@@ -25,6 +25,12 @@ const InboxVariable = "LEGION_CLAUDE_INBOX"
 type InboxDelivery struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
+	// Blocks is the delivery as Claude Code's own content blocks, which a line carries where the
+	// delivery is more than its text: a person's own message and the pictures it embeds
+	// (packages/claude-envoy, src/legion-inbox.ts). The bridge reads none of it — each block goes
+	// to Claude Code as it came — and Content stays the delivery's text, so a line without the
+	// field is the line it always was and a bridge of any age delivers the text.
+	Blocks []json.RawMessage `json:"blocks,omitempty"`
 }
 
 type InboxAnswer struct {
@@ -116,7 +122,7 @@ func serveInbox(conn net.Conn, events chan<- event, stop <-chan struct{}, logger
 			var d InboxDelivery
 			if err := json.Unmarshal(line, &d); err != nil || d.ID == "" || d.Content == "" {
 				answer <- errors.New(malformedDelivery)
-			} else if !send(events, stop, event{delivery: &delivery{id: d.ID, content: d.Content, answer: answer}}) {
+			} else if !send(events, stop, event{delivery: &delivery{id: d.ID, content: d.Content, blocks: d.Blocks, answer: answer}}) {
 				return
 			}
 			select {

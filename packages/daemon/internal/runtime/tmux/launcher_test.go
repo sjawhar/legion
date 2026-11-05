@@ -87,7 +87,8 @@ const (
 	livePaneClaude = "/bin/sh\x00-c\x00tmux set-option -w -t \"$TMUX_PANE\" @legion_owner legion-t1 && export PATH=/state/bin:/usr/bin:/bin && " +
 		"cd /state/workspaces/LEGION-2 && /opt/legion/legion worker-shim --connect unix:///state/stream.sock " +
 		"--boot-token-file /state/secrets/legion-t1-legion-2-implementer -- /opt/legion/legion claude-bridge -- /opt/claude/bin/claude -p " +
-		"--input-format stream-json --output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config " +
+		"--input-format stream-json --output-format stream-json --verbose --replay-user-messages " +
+		"--thinking-display summarized --permission-mode bypassPermissions --strict-mcp-config " +
 		"--mcp-config /state/claude/legion-t1-legion-2-implementer/mcp.json --plugin-dir /opt/claude-envoy --plugin-dir /opt/claude-envoy/legion " +
 		"--session-id a1917bc9-2989-441e-9eef-c65e0d51bfbf --append-system-prompt \"$(cat /roles/implementer.md)\"\x00"
 )

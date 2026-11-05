@@ -4189,7 +4189,8 @@ Everything is built from the checkout:
 - an Oh My Pi session, `omp --mode rpc --no-extensions -e <pi-envoy>`, the plugin packed by [`lib/pack-plugin.sh`](#libpack-pluginsh);
 
 - a Claude Code session, `legion claude-bridge -- claude -p --input-format stream-json
-  --output-format stream-json --verbose --replay-user-messages …`, configured as `packages/daemon/internal/runtime/tmux/claude.go` configures a Legion pane:
+  --output-format stream-json --verbose --replay-user-messages --thinking-display summarized …`,
+  configured as `packages/daemon/internal/runtime/tmux/claude.go` configures a Legion pane:
   an MCP config that runs claude-envoy's `dist/envoy-channel.js`, both plugin directories, `LEGION_CLAUDE_INBOX` from the bridge.
   The claude-envoy plugin is the run's own copy, built from this checkout into its work directory (`packages/claude-envoy/scripts/build.ts --out`), since a pull request's tree carries no fresh `dist/` or `legion/`.
   Claude Code is `bunx --package @anthropic-ai/claude-code@<version> claude`.

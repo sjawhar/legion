@@ -11,7 +11,8 @@
 #
 #   pi   Oh My Pi in `--mode rpc --no-extensions -e <the checkout's packed pi-envoy>`
 #   cc   Claude Code under `legion claude-bridge -- claude -p --input-format stream-json
-#        --output-format stream-json --verbose --replay-user-messages …`, Claude Code from
+#        --output-format stream-json --verbose --replay-user-messages --thinking-display
+#        summarized …`, Claude Code from
 #        `bunx --package @anthropic-ai/claude-code@<version> claude`, with claude-envoy built from
 #        the checkout (`packages/claude-envoy/scripts/build.ts --out` into the run's directory: a
 #        pull request's tree carries no fresh dist/) as
@@ -748,7 +749,8 @@ start_cc() {
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_DISABLE_CRON=1 LEGION_ROLE=implementer \
     LEGION_ISSUE="$followed_issue" ENVOY_HEARTBEAT_MS="$heartbeat_ms" ANTHROPIC_API_KEY="$anthropic_key" -- \
     setsid "$work/bin/legion" claude-bridge -- "$work/bin/claude" -p --input-format stream-json \
-    --output-format stream-json --verbose "${replay_flag[@]}" --permission-mode bypassPermissions \
+    --output-format stream-json --verbose "${replay_flag[@]}" --thinking-display summarized \
+    --permission-mode bypassPermissions \
     --strict-mcp-config --mcp-config "${home[cc]}/config/mcp.json" "${plugin_dirs[@]}" \
     "$flag" "${sid[cc]}" --model "$model" --append-system-prompt "$cc_note") \
     <"${home[cc]}/stdin" >"$(rpc_log cc)" 2>"$(err_log cc)" &
