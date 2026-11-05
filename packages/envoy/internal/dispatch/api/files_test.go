@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -308,8 +309,25 @@ func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	case response := <-uploaded:
 		t.Fatalf("the upload answered without writing to the store: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue); err != nil {
-		t.Fatalf("lock the issue while its upload's bytes are in flight: %v", err)
+	// The probe is retried while the upload stays parked in Put, because `nowait` answers 55P03
+	// for whoever holds the row and the server writes that issue's own rows for other reasons -
+	// a sweep, an event of the request before it - which a loaded runner can put under the first
+	// try (job 127173308649). The claim is unweakened: were the UPLOAD holding the lock it would
+	// hold it for this whole window, since it cannot proceed until release() below, so every try
+	// would answer 55P03 and the test would fail here as it did.
+	locked := func() error {
+		_, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue)
+		return err
+	}
+	var lockErr error
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		if lockErr = locked(); lockErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lock the issue while its upload's bytes are in flight: %v", lockErr)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	release()
 	if response := <-uploaded; response.Code != http.StatusCreated {
