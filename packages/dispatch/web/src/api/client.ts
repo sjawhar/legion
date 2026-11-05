@@ -1001,6 +1001,11 @@ export class DispatchApiClient {
     );
   }
 
+  /** `GET /api/v1/issues/{key}/verification`: the Verification tab's one read - the checks of
+   *  the issue's Verification document in document order, each with every result recorded
+   *  against it from any issue, newest first, and each result's currency, plus what each check
+   *  serves. A served requirement the block index no longer holds is marked `removed` rather
+   *  than dropped. */
   getIssueVerification(key: string): Promise<IssueVerification> {
     return this.json<IssueVerification>(`/api/v1/issues/${pathSegment(key)}/verification`);
   }

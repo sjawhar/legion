@@ -57,6 +57,7 @@ test("Verification shows the requirements each check serves from one named graph
       details: [],
       issues: 1,
       mismatches: 0,
+      next_issue: "",
     });
     await requirement.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("verification-serves.png") });

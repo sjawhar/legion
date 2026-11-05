@@ -210,6 +210,7 @@ export type {
   SearchResult,
   SearchResultKind,
   SearchResultsPage,
+  ServesTarget,
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,

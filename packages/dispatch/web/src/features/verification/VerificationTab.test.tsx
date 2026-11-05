@@ -4,7 +4,7 @@ import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, CheckBlock, CheckResult } from "../../api/types";
+import type { Artifact, CheckBlock, CheckResult, IssueVerification } from "../../api/types";
 import { VerificationTab } from "./VerificationTab";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -68,11 +68,15 @@ const verification: Artifact = {
   versions: [],
 };
 
-function renderTab(artifact: Artifact | undefined, checks: CheckBlock[]) {
+function renderTab(
+  artifact: Artifact | undefined,
+  checks: CheckBlock[],
+  serves: IssueVerification["serves"] = {}
+) {
   const getIssueResults = spyOn(api, "getIssueVerification").mockResolvedValue({
     checks,
     issue: "CORE-1",
-    serves: {},
+    serves,
     verification_artifact_id: artifact?.id ?? "",
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -172,6 +176,29 @@ test("a result shows how it ran, what was seen, its counts, its role and its scr
   expect(within(row).getByTestId("verification-result-screenshot").getAttribute("href")).toBe(
     "/issues/CORE-1/artifacts/shot-png"
   );
+});
+
+test("a check links its served requirements and marks removed targets", async () => {
+  const { getIssueResults, view } = renderTab(verification, [check("c1", [])], {
+    c1: [
+      { reference: "dispatch://CORE-1/spec#b-present", removed: false },
+      { reference: "dispatch://CORE-1/spec#b-gone", removed: true },
+    ],
+  });
+  restore = () => {
+    getIssueResults.mockRestore();
+    view.unmount();
+  };
+
+  const serves = await screen.findByTestId("verification-check-serves");
+  const links = within(serves).getAllByRole("link");
+  expect(links.map((link) => link.getAttribute("href"))).toEqual([
+    "/issues/CORE-1/spec#b-present",
+    "/issues/CORE-1/spec#b-gone",
+  ]);
+  const removed = within(serves).getByTestId("verification-check-serves-removed");
+  expect(removed.textContent).toBe("removed");
+  expect(removed.parentElement?.textContent).toContain("dispatch://CORE-1/spec#b-gone");
 });
 
 test("an issue with no Verification document shows the command that makes one", () => {

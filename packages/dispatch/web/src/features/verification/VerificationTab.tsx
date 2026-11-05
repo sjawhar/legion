@@ -2,7 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { issueVerificationQuery } from "../../api/queries";
-import type { Artifact, CheckBlock, CheckResult, CheckResultCurrency } from "../../api/types";
+import type {
+  Artifact,
+  CheckBlock,
+  CheckResult,
+  CheckResultCurrency,
+  ServesTarget,
+} from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { pillClassName, pillShapeClassName } from "../../components/Pill";
 import {
@@ -155,7 +161,13 @@ function Result({ result }: { result: CheckResult }): ReactNode {
   );
 }
 
-function Check({ check, serves }: { check: CheckBlock; serves: readonly string[] }): ReactNode {
+function Check({
+  check,
+  serves,
+}: {
+  check: CheckBlock;
+  serves: readonly ServesTarget[];
+}): ReactNode {
   const state = checkState(check);
   return (
     <li
@@ -187,10 +199,20 @@ function Check({ check, serves }: { check: CheckBlock; serves: readonly string[]
         </Fact>
       </dl>
       {serves.length === 0 ? null : (
-        <div className={`flex flex-wrap items-baseline gap-2 text-sm ${textMutedOnSurface}`}>
+        <div
+          className={`flex flex-wrap items-baseline gap-2 text-sm ${textMutedOnSurface}`}
+          data-testid="verification-check-serves"
+        >
           <span>Serves</span>
-          {serves.map((reference) => (
-            <ReferenceLink key={reference} label={reference} reference={reference} />
+          {serves.map((target) => (
+            <span className="flex items-baseline gap-1" key={target.reference}>
+              <ReferenceLink label={target.reference} reference={target.reference} />
+              {target.removed ? (
+                <span className={dangerText} data-testid="verification-check-serves-removed">
+                  removed
+                </span>
+              ) : null}
+            </span>
           ))}
         </div>
       )}

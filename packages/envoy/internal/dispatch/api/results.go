@@ -226,12 +226,49 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	answer, err := s.verificationGraph(r.Context(), s.deps.Store.Pool, issueKey, newCurrencyReader(s))
+	answer, err := s.liveCheckResults(r.Context(), s.deps.Store.Pool, issueKey, newCurrencyReader(s))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, answer.checkResultsRead)
+	WriteJSON(w, http.StatusOK, answer)
+}
+
+// liveCheckResults is this route's whole answer, and the one GET /api/v1/issues/{key}/verification
+// and the shadow census read as well, so the census compares the graph against what this route
+// actually serves rather than against a second copy of it. Membership and order are the live
+// document's (checkBlocksOf), which lists every check the document holds even when the block
+// index does not hold it yet, with a zero version and digest. currency may be nil, which judges
+// no result's currency and so reads no repository and writes no cache.
+func (s *server) liveCheckResults(ctx context.Context, q queryer, issueKey string, currency *currencyReader) (checkResultsRead, error) {
+	answer := checkResultsRead{Issue: issueKey, Checks: []model.CheckBlock{}}
+	artifact, held, err := s.verificationDocument(ctx, q, issueKey, "")
+	if err != nil || !held {
+		answer.VerificationArtifactID = artifact.ID
+		return answer, err
+	}
+	answer.VerificationArtifactID = artifact.ID
+	answer.Checks, err = s.checkBlocksOf(ctx, q, artifact)
+	if err != nil {
+		return checkResultsRead{}, err
+	}
+	recorded, err := loadCheckResults(ctx, q, artifact.ID)
+	if err != nil {
+		return checkResultsRead{}, err
+	}
+	for index := range answer.Checks {
+		results := recorded[answer.Checks[index].BlockID]
+		if results == nil {
+			results = []model.CheckResult{}
+		}
+		for result := range results {
+			if currency != nil {
+				results[result].Currency = currency.of(ctx, answer.Checks[index], results[result])
+			}
+		}
+		answer.Checks[index].Results = results
+	}
+	return answer, nil
 }
 
 // refusal is every refusal a result's own fields earn, before anything is read.

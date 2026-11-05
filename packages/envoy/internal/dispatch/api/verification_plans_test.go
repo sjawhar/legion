@@ -56,11 +56,12 @@ func TestVerificationGraphQueryPlans(t *testing.T) {
 		name, sql string
 		args      []any
 	}{
-		{"legacy coverage", legacyServingBlockCountsSQL, []any{own.PrimaryArtifactID, []string{own.Key}}},
-		{"graph coverage", servingBlockCountsSQL, []any{own.PrimaryArtifactID, []string{own.Key}}},
+		{"legacy coverage", servingBlockCountsSQL, []any{own.PrimaryArtifactID, []string{own.Key}}},
+		{"graph coverage", graphServingBlockCountsSQL, []any{own.PrimaryArtifactID, []string{own.Key}}},
 		{"legacy check metadata", `select block_id, changed_version, text_sha256 from document_blocks where artifact_id = $1::uuid and type = 'check'`, []any{document.Artifact.ID}},
 		{"legacy results", `select ` + checkResultColumns + ` from check_results where check_artifact_id = $1::uuid order by check_block_id, created_at desc, id desc`, []any{document.Artifact.ID}},
-		{"verification graph", verificationGraphSQL, []any{document.Artifact.ID}},
+		{"verification graph", graphCheckResultsSQL, []any{document.Artifact.ID}},
+		{"serves targets", servesTargetsSQL, []any{document.Artifact.ID}},
 	}
 	for _, query := range queries {
 		var encoded []byte
@@ -93,19 +94,19 @@ func TestVerificationGraphQueryPlans(t *testing.T) {
 		walk(plan[0].Plan)
 		t.Logf("%s: execution=%.3fms planning=%.3fms large-index-seq-scans=%s", query.name, plan[0].Execution, plan[0].Planning, strings.Join(largeScans, ","))
 		t.Logf("%s EXPLAIN: %s", query.name, encoded)
-		if len(largeScans) != 0 && (query.name == "graph coverage" || query.name == "verification graph") {
+		if len(largeScans) != 0 && (query.name == "graph coverage" || query.name == "verification graph" || query.name == "serves targets") {
 			t.Errorf("%s scans the unrelated block index: %v", query.name, largeScans)
 		}
 	}
 	oldTimes, graphTimes := make([]time.Duration, 0, 30), make([]time.Duration, 0, 30)
 	for i := range 31 {
 		start := time.Now()
-		if _, err := s.legacyCheckResults(t.Context(), database.Pool, own.Key); err != nil {
+		if _, err := s.liveCheckResults(t.Context(), database.Pool, own.Key, nil); err != nil {
 			t.Fatal(err)
 		}
 		old := time.Since(start)
 		start = time.Now()
-		if _, err := s.verificationGraph(t.Context(), database.Pool, own.Key, nil); err != nil {
+		if _, err := s.verificationTab(t.Context(), database.Pool, own.Key, nil); err != nil {
 			t.Fatal(err)
 		}
 		graph := time.Since(start)

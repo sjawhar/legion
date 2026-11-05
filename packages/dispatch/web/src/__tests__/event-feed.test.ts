@@ -1072,6 +1072,26 @@ test("a document version refreshes the issue's coverage and its recorded results
   expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "verification"]));
 });
 
+// A check of another issue can serve a requirement of this issue's spec, and this version can
+// delete or retype it. That read hangs under the serving issue's key, which the event does not
+// name, so the branch reaches it by what the cached read cites.
+test("a document version refreshes every Verification read that cites this issue", () => {
+  const version = event("artifact.version", { artifact_id: "artifact-3", name: "Spec" });
+  const citing = eventRefreshTargets(version, "alice").filter(
+    (target) => target.when !== undefined && JSON.stringify(target.queryKey) === '["issue"]'
+  );
+  expect(citing).toHaveLength(1);
+  const when = citing[0]?.when;
+  expect(
+    when?.({ serves: { k1: [{ reference: "dispatch://CORE-1/spec#b-r1", removed: false }] } })
+  ).toBe(true);
+  expect(
+    when?.({ serves: { k1: [{ reference: "dispatch://CORE-9/spec#b-r1", removed: false }] } })
+  ).toBe(false);
+  expect(when?.({ checks: [] })).toBe(false);
+  expect(when?.(undefined)).toBe(false);
+});
+
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here
  *  until it has a row. */
 const eventsByType: Record<EventType, Event> = {

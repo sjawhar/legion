@@ -54,13 +54,15 @@ func (s *server) getIssueCoverage(w http.ResponseWriter, r *http.Request) {
 }
 
 // issueCoverage reads the issue's requirements and what serves each. The documents' blocks are
-// read through graph_edges, which the existing block index derives from the document;
-// the requirements' order and words come from the live spec.
+// read from the block index (document_blocks and block_refs), which every accepted write leaves
+// in step with the document it wrote; the requirements' order and words come from the live spec.
+// This route does not read graph_edges: the shadow census measures that answer against this one,
+// and the switch waits on a window of zero mismatches in production.
 func (s *server) issueCoverage(ctx context.Context, q queryer, issueKey string) (model.IssueCoverage, error) {
 	return s.issueCoverageUsing(ctx, q, issueKey, servingBlockCountsSQL)
 }
 
-// The census supplies the pre-cutover relation query; formatting and live words are shared.
+// The census supplies the candidate relation query; formatting and live words are shared.
 func (s *server) issueCoverageUsing(ctx context.Context, q queryer, issueKey, countsSQL string) (model.IssueCoverage, error) {
 	coverage := model.IssueCoverage{Issue: issueKey, Requirements: []model.RequirementCoverage{}, Gaps: []string{}}
 	err := q.QueryRow(ctx, `
@@ -158,9 +160,22 @@ type servingCounts struct {
 // servingBlockCountsSQL counts, for each block of the spec, the `check` and `plan_task` blocks of
 // the documents of issues that name it in `serves`. Both ends are current blocks of their
 // documents: deleting the check deletes its row, so its requirement is uncovered again.
+const servingBlockCountsSQL = `
+	select t.block_id, s.type, count(*)
+	from block_refs r
+	join document_blocks t on t.node_id = r.to_id and t.artifact_id = $1::uuid and t.type = 'requirement'
+	join document_blocks s on s.artifact_id = r.artifact_id and s.block_id = r.block_id
+	join artifacts a on a.id = r.artifact_id
+	where r.kind = 'serves' and r.to_kind = 'block'
+	  and a.issue_key = any($2) and s.type in ('check', 'plan_task')
+	group by t.block_id, s.type
+`
+
+// graphServingBlockCountsSQL is the same count read through graph_edges. Only the shadow census
+// reads it, until that census shows zero mismatches in production.
 // OFFSET 0 keeps the graph and source-node lookups parameterized by each requirement,
 // rather than letting the planner hash the unrelated block index before filtering it.
-var servingBlockCountsSQL = `
+const graphServingBlockCountsSQL = `
 	select t.block_id, s.type, count(*)
 	from document_blocks t
 	cross join lateral (

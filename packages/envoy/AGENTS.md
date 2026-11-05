@@ -216,9 +216,9 @@ Each item below names a task and where its code is, then notes on it.
 
   `POST /api/v1/issues/{key}/results` records one result against a `check` block of the issue's Verification document or of an ancestor's, as `check_results`, keeping the block's `changed_version` and `text_sha256` with it, and answers the pull-request body line it implies;
   `GET` lists each check of the issue's Verification document with every result recorded against it.
-  `GET /api/v1/issues/{key}/verification` is the tab's named graph read, adding served requirement links to that results shape (`api/verification_graph.go`);
-  both reads select checks through `graph_edges.part_of`, and coverage counts its typed `serves` edges.
-  `GET /api/v1/verification-shadow` (`api/verification_shadow.go`) compares every issue with a Verification document against the retained pre-cutover results and coverage computations, reporting issue/cause counts without currency-cache writes.
+  `GET /api/v1/issues/{key}/verification` is the tab's one read, adding `serves` - each check's requirement citations, `{reference, removed}`, with active relations read from `graph_edges` and removed citations retained from the stored pointers - to that results shape (`api/verification_graph.go`);
+  both reads take the checks, their order and their attributes from the live document, so a check the block index does not hold yet is still listed, and `/coverage` still counts through `block_refs`.
+  `GET /api/v1/verification-shadow` (`api/verification_shadow.go`) is a bounded page, `limit` issues from `issue` onwards, comparing the edge-backed results and coverage against what those two routes serve today, reporting issue/cause counts without currency-cache writes; the two read switches wait on a window of zero mismatches in production.
   A result's currency is computed at the read, never written by a push:
   a `before_merge` result is `current` while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue (`pull_request_heads`, which the GitHub intake and the reconcile keep), and the check's words are the ones it proved;
   the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;

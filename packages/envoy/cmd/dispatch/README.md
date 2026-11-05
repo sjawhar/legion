@@ -2583,19 +2583,22 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/issues/{key}/verification` (GET; cookie, trusted header, or bearer)
 
-  The Verification tab's named graph read: the `/results` shape plus `serves`, a map from check block id to its served requirement references.
-  One SQL graph query selects the document's checks through `part_of` and their `serves` edges, with all recorded results joined in that query.
-  The live document supplies words, attributes and document order; result currency uses the same delivery policy as `/results`.
+  The Verification tab's one read: the `/results` shape plus `serves`, a map from check block id to the requirements it names, each `{reference, removed}`.
+  The checks, their order, their words and their attributes are the live document's, exactly as `/results` reads them, so a check the block index does not hold yet is listed with a zero version and digest and serves nothing.
+  One query per document reads each check's active `serves` edges from `graph_edges`, left-joining their targets, and retains retyped targets from the stored pointers as removed citations without changing the shared graph's type filter.
+  `removed` marks a target the index no longer holds as a `requirement` block, deleted or retyped, which is listed rather than dropped, so a dangling citation stays visible.
+  Result currency uses the same delivery policy as `/results`.
   The tab shows the served requirement links beside each check.
 
 - `/api/v1/verification-shadow` (GET; cookie, trusted header, or bearer)
 
-  Read-only equality census over every issue with a Verification document, including documents whose role is still null during a rolling deploy.
-  Answers `{issues, mismatches, by_cause, details}`; `details` lists issue keys and causes, never document bodies.
+  One page of the read-only equality census over the issues with a Verification document, including documents whose role is still null during a rolling deploy.
+  It is a page, never a fleet sweep: `limit` (1 to 100, 20 by default) issues from `issue` onwards in key order, each page under one `repeatable read` read-only snapshot.
+  Answers `{issues, mismatches, by_cause, details, next_issue}`; `details` lists issue keys and causes, never document bodies, and `next_issue` names where the next page starts and is empty at the end.
   Causes are `check_membership`, `check_attributes`, `results` and `coverage`.
   `mismatches` counts issue/cause pairs; an empty database reports `issues: 0`, not evidence of equality on live data.
-  After deployment, read this route with the deployment's usual authentication and require `issues > 0` and `mismatches == 0` before accepting the cutover.
-  It compares the graph-backed results and coverage with the retained pre-cutover computations; it writes no source records or indexes.
+  It compares the edge-backed results and coverage against what `/results` and `/coverage` serve today, which neither this nor any other route has switched to the edges; it writes no source records or indexes.
+  Switching those two reads waits on an agreed window of pages over production that report `issues > 0` and `mismatches == 0`.
 
 - `/api/v1/issues/{key}/coverage` (GET; cookie, trusted header, or bearer)
 
@@ -2604,7 +2607,6 @@ Each item below names a path with its method and identity, then its purpose.
   A requirement is a `requirement` block of the spec, and `requirements` lists them in document order, each with its block reference, its words, and how many `check` and `plan_task` blocks name it in `serves`.
 
   A block counts when it is in any document of the issue or of any descendant issue, at any status; the descendants are one recursive `child_of` walk bounded by `refs.IssueDepthCap` (`refs.IssueDescendants`).
-  Counts are derived from `graph_edges`' typed `serves` relations, with current requirement and serving block types checked at both ends.
 
   `gaps` is one line per gap, `<block id> has no check` and `<block id> has no plan task`, the second only once the issue has a plan document, or the single line `the spec marks no requirements` for a spec that marks none.
 

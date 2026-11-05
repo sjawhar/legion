@@ -2555,10 +2555,18 @@ export interface IssueCheckResults {
   readonly checks: readonly CheckBlock[];
 }
 
-/** `GET /api/v1/issues/{key}/verification`: one graph read for the Verification tab. */
+/** One requirement a check names in `serves`. `removed` marks a target the block index no longer
+ *  holds as a `requirement` block, deleted or retyped, which the read lists rather than drops. */
+export interface ServesTarget {
+  readonly reference: string;
+  readonly removed: boolean;
+}
+
+/** `GET /api/v1/issues/{key}/verification`: the Verification tab's one read. The checks are the
+ *  live document's, as in `IssueCheckResults`; `serves` lists active typed edges and removed citations. */
 export interface IssueVerification extends IssueCheckResults {
-  /** Served requirement references by check block id, in reference order. */
-  readonly serves: Readonly<Record<string, readonly string[]>>;
+  /** What each check serves, by check block id, in reference order. */
+  readonly serves: Readonly<Record<string, readonly ServesTarget[]>>;
 }
 
 /** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line it

@@ -24,6 +24,7 @@ import type {
   GraphReferences,
   InboxRow,
   IssueSummary,
+  IssueVerification,
   MyRepliesResponse,
   MyReplyRow,
 } from "./types";
@@ -151,6 +152,24 @@ function referencePanels(matches: (references: GraphReferences) => boolean): Ref
 /** The backlink panel of exactly one reference, as `ReferencedBy` keys it. */
 function referencePanel(reference: string): RefreshTarget {
   return { exact: true, queryKey: ["references", "to", reference] };
+}
+
+/** Every cached Verification read (`issueVerificationQuery`) whose `serves` cites a document of
+ *  issue `key`, whichever issue that read belongs to. A check serving a parent issue's
+ *  requirement would otherwise keep a stale `serves` list for the rest of the session, since
+ *  the event that deleted or retyped the requirement belongs to the parent. Only a Verification
+ *  read carries `serves`, so no other read under `["issue", ...]` matches. */
+function verificationCiting(key: string): RefreshTarget {
+  const prefix = `dispatch://${key}/`;
+  return {
+    queryKey: ["issue"],
+    when: (data) => {
+      const read = data as Partial<IssueVerification> | undefined;
+      return Object.values(read?.serves ?? {}).some((targets) =>
+        targets.some((target) => target.reference.startsWith(prefix))
+      );
+    },
+  };
 }
 
 // The document an ask or comment event touches: a block ask names the document that holds its
@@ -762,7 +781,11 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       // version of the Verification document moves which checks there are: the two reads hang
       // under the issue's key but are named here, since every issue target is `exact`.
       { exact: true, queryKey: ["issue", key, "coverage"] },
-      { exact: true, queryKey: ["issue", key, "verification"] }
+      { exact: true, queryKey: ["issue", key, "verification"] },
+      // A check of another issue can serve a requirement of this one's spec, and this version
+      // can delete or retype that requirement, so every open Verification tab that cites a
+      // document of this issue refreshes too.
+      verificationCiting(key)
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
