@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { MermaidDrawing } from "@legion/proof-editor/mermaid";
 import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { MarkdownBody } from "./MarkdownBody";
@@ -362,6 +362,193 @@ describe("Mermaid diagrams", () => {
       expect(diagramIn(figuresIn(again.container)[0])?.textContent).toContain("Again");
     } finally {
       again.unmount();
+    }
+  });
+
+  /** The `Mermaid source` disclosure of a drawn block. */
+  const disclosureIn = (figure: Element): HTMLDetailsElement | null =>
+    figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
+  /** Whether each drawn block of `container` shows its source, in the body's own order. */
+  const openIn = (container: HTMLElement): (boolean | undefined)[] =>
+    figuresIn(container).map((figure) => disclosureIn(figure)?.open);
+  /** Opens or closes one block's source as a reader does, by clicking `Mermaid source`.
+   *  happy-dom gives a clicked `summary` its activation behaviour, so this flips the `details`
+   *  and fires `toggle`, as a browser does; when it fires is what differs (the last case here). */
+  const clickTheSummary = (figure: Element): void => {
+    const summary = disclosureIn(figure)?.querySelector("summary");
+    if (summary == null) throw new Error("The drawn block has no Mermaid source summary.");
+    fireEvent.click(summary);
+  };
+
+  // A body is painted whole: a turn streaming above a diagram, an edit landing, a new decision
+  // card all build its disclosure anew. A reader reading the source of one keeps it.
+  test("a source a reader opened is open again after the body is painted anew", async () => {
+    await warmMarkdownRenderer();
+    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Kept");
+    const view = render(<MarkdownBody markdown={`Lead:\n\n${diagram}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const first = disclosureIn(figuresIn(view.container)[0]);
+      expect(first?.open).toBe(false);
+      clickTheSummary(figuresIn(view.container)[0]);
+      expect(first?.open).toBe(true);
+      // A whole task of the page's own timers, so a `toggle` queued as the HTML specification
+      // queues it has run by the repaint below; the ordering is the last case here.
+      await Bun.sleep(10);
+
+      view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
+      const repainted = disclosureIn(figuresIn(view.container)[0]);
+      expect(repainted).not.toBe(first);
+      expect(repainted?.open).toBe(true);
+      expect(view.container.textContent).toContain("Lead, and more of it:");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A thread collapsed and expanded again mounts the body afresh, with the source drawn before,
+  // so the disclosure is built inside the layout effect, from the cache. It is built open.
+  test("a source a reader opened is open again after the body is mounted afresh", async () => {
+    await warmMarkdownRenderer();
+    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Remounted");
+    const view = render(<MarkdownBody markdown={diagram} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      clickTheSummary(figuresIn(view.container)[0]);
+      // A task, as above, so the opening is written down whenever the head runs `toggle`.
+      await Bun.sleep(10);
+    } finally {
+      view.unmount();
+    }
+    const again = render(<MarkdownBody markdown={diagram} />);
+    try {
+      // Checked before any await: the reader is shown the body already drawn, and already open.
+      expect(openIn(again.container)).toEqual([true]);
+    } finally {
+      again.unmount();
+    }
+  });
+
+  // What is remembered is the source, not the block: an edit draws a diagram the reader has not
+  // opened, and the source they did open is theirs again wherever it comes back.
+  test("an edited source draws closed, and the source the reader opened comes back open", async () => {
+    await warmMarkdownRenderer();
+    const first = fence("sequenceDiagram\n  Alice->>Bob: First");
+    const edited = fence("sequenceDiagram\n  Alice->>Bob: Edited");
+    const view = render(<MarkdownBody markdown={first} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      clickTheSummary(figuresIn(view.container)[0]);
+      expect(openIn(view.container)).toEqual([true]);
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await waitFor(() =>
+        expect(diagramIn(figuresIn(view.container)[0] ?? view.container)?.textContent).toContain(
+          "Edited"
+        )
+      );
+      expect(openIn(view.container)).toEqual([false]);
+
+      view.rerender(<MarkdownBody markdown={first} />);
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("First");
+      expect(openIn(view.container)).toEqual([true]);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A refusal is drawn open so the reader reads what the renderer would not draw, whatever they
+  // last did with it; and it is no opening of theirs, so it takes none of the memory's room. The
+  // map is not exported, so that room is read through the drawn result: the memory holds the
+  // drawings' own limit, 32 sources, the oldest first out. Filled with 32 openings, it is one
+  // opening away from dropping the oldest of them - and that one still draws open here, so
+  // neither drawing the refusal open nor the reader's closing it was written down as an opening.
+  test("a refused source draws open whatever the reader does, and takes no room from their openings", async () => {
+    await warmMarkdownRenderer();
+    const sources = Array.from(
+      { length: 32 },
+      (_, index) => `sequenceDiagram\n  A${index}->>Bob: Hi`
+    );
+    const filling = render(<MarkdownBody markdown={sources.map(fence).join("\n")} />);
+    try {
+      await waitFor(() => expect(figuresIn(filling.container)).toHaveLength(32));
+      for (const figure of figuresIn(filling.container)) clickTheSummary(figure);
+      expect(openIn(filling.container)).toEqual(sources.map(() => true));
+      // A task, as above, so every opening is written down whenever the head runs `toggle`.
+      await Bun.sleep(10);
+    } finally {
+      filling.unmount();
+    }
+    // The oldest of those 32 openings, drawn beside a source the renderer refuses.
+    const beside = `${fence(sources[0])}\n${fence("graph TD\n  A -->")}`;
+    const view = render(<MarkdownBody markdown={`Lead:\n\n${beside}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
+      expect(figuresIn(view.container)[1].querySelector('[role="status"]')?.textContent).toMatch(
+        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
+      );
+      expect(openIn(view.container)).toEqual([true, true]);
+
+      clickTheSummary(figuresIn(view.container)[1]);
+      expect(openIn(view.container)).toEqual([true, false]);
+      await Bun.sleep(10);
+      view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${beside}`} />);
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
+      expect(openIn(view.container)).toEqual([true, true]);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The memory is bounded by the drawings' own limit, 32, and is not exported, so the bound is
+  // read through the drawn result: with a 33rd source opened, the first of the 33 is the one the
+  // next paint draws closed again, and every later one is still the reader's.
+  test("the thirty-third source a reader opens costs the first its place, and no other", async () => {
+    await warmMarkdownRenderer();
+    const sources = Array.from(
+      { length: 33 },
+      (_, index) => `sequenceDiagram\n  A${index}->>Bob: Hi`
+    );
+    const body = sources.map(fence).join("\n");
+    const view = render(<MarkdownBody markdown={`Lead:\n\n${body}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(33));
+      for (const figure of figuresIn(view.container)) clickTheSummary(figure);
+      expect(openIn(view.container)).toEqual(sources.map(() => true));
+      // A task, as above, so every opening is written down whenever the head runs `toggle`.
+      await Bun.sleep(10);
+
+      view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${body}`} />);
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(33));
+      expect(openIn(view.container)).toEqual(sources.map((_, index) => index > 0));
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The disclosure is remembered from `toggle`, which the HTML specification queues as a task:
+  // in a browser a repaint inside the reader's own click task - the live view painting a
+  // streaming turn anew, a decision card arriving - could read the memory before that task had
+  // written it. This head answers open: happy-dom fires `toggle` from the `open` attribute
+  // being set, inside the click's own activation behaviour, so the opening is written down
+  // before the repaint reads it. A head that queued it would fail this row and no other, and
+  // what it would ask for is a `click` listener on the summary, writing the state the
+  // activation is about to produce, with the `toggle` listener kept beside it for the
+  // programmatic path. What a browser does is `e2e/mermaid.e2e.ts`'s to measure.
+  test("a source the reader opens is open in a body painted anew inside their own click", async () => {
+    await warmMarkdownRenderer();
+    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Same task");
+    const view = render(<MarkdownBody markdown={`Lead:\n\n${diagram}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const first = disclosureIn(figuresIn(view.container)[0]);
+      clickTheSummary(figuresIn(view.container)[0]);
+      view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
+      const repainted = disclosureIn(figuresIn(view.container)[0]);
+      expect(repainted).not.toBe(first);
+      expect(repainted?.open).toBe(true);
+    } finally {
+      view.unmount();
     }
   });
 
