@@ -54,7 +54,7 @@ func TestTheInterestsListAnswersWithinItsBudgetWhileTheLastSeenBucketHangs(t *te
 		t.Fatalf("open the listener state bucket: %v", err)
 	}
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1),
-		session.WithLastSeenBucket(bus.KeyValue{KeyValue: hangingSeenKV{KeyValue: state.KeyValue, released: released}}))
+		session.WithLastSeenBucket(bus.NewKeyValue(hangingSeenKV{KeyValue: state.Legacy(), released: released}, state.WatchHandle(), state.Streams())))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
 	}
@@ -67,7 +67,8 @@ func TestTheInterestsListAnswersWithinItsBudgetWhileTheLastSeenBucketHangs(t *te
 		t.Fatalf("write %s's interest record: %v", lapsed, err)
 	}
 	waitFor(t, 5*time.Second, "the interest cache to hold the lapsed row", func() bool {
-		return slices.ContainsFunc(registry.List(), func(item store.Interest) bool { return item.SessionID == lapsed })
+		rows, err := registry.List()
+		return err == nil && slices.ContainsFunc(rows, func(item store.Interest) bool { return item.SessionID == lapsed })
 	})
 
 	answered := make(chan *httptest.ResponseRecorder, 1)

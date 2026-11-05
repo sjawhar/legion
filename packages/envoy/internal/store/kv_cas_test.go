@@ -54,7 +54,7 @@ func storedJSON(t *testing.T, kv natsgo.KeyValue, key string) map[string]json.Ra
 func storedTopics(t *testing.T, reg *Registry, sessionID string) []string {
 	t.Helper()
 	var topics []string
-	if err := json.Unmarshal(storedJSON(t, reg.interests().KeyValue, sessionID)["topics"], &topics); err != nil {
+	if err := json.Unmarshal(storedJSON(t, reg.interests().Legacy(), sessionID)["topics"], &topics); err != nil {
 		t.Fatalf("decode %s's stored topics: %v", sessionID, err)
 	}
 	slices.Sort(topics)
@@ -132,7 +132,7 @@ func TestAnInterestWriteThatLosesEveryRaceIsAConflict(t *testing.T) {
 	if _, err := a.Upsert(Interest{SessionID: sessionID, MachineID: "box-a"}, []string{"notifications.agent.ses_raced"}); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	racing := &conflictingInterestKV{KeyValue: a.interests().KeyValue}
+	racing := &conflictingInterestKV{KeyValue: a.interests().Legacy()}
 	useKV(t, a, racing)
 	_, err := a.Upsert(Interest{SessionID: sessionID, MachineID: "box-a"}, []string{"notifications.team.more"})
 	if !errors.Is(err, ErrWriteConflict) {
@@ -148,7 +148,7 @@ func TestAnInterestWriteThatLosesEveryRaceIsAConflict(t *testing.T) {
 func TestInterestAndClaimWritesKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 	a, _ := podRegistries(t)
 	const sessionID = "ses_newer_build"
-	interests, roles := a.interests().KeyValue, a.roles().KeyValue
+	interests, roles := a.interests().Legacy(), a.roles().Legacy()
 	if _, err := interests.Put(sessionID, []byte(`{"session_id":"ses_newer_build","machine_id":"box-a","topics":["notifications.agent.ses_newer_build","notifications.team.gone"],"future_field":[1,2]}`)); err != nil {
 		t.Fatalf("store a newer build's interest: %v", err)
 	}
@@ -216,11 +216,11 @@ func TestTheRoleReaperDeletesAClaimItCannotReadAtItsRevision(t *testing.T) {
 			t.Fatalf("store the unreadable claim: %v", err)
 		}
 	})
-	registry.roleKV = bus.KeyValue{KeyValue: &beforeDeleteKeyValue{KeyValue: rawRoles, before: func() {
+	registry.roleKV = bus.NewKeyValue(&beforeDeleteKeyValue{KeyValue: rawRoles, before: func() {
 		if _, err := rawRoles.Put(unreadable, claim("ses_fresh", time.Now().UnixMilli())); err != nil {
 			t.Fatalf("rewrite the claim between the reaper's scan and its delete: %v", err)
 		}
-	}}}
+	}}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 	if reaped, err := registry.ReapRoleClaims(func(string) bool { return false }, 0); err != nil || reaped != 0 {
 		t.Fatalf("reap role claims = %d, %v; want none: the claim the scan saw was rewritten", reaped, err)
 	}

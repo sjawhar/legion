@@ -45,7 +45,7 @@ func TestAListenerUnderItsMachinesGrantHoldsTheLeaseAndRecordsLastSeen(t *testin
 		t.Fatalf("connect as the admin: %v", err)
 	}
 	t.Cleanup(admin.Close)
-	state, err := bus.OpenKeyValue(admin.JS(), bus.ListenerStateBucket)
+	state, err := bus.OpenKeyValue(admin.Conn, admin.JS(), bus.ListenerStateBucket)
 	if err != nil {
 		t.Fatalf("open the listener state bucket: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAListenerUnderItsMachinesGrantHoldsTheLeaseAndRecordsLastSeen(t *testin
 	publish(t, publisher, newEnvelope("dispatch", contracts.RoleTopicPrefix+role, "a role message for its holder"))
 	ledger := "delivery." + bus.ListenerDurable(machineID) + "."
 	waitFor(t, 15*time.Second, "the role forward to record its delivery in the ledger", func() bool {
-		keys, err := state.Keys()
+		keys, err := state.Legacy().Keys()
 		return err == nil && hasKeyWithPrefix(keys, ledger)
 	})
 	if _, err := state.Get("seen." + sessionID); err != nil {

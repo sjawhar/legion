@@ -14,6 +14,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -58,10 +59,10 @@ func openStateTestPod(t *testing.T, instance string, startedAgo time.Duration, s
 
 // lapsedRoleAnswer is GET /v1/roles/<role>'s answer for a holder that is gone.
 type lapsedRoleAnswer struct {
-	Reason        roleHolderState `json:"reason"`
-	Holder        string          `json:"holder"`
-	LastSeen      *int64          `json:"last_seen"`
-	ClaimReleased *bool           `json:"claim_released"`
+	Reason        roles.State `json:"reason"`
+	Holder        string      `json:"holder"`
+	LastSeen      *int64      `json:"last_seen"`
+	ClaimReleased *bool       `json:"claim_released"`
 }
 
 // getLapsedRole asks pod for role, whose holder is gone, and returns the raw answer and its fields.
@@ -77,7 +78,7 @@ func (pod stateTestPod) getLapsedRole(t *testing.T, role string) (string, lapsed
 	if err := json.Unmarshal([]byte(body), &answer); err != nil {
 		t.Fatalf("decode GET /v1/roles/%s: %v (%s)", role, err, body)
 	}
-	if answer.Reason != roleHolderLapsed || answer.ClaimReleased == nil {
+	if answer.Reason != roles.Lapsed || answer.ClaimReleased == nil {
 		t.Fatalf("GET /v1/roles/%s = %s, want a lapsed holder whose claim this lookup released or kept", role, body)
 	}
 	return body, answer
@@ -91,10 +92,12 @@ func (pod stateTestPod) claim(t *testing.T, role, holder string) {
 }
 
 // A role whose holder is gone is answered alike by every pod of the machine, whenever each pod
-// started: the claim's grace counts from the service start in the delivery lease record, which each
-// pod's lease reads. Before, each pod counted it from its own start, so a pod that had run for long
-// released a claim from before the machine's pods began serving again, and one that started a
-// moment ago kept a claim made long after the machine's service began.
+// started, and no lookup releases its claim whatever its holder's state. The release is the role
+// claim reaper's alone, and the grace it holds a claim for counts from the service start in the
+// delivery lease record, which each pod's lease reads: asked to release the same claim, every pod
+// answers the same. Before, each pod counted that grace from its own start, so a pod that had run
+// for long released a claim from before the machine's pods began serving again, and one that
+// started a moment ago kept a claim made long after the machine's service began.
 func TestEveryPodAnswersARoleWhoseHolderLapsedAlike(t *testing.T) {
 	t.Run("the machine has served since long before the claim", func(t *testing.T) {
 		kv := leaseBucket(t)
@@ -109,10 +112,12 @@ func TestEveryPodAnswersARoleWhoseHolderLapsedAlike(t *testing.T) {
 
 		_, onA := a.getLapsedRole(t, "role-a")
 		_, onB := b.getLapsedRole(t, "role-b")
-		if !*onA.ClaimReleased || !*onB.ClaimReleased {
-			t.Fatalf("claim released on pod a = %v, on pod b = %v; want both released: each claim was made after the machine's service start",
+		if *onA.ClaimReleased || *onB.ClaimReleased {
+			t.Fatalf("claim released on a lookup: pod a = %v, pod b = %v; want neither, whatever the holder's state",
 				*onA.ClaimReleased, *onB.ClaimReleased)
 		}
+		requireRelease(t, a, "role-a", "ses_gone_a", store.ExpiredRoleClaimReleased)
+		requireRelease(t, b, "role-b", "ses_gone_b", store.ExpiredRoleClaimReleased)
 	})
 
 	t.Run("the machine began serving again after the claim", func(t *testing.T) {
@@ -130,12 +135,26 @@ func TestEveryPodAnswersARoleWhoseHolderLapsedAlike(t *testing.T) {
 		bodyA, onA := a.getLapsedRole(t, "role")
 		bodyB, _ := b.getLapsedRole(t, "role")
 		if *onA.ClaimReleased {
-			t.Fatalf("pod a, running since long before the claim, released it: %s; want it kept for one session TTL after the machine's service start", bodyA)
+			t.Fatalf("pod a released a claim on a lookup: %s; want no lookup to release one", bodyA)
 		}
 		if bodyA != bodyB {
 			t.Fatalf("pod a answers %s, pod b answers %s", bodyA, bodyB)
 		}
+		// The claim the machine's service start is younger than keeps its grace on every pod.
+		requireRelease(t, a, "role", "ses_gone", store.ExpiredRoleClaimRetained)
+		requireRelease(t, b, "role", "ses_gone", store.ExpiredRoleClaimRetained)
 	})
+}
+
+// requireRelease fails the test unless pod's registry answers want when asked to release role's
+// claim, held by holder, with the live window the listener gives its role claim reaper.
+func requireRelease(t *testing.T, pod stateTestPod, role, holder string, want store.ExpiredRoleClaimRelease) {
+	t.Helper()
+	live, _ := pod.deps.sessions.Windows()
+	release, err := pod.deps.registry.ReleaseExpiredRoleClaim(context.Background(), role, holder, live)
+	if err != nil || release != want {
+		t.Fatalf("release %s's claim held by %s = %v, %v; want %v", role, holder, release, err, want)
+	}
 }
 
 // A role holder whose session heartbeated only through pod A and then expired is reported with one

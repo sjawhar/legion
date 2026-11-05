@@ -480,22 +480,25 @@ func refusedWithAdvice(answer response) bool {
 
 // An ask's text and its answer are written into its block, so they grow a document as an edit
 // does, and are held to what one upload may hold on a real Dispatch process as an edit is: edits of
-// the asks of one document, each giving an option a 900 KB description, are taken until one would
-// leave the document's markdown past 1 MiB, which is refused with 413 CAP_EXCEEDED, and so is every
-// one after it; answers of 900 KB to them are all taken, each the document has no room for kept on
-// its ask and left out of its block. Either way the document stays within the cap, still reads, and
-// a one-word edit on a server that has not loaded it holds at most the bound. Before the bound
-// reached these routes, thirty-two such edits grew one document to 28.8 MB, on which a one-word
-// edit held 1,204 MiB, and under the production task's 1,024 MiB the server was killed.
+// the asks of one document, each giving an option a 31,500-character description, are taken until
+// one would leave the document's markdown past 1 MiB, which is refused with 413 CAP_EXCEEDED, and
+// so is every one after it; answers of 31,500 characters to them are all taken, each the document
+// has no room for kept on its ask and left out of its block. Either way the document stays within
+// the cap, still reads, and a one-word edit on a server that has not loaded it holds at most the
+// bound. The 900 KB description this test grew a document with before is refused outright now,
+// for the 32,000 characters an ask's question and options may hold together (INFRA-370), so the
+// growth is written here in texts that bound holds.
 func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	memory := newMemoryHarness(t)
-	const asks = 32
+	// Forty writes of 31,500 characters are 1.26 MB, so the document meets the 1 MiB cap partway
+	// through whichever route writes them.
+	const asks = 40
 	var spec strings.Builder
 	spec.WriteString("Before sentinel.\n")
 	for index := range asks {
 		fmt.Fprintf(&spec, "\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion %d?\n:::\n", index, index)
 	}
-	prose := strings.Repeat("word ", 180_000)
+	prose := strings.Repeat("word ", 6_300)
 	for _, route := range []struct {
 		name, method, path string
 		body               map[string]any
@@ -557,20 +560,29 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 }
 
 // An ask's question and options are plain text the server makes into markdown, so they are weighed
-// before they are rendered, on a real Dispatch process as in the route's tests: an option
-// description of 920 KB of `)_`, whose edit held 417 MiB before its text was weighed, and one of
-// 330,000 lines, whose edit did not answer within twenty minutes, are each refused with 413
-// CAP_EXCEEDED, naming the text's weight, within the bound and in seconds.
+// before they are rendered, on a real Dispatch process as in the route's tests. One write pays for
+// its whole wording, so the text is weighed against what the question it arrives with has already
+// made: a line of an escaped character weighs 5 elements (the line of text, its escape and the
+// hard break before it), so a question of 12,999 such lines makes 64,995 of the 65,536 elements
+// one write may make, and an option description beside it - 6,000 characters of `)_`, or 3,000
+// lines - passes that, and is refused with 413 CAP_EXCEEDED naming the text's weight, within the
+// bound and in seconds. The whole wording is 31,999 characters, inside the 32,000 an ask's
+// question and options may hold together (INFRA-370), which refuses a longer description - the
+// 920 KB one this test took before - before any of this.
 func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 	memory := newMemoryHarness(t)
 	server := memory.start(t)
 	issue := server.createIssue(t, "Ask text", "Before.\n\n:::ask{#ask-0 urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion 0?\n:::\n")
 	askID := server.blockAsks(t, issue.Key, 1)[0]
+	question := strings.Repeat("_\n", 12_999)
 	for _, description := range []struct{ name, text string }{
-		{"920 KB of )_", strings.Repeat(")_", 460_000)},
-		{"330,000 lines", strings.Repeat("a\n", 330_000)},
+		{"6,000 characters of )_", strings.Repeat(")_", 3_000)},
+		{"3,000 lines", strings.Repeat("a\n", 3_000)},
 	} {
-		body, err := json.Marshal(map[string]any{"options": []map[string]string{{"label": "A", "description": description.text}}})
+		body, err := json.Marshal(map[string]any{
+			"question": question,
+			"options":  []map[string]string{{"label": "A", "description": description.text}},
+		})
 		if err != nil {
 			t.Fatalf("encode the edit: %v", err)
 		}
@@ -595,14 +607,19 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 
 // An answer is stored on its ask as well as in its block, and settlement writes it back into a block
 // that returns to the document, so returning blocks cannot grow a document past what one upload may
-// hold on a real Dispatch process either: twenty-four answers of 900 KB, each taken against a
-// document their deleted blocks had left small, then all twenty-four blocks returned in one edit,
-// leave the document within 1 MiB, the edit and its settlement hold at most the bound, and so does
-// each cold read of the document. Before settlement weighed what it writes back, they left a 21.6 MB
-// document whose cold text read held 373 MiB, and four at once over 1,000 MiB.
+// hold on a real Dispatch process either: forty answers of 32,000 characters, the most an answer
+// may hold (INFRA-370), each taken against a document their deleted blocks had left small, then all
+// forty blocks returned in one edit, leave the document within 1 MiB, the edit and its settlement
+// hold at most the bound, and so does each cold read of the document. An answer of 900,000
+// characters, which this test took before that bound, is refused with 400 CAP_EXCEEDED saying how
+// far over the bound it is, so no answer reaches a block longer than that. Before settlement
+// weighed what it writes back, twenty-four such answers left a 21.6 MB document whose cold text
+// read held 373 MiB, and four reads at once over 1,000 MiB.
 func TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	memory := newMemoryHarness(t)
-	const asks = 24
+	// Forty answers of 32,000 characters are 1.28 MB, so returning their blocks would take the
+	// document past the 1 MiB cap if settlement wrote every one of them back.
+	const asks = 40
 	var spec, blocks strings.Builder
 	spec.WriteString("Before sentinel.\n")
 	for index := range asks {
@@ -610,13 +627,23 @@ func TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T
 		spec.WriteString(block)
 		blocks.WriteString(block)
 	}
-	body, err := json.Marshal(map[string]any{"text": strings.Repeat("word ", 180_000), "expected_edited_at": nil})
+	body, err := json.Marshal(map[string]any{"text": strings.Repeat("word ", 6_400), "expected_edited_at": nil})
 	if err != nil {
 		t.Fatalf("encode the answer: %v", err)
 	}
+	tooLong, err := json.Marshal(map[string]any{"text": strings.Repeat("word ", 180_000), "expected_edited_at": nil})
+	if err != nil {
+		t.Fatalf("encode the answer past the bound: %v", err)
+	}
 	server := memory.start(t)
 	issue := server.createIssue(t, "Returned answers", spec.String())
-	for index, askID := range server.blockAsks(t, issue.Key, asks) {
+	askIDs := server.blockAsks(t, issue.Key, asks)
+	refusal := server.send(t, http.MethodPost, "/api/v1/asks/"+askIDs[0]+"/answer", "application/json", bytes.NewReader(tooLong), http.Header{"X-Dispatch-User": {"alice"}})
+	t.Logf("a 900,000-character answer: %d %.200s", refusal.status, refusal.body)
+	if refusal.status != http.StatusBadRequest || !strings.Contains(string(refusal.body), `"code":"CAP_EXCEEDED"`) || !strings.Contains(string(refusal.body), "(900000/32000)") {
+		t.Errorf("a 900,000-character answer answered %d %.300s, want 400 CAP_EXCEEDED naming its length", refusal.status, refusal.body)
+	}
+	for index, askID := range askIDs {
 		if answer := server.send(t, http.MethodPost, "/api/v1/asks/"+askID+"/answer", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}}); answer.status != http.StatusOK {
 			t.Fatalf("answer %d: %d %.300s, want 200", index+1, answer.status, answer.body)
 		}

@@ -27,7 +27,7 @@ func openTestBucket(t *testing.T) bus.KeyValue {
 	if err != nil {
 		t.Fatalf("JetStream: %v", err)
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{
 		Bucket:   bus.ListenerStateBucket,
 		History:  1,
 		TTL:      10 * time.Minute,
@@ -164,7 +164,7 @@ func (f faultyKV) Delete(key string, opts ...nats.DeleteOpt) error {
 func TestKV_ARetryAfterACreateWhoseReplyWasLostProceeds(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
-	ledger := newTestKV(bus.KeyValue{KeyValue: faultyKV{KeyValue: kv.KeyValue, lostCreateReply: true}}, "boot-a", clock)
+	ledger := newTestKV(bus.NewKeyValue(faultyKV{KeyValue: kv.Legacy(), lostCreateReply: true}, kv.WatchHandle(), kv.Streams()), "boot-a", clock)
 
 	if _, err := ledger.Attempt("publish.abc", "ses_target"); !errors.Is(err, nats.ErrTimeout) {
 		t.Fatalf("Attempt whose create reply was lost: %v, want nats.ErrTimeout", err)
@@ -181,7 +181,7 @@ func TestKV_ARetryAfterACreateWhoseReplyWasLostProceeds(t *testing.T) {
 func TestKV_AnAttemptWhoseClearFailedIsTakenOverByTheNextAttempt(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
-	ledger := newTestKV(bus.KeyValue{KeyValue: faultyKV{KeyValue: kv.KeyValue, failDelete: true}}, "boot-a", clock)
+	ledger := newTestKV(bus.NewKeyValue(faultyKV{KeyValue: kv.Legacy(), failDelete: true}, kv.WatchHandle(), kv.Streams()), "boot-a", clock)
 
 	first := mustAttempt(t, ledger, "publish.abc", "ses_target", Proceed)
 	if err := ledger.Clear(first); !errors.Is(err, nats.ErrTimeout) {
@@ -215,7 +215,7 @@ func TestKV_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
 func TestKV_ADeliveryWhoseRecordFailedIsKept(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
-	ledger := newTestKV(bus.KeyValue{KeyValue: faultyKV{KeyValue: kv.KeyValue, failPut: true}}, "boot-a", clock)
+	ledger := newTestKV(bus.NewKeyValue(faultyKV{KeyValue: kv.Legacy(), failPut: true}, kv.WatchHandle(), kv.Streams()), "boot-a", clock)
 
 	if err := ledger.Record(mustAttempt(t, ledger, "publish.abc", "ses_target", Proceed)); !errors.Is(err, nats.ErrTimeout) {
 		t.Fatalf("Record on a bucket that refuses puts: %v, want nats.ErrTimeout", err)
@@ -477,7 +477,7 @@ func TestKV_ABucketThatDoesNotAnswerIsAnError(t *testing.T) {
 	healthy := newTestKV(kv, "boot-a", clock)
 	attempt := mustAttempt(t, healthy, "publish.abc", "ses_target", Proceed)
 
-	ledger := newTestKV(bus.KeyValue{KeyValue: failingKV{KeyValue: kv.KeyValue, err: nats.ErrTimeout}}, "boot-a", clock)
+	ledger := newTestKV(bus.NewKeyValue(failingKV{KeyValue: kv.Legacy(), err: nats.ErrTimeout}, kv.WatchHandle(), kv.Streams()), "boot-a", clock)
 	if _, err := ledger.Attempt("publish.abc", "ses_other"); !errors.Is(err, nats.ErrTimeout) {
 		t.Fatalf("Attempt on a bucket that times out: %v, want nats.ErrTimeout", err)
 	}

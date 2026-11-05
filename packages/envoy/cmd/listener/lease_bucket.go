@@ -59,7 +59,7 @@ func openListenerState(conn *nats.Conn, replicas int, wait time.Duration) (bus.K
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", bus.ListenerStateBucket, err)
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{
 		Bucket:   bus.ListenerStateBucket,
 		History:  1,
 		TTL:      listenerStateMaxAge,

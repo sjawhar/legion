@@ -80,10 +80,12 @@ func TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the stream's last push is delivery %q, want %q", envelope.SourceEventID, delivery)
 	}
 
-	if status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusOK {
-		t.Fatalf("GET /v1/sessions while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
-	}
+	// A list /v1 answers while the durable is held has its gauge sample: the gauges read the stores
+	// /v1 opened onto, not the dependencies /healthz waits for. Over an empty session bucket that
+	// sample is 0, and it counts the session registered next.
+	assertSessionsMatchTheirSample(t, listener, 0)
 	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+target+`","topics":[],"self_subscribed":true}`)
+	assertSessionsMatchTheirSample(t, listener, 1)
 	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/send", `{"target_session":"`+target+`","message":"sent while the durable is held"}`)
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/messages/send while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
@@ -140,6 +142,21 @@ func TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable(t *testing.T) {
 	listener.WaitForOutput(t, "durable receiving")
 }
 
+// assertSessionsMatchTheirSample fails the test unless the listener's GET /v1/sessions answers a
+// 200 list of want rows and its /metrics has the envoy_active_sessions sample want.
+func assertSessionsMatchTheirSample(t *testing.T, listener *listenerProcess, want int) {
+	t.Helper()
+	status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", "")
+	var rows []sessionInfo
+	if status != http.StatusOK || json.Unmarshal([]byte(answer), &rows) != nil || len(rows) != want {
+		t.Fatalf("GET /v1/sessions: status %d %q, want a 200 list of %d\n%s", status, answer, want, listener.Output.String())
+	}
+	status, scrape := do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/metrics"))
+	if sample := "\nenvoy_active_sessions " + strconv.Itoa(want) + "\n"; status != http.StatusOK || !strings.Contains(scrape, sample) {
+		t.Fatalf("/metrics beside a %d-row session list: status %d, want the sample %q:\n%s", want, status, strings.TrimSpace(sample), scrape)
+	}
+}
+
 // A listener started before its NATS answers waits for it, however long that takes: the process
 // stays up past the ten connect tries that once ended the start, /healthz answers 503 "starting"
 // and /v1 503 "service starting" meanwhile, and once NATS answers the listener is ready, 200 as
@@ -157,7 +174,13 @@ func TestAListenerStartedBeforeItsNATSWaitsForItThenServes(t *testing.T) {
 			t.Fatalf("/healthz while NATS is away = %d %s, want 503 starting", status, body)
 		}
 	}
-	if status, body := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, "service starting") {
+	// A closed /v1 answers "service starting", except to the two list reads, which get the
+	// refilling answer their routes give while a copy cannot be served, so a caller reads one
+	// answer for "the list is not ready" whichever gives it.
+	if status, body := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, "refilling") {
+		t.Fatalf("/v1/sessions while NATS is away = %d %s, want the refilling 503", status, body)
+	}
+	if status, body := callListener(t, listener.port, http.MethodGet, "/v1/roles/none", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, "service starting") {
 		t.Fatalf("/v1 while NATS is away = %d %s, want 503 service starting", status, body)
 	}
 	select {

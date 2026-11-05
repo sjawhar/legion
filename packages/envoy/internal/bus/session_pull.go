@@ -130,7 +130,7 @@ func (s *SessionConsumers) Pull(ctx context.Context, sessionID string) (*Session
 	// it too: the cost is one restart at the ack floor, where the cost of missing the event is a
 	// stalled relay.
 	changed := s.client.ConnectionChanged()
-	conn := s.client.currentConn()
+	conn := s.client.Connection()
 	p := &SessionPull{client: s.client, conn: conn, name: name, next: consumerAPI("MSG.NEXT", name), inbox: conn.NewInbox(), request: request, heartbeat: s.pullHeartbeat, reconnects: conn.Stats().Reconnects, changed: changed, wake: make(chan struct{}, 1)}
 	if p.sub, err = conn.Subscribe(p.inbox, p.receive); err != nil {
 		return nil, err
@@ -284,7 +284,7 @@ func (p *SessionPull) lost() bool {
 // have its caller publish or pull while the server still held that request, and a message the
 // server delivered to it would wait out the consumer's ack wait.
 func (p *SessionPull) lostRequest() bool {
-	return p.client.currentConn() != p.conn || p.conn.IsClosed() || p.conn.Stats().Reconnects != p.reconnects
+	return p.client.Connection() != p.conn || p.conn.IsClosed() || p.conn.Stats().Reconnects != p.reconnects
 }
 
 // sessionMessageOf is the message the server delivered as msg, whose reply subject carries its

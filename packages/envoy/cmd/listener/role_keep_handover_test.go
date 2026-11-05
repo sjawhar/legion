@@ -687,7 +687,7 @@ func claimRoleBeyondTheSessionCache(t *testing.T, harness listenerDeliveryHarnes
 }
 
 // A resolution of the role's holder that did not answer is a bus that missed a read, not a role
-// nobody holds: resolveRoleHolder answers a role no claim names with roleHolderUnclaimed and no
+// nobody holds: roles.ResolveHolder answers a role no claim names with roles.Unclaimed and no
 // error at all. A claim's handover, whose role was claimed a moment ago, used to end on the first
 // such failure all the same - at Debug, reporting nothing - and the copies it left behind waited
 // for the five-minute sweep, whose own handover could end the same way, until they aged past

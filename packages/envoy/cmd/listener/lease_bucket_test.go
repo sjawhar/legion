@@ -85,7 +85,7 @@ func TestOpeningTheListenerStateBucketRaisesAnEarlierBuildsMaxAge(t *testing.T) 
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if _, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{
+	if _, err := bus.EnsureKeyValue(conn, js, &natsgo.KeyValueConfig{
 		Bucket:   bus.ListenerStateBucket,
 		History:  1,
 		TTL:      10 * time.Minute,

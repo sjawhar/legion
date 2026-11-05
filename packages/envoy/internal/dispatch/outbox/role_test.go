@@ -3,7 +3,9 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
@@ -32,26 +35,19 @@ const roleHolder = "role-holder"
 
 // heldRoles is a role-claim store and session reader for a test publisher with no NATS: every role
 // is claimed by roleHolder, a live self-subscribed session, so a role route is forwarded to it with
-// a Request that the test publisher answers.
-type heldRoles struct{}
+// a Request that the test publisher answers. It judges that session on the package's own windows,
+// as roles.Buckets does (roles.Windows).
+type heldRoles struct{ roles.Windows }
 
 func (heldRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
 	return envoystore.RoleClaim{HolderSessionID: roleHolder}, nil
 }
 
-func (heldRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return envoystore.ExpiredRoleClaimSuperseded, nil
+func (heldRoles) Holder(context.Context, string) (session.SessionEntry, error) {
+	return session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}, nil
 }
 
-func (heldRoles) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
-	if !live(entry) {
-		return session.SessionEntry{}, natsgo.ErrKeyNotFound
-	}
-	return entry, nil
-}
-
-func (heldRoles) TTL() time.Duration { return 5 * time.Minute }
+func (heldRoles) LastSeen(context.Context, string) int64 { return 0 }
 
 // withHeldRoles is deps whose role routes resolve to roleHolder (heldRoles).
 func withHeldRoles(deps Deps) Deps {
@@ -73,25 +69,41 @@ type roleRig struct {
 
 func newRoleRig(t *testing.T) *roleRig {
 	t.Helper()
+	return newRoleRigWith(t)
+}
+
+// newRoleRigWithSessionMaxAge is a roleRig whose session bucket keeps a record for maxAge only,
+// shorter than the gone horizon as a deployed bucket's own maximum age can be: a holder that
+// stops heartbeating loses the record the bucket stored for it well before it is gone. The
+// bucket is created with that age (WithSessionTTL), which is the one way to put an age on it
+// under the duplicates window a KV bucket of two minutes' age carries.
+func newRoleRigWithSessionMaxAge(t *testing.T, maxAge time.Duration) *roleRig {
+	t.Helper()
+	return newRoleRigWith(t, session.WithSessionTTL(maxAge))
+}
+
+// newRoleRigWith is a roleRig on a server of its own, its session registry opened with options.
+func newRoleRigWith(t *testing.T, options ...session.SessionRegistryOption) *roleRig {
+	t.Helper()
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
 	}
 	t.Cleanup(client.Close)
-	return newRoleRigOn(t, url, client, testnats.Connect(t, url))
+	return newRoleRigOn(t, url, client, testnats.Connect(t, url), options...)
 }
 
 // newRoleRigOn is a roleRig on the server at url, with client as the outbox's client and conn as
 // the test's own connection, which the registries write through.
-func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Conn) *roleRig {
+func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Conn, options ...session.SessionRegistryOption) *roleRig {
 	t.Helper()
 	registry, err := envoystore.Open(conn)
 	if err != nil {
 		t.Fatalf("open the role registry: %v", err)
 	}
 	t.Cleanup(registry.StopWatch)
-	sessions, err := session.OpenSessionRegistry(conn)
+	sessions, err := session.OpenSessionRegistry(conn, options...)
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
 	}
@@ -101,10 +113,18 @@ func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Con
 }
 
 // deps is the outbox's dependencies as cmd/dispatch wires them: role routes resolved through
-// roles.Buckets on the outbox's own client, and that client the reader of a role's kept lane and
-// its drain cursor, which a keep's handover makes its pass over (Deps.KeptLanes).
+// roles.Buckets on the outbox's own client, judged by the package's own windows, which is what
+// a deployment that sets neither ENVOY_SESSION_LIVE_WINDOW nor ENVOY_SESSION_GONE_HORIZON
+// gives it, and that client the reader of a role's kept lane and its drain cursor, which a
+// keep's handover makes its pass over (Deps.KeptLanes).
 func (r *roleRig) deps() Deps {
-	holders := roles.NewBuckets(r.client)
+	return r.depsJudgedBy(roles.Windows{})
+}
+
+// depsJudgedBy is deps whose role-route holders are judged by windows, as cmd/dispatch judges
+// them by the two the deployment gave its listeners (roleHolderWindows, cmd/dispatch/main.go).
+func (r *roleRig) depsJudgedBy(windows roles.Windows) Deps {
+	holders := roles.NewBuckets(r.client, windows)
 	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders,
 		KeptLanes: r.client}
 }
@@ -118,44 +138,90 @@ func (r *roleRig) claim(t *testing.T, role, holder string, entry session.Session
 	}
 }
 
-// claimStale makes holder role's holder, registered and with a heartbeat older than
-// session.ClaimStaleAfter, so the role's resolution holds its forward pending with nothing sent
-// (forwardOf). The entry goes to the bucket directly: the registry stamps every entry it writes
-// with now.
-func (r *roleRig) claimStale(t *testing.T, role, holder string) {
+// claimRegisteredAt makes holder role's holder with a session record whose last registration is
+// age old: unresponsive past session.LiveWindow and gone past session.GoneHorizon, which is what
+// the resolution judges it by. The record goes to the session bucket directly, since the
+// registry stamps every entry it writes with now, and it is written now, so the bucket holds it
+// whatever its registration says.
+func (r *roleRig) claimRegisteredAt(t *testing.T, role, holder string, age time.Duration) {
 	t.Helper()
 	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
 		t.Fatalf("claim %s for %s: %v", role, holder, err)
 	}
-	stale, err := json.Marshal(session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().Add(-session.ClaimStaleAfter - time.Minute).UnixMilli()})
+	record, err := json.Marshal(session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().Add(-age).UnixMilli()})
 	if err != nil {
-		t.Fatalf("encode the stale entry: %v", err)
+		t.Fatalf("encode the record of %s: %v", holder, err)
 	}
+	kv, err := r.sessionBucket(t)
+	if err != nil {
+		t.Fatalf("open the session bucket: %v", err)
+	}
+	if _, err := kv.Put(holder, record); err != nil {
+		t.Fatalf("register %s as last seen %s ago: %v", holder, age, err)
+	}
+}
+
+// sessionBucket is the session bucket on the test's own connection, which these tests read and
+// write records through.
+func (r *roleRig) sessionBucket(t *testing.T) (natsgo.KeyValue, error) {
+	t.Helper()
 	js, err := r.conn.JetStream()
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	kv, err := js.KeyValue(bus.SessionBucket)
+	return js.KeyValue(bus.SessionBucket)
+}
+
+// waitForExpiredSessionKey waits until the session bucket holds no record for sessionID: its
+// maximum age passed and the server dropped the record it stored.
+func (r *roleRig) waitForExpiredSessionKey(t *testing.T, sessionID string) {
+	t.Helper()
+	kv, err := r.sessionBucket(t)
 	if err != nil {
 		t.Fatalf("open the session bucket: %v", err)
 	}
-	if _, err := kv.Put(holder, stale); err != nil {
-		t.Fatalf("register the stale holder %s: %v", holder, err)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, err := kv.Get(sessionID)
+		if errors.Is(err, natsgo.ErrKeyNotFound) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("read %s's record: %v", sessionID, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's record is still in the session bucket well past its maximum age", sessionID)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-// countingDeps is the rig's dependencies with a publish-failure counter on a registry of its own,
-// so a test can read which reason a send that was not reached was counted under.
+// roleClaim is role's claim as the role bucket holds it now.
+func (r *roleRig) roleClaim(t *testing.T, role string) envoystore.RoleClaim {
+	t.Helper()
+	claim, err := r.registry.RoleClaim(context.Background(), role)
+	if err != nil {
+		t.Fatalf("read %s's claim: %v", role, err)
+	}
+	return claim
+}
+
+// countingDeps is the rig's dependencies with the outbox's two counters on a registry of its own,
+// so a test can read which reason a send that was not reached was counted under, and which holder
+// state a forward held pending was counted on.
 func (r *roleRig) countingDeps(t *testing.T) (Deps, *metrics.Registry) {
 	t.Helper()
 	registry := metrics.New()
 	deps := r.deps()
 	deps.PublishFailures = registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
 		"Destinations of an outbox publish attempt that were not reached")
+	deps.RoleForwardsHeld = registry.NewCounter("envoy_dispatch_outbox_role_forwards_held_total",
+		"Role forwards a holder's resolution held pending with nothing sent")
 	return deps, registry
 }
 
-// failureReasons is what /metrics serves of registry, the counted reasons among it.
+// failureReasons is what /metrics serves of registry, the counted reasons and holder states among
+// it.
 func failureReasons(t *testing.T, registry *metrics.Registry) string {
 	t.Helper()
 	response := httptest.NewRecorder()
@@ -420,15 +486,19 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *tes
 	}
 }
 
-// A claim whose holder's session is gone is released, with the listener's compare and set, and the
-// role then has no holder: the event is published with nothing sent to its gone holder, its copy
-// kept for the role's next holder as an unclaimed role's is, and the claim is gone.
-func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T) {
+// A holder whose own record is past the gone horizon is gone, and the role route counts as
+// reached: the event is published with nothing sent to that holder, its copy kept for the role's
+// next holder as an unclaimed role's is, rather than being retried for a session that will not
+// answer. The claim is not touched - releasing it is the listener's role-claim reaper's alone,
+// and a resolution that released it here would take an unresponsive holder's role on the next
+// event (dispatch://INFRA-392).
+// The copy on the role's kept lane is the envelope as its sender sent it, kept for the holder the
+// role-claim reaper's release of this claim lets claim the role next.
+func TestARoleRouteWhoseHolderIsGoneKeepsTheClaimAndIsPublished(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"
-	if _, err := rig.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim the role for a session that never registered: %v", err)
-	}
+	rig.claimRegisteredAt(t, role, holder, session.GoneHorizon+time.Minute)
+	claimedAt := rig.roleClaim(t, role).ClaimedAt
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	rig.silent(t, contracts.AgentSubject(holder))
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
@@ -439,18 +509,30 @@ func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T)
 		attempts, failure, _ := eventState(t, rig.database, event.ID)
 		t.Fatalf("the event was not published: attempt_count %d, publish_error %v", attempts, failure)
 	}
-	if claimed, err := rig.registry.RoleHolder(role); err != nil || claimed != "" {
-		t.Fatalf("the claim after the scan names %q (%v), want it released", claimed, err)
+	if claim := rig.roleClaim(t, role); claim.HolderSessionID != holder || claim.ClaimedAt != claimedAt {
+		t.Fatalf("the claim after the scan is %+v, want %s's untouched, claimed at %d", claim, holder, claimedAt)
+	}
+	kept := keptCopies(t, rig.client, role)
+	if len(kept) != 1 {
+		t.Fatalf("role %s's kept lane holds %d copies, want the one the outbox kept for its next holder", role, len(kept))
+	}
+	key := fmt.Sprintf("dispatch-%d", event.ID)
+	if kept[0].Topic != contracts.RoleTopicPrefix+role || kept[0].DedupeKey != key || kept[0].EventID != key {
+		t.Fatalf("the kept copy is topic %q dedupe key %q event id %q, want the envelope as its sender sent it under %q",
+			kept[0].Topic, kept[0].DedupeKey, kept[0].EventID, key)
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 0 {
+		t.Fatalf("the stream holds %d messages on the gone holder's subject, want none: the copy was kept, not sent", copies)
 	}
 }
 
-// A holder whose session is there but has not heartbeated within session.ClaimStaleAfter keeps its
-// claim, and the event stays unpublished, backed off with its attempt and the reason, to be
-// retried.
-func TestARoleRouteToAStaleHolderStaysPending(t *testing.T) {
+// A holder whose record is there but whose last registration is past the live window is
+// unresponsive, not gone: the event stays unpublished, backed off with its attempt and the
+// reason, to be retried when the session answers again, and the claim stands.
+func TestARoleRouteToAnUnresponsiveHolderStaysPending(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale"
-	rig.claimStale(t, role, holder)
+	rig.claimRegisteredAt(t, role, holder, session.LiveWindow+time.Minute)
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	rig.silent(t, contracts.AgentSubject(holder))
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
@@ -458,7 +540,7 @@ func TestARoleRouteToAStaleHolderStaysPending(t *testing.T) {
 	holding(t, rig.deps()).scan(context.Background(), unfenced{})
 
 	if publishedAt(t, rig.database, event.ID) != nil {
-		t.Fatal("the event of a stale holder was published")
+		t.Fatal("the event of an unresponsive holder was published")
 	}
 	var nextAttempt *time.Time
 	if err := rig.database.Pool.QueryRow(context.Background(), `select next_attempt_at from events where id = $1`, event.ID).Scan(&nextAttempt); err != nil {
@@ -466,10 +548,101 @@ func TestARoleRouteToAStaleHolderStaysPending(t *testing.T) {
 	}
 	attempts, failure, _ := eventState(t, rig.database, event.ID)
 	if attempts != 1 || nextAttempt == nil || failure == nil || !strings.Contains(*failure, "has not heartbeated") {
-		t.Fatalf("attempt_count %d, next_attempt_at %v, publish_error %v: want it backed off naming the stale holder", attempts, nextAttempt, failure)
+		t.Fatalf("attempt_count %d, next_attempt_at %v, publish_error %v: want it backed off naming the unresponsive holder", attempts, nextAttempt, failure)
 	}
 	if claimed, err := rig.registry.RoleHolder(role); err != nil || claimed != holder {
-		t.Fatalf("the claim after the scan names %q (%v), want the stale holder's kept", claimed, err)
+		t.Fatalf("the claim after the scan names %q (%v), want the unresponsive holder's kept", claimed, err)
+	}
+}
+
+// A role route's holder is judged by the windows Dispatch was given, never by the package's
+// compiled ones. Raising the gone horizon is the answer this change names for a stall longer
+// than an hour, and a deployment raises it in Dispatch as well as in its listeners
+// (ENVOY_SESSION_GONE_HORIZON, cmd/dispatch's roleHolderWindows): a holder silent for longer
+// than the compiled hour but inside the raised horizon is unresponsive, so its event stays
+// pending with the claim untouched, where the compiled windows call the same holder gone and
+// publish the event with nothing sent.
+//
+// That publish is the harm, not a slower delivery: the listener, carrying the operator's
+// horizon, still calls the holder unresponsive and keeps its role, so an event Dispatch marks
+// reached with nothing sent reaches the holder never, however long it stalled
+// (dispatch://INFRA-392).
+func TestARoleRouteIsJudgedOnTheWindowsDispatchWasGiven(t *testing.T) {
+	rig := newRoleRig(t)
+	// Silent for longer than the compiled gone horizon, and well inside a horizon raised to
+	// three hours for a deployment whose sessions stall for longer than one.
+	const silence = session.GoneHorizon + 30*time.Minute
+	for _, tc := range []struct {
+		name    string
+		role    string
+		holder  string
+		windows roles.Windows
+		pending bool
+	}{
+		{"the horizon the deployment raised", "reviewer", "ses_inside_raised_horizon", roles.Windows{Horizon: 3 * time.Hour}, true},
+		{"the compiled windows", "scribe", "ses_past_compiled_horizon", roles.Windows{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig.claimRegisteredAt(t, tc.role, tc.holder, silence)
+			claimedAt := rig.roleClaim(t, tc.role).ClaimedAt
+			rig.silent(t, contracts.RoleTopicPrefix+tc.role)
+			rig.silent(t, contracts.AgentSubject(tc.holder))
+			event := rig.routedEvent(t, "T-"+tc.role, tc.role, model.Actor{Kind: "user", ID: "alice"})
+
+			holding(t, rig.depsJudgedBy(tc.windows)).scan(context.Background(), unfenced{})
+
+			published := publishedAt(t, rig.database, event.ID)
+			attempts, failure, destinations := eventState(t, rig.database, event.ID)
+			reached := strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix)
+			switch {
+			case tc.pending && published != nil:
+				t.Fatalf("the event of a holder inside the raised horizon was published at %s with nothing sent; it is unresponsive, and its event waits for it", published)
+			case tc.pending && (attempts != 1 || failure == nil || !strings.Contains(*failure, "unresponsive") || reached):
+				t.Fatalf("attempt_count %d, publish_error %v, published_destinations %v: want it backed off naming the unresponsive holder with the role route still pending", attempts, failure, destinations)
+			case !tc.pending && published == nil:
+				t.Fatalf("the event of a holder past the compiled gone horizon was not published: attempt_count %d, publish_error %v", attempts, failure)
+			case !tc.pending && !reached:
+				t.Fatalf("published_destinations %v, want the gone holder's role route counted as reached", destinations)
+			}
+			if claim := rig.roleClaim(t, tc.role); claim.HolderSessionID != tc.holder || claim.ClaimedAt != claimedAt {
+				t.Fatalf("the claim after the scan is %+v, want %s's untouched, claimed at %d", claim, tc.holder, claimedAt)
+			}
+		})
+	}
+}
+
+// A holder whose session key has expired - the bucket's maximum age passed and the record it held
+// is gone - keeps its role and holds its events back. The bucket's maximum age is how long a
+// record is stored and no verdict on the session: it can be shorter than the gone horizon, as it
+// is here, so a key it no longer holds says the bucket forgot the holder, not that the holder
+// died. The event stays pending for the role-claim reaper or the holder's own return to settle,
+// and is not published with nothing sent. This is the case that cost a stalled Legion architect
+// its role: the resolution read the expired key as a session that is gone and released the claim
+// on the next event routed to the role (dispatch://INFRA-392).
+func TestARoleRouteWhoseHolderSessionKeyExpiredKeepsTheClaimAndStaysPending(t *testing.T) {
+	rig := newRoleRigWithSessionMaxAge(t, time.Second)
+	const role, holder = "reviewer", "ses_expired"
+	rig.claimRegisteredAt(t, role, holder, session.LiveWindow+time.Minute)
+	claimedAt := rig.roleClaim(t, role).ClaimedAt
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	rig.silent(t, contracts.AgentSubject(holder))
+	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
+	rig.waitForExpiredSessionKey(t, holder)
+
+	holding(t, rig.deps()).scan(context.Background(), unfenced{})
+
+	if published := publishedAt(t, rig.database, event.ID); published != nil {
+		t.Fatalf("the event of a holder whose session key expired was published at %s with nothing sent", published)
+	}
+	attempts, failure, destinations := eventState(t, rig.database, event.ID)
+	if attempts != 1 || failure == nil || !strings.Contains(*failure, holder) {
+		t.Fatalf("attempt_count %d, publish_error %v: want it backed off naming the holder", attempts, failure)
+	}
+	if strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix) {
+		t.Fatalf("published_destinations %v counts the role route reached, want it still pending", destinations)
+	}
+	if claim := rig.roleClaim(t, role); claim.HolderSessionID != holder || claim.ClaimedAt != claimedAt {
+		t.Fatalf("the claim after the scan is %+v, want %s's untouched, claimed at %d", claim, holder, claimedAt)
 	}
 }
 
@@ -561,20 +734,24 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	}
 }
 
-// A role forward its holder's resolution held pending is counted under the holder, not as a
-// publish failure: nothing was sent, so NATS neither refused nor dropped it, while `failed` is
-// what tells an operator the bus failed a send. The holder here is registered and has not
-// heartbeated within session.ClaimStaleAfter; a claim the store kept, a claim that churned and a
-// read that failed hold a forward pending the same way (forwardOf), and the event is backed off
-// as TestARoleRouteToAStaleHolderStaysPending holds.
-func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T) {
+// A role forward its holder's resolution held pending is a wait, not a failure: it is counted on
+// the outbox's hold counter under the state its holder was held on, never on the publish-failure
+// counter, and its event's back-off is logged below ERROR naming that holder and that state.
+// Nothing was sent, so NATS neither refused nor dropped it, while a publish failure and an ERROR
+// line are what tell an operator the bus failed a send. The holder here is registered and past the
+// live window; a holder nothing dates and a read that failed hold a forward pending the same way
+// (forwardOf), and the event is backed off as TestARoleRouteToAnUnresponsiveHolderStaysPending
+// holds.
+func TestAForwardHeldByItsHoldersResolutionIsAWaitNotAFailure(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale_counted"
-	rig.claimStale(t, role, holder)
+	rig.claimRegisteredAt(t, role, holder, session.LiveWindow+time.Minute)
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	rig.silent(t, contracts.AgentSubject(holder))
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
 	deps, registry := rig.countingDeps(t)
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 
@@ -582,11 +759,19 @@ func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T)
 		t.Fatal("the event whose role forward stayed pending was published")
 	}
 	body := failureReasons(t, registry)
-	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="holder"} 1`) {
-		t.Fatalf("/metrics body = %q, want the pending forward counted under its holder", body)
+	if !strings.Contains(body, `envoy_dispatch_outbox_role_forwards_held_total{holder_state="unresponsive"} 1`) {
+		t.Fatalf("/metrics body = %q, want the pending forward counted a hold under its holder's state", body)
 	}
-	if strings.Contains(body, `reason="failed"`) {
+	if strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{`) {
 		t.Fatalf("/metrics body = %q counts a forward that sent nothing as a publish failure", body)
+	}
+	logged := logs.Lines(fmt.Sprintf("event_id=%d ", event.ID))
+	if !strings.Contains(logged, `level=INFO msg="dispatch outbox: event waits for its role's holder"`) ||
+		!strings.Contains(logged, " holder="+holder+" ") || !strings.Contains(logged, " holder_state=unresponsive ") {
+		t.Fatalf("the held event logged %q, want its back-off below ERROR, naming its holder and that holder's state", logged)
+	}
+	if strings.Contains(logged, "level=ERROR") {
+		t.Fatalf("the held event logged %q, want nothing of it at ERROR: a hold is a wait, not a failure", logged)
 	}
 }
 

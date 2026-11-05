@@ -767,7 +767,7 @@ func TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack(t *testing.T) {
 }
 
 // A window longer than the durable's MaxDeliver can pay for still ends in a give-up record.
-// ENVOY_UNPLACEABLE_RETRY_WINDOW has no upper bound (envDuration, main.go), and at ten minutes the
+// ENVOY_UNPLACEABLE_RETRY_WINDOW has no upper bound (envconf.Duration), and at ten minutes the
 // window buys 120 deferrals against a consumer that stops redelivering after consumerMaxDeliver
 // (20), silently: nothing in this repository consumes JetStream's max-deliveries advisory. The
 // count the handler holds the window to is therefore capped at unplaceableMaxDeliveries, and the

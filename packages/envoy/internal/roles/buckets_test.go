@@ -41,7 +41,7 @@ func bucketsRig(t *testing.T) (*roles.Buckets, *store.Registry, *session.Session
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	return roles.NewBuckets(client), registry, sessions, js
+	return roles.NewBuckets(client, roles.Windows{}), registry, sessions, js
 }
 
 // Before any bucket exists a role has no claim; once one does, Buckets reads the claim a listener
@@ -53,7 +53,7 @@ func TestBucketsReadAClaimAsTheRegistryWroteIt(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	if claim, err := roles.NewBuckets(client).RoleClaim(context.Background(), "reviewer"); err != nil || claim.HolderSessionID != "" {
+	if claim, err := roles.NewBuckets(client, roles.Windows{}).RoleClaim(context.Background(), "reviewer"); err != nil || claim.HolderSessionID != "" {
 		t.Fatalf("the claim with no role bucket is %+v, %v; want none", claim, err)
 	}
 
@@ -107,46 +107,71 @@ func TestBucketsDecodeAClaimAsTheRegistryDoesWithinTheirContext(t *testing.T) {
 	if _, err := holders.RoleClaim(ended, "reviewer"); !errors.Is(err, context.Canceled) || err.Error() != "read role reviewer's claim: context canceled" {
 		t.Fatalf("a claim read under an ended context answered %v, want the context's error naming the read", err)
 	}
-	if _, err := holders.Holder(ended, "ses_holder", func(session.SessionEntry) bool { return true }); !errors.Is(err, context.Canceled) {
+	if _, err := holders.Holder(ended, "ses_holder"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("a session read under an ended context answered %v, want the context's error", err)
 	}
 }
 
-// A release deletes the claim only while the session it names still holds it: released, then
-// missing once it is gone, and superseded when another session holds it.
-func TestBucketsReleaseAClaimOnlyWhileItsHolderHoldsIt(t *testing.T) {
-	holders, registry, _, _ := bucketsRig(t)
-	if _, err := registry.SetRole("ses_gone", "test-machine", "reviewer", false); err != nil {
-		t.Fatalf("claim the role: %v", err)
+// A holder is judged by its own last registration and by the windows Buckets was given, never by
+// how long the session bucket keeps a record: a record the bucket still holds is answered
+// whatever its age, and the state it reads follows the windows alone. Before this a record older
+// than the bucket's TTL read as a session that is not there, and the resolution released its
+// role claim on that word (dispatch://INFRA-392).
+func TestBucketsJudgeAHolderByItsRegistrationAndNotTheBucketsAge(t *testing.T) {
+	holders, _, _, js := bucketsRig(t)
+	kv, err := js.KeyValue(bus.SessionBucket)
+	if err != nil {
+		t.Fatalf("open the session bucket: %v", err)
 	}
-	if release, err := holders.ReleaseExpiredRoleClaim(context.Background(), "reviewer", "ses_other", time.Minute); err != nil || release != store.ExpiredRoleClaimSuperseded {
-		t.Fatalf("the release for another session answered %v, %v; want superseded", release, err)
+	// Written now, so the bucket holds it; last registered long before, as a session that
+	// stopped heartbeating leaves its record.
+	stalled := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()}
+	stored, err := json.Marshal(stalled)
+	if err != nil {
+		t.Fatalf("encode the stalled record: %v", err)
 	}
-	if release, err := holders.ReleaseExpiredRoleClaim(context.Background(), "reviewer", "ses_gone", time.Minute); err != nil || release != store.ExpiredRoleClaimReleased {
-		t.Fatalf("the release answered %v, %v; want released", release, err)
+	if _, err := kv.Put("ses_stalled", stored); err != nil {
+		t.Fatalf("store the stalled record: %v", err)
 	}
-	if holder, err := registry.RoleHolder("reviewer"); err != nil || holder != "" {
-		t.Fatalf("the claim after the release names %q, %v; want none", holder, err)
+	entry, err := holders.Holder(context.Background(), "ses_stalled")
+	if err != nil || entry.UpdatedAt != stalled.UpdatedAt {
+		t.Fatalf("the stalled holder read %+v, %v; want the record the bucket holds", entry, err)
 	}
-	if release, err := holders.ReleaseExpiredRoleClaim(context.Background(), "reviewer", "ses_gone", time.Minute); err != nil || release != store.ExpiredRoleClaimMissing {
-		t.Fatalf("the second release answered %v, %v; want missing", release, err)
+	if state := holders.EntryState(entry); state != session.Unresponsive {
+		t.Fatalf("a holder that last registered 10m ago reads %s, want unresponsive on the package's windows", state)
+	}
+	if seen := holders.LastSeen(context.Background(), "ses_stalled"); seen != 0 {
+		t.Fatalf("LastSeen is %d, want 0: Dispatch remembers no session whose record has gone", seen)
+	}
+	// The windows alone decide the state, so these read the same record through Buckets built
+	// with windows of their own and no bucket to read.
+	for _, tc := range []struct {
+		name    string
+		windows roles.Windows
+		want    session.State
+	}{
+		{"windows the registration is inside", roles.Windows{Live: time.Hour, Horizon: 2 * time.Hour}, session.Live},
+		{"a gone horizon the registration is past", roles.Windows{Live: time.Minute, Horizon: 2 * time.Minute}, session.Gone},
+	} {
+		if state := roles.NewBuckets(nil, tc.windows).EntryState(entry); state != tc.want {
+			t.Fatalf("%s: the holder reads %s, want %s", tc.name, state, tc.want)
+		}
 	}
 }
 
-// Holder reads a registered session from the bucket; a session the bucket does not hold, one whose
-// value does not decode, one no key may name and one live refuses are each gone
-// (nats.ErrKeyNotFound). TTL is the bucket's.
+// Holder reads a registered session from the bucket; a session the bucket does not hold, one
+// whose value does not decode and one no key may name are each gone (nats.ErrKeyNotFound).
 func TestBucketsReadAHolderFromTheSessionBucket(t *testing.T) {
 	holders, _, sessions, js := bucketsRig(t)
 	if err := sessions.Put("ses_live", session.SessionEntry{SelfSubscribed: true, Title: "live"}); err != nil {
 		t.Fatalf("register the session: %v", err)
 	}
-	entry, err := holders.Holder(context.Background(), "ses_live", func(session.SessionEntry) bool { return true })
+	entry, err := holders.Holder(context.Background(), "ses_live")
 	if err != nil || !entry.SelfSubscribed || entry.Title != "live" {
 		t.Fatalf("the live holder read %+v, %v", entry, err)
 	}
-	if ttl := holders.TTL(); ttl != 2*time.Minute {
-		t.Fatalf("TTL is %s, want the bucket's 2m", ttl)
+	if state := holders.EntryState(entry); state != session.Live {
+		t.Fatalf("the holder that just registered reads %s, want live", state)
 	}
 	kv, err := js.KeyValue(bus.SessionBucket)
 	if err != nil {
@@ -158,25 +183,13 @@ func TestBucketsReadAHolderFromTheSessionBucket(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		session string
-		live    func(session.SessionEntry) bool
 	}{
-		{"not registered", "ses_missing", func(session.SessionEntry) bool { return true }},
-		{"garbled", "ses_garbled", func(session.SessionEntry) bool { return true }},
-		{"refused by live", "ses_live", func(session.SessionEntry) bool { return false }},
-		{"a key nats.go refuses", "ses:bad", func(session.SessionEntry) bool { return true }},
+		{"not registered", "ses_missing"},
+		{"garbled", "ses_garbled"},
+		{"a key nats.go refuses", "ses:bad"},
 	} {
-		if _, err := holders.Holder(context.Background(), tc.session, tc.live); !errors.Is(err, nats.ErrKeyNotFound) {
+		if _, err := holders.Holder(context.Background(), tc.session); !errors.Is(err, nats.ErrKeyNotFound) {
 			t.Fatalf("%s: Holder returned %v, want nats.ErrKeyNotFound", tc.name, err)
 		}
-	}
-	stored, err := json.Marshal(session.SessionEntry{UpdatedAt: time.Now().UnixMilli()})
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	if _, err := kv.Put("ses_fresh", stored); err != nil {
-		t.Fatalf("store a session: %v", err)
-	}
-	if _, err := holders.Holder(context.Background(), "ses_fresh", func(session.SessionEntry) bool { return true }); err != nil {
-		t.Fatalf("a session the bucket holds read %v", err)
 	}
 }

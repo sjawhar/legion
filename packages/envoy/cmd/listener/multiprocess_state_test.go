@@ -362,32 +362,37 @@ func TestTwoPodsWritesOnThePodWhoseCacheTrailsKeepTheNewerWrite(t *testing.T) {
 
 // A role claim whose holder is gone is answered alike by every pod, whenever each started: the
 // active pod has served for a while when the claim is made and its holder's session then ends,
-// and a standby starts after. Each releases the claim it is asked about. Before INFRA-557 each pod
-// counted the claim's grace from its own start, so the pod that started after the claim retained
-// it while the other released it.
+// and a standby starts after. Each answers the same holder, the same last_seen and the same
+// `claim_released: false`, and the claim itself stands: a lookup releases nothing whatever its
+// holder's state, and only the role claim reaper, on the pod holding the lease, takes one away.
+// Before INFRA-557 the lookup released the claim and each pod counted its grace from its own
+// start, so the pod that started after the claim retained it while the other released it; the
+// grace that reaper now holds a restored claim for is the machine's own service start
+// (internal/store's grace_test.go).
 func TestTwoPodsAnswerARoleWhoseHolderLapsedAlike(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
+	publisher := mpConnectPublisher(t, uri)
 	a := mpStartPod(t, binary, uri, "pod-a")
 	mpWaitActive(t, a, 30*time.Second)
 	time.Sleep(2 * time.Second) // the machine serves for a while before the claim
 	const holder = "ses_mp_grace_holder"
 	a.subscribe(t, fmt.Sprintf(`{"session_id":%q,"topics":[],"self_subscribed":true}`, holder))
-	// One role for each pod to look up: a lookup that releases a claim leaves the other pod none to
-	// judge.
-	a.setRole(t, holder, "mp-grace-a")
-	a.setRole(t, holder, "mp-grace-b")
+	a.setRole(t, holder, "mp-grace")
 	if answer := a.call(http.MethodDelete, "/v1/sessions/"+holder, ""); answer.status != http.StatusOK {
 		t.Fatalf("end %s's session through %s: %d %s %v", holder, a.instance, answer.status, answer.body, answer.err)
 	}
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
 
-	onA := a.lapsedRole(t, "mp-grace-a")
-	onB := b.lapsedRole(t, "mp-grace-b")
-	requireSameLapsedAnswer(t, a, b, onA, onB, "holder", "claim_released", "last_seen")
-	if onA["claim_released"] != true {
-		t.Fatalf("%s kept a claim made after the machine began serving: %v", a.instance, onA)
+	onA := a.lapsedRole(t, "mp-grace")
+	onB := b.lapsedRole(t, "mp-grace")
+	requireSameLapsedAnswer(t, a, b, onA, onB, "holder", "holder_state", "claim_released", "last_seen")
+	if onA["claim_released"] != false {
+		t.Fatalf("%s released a claim on a lookup: %v", a.instance, onA)
+	}
+	if claim := publisher.stored(t, bus.RoleClaimBucket, "mp-grace"); claim["holder_session_id"] != holder {
+		t.Fatalf("the role bucket holds %v after both pods looked mp-grace up; want %s's claim", claim, holder)
 	}
 }
 
@@ -494,4 +499,111 @@ func TestTwoPodsEveryQueuedMessageReachesTheSessionAtMostTwiceAcrossAReceiveLost
 	serving.requireOrder(t, messages)
 	t.Logf("%s took the lease %s after the cut of %s's receive connection; the %d messages %s had delivered were given back, the %d published after the take-over arrived, and nothing came back under an id no message carried",
 		b.instance, taken.Round(time.Millisecond), a.instance, len(delivered), a.instance, len(afterTheTakeOver))
+}
+
+// sessionState is the state and the last registration a pod answers for sessionID on
+// GET /v1/registry/<session_id>?include=unresponsive: the 200's own two fields while the session
+// is live or unresponsive, and the 404's, which carry the same two, once it is gone.
+func (p *mpPod) sessionState(t *testing.T, sessionID string) (string, int64) {
+	t.Helper()
+	answer := p.call(http.MethodGet, "/v1/registry/"+sessionID+"?include=unresponsive", "")
+	var body struct {
+		State    string `json:"state"`
+		LastSeen int64  `json:"last_seen"`
+	}
+	if answer.err != nil || (answer.status != http.StatusOK && answer.status != http.StatusNotFound) ||
+		json.Unmarshal([]byte(answer.body), &body) != nil {
+		t.Fatalf("GET /v1/registry/%s on %s: %d %s %v", sessionID, p.instance, answer.status, strings.TrimSpace(answer.body), answer.err)
+	}
+	return body.State, body.LastSeen
+}
+
+// A session that stops answering is in one state on every pod of its machine, and is dated alike
+// by each. It registers through the active pod and then heartbeats no more: both pods read it
+// live inside the live window, unresponsive past that window, and gone past the horizon, each
+// with one last_seen, the registration's own moment. Neither pod reads its own cache for any of
+// that — the state is the record's age (session.StateOf) and the time is the `seen.` record both
+// pods share (session.WithLastSeenBucket) — so a pod that never watched the session answers as
+// the pod that took its registration does.
+//
+// The claim that session holds is released by neither pod while it is unresponsive: no lookup
+// takes a claim away whatever its holder's state, and the role claim reaper, the one path that
+// does, acts only on a holder that is gone. Both pods answer that 404 alike, and the claim record
+// is still in the role bucket after both have looked it up.
+//
+// The windows are the deployment's own settings, set short so the row runs in seconds. The
+// bucket's maximum age is left far longer than the horizon, as a deployment that means the
+// horizon sets it, and both reapers' periods are set past the row, so nothing but the record's
+// own age moves a state here.
+func TestTwoPodsReportOneSessionStateAndLastSeen(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	publisher := mpConnectPublisher(t, uri)
+	const (
+		liveWindow  = 5 * time.Second
+		goneHorizon = 20 * time.Second
+	)
+	windows := []string{
+		"ENVOY_SESSION_LIVE_WINDOW=" + liveWindow.String(),
+		"ENVOY_SESSION_GONE_HORIZON=" + goneHorizon.String(),
+		"ENVOY_SESSION_MAX_AGE=10m",
+		"ENVOY_SESSION_REAP_INTERVAL=1h",
+		"ENVOY_ROLE_CLAIM_REAP_INTERVAL=1h",
+	}
+	a := mpStartPod(t, binary, uri, "pod-a", windows...)
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b", windows...)
+	mpWaitStandby(t, b, 30*time.Second)
+
+	const (
+		holder = "ses_mp_state"
+		role   = "mp-state"
+	)
+	a.subscribe(t, fmt.Sprintf(`{"session_id":%q,"topics":[],"self_subscribed":true}`, holder))
+	a.setRole(t, holder, role)
+
+	// readState waits for both pods to put the session in want and answers the last_seen they
+	// agree on, failing the row when they date it differently.
+	readState := func(want string) int64 {
+		t.Helper()
+		var agreed int64
+		mpEventually(t, goneHorizon+30*time.Second, "both pods to read "+holder+" "+want, func() bool {
+			stateA, seenA := a.sessionState(t, holder)
+			stateB, seenB := b.sessionState(t, holder)
+			if stateA != want || stateB != want {
+				return false
+			}
+			if seenA != seenB {
+				t.Fatalf("%s dates %s %d and %s dates it %d; every pod answers one last_seen for one session",
+					a.instance, holder, seenA, b.instance, seenB)
+			}
+			agreed = seenA
+			return true
+		})
+		return agreed
+	}
+
+	live := readState("live")
+	if live == 0 {
+		t.Fatalf("%s is live and dated by neither pod", holder)
+	}
+
+	unresponsive := readState("unresponsive")
+	if unresponsive != live {
+		t.Fatalf("%s's last_seen moved from %d to %d while it only stopped answering", holder, live, unresponsive)
+	}
+	onA, onB := a.lapsedRole(t, role), b.lapsedRole(t, role)
+	requireSameLapsedAnswer(t, a, b, onA, onB, "holder", "holder_state", "last_seen", "claim_released")
+	if onA["holder_state"] != "unresponsive" || onA["claim_released"] != false {
+		t.Fatalf("GET /v1/roles/%s while its holder is unresponsive = %v; want holder_state unresponsive and claim_released false", role, onA)
+	}
+	if claim := publisher.stored(t, bus.RoleClaimBucket, role); claim["holder_session_id"] != holder {
+		t.Fatalf("the role bucket holds %v after both pods looked %s up; want %s's claim, which no lookup releases", claim, role, holder)
+	}
+
+	gone := readState("gone")
+	if gone != live {
+		t.Fatalf("%s's last_seen moved from %d to %d once it was gone; the record's own registration is what dates it", holder, live, gone)
+	}
+	t.Logf("both pods read %s live, then unresponsive, then gone, each dating it %d, and neither released %s while it was unresponsive", holder, live, role)
 }

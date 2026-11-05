@@ -602,8 +602,9 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		t.Fatalf("the unclaimed role's line names holder %v: there is no holder to name", fmt.Sprint(holder))
 	}
 
-	// The role is claimed, but by a session the store does not hold: the claim has lapsed, its
-	// message is kept too, and the line names the holder the answer's own body names.
+	// The role is claimed, but by a session the store does not hold: the claim has lapsed and
+	// stands, so nothing is kept for it and the line is the refusal's, naming the holder the
+	// answer's own body names.
 	const lapsedHolder = "ses_recorded_lapsed_holder"
 	lapsedRole := "recorded-lapsed"
 	if _, err := registry.SetRole(lapsedHolder, "test-machine", lapsedRole, false); err != nil {
@@ -616,14 +617,14 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"source_session": sender,
 		"message":        "is the holder still there?",
 	}))
-	if lapsed.Code != http.StatusAccepted {
-		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 202 for a kept message", lapsed.Code, lapsed.Body.String())
+	if lapsed.Code != http.StatusNotFound {
+		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 404 with nothing kept", lapsed.Code, lapsed.Body.String())
 	}
 	assertRecordFields(t, lapsedRecord, map[string]any{
 		"msg":             "listener publish",
-		"level":           "INFO",
-		"outcome":         "accepted",
-		"status":          float64(http.StatusAccepted),
+		"level":           "WARN",
+		"outcome":         "role_lapsed",
+		"status":          float64(http.StatusNotFound),
 		"topic":           lapsedTopic,
 		"source":          "agent",
 		"source_session":  sender,
@@ -668,7 +669,10 @@ func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *t
 	if answered.Code != http.StatusNotFound {
 		t.Fatalf("a send whose bucket read answered that the key is gone: status %d, body %s; want 404", answered.Code, answered.Body.String())
 	}
-	if got, want := strings.TrimSpace(answered.Body.String()), fmt.Sprintf(`{"error":"no live session %s"}`, target); got != want {
+	// The error keeps its prefix - Dispatch classifies a delivery failure on the "no live
+	// session " one - the state the refusal was decided on stands beside it, and, this listener
+	// having no registration to name for a target that never registered, the error says so.
+	if got, want := strings.TrimSpace(answered.Body.String()), fmt.Sprintf(`{"error":"no live session %s; this listener does not know when it last registered","state":"gone"}`, target); got != want {
 		t.Fatalf("the 404 body is %s, want %s", got, want)
 	}
 	assertRecordFields(t, answeredRecord, map[string]any{

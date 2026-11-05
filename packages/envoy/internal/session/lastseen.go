@@ -27,27 +27,6 @@ func WithLastSeenBucket(kv bus.KeyValue) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.seen = kv }
 }
 
-// WithLastSeenRetention sets how long after a session leaves the cache LastSeen still answers its
-// final heartbeat; the id's revision fence is kept as long. The default, and any value shorter
-// than the bucket's TTL, is one TTL: the fence must outlive the id's leaving by at least one TTL
-// for dropping it to stay safe (expireDue). The listener keeps it for as long as the interest
-// reaper can still hold a dead session's interest, so its interests API can report the session's
-// last heartbeat for every interest row it still lists. With the listener state bucket
-// (WithLastSeenBucket) every pod answers out of the session's `seen.` record for this whole
-// window, and the bucket keeps a record longer than the listener ever sets this retention
-// (listenerStateMaxAge, cmd/listener/lease.go).
-func WithLastSeenRetention(d time.Duration) SessionRegistryOption {
-	return func(o *sessionRegistryOpts) { o.lastSeenRetention = d }
-}
-
-// retention is how long after a session leaves the cache its last-seen record and revision fence
-// are kept: WithLastSeenRetention's value, and never less than one TTL, so a registry built from a
-// struct literal keeps them one TTL. It means nothing when the TTL is not positive: then nothing
-// expires and no record is kept.
-func (r *SessionRegistry) retention() time.Duration {
-	return max(r.lastSeenRetention, r.ttl)
-}
-
 // LastSeen is sessionID's last registration write, in Unix milliseconds, or 0 when there is none to
 // report. While the session is live it is the live registration's UpdatedAt. Once the session lapsed
 // (its registration expired or was deleted) it is the time its last registration write recorded
@@ -75,18 +54,19 @@ func (r *SessionRegistry) retention() time.Duration {
 // removed yet answers the lapsed session's record, which is what its removal leaves in place, so
 // the answer is the same before and after the removal.
 func (r *SessionRegistry) LastSeen(ctx context.Context, sessionID string) int64 {
-	now := time.Now()
+	now := r.now()
 	r.mu.RLock()
-	cs, cached := r.cache[sessionID]
+	cs, cached := r.cache.Get(sessionID)
 	at := r.seenLocal[sessionID]
+	ttl, retention := r.ttl, r.retention()
 	r.mu.RUnlock()
 	if cached && !cs.expired(now) {
 		return cs.entry.UpdatedAt
 	}
-	if r.ttl <= 0 {
+	if ttl <= 0 {
 		return 0
 	}
-	if r.seen.KeyValue != nil {
+	if r.seen.Opened() {
 		stored, err := r.readSeen(ctx, sessionID)
 		if err != nil {
 			r.logger().Warn("session last-seen unavailable: its record in the listener state bucket could not be read",
@@ -94,7 +74,7 @@ func (r *SessionRegistry) LastSeen(ctx context.Context, sessionID string) int64 
 		}
 		at = stored
 	}
-	if at <= 0 || !now.Before(r.seenUntil(at)) {
+	if at <= 0 || !now.Before(seenUntil(at, ttl, retention)) {
 		return 0
 	}
 	return at
@@ -102,18 +82,17 @@ func (r *SessionRegistry) LastSeen(ctx context.Context, sessionID string) int64 
 
 // seenUntil is when a lapsed session's last-seen time at (Unix milliseconds) stops being reported:
 // the retention after the expiry of the registration written at at.
-func (r *SessionRegistry) seenUntil(at int64) time.Time {
-	return time.UnixMilli(at).Add(r.ttl + r.retention())
+func seenUntil(at int64, ttl, retention time.Duration) time.Time {
+	return time.UnixMilli(at).Add(ttl + retention)
 }
 
-// lastSeenUntilLocked is when sessionID's per-process last-seen record and revision fence may be
-// dropped after its entry left the cache at left: the retention past that, and never before the
-// record's own end (seenUntil), so nothing LastSeen still reports is dropped. Callers must hold
-// r.mu.
+// lastSeenUntilLocked is when sessionID's per-process last-seen record may be dropped after its
+// entry left the cache at left: the retention past that, and never before the record's own end
+// (seenUntil), so nothing LastSeen still reports is dropped. Callers must hold r.mu.
 func (r *SessionRegistry) lastSeenUntilLocked(sessionID string, left time.Time) time.Time {
 	until := left.Add(r.retention())
-	if at, ok := r.seenLocal[sessionID]; ok && r.seenUntil(at).After(until) {
-		return r.seenUntil(at)
+	if at, ok := r.seenLocal[sessionID]; ok && seenUntil(at, r.ttl, r.retention()).After(until) {
+		return seenUntil(at, r.ttl, r.retention())
 	}
 	return until
 }
@@ -141,7 +120,7 @@ func lastSeenKey(sessionID string) string {
 // A read that finds another revision, or no record, means a newer write replaced this one, and
 // that write records its own.
 func (r *SessionRegistry) recordSeen(ctx context.Context, kv bus.KeyValue, sessionID string, written uint64) {
-	if r.seen.KeyValue == nil {
+	if !r.seen.Opened() {
 		return
 	}
 	stored, _, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })

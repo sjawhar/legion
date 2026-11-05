@@ -22,7 +22,7 @@ func maxAgeBucket(t *testing.T, bucket string, ttl time.Duration) nats.JetStream
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if _, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, History: 1, TTL: ttl, Replicas: 1}); err != nil {
+	if _, err := EnsureKeyValue(client.Conn, js, &nats.KeyValueConfig{Bucket: bucket, History: 1, TTL: ttl, Replicas: 1}); err != nil {
 		t.Fatalf("create the bucket with a max age of %s: %v", ttl, err)
 	}
 	return js

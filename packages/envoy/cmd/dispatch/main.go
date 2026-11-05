@@ -47,6 +47,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/envconf"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/pglisten"
@@ -180,6 +181,10 @@ type bootConfig struct {
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
 	EnvoyToken string
+	// RoleHolderWindows are the session windows a role route's holder is judged by
+	// (ENVOY_SESSION_LIVE_WINDOW and ENVOY_SESSION_GONE_HORIZON, roleHolderWindows): what the
+	// outbox's reader of the role and session buckets carries (roles.NewBuckets).
+	RoleHolderWindows roles.Windows
 	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
 	// checked whole; newEmbedder builds its client.
 	Embedder embedderConfig
@@ -562,7 +567,14 @@ func main() {
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
-		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder whose entry records a port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+	)
+	// The holds beside the failures: a role-routed event whose holder is not answering is waiting
+	// for that session, with nothing sent and nothing failed, so it is counted here rather than
+	// under the publish failures an operator alerts on (outbox.Deps.RoleForwardsHeld).
+	outboxRoleForwardsHeld := met.NewCounter(
+		"envoy_dispatch_outbox_role_forwards_held_total",
+		"Role forwards an event's holder resolution held pending with nothing sent, by the holder's state: unresponsive (the holder is past the live window), undated (nothing dates the holder) or unresolved (the role claim or the holder's session could not be read)",
 	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
@@ -571,17 +583,19 @@ func main() {
 			os.Exit(1)
 		}
 		// One reader of the role and session buckets serves both: a role route's holder is read
-		// straight from the buckets on the bus client's connection, with no watcher.
-		holders := roles.NewBuckets(natsClient)
+		// straight from the buckets on the bus client's connection, with no watcher, and judged
+		// by the windows this deployment gave its listeners (roleHolderWindows).
+		holders := roles.NewBuckets(natsClient, boot.RoleHolderWindows)
 		outboxPublisher = outbox.New(outbox.Deps{
-			Store:           &store.Store{Pool: outboxPool},
-			Publisher:       natsClient,
-			Broker:          broker,
-			Listen:          database.Pool.Listener,
-			RoleClaims:      holders,
-			Sessions:        holders,
-			KeptLanes:       natsClient,
-			PublishFailures: outboxPublishFailures,
+			Store:            &store.Store{Pool: outboxPool},
+			Publisher:        natsClient,
+			Broker:           broker,
+			Listen:           database.Pool.Listener,
+			RoleClaims:       holders,
+			Sessions:         holders,
+			KeptLanes:        natsClient,
+			PublishFailures:  outboxPublishFailures,
+			RoleForwardsHeld: outboxRoleForwardsHeld,
 		})
 		outboxStopped = make(chan struct{})
 		go func() {
@@ -981,6 +995,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
+	if boot.RoleHolderWindows, err = roleHolderWindows(env); err != nil {
+		return bootConfig{}, err
+	}
 	for _, setting := range []struct {
 		name   string
 		target *time.Duration
@@ -1081,6 +1098,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	boot.Embedder, err = resolveEmbedder(env)
 	if err != nil {
 		return bootConfig{}, err
+	}
+	// The dev embedder's vectors mean nothing beyond the words a text and a query share, so a
+	// deployment that set it would answer meaning search with them and never know.
+	if !devSignIn && boot.Embedder.Place == embed.PlaceDev {
+		return bootConfig{}, errors.New("DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_EMBEDDER to embed a deployment's text at a model service")
 	}
 
 	if devSignIn {
@@ -1690,6 +1712,26 @@ func testHookBool(env settingValues, name string, testHooksEnabled bool, target 
 	}
 	*target = raw == "1"
 	return nil
+}
+
+// roleHolderWindows are the session windows Dispatch judges a role route's holder by, read
+// through the helper the listener reads its own with (envconf.SessionWindows): the listener's
+// two settings, their compiled defaults, a warning and the default for a value no duration can
+// be read from, and a refusal to start for one that is not positive. It hands the helper the
+// settings table's own lookup, so Dispatch still reads its environment in one place
+// (settings.go, TestNoReaderBypassesTheSettingsTable).
+//
+// Both processes judge the same holder, so both carry the same values. Dispatch left to the
+// compiled windows calls a holder gone whose horizon the deployment raised, counts its role
+// route reached and marks the event published with nothing sent (forwardOf), while the
+// listener, carrying the raise, still calls that holder unresponsive and keeps its claim: the
+// event reaches it never (dispatch://INFRA-392).
+func roleHolderWindows(env settingValues) (roles.Windows, error) {
+	live, horizon, err := envconf.SessionWindows(slog.Default(), env.lookup)
+	if err != nil {
+		return roles.Windows{}, err
+	}
+	return roles.Windows{Live: live, Horizon: horizon}, nil
 }
 
 // resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket

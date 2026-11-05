@@ -15,12 +15,13 @@ import (
 // runs them one at a time, in the order of the events, on the connection's own dispatcher
 // goroutine, so each of them returns at once: the connected flag's moves are the stores and
 // clears of noteConnection, the event is reported to the callers waiting on one
-// (connectionChanged), and a connection event's work is handed to a goroutine of the client's
-// (queueReconnect).
+// (connectionChanged), the disconnect hooks a KV cache registers to stop following its bucket are
+// run in place (onDisconnect), and a connection event's work is handed to a goroutine of the
+// client's (queueReconnect).
 func (c *Client) callbacks() connectCallbacks {
 	return connectCallbacks{
 		reconnected:  c.queueReconnect,
-		disconnected: c.connectionChanged,
+		disconnected: c.onDisconnect,
 		closed:       c.onClosed,
 		asyncErr:     c.onAsyncError,
 		state:        c.noteConnection,
@@ -216,6 +217,34 @@ func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	c.reconnectHooksMu.Lock()
 	c.reconnectHooks = append(c.reconnectHooks, hook)
 	c.reconnectHooksMu.Unlock()
+}
+
+// AddDisconnectHook registers what state attached to NATS, such as a KV watcher's cache, does when
+// the client's connection is lost. nats.go reconnects forever and keeps a watcher's subscription
+// open through the outage, so the watcher never ends and nothing else says its cache has stopped
+// following the bucket. The hooks run on every disconnect of the client's connection, in the order
+// they were added, on nats.go's callback goroutine and so before the reconnect hooks of the
+// reconnect that follows. A hook returns at once: it runs inside that callback.
+func (c *Client) AddDisconnectHook(hook func()) {
+	if hook == nil {
+		return
+	}
+	c.reconnectHooksMu.Lock()
+	c.disconnectHooks = append(c.disconnectHooks, hook)
+	c.reconnectHooksMu.Unlock()
+}
+
+// onDisconnect is wired as the DisconnectedErrCB callback, after its log line: it reports the
+// connection event (ConnectionChanged), so that a publish waiting for the connection reads it
+// again, and then runs the disconnect hooks.
+func (c *Client) onDisconnect() {
+	c.connectionChanged()
+	c.reconnectHooksMu.Lock()
+	hooks := slices.Clone(c.disconnectHooks)
+	c.reconnectHooksMu.Unlock()
+	for _, hook := range hooks {
+		hook()
+	}
 }
 
 // AddDrainHook registers an end Drain gives to state attached to NATS that the client does not

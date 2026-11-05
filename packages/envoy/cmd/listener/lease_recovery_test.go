@@ -107,7 +107,7 @@ func TestLeaseRenewalAfterAnOutageResumes(t *testing.T) {
 	kv := leaseBucket(t)
 	var fail atomic.Bool
 	clock := newFakeLeaseClock()
-	a := testLease(bus.KeyValue{KeyValue: faultyLeaseKV{KeyValue: kv.KeyValue, fail: &fail}}, "pod-a", productionLeaseConfig(), clock.now)
+	a := testLease(bus.NewKeyValue(faultyLeaseKV{KeyValue: kv.Legacy(), fail: &fail}, kv.WatchHandle(), kv.Streams()), "pod-a", productionLeaseConfig(), clock.now)
 	a.step()
 	drainChanges(a)
 

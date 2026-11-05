@@ -13603,6 +13603,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
 var MAX_ISSUE_BLOCKERS = 20;
 var ISSUE_TITLE_MAX = 1000;
 var PROJECT_NAME_MAX = 80;
@@ -13777,6 +13778,8 @@ var CommentEventPayloadSchema = object({
   project_key: string2().optional(),
   artifact_slug: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   reply_to: string2().nullish(),
   ask_id: string2().nullish(),
   ask_question: string2().optional(),
@@ -13802,6 +13805,8 @@ var CommentEventPayloadSchema = object({
 var MessageEventPayloadSchema = object({
   id: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   target: string2().nullish(),
   in_reply_to: string2().nullish(),
   reply_body: string2().optional(),
@@ -13928,14 +13933,37 @@ var AGENT_STREAM_LIMITS = {
   commandDescriptionChars: 200
 };
 // ../contracts/src/claim-holds.ts
-function claimHolds(claim, titles) {
+var HOLDING_OF = {
+  gone: "lapsed",
+  live: "holds",
+  unknown: "unknown",
+  unresponsive: "unresponsive"
+};
+function claimHolds(claim, titles, liveness = {}) {
   if (claim.actor.kind !== "session") {
     return "holds";
+  }
+  const state = liveness.holder_state;
+  if (state != null) {
+    return HOLDING_OF[state];
   }
   if (titles === undefined) {
     return "unknown";
   }
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
+}
+function claimTakeableAt(liveness, lastSeen = undefined) {
+  if (liveness.takeable_at != null) {
+    return liveness.takeable_at;
+  }
+  if (liveness.holder_state !== "unresponsive") {
+    return null;
+  }
+  const seen = liveness.last_seen == null ? lastSeen : Date.parse(liveness.last_seen);
+  if (seen === undefined || !Number.isFinite(seen) || seen <= 0) {
+    return null;
+  }
+  return new Date(seen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS).toISOString();
 }
 // ../contracts/src/dispatch-href.ts
 function hasControlCharacter(value) {
@@ -14124,12 +14152,14 @@ function componentsArgument(z) {
   }).describe("Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose.");
 }
 var SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
-function imagesArgument(z, owner, cap) {
-  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
+function imagesArgument(z, owner) {
+  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward the bound Dispatch holds the text to, which it names in its refusal.`).optional();
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
-var ASK_QUESTION_MAX = 2000;
-var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_BLOCK_UNITS = 32000;
+var DISPATCH_ITEM_BLOCKS = 32768;
+var BODY_BLOCK_RULE = `Each block (a paragraph, list, quote, table or code block) holds at most ${DISPATCH_BLOCK_UNITS} ` + `characters and a body at most ${DISPATCH_ITEM_BLOCKS} blocks; Dispatch refuses a longer one and ` + "names it, and `dispatch limits` prints the bounds.";
+var ASK_BOUND_RULE = "Dispatch bounds an ask's question and its options together, refuses a longer one and names " + "the bound, and `dispatch limits` prints it. An ask is short and asks one thing; its reasoning " + "goes in the document, not in the question.";
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
@@ -14148,16 +14178,12 @@ function handoffProblem(value) {
     return HANDOFF_PHASE_RULE;
   if (typeof body !== "string")
     return;
-  const bytes = new TextEncoder().encode(body).length;
-  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
-    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
-  }
   if (!isJsonObjectText(body)) {
     return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
   }
   return;
 }
-var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object.`;
 var handoffValidation = {
   check: (value) => handoffProblem(value) === undefined,
   message: HANDOFF_RULE,
@@ -14180,7 +14206,12 @@ var ISSUE_STATUSES = [
   "retro",
   "done"
 ];
-var ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"];
+var ISSUE_ROUTE_STATUSES = [
+  "live",
+  "holder_unresponsive",
+  "no_holder",
+  "unknown"
+];
 var DOC_EDIT_OPS = [
   "replace",
   "delete",
@@ -14222,7 +14253,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
-      reason: z.string({ max: DISPATCH_BODY_MAX }).describe(`Required with status done, and only with it: why the issue is closing, at most ${DISPATCH_BODY_MAX} characters. Posted on the issue as a message before it closes.`).optional(),
+      reason: z.string().describe(`Required with status done, and only with it: why the issue is closing. Posted on the issue as a message before it closes. ${BODY_BLOCK_RULE}`).optional(),
       title: z.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z.array(z.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
@@ -14268,13 +14299,13 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. ${ASK_BOUND_RULE} The lines images appends count ` + `toward that bound, and an ask has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().describe(`${ASK_QUESTION_CONTRACT} ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -14286,7 +14317,7 @@ var dispatchToolSpecs = [
         quote: z.string().describe("Exact text the decision concerns."),
         occurrence: z.number({ int: true, min: 0 }).describe("Zero-based occurrence of the quote.").optional()
       }).describe("Optional document location for the question.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${ASK_QUESTION_MAX}-character question limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -14309,7 +14340,7 @@ var dispatchToolSpecs = [
     description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z) => ({
       ask: z.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question. ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -14361,7 +14392,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. ${BODY_BLOCK_RULE} The lines images appends count toward it. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14369,11 +14400,11 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Review comment. ${BODY_BLOCK_RULE}`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: commentValidation
   },
@@ -14385,7 +14416,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most ${DISPATCH_BODY_MAX} characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. ${BODY_BLOCK_RULE} ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14393,7 +14424,7 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text; a CR LF or a lone carriage return in it is written as a line feed."),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Optional rationale, at most ${DISPATCH_BODY_MAX} characters.`).optional(),
+      body: z.string().describe(`Optional rationale. ${BODY_BLOCK_RULE}`).optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional()
     }),
     validation: documentOwnerValidation(true, true)
@@ -14401,12 +14432,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `${BODY_BLOCK_RULE} The lines images appends count toward it. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Update text. ${BODY_BLOCK_RULE}`),
       in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
-      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)")
     }),
     validation: messageValidation
   },
@@ -14605,7 +14636,7 @@ var dispatchToolSpecs = [
       label: z.string().describe("Optional label filter.").optional(),
       priority: z.array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
-      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
+      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. holder_unresponsive: that session has missed its " + "heartbeats without ending, so the route still reaches it and its messages wait. " + "no_holder: nobody running holds the role, or the session is gone, right now. " + "unknown: the Envoy listener did not answer.").optional(),
       limit: z.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
       offset: z.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional(),
       all: z.boolean().describe("Take every matching issue in one unpaged read, so no row is missed or repeated while " + "the list changes. Refused with limit or offset.").optional()
@@ -14665,6 +14696,13 @@ var dispatchToolSpecs = [
     name: "dispatch_whoami",
     example: {},
     description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token and under a broker token that names a service and no person. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or the fleet a broker token naming no person belongs to, or null. A broker token that names a service may read and is refused every write with SIGN_IN_REQUIRED, which names the command a person signs in on that machine with. project is the one project key your credential may write, or null when it names none.",
+    arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_limits",
+    example: {},
+    description: "The bounds this Dispatch server holds a write to, read from the server itself: how long one block of a body may be and how many blocks a body may hold, how many options an ask may have and how long an ask's question and options are together, how long a body an event carries whole may be, and how many bytes a request, a document and a handoff body may hold. Dispatch refuses a text over a bound and names the block or the field it passed; no tool and no command cuts or refuses your text before the server reads it, so these numbers are what decides whether a write is taken.",
     arguments: () => ({}),
     strict: true
   },
@@ -16276,6 +16314,9 @@ class DispatchClient {
   async whoami() {
     return this.#json("GET", ["api", "v1", "whoami"]);
   }
+  async limits() {
+    return this.#json("GET", ["api", "v1", "limits"]);
+  }
   async inbox(assignee) {
     return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
   }
@@ -16901,6 +16942,529 @@ function parseDispatchRef(ref) {
 // ../envoy-client/src/dispatch-picture-tools.ts
 import { basename, resolve as resolvePath } from "path";
 
+// ../../node_modules/.bun/@toon-format+toon@4.1.1/node_modules/@toon-format/toon/dist/index.mjs
+var NULL_LITERAL = "null";
+var DELIMITERS = {
+  comma: ",",
+  tab: "\t",
+  pipe: "|"
+};
+var DEFAULT_DELIMITER = DELIMITERS.comma;
+function escapeString(value) {
+  return value.replace(/\\/g, `\\\\`).replace(/"/g, `\\"`).replace(/\n/g, `\\n`).replace(/\r/g, `\\r`).replace(/\t/g, `\\t`).replace(/[\u0000-\u001F]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+var FETCH_LINE = Symbol("fetch-line");
+function isBooleanOrNullLiteral(token) {
+  return token === "true" || token === "false" || token === "null";
+}
+function setOwnProperty(target, key, value) {
+  if (key === "__proto__") {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+    return;
+  }
+  target[key] = value;
+}
+var COMMENT_LINE_PATTERN = new RegExp(`(?:^\uFEFF?|\\n) *#`);
+var RawString = class {
+  constructor(value) {
+    if (COMMENT_LINE_PATTERN.test(value))
+      throw new TypeError(`Raw string must not contain a line starting with "#": ${JSON.stringify(value)}`);
+    this.value = value;
+  }
+};
+function isRawString(value) {
+  return value instanceof RawString;
+}
+var SURROGATE_PATTERN = /[\uD800-\uDFFF]/;
+function normalizeValue(value) {
+  if (value === null)
+    return null;
+  if (isRawString(value))
+    return value;
+  if (typeof value === "object" && value !== null && "toJSON" in value && typeof value.toJSON === "function") {
+    const next = value.toJSON();
+    if (next !== value)
+      return normalizeValue(next);
+  }
+  if (typeof value === "string") {
+    assertNoLoneSurrogate(value, "string value");
+    return value;
+  }
+  if (typeof value === "boolean")
+    return value;
+  if (typeof value === "number") {
+    if (Object.is(value, -0))
+      return 0;
+    if (!Number.isFinite(value))
+      return null;
+    return value;
+  }
+  if (typeof value === "bigint") {
+    if (value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER)
+      return Number(value);
+    return value.toString();
+  }
+  if (value instanceof Date)
+    return value.toISOString();
+  if (Array.isArray(value))
+    return value.map(normalizeValue);
+  if (value instanceof Set)
+    return Array.from(value).map(normalizeValue);
+  if (value instanceof Map)
+    return Object.fromEntries(Array.from(value, ([k, v]) => [String(k), normalizeValue(v)]));
+  if (isPlainObject2(value)) {
+    const encodedValues = {};
+    for (const key in value)
+      if (Object.hasOwn(value, key)) {
+        assertNoLoneSurrogate(key, "object key");
+        setOwnProperty(encodedValues, key, normalizeValue(value[key]));
+      }
+    return encodedValues;
+  }
+  return null;
+}
+function assertNoLoneSurrogate(value, context) {
+  if (!SURROGATE_PATTERN.test(value))
+    return;
+  for (let index = 0;index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 55296 || code > 57343)
+      continue;
+    const isHighSurrogate = code <= 56319;
+    const next = value.charCodeAt(index + 1);
+    if (isHighSurrogate && next >= 56320 && next <= 57343) {
+      index++;
+      continue;
+    }
+    throw new TypeError(`Cannot encode ${context} containing an unpaired surrogate U+${code.toString(16).toUpperCase()} at index ${index}`);
+  }
+}
+function isJsonPrimitive(value) {
+  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+function isEncodablePrimitive(value) {
+  return isJsonPrimitive(value) || isRawString(value);
+}
+function isJsonArray(value) {
+  return Array.isArray(value);
+}
+function isJsonObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !isRawString(value);
+}
+function isEmptyObject(value) {
+  return Object.keys(value).length === 0;
+}
+function isPlainObject2(value) {
+  if (value === null || typeof value !== "object")
+    return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === null || prototype === Object.prototype;
+}
+function isArrayOfPrimitives(value) {
+  return value.length === 0 || value.every((item) => isEncodablePrimitive(item));
+}
+function isArrayOfArrays(value) {
+  return value.length === 0 || value.every((item) => isJsonArray(item));
+}
+function isArrayOfObjects(value) {
+  return value.length === 0 || value.every((item) => isJsonObject(item));
+}
+var NUMERIC_LIKE_PATTERN = /^[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i;
+function assertValidDelimiter(delimiter) {
+  if (!Object.values(DELIMITERS).includes(delimiter))
+    throw new TypeError(`Invalid delimiter ${JSON.stringify(delimiter)}. Valid delimiters are: comma (,), tab (\\t), pipe (|)`);
+}
+function isValidUnquotedKey(key) {
+  return /^[A-Z_][\w.]*$/i.test(key);
+}
+function isSafeUnquoted(value, delimiter = DEFAULT_DELIMITER) {
+  if (!value)
+    return false;
+  if (/^[ \t]|[ \t]$/.test(value))
+    return false;
+  if (isBooleanOrNullLiteral(value) || isNumericLike(value))
+    return false;
+  if (value.includes(":"))
+    return false;
+  if (value.includes('"') || value.includes("\\"))
+    return false;
+  if (/[[\]{}]/.test(value))
+    return false;
+  if (/[\u0000-\u001F]/.test(value))
+    return false;
+  if (value.includes(delimiter))
+    return false;
+  if (value.startsWith("-"))
+    return false;
+  if (value.startsWith("#"))
+    return false;
+  return true;
+}
+function isNumericLike(value) {
+  return NUMERIC_LIKE_PATTERN.test(value);
+}
+function encodePrimitive(value, delimiter) {
+  if (isRawString(value))
+    return value.value;
+  if (value === null)
+    return NULL_LITERAL;
+  if (typeof value === "boolean")
+    return String(value);
+  if (typeof value === "number")
+    return String(value);
+  return encodeStringLiteral(value, delimiter);
+}
+function encodeStringLiteral(value, delimiter = DEFAULT_DELIMITER) {
+  if (isSafeUnquoted(value, delimiter))
+    return value;
+  return `"${escapeString(value)}"`;
+}
+function encodeKey(key) {
+  if (isValidUnquotedKey(key))
+    return key;
+  return `"${escapeString(key)}"`;
+}
+function encodeAndJoinPrimitives(values, delimiter = DEFAULT_DELIMITER) {
+  return values.map((v) => encodePrimitive(v, delimiter)).join(delimiter);
+}
+function formatHeader(length, options) {
+  const key = options?.key;
+  const fields = options?.fields;
+  const delimiter = options?.delimiter ?? ",";
+  let header = "";
+  if (key != null)
+    header += encodeKey(key);
+  header += `[${length}${options?.keyed ? ":" : ""}${delimiter !== DEFAULT_DELIMITER ? delimiter : ""}]`;
+  if (fields)
+    header += `{${formatFieldSegment(fields, delimiter)}}`;
+  header += ":";
+  return header;
+}
+function formatFieldSegment(fields, delimiter) {
+  return fields.map((field) => encodeKey(field.name) + (field.children ? `{${formatFieldSegment(field.children, delimiter)}}` : "")).join(delimiter);
+}
+function extractTabularFields(rows) {
+  if (rows.length === 0)
+    return;
+  const firstKeys = Object.keys(rows[0]);
+  if (firstKeys.length === 0)
+    return;
+  for (const row of rows) {
+    if (Object.keys(row).length !== firstKeys.length)
+      return;
+    for (const key of firstKeys)
+      if (!Object.hasOwn(row, key))
+        return;
+  }
+  const fieldNodes = [];
+  for (const key of firstKeys) {
+    const fieldNode = classifyColumn(key, rows.map((row) => row[key]));
+    if (!fieldNode)
+      return;
+    fieldNodes.push(fieldNode);
+  }
+  return fieldNodes;
+}
+function extractKeyedTabularFields(value) {
+  const entryValues = Object.values(value);
+  if (entryValues.length < 2)
+    return;
+  if (!entryValues.every((entryValue) => isJsonObject(entryValue) && !isEmptyObject(entryValue)))
+    return;
+  return extractTabularFields(entryValues);
+}
+function collectRowLeaves(row, fields) {
+  const leaves = [];
+  collectLeafValues(row, fields, leaves);
+  return leaves;
+}
+function classifyColumn(name, values) {
+  if (values.every((value) => isEncodablePrimitive(value)))
+    return { name };
+  if (!values.every((value) => isJsonObject(value) && !isEmptyObject(value)))
+    return;
+  const children = extractTabularFields(values);
+  if (!children)
+    return;
+  return {
+    name,
+    children
+  };
+}
+function collectLeafValues(row, fields, leaves) {
+  for (const field of fields) {
+    const value = row[field.name];
+    if (field.children)
+      collectLeafValues(value, field.children, leaves);
+    else
+      leaves.push(value);
+  }
+}
+function* encodeJsonValue(value, options, depth) {
+  if (isEncodablePrimitive(value)) {
+    const encodedPrimitive = encodePrimitive(value, options.delimiter);
+    if (encodedPrimitive !== "")
+      yield encodedPrimitive;
+    return;
+  }
+  if (isJsonArray(value))
+    yield* encodeArrayLines(undefined, value, depth, options);
+  else if (isJsonObject(value)) {
+    const keyedFields = extractKeyedTabularFields(value);
+    if (keyedFields) {
+      yield* encodeKeyedObjectLines(undefined, value, keyedFields, depth, options);
+      return;
+    }
+    yield* encodeObjectLines(value, depth, options);
+  }
+}
+function* encodeObjectLines(value, depth, options) {
+  for (const [key, val] of Object.entries(value))
+    yield* encodeKeyValuePairLines(key, val, depth, options);
+}
+function* encodeKeyValuePairLines(key, value, depth, options) {
+  const encodedKey = encodeKey(key);
+  if (isEncodablePrimitive(value))
+    yield indentedLine(depth, `${encodedKey}: ${encodePrimitive(value, options.delimiter)}`, options.indentSize);
+  else if (isJsonArray(value))
+    yield* encodeArrayLines(key, value, depth, options);
+  else if (isJsonObject(value)) {
+    const keyedFields = extractKeyedTabularFields(value);
+    if (keyedFields) {
+      yield* encodeKeyedObjectLines(key, value, keyedFields, depth, options);
+      return;
+    }
+    yield indentedLine(depth, `${encodedKey}:`, options.indentSize);
+    if (!isEmptyObject(value))
+      yield* encodeObjectLines(value, depth + 1, options);
+  }
+}
+function* encodeKeyedObjectLines(key, value, fields, depth, options) {
+  const entries = Object.entries(value);
+  yield indentedLine(depth, formatHeader(entries.length, {
+    key,
+    fields,
+    delimiter: options.delimiter,
+    keyed: true
+  }), options.indentSize);
+  yield* encodeKeyedEntryRowsLines(entries, fields, depth + 1, options);
+}
+function* encodeKeyedEntryRowsLines(entries, fields, depth, options) {
+  for (const [entryKey, entryValue] of entries) {
+    const leaves = collectRowLeaves(entryValue, fields);
+    yield indentedLine(depth, `${encodeKey(entryKey)}: ${encodeAndJoinPrimitives(leaves, options.delimiter)}`, options.indentSize);
+  }
+}
+function* encodeArrayLines(key, value, depth, options) {
+  if (value.length === 0) {
+    yield indentedLine(depth, key != null ? `${encodeKey(key)}: []` : "[]", options.indentSize);
+    return;
+  }
+  if (isArrayOfPrimitives(value)) {
+    yield indentedLine(depth, encodeInlineArrayLine(value, options.delimiter, key), options.indentSize);
+    return;
+  }
+  if (isArrayOfArrays(value)) {
+    if (value.every((arr) => isArrayOfPrimitives(arr))) {
+      yield* encodeArrayOfArraysAsListItemsLines(key, value, depth, options);
+      return;
+    }
+  }
+  if (isArrayOfObjects(value)) {
+    const fields = extractTabularFields(value);
+    if (fields)
+      yield* encodeArrayOfObjectsAsTabularLines(key, value, fields, depth, options);
+    else
+      yield* encodeMixedArrayAsListItemsLines(key, value, depth, options);
+    return;
+  }
+  yield* encodeMixedArrayAsListItemsLines(key, value, depth, options);
+}
+function* encodeArrayOfArraysAsListItemsLines(prefix, values, depth, options) {
+  yield indentedLine(depth, formatHeader(values.length, {
+    key: prefix,
+    delimiter: options.delimiter
+  }), options.indentSize);
+  for (const arr of values)
+    if (isArrayOfPrimitives(arr)) {
+      const arrayLine = encodeInlineArrayLine(arr, options.delimiter);
+      yield indentedListItem(depth + 1, arrayLine, options.indentSize);
+    }
+}
+function encodeInlineArrayLine(values, delimiter, prefix) {
+  const header = formatHeader(values.length, {
+    key: prefix,
+    delimiter
+  });
+  const joinedValue = encodeAndJoinPrimitives(values, delimiter);
+  if (values.length === 0)
+    return header;
+  return `${header} ${joinedValue}`;
+}
+function* encodeArrayOfObjectsAsTabularLines(prefix, rows, fields, depth, options) {
+  yield indentedLine(depth, formatHeader(rows.length, {
+    key: prefix,
+    fields,
+    delimiter: options.delimiter
+  }), options.indentSize);
+  yield* writeTabularRowsLines(rows, fields, depth + 1, options);
+}
+function* writeTabularRowsLines(rows, fields, depth, options) {
+  for (const row of rows)
+    yield indentedLine(depth, encodeAndJoinPrimitives(collectRowLeaves(row, fields), options.delimiter), options.indentSize);
+}
+function* encodeMixedArrayAsListItemsLines(prefix, items, depth, options) {
+  yield indentedLine(depth, formatHeader(items.length, {
+    key: prefix,
+    delimiter: options.delimiter
+  }), options.indentSize);
+  for (const item of items)
+    yield* encodeListItemValueLines(item, depth + 1, options);
+}
+function* encodeObjectAsListItemLines(obj, depth, options) {
+  if (isEmptyObject(obj)) {
+    yield indentedLine(depth, "-", options.indentSize);
+    return;
+  }
+  const entries = Object.entries(obj);
+  const [firstKey, firstValue] = entries[0];
+  const restEntries = entries.slice(1);
+  if (isJsonArray(firstValue) && isArrayOfObjects(firstValue)) {
+    const fields = extractTabularFields(firstValue);
+    if (fields) {
+      yield indentedListItem(depth, formatHeader(firstValue.length, {
+        key: firstKey,
+        fields,
+        delimiter: options.delimiter
+      }), options.indentSize);
+      yield* writeTabularRowsLines(firstValue, fields, depth + 2, options);
+      if (restEntries.length > 0)
+        yield* encodeObjectLines(Object.fromEntries(restEntries), depth + 1, options);
+      return;
+    }
+  }
+  if (isJsonObject(firstValue)) {
+    const keyedFields = extractKeyedTabularFields(firstValue);
+    if (keyedFields) {
+      const keyedEntries = Object.entries(firstValue);
+      yield indentedListItem(depth, formatHeader(keyedEntries.length, {
+        key: firstKey,
+        fields: keyedFields,
+        delimiter: options.delimiter,
+        keyed: true
+      }), options.indentSize);
+      yield* encodeKeyedEntryRowsLines(keyedEntries, keyedFields, depth + 2, options);
+      if (restEntries.length > 0)
+        yield* encodeObjectLines(Object.fromEntries(restEntries), depth + 1, options);
+      return;
+    }
+  }
+  const encodedKey = encodeKey(firstKey);
+  if (isEncodablePrimitive(firstValue))
+    yield indentedListItem(depth, `${encodedKey}: ${encodePrimitive(firstValue, options.delimiter)}`, options.indentSize);
+  else if (isJsonArray(firstValue))
+    if (firstValue.length === 0)
+      yield indentedListItem(depth, `${encodedKey}: []`, options.indentSize);
+    else if (isArrayOfPrimitives(firstValue))
+      yield indentedListItem(depth, `${encodedKey}${encodeInlineArrayLine(firstValue, options.delimiter)}`, options.indentSize);
+    else {
+      yield indentedListItem(depth, `${encodedKey}${formatHeader(firstValue.length, { delimiter: options.delimiter })}`, options.indentSize);
+      for (const item of firstValue)
+        yield* encodeListItemValueLines(item, depth + 2, options);
+    }
+  else if (isJsonObject(firstValue)) {
+    yield indentedListItem(depth, `${encodedKey}:`, options.indentSize);
+    if (!isEmptyObject(firstValue))
+      yield* encodeObjectLines(firstValue, depth + 2, options);
+  }
+  if (restEntries.length > 0)
+    yield* encodeObjectLines(Object.fromEntries(restEntries), depth + 1, options);
+}
+function* encodeListItemValueLines(value, depth, options) {
+  if (isEncodablePrimitive(value))
+    yield indentedListItem(depth, encodePrimitive(value, options.delimiter), options.indentSize);
+  else if (isJsonArray(value))
+    if (isArrayOfPrimitives(value))
+      yield indentedListItem(depth, encodeInlineArrayLine(value, options.delimiter), options.indentSize);
+    else {
+      yield indentedListItem(depth, formatHeader(value.length, { delimiter: options.delimiter }), options.indentSize);
+      for (const item of value)
+        yield* encodeListItemValueLines(item, depth + 1, options);
+    }
+  else if (isJsonObject(value))
+    yield* encodeObjectAsListItemLines(value, depth, options);
+}
+function indentedLine(depth, content, indentSize) {
+  return " ".repeat(indentSize * depth) + content;
+}
+function indentedListItem(depth, content, indentSize) {
+  return indentedLine(depth, "- " + content, indentSize);
+}
+function applyReplacer(root, replacer) {
+  const replacedRoot = replacer("", root, []);
+  if (replacedRoot === undefined)
+    return transformChildren(root, replacer, []);
+  return transformReplaced(root, replacedRoot, replacer, []);
+}
+function transformReplaced(original, replaced, replacer, path) {
+  if (isRawString(replaced) && !isEncodablePrimitive(original))
+    return transformChildren(original, replacer, path);
+  return transformChildren(normalizeValue(replaced), replacer, path);
+}
+function transformChildren(value, replacer, path) {
+  if (isJsonObject(value))
+    return transformObject(value, replacer, path);
+  if (isJsonArray(value))
+    return transformArray(value, replacer, path);
+  return value;
+}
+function transformObject(obj, replacer, path) {
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const childPath = [...path, key];
+    const replacedValue = replacer(key, value, childPath);
+    if (replacedValue === undefined)
+      continue;
+    setOwnProperty(result, key, transformReplaced(value, replacedValue, replacer, childPath));
+  }
+  return result;
+}
+function transformArray(arr, replacer, path) {
+  const result = [];
+  for (let i = 0;i < arr.length; i++) {
+    const value = arr[i];
+    const childPath = [...path, i];
+    const replacedValue = replacer(String(i), value, childPath);
+    if (replacedValue === undefined)
+      continue;
+    result.push(transformReplaced(value, replacedValue, replacer, childPath));
+  }
+  return result;
+}
+function encode3(input, options) {
+  return Array.from(encodeLines(input, options)).join(`
+`);
+}
+function encodeLines(input, options) {
+  const normalizedValue = normalizeValue(input);
+  const resolvedOptions = resolveOptions(options);
+  return encodeJsonValue(resolvedOptions.replacer ? applyReplacer(normalizedValue, resolvedOptions.replacer) : normalizedValue, resolvedOptions, 0);
+}
+function resolveOptions(options) {
+  const delimiter = options?.delimiter ?? DEFAULT_DELIMITER;
+  assertValidDelimiter(delimiter);
+  return {
+    indentSize: options?.indentSize ?? options?.indent ?? 2,
+    delimiter,
+    replacer: options?.replacer
+  };
+}
+
 // ../envoy-client/src/dispatch-pictures.ts
 var PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 var PICTURE_SHOWN_MAX_BYTES = 3750000;
@@ -16955,146 +17519,831 @@ function picturesNewestFirst(texts) {
   return [...new Set(ordered.flatMap(({ item }) => pictureAddresses(item.text)))];
 }
 
-// ../envoy-client/src/tool-input-errors.ts
-class ToolInputError extends Error {
-  tool;
-  problems;
-  constructor(tool, problems) {
-    const count = problems.length;
-    const cli = isDispatchTool(tool);
-    const help = cli ? [
-      `Allowed flags: ${commandFlags(tool).join(", ")}`,
-      `Example: ${commandLine(tool, exampleFor(tool))}`
-    ] : [];
-    super([
-      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
-      ...problems.map((problem) => `- ${problem}`),
-      ...help.map((line) => `- ${line}`)
-    ].join(`
-`));
-    this.name = "ToolInputError";
-    this.tool = tool;
-    this.problems = problems;
-  }
+// ../envoy-client/src/human-edit.ts
+function humanEditHead(edit) {
+  const editors = edit.editors ?? [];
+  const by = editors.length === 0 ? "" : `, edited by ${editors.join(", ")}`;
+  return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
 }
-function isDispatchTool(tool) {
-  return dispatchToolSpecs.some((spec) => spec.name === tool);
-}
-function exampleFor(tool) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  return { ...spec?.example };
-}
-function unwrap(schema) {
-  let current = schema;
-  while (current !== undefined) {
-    const def = current.def;
-    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
-      break;
-    current = def.innerType;
-  }
-  return current;
-}
-function shapeOf(schema) {
-  const unwrapped = unwrap(schema);
-  if (unwrapped === undefined)
-    return;
-  const def = unwrapped.def;
-  return def.type === "object" && "shape" in def ? def.shape : undefined;
-}
-function schemaAt(schema, path) {
-  let current = schema;
-  for (const key of path) {
-    const unwrapped = unwrap(current);
-    if (unwrapped === undefined)
-      return;
-    const def = unwrapped.def;
-    if (def.type === "object" && "shape" in def) {
-      current = shapeOf(unwrapped)?.[String(key)];
-    } else if (def.type === "array" && "element" in def) {
-      current = def.element;
-    } else {
-      return;
+var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
+var HUMAN_EDIT_DIFF_MAX = 4096;
+function humanEditDiffBlock(diff, cut) {
+  if (diff === undefined || diff === "")
+    return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
+  const bytes = new TextEncoder;
+  let shown = diff;
+  let note = cut === true;
+  if (bytes.encode(shown).length > HUMAN_EDIT_DIFF_MAX) {
+    let kept = "";
+    let size = 0;
+    for (const line of shown.split(`
+`).slice(0, -1)) {
+      size += bytes.encode(`${line}
+`).length;
+      if (size > HUMAN_EDIT_DIFF_MAX)
+        break;
+      kept += `${line}
+`;
     }
+    shown = kept;
+    note = true;
   }
-  return unwrap(current);
+  if (shown === "")
+    return HUMAN_EDIT_DIFF_CUT_NOTE;
+  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const body = shown.endsWith(`
+`) ? shown : `${shown}
+`;
+  return `${fence}diff
+${body}${fence}${note ? `
+${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }
-function describeInput(value) {
-  if (value === null)
-    return "null";
-  if (Array.isArray(value))
-    return "an array";
-  switch (typeof value) {
-    case "number":
-    case "boolean":
-      return String(value);
-    case "string":
-      return "a string";
-    case "object":
-      return "an object";
-    default:
-      return typeof value;
-  }
+
+// ../envoy-client/src/delivery.ts
+var KNOWN_SOURCES = EnvelopeSchema.shape.source.enum;
+var FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
+var AskAuthorPayloadSchema = object({
+  author: object({ kind: string2(), id: string2() }).passthrough()
+});
+var InboundSenderSchema = object({
+  session_id: string2().optional(),
+  machine: string2().optional(),
+  cwd: string2().optional(),
+  title: string2().optional(),
+  roles: array(string2()).optional()
+});
+var InboundEnvelopeSchema = object({
+  event_id: string2().optional(),
+  source: string2(),
+  source_event_id: string2().optional(),
+  source_session: string2().optional(),
+  topic: string2().optional(),
+  dedupe_key: string2().optional(),
+  issued_at: number2().int().optional(),
+  expires_at: number2().int().optional(),
+  kept_at: number2().int().optional(),
+  payload_summary: string2().optional(),
+  payload: string2().optional(),
+  sender: InboundSenderSchema.optional(),
+  in_reply_to: string2().optional(),
+  supersedes: string2().optional(),
+  urgency: string2().optional(),
+  expects_reply: string2().optional()
+}).passthrough();
+function tolerantShape(shape) {
+  return Object.fromEntries(Object.entries(shape).map(([key, schema]) => [key, _catch2(schema, undefined)]));
 }
-function describeExpected(expected, schema) {
-  switch (expected) {
-    case "int":
-      return "an integer";
-    case "object": {
-      const shape = shapeOf(schema);
-      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
-      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
-    }
-    case "array":
-      return "an array";
-    default:
-      return `a ${expected}`;
-  }
+var TolerantInboundEnvelopeSchema = object({
+  ...tolerantShape(InboundEnvelopeSchema.shape),
+  source: InboundEnvelopeSchema.shape.source.optional().catch(undefined),
+  sender: object(tolerantShape(InboundSenderSchema.shape)).optional().catch(undefined)
+}).passthrough();
+function dispatchReplyPath(resource, id) {
+  const collection = resource === "message" ? "messages" : "comments";
+  return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
 }
-function pathText(path, cliTool) {
-  const [head, ...rest] = path.map(String);
-  if (cliTool === undefined || head === undefined)
-    return path.map(String).join(".");
-  let flag = fieldFlag(cliTool, head);
-  let index = 0;
-  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
-    flag += `[${rest[index]}]`;
-  }
-  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
-  return tail === "" ? flag : `${flag} ${tail}`;
-}
-function formatZodIssues(issues, schema, tool) {
-  const cliTool = isDispatchTool(tool) ? tool : undefined;
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
-  return issues.flatMap((issue) => {
-    const path = pathText(issue.path, cliTool);
-    switch (issue.code) {
-      case "invalid_type":
-        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
-          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
-        ];
-      case "unrecognized_keys": {
-        if (cliTool !== undefined && issue.path.length === 0) {
-          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
-        }
-        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
-        const where = path === "" ? "" : ` in ${path}`;
-        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
-      }
-      case "invalid_value":
-        return [
-          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
-        ];
-      case "too_big":
-        if (issue.origin === "array" && Array.isArray(issue.input)) {
-          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
-        }
-        return [`${path} ${issue.message}`];
-      case "custom":
-        return [issue.message];
-      default:
-        return [path === "" ? issue.message : `${path}: ${issue.message}`];
-    }
+async function postDeliveryReply(config, sessionId, delivery, result) {
+  const client = new DispatchClient(config.url, config.credential);
+  await client.deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result
   });
+}
+function expectsLaneReceipt(frame) {
+  return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
+}
+async function* readArrivals(subscription, now = Date.now) {
+  const source = subscription[Symbol.asyncIterator]();
+  const arrived = [];
+  let stopped;
+  let left = false;
+  let wake;
+  const signal = () => {
+    wake?.();
+    wake = undefined;
+  };
+  (async () => {
+    try {
+      for (;; ) {
+        const read = await source.next();
+        if (read.done === true || left)
+          break;
+        arrived.push({ message: read.value, receivedAt: now() });
+        signal();
+      }
+      stopped = { failed: false };
+    } catch (error) {
+      stopped = { error, failed: true };
+    }
+    signal();
+  })();
+  try {
+    for (;; ) {
+      const next = arrived.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (stopped?.failed === true)
+        throw stopped.error;
+      if (stopped !== undefined)
+        return;
+      const { promise, resolve } = Promise.withResolvers();
+      wake = resolve;
+      await promise;
+    }
+  } finally {
+    if (stopped === undefined) {
+      left = true;
+      Promise.resolve(source.return?.()).catch(() => {
+        return;
+      });
+    }
+  }
+}
+var DedupeIdentitySchema = object({
+  event_id: string2().min(1).optional(),
+  dedupe_key: string2().min(1).optional(),
+  source: string2().optional(),
+  source_event_id: string2().optional()
+});
+var DELIVERY_DEDUPE_KEY_LIMIT = 250000;
+var DELIVERY_EVENT_ID_LIMIT = 1e4;
+function createDeliveryDedupe(now = Date.now) {
+  const keys = new Map;
+  let events = new Map;
+  let olderEvents = new Map;
+  const pendingKeys = new Map;
+  const pendingEvents = new Map;
+  let claims = 0;
+  return {
+    claim(frame) {
+      const eventId = frame?.event_id;
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return;
+      }
+      const key = frame?.dedupe_key;
+      const named = frame !== undefined && key !== undefined && dedupeKeyNamesItsEvent(frame);
+      const at = now();
+      if (named) {
+        const claimedAt = keys.get(key);
+        if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) {
+          return;
+        }
+        for (const [oldest, deliveredAt] of keys) {
+          if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
+            break;
+          keys.delete(oldest);
+        }
+        keys.delete(key);
+        if (keys.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+          const oldest = keys.keys().next();
+          if (oldest.done !== true)
+            keys.delete(oldest.value);
+        }
+        keys.set(key, at);
+      }
+      const claim = ++claims;
+      if (eventId !== undefined) {
+        if (events.size >= DELIVERY_EVENT_ID_LIMIT / 2) {
+          olderEvents = events;
+          events = new Map;
+        }
+        events.set(eventId, claim);
+        pendingEvents.set(eventId, claim);
+      }
+      if (named)
+        pendingKeys.set(key, claim);
+      let open = true;
+      const close = () => {
+        if (!open)
+          return;
+        open = false;
+        if (eventId !== undefined && pendingEvents.get(eventId) === claim) {
+          pendingEvents.delete(eventId);
+        }
+        if (named && pendingKeys.get(key) === claim)
+          pendingKeys.delete(key);
+      };
+      let released = false;
+      return {
+        release() {
+          close();
+          if (released)
+            return;
+          released = true;
+          if (named && keys.get(key) === at)
+            keys.delete(key);
+          if (eventId === undefined)
+            return;
+          if (events.get(eventId) === claim)
+            events.delete(eventId);
+          if (olderEvents.get(eventId) === claim)
+            olderEvents.delete(eventId);
+        },
+        settle: close
+      };
+    },
+    pending(frame) {
+      const eventId = frame.event_id;
+      const key = frame.dedupe_key;
+      return eventId !== undefined && pendingEvents.has(eventId) || key !== undefined && dedupeKeyNamesItsEvent(frame) && pendingKeys.has(key);
+    }
+  };
+}
+function isCommentTargetedDelivery(delivery) {
+  return "comment_id" in delivery;
+}
+var DispatchTargetedFrameSchema = object({
+  event: DispatchEventSchema,
+  delivery: DispatchTargetedDeliverySchema
+}).superRefine(({ event, delivery }, context) => {
+  if (event.type === "message.created" && !isCommentTargetedDelivery(delivery) && DispatchTargetedMessagePayloadSchema.safeParse(event.payload).success) {
+    return;
+  }
+  if (event.type === "comment.created" && isCommentTargetedDelivery(delivery) && DispatchTargetedCommentPayloadSchema.safeParse(event.payload).success) {
+    return;
+  }
+  context.addIssue({
+    code: "custom",
+    message: event.type === "comment.created" ? "targeted delivery requires a complete comment.created event" : "targeted delivery requires a complete message.created event"
+  });
+});
+var RecoverableDispatchDeliveryFailureSchema = object({
+  event: object({
+    type: _enum2(["message.created", "comment.created"]),
+    issue_key: string2().nullable(),
+    payload: object({ id: string2(), body: string2().optional() }).passthrough()
+  }).passthrough(),
+  delivery: DispatchTargetedDeliverySchema
+}).refine(({ event, delivery }) => event.type === "comment.created" ? isCommentTargetedDelivery(delivery) : !isCommentTargetedDelivery(delivery) && DispatchTargetedResourceIDSchema.safeParse(event.payload.id).success, { message: "delivery resource must match its event type" });
+function eventPictures(event) {
+  let text;
+  if (event.type.startsWith("message.")) {
+    const parsed = MessageEventPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("comment.")) {
+    const parsed = CommentEventPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("ask.")) {
+    const parsed = (event.type === "ask.edited" ? AskEditedEventPayloadSchema : AskEventPayloadSchema).safeParse(event.payload);
+    if (parsed.success) {
+      switch (event.type) {
+        case "ask.answered":
+          text = parsed.data.answer?.text;
+          break;
+        case "ask.resolved":
+          text = parsed.data.resolution?.reason;
+          break;
+        case "ask.opened":
+        case "ask.edited":
+          text = parsed.data.question;
+          break;
+      }
+    }
+  }
+  return typeof text === "string" ? pictureAddresses(text) : [];
+}
+function carriedItem(event) {
+  const resource = event.type.startsWith("comment.") || event.type.startsWith("suggestion.") ? "comment" : event.type.startsWith("message.") ? "message" : undefined;
+  if (resource === undefined || !isObject2(event.payload))
+    return;
+  const id = event.payload["id"];
+  if (typeof id !== "string" || id === "")
+    return;
+  return { resource, id, issueKey: event.issue_key };
+}
+function bodyWasCut(payload) {
+  return isObject2(payload) && (payload["body_truncated"] === true || payload["payload_omitted"] === true);
+}
+function wholeItemRoute(item) {
+  return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
+}
+function carriedBodyNote(event) {
+  if (!bodyWasCut(event.payload))
+    return;
+  const what = isObject2(event.payload) && event.payload["payload_omitted"] === true ? "this event carries no body: it was too large for the bus" : "the body is its first part only";
+  const item = carriedItem(event);
+  return item === undefined ? what : `${what}; read it whole with ${wholeItemRoute(item)}`;
+}
+async function wholeCarriedBody(client, item, session) {
+  try {
+    if (item.resource === "comment") {
+      const read = await client.getComment(item.id);
+      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+    }
+    const read = item.issueKey === null ? session === undefined ? undefined : await client.getMessageThread(item.id, session) : await client.getMessage(item.issueKey, item.id);
+    return read === undefined ? undefined : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+  } catch {
+    return;
+  }
+}
+function senderLabel(envelope) {
+  const sender = envelope.source_session ?? envelope.source ?? "unknown";
+  return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
+}
+function replyWith(envelope) {
+  if (envelope.source !== "agent" || envelope.source_session === undefined)
+    return;
+  return {
+    tool: "envoy_send",
+    args: {
+      session_id: envelope.source_session,
+      ...envelope.event_id === undefined ? {} : { in_reply_to: envelope.event_id },
+      message: "..."
+    }
+  };
+}
+var DISPATCH_PAYLOAD_SCHEMAS = {
+  "issue.created": IssueEventPayloadSchema,
+  "issue.updated": IssueEventPayloadSchema,
+  "issue.closed": IssueEventPayloadSchema,
+  "artifact.created": ArtifactCreatedEventPayloadSchema,
+  "artifact.version": ArtifactVersionEventPayloadSchema,
+  "artifact.human_edited": ArtifactHumanEditedEventPayloadSchema,
+  "ask.opened": AskEventPayloadSchema,
+  "ask.anchor_refreshed": AskEventPayloadSchema,
+  "ask.edited": AskEditedEventPayloadSchema,
+  "ask.handed_back": AskEventPayloadSchema,
+  "ask.answered": AskEventPayloadSchema,
+  "ask.resolved": AskEventPayloadSchema,
+  "comment.created": CommentEventPayloadSchema,
+  "comment.anchor_refreshed": CommentEventPayloadSchema,
+  "comment.resolved": CommentEventPayloadSchema,
+  "comment.reopened": CommentEventPayloadSchema,
+  "comment.edited": CommentEventPayloadSchema,
+  "suggestion.accepted": CommentEventPayloadSchema,
+  "suggestion.rejected": CommentEventPayloadSchema,
+  "message.created": MessageEventPayloadSchema,
+  "message.delivery": MessageDeliveryEventPayloadSchema,
+  "message.answered": MessageEventPayloadSchema,
+  "child.status": ChildStatusEventPayloadSchema
+};
+function topicDocument(topic) {
+  if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) !== true)
+    return;
+  const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
+  return project !== undefined && project !== "" && slug !== undefined && slug !== "" ? { project, slug } : undefined;
+}
+function dispatchOwner(event, topic) {
+  if (event.issue_key !== null)
+    return event.issue_key;
+  const document = topicDocument(topic);
+  if (document !== undefined)
+    return `${document.project} / ${document.slug}`;
+  return event.artifact_id ?? "unknown";
+}
+function dispatchCommentReplyWith(event, topic, comment) {
+  if (comment === undefined || comment.id === undefined)
+    return;
+  const reply = comment.ask_id;
+  const thread = reply === undefined || reply === null || reply === "" ? "reply_to" : "reply_to_ask";
+  const threadID = thread === "reply_to" ? comment.id : String(reply);
+  if (event.issue_key !== null) {
+    return {
+      command: commandLine("dispatch_comment", {
+        issue: event.issue_key,
+        [thread]: threadID,
+        body: "..."
+      })
+    };
+  }
+  let project = comment.project_key;
+  let artifact = comment.artifact_slug;
+  if (project === undefined || project === "" || artifact === undefined || artifact === "") {
+    [project, artifact] = dispatchOwner(event, topic).split(" / ", 2);
+  }
+  if (project === undefined || project === "" || artifact === undefined || artifact === "")
+    return;
+  return {
+    command: commandLine("dispatch_comment", {
+      project,
+      artifact,
+      [thread]: threadID,
+      body: "..."
+    })
+  };
+}
+function askResolutionText(resolution) {
+  if (resolution === null || resolution === undefined)
+    return;
+  const kind = resolution.kind ?? "resolved";
+  const reason = resolution.reason ?? "";
+  return reason === "" ? kind : `${kind}: ${reason}`;
+}
+function dispatchCompact(event, comment) {
+  if (event.type === "artifact.human_edited") {
+    const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(event.payload);
+    if (!edit.success)
+      return;
+    return { askId: undefined, record: { edit: humanEditHead(edit.data) } };
+  }
+  if (event.type === "comment.created") {
+    if (comment?.ask_id === undefined || comment.ask_id === null)
+      return;
+    const question = dispatchAskQuestion(comment);
+    return {
+      askId: comment.ask_id,
+      record: {
+        ...question === undefined ? {} : { question },
+        reply: comment.body ?? "",
+        ...comment.ask_state === undefined ? {} : { state: comment.ask_state },
+        ...comment.ask_waiting_on === undefined ? {} : { waiting_on: comment.ask_waiting_on }
+      }
+    };
+  }
+  if (!event.type.startsWith("ask."))
+    return;
+  const ask = (event.type === "ask.edited" ? AskEditedEventPayloadSchema : AskEventPayloadSchema).safeParse(event.payload);
+  if (!ask.success)
+    return;
+  let record = { question: textHead(ask.data.question ?? "") };
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.edited": {
+      const options = (ask.data.options ?? []).map((option) => option.label ?? "").filter((label) => label !== "");
+      const quote = ask.data.anchor?.quote;
+      const { project, slug } = ask.data.anchor_artifact ?? {};
+      const document = project !== undefined && project !== "" && slug !== undefined && slug !== "" ? `${project}/${slug}` : undefined;
+      const previous = "previous" in ask.data && ask.data.previous !== undefined ? textHead(ask.data.previous.question) : undefined;
+      record = {
+        ...record,
+        ...options.length === 0 ? {} : { options },
+        ...quote === undefined || quote === "" ? {} : { quote: textHead(quote) },
+        ...document === undefined ? {} : { document },
+        ...previous === undefined ? {} : { previous }
+      };
+      break;
+    }
+    case "ask.answered": {
+      const previousAnswer = ask.data.previous_answer;
+      record = {
+        ...record,
+        answer: askAnswerText(ask.data.answer),
+        ...previousAnswer === null || previousAnswer === undefined ? {} : { previous_answer: askAnswerText(previousAnswer) }
+      };
+      break;
+    }
+    case "ask.resolved": {
+      const resolved = askResolutionText(ask.data.resolution);
+      record = resolved === undefined ? record : { ...record, resolved };
+      break;
+    }
+    default:
+      break;
+  }
+  return { askId: ask.data.id, record };
+}
+function dispatchPayload(event) {
+  const schema = DISPATCH_PAYLOAD_SCHEMAS[event.type];
+  if (schema === undefined)
+    return event.payload;
+  const parsed = schema.safeParse(event.payload);
+  return parsed.success ? parsed.data : event.payload;
+}
+function hasTarget(value) {
+  return isObject2(value) && "target" in value;
+}
+function dispatchPayloadForReader(event, sessionID) {
+  const payload = dispatchPayload(event);
+  if (!hasTarget(payload))
+    return payload;
+  const target = payload.target;
+  return target === `session:${sessionID}` ? { ...payload, target: `you (${target})` } : payload;
+}
+function dispatchAskQuestion(comment) {
+  return comment?.ask_question !== undefined && comment.ask_question !== "" ? textHead(comment.ask_question) : undefined;
+}
+function dispatchReplyRef(event, topic, inReplyTo, comment) {
+  let kind;
+  let document = topicDocument(topic);
+  if (event.type.startsWith("ask.")) {
+    kind = "ask";
+  } else if (event.type.startsWith("message.")) {
+    kind = "message";
+  } else if (event.type === "comment.created") {
+    if (comment === undefined || comment.ask_id === undefined || comment.ask_id === null) {
+      return inReplyTo;
+    }
+    kind = "ask";
+    const { project_key: project, artifact_slug: slug } = comment;
+    if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
+      document = { project, slug };
+    }
+  } else {
+    return inReplyTo;
+  }
+  if (event.issue_key !== null) {
+    return dispatchChildRef(dispatchIssueRef(event.issue_key), kind, inReplyTo);
+  }
+  if (document === undefined)
+    return inReplyTo;
+  return dispatchChildRef(dispatchDocumentRef(document.project, document.slug), kind, inReplyTo);
+}
+function isObject2(value) {
+  return typeof value === "object" && value !== null;
+}
+function withWholeBody(event, body) {
+  if (body === undefined || !isObject2(event.payload) || !bodyWasCut(event.payload))
+    return event;
+  const { body_truncated: _cut, payload_omitted: _omitted, ...carried } = event.payload;
+  return { ...event, payload: { ...carried, body } };
+}
+function parseDispatchFrame(rawPayload, wholeBody) {
+  let value;
+  try {
+    value = JSON.parse(rawPayload);
+  } catch {
+    return { raw: rawPayload };
+  }
+  if (isObject2(value) && "delivery" in value) {
+    const targeted = DispatchTargetedFrameSchema.safeParse(value);
+    if (targeted.success) {
+      const wireFrame = value;
+      return {
+        event: withWholeBody(targeted.data.event, wholeBody),
+        notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
+        delivery: targeted.data.delivery
+      };
+    }
+    const recoverable = RecoverableDispatchDeliveryFailureSchema.safeParse(value);
+    if (recoverable.success) {
+      const delivery = recoverable.data.delivery;
+      const commentDelivery = isCommentTargetedDelivery(delivery);
+      const resource = commentDelivery ? "comment" : "message";
+      const id = commentDelivery ? delivery.comment_id : recoverable.data.event.payload.id;
+      return {
+        raw: value,
+        rejectedDelivery: {
+          resource,
+          id,
+          attempt: delivery.attempt,
+          mode: delivery.mode,
+          replyPath: dispatchReplyPath(resource, id),
+          replyFields: commentDelivery ? { target: delivery.target } : {},
+          issueKey: recoverable.data.event.issue_key,
+          body: recoverable.data.event.payload.body ?? ""
+        },
+        malformedDelivery: true
+      };
+    }
+    return { raw: value, malformedDelivery: true };
+  }
+  const parsed = DispatchEventSchema.safeParse(value);
+  if (!parsed.success)
+    return { raw: value };
+  const wireEvent = value;
+  return {
+    event: withWholeBody(parsed.data, wholeBody),
+    notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
+    delivery: undefined
+  };
+}
+function inboundTimestamp(milliseconds) {
+  if (milliseconds === undefined)
+    return "unknown";
+  const date = new Date(Math.floor(milliseconds / 1000) * 1000);
+  return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString().replace(".000Z", "Z");
+}
+function renderInbound(raw, sessionID, subject, wholeBody) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return {
+      skip: false,
+      content: encode3({
+        envoy: { topic: subject ?? "unknown", unrecognised: "payload was not JSON" }
+      })
+    };
+  }
+  const parsed = InboundEnvelopeSchema.safeParse(value);
+  const parseIssues = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join(".") || "envelope");
+  let envelope;
+  if (parsed.success) {
+    envelope = parsed.data;
+  } else {
+    const tolerant = TolerantInboundEnvelopeSchema.safeParse(value);
+    if (!tolerant.success) {
+      return {
+        skip: false,
+        content: encode3({ envoy: { unrecognised: parseIssues.join(", ") || "envelope" } })
+      };
+    }
+    const data = tolerant.data;
+    envelope = { ...data, source: data.source ?? "unknown" };
+  }
+  let dispatchEvent;
+  let dispatchActor;
+  let dispatchIssue;
+  let dispatchReply;
+  let delivery;
+  let rejectedDelivery;
+  let malformedDelivery = false;
+  let pictures = [];
+  let bodyNote;
+  let cutItem;
+  let inReplyTo = envelope.in_reply_to;
+  let askAuthor;
+  let trailer = "";
+  const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
+  if (envelope.source === "dispatch") {
+    const topic = subject ?? envelope.topic;
+    if (envelope.payload === undefined) {
+      dispatchIssue = "payload";
+    } else {
+      const frame = parseDispatchFrame(envelope.payload, wholeBody);
+      if ("event" in frame) {
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+          return { skip: true, content: "", envelope };
+        }
+        if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
+          return { skip: true, content: "", envelope };
+        }
+        if (frame.event.type === "subscription.removed") {
+          const removed = SubscriptionRemovedEventPayloadSchema.safeParse(frame.event.payload);
+          if (!removed.success || removed.data.session_id !== sessionID) {
+            return { skip: true, content: "", envelope };
+          }
+          const who = removed.data.by?.id ?? "someone";
+          return {
+            skip: false,
+            content: `Unsubscribed from ${dispatchOwner(frame.event, topic)} by ${who}`,
+            envelope
+          };
+        }
+        if (frame.event.type === "ask.follower_added" || frame.event.type === "ask.follower_removed") {
+          const follower = AskFollowerEventPayloadSchema.safeParse(frame.event.payload);
+          if (!follower.success || follower.data.session_id !== sessionID) {
+            return { skip: true, content: "", envelope };
+          }
+          const who = follower.data.by?.id ?? "someone";
+          const owner = dispatchOwner(frame.event, topic);
+          const ask = follower.data.ask_id ?? "?";
+          return {
+            skip: false,
+            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; ${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
+            envelope
+          };
+        }
+        const comment = frame.event.type === "comment.created" ? CommentEventPayloadSchema.safeParse(frame.event.payload) : undefined;
+        const commentPayload = comment?.success === true ? comment.data : undefined;
+        const compact = dispatchCompact(frame.event, commentPayload);
+        if (frame.event.type.startsWith("ask.")) {
+          const asked = AskAuthorPayloadSchema.safeParse(frame.event.payload);
+          if (asked.success && asked.data.author.kind === "session") {
+            askAuthor = asked.data.author.id;
+          }
+        }
+        if (inReplyTo !== undefined) {
+          inReplyTo = dispatchReplyRef(frame.event, topic, inReplyTo, commentPayload);
+        }
+        dispatchReply = dispatchCommentReplyWith(frame.event, topic, commentPayload);
+        if (frame.event.type === "message.created") {
+          const message = DispatchTargetedMessagePayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchTargetedDeliverySchema.safeParse(frame.delivery);
+          if (message.success && requested.success && !isCommentTargetedDelivery(requested.data)) {
+            delivery = {
+              resource: "message",
+              id: message.data.id,
+              attempt: requested.data.attempt,
+              mode: requested.data.mode,
+              replyPath: dispatchReplyPath("message", message.data.id),
+              replyFields: {},
+              issueKey: frame.event.issue_key,
+              body: message.data.body,
+              ...message.data.body_truncated === true ? { bodyTruncated: true } : {},
+              ...typeof message.data.broadcast_id === "string" ? { broadcastId: message.data.broadcast_id } : {}
+            };
+            dispatchReply = {
+              command: commandLine("dispatch_message", {
+                ...frame.event.issue_key === null ? {} : { issue: frame.event.issue_key },
+                in_reply_to: message.data.id,
+                body: "..."
+              })
+            };
+          }
+        } else if (frame.event.type === "comment.created") {
+          const comment = DispatchTargetedCommentPayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchTargetedDeliverySchema.safeParse(frame.delivery);
+          if (comment.success && requested.success && isCommentTargetedDelivery(requested.data)) {
+            delivery = {
+              resource: "comment",
+              id: requested.data.comment_id,
+              attempt: requested.data.attempt,
+              mode: requested.data.mode,
+              replyPath: dispatchReplyPath("comment", requested.data.comment_id),
+              replyFields: { target: requested.data.target },
+              issueKey: frame.event.issue_key,
+              body: comment.data.body,
+              ...comment.data.body_truncated === true ? { bodyTruncated: true } : {}
+            };
+          }
+        }
+        const compactRecord = compact === undefined ? undefined : inReplyTo !== undefined || compact.askId === undefined ? compact.record : {
+          ask: dispatchReplyRef(frame.event, topic, compact.askId, commentPayload),
+          ...compact.record
+        };
+        dispatchEvent = {
+          owner: dispatchOwner(frame.event, topic),
+          type: frame.event.type,
+          actor: frame.event.actor,
+          ...compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }
+        };
+        dispatchActor = frame.event.actor;
+        bodyNote = carriedBodyNote(frame.event);
+        if (bodyWasCut(frame.event.payload))
+          cutItem = carriedItem(frame.event);
+        pictures = eventPictures(frame.event);
+        if (frame.event.type === "artifact.human_edited") {
+          const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(frame.event.payload);
+          if (edit.success)
+            trailer = humanEditDiffBlock(edit.data.diff, edit.data.diff_truncated);
+        }
+      } else {
+        dispatchEvent = frame.raw;
+        rejectedDelivery = frame.rejectedDelivery;
+        malformedDelivery = frame.malformedDelivery === true;
+      }
+    }
+  }
+  let parsedPayload;
+  if (!dispatchRendered && envelope.payload !== undefined && (envelope.source === "github" || envelope.payload !== envelope.payload_summary)) {
+    try {
+      parsedPayload = JSON.parse(envelope.payload);
+    } catch {
+      parsedPayload = envelope.payload;
+    }
+  }
+  const payloadSummary = envelope.payload_summary ?? "unknown";
+  const message = !dispatchRendered && envelope.payload !== undefined && envelope.payload !== envelope.payload_summary ? parsedPayload : undefined;
+  const summaryIsHead = typeof message === "string" && envelope.payload_summary !== undefined && message.startsWith(envelope.payload_summary.endsWith("\u2026") ? envelope.payload_summary.slice(0, -1) : envelope.payload_summary);
+  let foreignSession;
+  for (const part of [envelope.payload_summary ?? "", envelope.payload ?? ""]) {
+    for (const match of part.matchAll(FOREIGN_SESSION_ID)) {
+      if (match[0] !== envelope.source_session && match[0] !== sessionID && match[0] !== askAuthor) {
+        foreignSession = match[0];
+        break;
+      }
+    }
+    if (foreignSession !== undefined)
+      break;
+  }
+  const role = envelope.sender?.roles?.[0];
+  const reply = dispatchReply ?? replyWith(envelope);
+  const sourceIssue = parseIssues.includes("source") || KNOWN_SOURCES[envelope.source] !== undefined ? undefined : `source=${envelope.source}`;
+  const unrecognised = [
+    ...parseIssues,
+    ...sourceIssue === undefined ? [] : [sourceIssue],
+    ...dispatchIssue === undefined ? [] : [dispatchIssue]
+  ].join(", ") || undefined;
+  const rendered = {
+    ...envelope.topic === agentSubject(sessionID) ? { to: `you (${sessionID})` } : {},
+    from: senderLabel(envelope),
+    at: inboundTimestamp(envelope.issued_at),
+    id: envelope.event_id ?? "unknown",
+    ...envelope.kept_at === undefined ? {} : { kept_at: inboundTimestamp(envelope.kept_at) },
+    ...envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) },
+    ...envelope.urgency === undefined ? {} : { urgency: envelope.urgency },
+    ...envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply },
+    ...inReplyTo === undefined ? {} : { re: inReplyTo },
+    ...envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes },
+    ...reply === undefined ? {} : { reply_with: reply },
+    ...role === undefined ? {} : {
+      reply_role: {
+        tool: "envoy_publish",
+        args: { topic: `notifications.role.${role}`, message: "..." }
+      }
+    },
+    ...dispatchRendered ? { dispatch: dispatchEvent } : {
+      ...summaryIsHead ? {} : { summary: payloadSummary },
+      ...message === undefined ? {} : { message }
+    },
+    ...bodyNote === undefined ? {} : { body_note: bodyNote },
+    ...foreignSession === undefined ? {} : {
+      note: `body names session ${foreignSession}; the sender is ${envelope.source_session ?? "unknown"}`
+    },
+    ...unrecognised === undefined ? {} : { unrecognised }
+  };
+  return {
+    skip: false,
+    content: trailer === "" ? encode3({ envoy: rendered }) : `${encode3({ envoy: rendered })}
+
+${trailer}`,
+    envelope,
+    ...dispatchActor === undefined ? {} : { dispatchActor },
+    ...delivery === undefined ? {} : { delivery },
+    ...rejectedDelivery === undefined ? {} : { rejectedDelivery },
+    ...malformedDelivery ? { malformedDelivery: true } : {},
+    ...pictures.length === 0 ? {} : { pictures },
+    ...cutItem === undefined ? {} : { cutItem }
+  };
 }
 
 // ../envoy-client/src/dispatch-picture-tools.ts
@@ -17137,21 +18386,9 @@ async function localPicture(path, cwd) {
   }
   return { path, name: basename(absolute), file: Bun.file(absolute, { type }) };
 }
-function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
+async function textWithPictures(text, pictures, owner, upload, actor) {
   if (pictures.length === 0)
     return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
-  }
   const lines = [];
   const addresses = [];
   for (const picture of pictures) {
@@ -17168,11 +18405,7 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
     addresses.push(address);
     lines.push(pictureLine(picture.name, address));
   }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
-  }
-  return posted;
+  return withPictureLines(text, lines);
 }
 var AGENT_ARTIFACT_REF = new RegExp(`^dispatch://agent/(${SESSION_ID_PATTERN})/artifact/([^/@]+)(?:@v(\\d+))?$`, "u");
 function parseAgentArtifactRef(ref) {
@@ -17227,6 +18460,23 @@ function eventTexts(event) {
       texts = [];
   }
   return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
+}
+async function eventTextsWhole(client, events) {
+  const reads = new Map;
+  const whole = await Promise.all(events.map(async (event) => {
+    const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
+    if (item === undefined)
+      return eventTexts(event);
+    const key = `${item.resource}:${item.id}`;
+    let read = reads.get(key);
+    if (read === undefined) {
+      read = wholeCarriedBody(client, item);
+      reads.set(key, read);
+    }
+    const body = await read;
+    return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
+  }));
+  return whole.flat();
 }
 function shownPictureLine(index, address, name, mimeType, bytes) {
   return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
@@ -17405,47 +18655,6 @@ function subscriptionRemovedTopics(raw, sessionID) {
   if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
     return;
   return parsedPayload.data.topics ?? [];
-}
-
-// ../envoy-client/src/human-edit.ts
-function humanEditHead(edit) {
-  const editors = edit.editors ?? [];
-  const by = editors.length === 0 ? "" : `, edited by ${editors.join(", ")}`;
-  return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
-}
-var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
-var HUMAN_EDIT_DIFF_MAX = 4096;
-function humanEditDiffBlock(diff, cut) {
-  if (diff === undefined || diff === "")
-    return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
-  const bytes = new TextEncoder;
-  let shown = diff;
-  let note = cut === true;
-  if (bytes.encode(shown).length > HUMAN_EDIT_DIFF_MAX) {
-    let kept = "";
-    let size = 0;
-    for (const line of shown.split(`
-`).slice(0, -1)) {
-      size += bytes.encode(`${line}
-`).length;
-      if (size > HUMAN_EDIT_DIFF_MAX)
-        break;
-      kept += `${line}
-`;
-    }
-    shown = kept;
-    note = true;
-  }
-  if (shown === "")
-    return HUMAN_EDIT_DIFF_CUT_NOTE;
-  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(Math.max(3, longestRun + 1));
-  const body = shown.endsWith(`
-`) ? shown : `${shown}
-`;
-  return `${fence}diff
-${body}${fence}${note ? `
-${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }
 
 // ../envoy-client/src/search-answer.ts
@@ -17981,6 +19190,148 @@ async function sessionAnswersSettled(session) {
   await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
 }
 
+// ../envoy-client/src/tool-input-errors.ts
+class ToolInputError extends Error {
+  tool;
+  problems;
+  constructor(tool, problems) {
+    const count = problems.length;
+    const cli = isDispatchTool(tool);
+    const help = cli ? [
+      `Allowed flags: ${commandFlags(tool).join(", ")}`,
+      `Example: ${commandLine(tool, exampleFor(tool))}`
+    ] : [];
+    super([
+      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+      ...problems.map((problem) => `- ${problem}`),
+      ...help.map((line) => `- ${line}`)
+    ].join(`
+`));
+    this.name = "ToolInputError";
+    this.tool = tool;
+    this.problems = problems;
+  }
+}
+function isDispatchTool(tool) {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+function exampleFor(tool) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  return { ...spec?.example };
+}
+function unwrap(schema) {
+  let current = schema;
+  while (current !== undefined) {
+    const def = current.def;
+    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
+      break;
+    current = def.innerType;
+  }
+  return current;
+}
+function shapeOf(schema) {
+  const unwrapped = unwrap(schema);
+  if (unwrapped === undefined)
+    return;
+  const def = unwrapped.def;
+  return def.type === "object" && "shape" in def ? def.shape : undefined;
+}
+function schemaAt(schema, path) {
+  let current = schema;
+  for (const key of path) {
+    const unwrapped = unwrap(current);
+    if (unwrapped === undefined)
+      return;
+    const def = unwrapped.def;
+    if (def.type === "object" && "shape" in def) {
+      current = shapeOf(unwrapped)?.[String(key)];
+    } else if (def.type === "array" && "element" in def) {
+      current = def.element;
+    } else {
+      return;
+    }
+  }
+  return unwrap(current);
+}
+function describeInput(value) {
+  if (value === null)
+    return "null";
+  if (Array.isArray(value))
+    return "an array";
+  switch (typeof value) {
+    case "number":
+    case "boolean":
+      return String(value);
+    case "string":
+      return "a string";
+    case "object":
+      return "an object";
+    default:
+      return typeof value;
+  }
+}
+function describeExpected(expected, schema) {
+  switch (expected) {
+    case "int":
+      return "an integer";
+    case "object": {
+      const shape = shapeOf(schema);
+      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
+      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
+    }
+    case "array":
+      return "an array";
+    default:
+      return `a ${expected}`;
+  }
+}
+function pathText(path, cliTool) {
+  const [head, ...rest] = path.map(String);
+  if (cliTool === undefined || head === undefined)
+    return path.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
+  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
+  return issues.flatMap((issue) => {
+    const path = pathText(issue.path, cliTool);
+    switch (issue.code) {
+      case "invalid_type":
+        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
+          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
+        ];
+      case "unrecognized_keys": {
+        if (cliTool !== undefined && issue.path.length === 0) {
+          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
+        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
+        const where = path === "" ? "" : ` in ${path}`;
+        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
+      }
+      case "invalid_value":
+        return [
+          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
+        ];
+      case "too_big":
+        if (issue.origin === "array" && Array.isArray(issue.input)) {
+          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
+        }
+        return [`${path} ${issue.message}`];
+      case "custom":
+        return [issue.message];
+      default:
+        return [path === "" ? issue.message : `${path}: ${issue.message}`];
+    }
+  });
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -18109,6 +19460,7 @@ var issueFreeTools = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
   dispatch_inbox: true,
   dispatch_architecture_sync: true
 };
@@ -18224,16 +19576,12 @@ function askUrgency(args) {
   const value = args.urgency;
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
-function questionWithRef(question, ref) {
+function askQuestionWithRef(args) {
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
   return ref === undefined || question.includes(ref) ? question : `${question}
 
 Ref: ${ref}`;
-}
-function askQuestionWithRef(args) {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-function askQuestionProblem(withRef) {
-  return withRef.length > ASK_QUESTION_MAX ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref` : undefined;
 }
 var pictureSendingTools = {
   dispatch_ask: true,
@@ -18427,16 +19775,6 @@ function itemReplyTo(args, field) {
 function argumentProblems(tool, args) {
   const problems = [];
   switch (tool) {
-    case "dispatch_ask": {
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined)
-          problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {
@@ -19027,21 +20365,49 @@ function componentsLine(components) {
       return "Components: unassigned";
   }
 }
-function claimText(claim, titles) {
-  const holding = claimHolds(claim, titles);
-  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : "";
+function claimText(claim, agents, read = {}) {
+  const titles = agents?.titles;
+  const liveness = holderLiveness(claim, agents, read);
+  const holding = claimHolds(claim, titles, liveness);
+  const takeableAt = claimTakeableAt(liveness);
+  const unresponsive = liveness.holder_state === "unresponsive" && liveness.last_seen != null ? ` \xB7 unresponsive since ${liveness.last_seen}${takeableAt === null ? "" : `, takeable at ${takeableAt}`}` : " \xB7 unresponsive";
+  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : holding === "unresponsive" ? unresponsive : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
-async function liveSessionTitles(client, needed) {
+function holderLiveness(claim, agents, read) {
+  if (claim.actor.kind !== "session")
+    return read;
+  const row = agents?.liveness.get(claim.actor.id);
+  if (row === undefined)
+    return read;
+  const holderState = read.holder_state ?? row.holder_state;
+  const lastSeen = read.last_seen ?? row.last_seen;
+  const takeableAt = read.takeable_at ?? row.takeable_at;
+  return {
+    ...holderState === undefined ? {} : { holder_state: holderState },
+    ...lastSeen === undefined ? {} : { last_seen: lastSeen },
+    ...takeableAt === undefined ? {} : { takeable_at: takeableAt }
+  };
+}
+async function liveAgents(client, needed) {
   if (!needed) {
     return;
   }
   try {
     const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+    return {
+      titles: new Map(agents.map((agent) => [agent.session_id, agent.title])),
+      liveness: new Map(agents.map((agent) => [agent.session_id, agentLiveness(agent)]))
+    };
   } catch {
     return;
   }
+}
+function agentLiveness(agent) {
+  return {
+    ...agent.state === undefined ? {} : { holder_state: agent.state },
+    ...agent.last_seen > 0 ? { last_seen: new Date(agent.last_seen).toISOString() } : {}
+  };
 }
 function holdsSession(claim) {
   return claim?.actor.kind === "session";
@@ -19055,8 +20421,9 @@ function routeText(issue, titles) {
   const holder = issue.route_holder ?? null;
   const reach = {
     live: routeHeldBySession(issue) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
+    holder_unresponsive: issue.route.startsWith("role:") ? ` (its holder${holder === null ? "" : ` ${titles?.get(holder) ?? holder}`} is unresponsive: messages wait for it)` : " (that session is unresponsive: messages wait for it)",
     no_holder: issue.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
+    unknown: issue.route_status_reason === "refilling" ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)" : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -19114,7 +20481,7 @@ function refuseUnsavedRepository(verb, issue, repo) {
   const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
   throw new Error(`Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
-function issueSummary(issue, events, references, graph, linkBase, coverage, titles) {
+function issueSummary(issue, events, references, graph, linkBase, coverage, agents) {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -19135,11 +20502,11 @@ function issueSummary(issue, events, references, graph, linkBase, coverage, titl
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...issue.priority === null ? [] : [`Priority: P${issue.priority}`],
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${routeText(issue, titles)}`,
+    `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
@@ -19958,6 +21325,25 @@ async function executeDispatchTool(input) {
       details: { session, owner, service, project }
     };
   }
+  if (input.tool === "dispatch_limits") {
+    const limits = await dispatchClient().limits();
+    const count = (value) => value.toLocaleString("en-US");
+    return {
+      text: [
+        `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+        `Blocks in one body: ${count(limits.item_blocks)}.`,
+        `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+        `Options on one ask: ${count(limits.ask_options)}.`,
+        `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+        `One request: ${count(limits.request_bytes)} bytes.`,
+        `One markdown document: ${count(limits.document_bytes)} bytes.`,
+        `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one."
+      ].join(`
+`),
+      details: { ...limits }
+    };
+  }
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
     const pending = client.credentialPending().then((answer) => ({ answer }), (error) => ({ error }));
@@ -20008,18 +21394,18 @@ async function executeDispatchTool(input) {
       throw new Error("issue is required");
     return owner.issue;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+  const postWithPictures = (text, owner, upload) => textWithPictures(text, pictures, owner, (picture) => upload(picture).catch((error) => {
     if (!(error instanceof DispatchWriteLandedError))
       throw error;
     throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
   }), actor);
-  const writePictures = (resolved, text, limit) => {
+  const writePictures = (resolved, text) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) => client.projectArtifact(project, upload));
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   const hostSession = input.sessionId?.trim();
   const shown = hostSession ? shownPictures(hostSession) : undefined;
@@ -20323,10 +21709,11 @@ async function executeDispatchTool(input) {
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress
       }));
-      const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
+      const agents = await liveAgents(client, rows.some((row) => holdsSession(row.claim)));
       const isPartial = offset !== 0 || rows.length !== total;
       const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : pageSummaryText(offset, rows.length, total);
       return {
@@ -20334,7 +21721,7 @@ async function executeDispatchTool(input) {
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
           ...rows.map((row) => {
             const progress = progressText(row.progress, " \xB7 ");
-            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
+            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, agents)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
           })
         ].join(`
 `),
@@ -20429,13 +21816,7 @@ async function executeDispatchTool(input) {
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question"
-      });
+      const question = await writePictures(resolved, askQuestionWithRef(args));
       const askInput = {
         question,
         ...Array.isArray(options) ? { options } : {},
@@ -20499,11 +21880,7 @@ async function executeDispatchTool(input) {
       }
       const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       const requestedTurn = optionalString(args, "turn");
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      });
+      const body = await writePictures(resolved, stringArg(args, "body"));
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
@@ -20573,11 +21950,6 @@ async function executeDispatchTool(input) {
       const target = messageInReplyTo(args);
       const inReplyTo = target?.id;
       const written = stringArg(args, "body");
-      const bodyLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      };
       if (owner === null && inReplyTo !== undefined) {
         let body = written;
         if (pictures.length > 0) {
@@ -20585,7 +21957,7 @@ async function executeDispatchTool(input) {
           if (!sessionId) {
             throw new Error("host session id is required to send pictures in a direct-message reply");
           }
-          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
+          body = await postWithPictures(written, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
         }
         const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
         if (reply.duplicate === true && reply.body === body) {
@@ -20614,7 +21986,7 @@ async function executeDispatchTool(input) {
         };
       }
       const issueKey = issue();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload));
+      const body = await postWithPictures(written, issueKey, (upload) => client.artifact(issueKey, upload));
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
@@ -21117,7 +22489,7 @@ ${handoff.body}`,
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join(`
 `),
@@ -21135,18 +22507,18 @@ ${handoff.body}`,
       const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph, titles, pictures, coverage] = await Promise.all([
+      const [references, graph, agents, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts)
+          ...await eventTextsWhole(client, read.events)
         ]),
         issueCoverageOrReason(client, read.issue.key)
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, agents),
         details: { issue: read.issue.key },
         ...showImages(pictures),
         ...repositoryFieldsWarnings(read.issue)
@@ -21691,7 +23063,7 @@ function concat(...buffers) {
   }
   return buf;
 }
-function encode3(string) {
+function encode4(string) {
   const bytes = new Uint8Array(string.length);
   for (let i = 0;i < string.length; i++) {
     const code = string.charCodeAt(i);
@@ -21844,7 +23216,7 @@ function decode3(input) {
     throw new TypeError(invalid);
   }
 }
-function encode4(input) {
+function encode5(input) {
   let unencoded = input;
   if (typeof unencoded === "string") {
     unencoded = encoder2.encode(unencoded);
@@ -21856,7 +23228,7 @@ function encode4(input) {
 }
 
 // ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/type_checks.js
-function isObject2(input) {
+function isObject3(input) {
   if (typeof input !== "object" || input === null || Object.prototype.toString.call(input) !== "[object Object]") {
     return false;
   }
@@ -21884,7 +23256,7 @@ function isDisjoint(...headers) {
   }
   return true;
 }
-var isJWK = (key) => isObject2(key) && typeof key.kty === "string";
+var isJWK = (key) => isObject3(key) && typeof key.kty === "string";
 var isPrivateJWK = (key) => key.kty !== "oct" && (key.kty === "AKP" && typeof key.priv === "string" || typeof key.d === "string");
 var isPublicJWK = (key) => key.kty !== "oct" && key.d === undefined && key.priv === undefined;
 var isSecretJWK = (key) => key.kty === "oct" && typeof key.k === "string";
@@ -22303,7 +23675,7 @@ function numericDate(value, label) {
 class JWTClaimsBuilder {
   #payload;
   constructor(payload) {
-    if (!isObject2(payload)) {
+    if (!isObject3(payload)) {
       throw new TypeError("JWT Claims Set MUST be an object");
     }
     this.#payload = structuredClone(payload);
@@ -22380,8 +23752,8 @@ async function createSignature(input, key) {
   let payloadB;
   if (b64) {
     const encoded = input.encoded ??= [];
-    encoded[0] ??= encode4(input.payload);
-    encoded[1] ??= encode3(encoded[0]);
+    encoded[0] ??= encode5(input.payload);
+    encoded[1] ??= encode4(encoded[0]);
     payloadS = encoded[0];
     payloadB = encoded[1];
   } else {
@@ -22391,17 +23763,17 @@ async function createSignature(input, key) {
   let protectedHeaderString;
   let protectedHeaderBytes;
   if (protectedHeader) {
-    protectedHeaderString = encode4(JSON.stringify(protectedHeader));
-    protectedHeaderBytes = encode3(protectedHeaderString);
+    protectedHeaderString = encode5(JSON.stringify(protectedHeader));
+    protectedHeaderBytes = encode4(protectedHeaderString);
   } else {
     protectedHeaderString = "";
     protectedHeaderBytes = new Uint8Array;
   }
-  const data = concat(protectedHeaderBytes, encode3("."), payloadB);
+  const data = concat(protectedHeaderBytes, encode4("."), payloadB);
   const k = await prepareKey(entry, key, "sign");
   const signature = await sign(entry, k, data);
   const jws = {
-    signature: encode4(signature),
+    signature: encode5(signature),
     payload: payloadS
   };
   if (protectedHeader) {
@@ -22537,7 +23909,7 @@ async function keyToJWK(key) {
   if (key instanceof Uint8Array) {
     return {
       kty: "oct",
-      k: encode4(key)
+      k: encode5(key)
     };
   }
   if (!isCryptoKey(key)) {
@@ -22842,7 +24214,7 @@ class OperationProcessingError extends Error {
 function OPE(message, code, cause) {
   return new OperationProcessingError(message, { code, cause });
 }
-function isJsonObject(input) {
+function isJsonObject2(input) {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return false;
   }
@@ -23134,7 +24506,7 @@ async function parseOAuthResponseErrorBody(response) {
     assertApplicationJson(response);
     try {
       const json = await response.clone().json();
-      if (isJsonObject(json) && typeof json.error === "string" && json.error.length) {
+      if (isJsonObject2(json) && typeof json.error === "string" && json.error.length) {
         return json;
       }
     } catch {}
@@ -23403,7 +24775,7 @@ async function validateJwt(jws, checkAlg, clockSkew, clockTolerance, decryptJwt)
   } catch (cause) {
     throw OPE("failed to parse JWT Header body as base64url encoded JSON", PARSE_ERROR, cause);
   }
-  if (!isJsonObject(header)) {
+  if (!isJsonObject2(header)) {
     throw OPE("JWT Header must be a top level object", INVALID_RESPONSE, jws);
   }
   checkAlg(header);
@@ -23418,7 +24790,7 @@ async function validateJwt(jws, checkAlg, clockSkew, clockTolerance, decryptJwt)
   } catch (cause) {
     throw OPE("failed to parse JWT Payload body as base64url encoded JSON", PARSE_ERROR, cause);
   }
-  if (!isJsonObject(claims)) {
+  if (!isJsonObject2(claims)) {
     throw OPE("JWT Payload must be a top level object", INVALID_RESPONSE, jws);
   }
   const now = epochTime() + clockSkew;
@@ -23503,7 +24875,7 @@ async function getResponseJsonBody(response, check = assertApplicationJson) {
     check(response);
     throw OPE('failed to parse "response" body as JSON', PARSE_ERROR, cause);
   }
-  if (!isJsonObject(json)) {
+  if (!isJsonObject2(json)) {
     throw OPE('"response" body must be a top level object', INVALID_RESPONSE, { body: json });
   }
   return json;
@@ -24249,6 +25621,13 @@ var DEFAULT_HEARTBEAT_MS = 90000;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 var MAX_INTERVAL_MS = 2147483647;
+var REGISTRATION_SETTLE_MS = 5000;
+var SHUTDOWN_SETTLE_MS = 250;
+var HEARTBEAT_RETRY_MIN_MS = 20000;
+var HEARTBEAT_RETRY_MAX_MS = 40000;
+function heartbeatRetryDelayMs(draw = Math.random) {
+  return Math.round(HEARTBEAT_RETRY_MIN_MS + draw() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS));
+}
 function namedInterval(raw) {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;

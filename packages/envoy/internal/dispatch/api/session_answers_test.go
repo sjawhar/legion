@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	envoystore "github.com/sjawhar/envoy/internal/store"
 )
@@ -120,22 +121,18 @@ func (f *answersFixture) route(t *testing.T, route string) {
 // is claimed here, so such a destination counts as reached with nothing sent and the role's topic
 // is what the publisher records (outbox's roleForward). An outbox with no reader at all leaves
 // every role route pending, which would leave a routed event unpublished.
-type unclaimedRoles struct{}
+type unclaimedRoles struct{ roles.Windows }
 
 func (unclaimedRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
 	return envoystore.RoleClaim{}, nil
 }
 
-func (unclaimedRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return envoystore.ExpiredRoleClaimMissing, nil
-}
-
-// Holder is read only for a claimed role, so here it answers that the session is gone.
-func (unclaimedRoles) Holder(context.Context, string, func(session.SessionEntry) bool) (session.SessionEntry, error) {
+// Holder is read only for a claimed role, so here it answers that no record stands.
+func (unclaimedRoles) Holder(context.Context, string) (session.SessionEntry, error) {
 	return session.SessionEntry{}, natsgo.ErrKeyNotFound
 }
 
-func (unclaimedRoles) TTL() time.Duration { return 5 * time.Minute }
+func (unclaimedRoles) LastSeen(context.Context, string) int64 { return 0 }
 
 // publishOutbox runs the real outbox until every event that can carry a person's words to a session
 // is published, so each one's published_destinations holds every topic the publisher reached.

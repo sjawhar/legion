@@ -243,6 +243,11 @@ jobs:
               - 'packages/envoy/brokerclient/*'
               - 'packages/envoy/brokertest/*'
               - 'packages/envoy/daemonpermissions/*'
+              # dispatchbody is the one public door onto the Dispatch server's own block
+              # splitter, which the daemon refuses a close reason or a READY packet the server
+              # would refuse with (packages/daemon/internal/api): internal/dispatch/itemblocks
+              # below, and the document parser under it, are in the daemon's build through it.
+              - 'packages/envoy/dispatchbody/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -265,6 +270,12 @@ jobs:
               - 'packages/envoy/internal/brokerclient/**'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              # text's testdata too: the daemon's race-tested packages compile it, and a compiled
+              # package's testdata is read by the job that compiles it.
+              - 'packages/envoy/internal/dispatch/text/**'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
@@ -333,9 +344,12 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/envconf/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
+              # internal/dispatch/redeliver sweeps its redelivery records through
+              # kvwatch.ScanExistingKeys (redeliver/sweep.go:50,488).
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/metrics/*'
@@ -416,7 +430,17 @@ jobs:
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
               - 'packages/envoy/brokerclient/*'
+              # packages/envoy/dispatchbody answers whether Dispatch would refuse a body with the
+              # server's own splitter, which the close route and the merger's READY completion
+              # hold their text to (packages/daemon/internal/api): the splitter, the document
+              # parser under it and the contracts both read come with it.
+              - 'packages/envoy/dispatchbody/*'
               - 'packages/envoy/internal/brokerclient/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/listenfd/*'
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
@@ -432,6 +456,7 @@ jobs:
               - 'packages/envoy/internal/config/*'
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/dedupe/*'
+              - 'packages/envoy/internal/envconf/*'
               - 'packages/envoy/internal/ghrename/*'
               - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
@@ -466,9 +491,12 @@ jobs:
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/dedupe/*'
+              - 'packages/envoy/internal/envconf/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
+              # internal/dispatch/redeliver sweeps its redelivery records through
+              # kvwatch.ScanExistingKeys (redeliver/sweep.go:50,488).
               - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/logtest/*'
@@ -688,9 +716,9 @@ jobs:
               # The Go copies its tests hold the TypeScript to: src/dispatch-href.test.ts:49-53 and
               # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables,
               # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
-              # tables, and scripts/gen-go.test.ts checks every file scripts/gen-go.ts writes - two
-              # Go files, pmdoc's generated block schema and contracts' own generated TypeScript -
-              # is current. pmdoc/schema is the block schema those generated types are the shape
+              # tables, and scripts/gen-go.test.ts checks every file scripts/gen-go.ts writes - the
+              # Go contract, pmdoc's generated block schema and contracts' own generated TypeScript
+              # - is current. pmdoc/schema is the block schema those generated types are the shape
               # of, so a change to it is a change to what this job generates for.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
@@ -699,7 +727,6 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/envoy/internal/dispatch/pmdoc/schema_generated.go'
-              - 'packages/daemon/internal/dispatch/generated.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
             # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
             # (the root manifest and lockfile pin its TypeScript and Bun types), and Biome.
@@ -800,7 +827,16 @@ jobs:
               # packages/daemon/internal, and scripts/skill-scenarios/daemon-pane.ts:27 runs
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
-              # daemon-pane.go compiles the daemon module, which reaches that envoy package.
+              # daemon-pane.go compiles the daemon module, which reaches these envoy packages:
+              # the migration identifier rule, and the Dispatch body check the close route and
+              # the merger's READY completion make with the server's own splitter
+              # (packages/envoy/dispatchbody, and the parser and contracts under it).
+              - 'packages/envoy/dispatchbody/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
@@ -883,13 +919,11 @@ jobs:
               # (internal/dispatch/api/lock_level_test.go:120-133).
               - 'packages/envoy/**'
               # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
-              # and sources, renders pmdoc's generated block schema from
-              # schemas/block-schema.schema.json, and checks the daemon's generated copy too
-              # (its outputs list, the files the generator owns).
+              # and sources, and renders pmdoc's generated block schema from
+              # schemas/block-schema.schema.json (its outputs list, the files the generator owns).
               - 'packages/contracts/scripts/gen-go.ts'
               - 'packages/contracts/schemas/**'
               - 'packages/contracts/src/**'
-              - 'packages/daemon/internal/dispatch/generated.go'
               # The pmdoc fixture check and pmdoc's tests run pmdoc/gen, which imports the editor
               # (internal/dispatch/pmdoc/update_test.go:236-239).
               - 'packages/proof-editor/**'
@@ -950,8 +984,8 @@ jobs:
             # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
             # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
             # render_readback_test.go:32), so the editor's package is here too, and
-            # heavy_bodies_test.go:10 reads the body cap every writer of a comment meets
-            # (contracts.DispatchBodyMax), so the contracts package is too.
+            # heavy_bodies_test.go:36 reads the bound one block of a body stands inside
+            # (contracts.DispatchBlockUnits), so the contracts package is too.
             envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -1101,7 +1135,6 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
               - 'packages/envoy/internal/githubappjwt/*'
-              - 'packages/envoy/internal/kvwatch/kvwatchtest/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -1166,7 +1199,6 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
               - 'packages/envoy/internal/githubappjwt/*'
-              - 'packages/envoy/internal/kvwatch/kvwatchtest/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -1361,6 +1393,7 @@ jobs:
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/daemonpermissions/**'
               - 'packages/envoy/deploy/**'
+              - 'packages/envoy/dispatchbody/**'
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
               - 'packages/envoy/internal/**'
@@ -1539,9 +1572,6 @@ jobs:
 
       - name: Check every manifest names the one exact zod
         run: .github/scripts/check-zod-version.sh
-
-      - name: Check the comment and message body limit fits what the embedder reads whole
-        run: .github/scripts/check-body-embed-limit.sh
 
       - name: Check the registration heartbeat leaves a margin inside the session record lifetime
         run: .github/scripts/check-heartbeat-margin.sh
@@ -1880,9 +1910,6 @@ jobs:
 
       - name: Test the zod version check
         run: .github/scripts/check-zod-version.test.sh
-
-      - name: Test the body embed limit check
-        run: .github/scripts/check-body-embed-limit.test.sh
 
       - name: Test the heartbeat margin check
         run: .github/scripts/check-heartbeat-margin.test.sh
@@ -3760,6 +3787,13 @@ jobs:
   # the message sent while it was cut off once. They run only with LEGION_E2E_ENVOY_STACK=1,
   # which only this job sets, so the envoy-client, pi-envoy and claude-envoy jobs, which set up no
   # Go, skip them.
+  #
+  # The session state rig (dispatch://INFRA-392) runs on the same stack and needs no agent: it
+  # SIGSTOPs a child process carrying envoy-client's own registration and heartbeat and holds the
+  # listener to `unresponsive` — the role claim kept, the send stored — until the gone horizon.
+  # Its longest property waits out that horizon and one reaper pass: the role claim reaper runs
+  # at ENVOY_ROLE_CLAIM_REAP_INTERVAL, which the rig sets to two seconds, so the suite costs the
+  # horizon rather than the five minutes that reaper's own default would cost it.
   envoy-session-stall:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'
@@ -3793,6 +3827,11 @@ jobs:
         working-directory: packages/contracts
       - name: Stall test of envoy-client's NATS connection options
         run: bun test src/__tests__/nats-stall.test.ts
+        working-directory: packages/envoy-client
+      # A path, not a filter: bun test discovers only names holding ".test" or ".spec", and takes
+      # this one as a file because of the leading "./".
+      - name: Session state rig of a stalled session
+        run: bun test ./test/session-stall.ts
         working-directory: packages/envoy-client
       - name: Stall test of pi-envoy
         run: bun test extensions/envoy.test.ts -t "NATS path freezes"

@@ -1,0 +1,13 @@
+kind: Fixed
+body: |-
+  The role claim reaper runs on a period of its own, `ENVOY_ROLE_CLAIM_REAP_INTERVAL`, instead of
+  a fixed five minutes no operator could move. Its default is those same five minutes, so a
+  deployment keeps the release it had: a session whose record the bucket expires reads `gone` as
+  surely as one past the gone horizon, and the session bucket ships with a five-minute maximum
+  age, so judging claims every minute — the session reaper's period — would have taken a merely
+  stalled holder's role up to five times sooner than before. The session reaper keeps
+  `ENVOY_SESSION_REAP_INTERVAL`, a minute by default, and the startup line that resolves the
+  session windows now reports both periods. A restored claim's grace is measured from the
+  listener's start against the live window, not counted in passes, so no period changes it.
+custom:
+  Issue: pr2596

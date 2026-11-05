@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+    A session registration that fails is tried once more between 20 and 40 seconds later, instead
+    of at once: a listener slow enough to time the call out was asked again in the same breath,
+    and every session that failed asked together. The extra call is one per failing session per
+    interval — a second failure waits for the next heartbeat rather than asking again — and its
+    delay is drawn afresh each time, so the sessions one slow listener failed come back spread
+    out. Any registration that succeeds returns the session to the plain heartbeat at once, and
+    shutdown drops a call still waiting. The warning says how far out the extra call is.

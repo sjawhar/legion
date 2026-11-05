@@ -53,15 +53,12 @@ func healthzRoleViewRig(t *testing.T, machineID string) (func() (int, map[string
 	return get, registry, client, rig.consumer
 }
 
-// breakRoleClaimView leaves registry's role claim view where a first scan nats.go's idle timer
-// ended leaves it: the watcher runs, the buckets answer, and the view refuses every read.
-func breakRoleClaimView(t *testing.T, registry *store.Registry, client *bus.Client) {
+// breakRoleClaimView leaves registry's role claim view where a listener start leaves it before
+// its first complete read of the role bucket: the watcher runs, the buckets answer, and the view
+// refuses every read (refuseRoleClaimView).
+func breakRoleClaimView(t *testing.T, registry *store.Registry) {
 	t.Helper()
-	raw, err := client.JS().KeyValue(bus.RoleClaimBucket)
-	if err != nil {
-		t.Fatalf("open the role bucket: %v", err)
-	}
-	timeOutRoleClaimScan(t, registry, raw)
+	refuseRoleClaimView(t, registry)
 	if _, err := registry.RolesHeldBy("ses_healthz_role_view"); err == nil {
 		t.Fatal("the role claim view still answers a read, so /healthz has nothing to report")
 	}
@@ -78,8 +75,8 @@ func breakRoleClaimView(t *testing.T, registry *store.Registry, client *bus.Clie
 // repairs itself. The answer keeps the fields the healthy one carries, so a reader of the session
 // counts or the durable's backlog loses none of them while the view fills.
 func TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded(t *testing.T) {
-	get, registry, client, _ := healthzRoleViewRig(t, "healthz-role-view")
-	breakRoleClaimView(t, registry, client)
+	get, registry, _, _ := healthzRoleViewRig(t, "healthz-role-view")
+	breakRoleClaimView(t, registry)
 
 	code, body := get()
 	if code != http.StatusOK || body["status"] != "degraded" {
@@ -102,7 +99,7 @@ func TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded(t *testing.T) {
 // in service. The view is therefore reported last, after every check that answers 503.
 func TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete(t *testing.T) {
 	get, registry, client, consumer := healthzRoleViewRig(t, "healthz-role-view-durable")
-	breakRoleClaimView(t, registry, client)
+	breakRoleClaimView(t, registry)
 	if err := client.JS().DeleteConsumer(bus.Stream, consumer); err != nil {
 		t.Fatalf("delete the durable: %v", err)
 	}

@@ -231,9 +231,9 @@ func TestListenerPermissionsOpenTheListenerStateBucketOnRealServers(t *testing.T
 			config := &natsgo.KeyValueConfig{
 				Bucket: bus.ListenerStateBucket, History: 1, TTL: 10 * time.Minute, Storage: natsgo.FileStorage,
 			}
-			_, err = bus.EnsureKeyValue(js, config)
+			_, err = bus.EnsureKeyValue(conn, js, config)
 			require.NoError(t, err, "create the %s bucket", bus.ListenerStateBucket)
-			kv, err := bus.EnsureKeyValue(js, config)
+			kv, err := bus.EnsureKeyValue(conn, js, config)
 			require.NoError(t, err, "open the existing %s bucket", bus.ListenerStateBucket)
 
 			lease := "lease." + bus.ListenerDurable(liveMachineID)

@@ -182,7 +182,7 @@ func (k overwrittenTakeKV) Create(key string, value []byte) (uint64, error) {
 // another pod wrote first. The standby reads the record again at once, and finds pod-b's.
 func TestLeaseTakeOverwrittenBeforeItsReadBackIsNotHeld(t *testing.T) {
 	kv := leaseBucket(t)
-	a := testLease(bus.KeyValue{KeyValue: overwrittenTakeKV{KeyValue: kv.KeyValue}}, "pod-a", productionLeaseConfig(), newFakeLeaseClock().now)
+	a := testLease(bus.NewKeyValue(overwrittenTakeKV{KeyValue: kv.Legacy()}, kv.WatchHandle(), kv.Streams()), "pod-a", productionLeaseConfig(), newFakeLeaseClock().now)
 	if wait := a.step(); wait != 0 {
 		t.Fatalf("step after an overwritten take waits %s, want 0: read the record again at once", wait)
 	}
@@ -425,8 +425,8 @@ func TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait(t *testing.T) {
 	clock := newFakeLeaseClock()
 	// The clock never moves, so the term's validity never runs out: the debt this row is about is
 	// the timed-out release's, not a lapse's.
-	stalled := newStalledRenewKV(kv.KeyValue)
-	a := testLease(bus.KeyValue{KeyValue: stalled}, "pod-a", testLeaseTiming(), clock.now)
+	stalled := newStalledRenewKV(kv.Legacy())
+	a := testLease(bus.NewKeyValue(stalled, kv.WatchHandle(), kv.Streams()), "pod-a", testLeaseTiming(), clock.now)
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	a.Start(ctx)
@@ -485,8 +485,8 @@ func TestLeaseAStopMarksNoHandBackForTheRevisionAnEarlierGiveUpReleased(t *testi
 	clock := newFakeLeaseClock()
 	// The clock moves only to pass the two standby polls a give-up keeps its own released
 	// revision for another pod, so the term's validity never runs out.
-	stalled := newStalledRenewKV(kv.KeyValue)
-	a := testLease(bus.KeyValue{KeyValue: stalled}, "pod-a", testLeaseTiming(), clock.now)
+	stalled := newStalledRenewKV(kv.Legacy())
+	a := testLease(bus.NewKeyValue(stalled, kv.WatchHandle(), kv.Streams()), "pod-a", testLeaseTiming(), clock.now)
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	a.Start(ctx)

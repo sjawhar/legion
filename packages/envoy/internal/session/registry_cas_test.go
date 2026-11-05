@@ -104,7 +104,7 @@ func TestASessionWriteThatLosesEveryRaceIsAConflict(t *testing.T) {
 	if err := a.Put(sessionID, SessionEntry{Port: 7, MachineID: "box-a"}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	racing := &conflictingSessionKV{KeyValue: a.watcher.KV().KeyValue}
+	racing := &conflictingSessionKV{KeyValue: a.watcher.KV().Legacy()}
 	useKV(t, a, racing)
 	err := a.Put(sessionID, SessionEntry{Port: 7, MachineID: "box-a"})
 	if !errors.Is(err, ErrWriteConflict) {

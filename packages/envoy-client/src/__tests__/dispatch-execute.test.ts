@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
-  ASK_QUESTION_MAX,
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
@@ -15,7 +14,11 @@ import {
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import {
+  DISPATCH_BLOCK_UNITS,
+  DISPATCH_EVENT_BODY_MAX,
+  DISPATCH_ITEM_BLOCKS,
+} from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
 import { bearerCredential } from "../bearer";
 import { cliRefusals } from "../dispatch-cli";
@@ -497,25 +500,25 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([expect.objectContaining({ question })]);
   });
 
-  test("rejects an ask ref that would exceed Dispatch's question limit, naming the number to trim", async () => {
-    const fetchImpl = (() => {
-      throw new Error("network must not be called");
-    }) as unknown as typeof fetch;
+  // The bound on a question and its ref is the server's: the pair is sent whole, and the
+  // refusal the caller is thrown is the one Dispatch wrote.
+  test("sends a question with its ref whole and throws Dispatch's own refusal of the pair", async () => {
+    const ref = "dispatch://DSP-41/ask/ab";
+    const question = "x".repeat(DISPATCH_EVENT_BODY_MAX - 10);
+    const sent = `${question}\n\nRef: ${ref}`;
+    const refusal =
+      `question and options is 21 characters over the ${DISPATCH_EVENT_BODY_MAX}-character ` +
+      `limit (${DISPATCH_EVENT_BODY_MAX + 21}/${DISPATCH_EVENT_BODY_MAX})`;
+    const questions: unknown[] = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      questions.push(JSON.parse(String(init?.body)).question);
+      return response({ code: "CAP_EXCEEDED", error: refusal }, 400);
+    };
 
-    // The question at the cap less 10, plus "\n\nRef: " (7) and the 24-unit ref, is 21 over.
     await expect(
-      executeAsk(
-        {
-          issue: "DSP-41",
-          question: "x".repeat(ASK_QUESTION_MAX - 10),
-          ref: "dispatch://DSP-41/ask/ab",
-        },
-        fetchImpl
-      )
-    ).rejects.toThrow(
-      `question plus ref is 21 characters over the ${ASK_QUESTION_MAX}-character limit ` +
-        `(${ASK_QUESTION_MAX + 21}/${ASK_QUESTION_MAX}); shorten the question or drop the ref`
-    );
+      executeAsk({ issue: "DSP-41", question, ref }, fetchImpl as typeof fetch)
+    ).rejects.toThrow(refusal);
+    expect(questions).toEqual([sent]);
   });
 
   test("rejects an ask ref outside the dispatch scheme", async () => {
@@ -670,6 +673,8 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // A body longer than a block bound is no problem for the call to report: Dispatch holds the
+  // body to its bounds, so only the schema's problems and the hand checks are listed.
   test("reports the comment hand checks alongside the schema problems", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -682,7 +687,8 @@ describe("executeDispatchTool", () => {
         quote: "some text",
         reply_to: "c1",
         reply_to_ask: "a1",
-        body: "x".repeat(DISPATCH_BODY_MAX + 1),
+        body: "x".repeat(DISPATCH_BLOCK_UNITS + 1),
+        custom: "x",
       },
       cwd: "/workspace",
       host: "omp",
@@ -696,7 +702,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      `--body ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)}`,
+      "unknown flag --custom",
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -2577,6 +2583,70 @@ describe("executeDispatchTool", () => {
     expect(agentCalls).toHaveLength(3);
   });
 
+  // The line an agent reads before it decides whether to take an issue. A holder that has
+  // missed its heartbeats has not ended and still holds the claim, so "not running" would send
+  // the reader to take work that is being done; what it needs instead is both times - since
+  // when the holder has been silent, and from when the server lets anyone else take it
+  // (dispatch://INFRA-392).
+  test("an unresponsive holder's claim says since when it is silent and when it becomes takeable", async () => {
+    const serve = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/agents") {
+        return response([{ session_id: "session-stalled", title: "Live registry title" }]);
+      }
+      if (target.pathname === "/api/v1/issues/DSP-1") {
+        return response({
+          key: "DSP-1",
+          title: "Claimed work",
+          status: "todo",
+          priority: null,
+          assignee: null,
+          claim: {
+            actor: { kind: "session", id: "session-stalled", origin: { session_title: "Stamped" } },
+            at: "2026-09-24T06:00:00Z",
+          },
+          holder_state: "unresponsive",
+          last_seen: "2026-09-24T06:30:00Z",
+          takeable_at: "2026-09-24T06:50:00Z",
+          components: {
+            mode: "inherit",
+            ids: [],
+            unknown: [],
+            reason: null,
+            inherited_from: null,
+          },
+          route: null,
+          repo: null,
+          resolved_repo: null,
+          external_links: [],
+          open_asks: [],
+          last_seq: 0,
+          labels: [],
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-1/events") return response([]);
+      if (target.pathname === "/api/v1/issues/DSP-1/references") {
+        return response({ members: [], truncated: false });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("issue"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const stalled = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-1" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: serve as typeof fetch,
+    });
+    expect(stalled.text).toContain(
+      "Claimed by: Live registry title since 2026-09-24T06:00:00Z · unresponsive since 2026-09-24T06:30:00Z, takeable at 2026-09-24T06:50:00Z\n"
+    );
+    expect(stalled.text).not.toContain("not running");
+  });
+
   test("dispatch_issues passes each optional filter through, omits absent ones, and returns the documented row shape", async () => {
     const requests: URL[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -2676,6 +2746,7 @@ describe("executeDispatchTool", () => {
           route: "role:sre",
           route_status: "no_holder",
           route_holder: null,
+          route_status_reason: null,
           updated_at: "2026-09-13T00:00:00Z",
           progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
         },
@@ -2683,6 +2754,145 @@ describe("executeDispatchTool", () => {
       total: 1,
       offset: 0,
       limit: 50,
+    });
+  });
+
+  // A list row has no liveness of its own, so it used to judge a claim by membership of the
+  // agent list alone - and that list carries unresponsive sessions now, because an unresponsive
+  // session keeps its claims. Such a holder then read as plainly holding on the list while
+  // dispatch_read and the dashboard said unresponsive (dispatch://INFRA-392, R5).
+  test("dispatch_issues says an unresponsive holder is unresponsive, from the holder's own agent row", async () => {
+    const stalledAt = Date.parse("2026-09-24T06:30:00Z");
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/agents") {
+        return response([
+          { session_id: "s1", title: "Implementer", state: "unresponsive", last_seen: stalledAt },
+          { session_id: "s2", title: "Reviewer", state: "live", last_seen: stalledAt },
+        ]);
+      }
+      return response({
+        issues: [
+          {
+            key: "ACME-1",
+            title: "Stalled",
+            status: "doing",
+            priority: null,
+            rank: "a",
+            labels: [],
+            parent: null,
+            assignee: null,
+            updated_at: "2026-09-24T06:00:00Z",
+            last_seq: 1,
+            open_asks: 0,
+            progress: { tasks: null, children: null },
+            claim: {
+              actor: { kind: "session", id: "s1", origin: { session_title: "Stamped" } },
+              at: "2026-09-24T06:00:00Z",
+            },
+            route: null,
+            route_status: null,
+            route_holder: null,
+          },
+          {
+            key: "ACME-2",
+            title: "Running",
+            status: "doing",
+            priority: null,
+            rank: "b",
+            labels: [],
+            parent: null,
+            assignee: null,
+            updated_at: "2026-09-24T06:00:00Z",
+            last_seq: 1,
+            open_asks: 0,
+            progress: { tasks: null, children: null },
+            claim: {
+              actor: { kind: "session", id: "s2", origin: { session_title: "Stamped" } },
+              at: "2026-09-24T06:00:00Z",
+            },
+            route: null,
+            route_status: null,
+            route_holder: null,
+          },
+        ],
+        total: 2,
+        limit: 50,
+        offset: 0,
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    // Both times, as dispatch_read gives them: since when it has been silent, and from when the
+    // server lets another agent take the issue (last_seen plus the 20-minute grace).
+    expect(result.text).toContain(
+      "claimed by Implementer since 2026-09-24T06:00:00Z · unresponsive since 2026-09-24T06:30:00.000Z, takeable at 2026-09-24T06:50:00.000Z"
+    );
+    // A live holder keeps its bare line, and nothing reads as not running.
+    expect(result.text).toEndWith("claimed by Reviewer since 2026-09-24T06:00:00Z");
+    expect(result.text).not.toContain("not running");
+  });
+
+  test("dispatch_issues tells a route whose listener is refilling from one whose listener did not answer", async () => {
+    const row = (key: string, reason: string | null) => ({
+      key,
+      title: key,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+      progress: { tasks: null, children: null },
+      claim: null,
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: reason,
+    });
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response({
+        issues: [row("ACME-1", "refilling"), row("ACME-2", "unreachable"), row("ACME-3", null)],
+        total: 3,
+        limit: 50,
+        offset: 0,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(1)).toEqual([
+      "ACME-1 [todo] ACME-1 · route role:sre (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)",
+      "ACME-2 [todo] ACME-2 · route role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+      "ACME-3 [todo] ACME-3 · route role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+    ]);
+    expect(result.details).toMatchObject({
+      issues: [
+        { key: "ACME-1", route_status_reason: "refilling" },
+        { key: "ACME-2", route_status_reason: "unreachable" },
+        { key: "ACME-3", route_status_reason: null },
+      ],
     });
   });
 
@@ -2749,9 +2959,33 @@ describe("executeDispatchTool", () => {
     expect(gone.text).toContain(
       "Route: session:ses-gone (that session is not running right now)\n"
     );
-    const blind = await read({ route: "role:sre", route_status: "unknown", route_holder: null });
+    const blind = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: "unreachable",
+    });
     expect(blind.text).toContain(
       "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A server that gives no reason reads as one whose listener did not answer.
+    const unexplained = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+    });
+    expect(unexplained.text).toContain(
+      "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A listener whose agent list is refilling did answer: the route is unknown only for now.
+    const refilling = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: "refilling",
+    });
+    expect(refilling.text).toContain(
+      "Route: role:sre (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)\n"
     );
     // A held role names its holder the way a claim does: by the live registry's title.
     const held = await read({ route: "role:sre", route_status: "live", route_holder: "ses-sre" });
@@ -3874,6 +4108,50 @@ describe("executeDispatchTool", () => {
     );
     expect(older.warnings).toEqual([
       "dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so DSP-42's repository is unknown; upgrade the server",
+    ]);
+  });
+
+  test("limits prints the server's bounds", async () => {
+    const requests: string[] = [];
+    const bounds = {
+      block_units: DISPATCH_BLOCK_UNITS,
+      item_blocks: DISPATCH_ITEM_BLOCKS,
+      ask_options: 8,
+      ask_units: DISPATCH_EVENT_BODY_MAX,
+      event_body_units: DISPATCH_EVENT_BODY_MAX,
+      request_bytes: 1_048_576,
+      document_bytes: 1_048_576,
+      handoff_bytes: 32_768,
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      requests.push(new URL(String(url)).pathname);
+      return response(bounds);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_limits",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/limits"]);
+    expect(result.details).toEqual(bounds);
+    expect(result.text.split("\n")).toEqual([
+      "One block of a body - a paragraph, list, quote, table or code block: 32,000 characters (UTF-16 units).",
+      "Blocks in one body: 32,768.",
+      "An ask's question and its options together: 32,000 characters (UTF-16 units).",
+      "Options on one ask: 8.",
+      "The body an event carries whole: 32,000 characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.",
+      "One request: 1,048,576 bytes.",
+      "One markdown document: 1,048,576 bytes.",
+      "One handoff body: 32,768 bytes.",
+      "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one.",
     ]);
   });
 
@@ -5214,7 +5492,11 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_ask",
-        args: { issue: "DSP-41", question: "x".repeat(ASK_QUESTION_MAX + 1) },
+        args: {
+          issue: "DSP-41",
+          question: "Which way?",
+          options: Array.from({ length: 9 }, (_, index) => ({ label: `Way ${index}` })),
+        },
         cwd: "/workspace",
         host: "omp",
         config,

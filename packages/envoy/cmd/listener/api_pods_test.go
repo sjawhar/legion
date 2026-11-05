@@ -3,17 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 )
@@ -173,10 +171,9 @@ func (kv racedSessionKV) Update(key string, value []byte, last uint64) (uint64, 
 // the handle its watcher hands out, as stallSessionReads does.
 func raceSessionWrites(t *testing.T, sessions *session.SessionRegistry) {
 	t.Helper()
-	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
-	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	raced := bus.KeyValue{KeyValue: racedSessionKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue}}
-	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", raced, func(nats.KeyValueEntry) {}, func() {})))
+	swapSessionBucket(t, sessions, func(kv nats.KeyValue) nats.KeyValue {
+		return racedSessionKV{KeyValue: kv}
+	})
 }
 
 // A registration write that loses its compare-and-set on every attempt is a transient failure: the
@@ -214,11 +211,15 @@ func TestAHeartbeatAndARoleSetKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 		return kv
 	}
 	sessionKV, interestKV, roleKV := bucket(bus.SessionBucket), bucket(bus.InterestBucket), bucket(bus.RoleClaimBucket)
+	// The registration carries the moment it was written, as every build's does: a record with no
+	// updated_at is one no reader can date, which reads gone (session.StateOf), and a role set
+	// refuses a claimant this listener holds no standing record for.
+	registered := time.Now().UnixMilli()
 	for _, seed := range []struct {
 		kv         nats.KeyValue
 		key, value string
 	}{
-		{sessionKV, sessionID, `{"port":0,"machine_id":"test-machine","dir":"/work","future_field":"session"}`},
+		{sessionKV, sessionID, fmt.Sprintf(`{"port":0,"machine_id":"test-machine","dir":"/work","updated_at":%d,"future_field":"session"}`, registered)},
 		{interestKV, sessionID, `{"session_id":"ses_newer_build","machine_id":"test-machine","dir":"/work","topics":["notifications.agent.ses_newer_build"],"future_field":"interest"}`},
 		{roleKV, "keeper", `{"holder_session_id":"ses_before","claimed_at":1,"future_field":"claim"}`},
 	} {

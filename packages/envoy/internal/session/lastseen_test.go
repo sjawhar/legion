@@ -24,7 +24,7 @@ func listenerStateBucket(t *testing.T, conn *natsgo.Conn) bus.KeyValue {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	kv, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{Bucket: bus.ListenerStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 10 * time.Minute})
+	kv, err := bus.EnsureKeyValue(conn, js, &natsgo.KeyValueConfig{Bucket: bus.ListenerStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 10 * time.Minute})
 	if err != nil {
 		t.Fatalf("open the listener state bucket: %v", err)
 	}
@@ -170,8 +170,9 @@ func (b *syncBuffer) String() string {
 func TestARegistrationWhoseLastSeenRecordFailsIsStillWritten(t *testing.T) {
 	client := setupNATS(t)
 	var logs syncBuffer
+	state := listenerStateBucket(t, client.Conn)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1),
-		WithLastSeenBucket(bus.KeyValue{KeyValue: failingPutKV{KeyValue: listenerStateBucket(t, client.Conn).KeyValue}}),
+		WithLastSeenBucket(bus.NewKeyValue(failingPutKV{KeyValue: state.Legacy()}, state.WatchHandle(), state.Streams())),
 		WithSessionLogger(slog.New(slog.NewTextHandler(&logs, nil))))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)

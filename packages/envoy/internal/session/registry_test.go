@@ -232,17 +232,17 @@ func TestSessionRegistry_Delete(t *testing.T) {
 // A deregistration that names the instance that registered the session deletes it, as the
 // unconditional Delete does: the /clear handoff this guards is a client deregistering its own
 // session before it claims that session's role.
-func TestSessionRegistryDeleteIfInstance_DeletesTheSameInstancesEntry(t *testing.T) {
+func TestSessionRegistryDeleteIf_DeletesTheSameInstancesEntry(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 	const sessionID = "ses_instance_same"
 	putForInstanceDelete(t, reg, sessionID, "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a")
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a")
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryDeleted {
-		t.Fatalf("DeleteIfInstance = %s, want %s for an entry its own client instance deregistered", outcome, EntryDeleted)
+		t.Fatalf("DeleteIf = %s, want %s for an entry its own client instance deregistered", outcome, EntryDeleted)
 	}
 	if _, err := reg.watcher.KV().Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("read the deleted key: %v, want nats.ErrKeyNotFound", err)
@@ -255,17 +255,17 @@ func TestSessionRegistryDeleteIfInstance_DeletesTheSameInstancesEntry(t *testing
 // The hole this closes: another process resumed the session id and registered under its own
 // instance, so the earlier instance's deregistration must leave that live entry alone — and still
 // answer, since there is nothing for it to retry.
-func TestSessionRegistryDeleteIfInstance_KeepsAnotherInstancesEntry(t *testing.T) {
+func TestSessionRegistryDeleteIf_KeepsAnotherInstancesEntry(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 	const sessionID = "ses_instance_other"
 	putForInstanceDelete(t, reg, sessionID, "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2")
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a")
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryKeptForAnotherInstance {
-		t.Fatalf("DeleteIfInstance = %s, want %s for another client instance's live entry", outcome, EntryKeptForAnotherInstance)
+		t.Fatalf("DeleteIf = %s, want %s for another client instance's live entry", outcome, EntryKeptForAnotherInstance)
 	}
 	stored, err := reg.Get(sessionID)
 	if err != nil {
@@ -278,17 +278,17 @@ func TestSessionRegistryDeleteIfInstance_KeepsAnotherInstancesEntry(t *testing.T
 
 // An entry a client that predates the field registered carries no instance id, and a client that
 // names one still deregisters it: that client is the only one that can be deregistering it.
-func TestSessionRegistryDeleteIfInstance_DeletesAnEntryThatNamesNoInstance(t *testing.T) {
+func TestSessionRegistryDeleteIf_DeletesAnEntryThatNamesNoInstance(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 	const sessionID = "ses_instance_absent_stored"
 	putForInstanceDelete(t, reg, sessionID, "")
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a")
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryDeleted {
-		t.Fatalf("DeleteIfInstance = %s, want %s for an entry that carries no client instance id", outcome, EntryDeleted)
+		t.Fatalf("DeleteIf = %s, want %s for an entry that carries no client instance id", outcome, EntryDeleted)
 	}
 	if _, err := reg.Get(sessionID); err == nil {
 		t.Fatal("the cache still answers with the deleted entry")
@@ -297,17 +297,17 @@ func TestSessionRegistryDeleteIfInstance_DeletesAnEntryThatNamesNoInstance(t *te
 
 // A caller that names no instance id compares nothing, so it deletes whatever is stored, as the
 // route does for a client that sends no id of its own.
-func TestSessionRegistryDeleteIfInstance_WithNoInstanceIDDeletesWhateverIsStored(t *testing.T) {
+func TestSessionRegistryDeleteIf_WithNoInstanceIDDeletesWhateverIsStored(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 	const sessionID = "ses_instance_absent_requested"
 	putForInstanceDelete(t, reg, sessionID, "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2")
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, "")
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryDeleted {
-		t.Fatalf("DeleteIfInstance = %s, want %s for a request naming no client instance id", outcome, EntryDeleted)
+		t.Fatalf("DeleteIf = %s, want %s for a request naming no client instance id", outcome, EntryDeleted)
 	}
 	if _, err := reg.Get(sessionID); err == nil {
 		t.Fatal("the cache still answers with the deleted entry")
@@ -316,22 +316,22 @@ func TestSessionRegistryDeleteIfInstance_WithNoInstanceIDDeletesWhateverIsStored
 
 // A key that is not there is already gone, which is what the caller asked for: deleted, no error,
 // as Delete is idempotent today.
-func TestSessionRegistryDeleteIfInstance_AbsentKeyAnswersDeleted(t *testing.T) {
+func TestSessionRegistryDeleteIf_AbsentKeyAnswersDeleted(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), "ses_instance_missing", "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a")
+	outcome, err := reg.DeleteIf(context.Background(), "ses_instance_missing", DeleteConditions{ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryDeleted {
-		t.Fatalf("DeleteIfInstance = %s, want %s for an absent key", outcome, EntryDeleted)
+		t.Fatalf("DeleteIf = %s, want %s for an absent key", outcome, EntryDeleted)
 	}
 }
 
 // The deleting instance's own heartbeat lands between the read and the delete, so JetStream
 // refuses the delete with wrong last sequence: the sequence runs once more and the entry goes,
 // where answering "kept" would leave the predecessor alive and make the claim that follows a 409.
-func TestSessionRegistryDeleteIfInstance_RetriesOnceAfterALostCompareAndSwap(t *testing.T) {
+func TestSessionRegistryDeleteIf_RetriesOnceAfterALostCompareAndSwap(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 	const (
 		sessionID  = "ses_instance_race"
@@ -347,15 +347,15 @@ func TestSessionRegistryDeleteIfInstance_RetriesOnceAfterALostCompareAndSwap(t *
 	if err != nil {
 		t.Fatalf("encode the interleaved heartbeat: %v", err)
 	}
-	race := &interleavingSessionGetKeyValue{KeyValue: reg.watcher.KV(), key: sessionID, value: heartbeat, interleaves: 1}
+	race := &interleavingSessionGetKeyValue{KeyValue: reg.watcher.KV().Legacy(), key: sessionID, value: heartbeat, interleaves: 1}
 	useKV(t, reg, race)
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, instanceID)
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{ClientInstanceID: instanceID})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryDeleted {
-		t.Fatalf("DeleteIfInstance = %s, want %s where its own heartbeat only lost it one compare-and-swap", outcome, EntryDeleted)
+		t.Fatalf("DeleteIf = %s, want %s where its own heartbeat only lost it one compare-and-swap", outcome, EntryDeleted)
 	}
 	if got := race.reads(); got != 2 {
 		t.Fatalf("read the entry %d times, want the one retry (2)", got)
@@ -372,7 +372,7 @@ func TestSessionRegistryDeleteIfInstance_RetriesOnceAfterALostCompareAndSwap(t *
 // json.Unmarshal fills the fields it decoded before the type error, so the id another client
 // instance wrote would keep the entry if the half-decoded value were trusted. The branch drops
 // it, and the deregistration is not blocked by a record no reader can act on.
-func TestSessionRegistryDeleteIfInstance_DeletesAMalformedValueThatNamesAnotherInstance(t *testing.T) {
+func TestSessionRegistryDeleteIf_DeletesAMalformedValueThatNamesAnotherInstance(t *testing.T) {
 	logs := captureSessionRegistryLogs(t)
 	reg := openRegistryForInstanceDelete(t)
 	const sessionID = "ses_instance_malformed"
@@ -380,18 +380,18 @@ func TestSessionRegistryDeleteIfInstance_DeletesAMalformedValueThatNamesAnotherI
 		t.Fatalf("put the malformed value: %v", err)
 	}
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a")
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryDeleted {
-		t.Fatalf("DeleteIfInstance = %s, want %s for a value this build cannot read", outcome, EntryDeleted)
+		t.Fatalf("DeleteIf = %s, want %s for a value this build cannot read", outcome, EntryDeleted)
 	}
 	if _, err := reg.watcher.KV().Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("read the deleted key: %v, want nats.ErrKeyNotFound", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
-		return strings.Contains(logs.String(), "session registry deleting a malformed value for a named client instance")
+		return strings.Contains(logs.String(), "session registry deleting a malformed value under a conditional delete")
 	})
 }
 
@@ -399,7 +399,7 @@ func TestSessionRegistryDeleteIfInstance_DeletesAMalformedValueThatNamesAnotherI
 // the entry stayed. It is not the mismatch's outcome, because the write that won the race can be
 // this very client instance's heartbeat, and the route's reason for a mismatch would then be
 // false.
-func TestSessionRegistryDeleteIfInstance_KeepsTheEntryAfterTwoLostCompareAndSwaps(t *testing.T) {
+func TestSessionRegistryDeleteIf_KeepsTheEntryAfterTwoLostCompareAndSwaps(t *testing.T) {
 	reg := openRegistryForInstanceDelete(t)
 	const (
 		sessionID  = "ses_instance_race_lost"
@@ -415,15 +415,15 @@ func TestSessionRegistryDeleteIfInstance_KeepsTheEntryAfterTwoLostCompareAndSwap
 	if err != nil {
 		t.Fatalf("encode the interleaved heartbeat: %v", err)
 	}
-	race := &interleavingSessionGetKeyValue{KeyValue: reg.watcher.KV(), key: sessionID, value: heartbeat, interleaves: 2}
+	race := &interleavingSessionGetKeyValue{KeyValue: reg.watcher.KV().Legacy(), key: sessionID, value: heartbeat, interleaves: 2}
 	useKV(t, reg, race)
 
-	outcome, err := reg.DeleteIfInstance(context.Background(), sessionID, instanceID)
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{ClientInstanceID: instanceID})
 	if err != nil {
-		t.Fatalf("DeleteIfInstance: %v", err)
+		t.Fatalf("DeleteIf: %v", err)
 	}
 	if outcome != EntryKeptAfterLostRace {
-		t.Fatalf("DeleteIfInstance = %s, want %s after both compare-and-swaps lost", outcome, EntryKeptAfterLostRace)
+		t.Fatalf("DeleteIf = %s, want %s after both compare-and-swaps lost", outcome, EntryKeptAfterLostRace)
 	}
 	if got := race.reads(); got != 2 {
 		t.Fatalf("read the entry %d times, want the one retry (2)", got)
@@ -433,8 +433,59 @@ func TestSessionRegistryDeleteIfInstance_KeepsTheEntryAfterTwoLostCompareAndSwap
 	}
 }
 
+// The condition the daemon's clean stop of a dead role's session carries: the registration under
+// that session id was written after the moment the stop belongs to, so it is the relaunched
+// process's and the delete must not take it (dispatch://INFRA-392).
+func TestSessionRegistryDeleteIf_KeepsARegistrationWrittenAfterTheMoment(t *testing.T) {
+	reg := openRegistryForInstanceDelete(t)
+	const sessionID = "ses_registered_again"
+	putForInstanceDelete(t, reg, sessionID, "")
+	stored, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the registration back: %v", err)
+	}
+
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{NotRegisteredAfter: stored.UpdatedAt - 1})
+	if err != nil {
+		t.Fatalf("DeleteIf: %v", err)
+	}
+	if outcome != EntryKeptForALaterRegistration {
+		t.Fatalf("DeleteIf = %s, want %s for a registration newer than the stop", outcome, EntryKeptForALaterRegistration)
+	}
+	kept, err := reg.watcher.KV().Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the registration that stayed: %v, want it still stored", err)
+	}
+	if _, err := reg.Get(sessionID); err != nil {
+		t.Fatalf("the cache dropped the registration that stayed: %v (revision %d)", err, kept.Revision())
+	}
+}
+
+// The stop's own registration: nothing has been written under that session id since the moment
+// the stop belongs to, so the entry goes and the session reads gone at once.
+func TestSessionRegistryDeleteIf_DeletesARegistrationNoNewerThanTheMoment(t *testing.T) {
+	reg := openRegistryForInstanceDelete(t)
+	const sessionID = "ses_still_the_dead_launchs"
+	putForInstanceDelete(t, reg, sessionID, "")
+	stored, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the registration back: %v", err)
+	}
+
+	outcome, err := reg.DeleteIf(context.Background(), sessionID, DeleteConditions{NotRegisteredAfter: stored.UpdatedAt})
+	if err != nil {
+		t.Fatalf("DeleteIf: %v", err)
+	}
+	if outcome != EntryDeleted {
+		t.Fatalf("DeleteIf = %s, want %s for the registration the stop belongs to", outcome, EntryDeleted)
+	}
+	if _, err := reg.watcher.KV().Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("read the deleted key: %v, want nats.ErrKeyNotFound", err)
+	}
+}
+
 // openRegistryForInstanceDelete opens a registry whose cache has caught up with its bucket, so a
-// DeleteIfInstance test reads what it seeded and nothing else.
+// conditional-delete test reads what it seeded and nothing else.
 func openRegistryForInstanceDelete(t *testing.T) *SessionRegistry {
 	t.Helper()
 	client := setupNATS(t)
@@ -593,7 +644,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	const sessionID = "ses_revision"
 	raw := reg.watcher.KV()
 	useKV(t, reg, &interleavingSessionWriteKeyValue{
-		KeyValue: raw,
+		KeyValue: raw.Legacy(),
 		afterFirstWrite: func() {
 			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote"}
 			buf, err := json.Marshal(remote)
@@ -644,30 +695,41 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 		t.Fatalf("Get seeded entry: %v", err)
 	}
 	useKV(t, reg, &historyFailSessionKeyValue{
-		KeyValue: reg.watcher.KV(),
+		KeyValue: reg.watcher.KV().Legacy(),
 		err:      errors.New("injected history failure"),
 	})
 	if err := reg.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	reg.mu.Lock()
-	reg.cacheSessionLocked(sessionID, item, time.Time{}, entry.Revision())
-	reg.mu.Unlock()
+	sessionCache{reg}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
 	if _, err := reg.Get(sessionID); err == nil {
 		t.Fatal("Get returned a session restored by a stale watcher update")
 	}
 }
 
-// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle, so the registry writes
-// through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle that watches
+// through the handle's own jetstream one, so the registry writes through kv from here on.
+//
+// The watcher it replaces is ended rather than stopped before this one takes its place, and the
+// field is written under r.mu: the readers of it on other goroutines - a consume's delivery
+// through following(), which every scheduled deadline reaches (armExpiryLocked), the expiry
+// timers and the reaper - hold that lock. Production assigns the field once at open; a test is
+// the only writer there is.
 func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	t.Helper()
-	r.watcher.Stop()
-	r.watcher = kvwatch.New("session registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
-	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	r.mu.RLock()
+	previous := r.watcher
+	r.mu.RUnlock()
+	base := previous.KV()
+	previous.End(ctx)
+	rebuilt := kvwatch.New("session registry", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), sessionCache{r})
+	r.mu.Lock()
+	r.watcher = rebuilt
+	r.mu.Unlock()
+	rebuilt.Start()
 	if err := r.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("wait for the rebuilt watcher: %v", err)
 	}
@@ -708,7 +770,7 @@ func (kv *interleavingSessionWriteKeyValue) Update(key string, value []byte, las
 // interleavingSessionGetKeyValue writes value under key after each of the first interleaves reads
 // of key, so whatever that reader does next loses its compare-and-swap: the revision it read is
 // no longer the last one by the time it deletes. One interleaved write is the heartbeat
-// DeleteIfInstance retries past; two leave it no attempt that can land. Reads of any other key,
+// DeleteIf retries past; two leave it no attempt that can land. Reads of any other key,
 // and reads that did not answer, pass straight through and are not counted.
 type interleavingSessionGetKeyValue struct {
 	natsgo.KeyValue
@@ -738,7 +800,7 @@ func (kv *interleavingSessionGetKeyValue) Get(key string) (natsgo.KeyValueEntry,
 	return entry, nil
 }
 
-// reads is how often the key was read through this bucket, one per DeleteIfInstance attempt.
+// reads is how often the key was read through this bucket, one per DeleteIf attempt.
 func (kv *interleavingSessionGetKeyValue) reads() int {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
