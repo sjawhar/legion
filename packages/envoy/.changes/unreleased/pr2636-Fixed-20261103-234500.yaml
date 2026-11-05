@@ -1,0 +1,28 @@
+kind: Fixed
+body: |
+  A listener call that acts for a session presents that session's own credential, so a process
+  that switches sessions hands back the role the session it left still holds instead of being
+  answered 403 and leaving that role with a session whose subject it has closed until the
+  registration's TTL lapses. The listener binds a broker token's session on eight routes, and
+  every call whose body names the session it acts for — subscribe, unsubscribe, the
+  deregistration, a role claim, a replay, and a send or publish with a source session — now
+  names it to the credential; a read of another session's record still names none.
+
+  The token exchange mints or moves a launcher credential only for a trade that asks for one. An
+  absent `launcher_credential` parameter asks, so `agent-secrets`, `agent-secrets-helper` and a
+  person's sign-in keep theirs by sending nothing, and so does any client written before the
+  parameter; `false` declines and any other spelling is `invalid_request`. Every TypeScript
+  client declines: none reads the credential, and each makes a key per process and per session,
+  so each `dispatch` call, each Claude Code hook run, each `envoy-send` and each session of a
+  long-lived process used to leave a `launcher_credentials` row and a
+  `launcher_credential.token_login` audit row on the operator's machine-logins list that nothing
+  removes.
+
+  The TypeScript broker client reads `invalid_dpop_proof` and `use_dpop_nonce` as refusals a
+  later trade may be answered differently, as the Go client already did, so a proof signed
+  before NTP corrects the host's clock no longer drops a live token and fails every Dispatch and
+  listener call. The wire corpus both clients replay carries a vector for each of the two
+  behaviours above, so neither client can drift from the other on them unnoticed.
+time: 2026-11-03T23:45:00.000000000Z
+custom:
+  Issue: pr2636
