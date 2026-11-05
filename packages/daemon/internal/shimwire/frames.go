@@ -11,12 +11,15 @@ package shimwire
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The frame type names, verbatim from the shipped protocol.
@@ -52,6 +55,16 @@ const (
 	TypeLauncherStartResult          = "launcher_start_result"
 	TypeLauncherStop                 = "launcher_stop"
 	TypeLauncherStopResult           = "launcher_stop_result"
+	// The workspace bundle's two directions: the daemon asking one role's shim for the unpushed
+	// work of the workspace every role of its issue shares, and the daemon handing that bundle to
+	// the launcher of the pod that replaces the released one, in slices under the frame limit.
+	// The launcher reports what became of it once it has run the restore (launcher_restored),
+	// which is the confirmation the daemon drops its saved copy on.
+	TypeBundleWorkspace       = "bundle-workspace"
+	TypeBundleWorkspaceResult = "bundle-workspace-result"
+	TypeLauncherBundle        = "launcher_bundle"
+	TypeLauncherBundleResult  = "launcher_bundle_result"
+	TypeLauncherRestored      = "launcher_restored"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -339,6 +352,95 @@ type AdoptWorkingCopyResult struct {
 	Error string `json:"error,omitempty"`
 }
 
+// BundleWorkspace asks the shim to bundle the unpushed work of the workspace it runs in, so the
+// daemon can keep it while the released pod, its disk and that workspace go. The daemon names the
+// issue, the largest bundle it will take and the budget, never a command or a path: the shim
+// builds the bundle with the jj and git of the workspace it already works in.
+type BundleWorkspace struct {
+	ID        string `json:"id"`
+	Issue     string `json:"issue"`
+	MaxBytes  int    `json:"maxBytes"`
+	TimeoutMs int    `json:"timeoutMs"`
+}
+
+// BundleWorkspaceResult answers BundleWorkspace with the bundle and the three facts a restore
+// needs beside it: the commit the working copy sat on, the heads the bundle carries, and each
+// local bookmark that pointed into the saved set. A bundle larger than the request's MaxBytes is
+// refused rather than sent, with SizeBytes naming what it would have been, so the caller can stop
+// the release and record why. The result crosses the shim's lane as an rpc_chunk sequence when it
+// is larger than one line.
+type BundleWorkspaceResult struct {
+	ID        string            `json:"id"`
+	OK        bool              `json:"ok"`
+	Error     string            `json:"error,omitempty"`
+	SizeBytes int               `json:"sizeBytes"`
+	Bundle    []byte            `json:"bundle,omitempty"`
+	Head      string            `json:"head,omitempty"`
+	Tips      []string          `json:"tips,omitempty"`
+	Bookmarks map[string]string `json:"bookmarks,omitempty"`
+	At        time.Time         `json:"at"`
+}
+
+// LauncherBundle is one slice of a saved workspace bundle on its way to the launcher of the pod
+// that replaces a released one. The launcher has no rpc_chunk lane of its own, so the slicing is
+// the frame's: Payload is the Index-th LauncherBundlePayloadBytes of the whole body
+// (SplitWorkspaceBundle), Count how many slices there are, and SHA256 the digest of the body the
+// slices rebuild, which the launcher checks before it writes anything. ID names the sequence, so a
+// repeated slice is recognised as a repeated launcher_start id is.
+//
+// Release is the id of the release that saved the body, which the launcher echoes in its
+// launcher_restored: the daemon deletes the bundle that report names and no other, so a report
+// that reaches it after a later release has saved again deletes nothing (internal/runtime/sandbox's
+// restoreReported). It travels beside the body rather than in it so that a report still names its
+// release when the body could not be read.
+type LauncherBundle struct {
+	ID      string `json:"id"`
+	Index   int    `json:"index"`
+	Count   int    `json:"count"`
+	Release int64  `json:"release"`
+	Payload []byte `json:"payload"`
+	SHA256  string `json:"sha256"`
+}
+
+// LauncherBundleResult answers one LauncherBundle. Held is the launcher holding the whole,
+// digest-checked body, which it answers the last slice of the sequence with: the sequence is
+// over and the daemon sends no more of it. It is not the restore — that runs in the roles
+// container before the first role of the pod starts, and the launcher reports its outcome in a
+// launcher_restored of its own, which is what the daemon drops its saved copy on.
+type LauncherBundleResult struct {
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+	OK    bool   `json:"ok"`
+	Held  bool   `json:"held,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// LauncherRestored is the launcher's own report of what became of the bundle it held: the
+// launcher sends it, unasked, as soon as the start that applied the bundle has run the restore,
+// and again on each later connection until one carries it: this report is the one thing the
+// daemon drops its own copy of the work on, so a restore it never hears of leaves in its
+// database work the pod's workspace already holds. ID is the slice sequence the bundle arrived
+// under and Release the release whose save that sequence carried. OK is the restore that put the
+// work back; a restore that failed carries the reason the launcher wrote the agent, and the
+// daemon keeps its copy, which it sends to no pod again (store.TakeWorkspaceBundleForRestore).
+type LauncherRestored struct {
+	ID      string `json:"id"`
+	Release int64  `json:"release,omitempty"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+}
+
+// WorkspaceBundle is the saved work the LauncherBundle slices carry: the git bundle's own bytes,
+// the commit the working copy sat on, the heads the bundle carries and each local bookmark that
+// pointed into the saved set. It is no frame of its own — it is the body a sequence rebuilds.
+type WorkspaceBundle struct {
+	Bundle    []byte            `json:"-"`
+	Head      string            `json:"head"`
+	Tips      []string          `json:"tips,omitempty"`
+	Bookmarks map[string]string `json:"bookmarks,omitempty"`
+	At        time.Time         `json:"at"`
+}
+
 // RescueUnpushed asks the shim, before the daemon replaces its pod, to check every workspace on
 // the pod's disk for work its remote lacks and to push that work to rescue branches on that remote,
 // as the shim's role and with that role's own credential (internal/rescue). Branch is the prefix of
@@ -425,6 +527,11 @@ func (LauncherStart) FrameType() string                { return TypeLauncherStar
 func (LauncherStartResult) FrameType() string          { return TypeLauncherStartResult }
 func (LauncherStop) FrameType() string                 { return TypeLauncherStop }
 func (LauncherStopResult) FrameType() string           { return TypeLauncherStopResult }
+func (BundleWorkspace) FrameType() string              { return TypeBundleWorkspace }
+func (BundleWorkspaceResult) FrameType() string        { return TypeBundleWorkspaceResult }
+func (LauncherBundle) FrameType() string               { return TypeLauncherBundle }
+func (LauncherBundleResult) FrameType() string         { return TypeLauncherBundleResult }
+func (LauncherRestored) FrameType() string             { return TypeLauncherRestored }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -553,6 +660,31 @@ func (f LauncherStopResult) MarshalJSON() ([]byte, error) {
 	return marshalFrame(TypeLauncherStopResult, plain(f))
 }
 
+func (f BundleWorkspace) MarshalJSON() ([]byte, error) {
+	type plain BundleWorkspace
+	return marshalFrame(TypeBundleWorkspace, plain(f))
+}
+
+func (f BundleWorkspaceResult) MarshalJSON() ([]byte, error) {
+	type plain BundleWorkspaceResult
+	return marshalFrame(TypeBundleWorkspaceResult, plain(f))
+}
+
+func (f LauncherBundle) MarshalJSON() ([]byte, error) {
+	type plain LauncherBundle
+	return marshalFrame(TypeLauncherBundle, plain(f))
+}
+
+func (f LauncherBundleResult) MarshalJSON() ([]byte, error) {
+	type plain LauncherBundleResult
+	return marshalFrame(TypeLauncherBundleResult, plain(f))
+}
+
+func (f LauncherRestored) MarshalJSON() ([]byte, error) {
+	type plain LauncherRestored
+	return marshalFrame(TypeLauncherRestored, plain(f))
+}
+
 // Validate refuses a hello the listener would refuse (worker-stream-listener.ts:140-148).
 func (f Hello) Validate() error {
 	if f.BootToken == "" {
@@ -574,6 +706,174 @@ func (f AdoptWorkingCopy) Validate() error {
 		return fmt.Errorf("%w: adopt-working-copy timeoutMs is %d", ErrMalformedFrame, f.TimeoutMs)
 	}
 	return nil
+}
+
+// issueKeyShape is a Dispatch issue key, the one shape an issue has. The shim puts the issue into
+// a revset (`remote_bookmarks(exact:"legion/<issue>")`), so a frame whose issue is not one is
+// refused here rather than quoted into a command.
+var issueKeyShape = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
+
+// Validate refuses a bundle request the shim would refuse. The daemon is its only sender.
+func (f BundleWorkspace) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: bundle-workspace carries no id", ErrMalformedFrame)
+	case !issueKeyShape.MatchString(f.Issue):
+		return fmt.Errorf("%w: bundle-workspace issue %q is not an issue key", ErrMalformedFrame, f.Issue)
+	case f.MaxBytes <= 0:
+		return fmt.Errorf("%w: bundle-workspace maxBytes is %d", ErrMalformedFrame, f.MaxBytes)
+	case f.TimeoutMs <= 0:
+		return fmt.Errorf("%w: bundle-workspace timeoutMs is %d", ErrMalformedFrame, f.TimeoutMs)
+	}
+	return nil
+}
+
+// Validate refuses a bundle result the daemon could not act on: one answering no request, a
+// refusal with no reason, or a bundle whose bytes and declared size disagree.
+func (f BundleWorkspaceResult) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: bundle-workspace-result carries no id", ErrMalformedFrame)
+	case !f.OK && f.Error == "":
+		return fmt.Errorf("%w: bundle-workspace-result refuses without a reason", ErrMalformedFrame)
+	case f.OK && f.Head == "":
+		return fmt.Errorf("%w: bundle-workspace-result carries no head", ErrMalformedFrame)
+	case f.OK && f.SizeBytes != len(f.Bundle):
+		return fmt.Errorf("%w: bundle-workspace-result says %d bytes and carries %d", ErrMalformedFrame, f.SizeBytes, len(f.Bundle))
+	}
+	return nil
+}
+
+// Validate refuses a bundle slice the launcher could not place in its sequence.
+func (f LauncherBundle) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: launcher_bundle carries no id", ErrMalformedFrame)
+	case f.Count <= 0:
+		return fmt.Errorf("%w: launcher_bundle count is %d", ErrMalformedFrame, f.Count)
+	case f.Index < 0 || f.Index >= f.Count:
+		return fmt.Errorf("%w: launcher_bundle index %d of %d", ErrMalformedFrame, f.Index, f.Count)
+	case f.Release <= 0:
+		return fmt.Errorf("%w: launcher_bundle %d names no release", ErrMalformedFrame, f.Index)
+	case len(f.Payload) == 0:
+		return fmt.Errorf("%w: launcher_bundle %d carries no payload", ErrMalformedFrame, f.Index)
+	case len(f.Payload) > LauncherBundlePayloadBytes:
+		return fmt.Errorf("%w: launcher_bundle payload is %d bytes, limit %d", ErrMalformedFrame, len(f.Payload), LauncherBundlePayloadBytes)
+	case !digestShape.MatchString(f.SHA256):
+		return fmt.Errorf("%w: launcher_bundle sha256 %q is not a hex SHA-256", ErrMalformedFrame, f.SHA256)
+	}
+	return nil
+}
+
+// digestShape is a hex-encoded SHA-256: 64 lowercase hex characters.
+var digestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// LauncherBundlePayloadBytes is how much of a bundle's body one launcher_bundle frame carries.
+// Base64 of it, plus the frame's other members, stays well inside MaxFrameBytes, which is the
+// whole reason the sequence exists: the launcher reads one frame per line and nothing reassembles
+// rpc_chunk on its side.
+const LauncherBundlePayloadBytes = 256 << 10
+
+// MaxWorkspaceBundleBodyBytes is the largest body a launcher_bundle sequence carries, and every
+// allocation this file makes for one is under it. It is the wire's own refusal rather than the
+// release's: a release stops above runtime.MaxWorkspaceBundleBytes long before a body reaches
+// here (outbox's release), and this bound says what the sequence itself will build, so a caller
+// that never read that policy cannot ask for a slice count or a body buffer sized by a length
+// nothing checked. 64 MiB leaves the release's 40 MiB its header and room to grow under a bound
+// a test keeps ordered (runtime's workspace_bundle_wire_test.go).
+const MaxWorkspaceBundleBodyBytes = 64 << 20
+
+// SplitWorkspaceBundle slices b, the work release saved, into the launcher_bundle sequence that
+// carries it, every slice declaring the release and the digest of the whole body so the launcher
+// can refuse one that did not arrive as it was sent. The sequence's id is name, the release and
+// that digest, so the same bundle sent again is the same sequence and another bundle, or the same
+// work saved by another release, is another one: a launcher whose connection was replaced
+// mid-sequence answers a slice it already took with the answer it gave, and refuses only a payload
+// that differs from the one that id carried (internal/launcher's bundleRestore.receive).
+func SplitWorkspaceBundle(name string, release int64, b WorkspaceBundle) ([]LauncherBundle, error) {
+	if name == "" {
+		return nil, fmt.Errorf("%w: a launcher_bundle sequence needs a name", ErrMalformedFrame)
+	}
+	if release <= 0 {
+		return nil, fmt.Errorf("%w: a launcher_bundle sequence needs the release that saved it", ErrMalformedFrame)
+	}
+	body, err := marshalWorkspaceBundle(b)
+	if err != nil {
+		return nil, err
+	}
+	digest := BundleDigest(body)
+	id := name + "-" + strconv.FormatInt(release, 10) + "-" + digest
+	count := len(body) / LauncherBundlePayloadBytes
+	if len(body)%LauncherBundlePayloadBytes != 0 {
+		count++
+	}
+	frames := make([]LauncherBundle, 0, count)
+	for index := range count {
+		end := min((index+1)*LauncherBundlePayloadBytes, len(body))
+		frames = append(frames, LauncherBundle{
+			ID: id, Index: index, Count: count, Release: release,
+			Payload: body[index*LauncherBundlePayloadBytes : end], SHA256: digest,
+		})
+	}
+	return frames, nil
+}
+
+// ParseWorkspaceBundle reads the body a launcher_bundle sequence rebuilt: one JSON line naming
+// the saved commits, then the git bundle's own bytes. The bundle is kept raw rather than encoded
+// into that line so a 40 MiB bundle is base64'd once, by the slices that carry it, and not twice.
+func ParseWorkspaceBundle(body []byte) (WorkspaceBundle, error) {
+	head, bundle, found := bytes.Cut(body, []byte("\n"))
+	if !found {
+		return WorkspaceBundle{}, fmt.Errorf("%w: a workspace bundle body carries no header line", ErrMalformedFrame)
+	}
+	var b WorkspaceBundle
+	if err := json.Unmarshal(head, &b); err != nil {
+		return WorkspaceBundle{}, fmt.Errorf("%w: a workspace bundle header: %w", ErrMalformedFrame, err)
+	}
+	if len(bundle) == 0 {
+		return WorkspaceBundle{}, fmt.Errorf("%w: a workspace bundle body carries no bundle", ErrMalformedFrame)
+	}
+	b.Bundle = bundle
+	return b, nil
+}
+
+// BundleDigest is the digest a launcher_bundle sequence declares for the body it carries.
+func BundleDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// marshalWorkspaceBundle renders b as the body ParseWorkspaceBundle reads. JSON escapes its own
+// newlines, so the header line is one line. The body it builds is the whole of what the sequence
+// carries — the header, the newline and the bundle's own bytes — so that whole is what
+// MaxWorkspaceBundleBodyBytes bounds, and the two parts are never measured apart: each under the
+// bound and the body over it is the shape this refuses, which TestABundleUnderTheBoundWhoseBodyIsOverItIsRefused
+// is.
+func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
+	if b.Head == "" {
+		return nil, fmt.Errorf("%w: a workspace bundle carries no head", ErrMalformedFrame)
+	}
+	if len(b.Bundle) == 0 {
+		return nil, fmt.Errorf("%w: a workspace bundle carries no bundle", ErrMalformedFrame)
+	}
+	head, err := json.Marshal(b)
+	if err != nil {
+		return nil, err
+	}
+	// The body's own size is measured once, as one value, and the allocation below takes that
+	// value and no arithmetic of its own: a reader of this function, and the analysis CI runs
+	// over it, sees the number the buffer is made from bounded by the constant on the line
+	// before. A size that is not positive is a sum that wrapped, which no caller can produce and
+	// which is refused here rather than passed to make.
+	size := len(head) + 1 + len(b.Bundle)
+	if size <= 0 || size > MaxWorkspaceBundleBodyBytes {
+		return nil, fmt.Errorf("%w: a workspace bundle of %d bytes and a header of %d are over the %d a launcher_bundle sequence carries",
+			ErrMalformedFrame, len(b.Bundle), len(head), MaxWorkspaceBundleBodyBytes)
+	}
+	body := make([]byte, 0, size)
+	body = append(body, head...)
+	body = append(body, '\n')
+	return append(body, b.Bundle...), nil
 }
 
 // Validate refuses a rescue request the shim would refuse: no id, a branch prefix that is not one
@@ -754,6 +1054,16 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[LauncherStop](trimmed)
 	case TypeLauncherStopResult:
 		return decodeInto[LauncherStopResult](trimmed)
+	case TypeBundleWorkspace:
+		return decodeInto[BundleWorkspace](trimmed)
+	case TypeBundleWorkspaceResult:
+		return decodeInto[BundleWorkspaceResult](trimmed)
+	case TypeLauncherBundle:
+		return decodeInto[LauncherBundle](trimmed)
+	case TypeLauncherBundleResult:
+		return decodeInto[LauncherBundleResult](trimmed)
+	case TypeLauncherRestored:
+		return decodeInto[LauncherRestored](trimmed)
 	default:
 		return Raw{Type: head.Type, JSON: bytes.Clone(trimmed)}, nil
 	}

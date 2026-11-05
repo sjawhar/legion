@@ -175,7 +175,22 @@
       "slot": {
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
-      }
+      },
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
     },
     "LEGION-210": {
       "key": "LEGION-210",
@@ -228,6 +243,11 @@
       "issue": "LEGION-210",
       "role": "implementer",
       "state": "failed"
+    },
+    {
+      "issue": "LEGION-211",
+      "role": "implementer",
+      "state": "suspended"
     }
   ],
   "wakesWaiting": [
@@ -508,6 +528,10 @@
             "ephemeral_storage": "2Gi",
             "ephemeral_storage_request": "1Gi"
           }
+        },
+        "idle_release": {
+          "idle_minutes": 10,
+          "backstop_minutes": 60
         }
       }
     },
@@ -554,7 +578,10 @@
             "workflow": ".github/workflows/release.yaml",
             "step": "Apply"
           }
-        ]
+        ],
+        "memory": {
+          "config_files": []
+        }
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -565,7 +592,10 @@
           ]
         },
         "slack_channels": [],
-        "deploys": []
+        "deploys": [],
+        "memory": {
+          "config_files": []
+        }
       }
     },
     "gates": {

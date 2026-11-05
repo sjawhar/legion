@@ -110,6 +110,9 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
 	"Kubernetes.TestPostgres":                        "runtime.kubernetes.test_postgres",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
+	"Kubernetes.IdleRelease":                         "runtime.kubernetes.idle_release",
+	"IdleReleaseConfig.IdleMinutes":                  "runtime.kubernetes.idle_release.idle_minutes",
+	"IdleReleaseConfig.BackstopMinutes":              "runtime.kubernetes.idle_release.backstop_minutes",
 	"RepositoryCacheConfig.Volume":                   "runtime.kubernetes.repository_cache.volume",
 	"RepositoryCacheConfig.RefreshMinutes":           "runtime.kubernetes.repository_cache.refresh_minutes",
 	"RepositoryCacheConfig.RetainHours":              "runtime.kubernetes.repository_cache.retain_hours",
@@ -139,6 +142,10 @@ var settingsEmitted = map[string]string{
 	"Project.Merge":                                  "projects.<KEY>.merge",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
 	"Project.Deploys":                                "projects.<KEY>.deploys",
+	"Project.Memory":                                 "projects.<KEY>.memory",
+	"Memory.Mode":                                    "projects.<KEY>.memory.mode",
+	"Memory.ConfigFiles":                             "projects.<KEY>.memory.config_files",
+	"Memory.InstructionsPath":                        "projects.<KEY>.memory.instructions",
 	"Deploy.Repo":                                    "projects.<KEY>.deploys[].repo",
 	"Deploy.Workflow":                                "projects.<KEY>.deploys[].workflow",
 	"Deploy.Step":                                    "projects.<KEY>.deploys[].step",
@@ -289,7 +296,10 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache",
+		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache", "idle_release",
+	})
+	assertKeys(t, "settings.runtime.kubernetes.idle_release", keysOf(t, kubernetesKeys["idle_release"]), []string{
+		"idle_minutes", "backstop_minutes",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, kubernetesKeys["repository_cache"]), []string{
 		"volume", "refresh_minutes", "retain_hours", "resources",
@@ -318,7 +328,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		}
 	}
 
-	// (d) No null anywhere: the plugin's strict reader refuses one.
+	// (d) No null anywhere: the plugin's reader refuses one.
 	if bytes.Contains(encoded, []byte("null")) {
 		t.Errorf("settings carry null: %s", encoded)
 	}

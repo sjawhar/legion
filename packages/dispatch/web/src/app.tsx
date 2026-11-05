@@ -8,13 +8,15 @@ import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
+import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
-import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
+import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
+import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
 import { AgentRegistryPoller } from "./features/refs/agent-registry";
 import { TextAskCard } from "./features/refs/markdown-cards";
 import { RefPreviewHost } from "./features/refs/RefPreview";
@@ -32,13 +34,17 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
-import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
-import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
-import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
+import {
+  appKeymap,
+  type KeyBindingDescription,
+  MOD_KEY_LABEL,
+  useKeymap,
+} from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
+import { RailButton } from "./features/shell/RailButton";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import {
   SIGN_OUT_SETTLE_MS,
@@ -136,16 +142,15 @@ const DeliveryPage = lazy(() =>
 const PipelinePage = lazy(() =>
   import("./features/delivery/PipelinePage").then((module) => ({ default: module.PipelinePage }))
 );
-const MachineLoginPage = lazy(() =>
-  import("./features/credentials/MachineLoginPage").then((module) => ({
-    default: module.MachineLoginPage,
-  }))
-);
+
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
 );
 const RepliesPage = lazy(() =>
   import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
+);
+const SettingsPage = lazy(() =>
+  import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -301,6 +306,7 @@ function NavigationContents({
   closeButtonRef,
   compact,
   onClose,
+  onCreateIssue,
   onHideSidebar,
   onOpenInboxDrawer,
   onSearch,
@@ -312,6 +318,7 @@ function NavigationContents({
   closeButtonRef: RefObject<HTMLButtonElement | null>;
   compact: boolean;
   onClose: () => void;
+  onCreateIssue: () => void;
   onHideSidebar: () => void;
   onOpenInboxDrawer: () => void;
   onSearch: () => void;
@@ -338,11 +345,27 @@ function NavigationContents({
           </button>
         ) : null}
       </div>
-      <SearchButton
+      <RailButton
+        ariaKeyshortcuts="Control+K Meta+K"
+        className="mt-4"
+        label="Search"
         onOpen={() => {
           onClose();
           onSearch();
         }}
+        shortcut={MOD_KEY_LABEL === "⌘" ? "⌘K" : "Ctrl K"}
+      />
+      {/* The hint is `AppShell`'s global `create` binding, written as `?` and the palette write
+          it (`c`); `aria-keyshortcuts` names the same key in ARIA's uppercase form. */}
+      <RailButton
+        ariaKeyshortcuts="C"
+        className="mt-1"
+        label="New issue"
+        onOpen={() => {
+          onClose();
+          onCreateIssue();
+        }}
+        shortcut="c"
       />
       <Sidebar
         onHide={compact ? undefined : onHideSidebar}
@@ -586,6 +609,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       closeButtonRef={closeButtonRef}
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
+      onCreateIssue={() => setCreateOpen(true)}
       onHideSidebar={() => setSidebarHidden(true)}
       onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
       onSearch={() => setPaletteMode("all")}
@@ -806,7 +830,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<ProjectPage />} path="/projects/:key/documents" />
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
                 <Route element={<InboxPage />} path="/credentials/*" />
-                <Route element={<MachineLoginPage />} path="/credentials/machine" />
+                <Route element={<MachineLoginRoute />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<DeliveryPage />} path="/delivery" />
                 <Route element={<PipelinePage />} path="/pipeline" />
@@ -816,7 +840,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </ErrorBoundary>
         </main>
         <ErrorBoundary region="the margin" resetKey={location.pathname}>
-          <Margin
+          <MarginColumn
             collapsed={marginHidden}
             onCollapsedChange={setMarginHidden}
             onWidthChange={setMarginWidth}

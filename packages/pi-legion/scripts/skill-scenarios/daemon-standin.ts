@@ -72,11 +72,11 @@ const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", r
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
  * the lifecycle rows held behind their issues' running ones, `wakesWaiting` the wakes the pacing
  * holds until their turn, `consumers` the lag of the daemon's durable consumers and `repositories`
- * the project's mapping, each of which the strict reader requires; the rig has no deployment to
- * report on, its one claim runs and waits for no wake, it has no outbox and no NATS, so the first
- * five are the empty lists the daemon's MarshalJSON emits when there is none. `settings` is the
- * daemon's resolved legion.yaml with no credential in it, also required; the rig has no file, so it
- * carries the two keys the reader types at the daemon's defaults. */
+ * the project's mapping, each of which the reader requires; the rig has no deployment to report
+ * on, its one claim runs and waits for no wake, it has no outbox and no NATS, so the first five
+ * are the empty lists the daemon's MarshalJSON emits when there is none. `settings` is the
+ * daemon's resolved legion.yaml with no credential in it, also required; the rig has no file, so
+ * it carries the two keys the reader types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [], blocked: [] },
