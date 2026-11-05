@@ -54,9 +54,30 @@ func sameCharge(a, b peerWeighing) bool {
 // [0, clocks) of client: a delete range of one clock each, no two of them touching, so each range
 // the room does not hold deleted is charged its own splits.
 func everyOtherClockDeleted(client, clocks uint64) []byte {
-	f := newV1Frame(0).uint(1).uint(client).uint((clocks + 1) / 2)
-	for clock := uint64(0); clock < clocks; clock += 2 {
+	return everyOtherClockThenTheRestDeleted(client, clocks, clocks)
+}
+
+// everyOtherClockThenTheRestDeleted is that frame with its one-clock ranges bounded: every other
+// clock in [0, singly) one range each, and, when clocks runs past singly, one further range
+// covering [singly, clocks) whole. It writes singly/2 ranges and one, whatever clocks is, where
+// the frame above writes one range for every two clocks of a span a forged struct may claim -
+// a GC run of 2^33 clocks, appended already deleted (deletedRuns) - which is a loop of billions
+// in the test itself, and in nothing the room does. The clocks deleted one by one are rounded
+// down to an even count so the last of them never touches the range that follows it, and the
+// ranges stay what the frame above is built to be: no two adjacent, each charged its own splits.
+func everyOtherClockThenTheRestDeleted(client, clocks, singly uint64) []byte {
+	singly = min(singly, clocks)
+	ranges := (singly + 1) / 2
+	if singly < clocks {
+		singly -= singly % 2
+		ranges = singly/2 + 1
+	}
+	f := newV1Frame(0).uint(1).uint(client).uint(ranges)
+	for clock := uint64(0); clock < singly; clock += 2 {
 		f = f.uint(clock).uint(1)
+	}
+	if singly < clocks {
+		f = f.uint(singly).uint(clocks - singly)
 	}
 	return f.done()
 }
@@ -221,6 +242,16 @@ func namingTheFuzzRoomsClocks(update []byte, room *crdt.Doc) []byte {
 	return bytes.ReplaceAll(update, varuint(fuzzHeldClocks), varuint(clocks))
 }
 
+// fuzzProbeSingleClocks is how many of a client's clocks the probe below deletes one by one. A
+// room the fuzzer leaves holding fewer than these is probed exactly as the tests above probe
+// theirs, every other clock of it; past them the probe covers the rest in one range
+// (everyOtherClockThenTheRestDeleted). 4,096 is ninety times the 45 clocks the fixture's own
+// document holds, so an honest frame's room, and every seed below but the GC run of 2^33, is
+// probed one clock at a time as before; and a frame claiming 2^33 clocks - which the fuzzer
+// reaches in seconds, by a GC run of a length its own bytes name - costs the probe 2,049 ranges
+// where it cost four billion.
+const fuzzProbeSingleClocks = 1 << 12
+
 // The same property over a corpus: whatever bytes a browser sends, a room that admitted and
 // applied them lists ygo's own delete set, run for run, the clocks of the frame's GC structs
 // included, which the room lists from the commit that appended them - and the delete a browser
@@ -242,6 +273,19 @@ func FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(f *testing.F) {
 		group(1, fuzzHeldClient, 0).gc(fuzzHeldClocks).
 		group(1, 1<<40+37, 0).rooted(byte(structString), fragmentName, "").str("z").
 		uint(1).uint(fuzzHeldClient).uint(1).uint(0).uint(fuzzHeldClocks).done())
+	// The corpus entry a fuzz run was mutating when its probe hung, the 25 bytes the run
+	// reported. As it stands the hook refuses it at byte 20 - its delete set declares 2^40
+	// clients, more than ygo decodes (walkUpdate) - and it names neither sentinel, so it reaches
+	// the room exactly as the fuzzer wrote it. It is kept because the fuzzer mutates from it:
+	// the frame below is one byte-move away from it, and that one is admitted.
+	f.Add([]byte("\x02\x01?\x80\x80 \x00\x00\x00\x80\x80\x80 \x01\x80\x80\x80\x80\x80 \x00\x00\x00\x01\x00"))
+	// What such a mutation reaches, and what hung the probe: a GC run of 2^33 clocks of a client
+	// the room holds nothing of, whose id is below the 32 bits a room's own client is drawn from
+	// (crdt.New), so the room appends the run already deleted (deletedRuns) and
+	// fuzzRoomsOwnClocks answers for that client - 2^33 clocks where the fixture's own document
+	// holds 45. One range per two clocks over that span is four billion ranges to write; the
+	// probe writes fuzzProbeSingleClocks of them and one.
+	f.Add(newV1Frame(1).group(1, 63, 0).gc(1 << 33).noDeletes())
 	f.Fuzz(func(t *testing.T, update []byte) {
 		service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
 		update = namingTheFuzzRoomsClocks(update, room)
@@ -256,8 +300,24 @@ func FuzzAnAdmittedFrameLeavesTheRoomsListItsOwnDeleteSet(f *testing.F) {
 		}
 		// The delete that follows, over the room's own clocks and past them, weighs the same
 		// against the list as against ygo's delete set: a list equal run for run charges alike.
+		// An admitted frame can leave the room's own client holding a clock in the billions: a
+		// GC run whose length its own bytes name is appended to the store already deleted
+		// (deletedRuns), and the walk refuses a struct only past maxEditorClock, so a run of
+		// 2^33 clocks is a frame the hook admits. A probe of one range per two clocks over that
+		// span is a loop of billions in this test, and in nothing the room does: the hook reads
+		// a delete range as a range, whatever span it claims (weighPeerUpdate, held over a real
+		// socket by TestAFrameClaimingHugeClockSpansCostsOnlyItsBytes in cmd/dispatch). So the
+		// probe deletes every other clock over at most the first fuzzProbeSingleClocks and
+		// covers the rest in a single range: it costs the cap, and it is still a delete running
+		// eight clocks past every clock the room holds, so the splits at the ends of the room's
+		// own runs are weighed as they are for a small room. The half above - the list is the
+		// room's own delete set, run for run - is weighed in full whatever the span, and it is
+		// the half that reads every run the frame left.
 		client, clocks, _ := fuzzRoomsOwnClocks(room)
-		probe := everyOtherClockDeleted(client, clocks+8)
+		// Clamped to the clocks a delete range may name: the walk refuses one ending past
+		// maxEditorClock as a delete no editor writes (walkUpdate), and a frame can leave the
+		// room holding clocks within eight of it.
+		probe := everyOtherClockThenTheRestDeleted(client, min(clocks+8, uint64(maxEditorClock)), fuzzProbeSingleClocks)
 		var truth deletedRuns
 		truth.seed(crdt.DeleteSetFromDoc(room))
 		against, fresh := weighedAgainst(t, room, charge.deletes(), probe), weighedAgainst(t, room, &truth, probe)
