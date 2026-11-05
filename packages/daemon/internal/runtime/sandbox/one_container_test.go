@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -397,7 +396,10 @@ func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaun
 
 // A pod of the earlier layout that ended before this daemon replaced it has no `roles` container:
 // each role's Gone names its own container's end and quotes that container's log, as the release
-// that built the pod did, rather than a status and a log of a container the pod never ran.
+// that built the pod did, rather than a status and a log of a container the pod never ran. The
+// tester's own container ended OOMKilled here, and its Gone carries no out-of-memory mark: the
+// note that mark sends is written for a role of an issue pod's one container, which this pod
+// never had (outOfMemory).
 func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
 	labels := claimLabels(claim.RoleTester)
 	name := SandboxName(workerToken)
@@ -432,6 +434,9 @@ func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
 		}
 		if obs.Kind != runtime.Gone || !strings.Contains(obs.Detail, "pod "+name+" (uid "+recorded+") Failed: ") || !strings.HasSuffix(obs.Detail, want) {
 			t.Errorf("%s: %s %q, want Gone ending %q", token, obs.Kind, obs.Detail, want)
+		}
+		if obs.OutOfMemory {
+			t.Errorf("%s: %q is marked out of memory; a container of the layout before one container is no issue pod's one container", token, obs.Detail)
 		}
 	}
 }
@@ -522,138 +527,6 @@ func TestTheRolesContainerEndingEndsEveryRole(t *testing.T) {
 			t.Fatalf("%s: %s %q, want Gone naming the container's end and quoting only %s's lines", token, obs.Kind, obs.Detail, role)
 		}
 	}
-}
-
-// An issue pod's one container ending for want of memory is marked on the Gone of every role
-// whose turn that end cut off (Observation.OutOfMemory), which is what the daemon tells each of
-// them why its turn stopped from. The kubelet's reason is the whole of what says so, read
-// wherever the end is: off the ended container itself, and off the LastTerminationState of one
-// the kubelet has already restarted, whose role launcher reports no child and so died with that
-// instance. A launcher that reports the recorded generation's own exit has been running since
-// before that generation started, so the container did not end under it and its role's process
-// ended on its own: no mark. Neither does an end whose reason is Error, which carries 128, the
-// very exit code an out-of-memory end carries — the reason decides and the code never does.
-func TestTheRolesContainerOutOfMemoryEndIsMarkedOnTheRolesItCut(t *testing.T) {
-	labels := claimLabels(claim.RoleTester)
-	name := SandboxName(workerToken)
-	outOfMemoryEnd := corev1.ContainerStateTerminated{ExitCode: 128, Reason: "OOMKilled"}
-	erroredEnd := corev1.ContainerStateTerminated{ExitCode: 128, Reason: "Error"}
-	// ended is the container as the kubelet reports it the moment it ends, and restarted once the
-	// kubelet has started it again over that same end.
-	ended := func(end corev1.ContainerStateTerminated) corev1.ContainerStatus {
-		return corev1.ContainerStatus{Name: runtime.IssuePodContainer, State: corev1.ContainerState{Terminated: &end}}
-	}
-	restarted := func(end corev1.ContainerStateTerminated) corev1.ContainerStatus {
-		return corev1.ContainerStatus{
-			Name: runtime.IssuePodContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-			RestartCount: 1, LastTerminationState: corev1.ContainerState{Terminated: &end},
-		}
-	}
-	podStatus := func(phase corev1.PodPhase, container corev1.ContainerStatus) corev1.PodStatus {
-		return corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{container}}
-	}
-	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels),
-		podObject(name, recorded, sandboxUID, labels, podStatus(corev1.PodRunning, ended(outOfMemoryEnd)))}, withoutController())
-	for _, tc := range []struct {
-		name      string
-		phase     corev1.PodPhase
-		container corev1.ContainerStatus
-		launcher  *shimwire.LauncherState
-		want      bool
-	}{
-		{"the container was ended OOMKilled", corev1.PodRunning, ended(outOfMemoryEnd), nil, true},
-		{"the kubelet restarted it and the role's launcher reports no child", corev1.PodRunning, restarted(outOfMemoryEnd), &shimwire.LauncherState{}, true},
-		{"the pod itself ended with its container OOMKilled", corev1.PodFailed, ended(outOfMemoryEnd), nil, true},
-		{"the role's launcher reports the recorded generation's own exit", corev1.PodRunning, restarted(outOfMemoryEnd),
-			&shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 1}}, false},
-		{"the container was ended with reason Error at the same exit code", corev1.PodRunning, ended(erroredEnd), nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g.update(g.pod(name), func(p *corev1.Pod) { p.Status = podStatus(tc.phase, tc.container) })
-			g.eventually("the pod store to see "+tc.name, func() bool {
-				pod := g.r.storedPod(name)
-				if pod == nil || pod.Status.Phase != tc.phase {
-					return false
-				}
-				status := containerStatus(pod, runtime.IssuePodContainer)
-				return status != nil && reflect.DeepEqual(*status, tc.container)
-			})
-			if tc.launcher != nil {
-				g.reportLauncher(workerToken, *tc.launcher)
-			}
-			obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
-			if err != nil {
-				t.Fatalf("Probe: %v", err)
-			}
-			if obs.Kind != runtime.Gone || obs.OutOfMemory != tc.want {
-				t.Fatalf("%s OutOfMemory=%t %q, want Gone OutOfMemory=%t", obs.Kind, obs.OutOfMemory, obs.Detail, tc.want)
-			}
-		})
-	}
-}
-
-// The mark is the issue pod's one container's end and no other's, because the note it sends is
-// written for a role of an issue pod: it says the container ran every role of the issue, that
-// another role's work may have filled the pod, and that an issue pod runs no heavy build. An init
-// container's out-of-memory end cut no turn off, since it ended before any role's process
-// started; and the project controller's own pod runs the controller alone in a container of its
-// own, sharing its memory with nobody and reading no worker guide. Both are Gone, and neither is
-// marked.
-func TestAnOutOfMemoryEndOutsideTheRolesContainerIsNotMarked(t *testing.T) {
-	outOfMemory := &corev1.ContainerStateTerminated{ExitCode: 128, Reason: "OOMKilled"}
-	t.Run("an init container", func(t *testing.T) {
-		g := newRig(t, nil)
-		loc := g.spawn(workerSpec(t))
-		g.update(g.pod(loc.Sandbox.Name), func(p *corev1.Pod) {
-			p.Status.Phase = corev1.PodPending
-			p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
-				Name: initContainer, State: corev1.ContainerState{Terminated: outOfMemory},
-			}}
-		})
-		g.eventually("the pod store to see the failed init", func() bool {
-			p := g.r.storedPod(loc.Sandbox.Name)
-			if p == nil {
-				return false
-			}
-			_, failed := failedInit(p)
-			return failed != nil
-		})
-		obs, err := g.r.Probe(g.ctx, loc)
-		if err != nil {
-			t.Fatalf("Probe: %v", err)
-		}
-		if obs.Kind != runtime.Gone || obs.OutOfMemory {
-			t.Fatalf("%s OutOfMemory=%t %q, want Gone unmarked: the init container ran before any role's process", obs.Kind, obs.OutOfMemory, obs.Detail)
-		}
-	})
-	t.Run("the controller's own container", func(t *testing.T) {
-		g := newRig(t, nil)
-		loc := g.spawn(controllerSpec(t))
-		g.update(g.pod(loc.Sandbox.Name), func(p *corev1.Pod) {
-			p.Status.Phase = corev1.PodRunning
-			p.Status.ContainerStatuses = []corev1.ContainerStatus{{
-				Name: runtime.ControllerPodContainer, State: corev1.ContainerState{Terminated: outOfMemory},
-			}}
-		})
-		g.eventually("the pod store to see the controller's container ended", func() bool {
-			p := g.r.storedPod(loc.Sandbox.Name)
-			if p == nil {
-				return false
-			}
-			status := containerStatus(p, runtime.ControllerPodContainer)
-			return status != nil && status.State.Terminated != nil
-		})
-		// Its launcher reports no child, as one that came up with a restarted container does, so
-		// the verdict is read off the container's own end rather than off a running generation.
-		g.reportLauncher(controllerToken, shimwire.LauncherState{})
-		obs, err := g.r.Probe(g.ctx, loc)
-		if err != nil {
-			t.Fatalf("Probe: %v", err)
-		}
-		if obs.Kind != runtime.Gone || obs.OutOfMemory {
-			t.Fatalf("%s OutOfMemory=%t %q, want Gone unmarked: the controller's pod runs no role of an issue", obs.Kind, obs.OutOfMemory, obs.Detail)
-		}
-	})
 }
 
 // A Gone's quote of the shared log is the role's newest lines, read through the pod's log as the
