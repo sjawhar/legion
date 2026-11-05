@@ -762,7 +762,7 @@ func takeOwnDatabase(t *testing.T) {
 		t.Fatalf("connect the PostgreSQL LEGION_TEST_PG_DSN names: %v", err)
 	}
 	database := "legion_provider_error_" + strings.ToLower(randomSuffix(t))
-	if _, err := server.Exec(ctx, "create database "+database); err != nil {
+	if _, err := server.Exec(ctx, "create database "+database+" strategy file_copy"); err != nil {
 		server.Close(ctx)
 		t.Fatalf("make this run's own database %s: %v", database, err)
 	}
