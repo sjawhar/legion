@@ -53,7 +53,12 @@ type Config struct {
 	// TestPostgres has this launcher serve the pod's own PostgreSQL for tests (testpg.go), which
 	// only an issue pod's container does (RolesDir set). The deployment asks for it with
 	// `runtime.kubernetes.test_postgres`.
-	TestPostgres   bool
+	TestPostgres bool
+	// Sampler has this launcher run the pod's resource sampler (sampler.go), which only an issue
+	// pod's container does (RolesDir set): the daemon passes everything that sampler needs and
+	// the launcher knows nothing of, the issue among it. Nil is a pod with no sampler, which is
+	// every controller pod and every issue pod built before the daemon passed one.
+	Sampler        *SamplerConfig
 	Stdout, Stderr io.Writer
 	// StopGrace is the container shutdown and natural-exit descendant cleanup budget. Every role
 	// of an issue pod's container is given it whole, since they stop together.
@@ -118,6 +123,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.TestPostgres {
 		testPG = serveTestPG(ctx, cfg, managers[0].log, guard)
 	}
+	// The pod's resource sampler, which reads each role's generation from the roles file the
+	// managers below write, and is waited on with them.
+	var sampled <-chan struct{}
+	if cfg.Sampler != nil {
+		sampled = serveSampler(ctx, cfg, managers[0].log, guard)
+	}
 	var running sync.WaitGroup
 	for _, m := range managers {
 		running.Add(1)
@@ -129,6 +140,9 @@ func Run(ctx context.Context, cfg Config) error {
 	running.Wait()
 	if testPG != nil {
 		<-testPG
+	}
+	if sampled != nil {
+		<-sampled
 	}
 	return ctx.Err()
 }
@@ -143,6 +157,12 @@ func newManagers(cfg Config) ([]*manager, error) {
 		}}, nil
 	}
 	log := &roleLog{stdout: cfg.Stdout, stderr: cfg.Stderr}
+	// The roles file is one file for every role, so one object writes it for all of them, and it
+	// exists before the first role connects rather than at that role's first generation.
+	var roles *samplerRoles
+	if cfg.Sampler != nil {
+		roles = newSamplerRoles(cfg.RolesDir, log)
+	}
 	managers := make([]*manager, 0, len(cfg.Roles))
 	for _, role := range cfg.Roles {
 		file := filepath.Join(cfg.RolesDir, role, RoleLauncherDir, LauncherTokenFile)
@@ -160,7 +180,7 @@ func newManagers(cfg Config) ([]*manager, error) {
 		managers = append(managers, &manager{
 			cfg: cfg, role: role, token: strings.TrimSpace(string(token)), namespaced: true,
 			private: filepath.Join(cfg.RolesDir, role, RolePrivateDir), launcherID: randomID(),
-			log: log, stderr: own, requests: map[string]request{},
+			log: log, stderr: own, requests: map[string]request{}, roles: roles,
 		})
 	}
 	return managers, nil
@@ -391,11 +411,14 @@ type manager struct {
 	stdout     io.Writer
 	stderr     io.Writer
 	log        *roleLog
-	writer     *shimwire.Writer
-	mu         sync.Mutex
-	child      *child
-	lastExit   *shimwire.LauncherExit
-	requests   map[string]request
+	// roles is the sampler's roles file, which every manager of the launcher writes its own
+	// role's running generation to. Nil where the pod runs no sampler.
+	roles    *samplerRoles
+	writer   *shimwire.Writer
+	mu       sync.Mutex
+	child    *child
+	lastExit *shimwire.LauncherExit
+	requests map[string]request
 }
 
 // state reports the actual child to the current daemon connection, if one is up. A state change
@@ -508,6 +531,9 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	}
 	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, proxy: proxy, keeper: keeper, done: make(chan struct{})}
 	m.child = active
+	// The sampler counts this role's processes from this pid down, so the file it reads them
+	// from is written here, under the lock that holds the pid, and never after it.
+	m.roles.set(m.role, active.pid)
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
 	m.mu.Unlock()
@@ -612,6 +638,7 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	if m.child == active {
 		m.child = nil
 		m.lastExit = &exit
+		m.roles.clear(m.role)
 	}
 	// The generation's credentials end with it.
 	_ = os.RemoveAll(active.dir)

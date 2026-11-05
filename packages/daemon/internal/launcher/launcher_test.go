@@ -573,6 +573,13 @@ type fleet struct {
 // requireRoleNamespaces first.
 func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
 	t.Helper()
+	return newSampledFleet(t, grace, nil, roles...)
+}
+
+// newSampledFleet is that launcher with the pod's resource sampler it is given, which is the one
+// configuration of an issue pod's container a test varies (sampler_test.go).
+func newSampledFleet(t *testing.T, grace time.Duration, samples *SamplerConfig, roles ...string) *fleet {
+	t.Helper()
 	scratch := namespaceScratch(t)
 	f := &fleet{
 		t: t, rolesDir: filepath.Join(scratch, "roles"), home: filepath.Join(scratch, "home"),
@@ -612,6 +619,7 @@ func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
 		f.result <- Run(ctx, Config{
 			Connect: "tcp://" + listener.Addr().String(), Sandbox: "legion-legion-legion-208", PodUID: "pod-1",
 			RolesDir: f.rolesDir, Roles: roles, Stdout: f.stderr, Stderr: f.stderr, StopGrace: grace,
+			Sampler: samples,
 		})
 	}()
 	t.Cleanup(func() {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +138,46 @@ func TestTheLauncherCommandRefusesAMixOfItsTwoForms(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// A launcher that took the mixture would dial the unreachable daemon until its
 			// context ends; the bound makes that a failure of this test, not a hung run.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"legion", "launcher", "--connect", "tcp://127.0.0.1:1", "--sandbox", "s", "--pod-uid", "p"}, tc.args...)
+			if code := run(ctx, args, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("exit %d, stderr %q; want 2 naming %q", code, stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
+// The pod's sampler is an issue pod's: it reads that pod's roles from the file the launcher
+// writes beside them, which the controller pod's container has not got, and its one JSON flag
+// carries the rules a deployment wrote by hand. Each refusal is a usage error of this command
+// line, before the launcher dials anything, since a sampler the launcher would start again every
+// five seconds for the pod's whole life is no way to report a flag nobody can fix from in there.
+func TestTheLauncherCommandRefusesASamplerItCannotRun(t *testing.T) {
+	token := filepath.Join(t.TempDir(), "LAUNCHER_TOKEN")
+	if err := os.WriteFile(token, []byte("token"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	pod := []string{"--roles-dir", t.TempDir(), "--role", "tester"}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"a sampler without a roles directory",
+			[]string{"--token-file", token, "--role", "tester", "--private-dir", t.TempDir(), "--sampler", `{"port":9464}`},
+			"launcher: --sampler is an issue pod's container: it needs --roles-dir"},
+		{"a sampler that is not JSON", append(slices.Clone(pod), "--sampler", "{"),
+			"launcher: --sampler is one JSON object of the sampler's port, project, issue, volumes and rules"},
+		{"a sampler whose port is not a number", append(slices.Clone(pod), "--sampler", `{"port":"9464"}`),
+			"launcher: --sampler is one JSON object of the sampler's port, project, issue, volumes and rules"},
+		{"a sampler whose rules the engine refuses", append(slices.Clone(pod), "--sampler", `{"rules":[{"program":"go","kind":"agent"}]}`),
+			"launcher: --sampler rules:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A launcher that took the flag would dial the unreachable daemon until its context
+			// ends; the bound makes that a failure of this test, not a hung run.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var stdout, stderr bytes.Buffer
