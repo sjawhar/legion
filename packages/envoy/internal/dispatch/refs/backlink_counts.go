@@ -276,6 +276,8 @@ var backlinkArms = map[string][]backlinkArm{
 	"comment": {
 		// comments_reply_to_text.
 		{kind: "replies_to", from: `comments c`, where: `c.reply_to is not null`, toID: `c.reply_to::text`},
+		// comments_answers_text, partial on answers is not null.
+		{kind: "answers", from: `comments c`, where: `c.answers is not null`, toID: `c.answers::text`},
 		// comment_blocks_comment_id_text. The view's arm counts a current block only, so this
 		// one carries its position filter.
 		{kind: "part_of", from: `comment_blocks b`, where: `b.position is not null`, toID: `b.comment_id::text`},

@@ -1,5 +1,48 @@
 # Changelog
 
+## [29.14.0] - 2026-11-05
+
+### Changed
+
+- Dispatch holds a body block by block rather than as a whole: each block of a comment, comment
+  edit, message, broadcast or delivery reply to `contracts.DispatchBlockUnits` and a body to
+  `contracts.DispatchItemBlocks` blocks, each refusal naming the block that passed the bound,
+  and an ask's question and its options together to `contracts.DispatchEventBodyMax` wherever
+  the ask is written, a document's decision block included. `GET /api/v1/limits` publishes every
+  bound. An event carries at most `contracts.DispatchEventBodyMax` of a body and says
+  `body_truncated` when it carried a part. An envelope NATS refuses as too large goes out as a
+  stand-in on the same topic, under the same event id, carrying the payload's short top-level
+  fields and `payload_omitted: true`, so a reader learns which event it is and reads the item
+  itself where it learnt nothing before. Meaning search embeds windows of
+  neighbouring blocks (`document_block`, `comment_block`, `message_block` and `ask_part`, each
+  row carrying `covers`) rather than one vector per item cut at 32,000 runes, so a passage at
+  the end of a long document is found, and a hit names the block that matched. A local harness
+  embeds with no model service under `DISPATCH_DEV_EMBEDDER=1`, beside dev sign-in alone.
+
+## [29.12.0] - 2026-11-05
+
+### Added
+
+- Reviews retain the SHA-256 of the stored UTF-8 version they approved, with insert or backfill provenance. Startup fills legacy reviews without changing approval decisions, and review, approval, event and document-version reads expose the hashes.
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.2. A keystroke no longer scans
+  every distinct missing client in the waiting queue. Default document UUIDs use two allocations
+  instead of eight. Room closure cannot evict a room while an apply writes it, failed joins
+  reclaim eligible rooms, and cancelled applies can stop waiting for a room load. The library
+  also offers context-aware room closure; Dispatch retains its existing close wrapper. Logical
+  content lengths and splice offsets use uint64 without changing the wire format; Dispatch
+  needs no consumer API adaptation. Cloning a document with emptied waiting-queue slots no
+  longer panics, protecting current Dispatch's warm write forks. Three repeated library
+  microbenchmark slowdowns remain, but their percentages do not measure whole-update cost.
+
+## [29.11.0] - 2026-11-05
+
+### Added
+
+- Envoy records a CI check run or check suite that names no pull request under pull request n when its check suite's head branch is `refs/pull/<n>/head`, and Dispatch reconciles each open pull request's head with GitHub every 5 minutes, recording every completed check run and check suite the listener's record of that head lacks. One new setting, `DISPATCH_REVIEWER_APP_ID`, the review App's id, which the pass checks a `tester` or `architect` check run against.
+
 ## [29.9.0] - 2026-11-05
 
 ### Added

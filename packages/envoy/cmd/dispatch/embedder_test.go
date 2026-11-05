@@ -229,3 +229,43 @@ func TestNewEmbedderBuildsAzureFromEitherCredential(t *testing.T) {
 		})
 	}
 }
+
+// The dev embedder embeds by hashing words, so a deployment that set it would answer meaning
+// search with vectors that mean nothing and never know: it is read only by a local harness,
+// which is what DISPATCH_DEV_SIGNIN=1 marks, and it reads no setting of a model service.
+func TestTheDevEmbedderNeedsDevSignIn(t *testing.T) {
+	refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"},
+		"DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1")
+	refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "yes"},
+		`DISPATCH_DEV_EMBEDDER="yes" (expected 1 or unset)`)
+	for _, beside := range []map[string]string{
+		{"DISPATCH_EMBEDDER": "azure", "DISPATCH_AZURE_EMBED_ENDPOINT": "https://embed.example/models"},
+		{"DISPATCH_EMBEDDER": "bedrock"},
+		{"DISPATCH_AZURE_EMBED_KEY": testAzureKey},
+	} {
+		overrides := withOverrides(beside, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"})
+		if _, err := resolveBootConfig(devSignInEnvironment(overrides)); err == nil ||
+			!strings.Contains(err.Error(), "set, but DISPATCH_DEV_EMBEDDER=1: the dev embedder calls no model service and reads no setting of one") {
+			t.Errorf("resolveBootConfig(%v) = %v, want a refusal naming the settings beside it", overrides, err)
+		}
+	}
+
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_EMBEDDER": "1"}))
+	if err != nil || boot.Embedder != (embedderConfig{Place: embed.PlaceDev}) {
+		t.Fatalf("under dev sign-in: Embedder = %+v, %v; want the dev place and nothing else", boot.Embedder, err)
+	}
+	logged := capturedLog(t)
+	embedder, err := newEmbedder(context.Background(), boot.Embedder)
+	if err != nil {
+		t.Fatalf("newEmbedder: %v", err)
+	}
+	if _, ok := embedder.(*embed.DevClient); !ok {
+		t.Fatalf("newEmbedder built %T, want *embed.DevClient", embedder)
+	}
+	if place, _ := embed.IdentityPlace(embedder.Identity()); place != embed.PlaceDev {
+		t.Errorf("Identity() = %q, which names the place %q, not %q", embedder.Identity(), place, embed.PlaceDev)
+	}
+	if line := logged.String(); !strings.Contains(line, "place=dev identity="+embedder.Identity()) || !strings.Contains(line, "level=WARN") {
+		t.Errorf("logged %q, want one warning naming the place and the identity", line)
+	}
+}

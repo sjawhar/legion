@@ -127,6 +127,9 @@ func TestPersonAliasesIncludeEventClaimAndDocumentActorsWithoutInventingRoles(t 
 	}
 }
 
+// 20261104074751 alone, not every migration after it: 20261105014808 re-states graph_edges on
+// purpose, with the answers arm, so a run to the newest version would compare this migration's
+// effect with that one's.
 func TestPersonMigrationLeavesExistingGraphViewUnchanged(t *testing.T) {
 	ctx := context.Background()
 	database := openEmptyTestStore(t)
@@ -135,9 +138,7 @@ func TestPersonMigrationLeavesExistingGraphViewUnchanged(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select pg_get_viewdef('graph_edges')`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
+	migrateThrough(t, database, 20261104074751)
 	if err := database.Pool.QueryRow(ctx, `select pg_get_viewdef('graph_edges')`).Scan(&after); err != nil {
 		t.Fatal(err)
 	}

@@ -111,6 +111,9 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 	if appendedRows != 0 || busyRows != 0 {
 		t.Fatal("identity or delivery escaped into an old reader's view")
 	}
+	// The last graph_edges definition before this branch's migration number. Main has re-stated
+	// the view since (20261105014808, the answers arm), so this is the baseline of a build older
+	// than main's, not main's own; what it measures is an old reader on identical data.
 	previous, err := os.ReadFile("../store/migrations/20261101183525_graph_edges_ask_parts_and_block_pointers.up.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +136,7 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from graph_edges where from_kind = 'comment' and from_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b' and to_kind <> 'person'`).Scan(&mainRows); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("main baseline on identical data: planning %.3f ms, execution %.3f ms, outgoing rows %d", baseline[0].PlanningTime, baseline[0].ExecutionTime, mainRows)
+	t.Logf("20261101183525's view on identical data: planning %.3f ms, execution %.3f ms, outgoing rows %d", baseline[0].PlanningTime, baseline[0].ExecutionTime, mainRows)
 	report, err := persongraph.Census(ctx, database.Pool, time.Now().Add(-30*24*time.Hour))
 	if err != nil {
 		t.Fatal(err)

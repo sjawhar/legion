@@ -161,8 +161,15 @@ type Config struct {
 	// inside one run rather than wait out a day of real time.
 	PodUpdateRetask time.Duration
 	PodUpdateNotice time.Duration
-	ReviewRoundCap  int
-	MaxFixAttempts  int
+	// PodUpdateMaxOpenRounds is how many issues may hold an open pod-update round at once
+	// (`pod_update_max_open_rounds`), and PodUpdateRoundsPerMinute how many rounds one sweep may
+	// open in a minute (`pod_update_rounds_per_minute`). Both are pointers because a file that
+	// leaves the key out asks for no limit at all, which no number says: there is no default to
+	// fall back on, and nil is how a sweep reads "open as many as the fleet needs".
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           int
+	MaxFixAttempts           int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
@@ -294,15 +301,20 @@ type fileConfig struct {
 	ProductionCheckBound   *time.Duration
 	PodUpdateRetask        *time.Duration
 	PodUpdateNotice        *time.Duration
-	ReviewRoundCap         *int
-	MaxFixAttempts         *int
-	Controller             *string
-	Capabilities           *Capabilities
-	Durations              map[string]int
-	Counts                 map[string]int
-	WorkerBackends         map[claim.Role]runtime.Backend
-	RoleConfigFiles        map[claim.Role][]string
-	RepositoryRenames      []ghrepo.Rename
+	// PodUpdateMaxOpenRounds is `pod_update_max_open_rounds` and PodUpdateRoundsPerMinute
+	// `pod_update_rounds_per_minute`; each stays nil when the file leaves its key out, which is
+	// how resolve tells an absent key from a number and leaves Config's own pointer nil.
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           *int
+	MaxFixAttempts           *int
+	Controller               *string
+	Capabilities             *Capabilities
+	Durations                map[string]int
+	Counts                   map[string]int
+	WorkerBackends           map[claim.Role]runtime.Backend
+	RoleConfigFiles          map[claim.Role][]string
+	RepositoryRenames        []ghrepo.Rename
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -432,6 +444,12 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.PodUpdateRetask, err = readHours(value, key)
 		case "pod_update_notice_hours":
 			file.PodUpdateNotice, err = readHours(value, key)
+		// Both round caps are read here rather than through countKeys, which carries a default
+		// for every key it holds and so could never report that the operator named neither.
+		case "pod_update_max_open_rounds":
+			file.PodUpdateMaxOpenRounds, err = readPositiveInteger(value, key, 0)
+		case "pod_update_rounds_per_minute":
+			file.PodUpdateRoundsPerMinute, err = readPositiveInteger(value, key, 0)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":

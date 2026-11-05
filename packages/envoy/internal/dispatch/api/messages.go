@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
@@ -401,8 +401,8 @@ func validateCreateMessage(input *createMessageInput) (string, error) {
 	if strings.TrimSpace(input.Body) == "" {
 		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
-	if length := len16(input.Body); length > contracts.DispatchBodyMax {
-		return "", capExceededError("body", length, contracts.DispatchBodyMax)
+	if err := blockBoundError(itemblocks.Check("body", input.Body)); err != nil {
+		return "", err
 	}
 	target, delivery, err := validateMessageDelivery(input.Target, input.Delivery)
 	if err != nil {
@@ -551,12 +551,16 @@ func (t messageReplyThread) payload(
 	message model.Message,
 	changes model.ReferenceChanges,
 ) model.MessageEventPayload {
-	return model.MessageEventPayload{
+	payload := model.MessageEventPayload{
 		Message:                 message,
 		ReferenceChangesPayload: model.NewReferenceChangesPayload(changes),
 		ReplyBody:               t.ReplyBody,
 		ThreadTarget:            t.ThreadTarget,
 	}
+	// A body is bounded block by block, so it can be longer than one event carries: the event
+	// takes its first part and says so, and a reader gets the rest from the message itself.
+	payload.Body, payload.BodyTruncated = model.EventBody(message.Body)
+	return payload
 }
 
 // loadMessageReplyThread derives that for a stored message, for a caller that did not derive
