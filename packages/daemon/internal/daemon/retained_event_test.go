@@ -107,8 +107,8 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 					return err
 				}
 				// The tree runs, which its open lifecycle is what says (record.TreeLive): without
-				// it admission would find a root in the workflow that no slot can ever reach and
-				// take it out, which is not the fence this test is about.
+				// it admission would find a root at a running status with no tree of it running
+				// and take it out (admit's unslotted), which is not the fence this test is about.
 				return openTreeTx(ctx, tx, "LEGION", root.Tree)
 			}); err != nil {
 				t.Fatal(err)

@@ -84,10 +84,10 @@ on conflict do nothing;
 -- This insert and the lifecycle insert above act on every project in the database, not only on
 -- the project of the daemon that runs the migration: the issues, the slots and the tree
 -- lifecycles are one table each, shared by every daemon of the database (docs/kubernetes.md,
--- "Rolling back this release"). A daemon still on the earlier release that shares it counts the
--- new child slots against its own cap and admits nothing until they drain, so every daemon of
--- one database moves to this release together. The deploy note says so where an operator reads
--- it.
+-- "Rolling back the release whose cap counts issues"). A daemon still on the earlier release that
+-- shares it counts the new child slots against its own cap and admits nothing until they drain,
+-- so every daemon of one database moves to this release together. The deploy note says so where
+-- an operator reads it.
 insert into slots (issue, index, admitted_at)
 select i.key,
        row_number() over (order by i.key) + coalesce((select max(index) from slots), -1),

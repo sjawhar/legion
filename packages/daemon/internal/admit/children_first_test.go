@@ -261,9 +261,10 @@ func TestARootWithNoChildrenStartsPlanningAtItsGatesOpening(t *testing.T) {
 	}
 }
 
-// A5. One children-first notice per parent per generation: every fact, tick and boot runs the
-// admission pass again, and a child filed later during one wait is no second telling, while the
-// re-admission that opens a new generation is.
+// A5. One children-first notice per parent per run: every fact, tick and boot runs the admission
+// pass again, and a child filed later during one wait is no second telling, while a run the tree
+// has not had yet — the one a re-admission opens, and the one a hand-over gives a sub-parent in a
+// tree of its own — is.
 func TestTheChildrenFirstNoticeIsToldOncePerIssueAndGeneration(t *testing.T) {
 	pool := migratedPool(t)
 	admission := cfTree(t, pool, 3)
@@ -287,16 +288,57 @@ func TestTheChildrenFirstNoticeIsToldOncePerIssueAndGeneration(t *testing.T) {
 		t.Fatalf("blocked = %#v, want both children named, %#v", blockedNow(t, pool, admission), want)
 	}
 
-	// The telling is per generation, so the mark of this one says nothing about the next.
+	// The telling is per run, so the mark of this one says nothing about the next.
 	var told bool
 	inTx(t, pool, func(tx pgx.Tx) {
 		var err error
-		if told, err = record.NewStore().TellChildrenFirst(context.Background(), tx, cfRoot, issue(t, pool, cfRoot).Generation+1, fixedNow); err != nil {
+		if told, err = record.NewStore().TellChildrenFirst(context.Background(), tx, cfRoot, cfRoot, issue(t, pool, cfRoot).Generation+1, fixedNow); err != nil {
 			t.Fatalf("mark the next generation told: %v", err)
 		}
 	})
 	if !told {
-		t.Fatalf("the next generation's mark was already taken, want each generation told on its own")
+		t.Fatalf("the next generation's mark was already taken, want each run told on its own")
+	}
+
+	// A sub-parent waits the same way, and the run its mark names is its tree's. The root
+	// releases its first child, which has a child of its own still open.
+	const grandchild = "LEGION-4"
+	seedMirrorChild(t, pool, grandchild, "backlog", cfFirst)
+	releaseChild(t, pool, admission, "release-first", cfFirst, cfRoot, 9)
+	if told := childrenFirstNotices(t, pool, cfFirst); len(told) != 1 {
+		t.Fatalf("the sub-parent's children-first notices = %+v, want exactly one", told)
+	}
+
+	// Its tree is re-admitted, which raises the root's generation and leaves every member's
+	// where it stands: the new run's architect has heard nothing, so the wait is told again
+	// though nothing of the sub-parent's own record changed.
+	readmitted := issue(t, pool, cfRoot).Generation + 1
+	if _, err := pool.Exec(context.Background(), "update issues set generation = $2 where key = $1", cfRoot, int64(readmitted)); err != nil {
+		t.Fatalf("open the tree's next run: %v", err)
+	}
+	tick(t, pool, admission, "tick-5")
+	if told := childrenFirstNotices(t, pool, cfFirst); len(told) != 2 {
+		t.Fatalf("the sub-parent's children-first notices after its tree's re-admission = %+v, want a second: this run's architect has not heard what holds it", told)
+	}
+
+	// The tree finishes and hands the sub-parent over as a root of its own, whose run is
+	// numbered from its own record (readmit), which here is the number the tree it left is on.
+	// Keyed on the generation alone the old tree's mark would answer for this tree's first run
+	// and its architect would never be told. Its own architect has written that tree's spec and a
+	// person has approved it, which is what puts a root's own children-first wait in the line at
+	// all (record.ChildrenFirstCandidates).
+	handedOver := issue(t, pool, cfFirst).Generation + 1
+	if handedOver != readmitted {
+		t.Fatalf("the handed-over sub-parent's run = %d and the tree it left is on %d, want the fixture's own premise: the two numbers collide", handedOver, readmitted)
+	}
+	if _, err := pool.Exec(context.Background(), "update issues set tree = key, generation = $2, handed_over_from = $3 where key = $1",
+		cfFirst, int64(handedOver), cfRoot); err != nil {
+		t.Fatalf("hand the sub-parent over as a root of its own: %v", err)
+	}
+	seedGate(t, pool, record.DesignGate{Issue: cfFirst, ArtifactID: "artifact-2", LatestVersion: 1, ApprovedVersion: new(1), EverOpened: true})
+	tick(t, pool, admission, "tick-6")
+	if told := childrenFirstNotices(t, pool, cfFirst); len(told) != 3 {
+		t.Fatalf("the children-first notices of the handed-over sub-parent = %+v, want a third: the run of its own tree is one no architect has been told of", told)
 	}
 }
 

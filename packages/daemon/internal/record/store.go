@@ -797,13 +797,16 @@ func (s *Postgres) DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root s
 	return nil
 }
 
-// TellChildrenFirst records that issue's architect has been told, for the run generation, that
-// the issue waits for its own Dispatch children, and reports whether this call is the telling: a
-// second call at the same generation changes nothing and answers false, so the one row decides
-// who tells. at is the moment the pass ran, kept for a reader of the table alone.
-func (s *Postgres) TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue string, generation uint64, at time.Time) (bool, error) {
-	tag, err := tx.Exec(ctx, `insert into children_first_notices (issue, generation, told_at) values ($1, $2, $3)
-		on conflict (issue, generation) do nothing`, issue, int64(generation), at)
+// TellChildrenFirst records that issue's architect has been told, for the run generation of tree,
+// that the issue waits for its own Dispatch children, and reports whether this call is the
+// telling: a second call for the same tree and generation changes nothing and answers false, so
+// the one row decides who tells. The tree is part of the key because the generation is the root's
+// and only names a run within one tree: an issue handed over as a root of its own waits in a tree
+// of its own, at a generation of its own numbering (admit's readmit), and is told there again. at
+// is the moment the pass ran, kept for a reader of the table alone.
+func (s *Postgres) TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64, at time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx, `insert into children_first_notices (issue, tree, generation, told_at) values ($1, $2, $3, $4)
+		on conflict (issue, tree, generation) do nothing`, issue, tree, int64(generation), at)
 	if err != nil {
 		return false, fmt.Errorf("mark %s told it waits for its children: %w", issue, err)
 	}

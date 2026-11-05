@@ -1636,24 +1636,48 @@ Under this release a running root holds no slot in `accepting`, in `awaiting_mer
 Its cap also counts the child slots this migration wrote, so it admits nothing until they drain.
 
 **Take a dump of the daemon's database before the upgrade** ([Rolling back the upgrade](#rolling-back-the-upgrade) says how, and says which tables a shared login cannot read), and restore that dump to roll back.
-Nothing of the schema has to be undone by hand: the earlier release ignores the two new columns and reads the `slots` and `tree_lifecycles` rows it knows.
+No column has to be undone by hand: the earlier release ignores the two new columns and reads the `slots` and `tree_lifecycles` rows it knows.
+The outbox is the one thing that does, and it is undone the same way whether or not a dump is restored, since a dump taken before the upgrade carries no row of this release's shape while one taken after it carries them all ("The outbox rows the earlier release refuses" below).
 
 With no dump, put the slots back in the shape the earlier release reads, with the daemon stopped and before the earlier image is pinned:
 
 ```sql
 -- Every slot a child holds, which the earlier release never writes and counts against its cap.
 delete from slots where issue <> (select tree from issues where issues.key = slots.issue);
--- One slot for every root the earlier release expects to hold one: in the workflow and not lingering.
+-- One slot for every root the earlier release expects to hold one: in the workflow, not
+-- lingering, and not waiting in the line, which under this release is a root in todo.
 insert into slots (issue, index, admitted_at)
 select i.key, row_number() over (order by i.key) + coalesce((select max(index) from slots), -1), now()
   from issues i
- where i.key = i.tree and i.linger_until is null and i.phase <> 'done'
+ where i.key = i.tree and i.linger_until is null and i.phase <> 'done' and i.status <> 'todo'
    and i.status not in ('triage', 'icebox', 'backlog', 'done')
    and not exists (select 1 from slots held where held.issue = i.key);
 ```
 
 Read the count the second statement wrote against the deployment's `admissionCap` before starting the earlier image: it writes a row per running root whatever the cap, as this release's own migration does, and the earlier release's cap loop drains the surplus as trees finish rather than refusing to boot.
 Set `admissionCap` back to the value it had before the upgrade in the same change that pins the earlier image, since this release's value counts issues and the earlier one's counts trees.
+
+A root in `todo` is left out because it holds a slot under neither release: it goes back into the earlier release's waiting line, whose own admission pass gives it a slot and opens its tree when the line reaches it.
+Giving it one here would be the opposite of a rollback.
+The earlier release's `line` passes over a root that already holds a slot, and its `releasesSlot` and `releaseInactiveSlots` free only a root that is done, waiting on a person, or out of the workflow (`internal/admit/admit.go` on that release), so a queued root would hold its slot for ever, be promoted by nothing and fill the cap.
+With the cap full, which is the normal state, that strands every root waiting in the line.
+
+**The outbox rows the earlier release refuses must go, with or without a dump.**
+This release writes two marks into every phase worker's start — `needsSlot` on the row that carries the task, `relaunch` on the row that brings the worker's session back (`record.SuperviseRequest`, written by `workflow.StartOrOwe`) — and a `children-first` notice kind.
+The earlier release decodes an outbox payload strictly (`DisallowUnknownFields` in `record/outbox.go`), its `validNoticeKind` does not know that kind, and its `execute` returns the decode error, which is a permanent refusal for neither kind of row: every such row still queued fails and is retried on its backoff for ever, so the worker it was written for is never started again and the notice reaches nobody.
+Run this with the daemon stopped, before the earlier image is pinned:
+
+```sql
+-- The marks this release writes into the pair of rows a phase worker's start is.
+update outbox set payload = payload - 'needsSlot' - 'relaunch'
+ where kind = 'supervise' and (payload ? 'needsSlot' or payload ? 'relaunch');
+-- The notice kind the earlier release does not know.
+delete from outbox where kind = 'notice' and payload->>'kind' = 'children-first';
+```
+
+A start that was waiting for its issue's slot loses the mark that held it unclaimable, so the earlier release claims it as soon as it is due and delivers its task: that worker starts under the earlier release's own cap, which counts the trees holding a slot and not the issues at work, and the slot statements above are what keep that cap honest.
+The relaunch row beside it becomes an ordinary start of the same role carrying no task, which brings the claim back and delivers nothing, so the pair starts one worker and hands it one task between them.
+A deleted `children-first` notice is told to nobody, and nothing of the earlier release keeps the wait it named: that release starts a parent's own first phase whatever the Dispatch children under it are doing.
 
 **Every daemon sharing the database moves together.**
 Several projects' daemons can share one database ([Daemon-launched controller](#daemon-launched-controller), step 3), and `issues`, `slots` and `tree_lifecycles` are one table each for all of them: this migration's inserts act on every project's rows, not only on the project of the daemon that ran it.

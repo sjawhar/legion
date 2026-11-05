@@ -269,8 +269,22 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 		return false, err
 	}
 	if !agent {
+		// Whether the write lands on the root of a tree that is running now, by the one rule every
+		// reader of that question asks (record.TreeRunning, record.TreeRuns): its lifecycle stands
+		// open under the workflow's own authority, it does not linger, and it is not itself waiting
+		// in the line for its tree to be opened. It is the lifecycle rather than a slot because a
+		// slot counts one issue at work now, and a running tree holds none of its own while every
+		// issue in it waits in the line.
+		//
+		// It is deliberately not record.TreeLive, which also calls a root waiting in the line for
+		// its tree to be opened live, so that a todo child of such a root records into the tree
+		// that will adopt it. The question here is whether a session's lifecycle status write lands
+		// on a tree already running, and a root waiting for its slot runs nothing — a root reopened
+		// inside its own linger among them, whose readmit cleared the linger while the ended run's
+		// lifecycle still stands open: where no tree runs, an outside session's write is a person's
+		// move, which is the whole of the question.
 		waiting := claim.IsTreeRoot(issue.Key, issue.Tree) && issue.AwaitingPerson() && !issue.Lingers()
-		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted && !waiting {
+		if admitted, err := record.TreeRunning(ctx, e.store, tx, issue); err != nil || !admitted && !waiting {
 			return false, err
 		}
 	}
@@ -338,24 +352,6 @@ func (e *Engine) rejectStaleHandover(ctx context.Context, tx pgx.Tx, issue recor
 	}
 	e.logOnCommit(ctx, "workflow: rejected stale hand-over event", "issue", issue.Key, "tree", handover.Tree, "linger", handover.Generation)
 	return true, nil
-}
-
-// admittedRoot says whether issue is the root of a tree that is running now, by the one rule
-// every reader of that question asks (record.TreeRunning, record.TreeRuns): its lifecycle
-// stands open under the workflow's own authority, it does not linger, and it is not itself
-// waiting in the line for its tree to be opened. It is the lifecycle rather than a slot because
-// a slot counts one issue at work now, and a running tree holds none of its own while every
-// issue in it waits in the line.
-//
-// It is deliberately not record.TreeLive, which also calls a root waiting in the line for its
-// tree to be opened live, so that a todo child of such a root records into the tree that will
-// adopt it. Its one caller asks whether a session's lifecycle status write lands on a tree
-// already running (sessionStatusWrite), and a root waiting for its slot runs nothing — a root
-// reopened inside its own linger among them, whose readmit cleared the linger while the ended
-// run's lifecycle still stands open: where no tree runs, an outside session's write is a
-// person's move, which is the whole of the question.
-func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (bool, error) {
-	return record.TreeRunning(ctx, e.store, tx, issue)
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission

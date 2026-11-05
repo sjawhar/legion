@@ -187,12 +187,14 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 // only the newest review, so it alone cannot recognise a request a later review replaced. A new
 // generation is told the request again, as its architect was not.
 //
-// The notice is work the daemon hands the running architect, so it is a handout for a root that
-// holds its slot: what that architect handed back at or before the review is part of the spec it is
-// now asked to revise, and only a hand-back after the review starts the next wait
-// (record.Store.TakeInThrough). A hand-back newer than the review, applied first, still stands. A
-// review with no sequence cannot be placed, so it takes in everything the record holds
-// (record.Store.StartHandout), as the notice did before hand-backs were placed.
+// The notice is work the daemon hands the running architect, so it is a handout whatever slot the
+// root holds: the cap counts the issues at work, and a root whose gate has opened once holds none
+// of its own while its architect revises the spec (record.AtWork). What that architect handed back
+// at or before the review is part of the spec it is now asked to revise, and only a hand-back
+// after the review starts the next wait (record.Store.TakeInThrough). A hand-back newer than the
+// review, applied first, still stands. A review with no sequence cannot be placed, so it takes in
+// everything the record holds (record.Store.StartHandout), as the notice did before hand-backs
+// were placed.
 //
 // With notify false the review is marked processed and nothing is sent: a root waiting on a person
 // has the review named by the task that resumes it, and the mark keeps a redelivery after that

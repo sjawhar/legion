@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -60,12 +61,68 @@ func TestTheChildHeldUnderAnAcceptedRootIsHandedOverWhenTheRootCloses(t *testing
 	}
 	apply("linger", intake.LingerExpired{Issue: root, Generation: 7})
 
-	handover := handoverOf(t, pool, held)
-	if handover == nil {
-		t.Fatalf("the tree's close left %s at admitted with no hand-over: nothing would ever start it, though the architect was told it starts once %s closed", held, root)
+	assertHandedOver(t, pool, held, root, 7)
+}
+
+// The same promise when a person closes the accepted root by hand, which leaves no merged pull
+// request at all: an architect's tree is signed off, and a person marks the root done on the
+// Dispatch dashboard while it stands in retro. The linger read the merge, so the held child was
+// skipped and stood todo at admitted in a closed tree for ever, though its architect had been
+// told it starts once the root has closed. The hand-over is decided from the hold instead, as
+// the root's linger begins and its phase still says it was accepted (fenceHeldUnderAccepted).
+func TestTheChildHeldUnderAnAcceptedRootIsHandedOverWhenAPersonClosesItByHand(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 4, 4, 0, 0, 0, time.UTC)
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: 48 * time.Hour,
+		Clock: func() time.Time { return now }}, nil)
+	root, held := "LEGION-208", "LEGION-210"
+	rootKey := root
+	seedIssue(t, pool, record.Issue{Key: root, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: root, Project: "LEGION", Title: "root", Phase: phase.Retro, Generation: 7, Status: "retro",
+		DispatchStatus: "retro", Rank: "U", LastDispatchSeq: 1})
+	// The issue a person moved to todo under the root while it was accepted, held at admitted.
+	seedIssue(t, pool, record.Issue{Key: held, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: root, Parent: &rootKey, Project: "LEGION", Title: "held", Phase: phase.Admitted, Generation: 7,
+		Status: "todo", Rank: "V2", LastDispatchSeq: 1})
+	// The root's own head was approved and accepted, and never merged: nothing of its pull
+	// request says it was accepted.
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: root, Repo: "sjawhar/legion", Number: 43,
+		Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
+
+	apply := applyFacts(t, pool, engine)
+	apply("closed-by-hand", intake.DispatchIssue{Key: root, ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.closed",
+		Status: "done", Title: "root", Rank: "U"})
+	var lingering bool
+	if err := pool.QueryRow(ctx, "select linger_until is not null from issues where key = $1", root).Scan(&lingering); err != nil || !lingering {
+		t.Fatalf("the hand-closed root lingers = %v, %v; want its tree lingering", lingering, err)
 	}
-	if handover.Tree != root || handover.Generation != 7 {
-		t.Fatalf("the hand-over of %s names tree %s at generation %d, want %s at 7", held, handover.Tree, handover.Generation, root)
+	// Admission, which runs after the workflow handler, is what records the status a person's
+	// move shows (its recordObservation); this test runs the engine alone.
+	if _, err := pool.Exec(ctx, "update issues set status = 'done', dispatch_status = 'done' where key = $1", root); err != nil {
+		t.Fatalf("record the status the person's close shows: %v", err)
+	}
+
+	apply("linger", intake.LingerExpired{Issue: root, Generation: 7})
+
+	assertHandedOver(t, pool, held, root, 7)
+}
+
+// assertHandedOver is the hand-over of key the linger of tree at generation made: the durable
+// fence it is held under, and the one Dispatch write that puts the issue todo with the legion
+// label under that fence, which is what makes it a root of its own.
+func assertHandedOver(t *testing.T, pool *pgxpool.Pool, key, tree string, generation uint64) {
+	t.Helper()
+	handover := handoverOf(t, pool, key)
+	if handover == nil || handover.Tree != tree || handover.Generation != generation || handover.Cancelled {
+		t.Fatalf("the hand-over fence of %s = %+v, want %s at generation %d, standing", key, handover, tree, generation)
+	}
+	var writes int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'dispatch_status' and issue = $1
+		and payload->>'status' = 'todo' and payload->>'handOver' = 'true' and payload->>'handOverTree' = $2
+		and payload->>'handOverLinger' = $3`, key, tree, fmt.Sprint(generation)).Scan(&writes); err != nil || writes != 1 {
+		t.Fatalf("the hand-over writes of %s = %d, %v; want one fenced on %s's linger %d: nothing else would ever start it, though the architect was told it starts once %s closed",
+			key, writes, err, tree, generation, tree)
 	}
 }
 

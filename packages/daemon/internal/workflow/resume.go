@@ -91,9 +91,14 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 			continue
 		}
 		root, ok := byKey[issue.Tree]
-		if !ok || root.Lingers() {
+		if !ok {
 			continue
 		}
+		// The tree must be running — this generation of it, by the one rule every reader of that
+		// question asks (record.TreeRuns, read here through record.RunningRoots): the workflow has
+		// opened its lifecycle and not closed it, the root does not linger, and the root is not
+		// itself waiting in the line for the tree to be opened, whose architect's first task comes
+		// with its promotion.
 		if _, runs := running[root.Key]; !runs {
 			continue
 		}

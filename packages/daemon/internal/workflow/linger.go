@@ -233,15 +233,22 @@ func awaitsMerge(issue record.Issue) bool {
 // beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold
 // if it has one, as a child's leave does. Its one caller (leave) calls it once per close: a root
 // that already lingers leaves no second time.
+//
+// The tree's members are read before the root's own record is written, because the write ends the
+// root's phase and the hand-over fences below are judged from it (fenceHeldUnderAccepted). Nothing
+// else of the loop reads a member's phase.
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	until := e.lingerAt()
+	members, err := e.treeMembers(ctx, tx, root)
+	if err != nil {
+		return err
+	}
+	if err := e.fenceHeldUnderAccepted(ctx, tx, root, members); err != nil {
+		return err
+	}
 	root.LingerUntil = &until
 	root.Phase, root.Hold, root.Awaiting = phase.Done, nil, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
-		return err
-	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
 		return err
 	}
 	for _, member := range members {
@@ -261,6 +268,63 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		return err
 	}
 	e.logOnCommit(ctx, "workflow: tree lingers", "tree", root.Key, "generation", root.Generation, "until", until)
+	return nil
+}
+
+// fenceHeldUnderAccepted records the hand-over of every member the daemon is itself holding at
+// admitted under an ancestor it has accepted, as the root's linger begins. Nothing else would
+// ever start such a member: a person moved it to todo under an ancestor in retro, merging or
+// awaiting_merge, the daemon recorded it at admitted and told the architect it starts once that
+// ancestor closes (ChildUnderAcceptedParentNotice), and the same hold is what let the ancestor be
+// accepted and close at all, since record.OpenBeneath leaves such a member out of the wait. Its
+// tree has closed, the line offers a slot to nothing of a closed tree, and a status it already
+// carries moves nobody. So the tree's close hands it to Legion as a root of its own, which is the
+// promise the notice made (unfinishedHandOvers, which hands over what is fenced here).
+//
+// The hold is what the hand-over is decided from, and it is read here rather than at the linger's
+// expiry because by then the root's own phase is done, whichever way it closed: an accepted root a
+// person closes by hand from the Dispatch dashboard leaves no merged pull request, and reading the
+// merge instead left its held members standing todo at admitted in a closed tree with nobody told.
+// An ancestor below the root keeps its phase through the linger, so the rule reads the same there.
+//
+// accepted is that same acceptance for the root itself, which record.AcceptedPhases cannot answer
+// for in one of the two ways a root closes: the transition that closes a merged root writes its
+// phase as done before the linger begins, so its pull request is what says it was accepted. Under
+// it every member left at admitted is one the hold stopped — children-first refuses the sign-off
+// of a root with any other issue beneath it in the workflow, so no released child of its own can
+// be standing there.
+//
+// The fence is the durable record of a hand-over to come (record.Handover): the re-admission of
+// this root inside its linger cancels every one of them (admit's readmit), and the linger's expiry
+// writes each again with the Dispatch PATCH it queues (handOver). A member a person takes out of
+// the workflow meanwhile is handed over by nothing: the expiry passes over it, and the fence it
+// leaves behind names a root nobody is handing it over from.
+func (e *Engine) fenceHeldUnderAccepted(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
+	accepted := slices.Contains(record.AcceptedPhases, root.Phase)
+	if !accepted {
+		pr, err := e.store.PullRequest(ctx, tx, root.Key)
+		if err != nil {
+			return err
+		}
+		accepted = pr != nil && pr.State == record.PullRequestMerged
+	}
+	byKey := make(map[string]record.Issue, len(members))
+	for _, member := range members {
+		byKey[member.Key] = member
+	}
+	for _, member := range members {
+		if member.Key == root.Key || member.Phase != phase.Admitted || !record.InWorkflow(member) {
+			continue
+		}
+		if !accepted && !record.HeldUnderAccepted(member, byKey) {
+			continue
+		}
+		if err := e.store.PutHandover(ctx, tx, record.Handover{Issue: member.Key, Tree: root.Tree, Generation: root.Generation}); err != nil {
+			return err
+		}
+		e.logOnCommit(ctx, "workflow: a member held at admitted under an accepted ancestor is Legion's once its tree's linger ends",
+			"issue", member.Key, "tree", root.Key, "generation", root.Generation)
+	}
 	return nil
 }
 
@@ -289,25 +353,15 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // taken back either — it is checked, which is what the blocked-root rule reads when the child comes
 // up for admission (blockers.Exempt).
 //
-// The second exception is the child the daemon itself held at admitted under this root while the
-// root was accepted (record.HeldUnderAccepted): a person moved it to todo under an ancestor in
-// retro, merging or awaiting_merge, the daemon recorded it at admitted and told the architect it
-// starts once that ancestor closes (ChildUnderAcceptedParentNotice), and the same hold is what
-// let the root close at all, since record.OpenBeneath leaves such a child out of the wait its
-// merge keeps. Nothing else would ever start it: its tree has closed, the line offers a slot to
-// nothing of a closed tree, and a status it already carries moves nobody. So the root's close
-// hands it to Legion as a root of its own, which is the promise the notice made.
-//
-// It is read as the root's own merge rather than by walking the chain again, because by now the
-// root is done and no ancestor of the child stands in an accepted phase: a root whose pull
-// request merged is a root that was accepted, and a child left at admitted in the workflow under
-// such a root is exactly a child that hold stopped — children-first refuses the sign-off of a
-// root with any other issue beneath it in the workflow (record.OpenBeneath), so no released
-// child of its own can be standing there. A root a person closed by hand, and one closed at
-// admitted before any phase started (closeRoot), merged nothing, so their admitted children are
-// left where they are, as before. An ancestor below the root needs none of this: when it closes,
-// the child's hold is read again and finds no accepted ancestor, so the line starts it inside the
-// tree that is still running.
+// The second exception is the child the daemon itself held at admitted under an ancestor it had
+// accepted, whose hand-over this root's own close recorded as its linger began
+// (fenceHeldUnderAccepted, where the hold and the promise made to the architect are set out).
+// The fence is read here rather than the hold itself, because by now the root is done: a root
+// that was accepted and one closed at admitted before any phase started (closeRoot) read alike,
+// and the merge that stood in for the acceptance answered nothing for an accepted root a person
+// closed by hand. An ancestor below the root needs none of this: when it closes, the child's
+// hold is read again and finds no accepted ancestor, so the line starts it inside the tree that
+// is still running.
 func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) ([]record.Issue, error) {
 	if root.Status != "done" {
 		return nil, nil
@@ -326,22 +380,32 @@ func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return nil, err
 	}
-	accepted := false
-	if len(admitted) > 0 {
-		pr, err := e.store.PullRequest(ctx, tx, root.Key)
-		if err != nil {
-			return nil, err
-		}
-		accepted = pr != nil && pr.State == record.PullRequestMerged
-	}
 	var handed []record.Issue
 	for _, member := range unfinished {
-		if member.Phase == phase.Admitted && !accepted && len(blockers.Holds(rows, member)) == 0 {
-			continue
+		if member.Phase == phase.Admitted && len(blockers.Holds(rows, member)) == 0 {
+			fenced, err := e.fencedForHandOver(ctx, tx, root, member)
+			if err != nil {
+				return nil, err
+			}
+			if !fenced {
+				continue
+			}
 		}
 		handed = append(handed, member)
 	}
 	return handed, nil
+}
+
+// fencedForHandOver says whether this root's linger recorded member's hand-over when it began
+// (fenceHeldUnderAccepted): the fence names this tree and this root generation and the root's
+// re-admission has not cancelled it. A member standing at admitted with no fence is one that
+// never started under its tree's design and nothing was holding, so it is left where it is.
+func (e *Engine) fencedForHandOver(ctx context.Context, tx pgx.Tx, root, member record.Issue) (bool, error) {
+	handover, err := e.store.Handover(ctx, tx, member.Key)
+	if err != nil || handover == nil {
+		return false, err
+	}
+	return !handover.Cancelled && handover.Tree == root.Tree && handover.Generation == root.Generation, nil
 }
 
 // handOver writes the durable fence before queuing the one Dispatch PATCH that sets the child todo

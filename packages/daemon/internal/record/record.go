@@ -1146,12 +1146,13 @@ type Store interface {
 	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
 	// ReadmittedApproval is the pair root keeps, in any state, zeros when it keeps none.
 	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
-	// TellChildrenFirst marks that issue's architect has been told, for the run generation, that
-	// the issue's own first phase waits for the Dispatch children under it, and reports whether
-	// this call is the telling. The wait itself is never stored, so that a stale mirror row
-	// costs one pass; the telling is, so that the pass every fact, tick, hold release and boot
-	// runs does not tell it again. A re-admission opens a new generation and so tells it anew.
-	TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue string, generation uint64, at time.Time) (bool, error)
+	// TellChildrenFirst marks that issue's architect has been told, for the run generation of
+	// tree, that the issue's own first phase waits for the Dispatch children under it, and
+	// reports whether this call is the telling. The wait itself is never stored, so that a stale
+	// mirror row costs one pass; the telling is, so that the pass every fact, tick, hold release
+	// and boot runs does not tell it again. A re-admission opens a new generation of the tree and
+	// so tells it anew, and so does a hand-over, which gives the issue a tree of its own.
+	TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64, at time.Time) (bool, error)
 	// ForgetKeptDecisions tells what outbox row's published catch-up named of what tree is owed
 	// (KeptDecisions), of the rows row claims or nothing claims: every parked decision still
 	// standing at the reference and time it named — a newer decision on the same reference, kept

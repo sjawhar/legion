@@ -16,9 +16,9 @@ import (
 const strandedRoleRunBatchSize = 200
 
 // Stranded is every claim of s's issues that nothing will wake, by issue and then role. A claim
-// is stranded when its issue's tree runs — its lifecycle stands open under the workflow and the
-// root does not linger, the rule record.LiveRoots applies — nothing will wake it, and it is
-// suspended or failed and one of:
+// is stranded when its issue's tree runs — its lifecycle stands open under the workflow, the root
+// does not linger and the root is not itself waiting in the line, the rule record.TreeRuns applies
+// — nothing will wake it, and it is suspended or failed and one of:
 //
 //   - A worker of its issue's phase: the role RoleFor gives the phase its worker works
 //     (workingPhase), which a held issue keeps from the phase it left. Only a start of that phase
@@ -44,7 +44,7 @@ const strandedRoleRunBatchSize = 200
 // The move that brings each one back is api.StrandedClaim.Move's.
 //
 // It names no other claim: a worker whose phase is not its own is started again when its phase
-// comes, and a tree that is not live runs nothing yet. That is a lingering tree — a root that
+// comes, and a tree that is not running runs nothing yet. That is a lingering tree — a root that
 // leaves the workflow, closed or moved out by a person, always lingers first (leave) — whose
 // members its re-admission starts again, and a root that never ran, whose architect receives its
 // first task only when the line reaches it. A claim of a running tree whose issue waits for a
@@ -86,17 +86,18 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, cl
 			continue
 		}
 		root, ok := recorded[issue.Tree]
-		if !ok || root.Lingers() || root.AwaitingPerson() {
+		if !ok || root.AwaitingPerson() {
 			continue
 		}
 		// The tree must be running — this generation of it, by the one rule every reader of that
 		// question asks (record.TreeRuns): the workflow has opened its lifecycle and not closed
-		// it, and its root is not itself waiting in the line for the tree to be opened. A root
-		// that waits there — one that never ran, a re-admitted one, one reopened inside its own
-		// linger, whose readmit cleared the linger while the ended run's lifecycle still stands
-		// open — is live for the ancestry hold's purposes (record.TreeLive) but runs nothing
-		// yet, and its architect's task comes with its promotion, so nothing of it is stranded.
-		// Nor is anything of a root waiting on a person, whose architect its answer resumes.
+		// it, the root does not linger, and the root is not itself waiting in the line for the
+		// tree to be opened. A root that waits there — one that never ran, a re-admitted one, one
+		// reopened inside its own linger, whose readmit cleared the linger while the ended run's
+		// lifecycle still stands open — is live for the ancestry hold's purposes (record.TreeLive)
+		// but runs nothing yet, and its architect's task comes with its promotion, so nothing of it
+		// is stranded. Nor is anything of a root waiting on a person, whose architect its answer
+		// resumes.
 		if _, runs := running[root.Key]; !runs {
 			continue
 		}
