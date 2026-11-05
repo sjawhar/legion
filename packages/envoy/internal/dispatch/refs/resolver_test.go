@@ -461,7 +461,7 @@ func TestAFailedResolverLeavesTheWriteStoringTheTextAsWritten(t *testing.T) {
 	slog.SetDefault(slog.New(logged))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	located := NewReader(ctx, failingQueryer{}, "comment", source, resolverServer).mentions(body)
+	located := NewReader(ctx, failingQueryer{}, "comment", source, resolverServer).Mentions(body)
 	if want := text.ExtractAt(body, resolverServer); !reflect.DeepEqual(located, want) {
 		t.Errorf("a failed resolver read %#v; want the text as written, %#v", located, want)
 	}
@@ -516,11 +516,11 @@ func TestAResolverResolvesEachPrefixOnce(t *testing.T) {
 	cite := "dispatch://ACME-1/ask/" + resolverAsk[:8]
 	reads := 0
 	resolve := NewReader(ctx, countingQueryer{Queryer: tx, reads: &reads}, "comment", resolverSource(1), resolverServer)
-	if located := resolve.mentions("See " + cite + "."); len(located) != 1 || located[0].ID != resolverAsk {
+	if located := resolve.Mentions("See " + cite + "."); len(located) != 1 || located[0].ID != resolverAsk {
 		t.Fatalf("the first text read %#v; want the whole id of %s", located, resolverAsk)
 	}
 	once := reads
-	if located := resolve.mentions("See " + cite + " and " + cite + " again."); len(located) != 2 {
+	if located := resolve.Mentions("See " + cite + " and " + cite + " again."); len(located) != 2 {
 		t.Fatalf("the second text read %#v; want two references", located)
 	}
 	if reads != once {

@@ -101,8 +101,9 @@ func TestADocumentVersionLeavesItsScopeOwed(t *testing.T) {
 		t.Fatalf("the version's write owes %v, want %v", owed, wantOwed)
 	}
 
+	reader := NewReader(ctx, tx, "artifact", document, refsGrammarServer)
 	if _, err := ReplaceDocumentCounted(ctx, tx, document, 1, versionAt,
-		text.Refs(Mentions(ctx, tx, "artifact", document, "Blocked on CORE-1.", refsGrammarServer)), nil, nil); err != nil {
+		text.Refs(reader.Mentions("Blocked on CORE-1.")), nil, nil); err != nil {
 		t.Fatalf("index the version: %v", err)
 	}
 

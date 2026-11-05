@@ -148,7 +148,7 @@ func askPartsSum(parts []itemblocks.Block) string {
 func askPartPairs(parts []itemblocks.Block, ids []string, r *Reader) []blockPair {
 	var pairs []blockPair
 	for index, part := range parts {
-		located := r.mentions(part.Text)
+		located := r.Mentions(part.Text)
 		if len(located) == 0 {
 			continue
 		}

@@ -10,27 +10,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// Mentions is the references one source's text writes, read with the whole grammar
-// (text.Mentions): the `dispatch://` and dashboard addresses it spells out, the issue keys it
-// writes bare, the `#id`s naming the question blocks of the document its text belongs to, and the
-// ask, comment, message and block ids it writes short, each resolved to the whole id, over q, the
-// pool or transaction the write runs in. Every indexing path reads its text through this call or
-// through the Reader behind it (NewReader), so a comment, an ask, a message, a document, a
-// block, an excerpt, the full rebuild (RebuildAll) and the re-index of old text (ReindexOwed)
-// all store the same edges for the same text. fromKind and fromID are the source whose text body
-// is, as refs stores it: they decide which document a `#id` resolves against (ScopeOf). Each
-// mention keeps its byte offset, so a caller that places mentions in blocks passes the result
-// through unchanged.
-//
-// A lookup that fails is not a mention that fails: the reader answers "nothing resolved" for
-// that kind, and the text is indexed as it is written, the way a mention of a target that does
-// not exist is (CountedChanges). What it does not do is save a write: a query that fails inside
-// the write's own transaction aborts that transaction, so the write fails at its next statement
-// whatever this answers.
-func Mentions(ctx context.Context, q Queryer, fromKind, fromID, body, serverURL string) []text.Located {
-	return NewReader(ctx, q, fromKind, fromID, serverURL).mentions(body)
-}
-
 // Reader is the database one write reads every text of its source through, over the pool or
 // transaction that write runs in and for the one source whose text it is: its kind and id decide
 // the document a `#id` resolves against, and the server URL is the one the mentions are read
@@ -85,8 +64,22 @@ func NewReader(ctx context.Context, q Queryer, fromKind, fromID, serverURL strin
 	return &Reader{ctx: ctx, q: q, kind: fromKind, id: fromID, serverURL: serverURL}
 }
 
-// mentions is text.Mentions of body resolved through r.
-func (r *Reader) mentions(body string) []text.Located {
+// Mentions is the references body writes, read with the whole grammar (text.Mentions): the
+// `dispatch://` and dashboard addresses it spells out, the issue keys it writes bare, the
+// `#id`s naming the question blocks of the document the reader's source belongs to, and the
+// ask, comment, message and block ids it writes short, each resolved to the whole id through
+// the reader. Every indexing path reads its text through this call, so a comment, an ask, a
+// message, a document, a block, an excerpt, the full rebuild (RebuildAll) and the
+// re-index of old text (ReindexOwed) all store the same edges for the same text. Each mention
+// keeps its byte offset, so a caller that places mentions in blocks passes the result through
+// unchanged.
+//
+// A lookup that fails is not a mention that fails: the reader answers "nothing resolved" for
+// that kind, and the text is indexed as it is written, the way a mention of a target that does
+// not exist is (CountedChanges). What it does not do is save a write: a query that fails inside
+// the write's own transaction aborts that transaction, so the write fails at its next statement
+// whatever this answers.
+func (r *Reader) Mentions(body string) []text.Located {
 	located, err := text.Mentions(body, r.serverURL, r)
 	if err != nil {
 		// Unreachable: r answers every failure as nothing resolved and returns none. A build

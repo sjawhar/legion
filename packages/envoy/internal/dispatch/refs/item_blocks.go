@@ -105,7 +105,7 @@ func ReplaceCountedItem(
 	itemID, body, serverURL string,
 	at time.Time,
 ) (model.ReferenceChanges, error) {
-	located := Mentions(ctx, tx, string(kind), itemID, body, serverURL)
+	located := NewReader(ctx, tx, string(kind), itemID, serverURL).Mentions(body)
 	changed, err := replaceItemRefs(ctx, tx, kind, itemID, body, at, located, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
@@ -128,7 +128,7 @@ func ReplaceCountedItemEdit(
 	at time.Time,
 	carried *CarriedEdit,
 ) (model.ReferenceChanges, error) {
-	located := Mentions(ctx, tx, string(kind), itemID, body, serverURL)
+	located := NewReader(ctx, tx, string(kind), itemID, serverURL).Mentions(body)
 	changed, err := replaceItemRefs(ctx, tx, kind, itemID, body, at, located, carried)
 	if err != nil {
 		return model.ReferenceChanges{}, err

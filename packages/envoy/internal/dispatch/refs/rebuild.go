@@ -166,7 +166,8 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, serverURL str
 	if err != nil || !found {
 		return false, err
 	}
-	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Refs(Mentions(ctx, tx, fromKind, fromID, body, serverURL)), nil); err != nil {
+	located := NewReader(ctx, tx, fromKind, fromID, serverURL).Mentions(body)
+	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Refs(located), nil); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -368,7 +369,7 @@ func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL strin
 		return nil
 	}
 	resolve := NewReader(ctx, tx, kind, id, serverURL)
-	located := resolve.mentions(body)
+	located := resolve.Mentions(body)
 	switch itemKind := ItemKind(kind); itemKind {
 	case ItemComment, ItemMessage:
 		if _, err := IndexItem(ctx, tx, itemKind, id, body, writtenAt, located, nil); err != nil {

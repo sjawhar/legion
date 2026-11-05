@@ -56,7 +56,7 @@ func ReplaceCounted(
 	r *Reader,
 	body string,
 ) (model.ReferenceChanges, error) {
-	found := text.Refs(r.mentions(body))
+	found := text.Refs(r.Mentions(body))
 	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
@@ -73,7 +73,7 @@ func ReplaceCountedEdit(
 	r *Reader,
 	previous, body string,
 ) (model.ReferenceChanges, error) {
-	found := text.Refs(r.mentions(body))
+	found := text.Refs(r.Mentions(body))
 	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
