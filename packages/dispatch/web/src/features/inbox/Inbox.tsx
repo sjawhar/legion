@@ -794,8 +794,7 @@ export function Inbox({
       : focusedRow();
   const inAnswerHand = (selector: string) =>
     answerHand()?.querySelector<HTMLElement>(selector) ?? null;
-  // The bar is reached through its own ref: the empty state a pick can leave behind renders it
-  // outside the list.
+  // The bar is reached through its own ref, which holds wherever the header draws it.
   const bulkPicker = () => bulkBarRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
   // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
   // has no row to fall back through - is one level out rather than a dead end.
@@ -974,8 +973,7 @@ export function Inbox({
       label: "Back to the list from the bulk snooze picker",
       run: () => {
         // With every marked row gone there is no row to return to, so the bar itself is the
-        // level out: it holds the count and the way to clear it. It is reached through its own
-        // ref, because the empty state a pick can leave behind renders it outside the list.
+        // level out: it holds the count and the way to clear it.
         (originRow(pickerOrigin.current) ?? rows()[0] ?? bulkBarRef.current)?.focus();
       },
       when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
