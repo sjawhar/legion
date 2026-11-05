@@ -1,5 +1,23 @@
 # Changelog
 
+## [29.12.0] - 2026-11-05
+
+### Added
+
+- Reviews retain the SHA-256 of the stored UTF-8 version they approved, with insert or backfill provenance. Startup fills legacy reviews without changing approval decisions, and review, approval, event and document-version reads expose the hashes.
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.2. A keystroke no longer scans
+  every distinct missing client in the waiting queue. Default document UUIDs use two allocations
+  instead of eight. Room closure cannot evict a room while an apply writes it, failed joins
+  reclaim eligible rooms, and cancelled applies can stop waiting for a room load. The library
+  also offers context-aware room closure; Dispatch retains its existing close wrapper. Logical
+  content lengths and splice offsets use uint64 without changing the wire format; Dispatch
+  needs no consumer API adaptation. Cloning a document with emptied waiting-queue slots no
+  longer panics, protecting current Dispatch's warm write forks. Three repeated library
+  microbenchmark slowdowns remain, but their percentages do not measure whole-update cost.
+
 ## [29.11.0] - 2026-11-05
 
 ### Added
