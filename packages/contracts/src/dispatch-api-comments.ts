@@ -11,11 +11,11 @@ import {
 import type { GraphNode } from "./dispatch-api-graph";
 import { ASK_TURNS, type AskTurn, DELIVERY_CAPABILITIES } from "./dispatch-api-limits";
 import {
-  InboundReplyBlockSchema,
   ReplyBlockSchema,
   type ReplyBlockWithTrees,
   referenceChangesFields,
   threadLoginsFields,
+  WrittenReplyBlockSchema,
 } from "./dispatch-api-refs";
 
 /**
@@ -29,12 +29,12 @@ export const commentMentionFields = {
   session_id: z.string().nullable(),
 };
 
-export const CommentMentionSchema = z.strictObject(commentMentionFields).readonly();
+export const WrittenCommentMentionSchema = z.strictObject(commentMentionFields).readonly();
 
-export type CommentMention = z.output<typeof CommentMentionSchema>;
+export type CommentMention = z.output<typeof WrittenCommentMentionSchema>;
 
 /** A mention as a bus frame carries it: the same three fields, with anything else dropped. */
-export const InboundCommentMentionSchema = z.object(commentMentionFields);
+export const CommentMentionSchema = z.object(commentMentionFields);
 
 export const commentDeliveryFields = {
   comment_id: z.string(),
@@ -55,14 +55,14 @@ export const commentDeliveryFields = {
   created_at: z.string(),
 };
 
-export const CommentDeliverySchema = z.strictObject(commentDeliveryFields).readonly();
+export const WrittenCommentDeliverySchema = z.strictObject(commentDeliveryFields).readonly();
 
-export type CommentDelivery = z.output<typeof CommentDeliverySchema>;
+export type CommentDelivery = z.output<typeof WrittenCommentDeliverySchema>;
 
 /** One delivery attempt as a bus frame carries it. A stripping object: without `duplicate`
  *  declared the flag is dropped from every agent-bound comment frame, since this schema is
  *  nested inside the passthrough payload schemas. */
-export const InboundCommentDeliverySchema = z.object(commentDeliveryFields);
+export const CommentDeliverySchema = z.object(commentDeliveryFields);
 
 export const suggestionFields = {
   replace_with: z.string(),
@@ -93,12 +93,12 @@ export const commentFields = {
   edited_at: z.string().nullable(),
   suggestion: SuggestionSchema.nullable(),
   created_at: z.string(),
-  mentions: z.array(CommentMentionSchema),
-  deliveries: z.array(CommentDeliverySchema),
+  mentions: z.array(WrittenCommentMentionSchema),
+  deliveries: z.array(WrittenCommentDeliverySchema),
   /** The block this reply answers (`reply_to_block`): a block of the comment `reply_to` names,
    *  or, with `ask_id`, a part of that ask; null on every other comment, and absent from a
    *  Dispatch older than the field. */
-  reply_block: ReplyBlockSchema.nullable().optional(),
+  reply_block: WrittenReplyBlockSchema.nullable().optional(),
 };
 
 export const CommentSchema = z.strictObject(commentFields).readonly();
@@ -173,8 +173,8 @@ export interface AcceptSuggestionResponse extends Comment {
  */
 export const commentEventPayloadFields = {
   ...commentFields,
-  mentions: z.array(CommentMentionSchema).optional(),
-  deliveries: z.array(CommentDeliverySchema).optional(),
+  mentions: z.array(WrittenCommentMentionSchema).optional(),
+  deliveries: z.array(WrittenCommentDeliverySchema).optional(),
   artifact_name: z.string(),
   /** The document owner for an artifact comment, including direct author routes. */
   project_key: z.string().optional(),
@@ -192,9 +192,11 @@ export const commentEventPayloadFields = {
   ...threadLoginsFields,
 };
 
-export const CommentEventPayloadSchema = z.strictObject(commentEventPayloadFields).readonly();
+export const WrittenCommentEventPayloadSchema = z
+  .strictObject(commentEventPayloadFields)
+  .readonly();
 
-export type CommentEventPayload = z.output<typeof CommentEventPayloadSchema>;
+export type CommentEventPayload = z.output<typeof WrittenCommentEventPayloadSchema>;
 
 /**
  * What a reader of the bus makes of a `comment.*` payload: the fields Dispatch clients are known
@@ -207,7 +209,7 @@ export type CommentEventPayload = z.output<typeof CommentEventPayloadSchema>;
  * vanishing when a consumer that reads it is added later, as `ask_waiting_on` and `turn` would
  * vanish from a `comment.created` reply with no test to catch it.
  */
-export const InboundCommentEventPayloadSchema = z
+export const CommentEventPayloadSchema = z
   .object({
     id: commentFields.id.optional(),
     artifact_name: commentEventPayloadFields.artifact_name.optional(),
@@ -233,9 +235,9 @@ export const InboundCommentEventPayloadSchema = z
     suggestion: z.object({ replace_with: suggestionFields.replace_with.optional() }).nullish(),
     author: InboundActorSchema.optional(),
     created_at: commentFields.created_at.optional(),
-    mentions: z.array(InboundCommentMentionSchema).optional(),
-    deliveries: z.array(InboundCommentDeliverySchema).optional(),
-    reply_block: InboundReplyBlockSchema.nullish(),
+    mentions: z.array(CommentMentionSchema).optional(),
+    deliveries: z.array(CommentDeliverySchema).optional(),
+    reply_block: ReplyBlockSchema.nullish(),
     thread_logins: threadLoginsFields.thread_logins,
   })
   .passthrough();

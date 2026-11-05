@@ -272,15 +272,15 @@ export interface DocumentRead {
   readonly read_at: string | null;
 }
 
-export const ArtifactCreatedEventPayloadSchema = z
+export const WrittenArtifactCreatedEventPayloadSchema = z
   .strictObject({ artifact: ArtifactSchema, ...referenceChangesFields })
   .readonly();
 
-export type ArtifactCreatedEventPayload = z.output<typeof ArtifactCreatedEventPayloadSchema>;
+export type ArtifactCreatedEventPayload = z.output<typeof WrittenArtifactCreatedEventPayloadSchema>;
 
 /** What a reader of the bus makes of an `artifact.created` payload: the three fields of the
  *  document a renderer names it by, each optional, and everything else dropped. */
-export const InboundArtifactCreatedEventPayloadSchema = z.object({
+export const ArtifactCreatedEventPayloadSchema = z.object({
   artifact: z
     .object({
       id: artifactFields.id.optional(),
@@ -297,16 +297,16 @@ export const artifactVersionEventPayloadFields = {
   diff: z.string().optional(),
 };
 
-export const ArtifactVersionEventPayloadSchema = z
+export const WrittenArtifactVersionEventPayloadSchema = z
   .strictObject({ ...artifactVersionEventPayloadFields, ...referenceChangesFields })
   .readonly();
 
-export type ArtifactVersionEventPayload = z.output<typeof ArtifactVersionEventPayloadSchema>;
+export type ArtifactVersionEventPayload = z.output<typeof WrittenArtifactVersionEventPayloadSchema>;
 
 /** What a reader of the bus makes of an `artifact.version` payload: the fields a renderer shows,
  *  each optional, and of the version only its number and summary. The version number is read as
  *  the stored field, so a fractional one is refused; no writer emits one. */
-export const InboundArtifactVersionEventPayloadSchema = z.object({
+export const ArtifactVersionEventPayloadSchema = z.object({
   artifact_id: artifactVersionEventPayloadFields.artifact_id.optional(),
   name: artifactVersionEventPayloadFields.name.optional(),
   version: z
@@ -332,17 +332,17 @@ export const artifactHumanEditedEventPayloadFields = {
   diff_truncated: z.boolean(),
 };
 
-export const ArtifactHumanEditedEventPayloadSchema = z
+export const WrittenArtifactHumanEditedEventPayloadSchema = z
   .strictObject(artifactHumanEditedEventPayloadFields)
   .readonly();
 
 export type ArtifactHumanEditedEventPayload = z.output<
-  typeof ArtifactHumanEditedEventPayloadSchema
+  typeof WrittenArtifactHumanEditedEventPayloadSchema
 >;
 
 /** What a reader of the bus makes of an `artifact.human_edited` payload: every field optional,
  *  because a frame is untrusted and a missing one must not discard the event. */
-export const InboundArtifactHumanEditedEventPayloadSchema = z.object({
+export const ArtifactHumanEditedEventPayloadSchema = z.object({
   artifact_id: artifactHumanEditedEventPayloadFields.artifact_id.optional(),
   name: artifactHumanEditedEventPayloadFields.name.optional(),
   from_version: artifactHumanEditedEventPayloadFields.from_version.optional(),
@@ -372,16 +372,16 @@ export const artifactReviewEventPayloadFields = {
   kind: ArtifactReviewKindSchema.optional(),
 };
 
-export const ArtifactReviewEventPayloadSchema = z
+export const WrittenArtifactReviewEventPayloadSchema = z
   .strictObject(artifactReviewEventPayloadFields)
   .readonly();
 
-export type ArtifactReviewEventPayload = z.output<typeof ArtifactReviewEventPayloadSchema>;
+export type ArtifactReviewEventPayload = z.output<typeof WrittenArtifactReviewEventPayloadSchema>;
 
 /** What a reader of the bus makes of an `artifact.approved` or `artifact.changes_requested`
  *  payload: every field optional, and the reviewer's `kind` an open string, since a frame
  *  retained from an earlier release may name a kind this one does not. */
-export const InboundArtifactReviewEventPayloadSchema = z.object({
+export const ArtifactReviewEventPayloadSchema = z.object({
   artifact_id: artifactReviewEventPayloadFields.artifact_id.optional(),
   name: artifactReviewEventPayloadFields.name.optional(),
   version: artifactReviewEventPayloadFields.version.optional(),

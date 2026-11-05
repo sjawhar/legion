@@ -1,11 +1,11 @@
 import { z } from "zod";
 import {
-  InboundCommentDeliverySchema,
-  InboundCommentEventPayloadSchema,
-  InboundCommentMentionSchema,
+  CommentDeliverySchema,
+  CommentEventPayloadSchema,
+  CommentMentionSchema,
 } from "./dispatch-api-comments";
 import { DELIVERY_CAPABILITIES } from "./dispatch-api-limits";
-import { InboundMessageEventPayloadSchema } from "./dispatch-api-messages";
+import { MessageEventPayloadSchema } from "./dispatch-api-messages";
 
 /**
  * A targeted delivery as the host that receives it reads it: the message or comment Dispatch
@@ -16,7 +16,7 @@ import { InboundMessageEventPayloadSchema } from "./dispatch-api-messages";
 
 export const DispatchTargetedResourceIDSchema = z.uuid();
 
-export const DispatchTargetedMessagePayloadSchema = InboundMessageEventPayloadSchema.extend({
+export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
   id: DispatchTargetedResourceIDSchema,
   issue_key: z.string().nullable(),
   author: z.object({ kind: z.string(), id: z.string() }),
@@ -30,7 +30,7 @@ export const DispatchTargetedMessagePayloadSchema = InboundMessageEventPayloadSc
   created_at: z.string(),
 });
 
-export const DispatchTargetedCommentPayloadSchema = InboundCommentEventPayloadSchema.extend({
+export const DispatchTargetedCommentPayloadSchema = CommentEventPayloadSchema.extend({
   id: DispatchTargetedResourceIDSchema,
   issue_key: z.string().nullable(),
   artifact_id: z.string().nullable(),
@@ -38,8 +38,8 @@ export const DispatchTargetedCommentPayloadSchema = InboundCommentEventPayloadSc
   body: z.string(),
   reply_to: z.string().nullable(),
   ask_id: z.string().nullable(),
-  mentions: z.array(InboundCommentMentionSchema),
-  deliveries: z.array(InboundCommentDeliverySchema),
+  mentions: z.array(CommentMentionSchema),
+  deliveries: z.array(CommentDeliverySchema),
   created_at: z.string(),
   artifact_name: z.string(),
 });

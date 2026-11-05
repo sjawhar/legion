@@ -62,17 +62,17 @@ export const subscriptionRemovedEventPayloadFields = {
   request_event_id: z.number().int().positive().optional(),
 };
 
-export const SubscriptionRemovedEventPayloadSchema = z
+export const WrittenSubscriptionRemovedEventPayloadSchema = z
   .strictObject(subscriptionRemovedEventPayloadFields)
   .readonly();
 
 export type SubscriptionRemovedEventPayload = z.output<
-  typeof SubscriptionRemovedEventPayloadSchema
+  typeof WrittenSubscriptionRemovedEventPayloadSchema
 >;
 
 /** What a reader of the bus makes of a `subscription.*` payload: every field optional, and the
  *  remover read as a frame may carry it. */
-export const InboundSubscriptionRemovedEventPayloadSchema = z.object({
+export const SubscriptionRemovedEventPayloadSchema = z.object({
   session_id: subscriptionRemovedEventPayloadFields.session_id.optional(),
   by: InboundBySchema.optional(),
   topics: subscriptionRemovedEventPayloadFields.topics.optional(),

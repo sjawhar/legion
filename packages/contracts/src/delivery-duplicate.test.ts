@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import {
-  InboundCommentEventPayloadSchema as CommentEventPayloadSchema,
+  CommentEventPayloadSchema,
   DispatchTargetedCommentPayloadSchema,
-  InboundMessageDeliveryEventPayloadSchema as MessageDeliveryEventPayloadSchema,
+  MessageDeliveryEventPayloadSchema,
 } from "./dispatch-api";
 
 // LEGION-271. A delivery attempt now records whether the stream already held the message, so a

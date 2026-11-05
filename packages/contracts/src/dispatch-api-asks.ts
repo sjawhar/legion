@@ -320,9 +320,9 @@ export const askEventPayloadFields = {
   restored: z.boolean().optional(),
 };
 
-export const AskEventPayloadSchema = z.strictObject(askEventPayloadFields).readonly();
+export const WrittenAskEventPayloadSchema = z.strictObject(askEventPayloadFields).readonly();
 
-export type AskEventPayload = z.output<typeof AskEventPayloadSchema>;
+export type AskEventPayload = z.output<typeof WrittenAskEventPayloadSchema>;
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -332,7 +332,7 @@ export const AskAnsweredEventPayloadSchema = z
 
 export type AskAnsweredEventPayload = z.output<typeof AskAnsweredEventPayloadSchema>;
 
-export const AskEditEventPayloadSchema = z
+export const WrittenAskEditEventPayloadSchema = z
   .strictObject({
     ...askEventPayloadFields,
     previous: AskEditPreviousSchema,
@@ -349,7 +349,7 @@ export const AskEditEventPayloadSchema = z
   })
   .readonly();
 
-export type AskEditEventPayload = z.output<typeof AskEditEventPayloadSchema>;
+export type AskEditEventPayload = z.output<typeof WrittenAskEditEventPayloadSchema>;
 
 /**
  * The fields a reader of the bus makes of an `ask.*` payload: the ones Dispatch clients render,
@@ -418,7 +418,7 @@ const inboundAskEventPayloadFields = {
   thread_logins: threadLoginsFields.thread_logins,
 };
 
-export const InboundAskEventPayloadSchema = z.intersection(
+export const AskEventPayloadSchema = z.intersection(
   z.object(inboundAskEventPayloadFields),
   z.object({
     previous: z.never().optional(),
@@ -430,7 +430,7 @@ export const InboundAskEventPayloadSchema = z.intersection(
  * What a reader of the bus makes of an `ask.edited` payload: the ask fields above plus the
  * rewording, with `urgency` an open string for the same reason `kind` is one.
  */
-export const InboundAskEditEventPayloadSchema = z.object({
+export const AskEditEventPayloadSchema = z.object({
   ...inboundAskEventPayloadFields,
   multiple: askFields.multiple,
   urgency: z.string(),
@@ -446,7 +446,7 @@ export const InboundAskEditEventPayloadSchema = z.object({
 
 /** `ask.edited` carries an `AskEditEventPayload`, under the name the event type spells: one
  *  payload, two spellings. This alias is the name every reader of the bus already imports. */
-export const AskEditedEventPayloadSchema = InboundAskEditEventPayloadSchema;
+export const AskEditedEventPayloadSchema = AskEditEventPayloadSchema;
 
 // AskFollowerEventPayload is the wire payload of ask.follower_added and
 // ask.follower_removed: which session joined or left which ask, and who did it. The
@@ -457,15 +457,15 @@ export const askFollowerEventPayloadFields = {
   by: ActorSchema,
 };
 
-export const AskFollowerEventPayloadSchema = z
+export const WrittenAskFollowerEventPayloadSchema = z
   .strictObject(askFollowerEventPayloadFields)
   .readonly();
 
-export type AskFollowerEventPayload = z.output<typeof AskFollowerEventPayloadSchema>;
+export type AskFollowerEventPayload = z.output<typeof WrittenAskFollowerEventPayloadSchema>;
 
 /** What a reader of the bus makes of an `ask.follower_added` or `ask.follower_removed` payload:
  *  every field optional, and the writer read as a frame may carry it. */
-export const InboundAskFollowerEventPayloadSchema = z.object({
+export const AskFollowerEventPayloadSchema = z.object({
   ask_id: askFollowerEventPayloadFields.ask_id.optional(),
   session_id: askFollowerEventPayloadFields.session_id.optional(),
   by: InboundBySchema.optional(),

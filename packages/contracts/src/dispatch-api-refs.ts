@@ -83,9 +83,9 @@ export const replyBlockFields = {
  *  the ask the reply names), its reference (absent for a block of a direct message, which has no
  *  address), its id, its text cut to 480 characters (the last text it held once removed), and
  *  whether its item's current revision no longer holds it. */
-export const ReplyBlockSchema = z.strictObject(replyBlockFields).readonly();
+export const WrittenReplyBlockSchema = z.strictObject(replyBlockFields).readonly();
 
-export type ReplyBlock = z.output<typeof ReplyBlockSchema>;
+export type ReplyBlock = z.output<typeof WrittenReplyBlockSchema>;
 
 /** The block a reply answers, as the web app reads it: with the display tree of the excerpt it
  *  stored. */
@@ -97,4 +97,4 @@ export type ReplyBlockWithTrees = ReplyBlock & {
  *  An event recorded before the field, or by a Dispatch older than it, carries none. A bus frame
  *  may carry a field this release does not know, so the inbound reading strips rather than
  *  refuses. */
-export const InboundReplyBlockSchema = z.object(replyBlockFields);
+export const ReplyBlockSchema = z.object(replyBlockFields);

@@ -506,11 +506,11 @@ export type IssueEventChanges = z.output<typeof IssueEventChangesSchema>;
 
 /** Every `issue.*` event payload is the issue row, flat, plus what the write moved in the
  *  reference graph: a new issue's spec text is indexed in the creating transaction. */
-export const IssueEventPayloadSchema = z
+export const WrittenIssueEventPayloadSchema = z
   .strictObject({ ...issueFields, ...referenceChangesFields, ...issueEventChangesFields })
   .readonly();
 
-export type IssueEventPayload = z.output<typeof IssueEventPayloadSchema>;
+export type IssueEventPayload = z.output<typeof WrittenIssueEventPayloadSchema>;
 
 /**
  * What a reader of the bus makes of an `issue.*` payload: the nine fields Dispatch clients read
@@ -518,7 +518,7 @@ export type IssueEventPayload = z.output<typeof IssueEventPayloadSchema>;
  * everything else dropped. A frame is untrusted, so a malformed display field must not discard a
  * valid event header.
  */
-export const InboundIssueEventPayloadSchema = z.object({
+export const IssueEventPayloadSchema = z.object({
   title: issueFields.title.optional(),
   labels: issueFields.labels.optional(),
   status: issueFields.status.optional(),
@@ -587,15 +587,15 @@ export const childStatusEventPayloadFields = {
   to: z.string(),
 };
 
-export const ChildStatusEventPayloadSchema = z
+export const WrittenChildStatusEventPayloadSchema = z
   .strictObject(childStatusEventPayloadFields)
   .readonly();
 
-export type ChildStatusEventPayload = z.output<typeof ChildStatusEventPayloadSchema>;
+export type ChildStatusEventPayload = z.output<typeof WrittenChildStatusEventPayloadSchema>;
 
 /** What a reader of the bus makes of a `child.status` payload: each field optional, because a
  *  frame is untrusted and a missing one must not discard the event. */
-export const InboundChildStatusEventPayloadSchema = z.object({
+export const ChildStatusEventPayloadSchema = z.object({
   child_key: childStatusEventPayloadFields.child_key.optional(),
   from: childStatusEventPayloadFields.from.optional(),
   to: childStatusEventPayloadFields.to.optional(),

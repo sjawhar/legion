@@ -2,11 +2,11 @@ import { z } from "zod";
 import { type Actor, ActorSchema, type DisplayTree, InboundActorSchema } from "./dispatch-api-core";
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "./dispatch-api-limits";
 import {
-  InboundReplyBlockSchema,
   ReplyBlockSchema,
   type ReplyBlockWithTrees,
   referenceChangesFields,
   threadLoginsFields,
+  WrittenReplyBlockSchema,
 } from "./dispatch-api-refs";
 
 /**
@@ -85,7 +85,7 @@ export const messageFields = {
   created_at: z.string(),
   /** The block of the message this reply answers (`in_reply_to_block`); null on every other
    *  message, and absent from a Dispatch older than the field. */
-  reply_block: ReplyBlockSchema.nullable().optional(),
+  reply_block: WrittenReplyBlockSchema.nullable().optional(),
 };
 
 export const MessageSchema = z.strictObject(messageFields).readonly();
@@ -195,13 +195,15 @@ export const messageEventPayloadFields = {
   ...threadLoginsFields,
 };
 
-export const MessageEventPayloadSchema = z.strictObject(messageEventPayloadFields).readonly();
+export const WrittenMessageEventPayloadSchema = z
+  .strictObject(messageEventPayloadFields)
+  .readonly();
 
-export type MessageEventPayload = z.output<typeof MessageEventPayloadSchema>;
+export type MessageEventPayload = z.output<typeof WrittenMessageEventPayloadSchema>;
 
 /** What a reader of the bus makes of a `message.*` payload: the fields a renderer shows, each
  *  optional, the author's `kind` an open string, and everything else dropped. */
-export const InboundMessageEventPayloadSchema = z.object({
+export const MessageEventPayloadSchema = z.object({
   id: messageFields.id.optional(),
   body: messageFields.body.optional(),
   target: messageFields.target.optional(),
@@ -209,7 +211,7 @@ export const InboundMessageEventPayloadSchema = z.object({
   reply_body: messageEventPayloadFields.reply_body,
   thread_target: messageEventPayloadFields.thread_target,
   author: InboundActorSchema.optional(),
-  reply_block: InboundReplyBlockSchema.nullish(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: threadLoginsFields.thread_logins,
 });
 
@@ -228,16 +230,16 @@ export const messageDeliveryEventPayloadFields = {
   error: z.string().optional(),
 };
 
-export const MessageDeliveryEventPayloadSchema = z
+export const WrittenMessageDeliveryEventPayloadSchema = z
   .strictObject(messageDeliveryEventPayloadFields)
   .readonly();
 
-export type MessageDeliveryEventPayload = z.output<typeof MessageDeliveryEventPayloadSchema>;
+export type MessageDeliveryEventPayload = z.output<typeof WrittenMessageDeliveryEventPayloadSchema>;
 
 /** What a reader of the bus makes of a `message.delivery` receipt: every field optional. A
  *  stripping object: without `duplicate` declared the flag is dropped from every agent-bound
  *  `message.delivery` frame. */
-export const InboundMessageDeliveryEventPayloadSchema = z.object({
+export const MessageDeliveryEventPayloadSchema = z.object({
   message_id: messageDeliveryEventPayloadFields.message_id.optional(),
   attempt: messageDeliveryEventPayloadFields.attempt.optional(),
   delivery: messageDeliveryEventPayloadFields.delivery.optional(),
