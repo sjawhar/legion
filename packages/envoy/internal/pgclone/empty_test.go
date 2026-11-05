@@ -131,7 +131,7 @@ func TestADatabaseAMigrationTestChangedComesBackEmpty(t *testing.T) {
 	}
 
 	if outcome := release(t, emptyTestPool, name, func() { conn.Close(ctx) }); outcome != reused {
-		t.Fatalf("the database of a test that migrated was %s; every migration test would pay a create database and a drop database of its own", outcome)
+		t.Fatalf("the database of a test that migrated was %s; every migration test would pay a database made and dropped of its own", outcome)
 	}
 	again := emptyTestPool.Take(t, true)
 	if again != name {

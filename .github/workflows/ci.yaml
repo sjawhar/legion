@@ -2708,7 +2708,13 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # --shm-size: a service container gets 64 MB of /dev/shm by default, and Postgres puts a
+        # parallel worker's shared memory there. With the module's packages running at once the
+        # seed's HNSW build failed on it ("could not resize shared memory segment … No space left
+        # on device", job 127148899326), which is the container's limit rather than the server's
+        # (dispatch://INFRA-1075).
         options: >-
+          --shm-size=1g
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
@@ -2730,6 +2736,7 @@ jobs:
           POSTGRES_PASSWORD: ci
         ports: ["5433:5432"]
         options: >-
+          --shm-size=1g
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
