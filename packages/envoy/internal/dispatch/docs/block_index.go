@@ -17,14 +17,18 @@ import (
 
 // blockIndexDocumentBatch is how many owed documents one block-index tick reads,
 // blockIndexItemBatch how many items owed an index with the block grammar and, separately, how
-// many comments, messages and asks owed a block index of their own blocks; blockIndexStep is the
-// wait before the next tick while any batch was full, BlockIndexReconcileInterval the wait once
-// none is. The owed reads go through partial indexes (document_block_versions_owed,
+// many comments, messages and asks owed a block index of their own blocks;
+// blockIndexWindowBatch how many owners with blocks and no embedding window it gives windows to
+// and blockIndexRetireBatch how many whole-text embeddings rows it retires; blockIndexStep is
+// the wait before the next tick while any batch was full, BlockIndexReconcileInterval the wait
+// once none is. The owed reads go through partial indexes (document_block_versions_owed,
 // block_grammar_owed_enqueued, comment_block_state_owed, message_block_state_owed,
 // ask_block_state_owed), so a tick that finds nothing owed reads nothing else.
 const (
 	blockIndexDocumentBatch     = 20
 	blockIndexItemBatch         = 200
+	blockIndexWindowBatch       = 200
+	blockIndexRetireBatch       = 500
 	blockIndexStep              = 2 * time.Second
 	BlockIndexReconcileInterval = 30 * time.Second
 )
@@ -34,6 +38,15 @@ const (
 // for one result.
 const blockIndexLease = "block-index"
 
+// BlockIndexCursors is where a tick's keyset reads start, as the tick before it left them
+// (BlockIndexTick.Cursor): the owed documents, and, for each owner kind the window arm walks
+// ("document", "comment", "message", "ask"), the owner its batch of that kind starts after. A
+// zero value starts every read from the beginning.
+type BlockIndexCursors struct {
+	Documents string
+	Windows   map[string]string
+}
+
 // BlockIndexTick is what one tick of the block-index reconciliation did (ReconcileBlockIndex).
 type BlockIndexTick struct {
 	// Documents is how many owed documents it indexed, Items how many owed comments, asks and
@@ -42,6 +55,10 @@ type BlockIndexTick struct {
 	Documents  int
 	Items      int
 	ItemBlocks int
+	// Windows is how many owners with blocks and no embedding window it gave windows to, and
+	// Retired how many whole-text embeddings rows it deleted behind a current window.
+	Windows int
+	Retired int
 	// LiveAhead is how many owed documents, none of a closed issue, it skipped because their live
 	// text is ahead of their latest version and differs from it: owed a settlement that has not run.
 	LiveAhead int
@@ -49,11 +66,11 @@ type BlockIndexTick struct {
 	OwedDocuments  int
 	OwedItems      int
 	OwedItemBlocks int
-	// Cursor is the document the next tick's batch starts after: the last one this batch listed
-	// while the batch was full, empty once a batch lists fewer and the next starts over.
-	Cursor string
-	// Full reports a batch of documents, of items or of item blocks that was full, so more may be
-	// owed.
+	// Cursor is where the next tick's batches start: the last owner each batch listed while that
+	// batch was full, and the start again once a batch lists fewer.
+	Cursor BlockIndexCursors
+	// Full reports a batch of documents, of items, of item blocks, of owners with no window or
+	// of retired rows that was full, so more may be waiting.
 	Full bool
 }
 
@@ -76,34 +93,35 @@ type BlockIndexTick struct {
 // waits the full interval: that process is doing this work.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	var cursor string
+	var cursors BlockIndexCursors
 	// logged is the last tick this loop logged: a tick that indexed nothing and leaves the same
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
 	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
 		var wait time.Duration
-		wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
+		wait, cursors = s.blockIndexTick(ctx, cursors, liveAhead, &logged)
 		return wait
 	})
 }
 
-// blockIndexTick runs one tick from cursor, logs what it did unless it indexed nothing and left the
-// counts *logged holds, and returns how long to wait before the next tick and the cursor it starts
-// from.
-func (s *Service) blockIndexTick(ctx context.Context, cursor string, liveAhead liveAheadDocuments, logged *BlockIndexTick) (time.Duration, string) {
-	tick, err := s.ReconcileBlockIndex(ctx, cursor, liveAhead)
+// blockIndexTick runs one tick from cursors, logs what it did unless it indexed nothing and left
+// the counts *logged holds, and returns how long to wait before the next tick and the cursors it
+// starts from.
+func (s *Service) blockIndexTick(ctx context.Context, cursors BlockIndexCursors, liveAhead liveAheadDocuments, logged *BlockIndexTick) (time.Duration, BlockIndexCursors) {
+	tick, err := s.ReconcileBlockIndex(ctx, cursors, liveAhead)
 	if ctx.Err() != nil {
-		return BlockIndexReconcileInterval, cursor
+		return BlockIndexReconcileInterval, cursors
 	}
 	if err != nil {
 		slog.Error("dispatch: block index reconciliation", "error", err)
 	}
-	if tick.Documents > 0 || tick.Items > 0 || tick.ItemBlocks > 0 || tick.LiveAhead != logged.LiveAhead ||
-		tick.OwedDocuments != logged.OwedDocuments || tick.OwedItems != logged.OwedItems ||
-		tick.OwedItemBlocks != logged.OwedItemBlocks {
+	if tick.Documents > 0 || tick.Items > 0 || tick.ItemBlocks > 0 || tick.Windows > 0 || tick.Retired > 0 ||
+		tick.LiveAhead != logged.LiveAhead || tick.OwedDocuments != logged.OwedDocuments ||
+		tick.OwedItems != logged.OwedItems || tick.OwedItemBlocks != logged.OwedItemBlocks {
 		slog.Info("dispatch: block index", "documents", tick.Documents, "items", tick.Items,
-			"item_blocks", tick.ItemBlocks, "owed_documents", tick.OwedDocuments, "owed_items", tick.OwedItems,
+			"item_blocks", tick.ItemBlocks, "windows", tick.Windows, "retired", tick.Retired,
+			"owed_documents", tick.OwedDocuments, "owed_items", tick.OwedItems,
 			"owed_item_blocks", tick.OwedItemBlocks, "live_ahead", tick.LiveAhead)
 		*logged = tick
 	}
@@ -138,20 +156,24 @@ type owedDocument struct {
 // remembered nor taken from here while one is resident.
 type liveAheadDocuments map[string]owedDocument
 
-// ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past after (a
-// document id; empty is the start), one batch of the items owed an index with the block grammar,
-// oldest first (refs.ReindexOwedItem), and one batch of the comments, messages and asks owed a
-// block index of their own blocks, oldest owed_at first (refs.IndexOwedItemBlocks), each in its
-// own transaction taking the item row then its state row, never an owner row. The item blocks run
-// last, so an item the grammar batch indexed, blocks included, is no longer owed. The documents
-// are listed by keyset, so a document it skips never holds back the ones past it: the tick's
-// Cursor moves past every document its batch lists, indexed or not, and goes back to the start
-// once a batch lists fewer than a full one. A document or item it cannot index for a reason of
-// its own is logged and left owed, so one never holds back the rest of its batch. liveAhead is
-// the documents the calling loop's earlier ticks found live ahead, which this tick counts again
-// without reading and keeps up to date.
-func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
-	tick := BlockIndexTick{Cursor: after}
+// ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past
+// cursors.Documents (a document id; empty is the start), one batch of the items owed an index
+// with the block grammar, oldest first (refs.ReindexOwedItem), one batch of the comments,
+// messages and asks owed a block index of their own blocks, oldest owed_at first
+// (refs.IndexOwedItemBlocks), each in its own transaction taking the item row then its state
+// row, never an owner row, then one batch of the owners whose embedding windows do not stand
+// for their blocks (windowDrift) and one of the whole-text embeddings rows the windows have
+// replaced (retireWholeText). The item blocks run before the windows, so an item the grammar
+// batch indexed, windows included, is no longer listed. The documents are listed by keyset, so
+// a document it skips never holds back the ones past it: the tick's Cursor moves past every
+// document its batch lists, indexed or not, and goes back to the start once a batch lists fewer
+// than a full one, and the window arm walks its owners the same way. A document or item it
+// cannot index for a reason of its own is logged and left owed, so one never holds back the rest
+// of its batch. liveAhead is the documents the calling loop's earlier ticks found live ahead,
+// which this tick counts again without reading and keeps up to date.
+func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCursors, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
+	after := cursors.Documents
+	tick := BlockIndexTick{Cursor: BlockIndexCursors{Documents: after}}
 	owed, err := s.owedDocuments(ctx, after)
 	if err != nil {
 		return tick, err
@@ -164,7 +186,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 	for _, document := range owed {
 		if s.stillLiveAhead(liveAhead, document) {
 			tick.LiveAhead++
-			tick.Cursor = document.id
+			tick.Cursor.Documents = document.id
 			continue
 		}
 		delete(liveAhead, document.id)
@@ -186,10 +208,10 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		case indexed:
 			tick.Documents++
 		}
-		tick.Cursor = document.id
+		tick.Cursor.Documents = document.id
 	}
 	if !documentsFull {
-		tick.Cursor = ""
+		tick.Cursor.Documents = ""
 	}
 
 	items, err := refs.OwedItems(ctx, s.store.Pool, blockIndexItemBatch)
@@ -226,7 +248,18 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 			tick.ItemBlocks++
 		}
 	}
-	tick.Full = documentsFull || len(items) == blockIndexItemBatch || len(itemBlocks) == blockIndexItemBatch
+
+	windowsFull, err := s.windowDrift(ctx, cursors.Windows, &tick)
+	if err != nil {
+		return tick, err
+	}
+	retired, err := s.retireWholeText(ctx)
+	tick.Retired = retired
+	if err != nil {
+		return tick, err
+	}
+	tick.Full = documentsFull || len(items) == blockIndexItemBatch || len(itemBlocks) == blockIndexItemBatch ||
+		windowsFull || retired == blockIndexRetireBatch
 
 	if err := s.store.Pool.QueryRow(ctx, `
 		select (select count(*) from document_block_versions where version is null),
@@ -238,6 +271,239 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		return tick, fmt.Errorf("count what is owed a block index: %w", err)
 	}
 	return tick, nil
+}
+
+// windowOwner is one kind of owner the window arm walks: name keys its cursor and names it in a
+// log line, batch is the most of one tick's shared batch its kind may take, list lists at most
+// limit owners of the kind whose windows do not stand for their blocks, in id order past after,
+// and window writes one owner's windows and reports whether it wrote them. One loop serves them
+// all, so the reset, the fullness rule and the cursor are written once and every key is this
+// name.
+type windowOwner struct {
+	name   string
+	batch  int
+	list   func(ctx context.Context, after string, limit int) ([]string, error)
+	window func(ctx context.Context, id string) (bool, error)
+}
+
+// windowItemKinds is the item kinds whose blocks carry embedding windows, in the order the
+// window arm serves them after the documents.
+var windowItemKinds = []refs.ItemKind{refs.ItemComment, refs.ItemMessage, refs.ItemAsk}
+
+// windowOwners is the owners the window arm serves, in order: the documents, then the comments,
+// the messages and the asks. The documents are held to blockIndexDocumentBatch of the shared
+// batch, the bound the owed-document arm reads under, because a document's windows cost the
+// same read of the document that arm makes; an item's windows are one transaction of its own,
+// so its kind may take the whole batch.
+func (s *Service) windowOwners() []windowOwner {
+	owners := []windowOwner{{
+		name:  "document",
+		batch: blockIndexDocumentBatch,
+		list: func(ctx context.Context, after string, limit int) ([]string, error) {
+			return refs.DocumentsOwedWindows(ctx, s.store.Pool, after, limit)
+		},
+		window: s.windowDocument,
+	}}
+	for _, kind := range windowItemKinds {
+		owners = append(owners, windowOwner{
+			name:  string(kind),
+			batch: blockIndexWindowBatch,
+			list: func(ctx context.Context, after string, limit int) ([]string, error) {
+				return refs.ItemsOwedWindows(ctx, s.store.Pool, kind, after, limit)
+			},
+			window: func(ctx context.Context, id string) (bool, error) {
+				return s.windowItem(ctx, kind, id)
+			},
+		})
+	}
+	return owners
+}
+
+// windowDrift gives windows to at most blockIndexWindowBatch owners whose windows do not stand
+// for their blocks: every document, comment, message and ask written before meaning search
+// moved to windows, any whose write wrote its blocks and failed before its windows, and any a
+// build without this change re-indexed while the deploy rolled, which left the windows of its
+// old text behind (refs.DocumentsOwedWindows, refs.ItemsOwedWindows). It counts them in
+// tick.Windows, leaves each kind's cursor in tick.Cursor.Windows and reports whether a batch
+// was full.
+//
+// Each owner is windowed as its own indexer windows it, and nothing else is written: a document
+// is read as the server serves it and windowed under its owner row (windowDocument), an item is
+// read as the blocks routes read it and windowed under its own row (windowItem). Either way the
+// write stamps the state the owner's blocks are in, so an owner this arm has served is no
+// longer listed.
+func (s *Service) windowDrift(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) (bool, error) {
+	owners := s.windowOwners()
+	next := make(map[string]string, len(owners))
+	tick.Cursor.Windows = next
+	budget, full := blockIndexWindowBatch, false
+	for _, owner := range owners {
+		if budget <= 0 {
+			break
+		}
+		asked := min(budget, owner.batch)
+		ids, err := owner.list(ctx, cursors[owner.name], asked)
+		if err != nil {
+			return false, err
+		}
+		for _, id := range ids {
+			windowed, err := owner.window(ctx, id)
+			switch {
+			case ctx.Err() != nil:
+				return false, ctx.Err()
+			case err != nil:
+				slog.Error("dispatch: block index skipped an owner it could not window",
+					"owner", owner.name, "id", id, "error", err)
+			case windowed:
+				tick.Windows++
+			}
+			next[owner.name] = id
+		}
+		budget -= len(ids)
+		full = full || len(ids) == asked
+		if len(ids) < asked {
+			next[owner.name] = ""
+		}
+	}
+	return full, nil
+}
+
+// windowItem writes the windows of one comment, message or ask whose windows do not stand for
+// its blocks, in a transaction of its own: it takes the item row, reads the text its blocks
+// were split from and writes the windows of those blocks (refs.WriteItemWindows). It writes no
+// block row and no reference: the index of this item's blocks stands, and only its windows are
+// missing. An item whose stored text no longer splits into the blocks the index holds is marked
+// owed a block index instead, which the transaction commits for the owed arm to act on.
+func (s *Service) windowItem(ctx context.Context, kind refs.ItemKind, id string) (bool, error) {
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	windowed, err := refs.WriteItemWindows(ctx, tx, kind, id)
+	if err != nil {
+		return false, err
+	}
+	return windowed, tx.Commit(ctx)
+}
+
+// windowDocument writes the windows of one document whose blocks hold none, in a transaction of
+// its own: it reads the document the server serves (TextWithBlocks) with no transaction held,
+// then, under the document's owner row, which every version write holds first, writes the
+// windows of those blocks (refs.WriteDocumentWindows). It writes no block row and no reference:
+// the index of this document's blocks stands, and only its windows are missing.
+//
+// The live text is windowed only where it is the latest version's text - the document owes no
+// settlement, or its live markdown equals that version's stored markdown byte for byte - as
+// indexOwedDocument indexes it only there: a window of a text no version holds would cover
+// blocks the index does not hold. A document whose live text is ahead keeps no window until its
+// settlement writes the next version, which writes them. A document the server cannot read has
+// no block to window; its blocks came from its version's own markdown and the next version write
+// windows them.
+func (s *Service) windowDocument(ctx context.Context, artifactID string) (bool, error) {
+	markdown, blocks, err := s.TextWithBlocks(ctx, artifactID)
+	switch {
+	case ctx.Err() != nil:
+		return false, ctx.Err()
+	case errors.Is(err, ErrDocumentUnloadable), errors.Is(err, ErrDocOutsideSchema):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	switch _, _, err := lockArtifactOwner(ctx, tx, artifactID); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	var stored string
+	var pending bool
+	err = tx.QueryRow(ctx, `
+		select v.markdown, exists (select 1 from doc_settlements_pending p where p.artifact_id = $1)
+		from artifact_versions v
+		where v.artifact_id = $1 and v.markdown is not null
+		order by v.number desc limit 1
+	`, artifactID).Scan(&stored, &pending)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("re-read the latest version of %s for its windows: %w", artifactID, err)
+	case pending && markdown != stored:
+		return false, nil
+	}
+	if err := refs.WriteDocumentWindows(ctx, tx, artifactID, markdown, blocks); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// wholeTextOwner is one kind of whole-text embeddings row the windows replace, with the kind of
+// window that stands for it and the owner key a row's own id makes: a document's windows are
+// under its artifact id, an item's under "<kind>/<uuid>" (refs.ItemKind.WindowOwnerKey).
+type wholeTextOwner struct{ kind, windowKind, ownerKey string }
+
+// wholeTextOwners is every kind of row the release before this one's meaning search reads,
+// which this one replaces with windows. The issue rows are not among them: an issue's whole text
+// is its title and the head of its spec, which no block indexer writes, and its trigger stands.
+var wholeTextOwners = func() []wholeTextOwner {
+	owners := []wholeTextOwner{{kind: "document", windowKind: refs.DocumentWindowKind, ownerKey: "e.id"}}
+	for _, kind := range windowItemKinds {
+		owners = append(owners, wholeTextOwner{
+			kind:       string(kind),
+			windowKind: kind.WindowKind(),
+			ownerKey:   "'" + kind.WindowOwnerKey("") + "' || e.id",
+		})
+	}
+	return owners
+}()
+
+// retire deletes up to $1 of the kind's whole-text rows whose owner already holds a window of
+// the matching kind carrying a vector of its current text. The release before this one's meaning
+// search reads exactly these rows, so an item leaves that search only once this one's windows
+// can find it, and the two builds overlap for one deploy. The vector is read as well as the
+// hash: the queue settles a window whose text has nothing to embed with no vector and its
+// embedded_hash set (embedqueue's settledNothingToEmbed), and such a window stands for nothing
+// in a meaning search, so a row behind it would be deleted with no vector left for the item at
+// all. The kinds are written as literals, not parameters, so the planner can prove
+// embeddings_window_owner's partial predicate and find the owner's windows through that index.
+func (owner wholeTextOwner) retire() string {
+	return fmt.Sprintf(`
+		with picked as (
+			select e.kind, e.id from embeddings e
+			where e.kind = '%s' and exists (
+				select 1 from embeddings w
+				where w.kind = '%s' and split_part(w.id, '#', 1) = %s
+				  and w.embedding is not null
+				  and w.embedded_hash is not null and w.embedded_hash = w.content_hash
+			)
+			limit $1
+			for update skip locked
+		)
+		delete from embeddings e using picked where e.kind = picked.kind and e.id = picked.id`,
+		owner.kind, owner.windowKind, owner.ownerKey)
+}
+
+// retireWholeText deletes at most blockIndexRetireBatch whole-text rows, shared by the kinds in
+// order, and reports how many it deleted.
+func (s *Service) retireWholeText(ctx context.Context) (int, error) {
+	retired := 0
+	for _, owner := range wholeTextOwners {
+		if retired >= blockIndexRetireBatch {
+			break
+		}
+		tag, err := s.store.Pool.Exec(ctx, owner.retire(), blockIndexRetireBatch-retired)
+		if err != nil {
+			return retired, fmt.Errorf("retire the whole-text embeddings of the %ss behind their windows: %w", owner.kind, err)
+		}
+		retired += int(tag.RowsAffected())
+	}
+	return retired, nil
 }
 
 // stillLiveAhead reports whether document, as listed now with its issue open, is one liveAhead

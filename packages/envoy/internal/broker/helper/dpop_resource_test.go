@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // resourceConfig is the rfc9449.StrategyConfig a resource server checks a proof with: the
@@ -106,7 +107,7 @@ func TestTheDPoPTransportSignsAResourceRequestWithTheAccessTokenHash(t *testing.
 		t.Fatal(err)
 	}
 	captured := &capturedRequests{}
-	client := &http.Client{Transport: NewDPoPTransport(key, captured)}
+	client := &http.Client{Transport: brokerclient.NewDPoPTransport(key, captured)}
 	strategy := rfc9449.NewDefaultStrategy(resourceConfig{}, newResourceStore())
 	ctx := t.Context()
 
