@@ -1016,8 +1016,22 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 }
 
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
-// Task 4b.6b): the claim's Secret projects it into workspace-fetch alone, the only container told
-// where it is, and no other container can write a volume workspace-fetch mounts — the feed it
+// Task 4b.6b), and it reaches the one container that holds it as a file, never as an environment
+// value (INFRA-1254). Two rules, counted apart:
+//
+//   - The volume route — the claim's Secret as a Secret volume, or projected — is workspace-fetch's
+//     alone: required for it, the only container told where the token is, and forbidden for every
+//     other container, the worker's included. Its mount of that volume carries an empty subPath,
+//     because the daemon rewrites the claim's Secret as the lease is renewed and the kubelet
+//     rewrites a whole-volume Secret projection in place, never a subPath copy, which is taken
+//     once at start.
+//   - The environment route — an env entry whose secretKeyRef names the claim Secret's
+//     provisioning-token key, or an envFrom of that Secret — is forbidden everywhere,
+//     workspace-fetch included: an environment value is fixed for the container's life, so a
+//     container holding one serves the token the pod started with however often the Secret is
+//     rewritten.
+//
+// Beside them, no other container can write a volume workspace-fetch mounts — the feed it
 // fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
 // in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
 // nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
@@ -1052,21 +1066,34 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 			maps := func(items []corev1.KeyToPath) bool {
 				return len(items) == 0 || slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == provisionTokenKey })
 			}
-			reaches := func(c corev1.Container) []string {
-				var routes []string
+			// The volume route is the token as a file the kubelet rewrites in place when the Secret
+			// changes. Each one carries the mount it came by, since a mount with a subPath is a copy
+			// taken when the container starts that no rewrite reaches.
+			type route struct {
+				mount corev1.VolumeMount
+				named string
+			}
+			volumeRoutes := func(c corev1.Container) []route {
+				var routes []route
 				for _, mount := range c.VolumeMounts {
 					volume := volumes[mount.Name]
 					if secret := volume.Secret; secret != nil && secret.SecretName == claimSecret && maps(secret.Items) {
-						routes = append(routes, "secret volume "+mount.Name)
+						routes = append(routes, route{mount, "secret volume " + mount.Name})
 					}
 					if projected := volume.Projected; projected != nil {
 						for _, source := range projected.Sources {
 							if secret := source.Secret; secret != nil && secret.Name == claimSecret && maps(secret.Items) {
-								routes = append(routes, "projected volume "+mount.Name)
+								routes = append(routes, route{mount, "projected volume " + mount.Name})
 							}
 						}
 					}
 				}
+				return routes
+			}
+			// The environment route is a copy fixed for the container's life, which no container may
+			// hold, workspace-fetch included.
+			envRoutes := func(c corev1.Container) []string {
+				var routes []string
 				for _, v := range c.Env {
 					if from := v.ValueFrom; from != nil && from.SecretKeyRef != nil && from.SecretKeyRef.Name == claimSecret && from.SecretKeyRef.Key == provisionTokenKey {
 						routes = append(routes, "env "+v.Name)
@@ -1074,7 +1101,7 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 				}
 				for _, from := range c.EnvFrom {
 					if from.SecretRef != nil && from.SecretRef.Name == claimSecret {
-						routes = append(routes, "envFrom")
+						routes = append(routes, "envFrom "+from.SecretRef.Name)
 					}
 				}
 				return routes
@@ -1082,9 +1109,24 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 			containers := slices.Concat(pod.InitContainers, pod.Containers)
 			for _, c := range containers {
 				_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
-				routes := reaches(c)
-				if holds := c.Name == fetchContainer; (len(routes) > 0) != holds || pointed != holds {
-					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
+				holds := c.Name == fetchContainer
+				mounted := volumeRoutes(c)
+				var named []string
+				for _, r := range mounted {
+					named = append(named, r.named)
+				}
+				if (len(mounted) > 0) != holds || pointed != holds {
+					t.Errorf("%s reaches the provisioning token's file by %v, pointed at %t; want %t for both", c.Name, named, pointed, holds)
+				}
+				for _, r := range mounted {
+					if r.mount.SubPath != "" {
+						t.Errorf("%s takes the provisioning token from %s with subPath %q, want the whole volume: the kubelet rewrites a whole-volume Secret projection in place when the Secret changes and never a subPath copy, so a renewed token would not reach the file",
+							c.Name, r.named, r.mount.SubPath)
+					}
+				}
+				if routes := envRoutes(c); len(routes) > 0 {
+					t.Errorf("%s reaches the provisioning token through the environment by %v, which no container may, %s included: an environment value is fixed for the container's life, so a renewed token never reaches it",
+						c.Name, routes, fetchContainer)
 				}
 			}
 			kind, err := podKindOf(template.Metadata.Labels)
