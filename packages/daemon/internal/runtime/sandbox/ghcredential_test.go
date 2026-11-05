@@ -33,6 +33,17 @@ func secretUpdates(writes []action) []string {
 	return names
 }
 
+// linesHolding are the lines of logged that hold text.
+func linesHolding(logged, text string) []string {
+	var held []string
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, text) {
+			held = append(held, line)
+		}
+	}
+	return held
+}
+
 // The refresher brings a live pod's role Secrets to the current render of each role's credential
 // for the default owner its Secret records, and touches nothing else, the controller's included: a
 // Secret whose owners' hosts.yml are already the render is not written, one another Sandbox owns is
@@ -315,7 +326,12 @@ func spawnIssue(t *testing.T, g *rig, key string) string {
 
 // provisioned is the token the provisioning Secret of the pod named name holds.
 func provisioned(g *rig, name string) string {
-	return string(g.secret(secretName(name)).Data[provisionTokenKey])
+	g.t.Helper()
+	secret := g.secret(secretName(name))
+	if secret == nil {
+		g.t.Fatalf("no provisioning Secret %s", secretName(name))
+	}
+	return string(secret.Data[provisionTokenKey])
 }
 
 // refreshTick is the refresher's tick over the Secrets: the walk of the pod store and then the
@@ -355,7 +371,12 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 		unparsed := spawnIssue(t, g, "LEGION-309")
 		foreign := spawnIssue(t, g, "LEGION-310")
 		live := []string{running, pastFetch, inFetch}
-		left := []string{deleting, succeeded, failed, unlabelled, unowned, unparsed, foreign}
+		// skipped are the pods whose provisioning Secret the walk never reads; left is every pod
+		// whose Secret stays as it was, which is those and the one another Sandbox owns; minting
+		// is every pod whose Secret the walk reads.
+		skipped := []string{deleting, succeeded, failed, unlabelled, unowned, unparsed}
+		left := append(slices.Clone(skipped), foreign)
+		minting := append(slices.Clone(live), foreign)
 		for _, name := range append(slices.Clone(live), left...) {
 			if got := provisioned(g, name); got != "ghs_first_"+owner {
 				t.Fatalf("%s's provisioning Secret holds %q at launch, want the first lease's", name, got)
@@ -446,7 +467,7 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 		minted := tokens.minted(owner)
 		g.r.refreshGitHubCredentials(g.ctx)
 		if got := tokens.minted(owner) - minted; got != 1 {
-			t.Errorf("the walk minted %s's token %d times over its %d live pods, want once", owner, got, len(live)+1)
+			t.Errorf("the walk minted %s's token %d times over the %d pods whose Secret it reads, want once", owner, got, len(minting))
 		}
 		g.r.refreshCacheTokens(g.ctx)
 		if updated := secretUpdates(g.writes()); len(updated) != 0 {
@@ -458,12 +479,12 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 				reads[request.name]++
 			}
 		}
-		for _, name := range append(slices.Clone(live), foreign) {
+		for _, name := range minting {
 			if reads[secretName(name)] != 1 {
 				t.Errorf("the tick read %s's provisioning Secret %d times, want once", name, reads[secretName(name)])
 			}
 		}
-		for _, name := range left[:len(left)-1] {
+		for _, name := range skipped {
 			if reads[secretName(name)] != 0 {
 				t.Errorf("the tick read %s's provisioning Secret %d times, want none", name, reads[secretName(name)])
 			}
@@ -497,12 +518,7 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 				t.Errorf("%s's provisioning Secret holds %q, want it left as it was", name, got)
 			}
 		}
-		var failures []string
-		for _, line := range strings.Split(logs.String(), "\n") {
-			if strings.Contains(line, "sandbox runtime: provisioning token mint failed") {
-				failures = append(failures, line)
-			}
-		}
+		failures := linesHolding(logs.String(), "sandbox runtime: provisioning token mint failed")
 		if len(failures) != 1 || !strings.Contains(failures[0], "owner="+owner) || !strings.Contains(failures[0], "err=") || !strings.Contains(failures[0], "level=WARN") {
 			t.Errorf("the walk logged %q, want one warning naming %s and the error", failures, owner)
 		}
@@ -558,12 +574,7 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 				t.Errorf("%s's provisioning Secret holds %q, want the refused write left it as it was", name, got)
 			}
 		}
-		var failures []string
-		for _, line := range strings.Split(logs.String(), "\n") {
-			if strings.Contains(line, "sandbox runtime: provisioning token refresh failed") {
-				failures = append(failures, line)
-			}
-		}
+		failures := linesHolding(logs.String(), "sandbox runtime: provisioning token refresh failed")
 		if len(failures) != 2 {
 			t.Fatalf("the tick logged %q, want one failure for each refused Secret", failures)
 		}

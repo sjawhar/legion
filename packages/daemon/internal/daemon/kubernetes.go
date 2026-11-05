@@ -500,7 +500,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames), log: opts.Log, warned: &sync.Map{}}
+			opts.Tokens = newImplementTokens(apps, servingOwner(owners, renames), opts.Log)
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
 			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
@@ -558,14 +558,20 @@ type implementTokens struct {
 	serving func(owner string) string
 	// log receives the fallback's line; slog.Default() when nil, as the runtime's own Log is.
 	log *slog.Logger
-	// warned is the set of owners the fallback has already been said of, a pointer because the
-	// methods take a value receiver and the adapter is built as a value (sandboxRuntime), so
-	// every copy shares the one set, and a sync.Map because the three mint sites mint the pods
-	// of one owner at once.
-	warned *sync.Map
+
+	// mu guards warned, the set of owners the fallback has already been said of.
+	mu     sync.Mutex
+	warned map[string]bool
 }
 
-func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+// newImplementTokens is the adapter over apps, with serving as the map a mint's owner goes
+// through (servingOwner) and log as what the fallback's line is written to, slog.Default() when
+// nil.
+func newImplementTokens(apps appauth.Tokens, serving func(string) string, log *slog.Logger) *implementTokens {
+	return &implementTokens{apps: apps, serving: serving, log: log, warned: map[string]bool{}}
+}
+
+func (t *implementTokens) Token(ctx context.Context, owner string) (string, error) {
 	if t.serving != nil {
 		owner = t.serving(owner)
 	}
@@ -587,11 +593,14 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 // warnOwnToken writes the fallback's line the first time owner's pods are provisioned with the
 // owner's own installation token, and nothing on every mint after it, for the life of the process
 // (appauth's warnMissingActions, the same rule for a read token minted without actions).
-func (t implementTokens) warnOwnToken(owner string) {
-	if t.warned != nil {
-		if _, warned := t.warned.LoadOrStore(strings.ToLower(owner), struct{}{}); warned {
-			return
-		}
+func (t *implementTokens) warnOwnToken(owner string) {
+	key := strings.ToLower(owner)
+	t.mu.Lock()
+	warned := t.warned[key]
+	t.warned[key] = true
+	t.mu.Unlock()
+	if warned {
+		return
 	}
 	log := t.log
 	if log == nil {

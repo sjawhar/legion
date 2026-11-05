@@ -209,12 +209,8 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 	var logged syncBuffer
 	// The adapter as sandboxRuntime builds it, with the identity serving map of a deployment that
 	// configures no rename.
-	adapter := implementTokens{
-		apps:    github.tokens,
-		serving: func(owner string) string { return owner },
-		log:     slog.New(slog.NewJSONHandler(&logged, nil)),
-		warned:  &sync.Map{},
-	}
+	adapter := newImplementTokens(github.tokens, func(owner string) string { return owner },
+		slog.New(slog.NewJSONHandler(&logged, nil)))
 	fallbacks := func() []map[string]any {
 		t.Helper()
 		return loggedLines(t, logged.String(), "refuses a read-only provisioning token")
