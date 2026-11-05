@@ -760,8 +760,9 @@ export function Inbox({
    *      the list, the row a step out of the column focuses on its way, the dialog a picture
    *      opens full size. `forgetPaneReturn`, the wrapper's `onBlur`, covers the one exit that
    *      lands nowhere and so fires no `focusin`: a focus leaving the column for no node at all
-   *      - a click on the page's own background, a `blur()` of the control holding it - which
-   *      leaves `document.body` holding the focus.
+   *      - a `blur()` of the control holding it, a click on the page outside its focusable
+   *      `main` - which leaves `document.body` holding the focus. A click on non-focusable
+   *      content inside `main` focuses `main` itself, which is a `focusin` outside the wrapper.
    *
    *  Two cases look like a route out and keep the record, because neither breaks that pair. A
    *  window or tab blur moves no focus at all: nothing is focused anew, so no `focusin` fires,
@@ -832,14 +833,14 @@ export function Inbox({
     return () => document.removeEventListener("focusin", dropWhereFocusLands);
   }, []);
   /** The drop a focus that lands nowhere makes, which is the half of fact (b) no `focusin`
-   *  reports: React's `onBlur` bubbles from the column's descendants, so a reader who clicks the
-   *  page's background or whose control blurs itself has left the column with `document.body`
-   *  holding the focus, and nothing is focused for the listener above to read.
+   *  reports: React's `onBlur` bubbles from the column's descendants, so a reader whose control
+   *  blurs itself, or who clicks the page outside its focusable `main`, has left the column with
+   *  `document.body` holding the focus, and nothing is focused for the listener above to read.
    *
    *  Where the focus went is `relatedTarget`, and `document.activeElement` where the event names
    *  none, because those two nulls mean opposite things: a window or tab blur moves no focus and
    *  keeps the record, while a focus that left for the body drops it. The routes out that land
-   *  on a node are this handler's too, a commit before the listener above reads them, so what
+   *  on a node are this handler's too, an event before the listener above reads them, so what
    *  needs it is only the focus that lands nowhere. */
   const forgetPaneReturn = (event: FocusEvent<HTMLDivElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget ?? document.activeElement)) {

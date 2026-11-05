@@ -3133,11 +3133,12 @@ test("a focus that leaves the column for the body alone drops the record", async
     fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
     expect(document.activeElement).toBe(scroller());
 
-    // A click on the page's own background is the route this stands for: the scroller loses the
-    // focus to `document.body`, nothing takes it, and so no `focusin` reports the move. The
-    // wrapper's `onBlur` - naming no target, with the body holding the focus - is the only
-    // report that the reader has left. The keep above is this same event with the focus still in
-    // the column, which is why both halves of that null are read.
+    // A `blur()` of the control holding the focus is the route this stands for, as is a click on
+    // the page outside its focusable `main`: the scroller loses the focus to `document.body`,
+    // nothing takes it, and so no `focusin` reports the move. The wrapper's `onBlur` - naming no
+    // target, with the body holding the focus - is the only report that the reader has left. The
+    // keep above is this same event with the focus still in the column, which is why both halves
+    // of that null are read.
     act(() => scroller().blur());
     expect(document.activeElement).toBe(document.body);
 
