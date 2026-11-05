@@ -43,6 +43,20 @@ import (
 // link carries no time, and adding or removing one leaves its issue's updated_at alone), so the
 // walk visits them all in turn.
 
+// AttributionRuleVersion names the rule this build judges a pull request by: the first
+// candidate, of the five sources above, whose issue resolves to the repository the pull request
+// is in. pull_request_heads.attribution_rule records the rule that last judged a row, and the
+// reconcile re-judges a merged row credited to nobody once when the rule that judged it is
+// older than this one (ListStalePullRequestHeads, pull_request_heads.go). 0 is what a row
+// written before that column has: the rule that took the first candidate outright, whatever
+// repository its issue resolved to.
+//
+// Raising this by one is how a later change to the attribution reaches the merged rows already
+// stored. Nothing else revisits one — an open row comes round every five minutes, but a merged
+// row is read again only by that arm — so a change made without raising it leaves every pull
+// request merged before it judged by the rule of its day for good.
+const AttributionRuleVersion = 1
+
 // attributionSource names the source a pull request's issue came from.
 type attributionSource string
 

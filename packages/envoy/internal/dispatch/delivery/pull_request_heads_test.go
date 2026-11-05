@@ -55,10 +55,12 @@ func readHead(t *testing.T, ctx context.Context, pool *store.Pool, repo string, 
 	t.Helper()
 	var head PullRequestHead
 	if err := pool.QueryRow(ctx, `
-		select repo, number, head_sha, head_ref, base_ref, state, issue_key, attribution_source, checked_at
+		select repo, number, head_sha, head_ref, base_ref, state, issue_key, attribution_source,
+			checked_at, attribution_rule
 		from pull_request_heads where repo = $1 and number = $2
 	`, repo, number).Scan(&head.Repo, &head.Number, &head.HeadSHA, &head.HeadRef, &head.BaseRef,
-		&head.State, &head.IssueKey, &head.AttributionSource, &head.CheckedAt); err != nil {
+		&head.State, &head.IssueKey, &head.AttributionSource, &head.CheckedAt,
+		&head.AttributionRule); err != nil {
 		t.Fatalf("read the head of %s#%d: %v", repo, number, err)
 	}
 	return head
@@ -698,8 +700,8 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 		t.Fatalf("HeadAttributedTo(%s) before the pass = %v, %v; want false", issue, attributed, err)
 	}
 
-	// The bound, from the other side: a merged row that carries an attribution, and one already
-	// read and left unattributed, are no business of the pass.
+	// The bound, from the other side: a merged row that carries an attribution, and one this
+	// rule has already judged and left unattributed, are no business of the pass.
 	eventAt := time.Date(2026, 2, 6, 0, 0, 0, 0, time.UTC)
 	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
 		Repo: "acme/widgets", Number: 62, HeadSHA: "dddddddddddddddddddddddddddddddddddddddd",
@@ -708,12 +710,17 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	}); err != nil {
 		t.Fatalf("store the attributed merged head: %v", err)
 	}
+	// Read an hour ago by this build's own rule, which is what takes it out of the merged arm:
+	// the arm offers a merged row to each rule once, and this row has had its offer. A row
+	// stamped by an older rule is taken, which is
+	// TestReconcileAttributesAMergedHeadAnEarlierPassLeftCreditedToNobody (reconcile_test.go).
 	read := time.Now().Add(-time.Hour)
 	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
 		Repo: "acme/widgets", Number: 63, HeadSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		HeadRef: "topic", BaseRef: "main", State: "merged", EventAt: &eventAt, CheckedAt: &read,
+		AttributionRule: AttributionRuleVersion,
 	}); err != nil {
-		t.Fatalf("store the merged head read while it was open: %v", err)
+		t.Fatalf("store the merged head this rule has judged already: %v", err)
 	}
 	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
 		Repo: "acme/widgets", Number: 64, HeadSHA: "ffffffffffffffffffffffffffffffffffffffff",
@@ -728,7 +735,7 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	// Not fatal: the pass below is the behaviour this test is for, and its own assertions say
 	// what an empty batch costs the issue.
 	if len(batch) != 2 || batch[0].Number != 61 || batch[1].Number != 64 {
-		t.Errorf("the batch = %+v, want #61 and #64: an attributed merged row and one already read are not taken", batch)
+		t.Errorf("the batch = %+v, want #61 and #64: an attributed merged row and one this rule has judged are not taken", batch)
 	}
 
 	reconcile := NewReconcile(pool, client, nil)

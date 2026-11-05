@@ -120,6 +120,45 @@ func TestAttributingAStoredPullRequestTitledAfterAnotherRepositorysIssueKeepsIts
 	}
 }
 
+// TestAttributingABatchPicksEachRowsOwnRepositorysIssue: AttributePullRequests resolves every
+// candidate of a whole batch in one walk (attributionBatchQuery: candidates, then one
+// refs.IssueRepoTerms over all of them, then `distinct on (pr_repo, pr_number)`), so the pick
+// must be per row and not per walk. Two stored pull requests, one in each of two repositories,
+// whose titles name the same two issue keys in the same order, are the case that tells them
+// apart: each must take the issue of its own repository, the widgets one the first key and the
+// gadgets one the second. A rule that picked once for the walk would credit both to the same
+// issue.
+func TestAttributingABatchPicksEachRowsOwnRepositorysIssue(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	widgets := seedHeadIssue(t, ctx, pool, 10)
+	gadgets := seedGadgetsIssue(t, ctx, pool, 10)
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	title := widgets + " and " + gadgets + ", in that order"
+	for repo, number := range map[string]int{"acme/widgets": 230, "acme/gadgets": 231} {
+		if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+			Repo: repo, Number: number, Title: title,
+			URL:       "https://github.com/" + repo + "/pull/" + strconv.Itoa(number),
+			Author:    "octocat",
+			CreatedAt: &merged, MergedAt: &merged,
+			Attribution: &AttributionInputs{TitleKeys: []string{widgets, gadgets}},
+		}); err != nil {
+			t.Fatalf("seed the stored pull request %s#%d: %v", repo, number, err)
+		}
+	}
+
+	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
+		t.Fatalf("attribute: %v", err)
+	}
+	if got := storedIssueKey(t, ctx, pool, "acme/widgets", 230); got != widgets {
+		t.Fatalf("acme/widgets#230's issue = %s, want %s: the first key of its title is its own repository's", got, widgets)
+	}
+	if got := storedIssueKey(t, ctx, pool, "acme/gadgets", 231); got != gadgets {
+		t.Fatalf("acme/gadgets#231's issue = %s, want %s: %s resolves to acme/widgets, so this row reaches past it",
+			got, gadgets, widgets)
+	}
+}
+
 // TestAStoredPullRequestTitledAfterTwoOfItsOwnIssuesTakesTheFirst: precedence inside one
 // repository is what it always was. A candidate is passed over only where it fails the
 // repository test (attributionHeld), so two candidates that both pass it keep their ranked

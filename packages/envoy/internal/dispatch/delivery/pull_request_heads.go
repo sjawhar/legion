@@ -25,9 +25,9 @@ import (
 // Three writers keep it: the `pull_request` envelope (intake.go, every action), the read-through
 // a recorded result makes when its commit is no head Dispatch knows (ReadThroughCommitPulls),
 // and the reconcile's five-minute pass (reconcile.go), which takes every open row read longer
-// than five minutes ago and, once each, the merged rows that no read of GitHub ever reached and
-// that are attributed to nobody (ListStalePullRequestHeads). Nothing is written when the results
-// are read.
+// than five minutes ago and every merged row credited to nobody that the rule this build judges
+// by has not judged yet — one offer per rule version (AttributionRuleVersion,
+// ListStalePullRequestHeads). Nothing is written when the results are read.
 
 // PullRequestHead is one pull request's current head, as pull_request_heads stores it, and the
 // one shape every writer of that row fills in (UpsertPullRequestHead).
@@ -45,10 +45,14 @@ type PullRequestHead struct {
 	// attribution the row already holds. Only attributeHead can answer it, so the zero value is
 	// the careful one: a writer that does not set it deletes nobody's issue.
 	AttributionComplete bool
-	Title               string
-	URL                 string
-	EventAt             *time.Time
-	CheckedAt           *time.Time
+	// AttributionRule is the rule that judged the attribution this write carries
+	// (AttributionRuleVersion). A write that read GitHub stamps it on the row, which is what
+	// ends the reconcile's one offer of a merged row to that rule.
+	AttributionRule int
+	Title           string
+	URL             string
+	EventAt         *time.Time
+	CheckedAt       *time.Time
 }
 
 // PullRequestHeadState is the state a `pull_request` event leaves the row in: a pull request
@@ -79,8 +83,8 @@ func PullRequestHeadState(action string, merged bool) string {
 // cannot tell a branch of this repository from a fork's and so attributes nobody, and one whose
 // commit-message read failed with anything but a rate limit (attributeHead). Either would
 // otherwise delete an attribution an earlier, fuller read made — on a merged row for good,
-// since the reconcile's merged arm takes only rows no read of GitHub has reached
-// (ListStalePullRequestHeads) and such a row is stamped already, so that issue's results at its
+// since the reconcile's merged arm takes a merged row only until the current rule has judged it
+// (ListStalePullRequestHeads) and a complete write judges it, so that issue's results at its
 // own merged head would read `older` for ever. An incomplete write never carries an issue of
 // its own, so keeping the stored pair costs it nothing. A write that did read every source and
 // found nobody is complete, and clears: GitHub's answer is the whole truth about the row.
@@ -88,14 +92,19 @@ func PullRequestHeadState(action string, merged bool) string {
 // A write carrying no read time leaves the row's checked_at as it was: nulling it would hand a
 // row the reconcile has just read back to the next batch (ListStalePullRequestHeads orders the
 // never-read first), which is why an incomplete write is held off the attribution rather than
-// sent round again.
+// sent round again. attribution_rule is kept by the same test, and it is the other half of the
+// merged arm's bound: a write that did not read GitHub leaves the stored rule alone, so a
+// merged row an incomplete envelope wrote is still offered to the current rule, while a refresh
+// that did read GitHub ends that offer whether or not it could attribute the row. A test that
+// seeds a row without AttributionRule therefore seeds a row no rule has judged, which is what a
+// row stored before that column is.
 func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullRequestHead) error {
 	_, err := pool.Exec(ctx, `
 		insert into pull_request_heads (
 			repo, number, head_sha, head_ref, base_ref, state, issue_key, attribution_source,
-			title, url, event_at, checked_at
+			title, url, event_at, checked_at, attribution_rule
 		)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14)
 		on conflict (repo, number) do update set
 			head_sha = excluded.head_sha,
 			head_ref = excluded.head_ref,
@@ -108,14 +117,16 @@ func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullReque
 			title = excluded.title,
 			url = excluded.url,
 			event_at = coalesce(excluded.event_at, pull_request_heads.event_at),
-			checked_at = coalesce(excluded.checked_at, pull_request_heads.checked_at)
+			checked_at = coalesce(excluded.checked_at, pull_request_heads.checked_at),
+			attribution_rule = case when excluded.checked_at is null
+				then pull_request_heads.attribution_rule else excluded.attribution_rule end
 		where excluded.event_at is null
 		   or pull_request_heads.event_at is null
 		   or excluded.event_at >= pull_request_heads.event_at
 	`,
 		head.Repo, head.Number, head.HeadSHA, head.HeadRef, head.BaseRef, head.State,
 		head.IssueKey, head.AttributionSource, head.Title, head.URL, head.EventAt, head.CheckedAt,
-		head.AttributionComplete,
+		head.AttributionComplete, head.AttributionRule,
 	)
 	if err != nil {
 		return fmt.Errorf("store the head of %s#%d: %w", head.Repo, head.Number, err)
@@ -151,33 +162,41 @@ const (
 
 // ListStalePullRequestHeads is at most limit rows for the reconcile to read again, the longest
 // unread first: every open row whose checked_at is older than PullRequestHeadStaleAfter (a row
-// never read first), and every merged row that carries no attribution and has never been read.
+// never read first), and every merged row credited to nobody that the rule this build judges by
+// has not judged yet (AttributionRuleVersion).
 //
-// The merged arm is what keeps a merged head's currency honest. A `pull_request` envelope that
-// names no head repository attributes nobody (recordPullRequestHead), and GitHub's own answer
-// always names head.repo, so one read settles the row; without this arm a merge delivered by
-// such an envelope — of a pull request no earlier read attributed either — would stand
-// unattributed for good, since no other writer looks at a merged row again and a result at that
-// head would read `older` for ever. A row an earlier read did attribute never reaches this arm
-// and wants nothing from it: such an envelope is an incomplete write, which keeps the
-// attribution the row holds (UpsertPullRequestHead).
+// A merged row is revisited at all because nothing else ever revisits one. An open row comes
+// round every five minutes; a merged row is written once more at most, by an envelope or a
+// read-through, and a recorded result reads through only for a commit no head Dispatch knows.
+// So a merged row left credited to nobody stays that way, and every `before_merge` result at
+// that head reads `older` for ever: a merge delivered by a `pull_request` envelope naming no
+// head repository is one such row (recordPullRequestHead attributes nobody, since it cannot
+// tell this repository's branch from a fork's), and so is every pull request merged under an
+// older attribution rule that credited nobody — a title naming another repository's issue first
+// was the whole of INFRA-1240.
 //
-// checked_at is null is the bound, and it holds because only a reader of GitHub stamps it: the
-// reconcile's own refresh (RefreshPullRequestHead, which stamps whether or not the read could
-// attribute), the read-through, and an envelope only when its payload was a complete read, which
-// an envelope naming no head repository is not. So a merged row of this arm is taken exactly
-// once — the refresh stamps it, and it never comes back to the list, even when GitHub's answer
-// still attributes it to nobody. A merged row that was read while it was open and left
-// unattributed is not taken at all: it is stamped already, and GitHub's read of it answers the
-// same after the merge as it did before, so reading it again would buy nothing.
+// Only a row credited to nobody, because a row an older rule did credit keeps that issue under
+// this one: a candidate is passed over only where it fails the repository test
+// (attributionHeld), so an issue held to the pull request's own repository still wins, and
+// re-reading the row would buy nothing for a GitHub call.
+//
+// The bound is one offer per rule version, and the read ends the offer whatever it concluded.
+// Only a reader of GitHub stamps attribution_rule and checked_at — the reconcile's own refresh
+// (RefreshPullRequestHead), MarkPullRequestHeadChecked for a row it could not read at all, the
+// read-through, and an envelope only when its payload was a complete read (UpsertPullRequestHead
+// keeps both where the write carries no read time). So a merged row is taken once per rule: the
+// refresh stamps it at AttributionRuleVersion whether or not GitHub's answer attributed it, and
+// it comes back only when a later build raises that constant, which is how a change to the
+// attribution reaches the merged rows already stored.
 func ListStalePullRequestHeads(ctx context.Context, pool *store.Pool, limit int, now time.Time) ([]PullRequestHead, error) {
 	rows, err := pool.Query(ctx, `
 		select repo, number from pull_request_heads
 		where (state = 'open' and (checked_at is null or checked_at < $1))
-		   or (state = 'merged' and issue_key is null and checked_at is null)
+		   or (state = 'merged' and issue_key is null
+		       and (checked_at is null or attribution_rule < $3))
 		order by checked_at nulls first, repo, number
 		limit $2
-	`, now.Add(-PullRequestHeadStaleAfter), limit)
+	`, now.Add(-PullRequestHeadStaleAfter), limit, AttributionRuleVersion)
 	if err != nil {
 		return nil, fmt.Errorf("list the stale pull request heads: %w", err)
 	}
@@ -197,11 +216,16 @@ func ListStalePullRequestHeads(ctx context.Context, pool *store.Pool, limit int,
 }
 
 // MarkPullRequestHeadChecked stamps checked_at on a row the reconcile read but could not
-// complete, so one unreadable pull request does not hold the batch every pass.
+// complete — the repository unreadable, the pull request gone — so one unreadable pull request
+// does not hold the batch every pass. It stamps attribution_rule with it, from the constant and
+// not from a parameter, since the row the caller could not read is one the current rule has now
+// been offered: that is the same bound the refresh carries, and without it a merged row credited
+// to nobody whose pull request is gone would come back to the merged arm every pass for ever.
 func MarkPullRequestHeadChecked(ctx context.Context, pool *store.Pool, repoFull string, number int, now time.Time) error {
 	_, err := pool.Exec(ctx, `
-		update pull_request_heads set checked_at = $3 where repo = $1 and number = $2
-	`, repoFull, number, now)
+		update pull_request_heads set checked_at = $3, attribution_rule = $4
+		where repo = $1 and number = $2
+	`, repoFull, number, now, AttributionRuleVersion)
 	if err != nil {
 		return fmt.Errorf("stamp the head of %s#%d: %w", repoFull, number, err)
 	}
@@ -336,15 +360,16 @@ func attributeHead(ctx context.Context, pool *store.Pool, client *githubapp.Clie
 }
 
 // headRow is the row one pull request GitHub answered makes, with the attribution the read
-// reached: the one builder both GitHub readers below write through, so the two cannot drift.
-// The list form of a pull request carries merged_at but not merged, so a merge is read from
-// whichever of the two GitHub sent.
+// reached and the rule that made it (AttributionRuleVersion): the one builder both GitHub
+// readers below write through, so the two cannot drift. The list form of a pull request carries
+// merged_at but not merged, so a merge is read from whichever of the two GitHub sent.
 func headRow(repoFull string, payload pullRequestPayload, attributed headAttributionResult, checkedAt *time.Time) PullRequestHead {
 	return PullRequestHead{
 		Repo: repoFull, Number: payload.Number, HeadSHA: payload.Head.SHA, HeadRef: payload.Head.Ref,
 		BaseRef: payload.Base.Ref, State: PullRequestHeadState(payload.State, payload.Merged || payload.MergedAt != nil),
 		IssueKey: attributed.issueKey, AttributionSource: attributed.source,
-		AttributionComplete: attributed.complete, Title: payload.Title, URL: payload.HTMLURL,
+		AttributionComplete: attributed.complete, AttributionRule: AttributionRuleVersion,
+		Title: payload.Title, URL: payload.HTMLURL,
 		EventAt: payload.UpdatedAt, CheckedAt: checkedAt,
 	}
 }
@@ -427,7 +452,8 @@ func repositoryUnreadable(err error) bool {
 // would delete an attribution this read-through cannot make: the write carries the pull
 // request's own updated_at, so it lands on a row a `pull_request` event or the reconcile
 // attributed by its commit messages and would overwrite that issue with none — for a merged row
-// permanently, since the reconcile's merged arm takes only rows no read of GitHub has reached.
+// permanently, since the reconcile's merged arm takes a merged row only until the current rule
+// has judged it, and a complete write judges it.
 // A row whose commit messages could not be read is written incomplete and unstamped instead: it
 // keeps the attribution the row holds (UpsertPullRequestHead), and the reconcile reads it again
 // rather than this read-through standing as the last word.
@@ -513,7 +539,8 @@ func (in *Intake) recordPullRequestHead(ctx context.Context, payload map[string]
 		Repo: repoFull, Number: number, HeadSHA: payload["head_sha"], HeadRef: payload["head_ref"],
 		BaseRef: payload["base_ref"], State: PullRequestHeadState(payload["action"], payload["merged"] == "true"),
 		IssueKey: attributed.issueKey, AttributionSource: attributed.source,
-		AttributionComplete: attributed.complete, Title: payload["title"], URL: payload["url"],
+		AttributionComplete: attributed.complete, AttributionRule: AttributionRuleVersion,
+		Title: payload["title"], URL: payload["url"],
 		EventAt: envelopeTime(payload["updated_at"]), CheckedAt: checkedAt,
 	})
 }

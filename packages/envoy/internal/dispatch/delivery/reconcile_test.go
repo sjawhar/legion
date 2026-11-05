@@ -792,3 +792,75 @@ func TestReconcileAttributesAMergedHeadAnEarlierPassLeftCreditedToNobody(t *test
 			own, attributed, err)
 	}
 }
+
+// The other half of that repair: the re-judging is bounded, so the pass that corrects a merged
+// row does not go on reading it for ever. attribution_rule records the rule that judged a row
+// (AttributionRuleVersion), the merged arm offers a row to each rule once, and the refresh
+// stamps the rule as it writes the attribution — so the pass above reads the pull request from
+// GitHub exactly once, and the pass after it has no business with the row. Without that bound
+// every merged pull request credited to nobody would cost three GitHub calls every five
+// minutes, for ever, which is the shape the architect refused.
+func TestReconcileReadsAMergedHeadItReJudgedOnlyOnce(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	foreign := seedHeadIssue(t, ctx, pool, 61)
+	own := seedGadgetsIssue(t, ctx, pool, 61)
+	const sha = "6161616161616161616161616161616161616161"
+	title := foreign + ": the other repository's issue, and " + own + " (this one)"
+
+	var pullReads atomic.Int32
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/gadgets/pulls/61", func(w http.ResponseWriter, _ *http.Request) {
+		pullReads.Add(1)
+		mustEncode(t, w, map[string]any{
+			"number": 61, "title": title, "body": "", "html_url": "https://github.com/acme/gadgets/pull/61",
+			"state": "closed", "merged": true, "updated_at": "2026-02-07T00:00:00Z",
+			"head": map[string]any{
+				"ref": "legion/" + own, "sha": sha,
+				"repo": map[string]any{"full_name": "acme/gadgets"},
+			},
+			"base": map[string]any{"ref": "main"},
+		})
+	})
+	fake.handle("GET /repos/acme/gadgets/pulls/61/commits", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{})
+	})
+
+	// A row stored before this change: merged, credited to nobody, stamped read, and judged by
+	// the rule that took the first candidate outright, which attribution_rule numbers 0.
+	stamped := time.Now().Add(-24 * time.Hour)
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: "acme/gadgets", Number: 61, HeadSHA: sha, HeadRef: "legion/" + own, BaseRef: "main",
+		State: "merged", IssueKey: nil, AttributionSource: "none", AttributionComplete: true,
+		Title: title, URL: "https://github.com/acme/gadgets/pull/61", CheckedAt: &stamped,
+	}); err != nil {
+		t.Fatalf("store the merged head the old rule left: %v", err)
+	}
+
+	reconcile := NewReconcile(pool, fake.newTestClient(), events.NewBroker())
+	reconcile.runOnce(ctx)
+	head := readHead(t, ctx, pool, "acme/gadgets", 61)
+	if head.IssueKey == nil || *head.IssueKey != own {
+		t.Fatalf("the merged head after the first pass = %v, want %s", head.IssueKey, own)
+	}
+	if head.AttributionRule != AttributionRuleVersion {
+		t.Fatalf("the merged head's attribution_rule after the first pass = %d, want %d: the read stamps the rule that judged it",
+			head.AttributionRule, AttributionRuleVersion)
+	}
+
+	reconcile.runOnce(ctx)
+	if reads := pullReads.Load(); reads != 1 {
+		t.Fatalf("the two passes read the merged pull request from GitHub %d times, want once: the rule that judged the row is the current one now",
+			reads)
+	}
+	stale, err := ListStalePullRequestHeads(ctx, pool, PullRequestHeadBatch, time.Now())
+	if err != nil {
+		t.Fatalf("list the stale heads: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("a third pass would read %+v, want nothing: this rule has judged every merged row", stale)
+	}
+	if again := readHead(t, ctx, pool, "acme/gadgets", 61); again.IssueKey == nil || *again.IssueKey != own {
+		t.Fatalf("the merged head after the second pass = %v, want %s still", again.IssueKey, own)
+	}
+}
