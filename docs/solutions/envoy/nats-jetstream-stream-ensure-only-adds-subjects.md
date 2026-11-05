@@ -115,7 +115,7 @@ that need every program's setting changed first, or the keeper puts them back:
 is added back within 30 seconds by the keeper of any running binary that still compiles it.
 
 An earlier version of this page described the opposite behaviour, which was true until
-sjawhar/legion's fix for LEGION-208 Stage 3: `ensureStreamWithConfig` called `UpdateStream` with
+cybermonklabs/legion's fix for LEGION-208 Stage 3: `ensureStreamWithConfig` called `UpdateStream` with
 the starting binary's list whenever the deployed list differed, so whichever binary started last
 installed its own list. On 2026-09-24 a local boot of both production digests showed the cost: a
 Dispatch task on the previous image, restarted after the new listener, took

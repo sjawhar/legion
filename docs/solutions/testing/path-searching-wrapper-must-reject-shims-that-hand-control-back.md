@@ -76,7 +76,7 @@ rejection list and lose the only reachable real binary.
 
 The wrapper is the primary repair. The companion bounded-startup shape in
 `packages/pi-legion/src/jj-attribution.ts` (the change reviewed in
-[sjawhar/legion#1934](https://github.com/sjawhar/legion/pull/1934)) is the containment boundary:
+[sjawhar/legion#1934](https://github.com/cybermonklabs/legion/pull/1934)) is the containment boundary:
 run the lookup in its own process group, race it against a bootstrap-safe bound, and kill the
 whole group when the bound expires. On failure, attribution degrades to no trailer rather than
 blocking root bootstrap.

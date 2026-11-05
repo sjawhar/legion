@@ -43,5 +43,5 @@ related_issues:
   chain.
 - Before the change, 54 of 65 `release.yaml` runs on main since 2026-10-26 were replaced while
   pending, and merge-to-published medians were 270-374 minutes per package (the PR body's
-  measurement, script in https://github.com/sjawhar/legion/pull/2358#issuecomment-6434025628).
+  measurement, script in https://github.com/cybermonklabs/legion/pull/2358#issuecomment-6434025628).
 - https://docs.github.com/en/actions/reference/limits, "Job concurrency limits".

@@ -99,7 +99,7 @@ The spec allowed "no longer written, or ignored through a workspace-scoped ignor
 The planner measured the ignore shapes on the box's jj (`0.45.1-sami.20260910`, the daemon's) on a
 temp repo laid out like production — colocated `jj git clone <origin> repo` (`.git` and `.jj` both
 present) plus `jj workspace add <ws> --name … --revision main -R repo` per workspace, exactly the
-layout under `$LEGION_STATE_DIR/repos/github.com/sjawhar/legion` and its workspaces:
+layout under `$LEGION_STATE_DIR/repos/github.com/cybermonklabs/legion` and its workspaces:
 
 | shape | `jj status` in a fresh workspace with the stray file | why rejected |
 | --- | --- | --- |
@@ -230,7 +230,7 @@ directory layout; that layout is a jj-version detail.
   new tree, run `jj -R "$LEGION_WORKSPACE" status` before any split or commit and verify `The
   working copy has no changes.`; then run `test ! -e "$LEGION_WORKSPACE/.omp/config.yml"`. After
   its first user-authored commit is pushed, run `jj -R
-  "$LEGION_STATE_DIR/repos/github.com/sjawhar/legion" git fetch` followed by `jj -R
-  "$LEGION_STATE_DIR/repos/github.com/sjawhar/legion" log -r 'ancestors(legion/<KEY>@origin) ~
+  "$LEGION_STATE_DIR/repos/github.com/cybermonklabs/legion" git fetch` followed by `jj -R
+  "$LEGION_STATE_DIR/repos/github.com/cybermonklabs/legion" log -r 'ancestors(legion/<KEY>@origin) ~
   ancestors(main@origin)' --summary`. The status must be clean, the file must be absent, and the
   first-push ancestry must not list `.omp/config.yml`.

@@ -35,7 +35,7 @@ Extends docs/solutions/legion/conflict-only-rebases-keep-the-diff-auditable.md.
   `flanking_test.go`. It kept the other two parts (`marks.go`, `render.go`). Commit 7edefc89 then
   redesigned the read-back skip on the three readers.
 - Fingerprint d1f759aa… → 4b7e79f9…, changed
-  (https://github.com/sjawhar/legion/pull/2427#issuecomment-6468240380). Every proof was taken
+  (https://github.com/cybermonklabs/legion/pull/2427#issuecomment-6468240380). Every proof was taken
   again at the new base.
 - A later conflict with #2361 touched only an import block. Its fingerprint was unchanged
-  (https://github.com/sjawhar/legion/pull/2427#issuecomment-6473348407).
+  (https://github.com/cybermonklabs/legion/pull/2427#issuecomment-6473348407).

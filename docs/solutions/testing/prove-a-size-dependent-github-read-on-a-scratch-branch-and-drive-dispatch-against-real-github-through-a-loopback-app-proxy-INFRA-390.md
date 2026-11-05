@@ -21,7 +21,7 @@ related_issues:
 - **Build the fixture with the git data API, with no clone.** Make one `POST git/trees` on main's
   tree with inline `content`, then one `POST git/commits` and one `POST git/refs` under a
   `scratch/<issue>-…` name. GitHub accepted a 2.3 MB tree body in one call. No workflow runs on a
-  push to a branch other than main in sjawhar/legion.
+  push to a branch other than main in cybermonklabs/legion.
 - **Measure the answer itself, never file counts.** GitHub's commit JSON lists at most 300 files,
   and patch bytes decide its size. A 376-file main commit answered 1,025,463 bytes, under the cap.
   320 files of about 7 KB answered 1,239,400 bytes.
@@ -31,7 +31,7 @@ related_issues:
   limit. Only then call the production client. Read the role App's installation token in-process
   from the gh `hosts.yml` that `$GH_CONFIG_DIR` names, with yaml.v3. Never log the token or the
   decode error, because a YAML error can quote the file.
-- **The implementer owns the scratch branch.** The review App has `push: false` on sjawhar/legion.
+- **The implementer owns the scratch branch.** The review App has `push: false` on cybermonklabs/legion.
   The implementer creates the branch, leaves it for the tester and the reviewer, and deletes it at
   retro. Record the creation and the deletion as comments on the pull request. A retro is not
   always the last one: when the issue comes back, point a new ref at the same commit

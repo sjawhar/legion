@@ -67,8 +67,8 @@ export function isLegionProjectToken(project: string): boolean {
 }
 
 /** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
- * `sjawhar/legion`) into the Legion project token every role token, secret file, and
- * `LEGION_PROJECT` carries (`sjawharlegion`): lowercased, every non-alphanumeric dropped — the Go
+ * `cybermonklabs/legion`) into the Legion project token every role token, secret file, and
+ * `LEGION_PROJECT` carries (`cybermonklabslegion`): lowercased, every non-alphanumeric dropped — the Go
  * daemon's `claim.ProjectToken` too. The TypeScript daemon, `legion controller start`'s
  * operator-side loader and the Go controller's plugin all apply it, so an operator's copied value
  * lands on the daemon's own controller token; a value that sanitizes to nothing is refused naming

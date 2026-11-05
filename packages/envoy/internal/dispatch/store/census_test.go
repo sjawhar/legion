@@ -593,7 +593,7 @@ func TestCensusExemptsAMigrationOfOnlyCatalogStatementsFromTheTableLimit(t *test
 		t.Errorf("pending = %+v, want 0122 alone, exempt as a function and a trigger", report.Pending)
 	}
 	if out := reportText(report); !strings.Contains(out, "touches artifact_versions: ") ||
-		!strings.Contains(out, ", above the 1 bytes limit, from which the migration is exempt because its statements are only create function and create trigger, which change the catalog and read no row, so its rows were not counted;") {
+		!strings.Contains(out, ", above the 1 bytes limit, from which the migration is exempt because its statements are only create function and create trigger, which change the catalog or the transaction's own settings and read no row, so its rows were not counted;") {
 		t.Errorf("report:\n%s", out)
 	}
 }

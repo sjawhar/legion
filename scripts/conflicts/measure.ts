@@ -45,7 +45,7 @@ function parseOptions(argv: string[]): Options {
       options: {
         since: { type: "string" },
         until: { type: "string" },
-        repo: { type: "string", default: "sjawhar/legion" },
+        repo: { type: "string", default: "cybermonklabs/legion" },
         workdir: { type: "string" },
         "no-fetch": { type: "boolean", default: false },
         "from-json": { type: "string" },

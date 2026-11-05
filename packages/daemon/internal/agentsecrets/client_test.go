@@ -51,7 +51,7 @@ func jwkThumbprint(t *testing.T, header map[string]any) string {
 }
 
 // fakeBroker is the broker's token-login and enrollment routes (its HTTP API reference:
-// https://sjawhar.github.io/legion/broker/reference/api/) as a fake: it records every token login's
+// https://cybermonklabs.github.io/legion/broker/reference/api/) as a fake: it records every token login's
 // token and request object and every enrollment-route request's headers and body, and answers
 // exactly what the test configures. It never honors an Authorization header — none is ever sent.
 type fakeBroker struct {

@@ -1,5 +1,21 @@
 # Changelog
 
+## [main@27c52d310319] - 2026-11-05
+
+### Added
+
+- The Legion daemon API carries an idle issue pod's release: a claim posts what its session is
+  doing to `claims/activity` (whether it runs background work, and when a phase worker's next
+  reminder is due), a claim the daemon suspended because its idle pod was released reads
+  `suspendedBy: released`, and an issue pod reads the deployment's releases, resumes and holds
+  from `claims/release-records`.
+
+## [main@43a994db0ea1] - 2026-11-04
+
+### Changed
+
+- The `Actor` of a person carries `act`, the agent that made the act for them: the session a broker-issued token proved or the caller named, else the personal token's id and name, with the scopes that credential held, a snapshot taken at the act. `AskAnswer` carries it too, `AgentToken` carries its `scopes`, `WhoamiResponse` carries the caller's, and the mint and the new scope edit have input shapes of their own. A 28th tool spec, `dispatch_inbox`, lists what the person's Dispatch Inbox shows - Needs you, Waiting on agents, Later and Credential requests, each with its count and rows - read with the caller's own credential; it is not the Envoy tool `envoy_inbox`.
+
 ## [main@6f23228e01f0] - 2026-11-04
 
 ### Added

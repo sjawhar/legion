@@ -6,7 +6,7 @@
 # them fresh; gh in the session acts as the review App. It runs the real gh it finds first on PATH,
 # or the one LEGION_GH_PATH names, and refuses to start without one, or when the one first on PATH
 # is a script (a gh wrapper, which would answer in place of the review App).
-# The daemon's project, exactly as its legion.yaml writes it: `sjawhar/legion` and `sjawharlegion`
+# The daemon's project, exactly as its legion.yaml writes it: `cybermonklabs/legion` and `cybermonklabslegion`
 # both name the same instance — the value is sanitized like the daemon's (lowercased, every
 # non-alphanumeric dropped) before it names the controller token and LEGION_PROJECT.
 project: demo

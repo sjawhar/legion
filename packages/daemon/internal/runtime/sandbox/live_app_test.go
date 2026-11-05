@@ -62,6 +62,13 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 	return bundle, nil
 }
 
+// ProjectOwners is the harness's GitHubOwners (Options.GitHubOwners): the owners of the run's
+// repositories as appauth.GitHubOwners reads them for a deployment that configures no rename,
+// lowercased and sorted, which is the set every bundle Credential renders holds a directory for.
+func (t implementTokens) ProjectOwners() []string {
+	return appauth.GitHubOwners(func() []string { return t.owners }, ghrepo.Renames{})
+}
+
 // resolveApp mints the implement App's tokens through the token command the script hands the
 // harness (LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND): lib/github-apps.sh's own app_token_command,
 // which asks the secrets broker's github-app secret for a release of installation tokens, so the

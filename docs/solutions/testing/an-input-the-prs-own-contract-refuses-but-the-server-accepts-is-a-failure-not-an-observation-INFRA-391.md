@@ -26,7 +26,7 @@ related_issues:
 ## Evidence
 
 On sjawhar/legion#2209 the route description said a source save proves "the branch exists". The
-tester's round-2 run (https://github.com/sjawhar/legion/pull/2209#issuecomment-6406140808) showed
+tester's round-2 run (https://github.com/cybermonklabs/legion/pull/2209#issuecomment-6406140808) showed
 saves on `main~1`, a full SHA and `refs/heads/<branch>` answered `200`, stored, and wrote the
 update event. It filed them as "Observed, not defects". The reviewer raised the same behaviour as
 the round's Important finding, citing that note. That cost one more implementing, testing and

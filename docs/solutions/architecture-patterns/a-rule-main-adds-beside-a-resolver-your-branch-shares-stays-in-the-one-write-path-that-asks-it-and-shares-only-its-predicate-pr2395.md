@@ -36,7 +36,7 @@ forward merge brings a new rule main wrote next to the old copy.
 - Merge `1b15f353` of main's #2592 (`151d2d7996`, a soft claim takes a role from its predecessor
   only within one client instance) into this pull request's move of role-holder resolution into
   `internal/roles`. Resolution and reasons: the diff-check comment
-  https://github.com/sjawhar/legion/pull/2395#issuecomment-6546429898.
+  https://github.com/cybermonklabs/legion/pull/2395#issuecomment-6546429898.
 - The rule stays in the claim route: `packages/envoy/cmd/listener/role_holder.go:260`
   (`roleSupersessionVerdict`, its liveness read on `roles.Registered`), whose only caller is
   `cmd/listener/api.go:1209` (`POST /v1/roles/set`).
