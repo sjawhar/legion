@@ -2398,11 +2398,36 @@ func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
 // openSyncedEditor sends a metadata marker after the tab renders and returns only once that
 // specific update is stored. Sync frames ahead of it on the socket have then been processed too,
 // so only a subsequent write on B can leave A's room behind the durable head.
+//
+// The marker is an entry of the document's own marks map - its margin - rather than of a root of
+// this test's own, because the peer update hook refuses a browser update naming any root other
+// than the fragment, the margin and a rebuild's retired clients: namedRoot's default arm calls
+// notFromEditor for an update fromPeer (internal/dispatch/docs/update_walk.go:536-540), and that
+// refusal closes the socket 4413 DOC_UPDATE_REFUSED without storing or relaying the update. A
+// marker under a root of its own is then no marker at all - the editor it would synchronise is
+// closed instead - and no real client writes one either: the editor takes only
+// getXmlFragment("prosemirror") and the marks map (the search quoted at update_walk.go:93-104).
+// "marks" is marksMapName, internal/dispatch/docs/tree.go:18, unexported in that package and so
+// spelled out here, as the margin rows of browser_memory_test.go spell it (:755, :868).
+//
+// The entry is inert, so the rows below still measure what they name. The document's markdown is
+// read from the fragment alone (treeOf, docs/tree.go:194-203), so a margin entry cannot move it,
+// and a struct under the margin is charged no rendered content (renderedContent.walkedStruct,
+// docs/room_charge.go:324-333). Nothing sweeps it: the unrecorded-mark sweep walks the anchor
+// marks of the tree (sweepUnrecordedMarks, docs/marks.go:885-960, over pmdoc.ListMarks(tree) at
+// :892) and unmarks those, never a margin key, so neither MarkWait nor UnrecordedMarkTTL
+// (docs.Deps) reaches this entry, and nothing in that package deletes a margin entry at all.
+// Nothing rewrites it: the one server write of the margin writes a whole record under a mark's
+// own id (applyMargin, docs/mutation.go:445-484), and this key is no mark id. Nothing weighs it:
+// the margin bound measures only the records a server write's own fork changed (marginWatch,
+// docs/growth.go:189-235), and the value is a bool, whose marginText is zero in any case
+// (docs/growth.go:303-335). So the marker leaves the store exactly the one update this helper
+// waits for, and no later update of the server's own that would move a durable head a row counts.
 func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
 	t.Helper()
 	editor := pair.a.openEditor(t, artifactID, want)
-	markers := editor.Doc.GetMap("test-sync")
-	marker := strconv.FormatUint(uint64(editor.Doc.ClientID()), 10)
+	markers := editor.Doc.GetMap("marks")
+	marker := "test-sync:" + strconv.FormatUint(uint64(editor.Doc.ClientID()), 10)
 	update, err := editor.Send(func(txn *crdt.Transaction) { markers.Set(txn, marker, true) })
 	if err != nil {
 		t.Fatalf("send the editor's sync marker: %v", err)
