@@ -3205,6 +3205,26 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # This job's Postgres is a container that dies with it, so nothing it holds has to survive
+      # a crash and a forced checkpoint need not be paid for (dispatch://INFRA-1075; envoy-go's
+      # own step says what that costs). The harness changes no server setting; this step does.
+      - name: Set the disposable service up for the race tests
+        run: |
+          id="${{ job.services.postgres.id }}"
+          for setting in fsync full_page_writes synchronous_commit; do
+            docker exec "$id" psql -U postgres -c "alter system set $setting = off"
+          done
+          docker restart "$id"
+          for _ in $(seq 60); do
+            value=$(docker exec "$id" psql -U postgres -Atc "show fsync" 2>/dev/null || true)
+            if [ "$value" = "off" ]; then break; fi
+            sleep 1
+          done
+          for setting in fsync full_page_writes synchronous_commit; do
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            [ "$value" = "off" ] || { echo "::error::the Postgres service reports $setting=$value"; exit 1; }
+          done
+          echo "fsync=off full_page_writes=off synchronous_commit=off"
       - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
         run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
@@ -3292,20 +3312,30 @@ jobs:
       # pg_locks shows with no backend pid. The image's max_prepared_transactions is 0, and the
       # test refuses to skip in CI, so this job raises it as envoy-go does
       # (dispatch://INFRA-1075).
-      - name: Raise the Postgres service's connection and prepared-transaction limits
+      - name: Set the disposable service up for the race tests
         run: |
-          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_connections = 500"
-          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_prepared_transactions = 20"
-          docker restart "${{ job.services.postgres.id }}"
+          id="${{ job.services.postgres.id }}"
+          docker exec "$id" psql -U postgres -c "alter system set max_connections = 500"
+          docker exec "$id" psql -U postgres -c "alter system set max_prepared_transactions = 20"
+          # The service dies with the job, so nothing it holds has to survive a crash and a
+          # forced checkpoint need not be paid for (envoy-go's own step says what that costs).
+          for setting in fsync full_page_writes synchronous_commit; do
+            docker exec "$id" psql -U postgres -c "alter system set $setting = off"
+          done
+          docker restart "$id"
           for _ in $(seq 60); do
-            prepared=$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_prepared_transactions" 2>/dev/null || true)
+            prepared=$(docker exec "$id" psql -U postgres -Atc "show max_prepared_transactions" 2>/dev/null || true)
             if [ "$prepared" = "20" ]; then break; fi
             sleep 1
           done
           [ "$prepared" = "20" ] || { echo "::error::the Postgres service reports max_prepared_transactions=$prepared"; exit 1; }
-          limit=$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_connections")
+          limit=$(docker exec "$id" psql -U postgres -Atc "show max_connections")
           [ "$limit" = "500" ] || { echo "::error::the Postgres service reports max_connections=$limit"; exit 1; }
-          echo "max_connections=$limit max_prepared_transactions=$prepared"
+          for setting in fsync full_page_writes synchronous_commit; do
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            [ "$value" = "off" ] || { echo "::error::the Postgres service reports $setting=$value"; exit 1; }
+          done
+          echo "max_connections=$limit max_prepared_transactions=$prepared fsync=off full_page_writes=off synchronous_commit=off"
       - name: Race-test the Dispatch API
         run: go test -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy
@@ -3374,6 +3404,26 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # This job's Postgres is a container that dies with it, so nothing it holds has to survive
+      # a crash and a forced checkpoint need not be paid for (dispatch://INFRA-1075; envoy-go's
+      # own step says what that costs). The harness changes no server setting; this step does.
+      - name: Set the disposable service up for the race tests
+        run: |
+          id="${{ job.services.postgres.id }}"
+          for setting in fsync full_page_writes synchronous_commit; do
+            docker exec "$id" psql -U postgres -c "alter system set $setting = off"
+          done
+          docker restart "$id"
+          for _ in $(seq 60); do
+            value=$(docker exec "$id" psql -U postgres -Atc "show fsync" 2>/dev/null || true)
+            if [ "$value" = "off" ]; then break; fi
+            sleep 1
+          done
+          for setting in fsync full_page_writes synchronous_commit; do
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            [ "$value" = "off" ] || { echo "::error::the Postgres service reports $setting=$value"; exit 1; }
+          done
+          echo "fsync=off full_page_writes=off synchronous_commit=off"
       # This job is the one the runner killed for memory: three times on this branch it ended with
       # exit 143, "The runner has received a shutdown signal", with no test named and no output at
       # all (jobs 126439344272, 126547001537 and 126603083935, at 7.5, 14.1 and 8.8 minutes;
