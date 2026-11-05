@@ -408,14 +408,30 @@ func TargetSpansBlocks(doc *Node, r Range) bool {
 
 // FindHeading finds the heading whose text, as a read serves it (TextContent), equals title
 // exactly. occurrence is zero-based; without it, repeated titles return ErrTargetAmbiguous.
+// It validates doc first: a nil tree wants a document, and one Validate refuses is Validate's
+// error. It validates the tree rather than the document (ValidateDocument), so a tree that is no
+// document is searched for its headings as it always was, and finds none.
 func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	if doc == nil {
-		return Range{}, fmt.Errorf("%w: FindHeading wants a document", ErrSchema)
+		return Range{}, wantsDocument("FindHeading")
 	}
 	if err := doc.Validate(); err != nil {
 		return Range{}, err
 	}
+	return findHeading(doc, title, occurrence)
+}
 
+// FindHeading is FindHeading over d's tree without validating it again; the zero ValidDocument
+// wants a document, as FindHeading's nil tree does.
+func (d ValidDocument) FindHeading(title string, occurrence *int) (Range, error) {
+	if d.doc == nil {
+		return Range{}, wantsDocument("FindHeading")
+	}
+	return findHeading(d.doc, title, occurrence)
+}
+
+// findHeading is the heading search itself, over a tree its caller has validated.
+func findHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	var matches []Candidate
 	pos := 0
 	for _, child := range doc.Children {
@@ -1528,29 +1544,17 @@ func markAttributeID(value any) string {
 	return id
 }
 
-// StripAnchorMarks returns a copy of doc with every mark the rendering does not write
-// (renderedMarkTypes) removed - Proof and Dispatch anchors - coalescing adjacent equal-mark text
-// runs.
+// StripAnchorMarks is a copy of node without the marks the rendering does not write
+// (renderedMarkTypes) - Proof and Dispatch anchors - and with adjacent text runs under equal
+// written marks merged into one that keeps the first run's attributes and children. That is what
+// the rendering reads (writtenTree), with lineBreaks false, so no line break is rewritten, and
+// before any U+0000 is written (nulsWrittenTree): the text and the attributes are node's own
+// bytes. The copy is the caller's, which cloneNode gives whether or not the rendering writes
+// anything otherwise, since callers own and change what they get (docs.asUploaded, the paragraph
+// a docs edit builds, spreadDifferences).
 func StripAnchorMarks(node *Node) *Node {
 	if node == nil {
 		return nil
 	}
-	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: node.Text}
-	for _, mark := range node.Marks {
-		if renderedMarkTypes[mark.Type] {
-			out.Marks = append(out.Marks, Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)})
-		}
-	}
-	for _, child := range node.Children {
-		clean := StripAnchorMarks(child)
-		if len(out.Children) > 0 {
-			previous := out.Children[len(out.Children)-1]
-			if previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks) {
-				previous.Text += clean.Text
-				continue
-			}
-		}
-		out.Children = append(out.Children, clean)
-	}
-	return out
+	return cloneNode(writtenTree(node, false))
 }
