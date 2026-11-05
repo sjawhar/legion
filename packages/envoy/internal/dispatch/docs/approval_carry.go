@@ -76,13 +76,21 @@ import (
 // change, as N's diff against A shows. A version whose decision blocks differ from A's does not
 // hold A's text, so the answer carry alone decides it, as before this rule.
 
+// CarriedApprovalReasonPrefix opens the reason of every approval Dispatch carries forward in a
+// person's name, and nothing else writes it. It is the mark of a carried answer in the ask's own
+// record: the request Dispatch answers for the person takes that reason as its answer's text
+// (answerApprovalAsk), so a reader of an ask row can tell such an answer from one the person
+// wrote. The Legion daemon reads the same prefix on the review
+// (packages/daemon/internal/intake, CarriedApprovalReasonPrefix, which holds its own literal
+// because it may not import this module).
+const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"
+
 // carryReason is the reason a carried review records, naming the approval it follows.
-const carryReason = "Carried forward from the approval of version %d: the answer to a decision block was the whole change since it."
+const carryReason = CarriedApprovalReasonPrefix + " %d: the answer to a decision block was the whole change since it."
 
 // restoreReason is the reason a review carried to a version restoring the approved text records,
-// naming the approval it follows. It opens as carryReason does, which is how the Legion daemon
-// tells a carry from a person's own approval (intake.CarriedApprovalReasonPrefix).
-const restoreReason = "Carried forward from the approval of version %d: this version's text is that version's, unchanged."
+// naming the approval it follows. It opens as carryReason does.
+const restoreReason = CarriedApprovalReasonPrefix + " %d: this version's text is that version's, unchanged."
 
 // carryInput is what the rule is decided on once H, the version he approved, A, and when he
 // approved it are known: the blocks of N by block id, each its row (rowBackedBlocks); the block

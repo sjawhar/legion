@@ -2,9 +2,11 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -171,5 +173,57 @@ func setAnswerTime(t *testing.T, database *store.Store, askID, at string) {
 	if _, err := database.Pool.Exec(t.Context(),
 		`update asks set answer = jsonb_set(answer, '{at}', to_jsonb($2::text)) where id = $1::uuid`, askID, at); err != nil {
 		t.Fatalf("set the answer time of %s: %v", askID, err)
+	}
+}
+
+// An approval Dispatch carried forward in the target's name is not one of their answers. The
+// carry answers the open approval request as the person, with the person as the answer's user
+// and as the event's actor and the carry's own sentence as its text, so nothing but that text
+// tells it from an answer they wrote. The four steps that make one: the person approves version
+// 1, the agent changes the document and asks for approval, the agent restores the approved text,
+// which answers the request, and an ask then lists the person's answers. Left in, a run of
+// carries would push their real answers out of the few rows the advisory lists.
+func TestAskProxyAdviceLeavesOutAnApprovalDispatchCarried(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	person, _ := proxyPerson(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Carry the approval under a proxy", restoreSpec)
+
+	// The person's own answer to a question, the one row the advisory should list.
+	answered, _ := openProxyAsk(t, handler, issue.Key, "Does the service ship behind a flag?", "alice")
+	answerProxyAsk(t, handler, answered, "It ships behind a flag.", person)
+
+	if review := reviewDocument(t, handler, issue.PrimaryArtifactID, person, "approved", ""); review.Version != 1 {
+		t.Fatalf("review = %#v, want an approval of version 1", review)
+	}
+	agentEdit(t, handler, issue.PrimaryArtifactID, 2, replaceOp("behind a flag.", "behind a flag and a canary."))
+	request := requestApproval(t, handler, issue.PrimaryArtifactID)
+	agentEdit(t, handler, issue.PrimaryArtifactID, 3, replaceOp("behind a flag and a canary.", "behind a flag."))
+	carried := readBlockAsk(t, handler, request.ID)
+	if carried.State != "answered" || carried.Answer == nil || model.CanonicalLogin(carried.Answer.User) != person ||
+		carried.Answer.Text == nil || *carried.Answer.Text != restoreSentence(1) {
+		t.Fatalf("the request after the restore = state %q answer %#v, want the carry in %s's name", carried.State, carried.Answer, person)
+	}
+	setIssueAssignee(t, handler, issue.Key, person)
+
+	_, suggestions := openProxyAsk(t, handler, issue.Key, "Which region takes the first wave?", "alice")
+	proxy := suggestions.Proxy
+	if proxy == nil {
+		t.Fatalf("advice.suggestions = %+v, want the proxy advisory for %s", suggestions, person)
+	}
+	want := []model.AskProxyAnswer{{
+		Ref: "dispatch://" + issue.Key + "/ask/" + answered, Line: "It ships behind a flag.",
+	}}
+	if !reflect.DeepEqual(proxy.Answers, want) {
+		t.Fatalf("proxy answers = %+v, want only the answer %s wrote, never the carried approval %s", proxy.Answers, person, request.ID)
+	}
+}
+
+// setIssueAssignee gives the issue the person whose asks it reaches.
+func setIssueAssignee(t *testing.T, handler http.Handler, issueKey, login string) {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issueKey,
+		map[string]any{"assignee": login}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("assign %s to %s: status=%d body=%s", issueKey, login, response.Code, response.Body.String())
 	}
 }
