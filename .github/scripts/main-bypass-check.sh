@@ -29,8 +29,10 @@
 # `skip-checks` should be last." The rule this script implements, in its own: the words count
 # when they are the message's last non-empty line and that line ends the message's last block of
 # non-empty lines, where every line of the block is a trailer — `token: value`, the token made of
-# letters, digits and hyphens, or a folded continuation, which begins with a space or a tab — and
-# an empty line comes before the block, which is therefore never the subject's own line. So the
+# letters, digits and hyphens, or a folded continuation, which begins with a space or a tab and
+# is never the block's own first line, since the line such a first line would continue is above
+# the empty line and no part of the block — and an empty line comes before the block, which is
+# therefore never the subject's own line. So the
 # trailers a commit already carries (`Co-authored-by:`, `Omp-Session:`, `Signed-off-by:`) may
 # stand above `skip-checks`, as the page says they may, and that commit is still passed over: one
 # empty line before the block is enough, because git's own cleanup, which the same page names,
@@ -52,8 +54,8 @@
 # Its inputs, from the step's env:
 #   COMMITS  a JSON array of the push's commits, oldest first, each {"id": "<sha>", "message":
 #            "<the whole message>"}; any other field is ignored. From
-#            `${{ toJSON(github.event.commits) }}`, or from the compare API when that payload list
-#            is cut short (the workflow says when and how).
+#            `.commits` of the push payload, read from $GITHUB_EVENT_PATH, or from the compare
+#            API when GitHub cut that array short (the workflow says when and how).
 #   RUNS     a JSON object mapping each commit's sha to the ci.yaml merge-group runs at that
 #            commit, each {"conclusion": "success|failure|cancelled|null", "headSha": "…",
 #            "workflowName": "…"}; a sha with no such run maps to []. From, over the shas of
@@ -65,11 +67,13 @@
 #   CI_OK    a JSON object mapping each commit's sha to its ci-ok check runs, each {"name": "…",
 #            "conclusion": "success|failure|…|null"}; a sha with no ci-ok maps to []. From, over
 #            the same shas:
-#              gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all" \
+#              gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
 #                --jq '[.check_runs[] | {name, conclusion}]'
 #            `filter=all` is required: the default, `latest`, returns one check run per name, and
 #            a commit can carry two — a failing one from the run whose job failed, and a passing
-#            one from a later run of the same group.
+#            one from a later run of the same group. `per_page=100` is required too: the default
+#            page holds the 30 newest check runs of the commit, and a commit the queue tested
+#            more than once can carry more than that.
 # RUNS and CI_OK must hold a reading for every commit of COMMITS, so that a gather that read
 # nothing is a refusal here rather than a commit silently read as untested.
 #
@@ -79,8 +83,10 @@
 # the workflow puts in the job log and the job summary. It exits 0 whenever it could decide, and
 # non-zero only on a bad input, which it names.
 #
-# Reading stops at that first untested commit: one dispatched run tests main's tip, which contains
-# every commit of the push, so what the commits after it carry changes nothing.
+# The decision stops at that first untested commit: every commit after it is read, since the
+# workflow gathers both readings for every commit of the push and this script holds them all,
+# but none of them is judged and the reasoning names none of them — one dispatched run tests
+# main's tip, which contains every commit of the push, so what they carry changes nothing.
 #
 # Run from anywhere:
 #   COMMITS=... RUNS=... CI_OK=... .github/scripts/main-bypass-check.sh
@@ -126,8 +132,10 @@ def markers: ["[skip ci]", "[ci skip]", "[no ci]", "[skip actions]", "[actions s
 # message's last non-empty one and it ends the message's last block of non-empty lines, every
 # line of which is a trailer, with an empty line before the block (the header says why, and
 # quotes GitHub's rule). A block that starts at the first line is the subject's own and is no
-# trailer section. Trailing blanks and a carriage return, which a message from a Windows client
-# can carry, are not part of a line.
+# trailer section, and neither is one whose own first line is a folded continuation: the line
+# such a first line would continue is above the empty line and no part of the block, which is
+# how git reads it too. Trailing blanks and a carriage return, which a message from a Windows
+# client can carry, are not part of a line.
 def trailer_line: test("^[A-Za-z0-9-]+:") or test("^[ \t]");
 def skip_trailer:
   (split("\n") | map(sub("[[:space:]]+$"; ""))) as $lines
@@ -194,7 +202,7 @@ as $read
         ["log", "every commit of this push was tested on the merge queue or carries a skip marker: no run is started"]
       end)
    else
-     ["log", "commit \($read[$first].commit.id) reached this branch untested, so ci.yaml is started on this branch by workflow_dispatch: that run tests the branch's tip, which contains it. The \((($read | length) - $first - 1)) commit(s) after it are left unread, because that one run tests them too."],
+     ["log", "commit \($read[$first].commit.id) reached this branch untested, so ci.yaml is started on this branch by workflow_dispatch: that run tests the branch's tip, which contains it. The \((($read | length) - $first - 1)) commit(s) after it are left unjudged, because that one run tests them too."],
      ["out", "dispatch \($read[$first].commit.id)"]
    end)
 | @tsv

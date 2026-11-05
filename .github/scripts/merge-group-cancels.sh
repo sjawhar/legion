@@ -42,32 +42,59 @@
 #                `filter=all` is required, as it is in main-bypass-check.yaml's read of the same
 #                check run: the default, `latest`, returns one check run per name, and a commit
 #                can carry two — a failing one from the run whose job failed, and a passing one
-#                from a later run of the same group. A commit that carries both is no failed
-#                group, so a `success` among them is the conclusion this map holds:
+#                from a later run of the same group. `per_page=100` is required with it: the
+#                default page holds the 30 newest check runs of the commit. A commit that
+#                carries both is no failed group, so a `success` among them is the conclusion
+#                this map holds:
 #                  jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS" |
 #                    while read -r sha; do
-#                      gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all" \
+#                      gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
 #                        --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
 #                              else .check_runs[0].conclusion // empty end' |
 #                        jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
 #                    done | jq -s 'add // {}'
-#   CANCEL_SELF  `true` or `false`, and `true` when it is unset: whether the caller of the failed
-#                act will act on the `self` line it prints. The decision is the same either way —
-#                `self` is printed, and last — and this is read only so that the reasoning says
-#                what the caller does with that line instead of asserting a force-cancel the
-#                caller may not make. .github/actions/merge-group-cancel passes its `cancel-self`
-#                input here, and ci.yaml's `cancel-changes` is the one caller that passes
-#                `false`. The started act does not read it.
+#   REPORT       the failed act's whole decision, which the caller reads from this run's
+#                artifacts before it asks: the report the job that fired the follower uploaded
+#                for this run attempt (.github/actions/ci-ok-report uploads it as
+#                `ci-ok-<job>-<run attempt>-<success|failure|cancelled>` before it posts
+#                anything), or `absent` when it uploaded none, or `unknown` when GitHub refused
+#                the list. The started act does not read it and needs none.
 #
-# ACT=failed — a selected job of the asking run has failed, so its group cannot merge and neither
-# can any group built on it. It cancels every run of RUNS that has not completed and whose chain of
-# parents reaches HEAD_SHA, the nearest descendant first, and then prints `self`. A direct child's
-# first step up is through HEAD_SHA itself, which the walk resolves from HEAD_SHA and HEAD_BRANCH,
-# so a RUNS that does not hold the asking run yet costs this act no descendant. A run that has
-# completed is left alone, since it holds no runner. The asking run is never in the cancel list: it
-# is the `self` line, and that line is last because cancelling this run first would kill the job
-# that has the descendants to cancel. Whether the caller acts on that line is the caller's, and
-# CANCEL_SELF is how it says so.
+# ACT=failed — a job of the asking run reported `failure` or `cancelled` to its follower. That
+# result says the job ended badly, not that its own work did: a job whose tests all passed ends
+# `failure` when its ci-ok-report step cannot reach GitHub. REPORT is what tells the two apart,
+# and the act has one answer for each:
+#
+#   * `failure` or `cancelled` — the job's own work failed, so this group cannot merge and
+#     neither can any group built on it. It cancels every run of RUNS that has not completed
+#     and whose chain of parents reaches HEAD_SHA, the nearest descendant first, and then the
+#     asking run itself, whose id is the last `cancel` line: cancelling this run first would
+#     kill the job that has the descendants to cancel. The same report step posted this group's
+#     failing ci-ok before the follower started, so nothing here leaves the group unjudged.
+#   * `absent` — the job uploaded no report, so this group carries no ci-ok of its own yet.
+#     `cancel-changes` always meets this: `changes` has no ci-ok-report step, and the jobs that
+#     post for a run whose `changes` did not succeed (lint, typecheck and test, whose `if:`
+#     admits a `changes` that did not succeed) are still running when its follower fires. A job
+#     whose artifact upload failed leaves the same absence. It cancels the descendants, which
+#     are doomed whichever of the two it was, and never the asking run: force-cancelling it
+#     would leave every `if: always()` step skipped and the group with no ci-ok at all, which
+#     holds it in the queue until GitHub's 180-minute check timeout. What the lesser cost is:
+#     the first of those jobs to report posts this group's failing ci-ok, and the others run on
+#     to their own end with nothing left to cancel them — up to `test`'s 80-minute limit, the
+#     longest of the three (lint's is 30 and typecheck's is 10). So the act trades up to 80
+#     minutes of this run's runner time for the 180 a group with no ci-ok holds the queue. This
+#     is the one place that trade is written down; ci.yaml and the action point here.
+#   * `success` — the job's work passed and its report step alone failed. Nothing is cancelled
+#     at all: this group is no failed group, the groups built on it are testing trees that
+#     still land, and a later job of this run finds that `success` among the reports and posts
+#     a passing ci-ok.
+#   * `unknown` — the caller could not read the reports, so nothing here shows this group
+#     failed. Nothing is cancelled, as a head whose ci-ok the started act cannot read dooms
+#     nothing: an act proves what it cancels.
+#
+# A direct child's first step up is through HEAD_SHA itself, which the walk resolves from
+# HEAD_SHA and HEAD_BRANCH, so a RUNS that does not hold the asking run yet costs this act no
+# descendant. A run that has completed is left alone, since it holds no runner.
 #
 # ACT=started — the asking run has just started, and it answers two questions. It cancels every run
 # of RUNS of the same pull request that has not completed and was created before this run
@@ -85,21 +112,22 @@
 # When this group is the pull request's last there is no later one — the group merges, or the
 # pull request leaves the queue, where dequeued.yaml cancels the removed group's own head and
 # never a stale sibling — and the older group then runs to the end.
-# Then it prints `self-doomed` when this run's chain of parents reaches a group whose head
-# carries a ci-ok of `failure` in CI_OK: that group cannot merge, and this group is built on it.
+# Then it prints the asking run's own id as the last `cancel` line when this run's chain of
+# parents reaches a group whose head carries a ci-ok of `failure` in CI_OK: that group cannot
+# merge, and this group is built on it.
 # That half is answered whether or not the list holds the asking run, since the walk reads
 # HEAD_SHA and HEAD_BRANCH and no run's createdAt. The commit the walk stops at dooms nothing even
 # when its ci-ok failed, because it is a commit of main, and a red run on main is not a failed
 # group.
 #
-# It prints one token per line on stdout, in the order the caller must act on them: `cancel <run
-# id>` for each other run, descendants before anything else, then `self` as the last line of the
-# failed act, or `self-doomed` as the last line of the started act when it applies. The reasoning —
+# It prints one line per run to force-cancel on stdout, in the order the caller must act on
+# them: `cancel <run id>`, the descendants before anything else, and the asking run's own id
+# last when the act must end it. The reasoning —
 # which run, and why — goes to stderr, so the job log holds the decision beside the act. It exits 0
 # whenever it could decide, and non-zero only on a bad input, which it names.
 #
 # Run from anywhere:
-#   ACT=... RUN_ID=... HEAD_SHA=... HEAD_BRANCH=... RUNS=... CI_OK=... \
+#   ACT=... RUN_ID=... HEAD_SHA=... HEAD_BRANCH=... RUNS=... CI_OK=... REPORT=... \
 #     .github/scripts/merge-group-cancels.sh
 # Its tests are in merge-group-cancels.test.sh, which ci.yaml's test job runs.
 set -euo pipefail
@@ -148,14 +176,19 @@ fi
 jq -e 'type == "object" and all(.[]; type == "string")' <<<"$ci_ok" >/dev/null 2>&1 ||
   fail "CI_OK is not a JSON object mapping a commit sha to its ci-ok conclusion: $ci_ok"
 
-# Unset is `true`, the default of the action's `cancel-self` input; anything but the two words is
-# a caller's typo, and reading it as `false` would leave a doomed run alive and say so in the
-# reasoning as if the caller had asked for it.
-cancel_self=${CANCEL_SELF:-true}
-case $cancel_self in
-  true | false) ;;
-  *) fail "CANCEL_SELF is whether the caller acts on the self line, true or false, not '$cancel_self'" ;;
-esac
+# The failed act's decision, which the caller reads from the run's artifacts: an unreadable list
+# is `unknown` and an unreported job `absent`, both of which the caller says in that word rather
+# than by leaving REPORT out, so a caller that forgot it is a failure here and never a silent
+# cancel of a healthy group.
+report=${REPORT:-}
+if [ "$ACT" = failed ]; then
+  [ -n "$report" ] ||
+    fail "the failed act reads the reporting job's own report, so it needs REPORT in its environment"
+  case $report in
+    success | failure | cancelled | absent | unknown) ;;
+    *) fail "REPORT is the reporting job's own report, one of success, failure, cancelled, absent and unknown, not '$report'" ;;
+  esac
+fi
 
 # One row per line, tab-separated: `out` and a token for stdout, or `log` and a line of the
 # reasoning for stderr. Both are emitted in the order the caller must act on them.
@@ -194,28 +227,34 @@ def ts: sub("[.][0-9]+Z$"; "Z") | fromdateiso8601;
           end);
 
   if $act == "failed" then
-    [$runs[]
-     | select(.databaseId != $run_id)
-     | . as $run
-     | (walk(.headSha; .headBranch).steps | map(.headSha) | index($head_sha)) as $step
-     | select($step != null)
-     | {run: $run, depth: ($step + 1)}]
-    | sort_by(.depth, .run.createdAt, .run.databaseId) as $descendants
-    | (select($descendants | length == 0)
-       | ["log", "no other merge-group run has \($head_sha) in its chain of parents"]),
-      ($descendants[]
-       | if .run.status == "completed" then
-           ["log", "run \(.run.databaseId) (\(.run.headBranch)) is built on \($head_sha), \(.depth) step(s) up, but it has completed (\(.run.conclusion // "no conclusion")): left alone"]
+    if $report == "success" then
+      ["log", "the job's own report for this run is success: its work passed and its report step alone failed, so this group is no failed group and nothing is cancelled"]
+    elif $report == "unknown" then
+      ["log", "the job's own report could not be read, so nothing here shows that this group failed and nothing is cancelled"]
+    else
+      [$runs[]
+       | select(.databaseId != $run_id)
+       | . as $run
+       | (walk(.headSha; .headBranch).steps | map(.headSha) | index($head_sha)) as $step
+       | select($step != null)
+       | {run: $run, depth: ($step + 1)}]
+      | sort_by(.depth, .run.createdAt, .run.databaseId) as $descendants
+      | (select($descendants | length == 0)
+         | ["log", "no other merge-group run has \($head_sha) in its chain of parents"]),
+        ($descendants[]
+         | if .run.status == "completed" then
+             ["log", "run \(.run.databaseId) (\(.run.headBranch)) is built on \($head_sha), \(.depth) step(s) up, but it has completed (\(.run.conclusion // "no conclusion")): left alone"]
+           else
+             ["log", "run \(.run.databaseId) (\(.run.headBranch)) is \(.run.status) and its chain of parents reaches \($head_sha) after \(.depth) step(s), so its group can no longer merge: cancel it"],
+             ["out", "cancel \(.run.databaseId)"]
+           end),
+        (if $report == "absent" then
+           ["log", "the job uploaded no report, so this group's failing ci-ok is still unposted: run \($run_id) is left running, after the descendants it had to cancel first, so that a job of it can post that ci-ok"]
          else
-           ["log", "run \(.run.databaseId) (\(.run.headBranch)) is \(.run.status) and its chain of parents reaches \($head_sha) after \(.depth) step(s), so its group can no longer merge: cancel it"],
-           ["out", "cancel \(.run.databaseId)"]
-         end),
-      (if $cancel_self == "false" then
-         ["log", "`self` is last in the order, after the descendants that had to be cancelled first, and this caller acts on no `self` line: run \($run_id) is left running"]
-       else
-         ["log", "run \($run_id)'s own remaining jobs are force-cancelled last, after the descendants it had to cancel first"]
-       end),
-      ["out", "self"]
+           ["log", "run \($run_id)'s own remaining jobs are force-cancelled last, after the descendants it had to cancel first"],
+           ["out", "cancel \($run_id)"]
+         end)
+    end
   else
     ([$runs[] | select(.databaseId == $run_id)] | first) as $self
     | ($head_branch | parsed) as $me
@@ -252,7 +291,7 @@ def ts: sub("[.][0-9]+Z$"; "Z") | fromdateiso8601;
       (if ($doomed | length) > 0 then
          ($doomed[0]
           | ["log", "this run is doomed: its chain of parents reaches \(.headSha), the head of run \(.databaseId), whose ci-ok is failure, so that group cannot merge and this group is built on it"]),
-         ["out", "self-doomed"]
+         ["out", "cancel \($run_id)"]
        else
          ["log", "no group in this run's chain of parents carries a failing ci-ok (\($chain.steps | length) group(s) walked): this run is not doomed"]
        end)
@@ -260,7 +299,7 @@ def ts: sub("[.][0-9]+Z$"; "Z") | fromdateiso8601;
 | @tsv
 JQ
 rows=$(jq -r --arg act "$ACT" --argjson run_id "$RUN_ID" --arg head_sha "$HEAD_SHA" \
-  --arg head_branch "$HEAD_BRANCH" --argjson ci_ok "$ci_ok" --arg cancel_self "$cancel_self" \
+  --arg head_branch "$HEAD_BRANCH" --argjson ci_ok "$ci_ok" --arg report "$report" \
   "$program" <<<"$RUNS")
 
 while IFS=$'\t' read -r kind text; do

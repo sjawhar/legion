@@ -1,6 +1,8 @@
 """The engine of check-ci-filters.sh, whose header says what it proves and why. ci_job_reads.py,
 beside it, is the data it reads: each ci.yaml gate's go commands and static reads, and the files
-tests read outside their packages.
+tests read outside their packages. ci_workflow_rules.py, also beside it, holds the rules that
+read none of that - what no `if:` of ci.yaml may say, what every job's `if:` must say, and what
+ci-caches.yaml must save for the entries ci.yaml restores - and main() runs them.
 
 check-ci-filters.sh runs it from the repository root with this directory on PYTHONPATH, through
 `import ci_filter_coverage` rather than as a script, so ci_job_reads.py's `from ci_filter_coverage
@@ -482,7 +484,8 @@ def reduce_line(line: str) -> tuple:
 # each module's hash whichever source serves it. This check's own go commands run with
 # GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
 # them either. CI_OK_SELECTED_BY, CI_OK_PULL_REQUEST_ONLY and CI_OK_EXEMPT are ci.yaml's ci-ok
-# map and its exemptions, which only ci-ok-report.sh and ci-ok.sh read.
+# map and its exemptions: ci-ok-report.sh reads the first two out of that file and hands them to
+# ci-ok.sh, and CI_OK_EXEMPT is read by this check alone.
 ENV_ALLOWED = frozenset({
     "BROKER_TEST_DATABASE_URL", "CI_OK_EXEMPT", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY", "DATABASE_URL",
     "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
@@ -758,6 +761,13 @@ REQUIRED_CHECKS = ("ci-ok", "pr-title")
 # doomed merge-group run, which runs only on merge_group, holds `actions: write`, runs no
 # dependency code, reports no result to ci-ok and is no job a verdict waits for.
 EXEMPT_LIST = "CI_OK_EXEMPT"
+# The composite action a follower cancel job runs, which is what makes a job a follower, and the
+# one condition every follower carries. The job a follower follows is named in its `needs:` and
+# nowhere else — the action reads the id from `toJSON(needs)` — so this text is the same in all
+# of them, and a hand-written variant of it is drift this check refuses.
+FOLLOWER_ACTION = "./.github/actions/merge-group-cancel"
+FOLLOWER_IF = ("${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' "
+               "&& (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}")
 
 
 def check_ci_ok(document: dict, problems: list) -> None:
@@ -769,7 +779,10 @@ def check_ci_ok(document: dict, problems: list) -> None:
     a workflow must hand that workflow `ci-ok-changes` for its job's report step. No job may be
     named for a required check. A job EXEMPT_LIST names is outside all of that: it is no job of
     CI_OK_SELECTED_BY, it needs no report step, and it must carry none, since ci-ok.sh fails a
-    result for a job CI_OK_SELECTED_BY cannot map."""
+    result for a job CI_OK_SELECTED_BY cannot map. The followers, the jobs that run
+    FOLLOWER_ACTION, are one per job that can run on a merge group and is no cancel job of
+    EXEMPT_LIST's — the jobs ci-ok waits for there, plus `changes` — each following the one job
+    its `needs:` names, under FOLLOWER_IF and no other text."""
     jobs = document.get("jobs") or {}
     env = document.get("env") or {}
     try:
@@ -881,6 +894,38 @@ def check_ci_ok(document: dict, problems: list) -> None:
             problems.append(f"::error file={WORKFLOW}::job {job_id}'s last step is not `uses: {REPORT_ACTION}` with "
                             f"`if: always()`, `changes: {REPORT_CHANGES}` and `job-status: {REPORT_STATUS}`, so a run "
                             f"that {job_id} ends never gets ci-ok")
+    # One follower per job a merge-group run can run, and each written in the one text: a job
+    # with none leaves every group built on this one running to its end when it fails, and a
+    # follower whose condition drifts is a follower that fires in runs it was not written for.
+    # A follower follows the one job its `needs:` names, which is how the act knows whose
+    # report to read, and the pull-request-only jobs are left out: the queue never runs them.
+    followers = {}
+    for job_id, job in jobs.items():
+        job = job or {}
+        if not any((step or {}).get("uses") == FOLLOWER_ACTION for step in job.get("steps") or []):
+            continue
+        needed = job.get("needs") or []
+        followers[job_id] = [needed] if isinstance(needed, str) else list(needed)
+    waited = set(jobs) - set(exempt) - list_expected["CI_OK_PULL_REQUEST_ONLY"]
+    followed = {}
+    for job_id, needed in sorted(followers.items()):
+        if len(needed) != 1:
+            problems.append(f"::error file={WORKFLOW}::job {job_id} runs {FOLLOWER_ACTION} and needs "
+                            f"{len(needed)} jobs, not one; a follower names the job it follows in `needs:` and "
+                            f"nowhere else, and the act reads that one id from `toJSON(needs)`")
+            continue
+        followed[needed[0]] = job_id
+        if squash(str((jobs.get(job_id) or {}).get("if", ""))) != FOLLOWER_IF:
+            problems.append(f"::error file={WORKFLOW}::job {job_id}'s if: is not the one every follower carries, "
+                            f"`{FOLLOWER_IF}`; it is written once and names no job, so a variant of it is drift")
+    for job_id in sorted(waited - set(followed)):
+        problems.append(f"::error file={WORKFLOW}::job {job_id} can run on a merge group and has no follower, so "
+                        f"nothing cancels the groups built on this one when it fails; add a cancel-{job_id} job "
+                        f"that needs it, runs {FOLLOWER_ACTION} and is named in {EXEMPT_LIST}")
+    for job_id in sorted(set(followed) - waited):
+        problems.append(f"::error file={WORKFLOW}::job {followed[job_id]} follows {job_id}, which is no job a "
+                        f"merge-group run of this file runs outside the cancel jobs, so it could never fire; "
+                        f"drop it, or name the job it was meant for")
 
 
 def check_push_workflows(data, filters: dict, problems: list) -> list:
@@ -917,118 +962,6 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
-# ---------------------------------------------------------------- the conditions ci.yaml cannot hold
-# ci.yaml runs on a pull request, a merge group and a workflow_dispatch, and on no push, so an if:
-# testing for a push event, or comparing github.ref with a branch ref, holds its job or step back
-# on every run there is. Either way round, as a GitHub expression may be written; its strings are
-# single-quoted, a double-quoted one being no expression at all. github.ref_name, and github.ref
-# in anything but such a comparison - startsWith against refs/heads/gh-readonly-queue/, the branch
-# a merge_group run does carry, among them - are left alone.
-def comparison(left: str, right: str) -> str:
-    """The regex of a GitHub expression comparing `left` with `right`, either operand first."""
-    return rf"{left}\s*[=!]=\s*{right}|{right}\s*[=!]=\s*{left}"
-
-
-PUSH_CONDITION = re.compile("|".join((comparison(r"github\.event_name", "'push'"),
-                                      comparison(r"github\.ref", r"'refs/heads/[^']*'"))))
-# Where the work such a condition used to gate lives now.
-PUSH_INSTEAD = (f"a cache that must be filled on a push to main belongs in {CACHE_WORKFLOW}, and a job that must "
-                f"run at main's tip is started by the workflow_dispatch "
-                f".github/workflows/main-bypass-check.yaml sends")
-
-
-def check_push_conditions(document: dict, problems: list) -> None:
-    """A job or a step of ci.yaml gated on a push event, or on github.ref being a branch ref, is
-    dead: the workflow has no push trigger, and on its three events github.ref is a pull request's
-    merge ref or the merge queue's own branch, never the ref such a condition names. Dead code
-    that reads as live is worse than none - the cache restores carried
-    `github.ref != 'refs/heads/main'` conditions that could no longer be true - so a later pull
-    request may not bring one back. Read off the if: text, one comparison at a time: a committer
-    who writes the same test as a function call is the review's to catch."""
-    for job_id, job in (document.get("jobs") or {}).items():
-        job = job or {}
-        refs = conditions(job)
-        for step, condition in refs:
-            for found in dict.fromkeys(m.group(0) for m in PUSH_CONDITION.finditer(condition)):
-                where = where_if(job_id, step)
-                problems.append(f"::error file={WORKFLOW}::{where} has `if: {squash(condition)}`, which tests "
-                                f"`{found}`: {WORKFLOW} runs on a pull request, a merge group and a "
-                                f"workflow_dispatch, never on a push to main, so nothing that condition gates ever "
-                                f"runs; {PUSH_INSTEAD}")
-
-
-# ---------------------------------------------------------------- the cache round trip
-def cache_family(key: str) -> str:
-    """The family a cache key names: its text up to the first expression - the Go version the
-    entry is keyed on - without the separator that joins the two."""
-    return key.split("${{")[0].strip().rstrip("-")
-
-
-def path_lines(value) -> list:
-    """A cache step's path:, as the ordered list of directories it names."""
-    return [line.strip() for line in str(value).splitlines() if line.strip()]
-
-
-def cache_steps(document: dict, action: str) -> list:
-    """Every actions/cache/<action> step of a workflow, as (its job, its family, its with:)."""
-    return [(job_id, cache_family(str((step.get("with") or {}).get("key", ""))), step.get("with") or {})
-            for job_id, job in (document.get("jobs") or {}).items()
-            for step in ((job or {}).get("steps") or [])
-            if str((step or {}).get("uses", "")).split("@")[0] == f"actions/cache/{action}"]
-
-
-def check_cache_round_trip(document: dict, problems: list) -> None:
-    """ci-caches.yaml fills on a push to main the entries ci.yaml's jobs restore, so each family's
-    save must carry exactly the key and the paths its restores name: a key or a path that drifts
-    apart makes every restore miss, and nothing fails - each job just rebuilds from nothing what
-    the fill already built. A family is the key's text up to its first expression, and it is what
-    pairs a save with the restores to hold it to; the keys are compared as text and the paths as
-    the ordered lists of lines they name. A family ci.yaml restores that this workflow does not
-    save is no fault: docs-pages.yaml saves go-docs. The other way round is one, a family nothing
-    restores being a fill nobody reads. Each restore here is a lookup, which must be
-    `lookup-only: true` with no restore-keys: the question it asks is whether that exact key is
-    already there, the entry it would download is read by nothing in this workflow, and a prefix
-    hit would answer for an older key and skip the build that fills this one. A ci-caches.yaml
-    that is not in the repository saves nothing, and so has nothing to hold."""
-    if not (REPO / CACHE_WORKFLOW).is_file():
-        return
-    caches = yaml.safe_load((REPO / CACHE_WORKFLOW).read_text()) or {}
-    restores = defaultdict(list)
-    for job_id, family, given in cache_steps(document, "restore"):
-        restores[family].append((job_id, given))
-    for job_id, family, given in cache_steps(caches, "save"):
-        key, paths = str(given.get("key", "")).rstrip(), path_lines(given.get("path", ""))
-        if family not in restores:
-            problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves cache family {family}, which no "
-                            f"actions/cache/restore of {WORKFLOW} reads; this workflow exists to fill what "
-                            f"{WORKFLOW} restores, so a family nothing restores is a fill nobody reads: restore it "
-                            f"there, or drop the save")
-            continue
-        for restore_job, restored in restores[family]:
-            restored_key = str(restored.get("key", "")).rstrip()
-            restored_paths = path_lines(restored.get("path", ""))
-            if key != restored_key:
-                problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves family {family} under key "
-                                f"`{key}`, but job {restore_job} of {WORKFLOW} restores it under "
-                                f"`{restored_key}`: a restore whose key is not the save's "
-                                f"misses every time, and nothing fails - the job rebuilds from nothing instead")
-            if paths != restored_paths:
-                problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves family {family} from "
-                                f"{', '.join(paths) or '(no path)'}, but job {restore_job} of {WORKFLOW} restores "
-                                f"it into {', '.join(restored_paths) or '(no path)'}: the "
-                                f"entry then holds other directories than the job reads, and the job rebuilds what "
-                                f"the fill already built")
-    for job_id, family, given in cache_steps(caches, "restore"):
-        if str(given.get("lookup-only", "")).strip().lower() != "true":
-            problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id}'s actions/cache/restore of family "
-                            f"{family} is not `lookup-only: true`: it asks only whether that exact key is already "
-                            f"there, and the entry a restore downloads is read by no step of this workflow")
-        if given.get("restore-keys") is not None:
-            problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id}'s actions/cache/restore of family "
-                            f"{family} has restore-keys: a prefix hit would answer for an older key, and the build "
-                            f"that fills this one would be skipped, leaving the key empty")
-
-
 def declared_reads(data) -> list:
     """Every read pattern ci_job_reads.py declares, each with where it is: a gate's reads, or a
     RULES row's (a row's Runs declare go commands, not patterns)."""
@@ -1063,13 +996,18 @@ def main() -> int:
     problems: list = []
     document = yaml.safe_load((REPO / WORKFLOW).read_text())
     import ci_job_reads as data  # imported here so its at() citations land in this module's CITED
+    # The rules of ci.yaml that read no filter and no go command, in a module of their own. It is
+    # imported here, not at the top, because it imports this module's constants and helpers: by
+    # the time main() runs, this module is loaded whole.
+    import ci_workflow_rules as rules
 
     filters, quantifiers = changes_filters(document, problems)
     files = repo_files()
     unreduced = check_table(document, data, filters, set(files), problems)
     check_ci_ok(document, problems)
-    check_push_conditions(document, problems)
-    check_cache_round_trip(document, problems)
+    rules.check_push_conditions(document, problems)
+    rules.check_rerun_guard(document, problems)
+    rules.check_cache_round_trip(document, problems)
     expander = Expander(files)
     check_dead_patterns(data, filters, expander, problems)
     session = Session()

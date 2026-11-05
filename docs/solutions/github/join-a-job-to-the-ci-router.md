@@ -33,11 +33,19 @@ with the `ci-ok-report` step, and the last job of the run to finish posts `ci-ok
 section on `ci-ok` below). The deployment repository keeps its own router guide for its own
 workflows; this page covers this repository only.
 
-## The six places a job joins
+## The seven places a job joins
 
 1. **A filter in `changes`** that names every file the job reads (the method is below).
-2. **An output of `changes`** for that filter: `<filter>: ${{ steps.filter.outputs.<filter> }}`.
-3. **`needs: changes`** on the job, and `if: needs.changes.outputs.<filter> == 'true'`.
+2. **An output of `changes`** for that filter.
+   Every output carries the dispatched term, since a dispatched run skips the filter step and selects every job:
+   `<filter>: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.<filter> }}`.
+   A slow suite carries the `full-ci` term too (step 5 says why), and ends with the `'false'` that makes the skip `changes`' own:
+   `<filter>: ${{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.<filter> || 'false' }}`.
+3. **`needs: changes`** on the job, and
+   `if: needs.changes.outputs.<filter> == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')`.
+   The second term holds the job back on a re-run attempt of a merge-group run, where the group is tested already.
+   Every job of `ci.yaml` carries a term of its own for that and `check-ci-filters.sh` fails one that does not:
+   `gh run rerun --failed` leaves out a `changes` that succeeded and hands the attempt that job's outputs again, so no job may lean on `changes`' skip for it.
 4. **The `ci-ok-report` step as the job's last step**, the same text in every job:
 
    ```yaml
@@ -64,7 +72,12 @@ workflows; this page covers this repository only.
    every job the map says `changes` selected and fails one the map does not name, and
    `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test, or a
    job outside `CI_OK_EXEMPT` lacks the report step (the section on `ci-ok` below says why).
-6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
+6. **A `cancel-<job>` follower**, and that follower's id in `CI_OK_EXEMPT`.
+   It is the same job every time: `needs: <job>`, the one condition every follower carries, a sparse checkout of `.github` and `.github/actions/merge-group-cancel` with `needs: ${{ toJSON(needs) }}`.
+   The merge-queue section below says what it does.
+   A job `ci-ok` waits for that has none leaves every group built on a failed one running to its end, and `check-ci-filters.sh` fails it.
+   A job that runs only on a pull request takes no follower, since the queue never runs it.
+7. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
 A Go job also restores its caches the way the section on caches below says.
@@ -303,13 +316,12 @@ when it carries the label `full-ci`. The
 docs job runs on a group and on a pull request alike; docs-pages.yaml builds and publishes main's
 site on a push trigger of its own.
 
-Two things a group's run alone carries. Every job of a re-run attempt skips, so a merge-group run
-is never re-run: a group is tested once, and the pull request is tested again when it is queued
-again. And the run of a group that can no longer merge is force-cancelled by jobs of the workflow
-itself — `cancel-started` and one follower per job `ci-ok` waits for — which run only on
-`merge_group`, report nothing and are therefore named in `CI_OK_EXEMPT` rather than in
-`CI_OK_SELECTED_BY`. A new job `ci-ok` waits for takes a `cancel-<job>` follower and an entry in
-that list with it.
+Two things a group's run alone carries.
+Every job of a re-run attempt skips, so a merge-group run is never re-run: a group is tested once, and the pull request is tested again when it is queued again.
+Each job carries the term that does it, which step 3 above gives.
+And the run of a group that can no longer merge is force-cancelled by jobs of the workflow itself — `cancel-started` and one follower per job `ci-ok` waits for, plus one for `changes` — which run only on `merge_group`, report nothing and are therefore named in `CI_OK_EXEMPT` rather than in `CI_OK_SELECTED_BY`.
+A follower reads the report its job uploaded before it ended, so it acts only when that job's own work failed: a job whose tests passed and whose `ci-ok-report` step alone failed cancels nothing, and a job that uploaded none leaves this run alive to post the group's `ci-ok`.
+Step 6 above is the follower a new job takes with it.
 
 ## Drafts run no test job
 

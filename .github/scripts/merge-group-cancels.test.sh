@@ -54,18 +54,19 @@ mg_run() {
 # runs <run>...: the RUNS array, in the order given (the script must not depend on it).
 runs() { printf '%s\n' "$@" | jq -s '.'; }
 
-# run_cancels <act> <run id> <head sha> <head branch> <runs> [<ci-ok map>]: sets out (stdout, the
-# tokens), err (stderr, the reasoning) and status.
+# run_cancels <act> <run id> <head sha> <head branch> <runs> [<ci-ok map>] [<report>]: sets out
+# (stdout, the cancels), err (stderr, the reasoning) and status. The report is the failed act's
+# only reader; it defaults to `failure`, the answer a job whose own work failed gives.
 run_cancels() {
   set +e
-  out=$(ACT=$1 RUN_ID=$2 HEAD_SHA=$3 HEAD_BRANCH=$4 RUNS=$5 CI_OK=${6:-} \
+  out=$(ACT=$1 RUN_ID=$2 HEAD_SHA=$3 HEAD_BRANCH=$4 RUNS=$5 CI_OK=${6:-} REPORT=${7-failure} \
     timeout 60 "$script_dir/merge-group-cancels.sh" 2>"$work/err")
   status=$?
   set -e
   err=$(cat "$work/err")
 }
 
-echo "case: a chain with a failed link: every descendant is cancelled, in chain order, self last"
+echo "case: a chain with a failed link: every descendant is cancelled, in chain order, this run last"
 stack=$(runs \
   "$(mg_run 41865489886 2734 "$head_2720" "$head_2734" queued "" 2026-11-04T18:09:44Z)" \
   "$(mg_run 41860898444 2589 "$main_tip" "$head_2589" in_progress "" 2026-11-04T17:58:02Z)" \
@@ -73,13 +74,13 @@ stack=$(runs \
   "$(mg_run 41870000001 2800 "$main_older" 92a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5 in_progress "" 2026-11-04T18:04:00Z)")
 run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack"
 check "decides" "$(is "$status" 0)"
-check "cancels the nearest descendant, then the one above it, and ends with self" \
-  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\nself')")"
+check "cancels the nearest descendant, then the one above it, and ends with this run" \
+  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\ncancel 41860898444')")"
 check "says why the group one step up is cancelled" \
   "$(contains "$err" "^run 41861688656 (gh-readonly-queue/main/pr-2720-$head_2589) is in_progress and its chain of parents reaches $head_2589 after 1 step(s)")"
 check "says why the group two steps up is cancelled" \
   "$(contains "$err" "^run 41865489886 (gh-readonly-queue/main/pr-2734-$head_2720) is queued and its chain of parents reaches $head_2589 after 2 step(s)")"
-check "says self is last and why" \
+check "says this run is cancelled last and why" \
   "$(contains "$err" "^run 41860898444's own remaining jobs are force-cancelled last, after the descendants it had to cancel first\$")"
 check "leaves a group of another chain alone" "$(is "$(contains "$out" '41870000001')" false)"
 
@@ -126,8 +127,8 @@ mixed=$(runs \
   "$(mg_run 41869000004 2740 "$head_2734" 8192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4 queued "" 2026-11-04T18:12:00Z)")
 run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$mixed"
 check "decides" "$(is "$status" 0)"
-check "cancels the running one and the queued one, and ends with self" \
-  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41869000004\nself')")"
+check "cancels the running one and the queued one, and ends with this run" \
+  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41869000004\ncancel 41860898444')")"
 check "says the completed descendant is left alone" \
   "$(contains "$err" "^run 41865489886 (gh-readonly-queue/main/pr-2734-$head_2720) is built on $head_2589, 2 step(s) up, but it has completed (success): left alone\$")"
 
@@ -140,7 +141,7 @@ requeued=$(runs \
 run_cancels failed 41872000100 "$dequeued_head" "$(queue_branch 2750 "$main_tip")" "$requeued"
 check "decides" "$(is "$status" 0)"
 check "cancels only itself: the new group is built on main, not on the old group" \
-  "$(is "$out" 'self')"
+  "$(is "$out" 'cancel 41872000100')"
 check "says no run is built on the failed group's head" \
   "$(contains "$err" "^no other merge-group run has $dequeued_head in its chain of parents\$")"
 
@@ -159,7 +160,7 @@ below=$(runs \
   "$(mg_run 41860898444 2589 "$group_2500" "$head_2589" in_progress "" 2026-11-04T17:58:02Z)")
 red_group=$(jq -n --arg g "$group_2500" --arg m "$main_tip" '{($g): "failure", ($m): "failure"}')
 run_cancels started 41860898444 "$head_2589" "$(queue_branch 2589 "$group_2500")" "$below" "$red_group"
-check "the same conclusion on a group's head dooms this run" "$(is "$out" 'self-doomed')"
+check "the same conclusion on a group's head dooms this run" "$(is "$out" 'cancel 41860898444')"
 check "names the group that dooms it" \
   "$(contains "$err" "^this run is doomed: its chain of parents reaches $group_2500, the head of run 41859000500, whose ci-ok is failure")"
 
@@ -172,7 +173,7 @@ cycle=$(runs \
 run_cancels failed 41873000100 "$cycle_a" "$(queue_branch 2810 "$cycle_b")" "$cycle"
 check "the failed act decides rather than hanging" "$(is "$status" 0)"
 check "cancels the run the cycle made a descendant, then itself" \
-  "$(is "$out" "$(printf 'cancel 41873000200\nself')")"
+  "$(is "$out" "$(printf 'cancel 41873000200\ncancel 41873000100')")"
 run_cancels started 41873000100 "$cycle_a" "$(queue_branch 2810 "$cycle_b")" "$cycle" '{}'
 check "the started act decides rather than hanging" "$(is "$status" 0)"
 check "says the branch names form a cycle" \
@@ -191,6 +192,14 @@ check "names it" "$(contains "$err" '^::error::RUNS is not a JSON array of runs 
 run_cancels started 41865489886 "$head_2734" "$(queue_branch 2734 "$head_2720")" "$stack"
 check "the started act without CI_OK fails" "$(is "$status" 1)"
 check "names it" "$(contains "$err" "^::error::the started act reads each ancestor group's ci-ok, so it needs CI_OK in its environment\$")"
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' ''
+check "the failed act without REPORT fails" "$(is "$status" 1)"
+check "names it" \
+  "$(contains "$err" "^::error::the failed act reads the reporting job's own report, so it needs REPORT in its environment\$")"
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' passed
+check "a REPORT that is none of the five answers fails" "$(is "$status" 1)"
+check "names it" \
+  "$(contains "$err" "^::error::REPORT is the reporting job's own report, one of success, failure, cancelled, absent and unknown, not 'passed'\$")"
 
 echo "case: the started act cancels nothing when the list does not hold the asking run yet"
 run_cancels started 41999999999 "$head_2734" "$(queue_branch 2734 "$head_2720")" "$stack" '{}'
@@ -198,7 +207,7 @@ check "it decides rather than failing" "$(is "$status" 0)"
 check "it cancels nothing" "$(is "$out" "")"
 check "it says why, and what reclaims those groups instead" \
   "$(contains "$err" "^the run list does not hold the asking run 41999999999 yet, so no group of pull request 2734 can be shown to be older than this one and none is cancelled: the next merge-group run of this pull request cancels them when it starts\$")"
-check "it still walks the chain and answers the self-doomed half" \
+check "it still walks the chain and answers the doomed half" \
   "$(contains "$err" 'this run is not doomed$')"
 
 echo "case: the stand-in must not cancel a newer group of the same pull request"
@@ -214,14 +223,15 @@ check "it cancels no group it cannot prove is older than itself" "$(is "$out" ""
 echo "case: every cancel job of ci.yaml can run when the job it needs did not succeed"
 # GitHub gives a job `if:` that names no status-check function an implicit `success()`
 # (docs.github.com, "Evaluate expressions", Status check functions), false once any job in
-# `needs:` failed or was cancelled. A follower whose condition reads `needs.<job>.result ==
-# 'failure' || … == 'cancelled'` with no `always()` or `!cancelled()` is therefore skipped in
-# exactly the runs it exists for, so the act below is never asked for a decision at all.
+# `needs:` failed or was cancelled. A follower whose condition reads the result of the job it
+# needs — `contains(needs.*.result, 'failure')` and its `cancelled` twin — with no `always()`
+# or `!cancelled()` is therefore skipped in exactly the runs it exists for, so the act below is
+# never asked for a decision at all.
 # release.yaml's header states the same rule for this repository and names the run it cost
 # (38822866387); check-release-credentials.sh rule 5 pins it there and reads no other workflow.
 dead_followers=$(yq -r '
   .jobs | to_entries
-  | map(select((.value."if" // "") | test("needs\.[A-Za-z0-9_-]+\.result")))
+  | map(select((.value."if" // "") | test("needs\.[A-Za-z0-9_*-]+\.result")))
   | map(select(((.value."if" // "") | test("always\(\)|cancelled\(\)|failure\(\)|success\(\)")) | not))
   | map(.key) | join(" ")' "$script_dir/../workflows/ci.yaml" 2>/dev/null)
 check "no job of ci.yaml reads a need's result behind an implicit success()" \
@@ -239,40 +249,28 @@ lagging_child=$(runs \
 run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$lagging_child"
 check "it decides rather than failing" "$(is "$status" 0)"
 check "it cancels the descendant, then itself" \
-  "$(is "$out" "$(printf 'cancel 41865489886\nself')")"
+  "$(is "$out" "$(printf 'cancel 41865489886\ncancel 41860898444')")"
 
-echo "case: the reasoning says what the caller will do with the self line"
-# ci.yaml's `cancel-changes` passes `cancel-self: 'false'` to
-# .github/actions/merge-group-cancel, which passes it here as CANCEL_SELF. The decision is the
-# same either way — `self` is printed, and last — so only the line about it differs, and the
-# script's reasoning and the action's notice never say two different things about one run.
-run_cancel_self() { # run_cancel_self <value>: the failed act of the stack, with CANCEL_SELF set.
-  set +e
-  out=$(ACT=failed RUN_ID=41860898444 HEAD_SHA="$head_2589" \
-    HEAD_BRANCH="$(queue_branch 2589 "$main_tip")" RUNS="$stack" CANCEL_SELF="$1" \
-    timeout 60 "$script_dir/merge-group-cancels.sh" 2>"$work/err")
-  status=$?
-  set -e
-  err=$(cat "$work/err")
-}
-run_cancel_self false
-check "decides" "$(is "$status" 0)"
-check "prints the same tokens, self last" \
-  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\nself')")"
-check "says this caller acts on no self line and leaves the run running" \
-  "$(contains "$err" "^\`self\` is last in the order, after the descendants that had to be cancelled first, and this caller acts on no \`self\` line: run 41860898444 is left running\$")"
-check "does not say the run was force-cancelled" \
-  "$(is "$(contains "$err" 'force-cancelled last')" false)"
-run_cancel_self true
-check "cancel-self true says the run's own jobs are force-cancelled last" \
-  "$(contains "$err" "^run 41860898444's own remaining jobs are force-cancelled last, after the descendants it had to cancel first\$")"
-run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack"
-check "an unset CANCEL_SELF reads as true, the default of the action's input" \
-  "$(contains "$err" "^run 41860898444's own remaining jobs are force-cancelled last, after the descendants it had to cancel first\$")"
-run_cancel_self False
-check "a CANCEL_SELF that is neither word fails rather than leaving the run alive" \
-  "$(is "$status" 1)"
-check "names it" \
-  "$(contains "$err" "^::error::CANCEL_SELF is whether the caller acts on the self line, true or false, not 'False'\$")"
+echo "case: the report of the job that fired the follower decides what the failed act cancels"
+# A follower fires on its job's `failure` or `cancelled` result, which a job whose tests all
+# passed carries too when its ci-ok-report step cannot reach GitHub. The report that step
+# uploaded before it posted anything tells the two apart, and .github/actions/merge-group-cancel
+# reads it out of the run's artifacts for this script.
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' success
+check "a report of success cancels nothing at all" "$(is "$out" "")"
+check "says the job's work passed and its report step alone failed" \
+  "$(contains "$err" "^the job's own report for this run is success: its work passed and its report step alone failed, so this group is no failed group and nothing is cancelled\$")"
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' unknown
+check "a report GitHub refused cancels nothing either" "$(is "$out" "")"
+check "says nothing here shows this group failed" \
+  "$(contains "$err" "^the job's own report could not be read, so nothing here shows that this group failed and nothing is cancelled\$")"
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' absent
+check "a job that uploaded no report, as the changes job never does, cancels the descendants" \
+  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886')")"
+check "and never this run, which stays alive so a job of it can post this group's ci-ok" \
+  "$(contains "$err" "^the job uploaded no report, so this group's failing ci-ok is still unposted: run 41860898444 is left running, after the descendants it had to cancel first, so that a job of it can post that ci-ok\$")"
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' cancelled
+check "a report of cancelled, which a job its own timeout cut off leaves, ends this run too" \
+  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\ncancel 41860898444')")"
 
 summary "the merge-group cancel decision"

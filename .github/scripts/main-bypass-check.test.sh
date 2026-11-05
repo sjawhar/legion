@@ -103,7 +103,7 @@ check "names that commit, and only it" "$(is "$out" "dispatch $bypassed")"
 check "says what is missing" \
   "$(contains "$err" "^commit $bypassed (fix(ci): an admin merge, pushed past the queue): it is the head of no ci.yaml merge-group run and it carries no ci-ok check run: not tested\$")"
 check "says what the one run it starts tests" \
-  "$(contains "$err" "^commit $bypassed reached this branch untested, so ci.yaml is started on this branch by workflow_dispatch: that run tests the branch's tip, which contains it. The 0 commit(s) after it are left unread")"
+  "$(contains "$err" "^commit $bypassed reached this branch untested, so ci.yaml is started on this branch by workflow_dispatch: that run tests the branch's tip, which contains it. The 0 commit(s) after it are left unjudged")"
 
 echo "case: a commit whose message carries a skip marker in its subject is passed over"
 for marker in '[skip ci]' '[ci skip]' '[no ci]' '[skip actions]' '[actions skip]'; do
@@ -140,9 +140,9 @@ run_bypass "$two_bypassed" \
   "$(readings "$bypassed" '[]' "$bypassed_two" '[]' "$queued" "$(list "$(ci_ok_run success)")")"
 check "decides" "$(is "$status" 0)"
 check "prints one token, the first untested commit" "$(is "$out" "dispatch $bypassed")"
-check "says the two commits after it are left unread" \
-  "$(contains "$err" 'The 2 commit(s) after it are left unread, because that one run tests them too[.]$')"
-check "reads none of them" "$(is "$(contains "$err" "$bypassed_two")" false)"
+check "says the two commits after it are left unjudged" \
+  "$(contains "$err" 'The 2 commit(s) after it are left unjudged, because that one run tests them too[.]$')"
+check "judges none of them: the reasoning names neither" "$(is "$(contains "$err" "$bypassed_two")" false)"
 
 echo "case: a ci-ok that concluded failure is no passing ci-ok"
 red=$(list "$(commit "$bypassed" "fix(daemon): the rescue test reads the pod's workspace")")

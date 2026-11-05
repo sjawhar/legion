@@ -47,8 +47,8 @@ other change to the head voids it.
   `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: on a `pull_request`
   run, re-run that run's
   failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
-  succeeded too. A merge-group run is never re-run: every job of a re-run attempt of one skips, so
-  the implementer finishes its round and the pull request is tested again when it is queued again.
+  succeeded too. A merge-group run is never re-run: the implementer finishes its round instead,
+  and the pull request is tested again when it is queued again.
   Find the run and job at the head: the head's runs
   (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<headRefOid>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
   then each candidate run's jobs

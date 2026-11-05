@@ -49,6 +49,7 @@ GO_TARGETS = ".github/go-release-targets.json"
 CLIENT_TARGETS = ".github/agent-secrets-client-targets.json"
 INFRA_TARGETS = ".github/envoy-infra-targets.json"
 NOTICES = "scripts/go-third-party-notices.sh"
+NOTICES_LOOPS = ".github/scripts/go-release-notices.sh"
 CI = ".github/workflows/ci.yaml"
 DOCS_SITE = ".github/workflows/docs-site.yaml"
 
@@ -312,25 +313,32 @@ NOTICES_STEP = "Check every Go release archive's third-party notices can be writ
 
 
 def go_notices_runs():
+    """Every go command .github/scripts/go-release-notices.sh starts, one per release target of
+    each list it reads. The lines are the script's, not the step's: lint's notices step runs the
+    script, and ci-caches.yaml's daemon job runs the same one to fill the cache lint restores."""
+    started_by = at("lint", NOTICES_STEP)
     out = []
     for target in targets(GO_TARGETS, "legion"):
         goos, goarch = target.split("/")
-        out.append(step_run("lint", NOTICES_STEP, '../../scripts/go-third-party-notices.sh "$notices/legion-${target%/*}-${target#*/}" ./cmd/legion',
-                            DAEMON, ["./cmd/legion"], mode="build", env={"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}))
+        out.append(script_run(NOTICES_LOOPS, '../../scripts/go-third-party-notices.sh "$notices/legion-${target%/*}-${target#*/}" ./cmd/legion',
+                              started_by, DAEMON, ["./cmd/legion"], mode="build",
+                              env={"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}))
     for arch in targets(GO_TARGETS, "envoy"):
-        out.append(step_run("lint", NOTICES_STEP, '../../scripts/go-third-party-notices.sh "$notices/legion-envoy-$arch" ./cmd/listener',
-                            ENVOY, ["./cmd/listener"], mode="build", env={"GOOS": "linux", "GOARCH": arch}))
-        out.append(step_run("lint", NOTICES_STEP, '../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch"',
-                            ENVOY, ["./cmd/agent-secrets", "./cmd/agent-secrets-helper"], mode="build",
-                            env={"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": arch}))
+        out.append(script_run(NOTICES_LOOPS, '../../scripts/go-third-party-notices.sh "$notices/legion-envoy-$arch" ./cmd/listener',
+                              started_by, ENVOY, ["./cmd/listener"], mode="build", env={"GOOS": "linux", "GOARCH": arch}))
+        out.append(script_run(NOTICES_LOOPS, '../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch"',
+                              started_by, ENVOY, ["./cmd/agent-secrets", "./cmd/agent-secrets-helper"], mode="build",
+                              env={"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": arch}))
     for target in targets(CLIENT_TARGETS, "agent-secrets-client"):
         goos, goarch = target.split("/")
-        out.append(step_run("lint", NOTICES_STEP, "go build -buildvcs=false -o /dev/null ./cmd/agent-secrets",
-                            ENVOY, ["./cmd/agent-secrets"], mode="build", env={"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}))
+        out.append(script_run(NOTICES_LOOPS, "go build -buildvcs=false -o /dev/null ./cmd/agent-secrets",
+                              started_by, ENVOY, ["./cmd/agent-secrets"], mode="build",
+                              env={"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}))
     for target in targets(INFRA_TARGETS, "envoy-infra"):
         goos, goarch = target.split("/")
-        out.append(step_run("lint", NOTICES_STEP, "go build -buildvcs=false -o /dev/null ./cmd/...",
-                            INFRA, ["./cmd/..."], mode="build", env={"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}))
+        out.append(script_run(NOTICES_LOOPS, "go build -buildvcs=false -o /dev/null ./cmd/...",
+                              started_by, INFRA, ["./cmd/..."], mode="build",
+                              env={"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}))
     return out
 
 
@@ -424,6 +432,11 @@ GATES = [
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
                               "ci_job_reads.py or release-bump.sh where a checker reads them)"),
+        (".github/workflows/main-bypass-check.yaml",
+         at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:239-246 reads the "
+         "workflow and holds every run: step of it to a shell with pipefail"),
+        (".github/ci-images.yaml", f"{at('test', 'Test the CI image mirror')}: mirror-ci-images.test.sh:322-351 builds "
+                                   "its ordering fixture from the repository's own rows"),
         (".github/e2e-scripts.json", f"{at('test', 'Test the e2e proof selector')}: select-e2e-proofs.test.sh runs the "
                                      "selector over the repository's own list"),
         ("scripts/third-party-notices.test.ts", at("test", "Test third-party notices")),
@@ -802,15 +815,16 @@ GATES = [
     ) + setup_go(STALL, f"{ENVOY}/go.mod") + bun_job(STALL) + CI_SELF),
 
     gate("go_notices", "lint", step=NOTICES_STEP, runs=go_notices_runs(), reads=reads(
-        (NOTICES, f"{at('lint', NOTICES_STEP)} runs it"),
-        (GO_TARGETS, f"{at('lint', NOTICES_STEP)}: jq reads it"),
-        (CLIENT_TARGETS, f"{at('lint', NOTICES_STEP)}: jq reads it"),
-        (INFRA_TARGETS, f"{at('lint', NOTICES_STEP)}: jq reads it"),
+        (NOTICES_LOOPS, f"{at('lint', NOTICES_STEP)} runs it; it holds the loops"),
+        (NOTICES, f"{NOTICES_LOOPS} runs it once per release target"),
+        (GO_TARGETS, f"{NOTICES_LOOPS}: jq reads it"),
+        (CLIENT_TARGETS, f"{NOTICES_LOOPS}: jq reads it"),
+        (INFRA_TARGETS, f"{NOTICES_LOOPS}: jq reads it"),
     ) + CI_SELF),
 
     # This check itself: it lists every module's packages (vet mode: each package directory, its
     # dependencies' and the test files, without the files tests read), reads the target lists
-    # the runs above expand, and is its own script, engine, data and path model.
+    # the runs above expand, and is its own script, engine, data, rules and path model.
     gate("ci_filters", "ci-filters", runs=[
         run(DAEMON, ["./..."], f"{at('ci-filters', CHECK_STEP)}: go list over the daemon module", mode="vet", step=CHECK_STEP,
             text=".github/scripts/check-ci-filters.sh"),
@@ -823,12 +837,14 @@ GATES = [
         (".github/scripts/check-ci-filters.sh", at("ci-filters", CHECK_STEP)),
         (".github/scripts/ci_filter_coverage.py", "check-ci-filters.sh's engine"),
         (".github/scripts/ci_job_reads.py", "check-ci-filters.sh's data"),
+        (".github/scripts/ci_workflow_rules.py", "check-ci-filters.sh's rules about ci.yaml's conditions and "
+                                                 "ci-caches.yaml, which ci_filter_coverage.main() runs"),
         (".github/scripts/workflow_paths.py", "ci_filter_coverage.py reads filters through it"),
         (GO_TARGETS, "ci_job_reads.py expands the notices and pack runs over it"),
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (DOCS_SITE, "ci_filter_coverage.py looks the docs gate's step citations up in it"),
-        (CACHE_WORKFLOW, "ci_filter_coverage.py holds its cache saves to ci.yaml's restores"),
+        (CACHE_WORKFLOW, "ci_workflow_rules.py holds its cache saves to ci.yaml's restores"),
     ) + reads(*((path, f"check-ci-filters.sh holds its on.push.paths equal to the {name} filter (PUSH_WORKFLOWS)")
                 for name, path in PUSH_WORKFLOWS.items()))
       + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),

@@ -938,14 +938,15 @@ def gating_filters(
     workflow: Path,
     describe: str,
     holder: dict,
-    publishes: bool,
     modes: dict[str, str | None] | None = None,
-) -> tuple[list[tuple[str, PathsFilter]], set[str]]:
-    """The dorny/paths-filter filters an `if:` is gated on, and the trigger events it admits.
-    The holder is a job that builds an image, a job that calls a workflow which does, a job
-    either of those needs, or the build step itself, in `workflow`; `publishes` says whether the
-    build this gate decides is published, which is what forbids a narrowed output (output_filter)
-    here; `modes` are the CALL_MODE inputs its `if:` may test, none for a step. A gate this check
+) -> tuple[list[tuple[str, PathsFilter, str]], set[str]]:
+    """The dorny/paths-filter filters an `if:` is gated on, each with the refusal its narrowing
+    term earns ("" when the output hands the filter's value unnarrowed), and the trigger events
+    the `if:` admits. The holder is a job that builds an image, a job that calls a workflow which
+    does, a job either of those needs, or the build step itself, in `workflow`; `modes` are the
+    CALL_MODE inputs its `if:` may test, none for a step. Whether a narrowed output is a fault
+    depends on whether the build the gate decides is published, which only the build loop knows,
+    so the refusal is written here and reported there (narrowed_refusals). A gate this check
     cannot evaluate is reported, never ignored, since ignoring it would treat a gated build as
     one that runs on every change. So is a draft term under a trigger that does not build the
     head once the draft is marked ready (the comment above NEUTRAL)."""
@@ -985,18 +986,16 @@ def gating_filters(
             )
             continue
         narrowing = reference[2]
-        if narrowing and publishes:
-            problems.append(
-                f"::error::{describe} builds or calls an image its job publishes, and is gated "
-                f"on needs.{needed}.outputs.{output}, which hands it "
-                f"steps.{reference[0]}.outputs.{reference[1]} only while "
-                f"`{' '.join(narrowing.split())}` holds, so a change that filter selects "
-                f"publishes no image and no pin can name that commit; drop the narrowing term "
-                f"from that output, which leaves the filter deciding the job, or keep the "
-                f"narrowed output for a job whose every docker/build-push-action step publishes "
-                f"nothing (no push:, and outputs: exporters that write no registry)"
-            )
-            continue
+        refusal = "" if not narrowing else (
+            f"::error::{describe} builds or calls an image its job publishes, and is gated "
+            f"on needs.{needed}.outputs.{output}, which hands it "
+            f"steps.{reference[0]}.outputs.{reference[1]} only while "
+            f"`{' '.join(narrowing.split())}` holds, so a change that filter selects "
+            f"publishes no image and no pin can name that commit; drop the narrowing term "
+            f"from that output, which leaves the filter deciding the job, or keep the "
+            f"narrowed output for a job whose every docker/build-push-action step publishes "
+            f"nothing (no push:, and outputs: exporters that write no registry)"
+        )
         name = reference[1]
         # A filter of the same name in another paths-filter step of the job reads like the gate,
         # while the output reads only one of them.
@@ -1045,7 +1044,7 @@ def gating_filters(
                 f"`[...]` and literal characters"
             )
             continue
-        found.append((filter_label(needed, name), PathsFilter(patterns, quantifier)))
+        found.append((filter_label(needed, name), PathsFilter(patterns, quantifier), refusal))
     return found, admitted
 
 
@@ -1072,7 +1071,8 @@ def output_filter(document: dict, needed: str, output: str) -> tuple[str, str, s
       * NARROWED, the reference being the LAST conjunct of its disjunct:
         `${{ <term> && steps.filter.outputs.x || 'false' }}`, ci.yaml's `full-ci` shape, whose
         <term> is every conjunct beside it. The job then runs on fewer changes than its filter
-        selects, so gating_filters admits it only for a build that publishes nothing. A
+        selects, which the build loop admits only for a build that publishes nothing
+        (narrowed_refusals). A
         disjunct after the reference may only be the literal `'false'`, the fallback that
         shape writes.
 
@@ -1180,19 +1180,27 @@ def deciding_jobs(document: dict, job_name: str) -> list[str]:
 
 
 def inherited_gates(
-    workflow: Path, job_name: str, publishes: bool
-) -> list[tuple[str, list[tuple[str, PathsFilter]], set[str]]]:
+    workflow: Path, job_name: str
+) -> list[tuple[str, list[tuple[str, PathsFilter, str]], set[str]]]:
     """(label, filters, admitted events) for every gate that decides whether `job_name` runs:
-    the `if:` of each of its deciding_jobs, in `workflow`. `publishes` says whether the build
-    those gates decide is published, which gating_filters holds a narrowed output to."""
+    the `if:` of each of its deciding_jobs, in `workflow`. Each filter carries the refusal a
+    narrowed output earns, which narrowed_refusals reads for a published build."""
     document = documents[workflow]
     modes = call_inputs(document)
     gates = []
     for name in deciding_jobs(document, job_name):
         job = (document.get("jobs") or {}).get(name) or {}
-        found, admitted = gating_filters(workflow, f"jobs.{name}", job, publishes, modes)
+        found, admitted = gating_filters(workflow, f"jobs.{name}", job, modes)
         gates.append((f"jobs.{name}.if", found, admitted))
     return gates
+
+
+def narrowed_refusals(gates: list) -> list[str]:
+    """The refusal of every narrowed output among `gates`. A narrowed output hands its job the
+    filter's value only while another term holds, so the job runs on fewer changes than the
+    filter selects: that is a fault only where the build those gates decide is published, and
+    the caller is what knows it."""
+    return [refusal for _, found, _ in gates for _, _, refusal in found if refusal]
 
 
 def apply_gates(triggers: list, gates: list, workflow: Path) -> list:
@@ -1206,35 +1214,38 @@ def apply_gates(triggers: list, gates: list, workflow: Path) -> list:
         triggers = [trigger for trigger in triggers if trigger[1] in admitted]
         if not found:
             continue
-        names = " or ".join(label for label, _ in found)
-        either = AnyOf([f for _, f in found])
+        names = " or ".join(label for label, _, _ in found)
+        either = AnyOf([f for _, f, _ in found])
         triggers = [
             (
                 f"{label} + {gate_label} ({names})",
                 event,
                 filters + [either],
                 origin,
-                selectors + tuple((workflow, name) for name, _ in found),
+                selectors + tuple((workflow, name) for name, _, _ in found),
             )
             for label, event, filters, origin, selectors in triggers
         ]
     return triggers
 
 
-def triggers_for(workflow: Path, publishes: bool) -> list[tuple[str, str, list, Path, tuple]]:
+def triggers_for(workflow: Path) -> tuple[list[tuple[str, str, list, Path, tuple]], list[str]]:
     """(label, event, filters that must all cover an input, the workflow whose trigger it is,
-    the paths-filter filters that select it) for every trigger that runs `workflow`. A called
-    workflow's `github.event_name` is its caller's event, so a caller's trigger carries the
-    caller's event."""
+    the paths-filter filters that select it) for every trigger that runs `workflow`, and the
+    refusals the callers' gates earn for a published build. A called workflow's
+    `github.event_name` is its caller's event, so a caller's trigger carries the caller's
+    event."""
     document = documents[workflow]
     found = [
         (f"{workflow} {label}", event, [f], workflow, ())
         for event, label, f in event_filters(workflow, document)
     ]
+    refusals = []
     for caller, caller_document, job_name in calling_jobs(workflow):
         # The calling job is gated by its own `if:` and by every job it transitively needs,
         # exactly as a building job is.
-        gates = inherited_gates(caller, job_name, publishes)
+        gates = inherited_gates(caller, job_name)
+        refusals += narrowed_refusals(gates)
         base = [
             (f"{caller} {label}", event, [caller_filter], caller, ())
             for event, label, caller_filter in event_filters(caller, caller_document)
@@ -1244,7 +1255,7 @@ def triggers_for(workflow: Path, publishes: bool) -> list[tuple[str, str, list, 
             (label if filtered else f"{label} (jobs.{job_name})", *rest)
             for label, *rest in apply_gates(base, gates, caller)
         ]
-    return found
+    return found, refusals
 
 
 builds = []
@@ -1513,13 +1524,18 @@ for workflow, job_name, step, context, dockerfile, _ in builds:
     # the trigger let through, and the image is then not built for that change either. The
     # gates are the build step's own `if:`, its job's, and every job that job transitively
     # needs. A gate's event terms drop the triggers whose event it does not admit.
-    gates = inherited_gates(workflow, job_name, publishes)
+    gates = inherited_gates(workflow, job_name)
     if str(step.get("if", "")):
         where = step.get("name") or "an unnamed step"
         describe = f"jobs.{job_name} step '{where}'"
-        found, admitted = gating_filters(workflow, describe, step, publishes)
+        found, admitted = gating_filters(workflow, describe, step)
         gates.append((f"{describe} if", found, admitted))
-    triggers = apply_gates(triggers_for(workflow, publishes), gates, workflow)
+    reached, caller_refusals = triggers_for(workflow)
+    # Whether a narrowed gate is a fault is this loop's to say: the narrowing costs a published
+    # image for a change its filter selects, and nothing at all where the job publishes none.
+    if publishes:
+        problems += caller_refusals + narrowed_refusals(gates)
+    triggers = apply_gates(reached, gates, workflow)
     read = {path for _, files in inputs for path in files}
     for label, event, filters, origin, selectors in triggers:
         if event in PULL_REQUEST_EVENTS:

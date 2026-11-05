@@ -6,6 +6,11 @@ description: >-
   ci-ok needs no job, and no runner, of its own. Call it with `if: always()`, so a failed,
   timed-out or cancelled job reports too. The job needs `actions: read` and `checks: write`.
 
+  The artifact is read twice: by .github/scripts/ci-ok-report.sh below, which posts ci-ok once
+  every job that runs has one, and, on a merge group, by the follower cancel job of this job
+  (.github/actions/merge-group-cancel), which acts only when this job's own report says its
+  work failed. So the name carries the result, and the upload comes before anything is posted.
+
   A fork pull request's run gets a read-only token, which can post no check run, so on one this
   action does nothing and the pull request gets no ci-ok: this repository takes no fork pull
   requests (their runs wait for an approval nobody gives). A fork is a head repository whose id

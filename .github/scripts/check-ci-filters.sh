@@ -65,8 +65,9 @@
 #      `github.event_name != 'push'`, or that compares `github.ref` with a single-quoted
 #      `'refs/heads/...'` literal with `==` or `!=` (either operand first), naming the job, the
 #      step and the expression: this workflow has no `push:` trigger, so such a condition gates
-#      its job or step on what no run of it ever is, and the dead code reads as live - the cache
-#      restores carried `github.ref != 'refs/heads/main'` long after a run on main was possible.
+#      its job or step on what no run of it ever is, and the dead code reads as live - a step
+#      behind `if: github.event_name == 'push'`, or a job behind `if: github.ref ==
+#      'refs/heads/main'`, runs in no run of this workflow while its text says it runs on main.
 #      A cache that must be filled on a push to main belongs in .github/workflows/ci-caches.yaml;
 #      a job that must run at main's tip is reached by the workflow_dispatch the bypass check
 #      (.github/workflows/main-bypass-check.yaml) sends. It refuses those two comparisons and
@@ -88,6 +89,22 @@
 #      nothing: the workflow asks only whether that exact key is already there, no step of it
 #      reads a restored entry, and a prefix hit would answer for an older key and skip the build
 #      that fills this one, leaving it empty.
+#  12. a job of ci.yaml that a merge-group run can run and that CI_OK_EXEMPT does not name -
+#      the jobs ci-ok waits for there, plus `changes` - with no follower cancel job of its own,
+#      a follower that follows no such job or more than one, and a follower whose `if:` is not
+#      the one text every follower carries. A follower names the job it follows in `needs:` and
+#      nowhere else, since .github/actions/merge-group-cancel reads that id out of
+#      `toJSON(needs)` to find the job's own report; a job with no follower leaves every group
+#      built on this one running to its end when it fails, and a condition written out by hand
+#      31 times drifts.
+#  13. a job of ci.yaml whose `if:` lacks `(github.event_name != 'merge_group' ||
+#      github.run_attempt == '1')`, or, for a job whose `if:` admits merge_group alone (the
+#      cancel jobs, rule 12's followers among them), `github.run_attempt == '1'`: a group is
+#      tested once, and `gh run rerun --failed` leaves out a `changes` that succeeded and hands
+#      the attempt that job's outputs again, so a job gated on `needs.changes.outputs.<x>`
+#      alone runs in full on a re-run attempt of a merge-group run and posts a ci-ok on a head
+#      the queue has thrown away. Each job needs the one term, so rules 12 and 13 never ask one
+#      job for two.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,
@@ -147,7 +164,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# The engine (ci_filter_coverage.py), its data (ci_job_reads.py) and the path model
+# The engine (ci_filter_coverage.py), its data (ci_job_reads.py), the rules of ci.yaml that read
+# neither (ci_workflow_rules.py: rules 10, 11 and 13 above) and the path model
 # (workflow_paths.py) sit beside this script in the repository it checks. The engine is imported,
 # not run as a script, so the data's `from ci_filter_coverage import ...` binds the same classes.
 # PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the tree.

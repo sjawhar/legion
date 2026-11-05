@@ -14,8 +14,9 @@ description: >-
   A run off main passes no-cache, so only a run on main saves: an entry a pull request writes is
   readable by no other pull request. ci.yaml runs on no push, so the entry comes from the
   workflows that do run on main — claude-envoy-rebuild.yaml, docs-pages.yaml (through
-  docs-site.yaml), release.yaml and release-envoy-listener.yaml — and from a dispatch of ci.yaml
-  on main. no-cache is setup-bun's only cache input and also skips the restore, so a run off main
+  docs-site.yaml), e2e.yaml (its nightly schedule, which GitHub starts from the default branch
+  alone), release.yaml and release-envoy-listener.yaml — and from a dispatch of ci.yaml on main.
+  no-cache is setup-bun's only cache input and also skips the restore, so a run off main
   downloads Bun (about 34 MB) instead of restoring it.
 
 runs:

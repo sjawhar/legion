@@ -122,45 +122,16 @@ jobs:
           key: go-notices-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           lookup-only: true
 
-      # lint's notices step, verbatim: the same loops over .github/go-release-targets.json,
-      # .github/agent-secrets-client-targets.json and .github/envoy-infra-targets.json, with the
-      # same GOOS, GOARCH and CGO_ENABLED per target, so the modules it downloads, the go-licenses
-      # it builds under ~/.cache/legion and the objects it leaves are the ones lint restores.
+      # The very script lint's notices step runs, .github/scripts/go-release-notices.sh: the
+      # same loops over .github/go-release-targets.json, .github/agent-secrets-client-targets.json
+      # and .github/envoy-infra-targets.json, with the same GOOS, GOARCH and CGO_ENABLED per
+      # target, so the modules it downloads, the go-licenses it builds under ~/.cache/legion and
+      # the objects it leaves are the ones lint restores. One script and not a copy of those
+      # loops, because a copy stops warming a target the day lint gains one, and nothing fails:
+      # lint just builds those objects cold on every run.
       - name: Write every Go release archive's third-party notices and cross-build the commands
         if: steps.go-notices.outputs.cache-hit != 'true'
-        run: |
-          notices="$RUNNER_TEMP/notices"
-          mkdir -p "$notices"
-          for target in $(jq -r '.legion[]' .github/go-release-targets.json); do
-            (cd packages/daemon && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../scripts/go-third-party-notices.sh "$notices/legion-${target%/*}-${target#*/}" ./cmd/legion)
-          done
-          for arch in $(jq -r '.envoy[]' .github/go-release-targets.json); do
-            (cd packages/envoy && GOOS=linux GOARCH="$arch" \
-              ../../scripts/go-third-party-notices.sh "$notices/legion-envoy-$arch" ./cmd/listener)
-            (cd packages/envoy && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
-              ./cmd/agent-secrets ./cmd/agent-secrets-helper)
-          done
-          for target in $(jq -r '.["agent-secrets-client"][]' .github/agent-secrets-client-targets.json); do
-            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              go build -buildvcs=false -o /dev/null ./cmd/agent-secrets)
-            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
-              ./cmd/agent-secrets)
-          done
-          for target in $(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json); do
-            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              go build -buildvcs=false -o /dev/null ./cmd/...)
-            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../../scripts/go-third-party-notices.sh \
-              "$notices/pulumi-resource-envoy-infra-${target%/*}-${target#*/}" \
-              ./cmd/pulumi-resource-envoy-infra)
-            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../../scripts/go-third-party-notices.sh \
-              "$notices/envoy-infra-${target%/*}-${target#*/}" ./cmd/envoy-infra)
-          done
-          wc -l "$notices"/*
+        run: .github/scripts/go-release-notices.sh "$RUNNER_TEMP/notices"
 
       - if: steps.go-notices.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

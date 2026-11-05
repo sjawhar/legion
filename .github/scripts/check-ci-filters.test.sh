@@ -9,13 +9,16 @@
 # each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
 # report step and no job may be named for a required check, and a PUSH_WORKFLOWS workflow's
 # on.push.paths must equal its filter, no `if:` of ci.yaml may test for a push event or compare
-# github.ref with a branch ref, and ci-caches.yaml's save of a cache family must carry the key and
-# the paths ci.yaml's restore of that family names, its own restores being lookups.
+# github.ref with a branch ref, every job a merge-group run runs must have a follower cancel job
+# carrying the one follower condition, every job's if: must hold the term that skips it on a
+# re-run attempt of a merge-group run, and ci-caches.yaml's save of a cache family must carry
+# the key and the paths ci.yaml's restore of that family names, its own restores being lookups.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
-# symlinks the real script, its engine (ci_filter_coverage.py) and the path model it imports
-# (workflow_paths.py) into it, so the code under test is the code CI runs. It needs go and a
+# symlinks the real script, its engine (ci_filter_coverage.py), the rules of ci.yaml it runs
+# (ci_workflow_rules.py) and the path model they import (workflow_paths.py) into it, so the code
+# under test is the code CI runs. It needs go and a
 # python3 with PyYAML.
 #
 # Run from anywhere: .github/scripts/check-ci-filters.test.sh
@@ -44,7 +47,7 @@ fixture() {
   fi
   mkdir -p "$root/.github/scripts" "$root/.github/workflows" "$root/mod/cmd/app" "$root/mod/lib" \
     "$root/mod/other" "$root/fixtures" "$root/docs"
-  for linked in check-ci-filters.sh ci_filter_coverage.py workflow_paths.py; do
+  for linked in check-ci-filters.sh ci_filter_coverage.py ci_workflow_rules.py workflow_paths.py; do
     ln -s "$script_dir/$linked" "$root/.github/scripts/$linked"
   done
   printf 'go 1.21\n\nuse ./mod\n' > "$root/go.work"
@@ -87,8 +90,10 @@ on: [pull_request]
 env:
   CI_OK_SELECTED_BY: '{"app": "app", "image": "image"}'
   CI_OK_PULL_REQUEST_ONLY: '["image"]'
+  CI_OK_EXEMPT: '["cancel-changes", "cancel-app"]'
 jobs:
   changes:
+    if: (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     outputs:
       app: ${{ steps.filter.outputs.app }}
@@ -115,7 +120,7 @@ jobs:
               - 'docs/**'
   app:
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.app == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     steps:
       - name: Test the app
@@ -129,7 +134,7 @@ jobs:
           job-status: ${{ job.status }}
   image:
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.image == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.image == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     steps:
       - name: Build
@@ -140,6 +145,26 @@ jobs:
         with:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
+  cancel-changes:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
+  cancel-app:
+    needs: app
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 YAML
   cat > "$root/.github/workflows/site.yaml" <<'YAML'
 name: Site
@@ -358,7 +383,7 @@ check "names the job and what its last step must be" \
 cancel_job() {
   cat >> "$1/.github/workflows/ci.yaml" <<'YAML'
   cancel:
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'merge_group' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     permissions:
       actions: write
@@ -371,8 +396,8 @@ YAML
 echo "case: a job CI_OK_EXEMPT names passes without the ci-ok report step"
 root=$(fixture ci-ok-exempt)
 cancel_job "$root"
-replace "$root/.github/workflows/ci.yaml" "CI_OK_PULL_REQUEST_ONLY: '[\"image\"]'" \
-  $'CI_OK_PULL_REQUEST_ONLY: \'["image"]\'\n  CI_OK_EXEMPT: \'["cancel"]\''
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"cancel-changes\", \"cancel-app\"]'" \
+  "CI_OK_EXEMPT: '[\"cancel-changes\", \"cancel-app\", \"cancel\"]'"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it checked" "$(contains "$out" 'every ci.yaml filter matches every file its job reads (1 gates)')"
@@ -384,6 +409,49 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and what its last step must be" \
   "$(contains "$out" "job cancel's last step is not \`uses: ./.github/actions/ci-ok-report\` with \`if: always()\`")"
+
+echo "case: a job a merge-group run runs with no follower, and a follower of a job it never runs"
+root=$(fixture follower-set)
+replace "$root/.github/workflows/ci.yaml" $'  cancel-app:\n    needs: app' $'  cancel-app:\n    needs: image'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job left without one" \
+  "$(contains "$out" "job app can run on a merge group and has no follower, so nothing cancels the groups built on this one when it fails")"
+check "names the follower that could never fire" \
+  "$(contains "$out" "job cancel-app follows image, which is no job a merge-group run of this file runs outside the cancel jobs")"
+
+echo "case: a follower whose condition is not the one every follower carries"
+root=$(fixture follower-if)
+replace "$root/.github/workflows/ci.yaml" \
+  "&& (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}" \
+  "&& (needs.changes.result == 'failure' || needs.changes.result == 'cancelled') }}"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the follower and the one text" \
+  "$(contains "$out" "job cancel-changes's if: is not the one every follower carries")"
+
+echo "case: a job with no term holding it back on a re-run attempt of a merge-group run"
+root=$(fixture rerun-guard)
+replace "$root/.github/workflows/ci.yaml" \
+  "    if: needs.changes.outputs.app == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')" \
+  "    if: needs.changes.outputs.app == 'true'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the term it lacks" \
+  "$(contains "$out" "job app's if: has no \`(github.event_name != 'merge_group' || github.run_attempt == '1')\`")"
+check "says why the changes job's own skip is not enough" \
+  "$(contains "$out" 'gh run rerun --failed` does not re-run the `changes` that succeeded')"
+
+echo "case: a merge-group-only job with no attempt-1 term"
+root=$(fixture rerun-guard-cancel)
+cancel_job "$root"
+replace "$root/.github/workflows/ci.yaml" \
+  "    if: github.event_name == 'merge_group' && github.run_attempt == '1'" \
+  "    if: github.event_name == 'merge_group'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the term it lacks" \
+  "$(contains "$out" "job cancel runs on merge_group and its if: has no \`github.run_attempt == '1'\`")"
 
 echo "case: a job named for a required check"
 root=$(fixture ci-ok-job)
@@ -656,8 +724,8 @@ check "and the file the tags compile in" "$(contains "$out" '::error file=mod/ot
 
 echo "case: a job defaults.run.shell around a simple go command"
 root=$(fixture job-default-shell)
-replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
-  $'    if: needs.changes.outputs.app == \'true\'\n    defaults:\n      run:\n        shell: bash --noprofile --norc -eo pipefail {0}'
+replace "$root/.github/workflows/ci.yaml" $'    runs-on: ubuntu-24.04\n    steps:\n      - name: Test the app' \
+  $'    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: bash --noprofile --norc -eo pipefail {0}\n    steps:\n      - name: Test the app'
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the command and the job's default shell" \
@@ -666,8 +734,8 @@ check "and a file it falls to" "$(contains "$out" '::error file=mod/other/other.
 
 echo "case: a job container around a simple go command"
 root=$(fixture job-container)
-replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
-  $'    if: needs.changes.outputs.app == \'true\'\n    container: golang:1.21'
+replace "$root/.github/workflows/ci.yaml" $'    runs-on: ubuntu-24.04\n    steps:\n      - name: Test the app' \
+  $'    runs-on: ubuntu-24.04\n    container: golang:1.21\n    steps:\n      - name: Test the app'
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the command and the container" \
@@ -807,17 +875,17 @@ check "says where such work belongs instead" \
 
 echo "case: a job of ci.yaml gated on main's ref"
 root=$(fixture push-gated-job)
-replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
-  "    if: needs.changes.outputs.app == 'true' && github.ref != 'refs/heads/main'"
+replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true' &&" \
+  "    if: needs.changes.outputs.app == 'true' && github.ref != 'refs/heads/main' &&"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the comparison" \
-  "$(contains "$out" "job app has \`if: needs.changes.outputs.app == 'true' && github.ref != 'refs/heads/main'\`, which tests \`github.ref != 'refs/heads/main'\`")"
+  "$(contains "$out" "job app has \`if: needs.changes.outputs.app == 'true' && github.ref != 'refs/heads/main' && (github.event_name != 'merge_group' || github.run_attempt == '1')\`, which tests \`github.ref != 'refs/heads/main'\`")"
 
 echo "case: github.ref_name, and github.ref outside such a comparison, are no push gate"
 root=$(fixture push-gate-free)
-replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
-  "    if: needs.changes.outputs.app == 'true' && github.ref_name != 'main' && !startsWith(github.ref, 'refs/heads/gh-readonly-queue/')"
+replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true' &&" \
+  "    if: needs.changes.outputs.app == 'true' && github.ref_name != 'main' && !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') &&"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 

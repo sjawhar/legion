@@ -185,14 +185,18 @@ jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
   # test job runs; marking it ready for review starts a run that selects by the same diff.
   #
-  # Also skipped on a re-run attempt of a merge-group run, here and in the three `if:`s below
-  # that do not test an output of this job (lint, typecheck and test); every other job's `if:`
-  # tests `needs.changes.outputs.<x> == 'true'`, which is false once this job is skipped, so
-  # those four terms skip the whole run. A group is tested once: the queue tests a pull request
-  # it removed again when it is added again, and a merge-group run this file's cancel acts
-  # (the comment above `cancel-started`) force-cancelled has descendants they already cancelled,
-  # so a passing re-run of it would leave those groups waiting for a ci-ok that never comes. A
-  # re-run must therefore do nothing and post nothing.
+  # Also skipped on a re-run attempt of a merge-group run, by a term every job of this file
+  # carries: `(github.event_name != 'merge_group' || github.run_attempt == '1')` in a job that
+  # runs on more than one event, and `github.run_attempt == '1'` in the cancel jobs, which run
+  # on merge_group alone. No job may lean on this one's skip instead: `gh run rerun --failed`
+  # leaves out a `changes` that succeeded and hands the attempt that job's outputs again, so an
+  # `if:` testing only `needs.changes.outputs.<x> == 'true'` would run the job again in full,
+  # and its report step would post a ci-ok on the dead group's head.
+  # .github/scripts/check-ci-filters.sh holds every job to its term. A group is tested once:
+  # the queue tests a pull request it removed again when it is added again, and a merge-group
+  # run this file's cancel acts (the comment above `cancel-started`) force-cancelled has
+  # descendants they already cancelled, so a passing re-run of it would leave those groups
+  # waiting for a ci-ok that never comes. A re-run must therefore do nothing and post nothing.
   changes:
     if: ${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
@@ -640,6 +644,12 @@ jobs:
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
               # checker sources them).
               - '.github/scripts/*'
+              # main-bypass-check.test.sh:239-246 reads the bypass check's own workflow and holds
+              # every run: step of it to a shell with pipefail.
+              - '.github/workflows/main-bypass-check.yaml'
+              # mirror-ci-images.test.sh:322-351 builds its ordering fixture from the repository's
+              # own image rows.
+              - '.github/ci-images.yaml'
               # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
               - '.github/e2e-scripts.json'
               - 'scripts/third-party-notices.test.ts'
@@ -1398,17 +1408,19 @@ jobs:
               - '!packages/*/.changes/**'
             # lint's notices step: the Go packages it loads for every release target (`legion`,
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
-            # workspaces they build in, the target lists and the notices script. Its go build lines
-            # sit in backslash-continued subshells that cd out of the repository root the step runs
-            # in, which check-ci-filters.sh does not reduce, so it counts as reading every Go file of
-            # the repository and every file under a Go module's directory (packages/daemon,
-            # packages/envoy and, inside it, packages/envoy/infra): any Go change selects it.
+            # workspaces they build in, the target lists, the script holding the loops and the
+            # notices script it runs per target. Those go build lines sit in backslash-continued
+            # subshells that cd out of the repository root, which check-ci-filters.sh does not
+            # reduce, so the step counts as reading every Go file of the repository and every file
+            # under a Go module's directory (packages/daemon, packages/envoy and, inside it,
+            # packages/envoy/infra): any Go change selects it.
             go_notices:
               - '.github/workflows/ci.yaml'
               - &any_go_change ['**/*.go', '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum', 'packages/daemon/**', 'packages/envoy/**']
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
+              - '.github/scripts/go-release-notices.sh'
               - 'scripts/go-third-party-notices.sh'
               - *go_workspace
               - *legion_command
@@ -1442,12 +1454,13 @@ jobs:
             # check-ci-filters.sh, which holds every filter above to what its job reads: every file
             # whose change can move a Go closure (Go code anywhere, the modules' embedded files and
             # testdata, every module and workspace file, the target lists the go commands expand
-            # over), this file, and the check's own script, engine, data and path model.
+            # over), this file, and the check's own script, engine, data, rules and path model.
             ci_filters:
               - '.github/workflows/ci.yaml'
               - '.github/scripts/check-ci-filters.sh'
               - '.github/scripts/ci_filter_coverage.py'
               - '.github/scripts/ci_job_reads.py'
+              - '.github/scripts/ci_workflow_rules.py'
               - '.github/scripts/workflow_paths.py'
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
@@ -1640,41 +1653,13 @@ jobs:
       # platform only fails the pull request rather than the release after the merge. It runs when
       # the go_notices filter matches (a Go package it loads, a module file, a target list or the
       # notices script changed), and whenever `changes` did not succeed.
+      #
+      # The loops are in .github/scripts/go-release-notices.sh, which
+      # .github/workflows/ci-caches.yaml's daemon job runs too, to fill the go-notices entry this
+      # step restores: one script, so the fill cannot warm anything but what this step builds.
       - name: Check every Go release archive's third-party notices can be written and the cross-built commands compile
         if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
-        run: |
-          notices="$RUNNER_TEMP/notices"
-          mkdir -p "$notices"
-          for target in $(jq -r '.legion[]' .github/go-release-targets.json); do
-            (cd packages/daemon && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../scripts/go-third-party-notices.sh "$notices/legion-${target%/*}-${target#*/}" ./cmd/legion)
-          done
-          for arch in $(jq -r '.envoy[]' .github/go-release-targets.json); do
-            (cd packages/envoy && GOOS=linux GOARCH="$arch" \
-              ../../scripts/go-third-party-notices.sh "$notices/legion-envoy-$arch" ./cmd/listener)
-            (cd packages/envoy && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
-              ./cmd/agent-secrets ./cmd/agent-secrets-helper)
-          done
-          for target in $(jq -r '.["agent-secrets-client"][]' .github/agent-secrets-client-targets.json); do
-            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              go build -buildvcs=false -o /dev/null ./cmd/agent-secrets)
-            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
-              ./cmd/agent-secrets)
-          done
-          for target in $(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json); do
-            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              go build -buildvcs=false -o /dev/null ./cmd/...)
-            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../../scripts/go-third-party-notices.sh \
-              "$notices/pulumi-resource-envoy-infra-${target%/*}-${target#*/}" \
-              ./cmd/pulumi-resource-envoy-infra)
-            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-              ../../../scripts/go-third-party-notices.sh \
-              "$notices/envoy-infra-${target%/*}-${target#*/}" ./cmd/envoy-infra)
-          done
-          wc -l "$notices"/*
+        run: .github/scripts/go-release-notices.sh "$RUNNER_TEMP/notices"
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -1694,7 +1679,7 @@ jobs:
   # event that can bring a new row in, and a failed copy is re-run with `gh run rerun`.
   ci-images:
     needs: changes
-    if: needs.changes.outputs.ci_images == 'true'
+    if: needs.changes.outputs.ci_images == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # packages: write is the ghcr.io push `crane copy` makes; actions: read and checks: write are
@@ -2057,14 +2042,14 @@ jobs:
   # docs-site.yaml's own job carries the limit.
   docs:
     needs: changes
-    if: needs.changes.outputs.docs == 'true'
+    if: needs.changes.outputs.docs == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     uses: ./.github/workflows/docs-site.yaml
     with:
       ci-ok-changes: ${{ toJSON(needs.changes) }}
 
   contracts:
     needs: changes
-    if: needs.changes.outputs.contracts == 'true'
+    if: needs.changes.outputs.contracts == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -2095,7 +2080,7 @@ jobs:
 
   conflicts-script:
     needs: changes
-    if: needs.changes.outputs.conflicts_script == 'true'
+    if: needs.changes.outputs.conflicts_script == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2120,7 +2105,7 @@ jobs:
 
   envoy-client:
     needs: changes
-    if: needs.changes.outputs.envoy_client == 'true'
+    if: needs.changes.outputs.envoy_client == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -2164,7 +2149,7 @@ jobs:
 
   pi-shared:
     needs: changes
-    if: needs.changes.outputs.pi_shared == 'true'
+    if: needs.changes.outputs.pi_shared == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -2194,7 +2179,7 @@ jobs:
 
   pi-envoy:
     needs: changes
-    if: needs.changes.outputs.pi_envoy == 'true'
+    if: needs.changes.outputs.pi_envoy == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
@@ -2270,7 +2255,7 @@ jobs:
 
   pi-legion:
     needs: changes
-    if: needs.changes.outputs.pi_legion == 'true'
+    if: needs.changes.outputs.pi_legion == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
@@ -2366,7 +2351,7 @@ jobs:
   # dashboard's Vite build aliases its sources, so only the browser suite needs contracts' dist/.
   dispatch-ui:
     needs: changes
-    if: needs.changes.outputs.dispatch_ui == 'true'
+    if: needs.changes.outputs.dispatch_ui == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -2419,7 +2404,7 @@ jobs:
   # build and asset checks are dispatch-ui's above.
   dispatch:
     needs: changes
-    if: needs.changes.outputs.dispatch == 'true'
+    if: needs.changes.outputs.dispatch == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 155
     services:
@@ -2520,7 +2505,7 @@ jobs:
   # suite's job does not wait on a second Vite build and two more servers.
   dispatch-browser-multiprocess:
     needs: changes
-    if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
+    if: needs.changes.outputs.dispatch_browser_multiprocess == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
@@ -2601,7 +2586,7 @@ jobs:
 
   claude-envoy:
     needs: changes
-    if: needs.changes.outputs.claude_envoy == 'true'
+    if: needs.changes.outputs.claude_envoy == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -2656,7 +2641,7 @@ jobs:
   # alone (the test binary of every package of the envoy module).
   envoy-go-checks:
     needs: changes
-    if: needs.changes.outputs.envoy_go_checks == 'true'
+    if: needs.changes.outputs.envoy_go_checks == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     # The builds below download the envoy module's dependencies and compile ./cmd/listener for
     # each release architecture, so the job restores go-envoy, the family whose entry holds that
@@ -2755,7 +2740,7 @@ jobs:
   # shell-script, build and pack steps are envoy-go-checks' above.
   envoy-go:
     needs: changes
-    if: needs.changes.outputs.envoy_go == 'true'
+    if: needs.changes.outputs.envoy_go == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
     # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
@@ -2858,7 +2843,7 @@ jobs:
   # compile runs in the lint job's notices step.
   envoy-infra-go:
     needs: changes
-    if: needs.changes.outputs.envoy_infra_go == 'true'
+    if: needs.changes.outputs.envoy_infra_go == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -2958,7 +2943,7 @@ jobs:
   # itself is the NATS KV view and needs none.
   envoy-go-race:
     needs: changes
-    if: needs.changes.outputs.envoy_go_race == 'true'
+    if: needs.changes.outputs.envoy_go_race == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
@@ -3005,7 +2990,7 @@ jobs:
   # has no headroom at all; at 40 minutes its bar is 1440 s and it uses 71 % of it.
   envoy-go-race-pmdoc:
     needs: changes
-    if: needs.changes.outputs.envoy_go_race_pmdoc == 'true'
+    if: needs.changes.outputs.envoy_go_race_pmdoc == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     # The step's -timeout 40m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
@@ -3036,7 +3021,7 @@ jobs:
   # says why). Its tests drive the store, so the job carries the lane's Postgres service.
   envoy-go-race-api:
     needs: changes
-    if: needs.changes.outputs.envoy_go_race_api == 'true'
+    if: needs.changes.outputs.envoy_go_race_api == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
@@ -3091,7 +3076,7 @@ jobs:
   # LEGION-499).
   envoy-go-race-docs:
     needs: changes
-    if: needs.changes.outputs.envoy_go_race_docs == 'true'
+    if: needs.changes.outputs.envoy_go_race_docs == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     # The step's -timeout 60m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race binary,
@@ -3152,7 +3137,7 @@ jobs:
   # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
   dispatch-memory:
     needs: changes
-    if: needs.changes.outputs.dispatch_memory == 'true'
+    if: needs.changes.outputs.dispatch_memory == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     services:
@@ -3199,7 +3184,7 @@ jobs:
   # process (internal/testnats), so the job needs no container runtime of its own.
   dispatch-multiprocess:
     needs: changes
-    if: needs.changes.outputs.dispatch_multiprocess == 'true'
+    if: needs.changes.outputs.dispatch_multiprocess == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -3248,7 +3233,7 @@ jobs:
   # (internal/testnats), so it needs no container runtime and no database.
   listener-server-change:
     needs: changes
-    if: needs.changes.outputs.listener_server_change == 'true'
+    if: needs.changes.outputs.listener_server_change == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -3297,7 +3282,7 @@ jobs:
   # nothing in a container - so neither step is here.
   broker-multiprocess:
     needs: changes
-    if: needs.changes.outputs.broker_multiprocess == 'true'
+    if: needs.changes.outputs.broker_multiprocess == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -3342,7 +3327,7 @@ jobs:
   # build reads.
   envoy-smoke:
     needs: changes
-    if: needs.changes.outputs.envoy_smoke == 'true'
+    if: needs.changes.outputs.envoy_smoke == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -3505,7 +3490,7 @@ jobs:
   # Deliverer.Text) and checked against the acceptance contract.
   envoy-e2e-local:
     needs: changes
-    if: needs.changes.outputs.envoy_e2e_local == 'true'
+    if: needs.changes.outputs.envoy_e2e_local == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -3561,7 +3546,7 @@ jobs:
   # Go, skip them.
   envoy-session-stall:
     needs: changes
-    if: needs.changes.outputs.envoy_session_stall == 'true'
+    if: needs.changes.outputs.envoy_session_stall == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -3616,7 +3601,7 @@ jobs:
   # module cache, so the job needs Go but downloads no module and restores no cache.
   ci-filters:
     needs: changes
-    if: needs.changes.outputs.ci_filters == 'true'
+    if: needs.changes.outputs.ci_filters == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -3641,7 +3626,7 @@ jobs:
   # sha- tag only. Main's image builds are release.yaml's call of the same workflow.
   worker-image:
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.worker_image == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.worker_image == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')
     uses: ./.github/workflows/worker-image.yaml
     # GitHub refuses a run whose calling job grants less than the called workflow's jobs declare,
     # whatever their `if:` (release.yaml's worker_image job says the same): its workflow-level block
@@ -3664,8 +3649,8 @@ jobs:
   # while their ci.yaml merge-group runs, which nothing cancelled, run to the end and decide
   # nothing. A doomed run's runner time is what these jobs take back. Both acts are decided by
   # .github/scripts/merge-group-cancels.sh, which makes no GitHub call and prints, in the order
-  # to act on them, `cancel <run id>` lines and then `self` (the failed act) or `self-doomed`
-  # (the started act, when it applies); its header says what it reads and why:
+  # to act on them, one `cancel <run id>` line per run to force-cancel, this run's own id last
+  # when the act must end it; its header says what it reads and why:
   #
   #   * `cancel-started` runs at the start of every merge-group run, with no `needs:` so that it
   #     starts at once. It cancels the older groups of the same pull request the queue has
@@ -3678,6 +3663,10 @@ jobs:
   #     the condition below ran and succeeded. A force-cancelled run leaves no follower
   #     running at all, so there is no third case to tell apart. It cancels every unfinished
   #     merge-group run built on this group, the nearest descendant first, and then this run.
+  #     That result is the trigger and not the decision: the act then reads the report the job
+  #     uploaded before it ended, so a job whose own work passed and whose report step alone
+  #     failed cancels nothing, and a job that uploaded no report leaves this run alive to post
+  #     the group's ci-ok (.github/actions/merge-group-cancel says what each answer does).
   #
   # Every follower's `if:` opens with `!cancelled()`, and one of them must name a status-check
   # function: a job `if:` that names none is given an implicit `success()`, which at job level
@@ -3700,7 +3689,7 @@ jobs:
   # `success()` has no ancestor job to be false about.
   #
   # Each cancel is `POST /repos/{owner}/{repo}/actions/runs/{id}/force-cancel`, acted on in the
-  # order the script printed, and the `self` line LAST: cancelling this run first would kill the
+  # order the script printed, and this run's own id LAST: cancelling this run first would kill the
   # job before it had cancelled the descendants. A force-cancel bypasses `if: always()` — the
   # step of a running job is left skipped, not run (measured on the same probe run) — so a
   # force-cancelled run posts no ci-ok, which is what these acts want: a failing ci-ok on a group
@@ -3712,8 +3701,9 @@ jobs:
   # Every job of both acts follows the same rules:
   #   * it runs only on `merge_group` and only on attempt 1 (the comment above `changes` says why
   #     a re-run attempt does nothing);
-  #   * `permissions:` is `actions: write` and nothing else. `gh run list` and the force-cancel
-  #     need it; the checkout needs no `contents: read`, because this repository is public and
+  #   * `permissions:` is `actions: write` and nothing else. `gh run list`, the force-cancel and
+  #     a follower's read of this run's artifacts need it (a scope granted `write` grants its read);
+  #     the checkout needs no `contents: read`, because this repository is public and
   #     GitHub serves a public repository's git data to any valid token — measured here with
   #     `git ls-remote` over https against a public repository the token holds no grant on at
   #     all, which succeeded;
@@ -3782,7 +3772,7 @@ jobs:
           trap 'rm -f "$readings"' EXIT
           while read -r sha; do
             [ -n "$sha" ] || continue
-            if conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all" \
+            if conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
               --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
                     else .check_runs[0].conclusion // empty end'); then
               [ -z "$conclusion" ] ||
@@ -3795,25 +3785,32 @@ jobs:
           export CI_OK
           acts=$(.github/scripts/merge-group-cancels.sh)
           while read -r act id; do
-            case $act in cancel) ;; self-doomed) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            [ "$act" = cancel ] || continue
             gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
               echo "::warning::force-cancel of run $id failed; it may have completed already"
           done <<<"$acts"
 
   # The followers, one per job ci-ok waits for on a merge-group run and one for `changes`, in
-  # this file's order. Each is the same act on a different job; the comment above
-  # `cancel-started` says what it does and why. `changes` is no job ci-ok waits for a report
-  # from — ci-ok reads its result through `needs.changes` — and it needs a follower all the
-  # same: a merge-group run whose `changes` failed still runs lint, typecheck and test,
-  # ci-ok-report posts the failing verdict from the first of them to report, and nothing would
-  # cancel the groups already built on this one. It passes `cancel-self: 'false'`, so it cancels
-  # those groups and leaves this run alive: `changes` carries no ci-ok-report step, so the
-  # failing ci-ok of this group is still unposted when this follower fires, and a force-cancel
-  # would leave every `if: always()` step skipped and the group with no ci-ok at all, waiting on
-  # GitHub's 180-minute check timeout. What the lesser cost is: the first of those three jobs to
-  # report posts the failing ci-ok, and the other two run on to their own end with nothing left
-  # to cancel them — up to `test`'s 80-minute limit, the longest of the three. Every other
-  # follower runs after its job posted that ci-ok, so each of those does cancel its own run.
+  # this file's order. Each is the same act on a different job, and each is written in the same
+  # text: the job it follows is named in `needs:` and nowhere else, `contains(needs.*.result,
+  # …)` reads the result of that one job, and the step hands the action `toJSON(needs)`, from
+  # which it reads the job's id and then the report that job uploaded. The comment above
+  # `cancel-started` says what the act is and why, and
+  # .github/scripts/merge-group-cancels.sh's header says what that report decides — including
+  # what leaving this run alive trades for, which is written there and nowhere else.
+  # .github/scripts/check-ci-filters.sh holds this set equal to the jobs ci-ok waits for on a
+  # merge group plus `changes`, and holds every follower to that one condition.
+  #
+  # `changes` is no job ci-ok waits for a report from — ci-ok reads its result through
+  # `needs.changes` — and it needs a follower all the same: a merge-group run whose `changes`
+  # failed, or whose `changes` its own time limit cut off, still runs lint, typecheck and
+  # test, ci-ok-report posts the failing verdict from the first of them to report, and nothing
+  # would cancel the groups already built on this one. `changes` carries no ci-ok-report step,
+  # so it uploads no report at all, and the act reads that absence as "this group is doomed and
+  # its ci-ok is still unposted": it cancels those groups and leaves this run running, so that
+  # one of the three jobs that do report can post the ci-ok. It needs no input of its own to
+  # say so.
+  #
   # `worker-image` has none: its `if:` admits only pull_request (CI_OK_PULL_REQUEST_ONLY names
   # it), so the queue never runs it and a follower of it could never fire — and a job that
   # `needs:` it would sit behind the worker_image filter, which
@@ -3821,7 +3818,7 @@ jobs:
   # the files that image build reads, since the filter would gate a job that is no image build.
   cancel-changes:
     needs: changes
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.changes.result == 'failure' || needs.changes.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3833,11 +3830,11 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
         with:
-          cancel-self: "false"
+          needs: ${{ toJSON(needs) }}
 
   cancel-lint:
     needs: lint
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.lint.result == 'failure' || needs.lint.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3848,10 +3845,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-ci-images:
     needs: ci-images
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.ci-images.result == 'failure' || needs.ci-images.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3862,10 +3861,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-typecheck:
     needs: typecheck
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.typecheck.result == 'failure' || needs.typecheck.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3876,10 +3877,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-test:
     needs: test
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.test.result == 'failure' || needs.test.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3890,10 +3893,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-docs:
     needs: docs
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.docs.result == 'failure' || needs.docs.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3904,10 +3909,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-contracts:
     needs: contracts
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.contracts.result == 'failure' || needs.contracts.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3918,10 +3925,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-conflicts-script:
     needs: conflicts-script
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.conflicts-script.result == 'failure' || needs.conflicts-script.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3932,10 +3941,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-client:
     needs: envoy-client
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-client.result == 'failure' || needs.envoy-client.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3946,10 +3957,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-pi-shared:
     needs: pi-shared
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.pi-shared.result == 'failure' || needs.pi-shared.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3960,10 +3973,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-pi-envoy:
     needs: pi-envoy
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.pi-envoy.result == 'failure' || needs.pi-envoy.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3974,10 +3989,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-pi-legion:
     needs: pi-legion
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.pi-legion.result == 'failure' || needs.pi-legion.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -3988,10 +4005,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-dispatch-ui:
     needs: dispatch-ui
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-ui.result == 'failure' || needs.dispatch-ui.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4002,10 +4021,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-dispatch:
     needs: dispatch
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch.result == 'failure' || needs.dispatch.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4016,10 +4037,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-dispatch-browser-multiprocess:
     needs: dispatch-browser-multiprocess
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-browser-multiprocess.result == 'failure' || needs.dispatch-browser-multiprocess.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4030,10 +4053,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-claude-envoy:
     needs: claude-envoy
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.claude-envoy.result == 'failure' || needs.claude-envoy.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4044,10 +4069,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-go-checks:
     needs: envoy-go-checks
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-checks.result == 'failure' || needs.envoy-go-checks.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4058,10 +4085,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-go:
     needs: envoy-go
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go.result == 'failure' || needs.envoy-go.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4072,10 +4101,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-infra-go:
     needs: envoy-infra-go
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-infra-go.result == 'failure' || needs.envoy-infra-go.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4086,10 +4117,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-go-race:
     needs: envoy-go-race
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race.result == 'failure' || needs.envoy-go-race.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4100,10 +4133,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-go-race-pmdoc:
     needs: envoy-go-race-pmdoc
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race-pmdoc.result == 'failure' || needs.envoy-go-race-pmdoc.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4114,10 +4149,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-go-race-api:
     needs: envoy-go-race-api
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race-api.result == 'failure' || needs.envoy-go-race-api.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4128,10 +4165,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-go-race-docs:
     needs: envoy-go-race-docs
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race-docs.result == 'failure' || needs.envoy-go-race-docs.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4142,10 +4181,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-dispatch-memory:
     needs: dispatch-memory
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-memory.result == 'failure' || needs.dispatch-memory.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4156,10 +4197,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-dispatch-multiprocess:
     needs: dispatch-multiprocess
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-multiprocess.result == 'failure' || needs.dispatch-multiprocess.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4170,10 +4213,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-listener-server-change:
     needs: listener-server-change
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.listener-server-change.result == 'failure' || needs.listener-server-change.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4184,10 +4229,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-broker-multiprocess:
     needs: broker-multiprocess
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.broker-multiprocess.result == 'failure' || needs.broker-multiprocess.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4198,10 +4245,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-smoke:
     needs: envoy-smoke
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-smoke.result == 'failure' || needs.envoy-smoke.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4212,10 +4261,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-e2e-local:
     needs: envoy-e2e-local
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-e2e-local.result == 'failure' || needs.envoy-e2e-local.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4226,10 +4277,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-envoy-session-stall:
     needs: envoy-session-stall
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-session-stall.result == 'failure' || needs.envoy-session-stall.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4240,10 +4293,12 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}
 
   cancel-ci-filters:
     needs: ci-filters
-    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.ci-filters.result == 'failure' || needs.ci-filters.result == 'cancelled') }}
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -4254,3 +4309,5 @@ jobs:
           sparse-checkout: .github
           persist-credentials: false
       - uses: ./.github/actions/merge-group-cancel
+        with:
+          needs: ${{ toJSON(needs) }}

@@ -12,9 +12,10 @@
 # tested. A re-run of only the failed jobs does not leave one: `gh run rerun <id> --failed` was
 # measured twice on pull request #2734, and each re-run kept 30 of the run's 31 jobs, ran only
 # the failed job again, and ci-ok passed both times. A merge_group run of ci.yaml is never
-# re-run at all: every job of a re-run attempt of a merge-group run skips, deliberately, because
-# a group is tested once, and a pull request the queue removed is tested again when it is added
-# again.
+# re-run at all: every job of a re-run attempt of a merge-group run skips, each held back by a
+# term of its own `if:` (the comment above ci.yaml's `changes` job says which), deliberately,
+# because a group is tested once, and a pull request the queue removed is tested again when it
+# is added again.
 #
 # Its inputs, from ci-ok-report.sh:
 #   NEEDS              `changes`' result and outputs, as `toJSON(needs.changes)` gives them, and

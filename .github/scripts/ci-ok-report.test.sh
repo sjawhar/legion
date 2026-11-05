@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `ci-ok-report.sh` and the `post-check-run.sh` it posts with: a job posts ci-ok only
 # once lint and every job `changes` selected have reported, a merge-group run whose verdict a
-# failure already decided posts at once instead, a re-run's report replaces the earlier
+# failure or a cancellation already decided posts at once instead,
+# a re-run's report replaces the earlier
 # attempt's, the verdict is ci-ok.sh's, and a list GitHub refuses posts nothing.
 #
 # Each case writes the run's artifact names, which are the jobs' reports, and the `changes` the
@@ -211,6 +212,20 @@ run_report '{"result": "failure", "outputs": {}}'
 check "posts once lint reported" "$(is "$(posted)" 1)"
 check "fails" "$(is "$(field .conclusion)" failure)"
 check "titled with changes' failure" "$(contains "$(field .output.title)" '^changes ended failure')"
+
+echo "case: a merge_group run whose changes its own time limit cancelled"
+# `cancel-changes` fires on `cancelled` as it does on `failure`, and `changes` uploads no
+# report, so its follower cancels the groups built on this one and leaves this run alive. The
+# verdict is decided all the same, and the first of lint, typecheck and test to report posts
+# it rather than the last of them.
+report ci-ok-typecheck-1-success
+jobs typecheck=completed/success lint=in_progress envoy-client=queued
+run_report '{"result": "cancelled", "outputs": {}}' merge_group
+check "exits 0" "$(is "$status" 0)"
+check "posts one check run rather than waiting" "$(is "$(posted)" 1)"
+check "failing" "$(is "$(field .conclusion)" failure)"
+check "says the cancelled changes decided it" \
+  "$(contains "$(field .output.summary)" 'reporting after changes was cancelled, which decides this merge-group run')"
 
 echo "case: GitHub refuses the artifact list"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success

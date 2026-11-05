@@ -53,7 +53,10 @@ on:
 # commit loses is an image and a version number of its own, never its change (release-push.sh
 # version counts every commit since the newest tag, and packages/envoy/deploy/scripts/autodeploy.sh
 # deploys the newest of main's last 30 commits that has a published image, so the next release
-# carries every older commit's change).
+# carries every older commit's change). That sentence is this repository's one copy of the
+# reasoning: the Confirm the version step below, .github/scripts/release-push.sh's `restart` and
+# .github/scripts/check-release-credentials.sh's rule 4 point here instead of restating it, so
+# the day autodeploy reads another number of commits there is one paragraph to correct.
 #
 # Each `workflow_dispatch` is a group of its own, keyed on github.run_id, and is never replaced:
 # release-push.sh restart starts a dispatch when a run loses its version race, and a group keyed
@@ -787,12 +790,9 @@ jobs:
       # chain a fault keeps alive: a started run gets lost_races + 1, and the one that loses with
       # lost_races 3 fails instead of starting a fourth, naming the command a person runs.
       # A commit this job leaves to another run loses an image and a version number of its own,
-      # never its change: the workflow-level group above replaces a waiting build with a newer
-      # push that still holds the commit, release-push.sh version counts every commit since the
-      # newest tag, and packages/envoy/deploy/scripts/autodeploy.sh deploys the newest of main's
-      # last 30 commits that has a published image, so the release that lands carries this
-      # commit's change. The run started here is a workflow_dispatch, a concurrency group of its
-      # own, which no newer push replaces while it waits.
+      # never its change: this file's header, above `concurrency:`, says why, and is the one copy
+      # of that reasoning. The run started here is a workflow_dispatch, a concurrency group of
+      # its own, which no newer push replaces while it waits.
       # $LEGION_ENVOY_VERSION_ARGS is expanded unquoted on purpose, as in release_build.
       - name: Confirm the version
         id: confirm

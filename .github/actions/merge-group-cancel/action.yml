@@ -2,38 +2,48 @@ name: Cancel the merge-group runs this group dooms
 description: >-
   The last step of every follower cancel job of ci.yaml (`cancel-<job>`), which run the same act
   on a different job: the comment above ci.yaml's `cancel-started` says what the act is and why.
-  .github/scripts/merge-group-cancels.sh decides it and makes no GitHub call; this step makes the
-  force-cancels it prints, in the order it printed them, and the `self` line last. A failed
-  force-cancel leaves a warning rather than a red job: the run it names may have completed
-  between the list and the call. The job needs `actions: write`, and a checkout of .github.
+  This step reads what GitHub has; .github/scripts/merge-group-cancels.sh decides from it and
+  makes no GitHub call; this step then makes the force-cancels the script prints, in the order it
+  printed them, this run's own last. A failed force-cancel leaves a warning rather than a red
+  job: the run it names may have completed between the list and the call. The job needs
+  `actions: write`, which covers the artifact list this step reads as well as the force-cancels
+  it makes, and a checkout of .github.
 
-  `cancel-self: 'false'` leaves this run alone and cancels the descendants only. One follower
-  needs that: `cancel-changes`. Every other job of ci.yaml ends with the ci-ok-report step, so by
-  the time its follower runs, the failing ci-ok of this group is already posted; `changes` has no
-  such step, and the jobs that post for a run whose `changes` failed (lint, typecheck and test,
-  whose `if:` admits a `changes` that did not succeed) are still running when its follower fires.
-  Force-cancelling the run there would leave every `if: always()` step skipped and the group with
-  no ci-ok at all, which holds it in the queue until GitHub's 180-minute check timeout. What the
-  lesser cost is: the first of those three jobs to report posts this group's failing ci-ok, and
-  the other two run on to their own end with nothing left to cancel them — up to `test`'s
-  80-minute limit, the longest of the three (lint's is 30 and typecheck's is 10). So the act
-  trades up to 80 minutes of this run's runner time for the 180 a group with no ci-ok holds the
-  queue.
+  A follower fires on its job's `failure` or `cancelled` result, and that result on its own does
+  not say the job's work failed: a job whose tests all passed still ends `failure` when its
+  ci-ok-report step cannot reach GitHub, and so does one whose artifact upload failed. So this
+  step reads that job's own report first — the artifact .github/actions/ci-ok-report uploads
+  before it posts anything, `ci-ok-<job>-<run attempt>-<success|failure|cancelled>` — and hands
+  the answer to the script as REPORT:
 
-  `cancel-self` is read as `true` or `false` and nothing else: a third value is a caller's typo,
-  and reading it as "leave the run alive" would make that trade silently and print a notice
-  saying it was meant. The value also reaches .github/scripts/merge-group-cancels.sh as
-  CANCEL_SELF, which refuses the same values, so the line it prints about `self` says what this
-  step does with that line rather than asserting a force-cancel.
+    * `failure` or `cancelled`: the job's own work failed, and the same report step posted this
+      group's failing ci-ok before this follower started. The act cancels the runs built on this
+      group and then this run.
+    * `success`: the job's work passed and its report step alone failed. Nothing is cancelled.
+      This group is no failed group, the groups built on it are testing trees that still land,
+      and the run's later jobs find this `success` in the artifact list and post a passing ci-ok.
+    * `absent`: the job uploaded no report, so this group carries no ci-ok of its own yet —
+      `changes` has no report step at all, and a job whose upload failed left none either. The
+      act cancels the runs built on this group, which are doomed either way, and leaves this run
+      running so that a later job of it can post this group's ci-ok.
+    * `unknown`: GitHub refused the artifact list. Nothing is cancelled, as for a head
+      `cancel-started` could not read: an act that cannot show a group failed reclaims nothing
+      rather than throwing away runs that may be healthy.
+
+  .github/scripts/merge-group-cancels.sh's header says what each of those answers trades, and it
+  is the one place that says it.
+
+  The job a follower follows is named in its `needs:` and nowhere else, so `needs` carries
+  `toJSON(needs)` and this step reads the job's id from its one key.
 
   `cancel-started` is no caller: it holds its own body, which differs in ACT, in the CI_OK it
-  gathers for the walk and in the `self-doomed` token it acts on.
+  gathers for the walk, and in reading no report at all — a run that has just started has no job
+  that has ended, and what dooms it is the failing ci-ok of a group below it.
 
 inputs:
-  cancel-self:
-    description: Force-cancel this run too, after the descendants (`false` leaves it running).
-    required: false
-    default: "true"
+  needs:
+    description: "`toJSON(needs)` of the follower: its one key is the id of the job it follows."
+    required: true
 runs:
   using: composite
   steps:
@@ -41,35 +51,40 @@ runs:
       shell: bash
       env:
         ACT: failed
-        CANCEL_SELF: ${{ inputs.cancel-self }}
         GH_TOKEN: ${{ github.token }}
         HEAD_BRANCH: ${{ github.ref_name }}
         HEAD_SHA: ${{ github.sha }}
+        NEEDS: ${{ inputs.needs }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
         RUN_ID: ${{ github.run_id }}
       run: |
-        case $CANCEL_SELF in
-          true | false) ;;
-          *)
-            echo "::error::cancel-self is true or false, not '$CANCEL_SELF'"
-            exit 1
-            ;;
-        esac
+        job=$(jq -r 'if (type == "object" and length == 1) then (keys_unsorted[0]) else "" end' <<<"$NEEDS")
+        if [ -z "$job" ]; then
+          echo "::error::a follower names the job it follows in needs: and nowhere else, so this step needs exactly one, not '$NEEDS'"
+          exit 1
+        fi
+        REPORT=unknown
+        if names=$(gh api --paginate \
+          "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+          --jq '.artifacts[].name'); then
+          REPORT=absent
+          while read -r name; do
+            case $name in
+              "ci-ok-$job-$RUN_ATTEMPT-success") REPORT=success ;;
+              "ci-ok-$job-$RUN_ATTEMPT-failure") REPORT=failure ;;
+              "ci-ok-$job-$RUN_ATTEMPT-cancelled") REPORT=cancelled ;;
+            esac
+          done <<<"$names"
+        else
+          echo "::warning::the run's artifact list could not be read, so whether $job's own work failed cannot be told here and this act cancels nothing"
+        fi
+        echo "$job's own report for attempt $RUN_ATTEMPT is $REPORT"
         RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
           --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-        export RUNS
+        export REPORT RUNS
         acts=$("$GITHUB_ACTION_PATH/../../scripts/merge-group-cancels.sh")
         while read -r act id; do
-          case $act in
-            cancel) ;;
-            self)
-              if [ "$CANCEL_SELF" = false ]; then
-                echo "::notice::this run is left to finish, so the jobs that post this group's failing ci-ok can post it"
-                continue
-              fi
-              id=$GITHUB_RUN_ID
-              ;;
-            *) continue ;;
-          esac
+          [ "$act" = cancel ] || continue
           gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
             echo "::warning::force-cancel of run $id failed; it may have completed already"
         done <<<"$acts"
