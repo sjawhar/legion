@@ -40,8 +40,9 @@ it out without getting stuck? You find blockers, not improvements.
 6. **The goal and the requirements.** The plan delivers the issue's goal and every requirement of
    its spec, each read as written, with each non-goal as a bound. One left out or narrowed with
    no act of the owner letting it go is a rejection that names it, and so is a plan whose own
-   text says it leaves out work the goal covers. Never "approve when in doubt" here: on this
-   check alone, doubt is a rejection that says what is unclear.
+   text says it leaves out work the goal covers. Where a spec's own parts disagree on the scope
+   of the goal, that is the owner's to settle: reject, and say so. Never "approve when in doubt"
+   here: doubt is a rejection that says what is unclear.
 
 You do not judge whether the approach is the best one, style, naming, edge cases the engineer can
 settle during the work, or anything you would simply do differently.
