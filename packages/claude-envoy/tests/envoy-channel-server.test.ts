@@ -436,14 +436,20 @@ test("the marketplace entry installs the plugin from the claude-plugin branch", 
   const printed = execFileSync(repoPathsScript, ["repository_url"], { encoding: "utf8" })
   const repositoryUrl = printed.trim()
   const script = readFileSync(join(repositoryRoot, ".github/scripts/release-push.sh"), "utf8")
-  const branch = /^plugin_branch=(\S+)$/m.exec(script)?.[1]
-  expect(branch).toBe("claude-plugin")
+  const declared = /^plugin_branch=(\S+)$/m.exec(script)?.[1]
+  if (declared === undefined) {
+    // Not an expect(): the entry's ref is built from this, so a release-push.sh that declares no
+    // plugin_branch must stop the test here rather than compare the entry with an undefined ref,
+    // which reads as "the marketplace names no branch" in the failure.
+    throw new Error(".github/scripts/release-push.sh declares no plugin_branch=<branch> line")
+  }
+  expect(declared).toBe("claude-plugin")
   expect(marketplaceEntries).toHaveLength(1)
   expect(marketplaceEntries[0]?.source).toEqual({
     source: "git-subdir",
     url: `${repositoryUrl}.git`,
     path: "packages/claude-envoy",
-    ref: branch,
+    ref: declared,
   })
 })
 
