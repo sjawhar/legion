@@ -529,8 +529,10 @@ export interface IssueSummaryPage {
 /**
  * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
  * `latest_version` is its greatest version number, null only for an artifact with no version,
- * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
- * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
+ * which no committed write leaves. `mime` is the content type that version is stored under,
+ * which tells a video from a picture, null for an artifact with no version and for a version
+ * stored under no type. `primary` marks the issue's spec, the document a reference to a block of
+ * the spec (`dispatch://<issue>/spec#b-…`) names.
  */
 export interface IssueReferenceSummaryDocument {
   readonly id: string;
@@ -538,6 +540,7 @@ export interface IssueReferenceSummaryDocument {
   readonly name: string;
   readonly kind: Artifact["kind"];
   readonly latest_version: number | null;
+  readonly mime: string | null;
   readonly primary: boolean;
 }
 

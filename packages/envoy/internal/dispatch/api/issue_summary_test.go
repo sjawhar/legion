@@ -26,13 +26,20 @@ type uploadedArtifact struct {
 	Version  model.Version  `json:"version"`
 }
 
-func uploadImage(t *testing.T, handler http.Handler, issueKey, name, pixels string) uploadedArtifact {
+// uploadFile is a multipart upload of bytes to an issue or a project, under the content type its
+// client declares; what the upload stores it under is read from the bytes (artifactKind).
+func uploadFile(t *testing.T, handler http.Handler, owner, name, contentType string, content []byte) uploadedArtifact {
 	t.Helper()
-	response := multipartRequest(t, handler, "/api/v1/issues/"+issueKey+"/artifacts", map[string]string{"name": name}, name, "image/png", pngBytes(pixels), "alice")
+	response := multipartRequest(t, handler, owner+"/artifacts", map[string]string{"name": name}, name, contentType, content, "alice")
 	if response.Code != http.StatusCreated {
-		t.Fatalf("upload %s: status=%d body=%s", name, response.Code, response.Body.String())
+		t.Fatalf("upload %s to %s: status=%d body=%s", name, owner, response.Code, response.Body.String())
 	}
 	return decodeBody[uploadedArtifact](t, response)
+}
+
+func uploadImage(t *testing.T, handler http.Handler, issueKey, name, pixels string) uploadedArtifact {
+	t.Helper()
+	return uploadFile(t, handler, "/api/v1/issues/"+issueKey, name, "image/png", pngBytes(pixels))
 }
 
 func uploadDocument(t *testing.T, handler http.Handler, owner, name, content string) uploadedArtifact {
@@ -166,6 +173,97 @@ func TestProjectDocumentSummaryResolvesAsTheDocumentReadDoes(t *testing.T) {
 		full := dispatchRequest(t, handler, http.MethodGet, owner+"/artifacts/missing", nil, "alice")
 		if full.Code != response.Code || full.Body.String() != response.Body.String() {
 			t.Fatalf("%s summary of a missing document answers %d %s, the full read %d %s; want the same refusal", caller, response.Code, response.Body.String(), full.Code, full.Body.String())
+		}
+	}
+}
+
+// mp4Bytes is an MP4's `ftyp` box and then body: bytes no picture sniffer reads as an image, so
+// an upload of them is a file, stored under the video type its client declares.
+func mp4Bytes(body string) []byte {
+	return append([]byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"), body...)
+}
+
+// jpegBytes is a JPEG's signature and then body, what http.DetectContentType reads as image/jpeg.
+func jpegBytes(body string) []byte {
+	return append([]byte("\xff\xd8\xff\xe0\x00\x10JFIF"), body...)
+}
+
+// Both summaries carry the content type the artifact's latest version is stored under, which is
+// how a reader tells a video from a picture before it draws either: a video upload is a file
+// under the video type it declares, a picture is under the type its bytes are - the latest
+// version's, which a second version of another type changes - and a document stores no type, so
+// its summary's is null.
+func TestEitherSummaryCarriesTheLatestVersionsContentType(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := createInteractionIssue(t, handler, "TEST", "Filmed", "A spec")
+	createReferenceAPIProject(t, handler, "CORE")
+	video, jpeg := "video/mp4", "image/jpeg"
+	type artifactType struct {
+		kind string
+		mime *string
+	}
+	// The three artifacts an owner holds, each with the kind and type its summary must carry.
+	// The picture's second version is a JPEG, so what the summary reports is the latest
+	// version's type and not the first's.
+	uploads := func(owner string) map[string]artifactType {
+		clip := uploadFile(t, handler, owner, "clip.mp4", "video/mp4", mp4Bytes("frames"))
+		uploadFile(t, handler, owner, "shot.png", "image/png", pngBytes("pixels"))
+		shot := uploadFile(t, handler, owner, "shot.png", "image/jpeg", jpegBytes("pixels"))
+		notes := uploadDocument(t, handler, owner, "notes.md", "# Notes\n\nOne.\n")
+		if clip.Artifact.Kind != "file" || shot.Artifact.Kind != "image" || shot.Version.Number != 2 {
+			t.Fatalf("%s holds the video as %#v and the picture as %#v version %d; want a file and an image at version 2",
+				owner, clip.Artifact, shot.Artifact, shot.Version.Number)
+		}
+		return map[string]artifactType{
+			clip.Artifact.Slug:  {kind: "file", mime: &video},
+			shot.Artifact.Slug:  {kind: "image", mime: &jpeg},
+			notes.Artifact.Slug: {kind: "doc", mime: nil},
+		}
+	}
+	sameType := func(got *string, want artifactType) bool {
+		if want.mime == nil {
+			return got == nil
+		}
+		return got != nil && *got == *want.mime
+	}
+
+	issueOwner := "/api/v1/issues/" + issue.Key
+	wanted := uploads(issueOwner)
+	for caller, response := range summaryRead(t, handler, issueOwner+"/summary") {
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s issue summary: status=%d body=%s", caller, response.Code, response.Body.String())
+		}
+		seen := map[string]bool{}
+		for _, document := range decodeBody[issueSummary](t, response).Documents {
+			// The issue's spec is a document of its own: it stores no type either.
+			want, uploaded := wanted[document.Slug]
+			if !uploaded {
+				want = artifactType{kind: "doc"}
+			}
+			if document.Kind != want.kind || !sameType(document.MIME, want) {
+				t.Fatalf("%s issue summary of %s = kind %q type %v, want kind %q type %v",
+					caller, document.Slug, document.Kind, document.MIME, want.kind, want.mime)
+			}
+			seen[document.Slug] = true
+		}
+		for slug := range wanted {
+			if !seen[slug] {
+				t.Fatalf("%s issue summary names no %s", caller, slug)
+			}
+		}
+	}
+
+	projectOwner := "/api/v1/projects/CORE"
+	for slug, want := range uploads(projectOwner) {
+		for caller, response := range summaryRead(t, handler, projectOwner+"/artifacts/"+slug+"/summary") {
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s summary of %s: status=%d body=%s", caller, slug, response.Code, response.Body.String())
+			}
+			summary := decodeBody[documentSummary](t, response)
+			if summary.Kind != want.kind || !sameType(summary.MIME, want) {
+				t.Fatalf("%s document summary of %s = kind %q type %v, want kind %q type %v",
+					caller, slug, summary.Kind, summary.MIME, want.kind, want.mime)
+			}
 		}
 	}
 }

@@ -25,32 +25,42 @@ type issueSummary struct {
 }
 
 // issueSummaryDocument is one artifact of an issue summary. LatestVersion is its greatest version
-// number, null only for an artifact with no version, which no committed write leaves. Primary
-// marks the issue's spec, which a reference to a block of the spec (`<issue>/spec#b-…`) names.
+// number, null only for an artifact with no version, which no committed write leaves. MIME is the
+// content type that version is stored under, which tells a video from a picture, null for an
+// artifact with no version and for a version stored under no type. Primary marks the issue's
+// spec, which a reference to a block of the spec (`<issue>/spec#b-…`) names.
 type issueSummaryDocument struct {
-	ID            string `json:"id"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	Kind          string `json:"kind"`
-	LatestVersion *int   `json:"latest_version"`
-	Primary       bool   `json:"primary"`
+	ID            string  `json:"id"`
+	Slug          string  `json:"slug"`
+	Name          string  `json:"name"`
+	Kind          string  `json:"kind"`
+	LatestVersion *int    `json:"latest_version"`
+	MIME          *string `json:"mime"`
+	Primary       bool    `json:"primary"`
 }
 
 // documentSummary is GET /api/v1/projects/{key}/artifacts/{slug}/summary: the project document
-// the full read resolves that reference to, with its greatest version number.
+// the full read resolves that reference to, with its greatest version number and that version's
+// content type.
 type documentSummary struct {
-	ID            string `json:"id"`
-	Project       string `json:"project"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	Kind          string `json:"kind"`
-	LatestVersion *int   `json:"latest_version"`
+	ID            string  `json:"id"`
+	Project       string  `json:"project"`
+	Slug          string  `json:"slug"`
+	Name          string  `json:"name"`
+	Kind          string  `json:"kind"`
+	LatestVersion *int    `json:"latest_version"`
+	MIME          *string `json:"mime"`
 }
 
 // summaryLatestVersion is the select-list term an artifact summary reads its latest version
 // through, over artifacts aliased a: one index probe of artifact_versions' (artifact_id, number)
 // key per artifact, inside the summary's one query.
 const summaryLatestVersion = `(select max(v.number) from artifact_versions v where v.artifact_id = a.id)`
+
+// summaryLatestMIME is the select-list term an artifact summary reads that latest version's
+// content type through, over the same alias and the same key: the type the version is stored
+// under, null where there is no version or the version stores none.
+const summaryLatestMIME = `(select v.mime from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1)`
 
 func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -65,7 +75,7 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestVersion+`, a.is_primary
+		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestVersion+`, `+summaryLatestMIME+`, a.is_primary
 		from artifacts a where a.issue_key = $1 order by a.created_at, a.id
 	`, summary.Key)
 	if err != nil {
@@ -89,9 +99,9 @@ func (s *server) getProjectDocumentSummary(w http.ResponseWriter, r *http.Reques
 	read := func(predicate string, value string) (documentSummary, error) {
 		var summary documentSummary
 		err := q.QueryRow(ctx, `
-			select a.id::text, coalesce(a.project_key, ''), a.slug, a.name, a.kind, `+summaryLatestVersion+`
+			select a.id::text, coalesce(a.project_key, ''), a.slug, a.name, a.kind, `+summaryLatestVersion+`, `+summaryLatestMIME+`
 			from artifacts a where `+predicate, value).Scan(
-			&summary.ID, &summary.Project, &summary.Slug, &summary.Name, &summary.Kind, &summary.LatestVersion,
+			&summary.ID, &summary.Project, &summary.Slug, &summary.Name, &summary.Kind, &summary.LatestVersion, &summary.MIME,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return documentSummary{}, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")

@@ -1,10 +1,9 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
-import { artifactVersionPath } from "../../api/client";
 import { borderDefault } from "../../theme/classes";
 import { isPlainClick, openPictureLightbox } from "./picture-lightbox";
 import { pictureThumbnailClassName, RefLink } from "./RefLink";
-import { useReferenceTarget } from "./reference-target";
+import { usePinnedMedia, useReferenceTarget } from "./reference-target";
 import { type DispatchReferenceRoute, parseNodeReference, referencedArtifact } from "./routes";
 
 /** A picture's placeholder in a rendered body, holding the `DispatchPicture` a portal renders
@@ -99,8 +98,8 @@ function BlockPicture({
  * click; `inline` (a one-line place: an option label, a clamped preview) shows the 40 px thumbnail
  * beside its caption. Until a version-less source's summary is read, and for a target that is no
  * picture the browser can draw - a document or another file referenced with the picture syntax,
- * a version whose bytes fail - it reads as a plain reference to it, its `RefLink`. A failed load
- * is that version's: a newer latest version draws again.
+ * a video, a version whose bytes fail - it reads as a plain reference to it, its `RefLink`. A
+ * failed load is that version's: a newer latest version draws again.
  */
 export function DispatchPicture({
   caption,
@@ -118,12 +117,10 @@ export function DispatchPicture({
     named !== undefined && pinned === undefined ? route : undefined,
     { text: false }
   ).picture;
-  const src =
-    named === undefined
-      ? undefined
-      : pinned === undefined
-        ? latest
-        : artifactVersionPath(named.owner, named.slug, pinned);
+  const media = usePinnedMedia(route) ?? latest;
+  // A video reads as its reference's link, as a target the browser cannot draw does; a later
+  // task of INFRA-760 draws the player here.
+  const src = media?.kind === "picture" ? media.src : undefined;
   if (src === undefined || src === failedSrc) {
     return <RefLink route={route} />;
   }

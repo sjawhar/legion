@@ -18,9 +18,12 @@ import {
   issueSummaryQuery,
   messageQuery,
   prefetchReference,
+  type ReferenceMedia,
+  usePinnedMedia,
   useReferenceTarget,
   watchPicturePath,
 } from "./reference-target";
+import type { DispatchReferenceRoute } from "./routes";
 
 let restore = () => {};
 
@@ -38,6 +41,7 @@ function spyReads() {
         id: "doc-1",
         kind: "doc",
         latest_version: 2,
+        mime: null,
         name: "design.md",
         primary: true,
         slug: "design",
@@ -70,6 +74,7 @@ function spyReads() {
       id: "doc-9",
       kind: "doc",
       latest_version: 4,
+      mime: null,
       name: "Runbook.md",
       project: "CORE",
       slug: "runbook-md",
@@ -361,12 +366,17 @@ test.each([
 
 test("watchPicturePath reports an image's latest version and follows its summary as it changes", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const summary = (kind: "image" | "doc", latest: number): IssueReferenceSummary => ({
+  const summary = (
+    kind: "image" | "doc" | "file",
+    latest: number,
+    mime: string | null = null
+  ): IssueReferenceSummary => ({
     documents: [
       {
         id: "shot",
         kind,
         latest_version: latest,
+        mime,
         name: "shot.png",
         primary: false,
         slug: "shot-png",
@@ -377,22 +387,39 @@ test("watchPicturePath reports an image's latest version and follows its summary
     status: "in_progress",
     title: "Core one",
   });
-  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 2));
-  const reported: (string | undefined)[] = [];
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 2, "image/png"));
+  const reported: (ReferenceMedia | undefined)[] = [];
   const stop = watchPicturePath(
     queryClient,
     { key: "CORE-1", kind: "artifact", slug: "shot-png" },
-    (path) => reported.push(path)
+    (media) => reported.push(media)
   );
 
   // A summary already read answers at once, so the picture draws with no link before it.
-  expect(reported).toEqual(["/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"]);
+  expect(reported).toEqual([
+    { kind: "picture", src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2" },
+  ]);
   // An event's refresh of the summary - a new version uploaded - reaches the watcher.
-  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 3));
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 3, "image/png"));
   await waitFor(() =>
-    expect(reported.at(-1)).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3")
+    expect(reported.at(-1)).toEqual({
+      kind: "picture",
+      src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/3",
+    })
   );
-  // A document is no picture.
+  // A video upload is a file whose latest version is stored under a video type, parameters and
+  // all: the watcher answers a video at the same address.
+  queryClient.setQueryData(
+    issueSummaryQuery("CORE-1").queryKey,
+    summary("file", 3, "video/mp4; codecs=avc1")
+  );
+  await waitFor(() =>
+    expect(reported.at(-1)).toEqual({
+      kind: "video",
+      src: "/api/v1/issues/CORE-1/artifacts/shot-png/versions/3",
+    })
+  );
+  // A document is neither.
   queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("doc", 4));
   await waitFor(() => expect(reported.at(-1)).toBeUndefined());
 
@@ -406,9 +433,72 @@ test("watchPicturePath reports an image's latest version and follows its summary
 });
 
 test("watchPicturePath answers undefined at once for a reference to no artifact", () => {
-  const reported: (string | undefined)[] = [];
-  watchPicturePath(new QueryClient(), { id: "ask-1", key: "CORE-1", kind: "ask" }, (path) =>
-    reported.push(path)
+  const reported: (ReferenceMedia | undefined)[] = [];
+  watchPicturePath(new QueryClient(), { id: "ask-1", key: "CORE-1", kind: "ask" }, (media) =>
+    reported.push(media)
   );
   expect(reported).toEqual([undefined]);
+});
+
+test("a pinned reference draws from the address it names, as a video only where the cache says so", () => {
+  const spies = spyReads();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const pinnedMedia = (route: DispatchReferenceRoute) =>
+    renderHook(() => usePinnedMedia(route), {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client: queryClient }, children),
+    });
+  const clip: DispatchReferenceRoute = {
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "clip-mp4",
+    version: 2,
+  };
+
+  // Nothing read yet: the pinned address draws at once, as a picture, which is what a pinned
+  // reference drew before a type was known.
+  const cold = pinnedMedia(clip);
+  expect(cold.result.current).toEqual({
+    kind: "picture",
+    src: "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/2",
+  });
+  cold.unmount();
+
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, {
+    documents: [
+      {
+        id: "clip",
+        kind: "file",
+        latest_version: 3,
+        mime: "video/mp4",
+        name: "clip.mp4",
+        primary: false,
+        slug: "clip-mp4",
+      },
+    ],
+    key: "CORE-1",
+    project: "CORE",
+    status: "in_progress",
+    title: "Core one",
+  } satisfies IssueReferenceSummary);
+  // The summary a link on the page already read says it is a video; the pinned version, not the
+  // latest, is still the address.
+  const warm = pinnedMedia(clip);
+  expect(warm.result.current).toEqual({
+    kind: "video",
+    src: "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/2",
+  });
+  warm.unmount();
+
+  // A reference that pins no version has no pinned media; and no read was started for either.
+  const live = pinnedMedia({ key: "CORE-1", kind: "artifact", slug: "clip-mp4" });
+  expect(live.result.current).toBeUndefined();
+  live.unmount();
+  expect(spies.getIssueSummary).not.toHaveBeenCalled();
+  expect(
+    queryClient
+      .getQueryCache()
+      .find({ queryKey: issueSummaryQuery("CORE-1").queryKey })
+      ?.getObserversCount()
+  ).toBe(0);
 });

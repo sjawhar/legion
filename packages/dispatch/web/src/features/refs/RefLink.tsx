@@ -53,16 +53,19 @@ export function RefLink({
   // The address that failed, not a flag: a plain reference names the latest version, so a version
   // uploaded since gets its own load instead of inheriting the last one's failure.
   const [failedPicture, setFailedPicture] = useState<string>();
+  // A video shows no thumbnail, as a target that is no picture shows none; a later task of
+  // INFRA-760 draws one for it.
+  const thumbnail = picture?.kind === "picture" ? picture.src : undefined;
   return (
     <>
-      {picture === undefined || picture === failedPicture ? null : (
+      {thumbnail === undefined || thumbnail === failedPicture ? null : (
         <>
           <img
             alt=""
             className={pictureThumbnailClassName}
             loading="lazy"
-            onError={() => setFailedPicture(picture)}
-            src={picture}
+            onError={() => setFailedPicture(thumbnail)}
+            src={thumbnail}
           />{" "}
         </>
       )}

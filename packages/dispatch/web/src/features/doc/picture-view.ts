@@ -5,6 +5,7 @@ import type { EditorView, NodeView, NodeViewConstructor } from "@milkdown/kit/pr
 import { artifactVersionPath } from "../../api/client";
 import { pictureClassName } from "../refs/DispatchPicture";
 import { isPlainClick, openPictureLightbox } from "../refs/picture-lightbox";
+import type { ReferenceMedia } from "../refs/reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -45,13 +46,13 @@ function fallbackLink(
   return link;
 }
 
-/** Watches the bytes route of a version-less picture's latest version: calls its listener at once
- *  and on every change, with undefined while the target is unread, unreadable or no picture the
- *  browser can draw, and returns the function that stops (`watchPicturePath` in
- *  `refs/reference-target.ts`, bound to the page's query client). */
+/** Watches what a version-less picture's reference draws at its latest version: calls its
+ *  listener at once and on every change, with undefined while the target is unread, unreadable
+ *  or no picture the browser can draw, and returns the function that stops (`watchPicturePath`
+ *  in `refs/reference-target.ts`, bound to the page's query client). */
 export type WatchPicture = (
   route: DispatchReferenceRoute,
-  onPicture: (src: string | undefined) => void
+  onPicture: (media: ReferenceMedia | undefined) => void
 ) => () => void;
 
 /**
@@ -125,10 +126,16 @@ export function pictureView(
   if (named === undefined) {
     showLink();
   } else if (named.version !== undefined) {
+    // A pinned source draws from the address it names, with no read behind it: a video pinned
+    // this way draws as a picture, fails to load and becomes the link, until a later task of
+    // INFRA-760 draws the player.
     showPicture(artifactVersionPath(named.owner, named.slug, named.version));
   } else {
     showLink();
-    stopWatching = watchPicture(route, (src) => {
+    stopWatching = watchPicture(route, (media) => {
+      // A video reads as the fallback link, as an unreadable target does; a later task of
+      // INFRA-760 draws the player.
+      const src = media?.kind === "picture" ? media.src : undefined;
       if (src === shown) return;
       if (src === undefined) showLink();
       else showPicture(src);

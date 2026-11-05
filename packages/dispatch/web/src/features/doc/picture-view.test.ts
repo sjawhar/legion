@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
 import { pictureClassName } from "../refs/DispatchPicture";
+import type { ReferenceMedia } from "../refs/reference-target";
 import type { DispatchReferenceRoute } from "../refs/routes";
 import { pictureView } from "./picture-view";
 
@@ -32,17 +33,23 @@ const noWatch = () => {
   throw new Error("watchPicture called for a pinned source");
 };
 
-/** A watcher the test drives: `report` sends the latest picture to the view, and `stopped`
- *  counts the view's unsubscribes. */
+/** A watcher the test drives: `report` sends the latest picture to the view, `reportVideo` a
+ *  video at that address, and `stopped` counts the view's unsubscribes. */
 function fakeWatch(initial?: string) {
   const fake = {
     asked: [] as string[],
-    report: (_src: string | undefined) => {},
+    send: (_media: ReferenceMedia | undefined) => {},
+    report: (src: string | undefined) =>
+      fake.send(src === undefined ? undefined : { kind: "picture", src }),
+    reportVideo: (src: string) => fake.send({ kind: "video", src }),
     stopped: 0,
-    watch: (route: DispatchReferenceRoute, onPicture: (src: string | undefined) => void) => {
+    watch: (
+      route: DispatchReferenceRoute,
+      onPicture: (media: ReferenceMedia | undefined) => void
+    ) => {
       fake.asked.push(route.kind === "artifact" ? `${route.key}/${route.slug}` : route.kind);
-      fake.report = onPicture;
-      onPicture(initial);
+      fake.send = onPicture;
+      fake.report(initial);
       return () => {
         fake.stopped += 1;
       };
@@ -212,6 +219,17 @@ test("a source that pins no version is its link until the latest version is know
   expect(view.stopEvent?.(press)).toBe(false);
 
   // A new version uploaded while the document is open replaces the picture.
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  expect(pictureOf(dom).getAttribute("src")).toBe(
+    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
+  );
+  // A video is drawn by nobody yet: it reads as the reference's link, as a target the browser
+  // cannot draw does, until a later task of INFRA-760 draws the player.
+  latest.reportVideo("/api/v1/issues/CORE-1/artifacts/shot-png/versions/5");
+  expect(dom.querySelector("img")).toBeNull();
+  expect(linkOf(dom).getAttribute("data-dispatch-href")).toBe(
+    "dispatch://CORE-1/artifact/shot-png"
+  );
   latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
   expect(pictureOf(dom).getAttribute("src")).toBe(
     "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
