@@ -32,6 +32,7 @@ func personalTokenActorBody(fields map[string]any) map[string]any {
 // credential rather than the kind of the actor the write records, which for a bearer is always
 // the session it acts for.
 func TestAPersonsTokenForcesAndReleasesAClaimAsThePersonDoes(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	token := mintPersonalToken(t, handler, "alice", actingTokenName, nil)
 
@@ -66,6 +67,7 @@ func TestAPersonsTokenForcesAndReleasesAClaimAsThePersonDoes(t *testing.T) {
 // answer reaches it - so the person's own credential makes it, where a session that is nobody's
 // person may still follow only itself.
 func TestAPersonsTokenFollowsAnAskForAnotherSession(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "KND", "Following for a session", "A spec")
 	token := mintPersonalToken(t, handler, "alice", actingTokenName, nil)
@@ -86,6 +88,7 @@ func TestAPersonsTokenFollowsAnAskForAnotherSession(t *testing.T) {
 // Rewording an ask somebody else asked is a person's act, so the person's own credential makes
 // it: a session that is nobody's person still rewords only its own ask (NOT_AUTHOR).
 func TestAPersonsTokenRewordsAnAskItDidNotAsk(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "KND", "Rewording an ask", "A spec")
 	token := mintPersonalToken(t, handler, "alice", actingTokenName, nil)
@@ -107,6 +110,7 @@ func TestAPersonsTokenRewordsAnAskItDidNotAsk(t *testing.T) {
 // whole, without naming a session in it. The session rule stands for a credential that is
 // nobody's person, which names its session and reads only a conversation it is in.
 func TestAPersonsTokenReadsTheirOwnDirectConversation(t *testing.T) {
+	t.Parallel()
 	live := true
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)

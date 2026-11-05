@@ -27,7 +27,7 @@ func compareFlow(t *testing.T, sides [2]*equivalenceSide, document *equivalenceD
 			side.cleanUp(t, ids)
 		}
 	}()
-	if !inParallel(t, "set up", sides, func(t *testing.T, _ int, side *equivalenceSide) {
+	if !onBothSides(t, "set up", sides, func(t *testing.T, _ int, side *equivalenceSide) {
 		side.setUp(t, document, flow, ids)
 	}) {
 		t.FailNow()
@@ -45,7 +45,7 @@ func compareFlow(t *testing.T, sides [2]*equivalenceSide, document *equivalenceD
 		t.Fatalf("the two sides start the flow from different stored histories (%d and %d rows)", len(history), len(other))
 	}
 	var observed [2]flowObservation
-	inParallel(t, "run", sides, func(t *testing.T, index int, side *equivalenceSide) {
+	onBothSides(t, "run", sides, func(t *testing.T, index int, side *equivalenceSide) {
 		observed[index] = side.run(t, document, flow, ids, history)
 	})
 	compareObservations(t, document, observed[0], observed[1])
@@ -54,14 +54,19 @@ func compareFlow(t *testing.T, sides [2]*equivalenceSide, document *equivalenceD
 	}
 }
 
-// inParallel runs run on both sides at once, in subtests named for them, and reports whether both
-// passed.
-func inParallel(t *testing.T, name string, sides [2]*equivalenceSide, run func(*testing.T, int, *equivalenceSide)) bool {
+// onBothSides runs run on each side in turn, in subtests named for them, and reports whether both
+// passed. The two sides share nothing - a service and a database each - so they once ran as
+// parallel subtests. A parallel subtest draws on the same -parallel budget every other test of
+// the package draws on, and a flow's two sides, registered deep under a parent that has already
+// given its own slot up, queue behind every parallel test still waiting: the first flow of the
+// first document waited 375 s of a 1,104 s package for them on a two-core pod
+// (dispatch://INFRA-1075). Run in turn they wait for nothing, and a flow costs the two sides'
+// work rather than the longer of them.
+func onBothSides(t *testing.T, name string, sides [2]*equivalenceSide, run func(*testing.T, int, *equivalenceSide)) bool {
 	t.Helper()
 	return t.Run(name, func(t *testing.T) {
 		for index, side := range sides {
 			t.Run(side.name, func(t *testing.T) {
-				t.Parallel()
 				run(t, index, side)
 			})
 		}

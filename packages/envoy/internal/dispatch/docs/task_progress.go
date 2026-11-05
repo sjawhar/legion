@@ -100,14 +100,10 @@ const (
 // none, so one broken document does not hold the rest back. It returns once no drift is left, the
 // retries are spent, or ctx ends.
 func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
-	s.runTaskProgressReconciliation(ctx, taskProgressBootRetryFirst)
-}
-
-func (s *Service) runTaskProgressReconciliation(ctx context.Context, firstRetry time.Duration) {
 	if !s.ReconcileTaskProgress(ctx) {
 		return
 	}
-	wait := firstRetry
+	wait := s.taskProgressBootRetryFirst
 	for range taskProgressBootRetries {
 		select {
 		case <-ctx.Done():
@@ -163,7 +159,7 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (driftLeft bool) {
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(time.Duration(retries) * taskProgressRetryBackoffStep):
+		case <-time.After(time.Duration(retries) * s.taskProgressRetryBackoff):
 		}
 	}
 	if counted > 0 {

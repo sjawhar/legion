@@ -200,6 +200,9 @@ func TestSearchAskStateRidesAMeaningMatch(t *testing.T) {
 // document traffic, while concurrent live search requests keep succeeding non-degraded, because
 // their InputQuery calls go straight to the unwrapped fake embedder and are never subject to
 // that backoff at all.
+//
+// It runs on its own: it bounds how long a live search takes while the backlog runs, and every
+// test running beside it would be counted into that time.
 func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
 	const title, spec = "Celestial navigation device maintenance", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{

@@ -42,17 +42,13 @@ var (
 // as are the migrations, which are SQL files the scan does not read.
 func TestOnlyWriteReviewWritesReviews(t *testing.T) {
 	t.Parallel()
-	sources := moduleSources(t, "../../..")
-	constants, err := stringConstants(sources)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scan := scanModule(t)
 	var offences []string
 	inserts, updates := 0, 0
-	for _, source := range sources {
+	for _, source := range scan.sources {
 		path := filepath.ToSlash(source.path)
 		writer := strings.HasSuffix(path, reviewWriter)
-		for _, statement := range sqlStatements(source.file, constants) {
+		for _, statement := range scan.statementsOf(source) {
 			insert := reviewInsertStatement.MatchString(statement)
 			update := reviewUpdateStatement.MatchString(statement)
 			if !insert && !update {

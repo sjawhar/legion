@@ -32,6 +32,9 @@ func withDeadline(handler http.Handler) http.Handler {
 // take none from the same pool: as soon as concurrent anchored writes fill it, a handler that
 // needs a second connection waits for one its own peers can only release by finishing, and the
 // server never recovers. Real callers reach this whenever enough agents comment on one issue.
+//
+// It runs on its own: it waits for its own four-connection pool to hand out every connection at
+// once, which measures this process's concurrency rather than the database's rows.
 func TestConcurrentAnchoredWritesDoNotWedgeTheirPool(t *testing.T) {
 	const maxConns = 4
 	for _, writers := range []int{maxConns, maxConns * 2} {
@@ -105,6 +108,9 @@ func (g *gatedMarkQuote) MarkQuote(
 // queued behind it fill a four-connection pool - small on purpose, because the cycle this
 // pins closes at any size and four reaches it with four callers - so the write in the middle
 // must finish without asking that pool for anything else.
+//
+// It runs on its own, as TestConcurrentAnchoredWritesDoNotWedgeTheirPool does and for the same
+// reason: it waits for its own four-connection pool to be held whole.
 func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	const maxConns = 4
 	gate := &gatedMarkQuote{entered: make(chan struct{}), release: make(chan struct{})}

@@ -34,6 +34,7 @@ type approvalRequestAsk struct {
 // One request covers a spec and its issue's Verification document: one Inbox card names both at
 // their current versions, and the human's one answer records an approved review on each.
 func TestApprovalRequestWithTheVerificationDocumentReviewsBoth(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "VER", "Approve both", "A spec\n")
 	owner := "/api/v1/issues/" + issue.Key
@@ -93,6 +94,7 @@ func TestApprovalRequestWithTheVerificationDocumentReviewsBoth(t *testing.T) {
 // Without the flag the request names the spec alone and writes nothing on the Verification
 // document, as it always has.
 func TestApprovalRequestWithoutTheFlagLeavesTheVerificationDocumentAlone(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "VER", "Approve the spec", "A spec\n")
 	verification := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", "# Verification\n\nOne.\n")
@@ -122,6 +124,7 @@ func TestApprovalRequestWithoutTheFlagLeavesTheVerificationDocumentAlone(t *test
 
 // An issue with no Verification document has nothing to name beside its spec.
 func TestApprovalRequestWithTheVerificationDocumentRefusesAnIssueThatHasNone(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "VER", "No verification", "A spec\n")
 
@@ -142,6 +145,7 @@ func TestApprovalRequestWithTheVerificationDocumentRefusesAnIssueThatHasNone(t *
 // document twice, and the human's one answer would write two reviews and two artifact.approved
 // events on it.
 func TestApprovalRequestWithTheVerificationDocumentRefusesEveryDocumentButTheSpec(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "VER", "Only the spec", "A spec\n")
 	owner := "/api/v1/issues/" + issue.Key
@@ -178,6 +182,7 @@ func TestApprovalRequestWithTheVerificationDocumentRefusesEveryDocumentButTheSpe
 // A new settled version of either document moves the one request, as a new spec version moves a
 // request on the spec alone: the card names the new version and waits on the agent again.
 func TestANewVerificationVersionMovesTheRequestThatNamesBoth(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "VER", "Move both", "A spec\n")
 	owner := "/api/v1/issues/" + issue.Key

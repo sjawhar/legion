@@ -117,6 +117,7 @@ func issueChildrenRows(t *testing.T, database *store.Store, statement, key strin
 // same external links. A leaf with no descendant is read as well as a branch with a subtree,
 // because the walk now carries the columns the rollup counts.
 func TestTheIssueChildrenAnswerWhatMainsStatementDid(t *testing.T) {
+	t.Parallel()
 	fixture := newIssueChildrenFixture(t)
 	want := issueChildrenRows(t, fixture.database, mainIssueChildrenQuery, fixture.root)
 	if len(want) != 2 {
@@ -190,6 +191,7 @@ func seedIssueChildrenBacklog(t *testing.T, database *store.Store) {
 // under a node that carries no index condition. Naming the index holds the statement to one read
 // of each issue.
 func TestTheIssueChildrenReadEveryIssueThroughTheParentIndex(t *testing.T) {
+	t.Parallel()
 	fixture := newIssueChildrenFixture(t)
 	seedIssueChildrenBacklog(t, fixture.database)
 	plan := planOf(t, fixture.database, issueChildrenQuery, fixture.root)

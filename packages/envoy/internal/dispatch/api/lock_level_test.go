@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -73,15 +74,11 @@ var (
 // did not spell, an owner table outside its `from` or a lock clause the query never assembles.
 func TestNoForUpdateOnOwnerTables(t *testing.T) {
 	t.Parallel()
-	sources := moduleSources(t, "../../..")
-	constants, err := stringConstants(sources)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scan := scanModule(t)
 	var offences []string
 	seen := map[string]struct{}{}
-	for _, source := range sources {
-		for _, statement := range sqlStatements(source.file, constants) {
+	for _, source := range scan.sources {
+		for _, statement := range scan.statementsOf(source) {
 			if !locksOwnerTableForUpdate(statement) {
 				continue
 			}
@@ -109,22 +106,66 @@ func locksOwnerTableForUpdate(statement string) bool {
 	return forUpdateClause.MatchString(statement) && ownerLockTable.MatchString(statement)
 }
 
-// moduleSource is one non-test Go file of the module with the tree both scans below read. The
-// file is parsed once here rather than again in each scan: the constant map and the statement
-// walk want the same trees, and parsing the module twice doubled this test's wall time. positions
-// is the file set it was parsed into, which turns a node's position into a line.
+// moduleSource is one non-test Go file of the module with the tree every scan below reads. The
+// file is parsed once rather than again in each scan: the constant map and the statement walk
+// want the same trees, and parsing the module twice doubled this test's wall time. positions is
+// the file set it was parsed into, which turns a node's position into a line.
 type moduleSource struct {
 	path      string
 	file      *ast.File
 	positions *token.FileSet
 }
 
-// moduleSources reads and parses every non-test Go file of the envoy module, not just the
+// moduleRoot is the module every scan below reads, relative to this package's directory.
+const moduleRoot = "../../.."
+
+// moduleScan is every non-test Go file of the module, parsed, with the package-level string
+// constants they declare and the SQL statements each file assembles from them. Four guards read
+// it - TestNoForUpdateOnOwnerTables, TestOnlyTheBrokerInsertsEvents,
+// TestEveryReviewReadOrdersByReviewOrder and TestOnlyWriteReviewWritesReviews - and each one
+// that built its own walked the tree, parsed every file, resolved the constants to a fixpoint
+// and inspected every tree again, a few seconds a guard. It is built once for the test binary.
+type moduleScan struct {
+	sources    []moduleSource
+	constants  map[string]string
+	statements map[*ast.File][]string
+}
+
+// statementsOf is every SQL statement source assembles, from the scan's own walk of it.
+func (s *moduleScan) statementsOf(source moduleSource) []string { return s.statements[source.file] }
+
+// sharedModuleScan builds that scan once. A failed build's error is kept and reported by each
+// guard that asks for it, as the copy-lock guard's graph is.
+var sharedModuleScan = sync.OnceValues(func() (*moduleScan, error) {
+	sources, err := parseModuleSources(moduleRoot)
+	if err != nil {
+		return nil, err
+	}
+	constants, err := stringConstants(sources)
+	if err != nil {
+		return nil, err
+	}
+	statements := make(map[*ast.File][]string, len(sources))
+	for _, source := range sources {
+		statements[source.file] = sqlStatements(source.file, constants)
+	}
+	return &moduleScan{sources: sources, constants: constants, statements: statements}, nil
+})
+
+func scanModule(t *testing.T) *moduleScan {
+	t.Helper()
+	scan, err := sharedModuleScan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scan
+}
+
+// parseModuleSources reads and parses every non-test Go file of the envoy module, not just the
 // Dispatch server: the broker's owner locks live in internal/events, and a future caller could
 // lock one of these rows from anywhere. Test sources hold these strings deliberately - the
 // upload regressions and the sabotage copies a red proof makes - so they are skipped.
-func moduleSources(t *testing.T, root string) []moduleSource {
-	t.Helper()
+func parseModuleSources(root string) ([]moduleSource, error) {
 	fileSet := token.NewFileSet()
 	var sources []moduleSource
 	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -141,9 +182,9 @@ func moduleSources(t *testing.T, root string) []moduleSource {
 		sources = append(sources, moduleSource{path: path, file: file, positions: fileSet})
 		return nil
 	}); err != nil {
-		t.Fatalf("scan dispatch sources: %v", err)
+		return nil, fmt.Errorf("scan dispatch sources: %w", err)
 	}
-	return sources
+	return sources, nil
 }
 
 // stringConstants maps every package-level string constant of the module - and every `var` bound

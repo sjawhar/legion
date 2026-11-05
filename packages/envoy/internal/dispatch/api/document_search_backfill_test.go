@@ -94,6 +94,7 @@ func countRows(t *testing.T, database *store.Store, statement string) int64 {
 // the same rows, which is what says the filled table holds each document's latest version and
 // no older one.
 func TestTheBackfillLeavesSearchAnsweringWhatMainsStatementDoes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)
 	// The issue is created first: creating one runs the related-item check, which reads the
@@ -159,6 +160,7 @@ func TestTheBackfillLeavesSearchAnsweringWhatMainsStatementDoes(t *testing.T) {
 // finished. The statements are counted on the pool the fill runs on, so the batches are read
 // rather than assumed.
 func TestTheFillCoversEveryDocumentOverMoreThanOneBatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "BATCH", "Range survey", "The herd crosses the plateau in spring.")
@@ -242,6 +244,7 @@ func TestTheFillCoversEveryDocumentOverMoreThanOneBatch(t *testing.T) {
 // behind its uncommitted row, which is the order of that race: the batch read artifact_versions
 // before the write committed, so the row it carries is the older version.
 func TestAVersionCommittedWhileTheFillRunsIsNotReplacedByTheOlderOneItRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "RACE", "Range survey", "The herd crosses the plateau in spring.")
@@ -319,6 +322,7 @@ func awaitFillQueued(t *testing.T, database *store.Store) {
 // statements are read off the pool the second run is given, so "reads no large table" is counted
 // rather than reasoned about.
 func TestAFillAfterThePassIsFinishedReadsOneRowAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)
 	createInteractionIssue(t, handler, "BOOT", "Range survey", "The herd crosses the plateau in spring.")
