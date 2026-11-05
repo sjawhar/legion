@@ -136,10 +136,21 @@ export const hasCitation = (sentence: string) =>
  * code, an indented code block, a quoted line (someone else's words), a heading, and a markdown
  * table's rows.
  *
- * Table rows are left out deliberately, and it is the lint's largest blind spot: a row is where a
- * report puts its numbers, and a row's own citation often lives in another column of the same row
- * or in the header. Reading each cell as a sentence flagged whole tables at once, which is the
- * fastest way to make a check nobody reads. A measurement that matters belongs in a sentence too.
+ * Table rows are left out, and it is the lint's largest blind spot: a table is where a report puts
+ * its numbers. The carve-out is measured, not assumed. Reading each **cell** as a sentence flagged
+ * whole tables at once. Reading each **row** — flag a row holding a measurement when no cell of it
+ * cites anything — was built and measured over the same 1,200 real reviewed writes: 5,146 rows held
+ * a measurement, 3,451 of them (67%) were silenced by a citation somewhere in the row, and 1,695
+ * were flagged, taking the lint from 1.27 to 2.68 flags per call. Sixty of those row flags were
+ * hand-read: 26 were false, 43%, against 13% on prose. They fell into three shapes — a row that
+ * names its subject in a way no citation pattern recognises (`openssl/punycode | fix104 | 7 PASS`,
+ * a job id, `copy#786`), a plan or enumeration table whose numeric cell is a section number or a
+ * cost, and a frequency table where one source covers every row and is stated once in the prose
+ * beside it. The other end is no better: 1,364 of the 1,695 (80.5%) carry a cell that names what
+ * the row measures, so counting that cell as the row's source leaves 331 flags, 0.28 per call,
+ * almost all of them pure-number benchmark rows. The claim and its source do not sit at the same
+ * granularity in a table, which is why this is a gap and not a bug. A measurement that must be
+ * checked belongs in a sentence too.
  */
 export function sentences(text: string): string[] {
   const out: string[] = [];

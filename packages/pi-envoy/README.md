@@ -344,7 +344,11 @@ charter check never does: the ones skipped for being on another provider, 3,823 
 entries read from one machine's session files on 2026-11-05. A sentence the writer already marked
 — `[INFERENCE]`, an estimate, a conditional, a plan, a requirement — is left alone, as is a
 question, a quotation, a heading, code, and a table row. What it cannot do: it says nothing about
-a claim that is wrong but sourced. Only a reader who re-runs the command catches those.
+a claim that is wrong but sourced — only a reader who re-runs the command catches those — and it
+reads no table, which is where a report puts its numbers. Flagging a table at row granularity was
+built and measured against the same real writes: 43% of its row flags were false by hand-read,
+against 13% on prose, because a row either names its subject in a way no citation pattern knows or
+shares one source with the whole table. The exclusion stayed.
 
 The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
 contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
