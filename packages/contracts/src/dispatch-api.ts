@@ -60,6 +60,12 @@ export type Actor =
        *  none, a browser cookie, a personal token and a broker token scoped to its person
        *  included. */
       readonly project?: string;
+      /** Set where the credential itself proved this session: an access token the secrets
+       *  broker issued, which the broker binds to one session. Every other bearer names its
+       *  session in the request body, so the id is the caller's word and this is absent. The
+       *  server sets it and never reads it from a body. A read that treats "this session is
+       *  that person's" as a fact takes only the actors carrying it. */
+      readonly session_verified?: boolean;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
@@ -2335,10 +2341,14 @@ export type GraphEdgeKind =
   | "part_of"
   | "depends_on"
   | "affects"
+  | "authored_by"
+  | "delivered_to"
   | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
-// session node has none. A component node's id is `<project>/<component id>`.
+// session node and a role node have none. A component node's id is `<project>/<component id>`.
+// A role node's id is the role token a delivery was published to; Dispatch records no fact of a
+// role, so it carries the same empty actor lists a session node does.
 //
 // Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
 // and `changed_at` (who last changed its own text or fields and when; the maker when nothing
@@ -2365,6 +2375,8 @@ export interface GraphNode {
     | "comment"
     | "message"
     | "session"
+    | "role"
+    | "person"
     | "component";
   readonly id: string;
   readonly block_id?: string;
@@ -2431,6 +2443,26 @@ export interface GraphEdge {
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+}
+
+/** One comment, message or ask a person authored or a recorded session alias received. */
+export interface PersonNode {
+  readonly kind: "comment" | "message" | "ask";
+  readonly id: string;
+  readonly relations: ("authored_by" | "delivered_to")[];
+  readonly title: string;
+  readonly created_at: string;
+  readonly ref: string | null;
+  readonly href: string | null;
+}
+
+/** GET /api/v1/people/{login}/nodes. Direct messages have no dispatch:// reference. */
+export interface PersonNodes {
+  readonly person: string;
+  readonly rows: PersonNode[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
 }
 
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,

@@ -40,8 +40,8 @@ var subcommands = []subcommand{
 	{"redeliver-webhooks", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return redeliverWebhooks(ctx, args, env, stdout)
 	}},
-	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
-		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
+	{"census", func(ctx context.Context, args []string, env settingValues, stdout, stderr io.Writer) int {
+		return runCensus(ctx, args, env.get("DATABASE_URL"), stdout, stderr)
 	}},
 	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
