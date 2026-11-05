@@ -7,18 +7,17 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { GraphReferences, IssueAskRow, IssueReferenceSummary } from "../../api/types";
+import type { GraphReferences, IssueReferenceSummary, ReferenceQuestions } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { warmMarkdownRenderer } from "./markdown-engine";
-import { parseNodeReference } from "./routes";
 import { readTextReferences, type TextSource } from "./text-references";
 
 const origin = "https://dispatch.test";
 
-/** The document every row's text belongs to: CORE-1's spec, whose question blocks a row's
- *  `questions` declares. */
-const source = { key: "CORE-1", kind: "issue" } as const satisfies TextSource;
+/** The record every row's text is: a message of CORE-1, whose `#id`s resolve against the
+ *  question map the server answers for that source, which the row's `questions` is. */
+const source = { id: "message-1", kind: "message" } as const satisfies TextSource;
 
 const testWindow = window as unknown as HappyDOMWindow;
 let pageBefore = "about:blank";
@@ -45,35 +44,17 @@ function summaryOf(key: string): IssueReferenceSummary {
   };
 }
 
-/** The asks `questions` declares, as `GET /issues/{key}/asks` lists them: each question block of
- *  CORE-1's spec with the ask settled for it. */
-function asksOf(questions: Readonly<Record<string, string>>): IssueAskRow[] {
-  return Object.entries(questions).flatMap(([block, reference]) => {
-    const route = parseNodeReference(reference);
-    if (route === undefined || route.kind !== "ask") {
-      return [];
-    }
-    const ask: IssueAskRow = {
-      anchor: null,
-      answer: null,
-      author: { id: "planner", kind: "session" },
-      block_artifact: { id: "spec-1", primary: true, slug: "spec" },
+/** The question map the route answers for that source, as `refs.QuestionMap` writes it: each
+ *  question block of CORE-1's spec with the ask settled for it and that ask's address. */
+function questionsOf(questions: Readonly<Record<string, string>>): ReferenceQuestions {
+  return {
+    document: "spec-1",
+    questions: Object.entries(questions).map(([block, reference]) => ({
+      ask: reference.slice(reference.lastIndexOf("/") + 1),
       block_id: block,
-      created_at: "2026-01-01T00:00:00Z",
-      edited_at: null,
-      id: route.id,
-      issue_key: route.key,
-      kind: "question",
-      last_reply: null,
-      multiple: false,
-      opened_event_id: 1,
-      options: [],
-      question: `Question ${block}`,
-      state: "open",
-      urgency: "med",
-    };
-    return [ask];
-  });
+      reference,
+    })),
+  };
 }
 
 /** The graph read of a reference whose id is written short, as the server answers it: the one
@@ -108,7 +89,10 @@ function cacheOf(row: (typeof DISPATCH_TEXT_REFERENCES)[number], server: string)
     queryClient.setQueryData(["issue-summary", key], summaryOf(key));
   }
   if (row.questions !== undefined) {
-    queryClient.setQueryData(["asks", source.key], asksOf(row.questions));
+    queryClient.setQueryData(
+      ["references", "questions", source.kind, source.id],
+      questionsOf(row.questions)
+    );
   }
   for (const reference of readTextReferences(row.body, { origin: server }).needs.prefixes) {
     const answer = prefixAnswer(reference, row.items ?? {});
@@ -155,8 +139,10 @@ test.each(
     new ApiError(404, { code: "NOT_FOUND", error: "no node" })
   );
   // The seeded reads are stale at once, so the answer behind each is the row's own: a refetch
-  // of the ask list must not replace the questions the row declares.
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue(asksOf(row.questions ?? {}));
+  // of the question map must not replace the questions the row declares.
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue(
+    questionsOf(row.questions ?? {})
+  );
   const bodyView = render(
     withQueries(cacheOf(row, server), <MarkdownBody markdown={body} source={source} />)
   );
@@ -172,6 +158,6 @@ test.each(
     previewView.unmount();
     getIssueSummary.mockRestore();
     getReferences.mockRestore();
-    listIssueAsks.mockRestore();
+    getReferenceQuestions.mockRestore();
   }
 });

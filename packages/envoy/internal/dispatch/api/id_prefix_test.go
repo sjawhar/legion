@@ -646,10 +646,12 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 	type questionsAnswer struct {
 		Document  string `json:"document"`
 		Questions []struct {
-			BlockID string `json:"block_id"`
-			Ask     string `json:"ask"`
+			BlockID   string `json:"block_id"`
+			Ask       string `json:"ask"`
+			Reference string `json:"reference"`
 		} `json:"questions"`
 	}
+	askReference := "dispatch://" + issue.Key + "/ask/" + blockAsk
 	for _, source := range []struct{ kind, id, prefix string }{
 		{"artifact", issue.PrimaryArtifactID, issue.PrimaryArtifactID[:8]},
 		{"ask", blockAsk, "ba000001"},
@@ -667,8 +669,9 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 			if answer.Document != issue.PrimaryArtifactID {
 				t.Fatalf("%s by %s: document=%q, want the issue's spec %q", source.kind, name, answer.Document, issue.PrimaryArtifactID)
 			}
-			if len(answer.Questions) != 1 || answer.Questions[0].BlockID != "q1" || answer.Questions[0].Ask != blockAsk {
-				t.Fatalf("%s by %s: questions=%+v, want q1 naming %s", source.kind, name, answer.Questions, blockAsk)
+			if len(answer.Questions) != 1 || answer.Questions[0].BlockID != "q1" || answer.Questions[0].Ask != blockAsk ||
+				answer.Questions[0].Reference != askReference {
+				t.Fatalf("%s by %s: questions=%+v, want q1 naming %s at %s", source.kind, name, answer.Questions, blockAsk, askReference)
 			}
 		}
 	}

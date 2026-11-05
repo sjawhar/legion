@@ -1,13 +1,13 @@
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import type { ReferenceLinking } from "./RefLink";
 import {
   issueSummaryQuery,
-  questionMap,
+  questionReferences,
+  questionsQuery,
   referencesQuery,
   resolvedPrefixItems,
-  useDocumentAsks,
 } from "./reference-target";
 import { readTextReferences, type TextReading, type TextSource } from "./text-references";
 
@@ -33,10 +33,11 @@ export interface TextReferences extends ReferenceLinking {
  * A bare issue key links only while its issue exists, which is its summary read answering: the
  * same read the link's own title comes from, so a key costs one request and a 404 for it is
  * final (`api/event-refresh.ts` re-asks it on `issue.created` alone). A `#id` resolves against
- * the question map of the document the text belongs to, which `source` names; a text of no
- * document asks nothing and links no `#id`. An id written as a prefix is resolved by the graph
- * read of the reference as written (`referencesQuery`), and the item is then read under the
- * whole id the answer carries, so nothing is ever cached under a prefix.
+ * the question map of the document the text's own source belongs to, which the server says and
+ * `questionsQuery` reads; a text naming no source, or one whose text belongs to no document,
+ * links no `#id`. An id written as a prefix is resolved by the graph read of the reference as
+ * written (`referencesQuery`), and the item is then read under the whole id the answer carries,
+ * so nothing is ever cached under a prefix.
  *
  * A body that writes no key, no `#id` and no prefix - almost every body - starts no query at all
  * and is read once.
@@ -56,13 +57,15 @@ export function useTextReferences(markdown: string, source?: TextSource): TextRe
   const exist = keys.filter((_, index) => summaries[index]?.isSuccess === true).join(" ");
   const issues = useMemo(() => (exist === "" ? NO_KEYS : exist.split(" ")), [exist]);
 
-  const asks = useDocumentAsks(source, questions && source !== undefined);
-  const declared =
-    questions && source !== undefined && asks !== undefined ? questionMap(asks, source) : undefined;
-  const declaredBy = declared === undefined ? "" : JSON.stringify(declared);
+  // Only a text that writes a `#id` asks for the map (`needs.questions`), and only one that
+  // names the record its text is can: the route answers for a source, not for a page.
+  const questionRead = useQuery({
+    ...questionsQuery(source),
+    enabled: questions && source !== undefined,
+  });
   const askedQuestions = useMemo(
-    () => (declaredBy === "" ? NO_MAP : (JSON.parse(declaredBy) as Record<string, string>)),
-    [declaredBy]
+    () => questionReferences(questionRead.data) ?? NO_MAP,
+    [questionRead.data]
   );
 
   const resolutions = useQueries({

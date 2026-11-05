@@ -198,11 +198,14 @@ type referenceQuestions struct {
 	Questions []referenceQuestion `json:"questions"`
 }
 
-// referenceQuestion is one question block of the document: the block id a `#id` writes, and the
-// whole id of the ask settlement made for it.
+// referenceQuestion is one question block of the document: the block id a `#id` writes, the
+// whole id of the ask settlement made for it, and that ask's `dispatch://` address, the one the
+// `#id`'s own edge is stored under (refs.AskRef). The address is empty for an ask no address
+// names - one on an agent conversation's document - which a reader can name by its id alone.
 type referenceQuestion struct {
-	BlockID string `json:"block_id"`
-	Ask     string `json:"ask"`
+	BlockID   string `json:"block_id"`
+	Ask       string `json:"ask"`
+	Reference string `json:"reference"`
 }
 
 // questionSourceKinds are the reference sources whose text belongs to a document, the kinds
@@ -264,7 +267,9 @@ func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
 	}
 	answer := referenceQuestions{Document: document, Questions: make([]referenceQuestion, 0, len(questions))}
 	for blockID, ask := range questions {
-		answer.Questions = append(answer.Questions, referenceQuestion{BlockID: blockID, Ask: ask.ID})
+		answer.Questions = append(answer.Questions, referenceQuestion{
+			BlockID: blockID, Ask: ask.ID, Reference: refs.AskRef(ask),
+		})
 	}
 	slices.SortFunc(answer.Questions, func(left, right referenceQuestion) int {
 		return strings.Compare(left.BlockID, right.BlockID)

@@ -92,6 +92,7 @@ import type {
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
+  ReferenceQuestions,
   RepoProject,
   SearchResponse,
   Subscriber,
@@ -1443,6 +1444,16 @@ export class DispatchApiClient {
   getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
     return this.json<GraphReferences>(
       pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
+  }
+
+  /** The question map of the document one reference source's text belongs to: every question
+   *  block that document's latest version declares, with the ask settled for it (for a copied
+   *  block, the ask it was copied from). `kind` is the source's own kind - artifact, ask,
+   *  comment or message - and `id` its id. A source whose text belongs to no document is 404. */
+  getReferenceQuestions(kind: string, id: string): Promise<ReferenceQuestions> {
+    return this.json<ReferenceQuestions>(
+      pathWithQuery("/api/v1/references/questions", { id, kind })
     );
   }
 

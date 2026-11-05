@@ -6,7 +6,13 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
-import type { AskRead, CommentRead, IssueAskRow, IssueReferenceSummary } from "../../api/types";
+import type {
+  AskRead,
+  CommentRead,
+  IssueAskRow,
+  IssueReferenceSummary,
+  ReferenceQuestions,
+} from "../../api/types";
 import { Unfurl } from "./Unfurl";
 
 /** The test DOM is happy-dom's window (`__tests__/setup.ts` registers it), which TypeScript
@@ -276,8 +282,14 @@ test("Unfurl unfurls a dispatch comment reference with its own words, reading no
   }
 });
 
-/** The ask `#q1` names: the question block of CORE-1's spec, as the issue's ask list carries
- *  it. */
+/** The question map the route answers for the body's source: `#q1` is the question block of
+ *  CORE-1's spec, settled into `ask-1`. */
+const specQuestions: ReferenceQuestions = {
+  document: "artifact-1",
+  questions: [{ ask: "ask-1", block_id: "q1", reference: "dispatch://CORE-1/ask/ask-1" }],
+};
+
+/** The ask `#q1` names, as its own read carries it. */
 const blockAsk: IssueAskRow = {
   anchor: null,
   answer: null,
@@ -330,11 +342,13 @@ test("Unfurl cards an issue key written bare, once its issue exists", async () =
 // these bodies is one reference and cards as it did before the predicate read them.
 test("Unfurl cards a reference that ends in the punctuation the grammar trims", async () => {
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(coreSummary);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([blockAsk]);
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue(
+    specQuestions
+  );
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(blockAskRead);
   const address = renderUnfurl("dispatch://CORE-1.");
   const key = renderUnfurl("CORE-1,");
-  const question = renderUnfurl("#q1.", { key: "CORE-1", kind: "issue" });
+  const question = renderUnfurl("#q1.", { id: "message-1", kind: "message" });
 
   try {
     expect(
@@ -348,7 +362,7 @@ test("Unfurl cards a reference that ends in the punctuation the grammar trims", 
     });
   } finally {
     getAsk.mockRestore();
-    listIssueAsks.mockRestore();
+    getReferenceQuestions.mockRestore();
     getIssueSummary.mockRestore();
     address.unmount();
     key.unmount();
@@ -373,19 +387,21 @@ test("Unfurl cards a dashboard address of this dashboard", async () => {
 });
 
 test("Unfurl cards a #id against the document the body's text belongs to", async () => {
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([blockAsk]);
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue(
+    specQuestions
+  );
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(blockAskRead);
-  const view = renderUnfurl("#q1", { key: "CORE-1", kind: "issue" });
+  const view = renderUnfurl("#q1", { id: "message-1", kind: "message" });
 
   try {
     const card = await within(view.container).findByRole("link", {
       name: "Which region do we deploy to?",
     });
     expect(card.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
-    expect(listIssueAsks).toHaveBeenCalledWith("CORE-1", "all");
+    expect(getReferenceQuestions).toHaveBeenCalledWith("message", "message-1");
   } finally {
     getAsk.mockRestore();
-    listIssueAsks.mockRestore();
+    getReferenceQuestions.mockRestore();
     view.unmount();
   }
 });

@@ -13,9 +13,9 @@ beforeAll(async () => {
   await warmMarkdownRenderer();
 });
 
-/** The ask the reply's `#q2` names: the question block of CORE-1's spec, as the issue's ask
- *  list carries it. */
-const questionAsk: IssueAskRow = {
+/** The question block of CORE-1's spec, as the issue's ask list carries it: what a map built
+ *  from that list would have named `#q2`, and what the reply below does not mean. */
+const specQuestionAsk: IssueAskRow = {
   anchor: null,
   answer: null,
   author: { id: "planner", kind: "session" },
@@ -82,8 +82,17 @@ const read: AskRead = {
   route_status: null,
 };
 
-test("an Inbox reply links the `#q2` its own issue's spec declares", async () => {
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([questionAsk]);
+test("an Inbox reply's `#q2` names the question of the document its comment is anchored to", async () => {
+  // The reply is anchored to `design.md`, which is no primary document of the issue: the server
+  // scopes the comment's text to that document (`refs.ScopeOf`), so `#q2` is that document's
+  // question. A map built from the issue's ask list would have chosen the spec's `q2` instead.
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([specQuestionAsk]);
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue({
+    document: "artifact-design",
+    questions: [
+      { ask: "ask-design", block_id: "q2", reference: "dispatch://CORE-1/ask/ask-design" },
+    ],
+  });
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
@@ -97,16 +106,17 @@ test("an Inbox reply links the `#q2` its own issue's spec declares", async () =>
   );
 
   try {
-    // The reply's own body links the question, as the margin's and the Conversation's do: its
-    // document is the ask's issue, which is what the `#id` resolves against.
     const linked = () =>
       [...view.container.querySelectorAll("[data-reply] [data-dispatch-ref]")].map((anchor) =>
         anchor.getAttribute("data-dispatch-ref")
       );
-    await waitFor(() => expect(linked()).toEqual(["dispatch://CORE-1/ask/ask-2"]));
-    expect(listIssueAsks).toHaveBeenCalledWith("CORE-1", "all");
+    await waitFor(() => expect(linked()).toEqual(["dispatch://CORE-1/ask/ask-design"]));
+    expect(getReferenceQuestions).toHaveBeenCalledWith("comment", "comment-1");
+    // One map: the page reads the server's, never the issue's whole ask list.
+    expect(listIssueAsks).not.toHaveBeenCalled();
   } finally {
     view.unmount();
+    getReferenceQuestions.mockRestore();
     listIssueAsks.mockRestore();
   }
 });

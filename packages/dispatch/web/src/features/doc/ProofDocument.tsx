@@ -47,7 +47,7 @@ import {
   buildProjectPath,
   documentRoute,
 } from "../refs/routes";
-import { isIdPrefix } from "../refs/text-references";
+import { isIdPrefix, textSourceOf } from "../refs/text-references";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
@@ -57,7 +57,7 @@ import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import { DocumentReferences, documentSource, useReferenceClick } from "./document-references";
+import { DocumentReferences, useReferenceClick } from "./document-references";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -267,11 +267,8 @@ export function ProofDocument({
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   // Where a `#id` in this document's text resolves: this document, whose question blocks
-  // declare the asks it names.
-  const textSource = useMemo(
-    () => documentSource(artifact.id, owner.kind === "document" ? owner : undefined),
-    [artifact.id, owner]
-  );
+  // declare the asks it names (`refs.ScopeOf` of a document version is the document).
+  const textSource = useMemo(() => textSourceOf("artifact", artifact.id), [artifact.id]);
   const followReference = useReferenceClick();
   // The address's fragment as the dashboard's own navigation leaves it: a click on a link to a
   // block of this document changes it in place, firing no event of the browser's own.

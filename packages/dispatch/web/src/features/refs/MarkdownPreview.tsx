@@ -263,8 +263,8 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * (`markdown-engine.ts`); and when the engine cannot load, the literal source renders as text
  * with `data-markdown-fallback`, as `MarkdownBody` does.
  *
- * A bare issue key, and a `#` and the id of a question block of `source`, read as references
- * too, and link where they name something (`useTextReferences`), as they do in a full body.
+ * A bare issue key, and a `#` and the id of a question block of `source`'s document, read as
+ * references too, and link where they name something (`useTextReferences`), as in a full body.
  */
 export function MarkdownPreview({
   className = "",
@@ -291,8 +291,8 @@ export function MarkdownPreview({
    *  a host whose own control is a toggle. */
   links?: "inert" | "live";
   markdown: string;
-  /** The document this text belongs to, which its `#id`s name a question block of
-   *  (`TextSource`); none for text of no document. */
+  /** The record this text is - the ask, comment, message or document version whose text it is
+   *  (`TextSource`); none for text of no record, which links no `#id`. */
   source?: TextSource;
 }): ReactNode {
   const root = useRef<HTMLSpanElement>(null);

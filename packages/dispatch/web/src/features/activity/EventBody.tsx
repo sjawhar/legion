@@ -9,7 +9,7 @@ import { AgentParts, AskResolutionLine } from "../refs/AgentName";
 import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
-import { issueSource } from "../refs/text-references";
+import { textSourceOf } from "../refs/text-references";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 
@@ -26,7 +26,7 @@ function AskEventBody({
   event: AskEvent;
   onRendered?: () => void;
 }): ReactNode {
-  const source = issueSource(event.issue_key);
+  const source = textSourceOf("ask", event.payload.id);
   const { answer, question, options, resolution, created_at } = event.payload;
   const resolutionReason = resolution === undefined ? undefined : askResolutionReason(resolution);
   // A changed answer names the one it replaced; the first answer's event carries none. An event
@@ -106,7 +106,12 @@ export function EventBody({
       <MarkdownBody
         markdown={event.payload.body}
         onRendered={onRendered}
-        source={issueSource(event.issue_key)}
+        source={textSourceOf(
+          event.type === "comment.created" || event.type === "comment.answered"
+            ? "comment"
+            : "message",
+          event.payload.id
+        )}
       />
     );
   }

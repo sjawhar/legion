@@ -39,6 +39,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { useMargin } from "./margin-context";
@@ -193,18 +194,20 @@ function CommentBody({
         </blockquote>
       )}
       {orphanNotice}
-      {suggestion === null ? <MarkdownBody markdown={comment.body} source={owner} /> : null}
+      {suggestion === null ? (
+        <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
+      ) : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
           <SuggestionDiff clamp={false} quote={anchor.quote} suggestion={suggestion} />
           {comment.body === "Suggested replacement." ? null : (
             <div className={`font-sans ${textSecondaryOnSurface}`}>
-              <MarkdownBody markdown={comment.body} source={owner} />
+              <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
             </div>
           )}
         </div>
       ) : null}
-      <Unfurl body={comment.body} source={owner} />
+      <Unfurl body={comment.body} source={textSourceOf("comment", comment.id)} />
       <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <span>
           <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
@@ -502,7 +505,7 @@ export function ThreadCard({
                       lines={1}
                       links="live"
                       markdown={root.body}
-                      source={owner}
+                      source={textSourceOf("comment", root.id)}
                     />
                   )}
                 </>
@@ -515,8 +518,13 @@ export function ThreadCard({
                       {root.anchor.quote}
                     </blockquote>
                   )}
-                  <MarkdownPreview lines={2} links="live" markdown={root.body} source={owner} />
-                  <Unfurl body={root.body} source={owner} />
+                  <MarkdownPreview
+                    lines={2}
+                    links="live"
+                    markdown={root.body}
+                    source={textSourceOf("comment", root.id)}
+                  />
+                  <Unfurl body={root.body} source={textSourceOf("comment", root.id)} />
                 </>
               )}
               {thread.replies.length === 0 ? null : (

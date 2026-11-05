@@ -91,16 +91,18 @@ const referenced: IssueReferenceSummary = {
 };
 
 /** A query client holding everything the three references resolve through: the issue a bare key
- *  names, the document's asks (its question map) and the ask a `#id` declares, and the issue
- *  whose document the bare reference names. */
+ *  names, the question map the document's own source answers with and the ask a `#id` declares,
+ *  and the issue whose document the bare reference names. */
 function seededQueryClient(): QueryClient {
   const queryClient = createQueryClient();
   queryClient.setQueryData(["issue-summary", "CORE-1"], summary);
   queryClient.setQueryData(["issue-summary", "CORE-2"], referenced);
-  // The document, read for the owner that serves its asks, and that owner's ask list: an
-  // issue's document answers its asks on the issue's route alone (`useDocumentAsks`).
-  queryClient.setQueryData(["artifact", "artifact-1"], artifact);
-  queryClient.setQueryData(["asks", "CORE-1"], [ask]);
+  // The question map of this document, under the key the route's read is cached by: the
+  // document is the source of its own text (`refs.ScopeOf`).
+  queryClient.setQueryData(["references", "questions", "artifact", artifact.id], {
+    document: artifact.id,
+    questions: [{ ask: ask.id, block_id: "q2", reference: `dispatch://CORE-1/ask/${ask.id}` }],
+  });
   queryClient.setQueryData(["ask", "ask-1"], askRead);
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   return queryClient;

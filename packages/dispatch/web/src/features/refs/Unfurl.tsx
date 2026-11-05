@@ -19,7 +19,7 @@ import { useTextReferences } from "./useTextReferences";
 
 interface UnfurlProps {
   body: string;
-  /** The document the body's text belongs to, which a `#id` in it names a question block of
+  /** The record the body's text is, whose document a `#id` in it names a question block of
    *  (`TextSource`); without one a `#id` names nothing, so a body holding one shows no card. */
   source?: TextSource;
 }

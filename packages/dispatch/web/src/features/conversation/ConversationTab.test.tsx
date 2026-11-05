@@ -2274,10 +2274,10 @@ test("a message that is nothing but a reference shows its card", async () => {
   }
 });
 
-// INFRA-869: a turn's text belongs to the issue, so a `#id` in it names a question block of
-// that issue's spec and reads as the ask settled for it - the same source the card beside the
-// turn already reads, now given to the rendered body as well.
-test("a Conversation turn links the `#q2` its issue's spec declares", async () => {
+// INFRA-869: a turn's text is its message's, so its `#id` resolves against the question map the
+// server answers for that message (its issue's spec) - the one map the reference graph stores
+// its edges from.
+test("a Conversation turn links the `#q2` the question map of its message names", async () => {
   const question: IssueAskRow = {
     ...baseAsk,
     block_artifact: { id: "spec-1", primary: true, slug: "spec" },
@@ -2287,7 +2287,10 @@ test("a Conversation turn links the `#q2` its issue's spec declares", async () =
     options: [],
     question: "Which region?",
   };
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([question]);
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue({
+    document: "spec-1",
+    questions: [{ ask: "ask-2", block_id: "q2", reference: "dispatch://CORE-1/ask/ask-2" }],
+  });
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     answers: [],
     ask: question,
@@ -2317,11 +2320,11 @@ test("a Conversation turn links the `#q2` its issue's spec declares", async () =
     });
     expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/ask/ask-2");
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-2");
-    expect(listIssueAsks).toHaveBeenCalledWith("CORE-1", "all");
+    expect(getReferenceQuestions).toHaveBeenCalledWith("message", "message-1");
   } finally {
     view.unmount();
     stub.restore();
     getAsk.mockRestore();
-    listIssueAsks.mockRestore();
+    getReferenceQuestions.mockRestore();
   }
 });

@@ -2424,6 +2424,25 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+// ReferenceQuestion is one question block of a document on
+// GET /api/v1/references/questions: the block id a `#id` in the source's text writes, the whole
+// id of the ask settlement made for it (for a copied block, the ask it was copied from), and
+// that ask's `dispatch://` address, the one the `#id`'s own edge is stored under. `reference` is
+// empty for an ask no address names, one on an agent conversation's document.
+export interface ReferenceQuestion {
+  readonly block_id: string;
+  readonly ask: string;
+  readonly reference: string;
+}
+
+// ReferenceQuestions is GET /api/v1/references/questions?kind=&id=: the document one reference
+// source's text belongs to (`refs.ScopeOf`) and every question block that document's latest
+// version declares, by block id. A source whose text belongs to no document answers 404.
+export interface ReferenceQuestions {
+  readonly document: string;
+  readonly questions: ReferenceQuestion[];
+}
+
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,
 // both block nodes, and when and in which version of its document the source block first held
 // it.

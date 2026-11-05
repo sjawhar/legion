@@ -228,6 +228,17 @@ func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Re
 	return questions, nil
 }
 
+// AskRef is the `dispatch://` address of one ask a question map holds, as every writer of an
+// ask's address writes it (itemRef): under its issue, or under the project document that owns
+// it. It is "" for an ask no address names - one on an agent conversation's document - which is
+// still the ask the `#id` names, stored as the edge its id makes.
+func AskRef(ref text.Ref) string {
+	if ref.IssueKey != "" {
+		return itemRef("ask", &ref.IssueKey, "", "", ref.ID)
+	}
+	return itemRef("ask", nil, ref.Project, ref.Document, ref.ID)
+}
+
 // scanQuestions reads rows of (key, ask id, issue key, project key, document slug) into each
 // ask's reference by key: an ask on an issue as `dispatch://<KEY>/ask/<id>` reads, one on a
 // project document as `dispatch://<PROJECT>/artifact/<slug>/ask/<id>` does (itemRef writes

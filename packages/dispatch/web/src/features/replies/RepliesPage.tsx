@@ -21,7 +21,7 @@ import { AskOwnerLink } from "../inbox/AskOwnerLink";
 import { AgentName } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
-import { issueSource } from "../refs/text-references";
+import { textSourceOf } from "../refs/text-references";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
@@ -44,6 +44,9 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
       : row.document !== undefined
         ? { document: row.document }
         : undefined;
+  // Both lines are the thread's: its root's text, and a reply that names no document of its own,
+  // which takes the root's scope (`refs.ScopeOf`). So one source answers for the row.
+  const source = textSourceOf(row.kind, row.thread_id);
   return (
     <li
       className={`rounded-xl border p-3 ${card} ${borderDefault}`}
@@ -62,7 +65,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         fullTitle
         lines={2}
         markdown={row.reply.first_line}
-        source={issueSource(row.issue?.key)}
+        source={source}
       />
       <MarkdownPreview
         className={`mt-1 text-xs ${textMutedOnCanvas}`}
@@ -70,7 +73,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         lead="In "
         lines={1}
         markdown={row.subject}
-        source={issueSource(row.issue?.key)}
+        source={source}
       />
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
         {/* The server's `ref` names the thread's root, never the reply: an anchored root redirects

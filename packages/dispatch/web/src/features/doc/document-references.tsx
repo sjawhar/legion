@@ -44,16 +44,6 @@ import type { EditorHandle } from "./editor";
 const NO_WORDS: readonly string[] = [];
 const NO_TITLES: Readonly<Record<string, string>> = {};
 
-/** Where a document's own text belongs, which its `#id`s resolve against: the document itself,
- *  so a question block declared in it names its ask whether or not it is an issue's spec.
- *  `owner` is the project document's address, for an ask that has no issue to be read under. */
-export function documentSource(
-  artifactId: string,
-  owner: { readonly project: string; readonly slug: string } | undefined
-): TextSource {
-  return { artifactId, kind: "document", project: owner?.project, slug: owner?.slug };
-}
-
 /**
  * How many of the words written the reference names, where that is fewer than all of them, so a
  * title hides no character the reference does not stand for: a `#id` the author left a sentence's
@@ -110,14 +100,16 @@ function ReferenceTitle({
 
 /**
  * Feeds `editor` the references its text holds and their titles, and renders nothing of its own.
- * `source` is the document the text belongs to, which its `#id`s name a question block of.
+ * `source` is the record the text is - the document itself - whose question map the server
+ * answers for, so a `#id` in the editor resolves exactly as it does in a rendered body
+ * (`useTextReferences`). Text of no record resolves no `#id`.
  */
 export function DocumentReferences({
   editor,
   source,
 }: {
   editor: EditorHandle | undefined;
-  source: TextSource;
+  source: TextSource | undefined;
 }): ReactNode {
   // The words the editor last reported: every candidate its reader found in the document, which
   // is what this resolves - never the markdown the page loaded, which a typed reference is not in.

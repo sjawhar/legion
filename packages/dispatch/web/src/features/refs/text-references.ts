@@ -58,27 +58,26 @@ export interface TextReferenceNeeds {
   readonly prefixes: readonly string[];
 }
 
-/** The document a text belongs to, which its `#id`s resolve against: an issue, whose spec is
- *  the scope, or a document by its own id. It is the margin's own owner (`MarginOwner`), so a
- *  surface inside the margin passes the owner it already holds; `project` and `slug` are that
- *  owner's, and name the address an ask written on a project document is referenced by, having
- *  no issue to be addressed under. Text of no document - an agent's conversation, a broadcast,
- *  a search hit - names none and gets no `#id` links, which is right: a `#id` there declares
- *  nothing. */
-export type TextSource =
-  | { readonly kind: "issue"; readonly key: string }
-  | {
-      readonly kind: "document";
-      readonly artifactId: string;
-      readonly project?: string;
-      readonly slug?: string;
-    };
+/** What the text belongs to, as the reference graph knows it: the record whose text it is, by
+ *  the kind the server indexes that record under and its id - a document version's own text
+ *  (`artifact`), an ask's question, answer or resolution reason, a comment, an issue message.
+ *  Which document a `#id` in it resolves against is the server's to say
+ *  (`refs.ScopeOf`, read through `GET /api/v1/references/questions`): the document itself, the
+ *  document an ask or a comment is written on or anchored to, an issue message's spec. Text
+ *  that is no record's - an agent's conversation, a broadcast, a search hit - names no source
+ *  and gets no `#id` links, which is right: a `#id` there declares nothing. */
+export interface TextSource {
+  readonly kind: "artifact" | "ask" | "comment" | "message";
+  readonly id: string;
+}
 
-/** The source of a text an issue owns - an ask's question, a message, an activity line: that
- *  issue, whose spec its `#id`s name a question block of. None where there is no issue, which a
- *  project document's own item has; a caller showing one names that document instead. */
-export function issueSource(key: string | null | undefined): TextSource | undefined {
-  return key === null || key === undefined || key === "" ? undefined : { key, kind: "issue" };
+/** The source of one record's own text, or none where there is no record to name it by: a
+ *  reply shown without its id, a row of text an issue owns but no record holds. */
+export function textSourceOf(
+  kind: TextSource["kind"],
+  id: string | null | undefined
+): TextSource | undefined {
+  return id === null || id === undefined || id === "" ? undefined : { id, kind };
 }
 
 /** What a caller already knows about the text. Each is read only where the text holds a
@@ -88,8 +87,8 @@ export interface TextReferenceFacts {
   readonly origin?: string;
   /** The issue keys that name an issue that exists. */
   readonly issues?: readonly string[];
-  /** The question map of the document the text belongs to: each question block id to the
-   *  reference of the ask it declares. */
+  /** The question map of the document the text's source belongs to, as the server answers it:
+   *  each question block id to the reference of the ask it declares. */
   readonly questions?: Readonly<Record<string, string>>;
   /** Each whole id a prefix resolved to, to the reference that item is stored under. */
   readonly items?: Readonly<Record<string, string>>;

@@ -576,6 +576,25 @@ function issueWriteTargets(
   return targets;
 }
 
+/** Every question map a reader holds (`["references", "questions", <kind>, <id>]`, the read
+ *  behind a `#id` in any text). The read is keyed by the source whose text was read, and
+ *  neither a version nor an ask names those sources, so the prefix is refreshed rather than one
+ *  key. */
+const EVERY_QUESTION_MAP: RefreshTarget = { queryKey: ["references", "questions"] };
+
+/** Whether the event can change what a `#id` names: a new version of a document, which decides
+ *  which `:::ask{#id}` blocks the latest version declares, or an ask settling into a block,
+ *  leaving one or moving - every ask event but a follower's arrival or departure, which moves
+ *  no block. */
+function changesQuestionMaps(event: Event): boolean {
+  return (
+    event.type === "artifact.version" ||
+    (isAskEvent(event) &&
+      event.type !== "ask.follower_added" &&
+      event.type !== "ask.follower_removed")
+  );
+}
+
 /** What a project document's event refreshes: an ask, a comment, a version or a review on a
  *  document that belongs to no issue. */
 function documentTargets(event: Event, viewer: string | undefined): RefreshTarget[] {
@@ -596,6 +615,9 @@ function documentTargets(event: Event, viewer: string | undefined): RefreshTarge
       when: (data) => data === undefined || (data as Artifact).id === id,
     },
   ];
+  if (changesQuestionMaps(event)) {
+    targets.push(EVERY_QUESTION_MAP);
+  }
   // A reference to the document shows its name, kind and latest version. A new document can be
   // the one a reference that found nothing named (no data to test), so it refreshes those too.
   if (event.type === "artifact.version" || event.type === "artifact.created") {
@@ -739,6 +761,9 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   }
   if (changesReferenceGraph(event)) {
     targets.push({ exact: true, queryKey: ["issue", key, "references"] });
+  }
+  if (changesQuestionMaps(event)) {
+    targets.push(EVERY_QUESTION_MAP);
   }
   if (event.type === "decision.kept") {
     // A Keep moves one decision's row of the issue's Decisions view and nothing else: it writes

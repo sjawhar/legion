@@ -295,10 +295,10 @@ function* paintBlockInSlices(
  * never reach the page in one task. A preview that must clamp its rendered line is
  * `MarkdownPreview`, which parses with the same engine.
  *
- * A bare issue key, and a `#` and the id of a question block of `source`, read as references
- * too, and link where they name something (`useTextReferences`). A caller whose text belongs to
- * a document names it in `source`; one whose text belongs to none passes nothing and gets no
- * `#id` links, which is right.
+ * A bare issue key, and a `#` and the id of a question block of `source`'s document, read as
+ * references too, and link where they name something (`useTextReferences`). A caller names the
+ * record this text is in `source`, and the server says which document its `#id`s resolve
+ * against; text that is no record's passes nothing and gets no `#id` links, which is right.
  */
 export function MarkdownBody({
   markdown,
@@ -313,8 +313,8 @@ export function MarkdownBody({
    *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
    *  as a model's streamed turn (`SoftBreaks`). */
   softBreaks?: SoftBreaks;
-  /** The document this text belongs to, which its `#id`s name a question block of
-   *  (`TextSource`); none for text of no document. */
+  /** The record this text is - the ask, comment, message or document version whose text it is
+   *  (`TextSource`); none for text of no record, which links no `#id`. */
   source?: TextSource;
   variant?: "block" | "inline";
 }): ReactNode {

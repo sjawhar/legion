@@ -208,6 +208,8 @@ export type {
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
+  ReferenceQuestion,
+  ReferenceQuestions,
   RepoProject,
   RequirementCoverage,
   SearchArtifactRef,

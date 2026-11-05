@@ -17,13 +17,13 @@ import type {
   Artifact,
   ArtifactText,
   ArtifactVersionContent,
-  Ask,
   AskRead,
   CommentRead,
   GraphReferences,
   IssueReferenceSummary,
   IssueReferenceSummaryDocument,
   MessageRead,
+  ReferenceQuestions,
 } from "../../api/types";
 import { itemOfBlock } from "./block-reference";
 import { useMarkdownHeadline } from "./markdown-engine";
@@ -32,7 +32,6 @@ import {
   buildReferencePath,
   type DispatchReferenceRoute,
   type IssueRoute,
-  itemRoute,
   type ReferencedArtifact,
   referencedArtifact,
 } from "./routes";
@@ -161,81 +160,33 @@ export const blockQuery = (reference: string | undefined) =>
     refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
-/** The document itself, read for the owner that serves its asks. It is the read every other
- *  surface of a document already shares (`["artifact", id]`), so a page showing the document
- *  pays nothing for it. */
-const documentQuery = (artifactId: string) =>
+/** `GET /api/v1/references/questions?kind=&id=`: the question map a `#id` in one source's text
+ *  resolves against, which is the server's own map (`refs.ScopeOf` for the document that text
+ *  belongs to, `refs.QuestionMap` for the questions that document's latest version declares) -
+ *  the one map the page and the reference graph share. Keyed by the source, so two texts of one
+ *  source read it once. A source whose text belongs to no document answers 404, which leaves
+ *  its `#id`s as plain text, so the read is not retried. */
+export const questionsQuery = (source: TextSource | undefined) =>
   queryOptions({
-    queryKey: ["artifact", artifactId],
-    queryFn: () => api.getArtifact(artifactId),
+    queryKey: ["references", "questions", source?.kind, source?.id] as const,
+    queryFn: () => api.getReferenceQuestions(source?.kind ?? "", source?.id ?? ""),
+    retry: false,
   });
 
-/** The asks the question map of a text's document is built from, read on the route that serves
- *  that document's owner and under the key that owner's other readers already use: an issue's
- *  asks under `["asks", <key>]`, since `/artifacts/{id}/asks` refuses a document an issue owns
- *  (`ARTIFACT_LINKED`), and a project document's own asks under `["artifact", <id>, "asks"]`,
- *  which is what `useAnsweredAsks` and `ProofDocument` read and what an ask event invalidates.
- *  A document source carries no issue key, so the owner comes from the document itself, read
- *  under the key every other surface of that document already shares. `enabled` is the caller's
- *  own need: only a text that writes a `#id` asks for any of this. */
-export function useDocumentAsks(
-  source: TextSource | undefined,
-  enabled: boolean
-): readonly Ask[] | undefined {
-  const artifactId = source?.kind === "document" ? source.artifactId : undefined;
-  const document = useQuery({
-    ...documentQuery(artifactId ?? ""),
-    enabled: enabled && artifactId !== undefined,
-  });
-  const issueKey =
-    source?.kind === "issue"
-      ? source.key
-      : document.data === undefined || document.data.issue_key === null
-        ? undefined
-        : document.data.issue_key;
-  // The owner is known once the issue key is in hand, or once the document it must come from
-  // says the document has none; until then there is no key to read under.
-  const owned = issueKey !== undefined && issueKey !== "";
-  const ownerless = source?.kind === "document" && document.data !== undefined && !owned;
-  const asks = useQuery<Ask[]>({
-    queryKey: ownerless ? ["artifact", artifactId, "asks"] : ["asks", owned ? issueKey : undefined],
-    queryFn: () =>
-      ownerless && artifactId !== undefined
-        ? api.listArtifactAsks(artifactId, "all")
-        : api.listIssueAsks(issueKey ?? "", "all"),
-    enabled: enabled && (owned || ownerless),
-  });
-  return asks.data;
-}
-
-/** The question map of `source`: each question block id its document declares to the reference
- *  of the ask settled for it, as the server's `refs.QuestionMap` writes it. The scope of an
- *  issue's text is its spec, the one document its question blocks are declared in; the scope of
- *  a project document's text is that document. An ask with no block of its own declares no
- *  question. */
-export function questionMap(asks: readonly Ask[], source: TextSource): Record<string, string> {
-  const document = source.kind === "document" ? source : undefined;
+/** The question map of a read's answer: each question block id its document declares to the
+ *  `dispatch://` reference of the ask settled for it, as the server writes that address. A
+ *  block whose ask has no address - an ask on an agent conversation's document - is left out,
+ *  since no reference names it. Undefined until the read answers. */
+export function questionReferences(
+  answer: ReferenceQuestions | undefined
+): Readonly<Record<string, string>> | undefined {
+  if (answer === undefined) {
+    return undefined;
+  }
   const questions: Record<string, string> = {};
-  for (const ask of asks) {
-    const block = ask.block_id;
-    if (block === undefined || block === null || block === "") {
-      continue;
-    }
-    const holder = ask.block_artifact;
-    const declared =
-      document === undefined ? holder?.primary === true : holder?.id === document.artifactId;
-    if (!declared) {
-      continue;
-    }
-    const route = itemRoute(
-      "ask",
-      { id: ask.id, issue_key: ask.issue_key },
-      document?.project === undefined || document.slug === undefined
-        ? undefined
-        : { project: document.project, slug: document.slug }
-    );
-    if (route !== undefined) {
-      questions[block] = buildDispatchReference(route);
+  for (const question of answer.questions) {
+    if (question.reference !== "") {
+      questions[question.block_id] = question.reference;
     }
   }
   return questions;

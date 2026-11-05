@@ -8,11 +8,12 @@ import type { Ask, BlockSchema } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
-import { DocumentReferences, documentSource, useReferenceClick } from "./document-references";
+import { DocumentReferences, useReferenceClick } from "./document-references";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
@@ -65,8 +66,8 @@ export function VersionView({
       ? versionQuery.data.markdown
       : undefined;
   // Where a `#id` in this version's text resolves: the document it is a version of, whose
-  // question blocks declare the asks it names.
-  const textSource = useMemo(() => documentSource(artifactId, owner), [artifactId, owner]);
+  // latest version's question blocks declare the asks it names, as the server reads them.
+  const textSource = useMemo(() => textSourceOf("artifact", artifactId), [artifactId]);
   const followReference = useReferenceClick();
 
   // `ProofDocument` renders this view and forwards `highlight`; `ArtifactDocument` above it

@@ -21,7 +21,7 @@ import { AskOwnerLink } from "../inbox/AskOwnerLink";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
-import { issueSource } from "../refs/text-references";
+import { textSourceOf } from "../refs/text-references";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 
 const PAGE_SIZE = 50;
@@ -53,9 +53,10 @@ function AnswerRow({
   onChange: () => void;
   row: MyAnswerRow;
 }): ReactNode {
-  // A row the reader answered on a project document names no document id (`InboxDocument` is
-  // its project, slug and name), so its text resolves no `#id`.
-  const source = "issue" in row.owner ? issueSource(row.owner.issue.key) : undefined;
+  // Every text of the row is the ask's: its question, the answer written on it, and a reply in
+  // its thread, which takes the ask's scope (`refs.ScopeOf`). So a `#id` in any of them resolves
+  // against the document the server scopes the ask to, read once for the row.
+  const source = textSourceOf("ask", row.ask_id);
   const changeable =
     row.kind === "answer" &&
     row.current &&
