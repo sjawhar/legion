@@ -43,17 +43,11 @@
 #                check run: the default, `latest`, returns one check run per name, and a commit
 #                can carry two — a failing one from the run whose job failed, and a passing one
 #                from a later run of the same group. `per_page=100` is required with it: the
-#                default page holds the 30 newest check runs of the commit. A commit that
-#                carries both is no failed group, so a `success` among them is the conclusion
-#                this map holds, and among the rest the newest check run decides, which is the
-#                one GitHub's merge box and the Legion daemon read:
-#                  jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS" |
-#                    while read -r sha; do
-#                      gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-#                        --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
-#                              else ([.check_runs[]?] | sort_by(.id) | last | .conclusion // empty) end' |
-#                        jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
-#                    done | jq -s 'add // {}'
+#                default page holds the 30 newest check runs of the commit. Which conclusion a
+#                page of them gives this map is .github/scripts/ci-ok-conclusion.sh's — the file
+#                ci.yaml's `cancel-started` step runs over each head it reads, and
+#                merge-group-cancels.test.sh runs over pages of its own, so that read is written
+#                once and neither this header nor that step holds a copy of it.
 #   REPORT       the failed act's whole decision, which the caller reads from this run's
 #                artifacts before it asks (.github/scripts/merge-group-report.sh): one of
 #                `success`, `failure`, `cancelled`, `unposted`, `absent` and `unknown`, which
@@ -73,12 +67,14 @@
 #     last `cancel` line: cancelling this run first would kill the job that has the descendants
 #     to cancel. The caller gives these two words only for a report whose ci-ok went up, so
 #     nothing here leaves the group unjudged.
-#   * `unposted` — the job's own work failed and no ci-ok of this group was posted for it: its
-#     report step was refused three times, by the artifact list or by the check-run post. It
-#     cancels the descendants, which are doomed either way, and never the asking run, which is
-#     the only run that can still post this group's verdict: a later job of it finds that
-#     `failure` among the reports and posts the failing ci-ok. It trades what the `absent` case
-#     below trades, and for the same reason.
+#   * `unposted` — the job's own work failed and nothing shows that a ci-ok of this group went
+#     up for it; merge-group-report.sh's header says which two artifacts answer that and when
+#     the answer is this word. It cancels the descendants, which are doomed either way, and
+#     never the asking run, which is the only run that can still post this group's verdict: a
+#     later job of it finds that `failure` among the reports and posts the failing ci-ok. When
+#     that job is the last of its run to report there is no later job: nothing posts a verdict,
+#     and the group carries no ci-ok until GitHub's 180-minute check timeout takes it out of the
+#     queue. It trades what the `absent` case below trades, and for the same reason.
 #   * `absent` — the job uploaded no report, so this group carries no ci-ok of its own yet.
 #     `cancel-changes` always meets this: `changes` has no ci-ok-report step, and the jobs that
 #     post for a run whose `changes` did not succeed (lint, typecheck and test, whose `if:`

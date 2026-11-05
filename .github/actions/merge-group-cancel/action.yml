@@ -52,9 +52,6 @@ runs:
         export JOB
         REPORT=$("$GITHUB_ACTION_PATH/../../scripts/merge-group-report.sh")
         echo "$JOB's own report for attempt $RUN_ATTEMPT is $REPORT"
-        if [ "$REPORT" = unknown ]; then
-          echo "::warning::the run's artifact list could not be read, so whether $JOB's own work failed cannot be told here and this act cancels nothing"
-        fi
         RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
           --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
         export REPORT RUNS

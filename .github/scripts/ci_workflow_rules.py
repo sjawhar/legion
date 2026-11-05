@@ -6,10 +6,11 @@ them; check-ci-filters.sh's header numbers them 10, 13, 12 and 11, and ci_filter
 is what runs them, over the ci.yaml document it already loaded.
 
 It sits beside that engine (and workflow_paths.py, the path model) in the repository it checks,
-and imports the engine's names for the two workflow files, the repository root, the env entry
-naming the jobs outside ci-ok's accounting and the three
-helpers that read an `if:`. main() imports this module rather than the other way round, so the
-one import here is of a module Python has finished loading by then.
+and imports the engine's names for the two workflow files, the repository root, the two env
+entries that leave a job out of a rule here — the jobs outside ci-ok's accounting, and the jobs
+the queue never runs, which take no follower — and the three helpers that read an `if:`. main()
+imports this module rather than the other way round, so the one import here is of a module
+Python has finished loading by then.
 """
 
 import json
@@ -18,7 +19,8 @@ from collections import defaultdict
 
 import yaml
 
-from ci_filter_coverage import CACHE_WORKFLOW, EXEMPT_LIST, REPO, WORKFLOW, conditions, squash, where_if
+from ci_filter_coverage import (CACHE_WORKFLOW, EXEMPT_LIST, PULL_REQUEST_ONLY_LIST, REPO, WORKFLOW, conditions,
+                                squash, where_if)
 
 
 # ---------------------------------------------------------------- the conditions ci.yaml cannot hold
@@ -107,8 +109,6 @@ def check_rerun_guard(document: dict, problems: list) -> None:
 FOLLOWER_ACTION = "./.github/actions/merge-group-cancel"
 FOLLOWER_IF = ("${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' "
                "&& (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}")
-# The env entry naming the jobs the queue never runs, which take no follower.
-PULL_REQUEST_ONLY_LIST = "CI_OK_PULL_REQUEST_ONLY"
 
 
 def check_followers(document: dict, problems: list) -> None:

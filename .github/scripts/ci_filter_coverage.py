@@ -742,12 +742,14 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
 
 # The jobs ci-ok.sh holds to success on every run, so CI_OK_SELECTED_BY maps neither.
 ALWAYS_RUN = ("changes", "lint")
+# ci.yaml's env entry naming the jobs the merge queue never runs, which take no follower.
+PULL_REQUEST_ONLY_LIST = "CI_OK_PULL_REQUEST_ONLY"
 # ci-ok.sh's lists of CI_OK_SELECTED_BY jobs whose if: admits only some events, as ci.yaml's env
 # names them: per list, the if: term that puts a job on it, what that term admits, and the events
 # where ci-ok.sh accepts its skip.
 EVENT_LISTS = {
-    "CI_OK_PULL_REQUEST_ONLY": (re.compile(r"github\.event_name\s*==\s*'pull_request'"),
-                                "admits only pull_request", "github.event_name == 'pull_request'", "every other event"),
+    PULL_REQUEST_ONLY_LIST: (re.compile(r"github\.event_name\s*==\s*'pull_request'"),
+                             "admits only pull_request", "github.event_name == 'pull_request'", "every other event"),
 }
 # The step every job but `changes` ends with (.github/actions/ci-ok-report): it records the job's
 # result, and the last job of a run to finish posts ci-ok from it, so its inputs are fixed.
@@ -762,7 +764,8 @@ REQUIRED_CHECKS = ("ci-ok", "pr-title")
 # dependency code, reports no result to ci-ok and is no job a verdict waits for.
 EXEMPT_LIST = "CI_OK_EXEMPT"
 # The cancel jobs EXEMPT_LIST names are held by ci_workflow_rules.check_followers, which reads
-# EXEMPT_LIST and the PULL_REQUEST_ONLY list of this module's EVENT_LISTS from the same env.
+# EXEMPT_LIST and PULL_REQUEST_ONLY_LIST, the one list of this module's EVENT_LISTS, from the
+# same env and imports both names from here, so each entry is named in one place.
 
 
 def check_ci_ok(document: dict, problems: list) -> None:

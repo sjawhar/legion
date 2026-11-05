@@ -434,7 +434,7 @@ GATES = [
                               "ci_job_reads.py or release-bump.sh where a checker reads them)"),
         (".github/workflows/main-bypass-check.yaml",
          at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:239-249 reads the "
-         "workflow and holds every run: step of it to a shell with pipefail, and :323 holds its COMMITS to "
+         "workflow and holds every run: step of it to a shell with pipefail, and :322-324 holds its COMMITS to "
          "push-commits.sh"),
         (".github/ci-images.yaml", f"{at('test', 'Test the CI image mirror')}: mirror-ci-images.test.sh:322-351 builds "
                                    "its ordering fixture from the repository's own rows"),

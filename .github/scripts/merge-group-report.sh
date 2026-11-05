@@ -61,7 +61,7 @@ done
 if ! names=$(gh_read gh api --paginate \
   "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
   --jq '.artifacts[].name'); then
-  echo "the run's artifact list could not be read, so what $JOB's own work did cannot be told here" >&2
+  echo "::warning::the run's artifact list could not be read, so what $JOB's own work did cannot be told here, and this follower cancels nothing" >&2
   echo unknown
   exit 0
 fi

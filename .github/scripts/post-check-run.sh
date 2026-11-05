@@ -44,8 +44,12 @@ case $CONCLUSION in
 esac
 
 # GitHub refuses a summary longer than 65535 characters. The body goes to a file rather than to
-# gh's stdin: a retried post must send it again, and a here-string is read to its end by the
-# attempt that was refused.
+# gh's stdin: a retried post must send it again, and the three attempts of gh-read.sh's ladder
+# share the one stdin a here-string gives them, which nothing rewinds. Measured under bash 5.2
+# over that ladder's shape: a refused attempt that read nothing leaves the whole body for the
+# next attempt, one that read the body to its end leaves it nothing, and one refused after 40 of
+# 121 bytes leaves the other 81 — so the body a retry sent would be whatever the refusal before
+# it happened to leave. `--input` names a file, which every attempt opens and reads in full.
 body=$(mktemp)
 trap 'rm -f "$body"' EXIT
 jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg conclusion "$CONCLUSION" \

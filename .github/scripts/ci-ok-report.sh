@@ -30,8 +30,10 @@
 # on, and the last of them to report posts the verdict — a failing one, since that job's
 # `failure` report is in the list it reads (.github/scripts/merge-group-report.sh reads the
 # report and the marker, and .github/scripts/merge-group-cancels.sh's header says what each
-# answer it gives does, and what each trades). The report artifact this step uploads is the very
-# signal the follower reads, so the two never disagree about which job's work failed. `changes`
+# answer it gives does, and what each trades). When that refused job is itself the last of its
+# run to report, no later job posts anything at all, and the group carries no ci-ok until that
+# same 180-minute timeout. The report artifact this step uploads is the very signal the follower
+# reads, so the two never disagree about which job's work failed. `changes`
 # is the other decided case with no force-cancel behind it: it uploads no report, so its
 # follower cancels the groups built on this one and leaves this run alive, and the first of
 # lint, typecheck and test to report posts the verdict below.
@@ -203,14 +205,9 @@ fi
 # jobs succeeded, and the group this run tests cannot merge either way.
 unreported=$(jq '.pending | length' <<<"$decision")
 if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]; }; then
-  jobs=
-  listed=false
   if jobs=$(gh_read gh api --paginate \
     "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
     --jq '.jobs[] | {name, status, conclusion}'); then
-    listed=true
-  fi
-  if [ "$listed" = true ]; then
     decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" --argjson decided "$decided" '
       def mine($job): [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))];
       def ended($job):
