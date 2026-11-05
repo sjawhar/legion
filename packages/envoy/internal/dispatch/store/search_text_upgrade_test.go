@@ -66,7 +66,8 @@ func readVectors(t *testing.T, ctx context.Context, store *Store, queries map[st
 func TestSearchTextMigrationKeepsEveryRowShapesVector(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 55)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 55)
 	generated := searchRowShapes(t, ctx, store, "a")
 	before := readVectors(t, ctx, store, generated)
 	// What the generated columns gave each shape on main: a binary version's vector is NULL (0019

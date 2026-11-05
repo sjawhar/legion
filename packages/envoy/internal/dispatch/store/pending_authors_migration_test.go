@@ -12,7 +12,8 @@ import (
 func TestMigrate0084KeepsEveryOwedSettlementAndStartsWithNoPendingAuthors(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 83)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 83)
 	var artifactID string
 	if err := store.Pool.QueryRow(ctx, `
 		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),

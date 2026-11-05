@@ -122,7 +122,7 @@ func TestTheIssueChildrenAnswerWhatMainsStatementDid(t *testing.T) {
 	if len(want) != 2 {
 		t.Fatalf("main's children statement answered %v; want the branch and the leaf", want)
 	}
-	if got := issueChildrenRows(t, fixture.database, issueChildrenQuery, fixture.root); !slices.Equal(got, want) {
+	if got := issueChildrenRows(t, fixture.database, issueChildrenStatement, fixture.root); !slices.Equal(got, want) {
 		t.Fatalf("the children statement answered\n%v\nwant main's rows\n%v", got, want)
 	}
 }
@@ -192,7 +192,7 @@ func seedIssueChildrenBacklog(t *testing.T, database *store.Store) {
 func TestTheIssueChildrenReadEveryIssueThroughTheParentIndex(t *testing.T) {
 	fixture := newIssueChildrenFixture(t)
 	seedIssueChildrenBacklog(t, fixture.database)
-	plan := planOf(t, fixture.database, issueChildrenQuery, fixture.root)
+	plan := planOf(t, fixture.database, issueChildrenStatement, fixture.root)
 	if unkeyed := explaintest.ScansWithoutIndexCond(t, plan); len(unkeyed) > 0 {
 		t.Errorf("the children statement reads %v, which no index serves:\n%s", unkeyed, plan)
 	}

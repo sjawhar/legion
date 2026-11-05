@@ -224,7 +224,8 @@ func TestTheBlockIndexTriggersOweWhatAnyBuildWrites(t *testing.T) {
 func TestTheBlockGrammarSeedOwesOlderText(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, beforeBlockGraph)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeBlockGraph)
 	seedBlockIndexIssue(t, store)
 	doc := insertReturningID(t, store, `
 		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)

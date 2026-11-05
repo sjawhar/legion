@@ -51,23 +51,14 @@ var shared struct {
 	template string
 }
 
-// TestMain runs the package's tests and then drops the templates its clones came from - the
-// set's head and each older version a test asked for (templateThrough); each clone is dropped
-// by the test that took it.
+// TestMain runs the package's tests and then drops the template its clones came from; each
+// clone is dropped by the test that took it.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if shared.admin != nil {
-		templates := []string{}
 		if shared.template != "" {
-			templates = append(templates, shared.template)
-		}
-		for _, name := range migratedTemplates.built {
-			templates = append(templates, name)
-		}
-		for _, name := range templates {
-			// No force: nothing is connected to a template, which is why they take clones.
-			if _, err := shared.admin.Exec(context.Background(), "drop database "+name); err != nil {
-				fmt.Fprintf(os.Stderr, "store test: drop template database %s: %v\n", name, err)
+			if _, err := shared.admin.Exec(context.Background(), "drop database "+shared.template+" with (force)"); err != nil {
+				fmt.Fprintf(os.Stderr, "store test: drop template database %s: %v\n", shared.template, err)
 				if code == 0 {
 					code = 1
 				}
@@ -114,8 +105,7 @@ func prepareShared(databaseURL string) error {
 // dropped when t ends. A clone carries what every migration left and nothing any test wrote, so
 // a test that wants the current schema and only its own rows takes one: running the whole set on
 // an empty database for that cost a second of Postgres per test (dispatch://INFRA-1075). Only a
-// test about the runner itself migrates, and there from an empty database (openEmptyTestStore)
-// or from the version its subject follows (openMigratedThrough).
+// test about the runner itself migrates, and there from an empty database (openEmptyTestStore).
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	databaseURL := testDatabaseURL(t)
@@ -146,85 +136,6 @@ func openEmptyTestStore(t *testing.T) *Store {
 // attempts stay at production's three, written here rather than read from the constant so that a
 // test of the give-up names the number it proves.
 var testLocking = pgmigrate.Locking{Timeout: 500 * time.Millisecond, Attempts: 3, RetryPause: 150 * time.Millisecond}
-
-// migratedTemplates are the databases a test clones a schema older than the set's head from, one
-// per version asked for, built once for the whole run and dropped by TestMain. A test that needs
-// the schema as of version N used to apply every migration up to N itself, a second or more of
-// Postgres work each; thirty-odd tests of this package do, several of them at the same version
-// (dispatch://INFRA-1075). Each template is built by cloning the nearest lower one already built
-// and applying the migrations between, so the run applies each migration a handful of times
-// rather than once per test, and a test pays one create database for its schema.
-//
-// A build holds mu for its whole length: two tests asking for one version build it once, and a
-// test asking for a version above another's waits for that one and starts from it rather than
-// from an empty database. Each template is closed to connections once it is built, as the head
-// template is, since Postgres refuses to clone a database another session is connected to.
-var migratedTemplates struct {
-	mu    sync.Mutex
-	built map[int]string
-}
-
-// templateThrough names the database carrying the embedded set through version, building it when
-// this run has not already.
-func templateThrough(t *testing.T, version int) string {
-	t.Helper()
-	ctx := context.Background()
-	migratedTemplates.mu.Lock()
-	defer migratedTemplates.mu.Unlock()
-	if name, built := migratedTemplates.built[version]; built {
-		return name
-	}
-	// The highest template already built that is no higher than the one wanted: its clone needs
-	// only the migrations above it.
-	from, at := "", 0
-	for built, name := range migratedTemplates.built {
-		if built <= version && built > at {
-			at, from = built, name
-		}
-	}
-	source := ""
-	if from != "" {
-		source = "template " + from + " "
-	}
-	suffix, err := randomSuffix()
-	if err != nil {
-		t.Fatalf("name the template at version %d: %v", version, err)
-	}
-	name := "dispatch_store_at_" + strconv.Itoa(version) + "_" + suffix
-	if _, err := shared.admin.Exec(ctx, "create database "+name+" "+source+"strategy file_copy"); err != nil {
-		t.Fatalf("create the template at version %d: %v", version, err)
-	}
-	store, err := Open(ctx, databaseURLOf(shared.server, name), WithMaxConns(testPoolSize))
-	if err != nil {
-		t.Fatalf("open the template at version %d: %v", version, err)
-	}
-	store.Locking = testLocking
-	// The migrations at or below the clone's own version are recorded in it already, so this
-	// applies only those above (applyMigrationOnce).
-	migrateThrough(t, store, version)
-	store.Pool.Close()
-	if _, err := shared.admin.Exec(ctx, "alter database "+name+" with allow_connections false"); err != nil {
-		t.Fatalf("close the template at version %d to connections: %v", version, err)
-	}
-	if migratedTemplates.built == nil {
-		migratedTemplates.built = map[int]string{}
-	}
-	migratedTemplates.built[version] = name
-	return name
-}
-
-// openMigratedThrough returns a store on a database of t's own carrying the embedded set through
-// version, cloned from that version's template rather than migrated here, and dropped when t
-// ends.
-func openMigratedThrough(t *testing.T, version int) *Store {
-	t.Helper()
-	databaseURL := testDatabaseURL(t)
-	shared.once.Do(func() { shared.err = prepareShared(databaseURL) })
-	if shared.err != nil {
-		t.Fatalf("prepare the migrated template database: %v", shared.err)
-	}
-	return openClone(t, "template "+templateThrough(t, version)+" ")
-}
 
 // testPoolSize bounds the shared pool of every store openClone hands a test, in place of
 // production's sharedPoolSize, for the reason storetest bounds its own at the same number: the
@@ -788,7 +699,8 @@ func auditTwoMigrations(t *testing.T, first, second string) error {
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 7)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 7)
 	// Production recorded version 8 from Go (the one-time legacy document
 	// conversion) before 0008_legacy_documents.up.sql existed.
 	if _, err := store.Pool.Exec(ctx, `insert into schema_migrations (version) values (8)`); err != nil {
@@ -977,7 +889,8 @@ func seedGraphAt0007(t *testing.T, store *Store) string {
 func TestMigrate0015BackfillsIssueRanksByProjectCreationOrder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 13)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 13)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core'), ('OPS', 'Operations');
 		insert into issues (key, project_key, number, title, created_by, created_at) values
@@ -1032,7 +945,8 @@ func TestMigrate0015BackfillsIssueRanksByProjectCreationOrder(t *testing.T) {
 func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 7)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 7)
 	seedGraphAt0007(t, store)
 
 	if err := store.Migrate(ctx); err != nil {
@@ -1085,7 +999,8 @@ func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
 func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 7)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 7)
 	commentID := seedGraphAt0007(t, store)
 	const malformed = "CORE-2/diagram-png``"
 	if _, err := store.Pool.Exec(ctx, `
@@ -1162,7 +1077,8 @@ func TestMigrateMarksLegacyNonNotifyingEventsPublished(t *testing.T) {
 func TestMigrate0031RewritesNullAskOptionsToEmptyArrays(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 30)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 30)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -1205,7 +1121,8 @@ func TestMigrate0031RewritesNullAskOptionsToEmptyArrays(t *testing.T) {
 func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 34)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 34)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -1541,7 +1458,8 @@ func TestAskReplyBackfillsMoveOnlyTheRepliesTheyOwn(t *testing.T) {
 	t.Parallel()
 	for _, backfill := range askReplyBackfills {
 		t.Run(backfill.name, func(t *testing.T) {
-			store := openMigratedThrough(t, backfill.through)
+			store := openEmptyTestStore(t)
+			migrateThrough(t, store, backfill.through)
 			seedAskThreads(t, store)
 			applyMigrationFile(t, store, backfill.file)
 			assertAskThreadsRepaired(t, store, backfill.name)
@@ -1626,7 +1544,8 @@ func TestAskReplyBackfillsTerminateOnACyclicReplyChain(t *testing.T) {
 	for _, backfill := range askReplyBackfills {
 		t.Run(backfill.name, func(t *testing.T) {
 			ctx := context.Background()
-			store := openMigratedThrough(t, backfill.through)
+			store := openEmptyTestStore(t)
+			migrateThrough(t, store, backfill.through)
 			const (
 				askID    = "33333333-3333-4333-8333-333333333333"
 				cyclicID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"

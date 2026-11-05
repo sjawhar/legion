@@ -333,7 +333,8 @@ func explainWithoutSeqScan(t *testing.T, store *Store, query string, setup ...st
 func TestMigrate0032RefusesNonUUIDAnchorArtifactIDs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 31)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 31)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank) values ('CORE-1', 'CORE', 1, 'Issue', '{"kind":"user","id":"alice"}', 'A');

@@ -23,7 +23,10 @@ const embeddingsPendingSinceVersion = 118
 func TestMigrationAddsPendingSince(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, embeddingsPendingSinceVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, embeddingsPendingSinceVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", embeddingsPendingSinceVersion-1, err)
+	}
 	waitingSince := time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into embeddings (kind, id, text_snapshot, content_hash, created_at) values ('issue', 'OLD-1', 'Pending', 'h1', $1);
@@ -107,7 +110,10 @@ func readPendingSince(t *testing.T, store *Store, kind, id string) (time.Time, *
 func TestMigrationDropsTheBackfillCheckpoints(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, embeddingsPendingSinceVersion)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, embeddingsPendingSinceVersion)); err != nil {
+		t.Fatalf("migrate through %d: %v", embeddingsPendingSinceVersion, err)
+	}
 	if _, err := store.Pool.Exec(ctx, `insert into embeddings_backfill_progress (kind, last_id, done) values ('issue', 'X-9', true)`); err != nil {
 		t.Fatalf("seed a checkpoint: %v", err)
 	}

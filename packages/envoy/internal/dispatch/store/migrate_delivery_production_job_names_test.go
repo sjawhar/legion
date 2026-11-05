@@ -17,7 +17,10 @@ const deliveryProductionJobNamesVersion = 109
 func TestMigrationTurnsTheProductionJobIntoAList(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, deliveryProductionJobNamesVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, deliveryProductionJobNamesVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", deliveryProductionJobNamesVersion-1, err)
+	}
 	const olderInsert = `insert into delivery_settings (deploy_repo, deploy_workflow_path, production_job_name, pr_checks_workflow_path, updated_by)
 		values ('acme/widgets', '.github/workflows/deploy.yml', $1, '.github/workflows/pr-checks.yml', '{"kind":"system","id":"test"}')`
 	if _, err := store.Pool.Exec(ctx, olderInsert, "widgets-release / widgets-release"); err != nil {

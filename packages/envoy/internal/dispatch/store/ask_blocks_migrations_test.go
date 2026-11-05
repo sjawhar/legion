@@ -159,7 +159,8 @@ func TestAnOlderBuildsWriteLeavesTheAskBlocksOwed(t *testing.T) {
 func TestTheAskBlockMigrationsOweEveryStoredAsk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, beforeAskBlocks)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeAskBlocks)
 	seedBlockIndexIssue(t, store)
 	insertAsk := func(question string) string {
 		return insertReturningID(t, store, `

@@ -15,7 +15,8 @@ import (
 func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 87)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 87)
 	if _, err := store.Pool.Exec(ctx, `insert into projects (key, name) values ('CORE', 'Core')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -111,7 +112,8 @@ func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 func TestMigrate0089WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 88)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 88)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)

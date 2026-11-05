@@ -4,7 +4,9 @@ import type { Doc } from "yjs";
 import type { BlockSchema } from "../../api/types";
 import { requestMermaidDrawing } from "../refs/mermaid-diagrams";
 import { importWhenOnline } from "../shell/DeploymentResilience";
+import type { WatchPicture } from "./picture-view";
 import { MARKS_MAP_NAME } from "./roots";
+import type { AskBlockHost } from "./typed-block-drawing";
 
 export type {
   MarkAction,
@@ -18,7 +20,16 @@ export type {
 } from "@legion/proof-editor";
 
 export type EditorHandle = ProofEditorHandle;
-export type EditorOptions = CreateProofEditorOptions & { blockSchema: BlockSchema };
+export type EditorOptions = CreateProofEditorOptions & {
+  blockSchema: BlockSchema;
+  /** The document's decision blocks, in document order, whenever the set changes. */
+  onAskBlockHosts: (hosts: readonly AskBlockHost[]) => void;
+  /** What a version-less picture's latest version is read through, for the `image` node view
+   *  `installTypedBlocks` mounts below. The reading is the page's (`watchPicturePath`, bound to
+   *  its query client), so a picture shares one summary read with the links and cards beside it;
+   *  the caller passes it because only React holds that client. */
+  watchPicture: WatchPicture;
+};
 export type CreateEditor = (root: HTMLElement, options: EditorOptions) => Promise<EditorHandle>;
 
 export const editorAttributes = {
@@ -31,14 +42,29 @@ export const editorAttributes = {
 // document mounts; `importWhenOnline` holds the retry policy for a chunk that fails offline.
 // Every editor's mermaid blocks (the live document, a read-only one, a past version) draw through
 // `requestMermaidDrawing`, in the Mermaid worker comments use, never on the page's thread.
+//
+// Dispatch's own node views travel with it (`ask-block.ts`): they are written against
+// ProseMirror's `DOMSerializer`, `Plugin` and `PluginKey`, so a page that imported them to call
+// them after the editor existed would parse a quarter of a megabyte of the editor's library
+// before its first paint - which is the very thing this `import()` is here to prevent.
 export const createEditor: CreateEditor = async (root, options) => {
-  const [{ createProofEditor }] = await importWhenOnline(() =>
-    Promise.all([import("@legion/proof-editor"), import("@legion/proof-editor/style.css")])
+  const [{ createProofEditor }, { installTypedBlocks }] = await importWhenOnline(() =>
+    Promise.all([
+      import("@legion/proof-editor"),
+      import("./ask-block"),
+      import("@legion/proof-editor/style.css"),
+    ])
   );
   const handle = await createProofEditor(root, { ...options, drawMermaid: requestMermaidDrawing });
   for (const [name, value] of Object.entries(editorAttributes)) {
     handle.view.dom.setAttribute(name, value);
   }
+  installTypedBlocks(
+    handle.view,
+    options.blockSchema,
+    options.onAskBlockHosts,
+    options.watchPicture
+  );
   return handle;
 };
 

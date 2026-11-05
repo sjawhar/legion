@@ -14,7 +14,8 @@ import (
 func TestMigrate0071AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 70)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 70)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)

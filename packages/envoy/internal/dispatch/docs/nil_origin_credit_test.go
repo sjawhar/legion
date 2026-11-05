@@ -43,8 +43,7 @@ const (
 
 // nilOriginCommit is what the service's own update observer made of one of the room's commits,
 // read while the class it recorded is still there (queueUpdateClass, consumeUpdateClass takes it
-// later), with the room's credit record just after it. class is the queued class itself, for a
-// test that measures it again as a live write's shadow would (storedClasses).
+// later), with the room's credit record just after it.
 type nilOriginCommit struct {
 	origin       string
 	classes      int
@@ -56,7 +55,6 @@ type nilOriginCommit struct {
 	lastActor    string
 	roomCredited bool
 	roomAuthors  []string
-	class        *queuedClass
 	after        creditState
 }
 
@@ -191,7 +189,6 @@ func (w *nilOriginWatch) record(update []byte, origin any) {
 			}
 			commit.classes++
 			commit.changed, commit.durable = class.contentChanged, class.durable
-			commit.class = class
 			if class.credit != nil {
 				commit.credited = true
 				commit.creditSeq = class.credit.record.seq
@@ -263,8 +260,8 @@ func paragraphLine(t *testing.T, markdown, prefix string) string {
 }
 
 // TestRenderReuseANilOriginCommitCreditsNoOne holds that a commit no one made - one ygo makes for
-// the room itself, with no origin - credits no browser, wherever the room's observer classifies it
-// as a content change.
+// the room itself, with no origin - credits no browser. It holds on both paths: where the room's
+// observer classifies the commit as a content change, and where it classifies it as no change.
 func TestRenderReuseANilOriginCommitCreditsNoOne(t *testing.T) {
 	t.Parallel()
 	t.Run("the browser's delete of a bold run it never saw", testADeleteThatDanglesABoldRun)
@@ -503,7 +500,9 @@ func testANilOriginCommitAfterARecover(t *testing.T) {
 // change after all (storedClasses). A shadow holding no document measures every class in its
 // window as a change (roomShadow.measure), so a cleanup of ygo's committed under an open write
 // would be stored as a change by every connected browser - an edit none of them made - unless
-// unchangedCredit refuses a nil origin as creditContentChange does (originCreditsNoOne).
+// unchangedCredit refuses a nil origin as creditContentChange does (originCreditsNoOne). That a
+// class the shadow measures as a change is stored with the authors the room recorded for it, none
+// here, is TestAShadowMeasuresTheClassesInItsWindowAndCreditsWhatItMeasures.
 func testANilOriginCommitAnOpenWritesShadowMeasures(t *testing.T) {
 	service, artifactID, sh := newRenderReuseService(t)
 	watch := watchNilOriginCredits(t, service, artifactID)
@@ -564,27 +563,6 @@ func testANilOriginCommitAnOpenWritesShadowMeasures(t *testing.T) {
 			commit.roomAuthors)
 	}
 	waitForLandedAppends(t, service, artifactID)
-
-	// What the write's shadow stores the commit as. A shadow left holding no document - a room
-	// update that did not apply to the fork leaves none (applyLocked) - measures the commit as a
-	// change, so the class is stored as a change with the authors the room recorded for it, and
-	// those must be none.
-	class := commit.class
-	if class == nil {
-		t.Fatal("the room recorded no class for the nil-origin commit, so there is nothing for a shadow to store")
-	}
-	if class.seq == 0 {
-		t.Fatal("the room recorded the nil-origin commit at no commit position, so no shadow window holds it")
-	}
-	window := shadowWindow{shadow: &roomShadow{}, cursor: class.cursor, from: class.seq - 1}
-	stored := storedClasses(artifactID, window, []*queuedClass{class})
-	if !stored[0].changed {
-		t.Fatal("a shadow holding no document measured the nil-origin commit as no change, so this test no longer reaches the author path")
-	}
-	if stored[0].credit != nil {
-		t.Errorf("the write's shadow stores the nil-origin commit as a change by %v: nobody typed it",
-			sortedActorKeys(stored[0].credit.record.authors))
-	}
 
 	sh.check(t)
 	replicaHoldsTheRoom(t, room, service.replicaOf(room), "the nil-origin commit under an open write")

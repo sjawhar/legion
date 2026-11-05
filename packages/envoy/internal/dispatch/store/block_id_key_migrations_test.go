@@ -70,7 +70,8 @@ func sqlState(err error) (string, string) {
 func TestTheBlockIDKeyIndexesHoldIDsPastTheKeyLimit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, beforeBlockIDKey)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeBlockIDKey)
 	seedBlockIndexIssue(t, store)
 	document := insertReturningID(t, store, `
 		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)

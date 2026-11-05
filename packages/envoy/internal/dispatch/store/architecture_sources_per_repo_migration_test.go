@@ -63,7 +63,10 @@ func architectureState(t *testing.T, store *Store) string {
 func TestMigrationKeepsAProjectsOneSourceAndItsComponents(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, architectureSourcesPerRepoVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, architectureSourcesPerRepoVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", architectureSourcesPerRepoVersion-1, err)
+	}
 	seedSingleSourceProject(t, store)
 	before := architectureState(t, store)
 	if err := store.migrate(ctx, migrationsThrough(t, architectureSourcesPerRepoVersion)); err != nil {
@@ -139,7 +142,10 @@ func TestMigrationKeepsAProjectsOneSourceAndItsComponents(t *testing.T) {
 func TestCensusCountsAComponentWhoseProjectHasNoSource(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, architectureSourcesPerRepoVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, architectureSourcesPerRepoVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", architectureSourcesPerRepoVersion-1, err)
+	}
 	seedSingleSourceProject(t, store)
 	if got := censusCount(t, store, architectureSourcesPerRepoVersion); got != 0 {
 		t.Fatalf("census over a project whose components have their source = %d, want 0", got)

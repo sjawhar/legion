@@ -2638,12 +2638,16 @@ run_step() {
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
   endpoints
+  # -heap-samples: the step's heap-live series, which CURVES.md and TREND.md show. A step measures
+  # the copy's capacity, not one build's CPU against another's, so the heap profile Dispatch
+  # writes every 15 s is worth its cost here; a replay, which is compared on Dispatch's CPU, runs
+  # without it (run_replay).
   run_in_runner "$name" "$dir" "step-$name" \
     $(($(duration_seconds "$warmup") + $(duration_seconds "$duration") + $(duration_seconds "$grace") + RUNNER_RUN_SLACK_SECONDS)) \
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup "$warmup" -grace "$grace" -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
+    -warmup "$warmup" -grace "$grace" -rng-seed "$rng_seed" -heap-samples "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 
@@ -3139,7 +3143,9 @@ replay_codepaths() {
 
 # run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME; with --typing
 # (TYPING), browser typing into typing_docs_replay's documents, mapped through the reset
-# database's loadtest.replay_ids.
+# database's loadtest.replay_ids. It gives loadgen run no -heap-samples: the replay is compared on
+# Dispatch's CPU over the window, and Dispatch writes any heap profile the harness asks for, so
+# the heap of a replay is read at the window's edges alone (heap-start.pprof, heap-end.pprof).
 run_replay() {
   local name=$1 from=$2 to=$3 phase=$4 window
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"

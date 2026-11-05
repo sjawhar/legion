@@ -23,7 +23,10 @@ const deliveryDropProductionJobNameVersion = 111
 func TestMigrationDropsTheProductionJobName(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, deliveryDropProductionJobNameVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, deliveryDropProductionJobNameVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", deliveryDropProductionJobNameVersion-1, err)
+	}
 	if _, err := store.Pool.Exec(ctx, `
 		insert into delivery_settings (deploy_repo, deploy_workflow_path, production_job_names, production_apply_step_name, pr_checks_workflow_path, updated_by)
 		values ('acme/widgets', '.github/workflows/deploy.yml', array['widgets-release / widgets-release', 'release / release'], 'Run ./.github/actions/apply', '.github/workflows/pr-checks.yml', '{"kind":"system","id":"test"}')
@@ -93,7 +96,10 @@ func TestMigrationDropsTheProductionJobName(t *testing.T) {
 func TestCensusRefusesTheDropOverARowWhoseColumnDriftedFromTheList(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, deliveryDropProductionJobNameVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, deliveryDropProductionJobNameVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", deliveryDropProductionJobNameVersion-1, err)
+	}
 	take := func() (*pgmigrate.Report, int64) {
 		t.Helper()
 		report, err := census(ctx, store.Pool.Config().ConnString(), migrationsThrough(t, deliveryDropProductionJobNameVersion), pgmigrate.CensusOptions{})

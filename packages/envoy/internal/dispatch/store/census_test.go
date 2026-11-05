@@ -605,7 +605,8 @@ func TestCensusRefusesATouchedTableAboveTheLimit(t *testing.T) {
 // prints artifact_versions above that limit with why the migration is exempt.
 func TestCensusExemptsAMigrationOfOnlyCatalogStatementsFromTheTableLimit(t *testing.T) {
 	t.Parallel()
-	store := openMigratedThrough(t, 121)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 121)
 	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, 122), pgmigrate.CensusOptions{TableLimit: 1})
 	if err != nil {
 		t.Fatalf("census: %v", err)
@@ -1189,7 +1190,8 @@ func TestCensusRefusesATouchedTableItCannotReadWithinTheLockTimeout(t *testing.T
 func TestCensusChecksTheTablesAForeignKeyReachesFromARowTheMigrationWrites(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, 55)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 55)
 	for _, statement := range []string{
 		`insert into projects (key, name) values ('CORE', 'Core')`,
 		`insert into issues (key, project_key, number, title, created_by, rank) values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U')`,

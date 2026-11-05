@@ -164,7 +164,8 @@ func TestAnOlderBuildsWriteLeavesTheItemOwed(t *testing.T) {
 func TestTheItemBlockMigrationsOweEveryStoredItem(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := openMigratedThrough(t, beforeItemBlocks)
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeItemBlocks)
 	seedBlockIndexIssue(t, store)
 	insertComment := func(body string) string {
 		return insertReturningID(t, store, `

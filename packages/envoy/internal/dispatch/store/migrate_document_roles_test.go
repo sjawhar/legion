@@ -15,7 +15,10 @@ const artifactDocumentRolesVersion = 20261102110000
 // picture, and another issue document each keep null.
 func TestMigrationGivesStoredIssueDocumentsTheirRole(t *testing.T) {
 	ctx := context.Background()
-	store := openMigratedThrough(t, artifactDocumentRolesVersion-1)
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, artifactDocumentRolesVersion-1)); err != nil {
+		t.Fatalf("migrate through the migration before the roles: %v", err)
+	}
 	for _, seed := range []string{
 		`insert into projects (key, name) values ('TEST', 'Test')`,
 		`insert into issues (key, project_key, number, title, created_by, rank) values ('TEST-1', 'TEST', 1, 'Spec', '{"kind":"user","id":"alice"}', 'U')`,
