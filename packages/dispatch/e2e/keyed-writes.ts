@@ -76,22 +76,49 @@ export function replayed(page: Page, method: string, path: string): Promise<Resp
  *  driven until the write moves rather than jumped once. `runFor` rather than `fastForward`:
  *  it fires a repeating timer every period it covers, where `fastForward` fires each timer once.
  *  The page's clock must be installed before it loaded (`page.clock.install()`, which leaves the
- *  clock running at real speed), so the write loop's timers are the ones driven here. */
+ *  clock running at real speed), so the write loop's timers are the ones driven here.
+ *
+ *  The clock stands still for as long as a write of the page's is out, and runs only over the
+ *  waits between attempts. An attempt the page has heard nothing of for `KEYED_SEND_ATTEMPT_MS`
+ *  of the page's own time is given up and made again under its key (`writeUnderKey`), and this
+ *  loop spends 1.1 s of page time for each 0.1 s of real time: driven over an attempt in flight
+ *  it reaches that 15 s in under a second and a half of a loaded lane's real time, abandoning
+ *  the very attempt the row waits for and raising one more POST than the row counts. Reads
+ *  (`GET`) are left out of the reckoning: none of them is a keyed attempt, and the page holds
+ *  some of them open for as long as it lives. */
 export async function runClockUntil<T>(
   page: Page,
   landing: Promise<T>,
   stepMs = 1_100
 ): Promise<T> {
+  // The writes of the page's that are out, by request: an attempt that went out before this was
+  // called ends while it runs, and a tally would count that ending as one write fewer than none.
+  const out = new Set<Request>();
+  const went = (request: Request) => {
+    if (request.method() !== "GET") out.add(request);
+  };
+  const ended = (request: Request) => {
+    out.delete(request);
+  };
+  page.on("request", went);
+  page.on("requestfailed", ended);
+  page.on("requestfinished", ended);
   let waiting = true;
   const landed = landing.finally(() => {
     waiting = false;
   });
   const quiet = landed.catch(() => undefined);
-  while (waiting) {
-    await page.clock.runFor(stepMs);
-    const margin = Promise.withResolvers<void>();
-    setTimeout(margin.resolve, 100);
-    await Promise.race([quiet, margin.promise]);
+  try {
+    while (waiting) {
+      if (out.size === 0) await page.clock.runFor(stepMs);
+      const margin = Promise.withResolvers<void>();
+      setTimeout(margin.resolve, 100);
+      await Promise.race([quiet, margin.promise]);
+    }
+  } finally {
+    page.off("request", went);
+    page.off("requestfailed", ended);
+    page.off("requestfinished", ended);
   }
   return landed;
 }

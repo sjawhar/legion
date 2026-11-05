@@ -67,13 +67,49 @@ async function shapePosition(
   }, shape);
 }
 
-/** Opens the seeded timeline and waits for its chart to paint run 500's deploy. On a phone the
- *  facets sit above the chart, so the chart is scrolled into view before anything points at it. */
+/** Whether the chart has taken the size of its host. ECharts measures the host once at
+ *  `echarts.init` and again on every notice its `ResizeObserver` gets, and the lane header above
+ *  it is relaid out from the same `containerWidth` (`Timeline.tsx`): until a pass it owes has
+ *  run, its canvas is drawn to a size the host no longer has, every shape on it stands somewhere
+ *  other than where it will stand, and the page is still being laid out around it. Null until
+ *  the chart exists, as `shapePosition` is: a poll fails on a throw rather than asking again, so
+ *  that moment has to read as "nothing to measure yet". */
+async function chartTookItsHost(page: Page): Promise<boolean | null> {
+  return page.evaluate(async () => {
+    interface Chart {
+      getHeight: () => number;
+      getWidth: () => number;
+    }
+    const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
+    if (host === null) return null;
+    const chunks = performance
+      .getEntriesByType("resource")
+      .map((resource) => resource.name)
+      .filter((name) => /\/assets\/index-[\w-]+\.js$/.test(name));
+    for (const chunk of chunks) {
+      // The page's own chunks, found by URL at run time: no specifier is known in advance.
+      const loaded = (await import(chunk)) as {
+        getInstanceByDom?: (element: HTMLElement) => Chart | undefined;
+      };
+      const chart = loaded.getInstanceByDom?.(host);
+      if (chart !== undefined) {
+        return chart.getWidth() === host.clientWidth && chart.getHeight() === host.clientHeight;
+      }
+    }
+    return null;
+  });
+}
+
+/** Opens the seeded timeline and waits for its chart to paint run 500's deploy and to have taken
+ *  the size of its host, so a position or a page measurement read next is the settled one rather
+ *  than one of a layout still running. On a phone the facets sit above the chart, so the chart is
+ *  scrolled into view before anything points at it. */
 async function openTimeline(page: Page, query = ""): Promise<void> {
   await page.goto(`/delivery?${FIXTURE_WINDOW}${query}`);
   await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
   await page.getByTestId("delivery-chart").scrollIntoViewIfNeeded();
   await expect.poll(() => shapePosition(page, DEPLOY_500)).not.toBeNull();
+  await expect.poll(() => chartTookItsHost(page)).toBe(true);
 }
 
 /** Clicks a run's shape, placed again at the moment of the click: a phone's browser can scroll
@@ -317,13 +353,15 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   await expect(page.getByText("acme/widgets#1: feat: a shipped widget")).toBeVisible();
   // The tooltip stays inside the chart: ECharts paints it inside the chart's host, and before the
   // host's wrapper clipped it, its first frame stood past the viewport's right edge, widening the
-  // page to 462 px and jumping it upward under the finger.
-  expect(await layout()).toEqual(before);
+  // page to 462 px and jumping it upward under the finger. Polled, not read once: a widening
+  // that lasts is never reached, and a single frame caught mid-paint is read again rather than
+  // failed.
+  await expect.poll(layout).toEqual(before);
   // Up the time axis (later times) from the dot, which sits near the chart's foot.
   await finger.moveTo({ x: dot.x, y: Math.max(box.y + 20, dot.y - box.height * 0.4) }, 8);
   await expect(page.getByTestId("delivery-brush-band")).toBeVisible();
   // The chart claims the finger (touch-action: none): the page does not scroll under it.
-  expect(await layout()).toEqual(before);
+  await expect.poll(layout).toEqual(before);
   await finger.lift();
 
   await expect(page).toHaveURL(/[?&]ws=.*[?&]we=/);

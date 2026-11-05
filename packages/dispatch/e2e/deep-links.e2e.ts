@@ -171,6 +171,52 @@ async function landingSettled(
   );
 }
 
+/**
+ * Waits until the mark a link names has arrived where the document's scroll to it promises to
+ * leave it: centred in every scrollport between it and the page, or at the end of a scroll that
+ * cannot centre it. `focusMark` (`packages/proof-editor/src/lib.ts`) scrolls to the mark with
+ * `scrollIntoView({ behavior: 'smooth', block: 'center' })`, and a smooth scroll the engine has
+ * not begun yet emits no scroll event and moves nothing: stillness reads the same before the
+ * landing starts and after it ends, and a mark already in the viewport reads the same mid-flight.
+ * This is the reading that is true only once the landing has arrived, which is what a row that
+ * acts on the document - a selection, a press on the action bar fixed beside it - needs before
+ * it acts, since a scroll still to come carries both away.
+ */
+async function markLanded(page: Page, markId: string): Promise<void> {
+  await expect
+    .poll(async () =>
+      markSpan(page, markId)
+        .first()
+        .evaluate((element) => {
+          /** How far a scrollport still has to travel to put `offset` at its middle. */
+          const toGo = (scroll: number, limit: number, offset: number) =>
+            Math.abs(Math.min(Math.max(scroll + offset, 0), Math.max(limit, 0)) - scroll);
+          const mark = element.getBoundingClientRect();
+          const middle = mark.top + mark.height / 2;
+          let offBy = toGo(
+            window.scrollY,
+            document.documentElement.scrollHeight - window.innerHeight,
+            middle - window.innerHeight / 2
+          );
+          for (let node = element.parentElement; node !== null; node = node.parentElement) {
+            const overflow = getComputedStyle(node).overflowY;
+            if (overflow !== "auto" && overflow !== "scroll" && overflow !== "overlay") continue;
+            const box = node.getBoundingClientRect();
+            offBy = Math.max(
+              offBy,
+              toGo(
+                node.scrollTop,
+                node.scrollHeight - node.clientHeight,
+                middle - (box.top + node.clientHeight / 2)
+              )
+            );
+          }
+          return offBy;
+        })
+    )
+    .toBeLessThanOrEqual(2);
+}
+
 /** Polls until `inner` has settled wholly inside `outer`'s box - the margin's own scrollport,
  *  which `toBeInViewport` cannot see: it measures the window. */
 async function expectSettledInside(inner: Locator, outer: Locator): Promise<void> {
@@ -460,9 +506,12 @@ test("a composer opened from the document is in the margin's view after a commen
     // and bring the form back. Both halves of the landing come first: the card, and the quote
     // the document scrolls to once the editor has projected its mark, which on a loaded machine
     // is later than the card. A selection made before that scroll is carried off screen by it,
-    // and so is the fixed action bar placed beside the selection.
+    // and so is the fixed action bar placed beside the selection - and the quote is in the
+    // viewport both while that scroll is still to come and once it has run, so the mark's
+    // arrival at the place `block: 'center'` promises is what says the document is done moving.
     await expect(card).toBeInViewport();
     await expect(markSpan(page, markId)).toBeInViewport();
+    await markLanded(page, markId);
     await landingSettled(sheet);
 
     await selectEditorText(page, "Paragraph 2: surrounding context");

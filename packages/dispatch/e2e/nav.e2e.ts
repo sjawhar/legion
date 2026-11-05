@@ -136,15 +136,24 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
 
     // A read the server answers 404 is asked again twice, QUERY_RETRY_DELAY_MS apart
     // (web/src/api/query-client.ts), before the page says the issue is missing: the clock runs
-    // those two waits once the page has taken each refusal.
+    // those two waits once the page has taken each refusal. `page.clock.install()` leaves the
+    // page's clock running at real speed, so a refusal can land between two samples of a
+    // counter that only grows; each wait is synchronised on "this refusal has been taken",
+    // never on an exact count a late sample steps over and can never see again. The exact
+    // total - the read and its two retries, and no third retry - is read at the end, once the
+    // page has given up and the clock has been run far past any wait a retry could be on.
     const missing = failedReads(page, "/api/v1/issues/CORE-999");
     await page.goto("/issues/CORE-999");
     for (const refusal of [1, 2]) {
-      await expect.poll(missing, { intervals: [50, 50, 100, 200, 500] }).toBe(refusal);
+      await expect
+        .poll(missing, { intervals: [50, 50, 100, 200, 500] })
+        .toBeGreaterThanOrEqual(refusal);
       await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
     }
     await expect(page.getByRole("heading", { name: "Issue not found" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Back to inbox" })).toBeVisible();
+    await page.clock.runFor(QUERY_RETRY_DELAY_MS * 10);
+    expect(missing()).toBe(3);
 
     await page.goto(`/issues/${issue.key}/not-a-tab`);
     await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
