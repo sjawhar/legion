@@ -556,6 +556,42 @@ test.describe("inbox search", () => {
     }
   });
 
+  // A reader types one letter at a time, and the letter that empties the list must not take the
+  // box out from under them. The empty list draws the header in a tree of its own
+  // (`Inbox.tsx`'s `empty`, a plain div, against the list's `ViewportAnchor`), so React mounts a
+  // fresh input there: the focus goes to the body, and the rest of the word, the Backspace that
+  // would correct it and every later keystroke reach the page's own keys instead of the box.
+  test("the box keeps the focus through a word that matches no row", async ({ browser }) => {
+    await seedInbox();
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      await openInbox(page);
+      const box = inboxSearchBox(page);
+      await page.keyboard.press("f");
+      await expect(box).toBeFocused();
+
+      await page.keyboard.type("ledger");
+      await expect(rows(page)).toHaveCount(4);
+
+      // The letter that empties the list.
+      await page.keyboard.type("z");
+      await expect(rows(page)).toHaveCount(0);
+      await expect(emptyState(page)).toHaveText("Nothing matches this text");
+      await expect(box).toBeFocused();
+
+      // The rest of the word, and the correction, still reach the box.
+      await page.keyboard.type("q");
+      await expect(box).toHaveValue("ledgerzq");
+      await page.keyboard.press("Backspace");
+      await page.keyboard.press("Backspace");
+      await expect(box).toHaveValue("ledger");
+      await expect(rows(page)).toHaveCount(4);
+    } finally {
+      await alice.close();
+    }
+  });
+
   // A question on a project document belongs to that document, so the document's name is what a
   // reader has to search it by - and the document's name is read only where there is no issue, so
   // `mirror` from the two MIRROR keys does not drag those rows in beside it.
