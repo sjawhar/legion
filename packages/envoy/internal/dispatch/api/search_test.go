@@ -103,12 +103,16 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.query, func(t *testing.T) {
 			body := searchResponse(t, handler, "q="+test.query)
-			if len(body.Results) == 0 {
-				t.Fatal("search returned no results")
+			// The wanted row by kind and id, not the page's first: an issue carries its primary
+			// document's words in its own vector (20261105145242), so a word only the spec holds
+			// answers with the issue as well as the document, and the fusion lists the issue
+			// first. Which kind leads is TestSearchFusesKindsRoundRobin's subject.
+			result := searchResultOf(body, test.kind, test.id)
+			if result == nil {
+				t.Fatalf("results = %#v, want kind=%q id=%q", body.Results, test.kind, test.id)
 			}
-			result := body.Results[0]
-			if result.Kind != test.kind || result.ID != test.id || result.Href != test.href {
-				t.Fatalf("result = %#v, want kind=%q id=%q href=%q", result, test.kind, test.id, test.href)
+			if result.Href != test.href {
+				t.Fatalf("href = %q, want %q", result.Href, test.href)
 			}
 			want := model.SearchOwner{Kind: "issue", Key: corpus.issueKey, Title: "Navigation instruments", Status: "triage"}
 			if result.Owner != want {
@@ -180,14 +184,7 @@ func TestSearchLinksAnchoredIssueItemsToTheirDocument(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.query, func(t *testing.T) {
 			body := searchResponse(t, handler, "q="+test.query)
-			var result *model.SearchResult
-			for index := range body.Results {
-				candidate := &body.Results[index]
-				if candidate.Kind == test.kind && candidate.ID == test.id {
-					result = candidate
-					break
-				}
-			}
+			result := searchResultOf(body, test.kind, test.id)
 			if result == nil {
 				t.Fatalf("results = %#v, want kind=%q id=%q", body.Results, test.kind, test.id)
 			}
@@ -203,11 +200,12 @@ func TestSearchDocumentSnippetWindowsAroundADeepMatch(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "SRCH", "Navigation", strings.Repeat("Filler ", 2_000)+"The astrolabe measures altitude.")
 
 	body := searchResponse(t, handler, "q=astrolabe")
-	if len(body.Results) == 0 || body.Results[0].ID != issue.PrimaryArtifactID {
-		t.Fatalf("results = %#v, want document %q first", body.Results, issue.PrimaryArtifactID)
+	result := searchResultOf(body, "document", issue.PrimaryArtifactID)
+	if result == nil {
+		t.Fatalf("results = %#v, want document %q", body.Results, issue.PrimaryArtifactID)
 	}
-	if !strings.Contains(body.Results[0].Snippet, "<mark>astrolabe</mark>") {
-		t.Fatalf("deep search snippet %q does not contain marked match", body.Results[0].Snippet)
+	if !strings.Contains(result.Snippet, "<mark>astrolabe</mark>") {
+		t.Fatalf("deep search snippet %q does not contain marked match", result.Snippet)
 	}
 }
 
@@ -238,15 +236,17 @@ func TestSearchReadsOnlyTheLatestDocumentVersion(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	// The issue carries its primary document's words too (20261105145242), so neither it nor the
+	// document may answer the word the edit replaced, and both answer the word that replaced it.
 	old := searchResponse(t, handler, "q=astrolabe")
 	for _, result := range old.Results {
-		if result.Kind == "document" && result.ID == issue.PrimaryArtifactID {
-			t.Fatalf("stale document result = %#v", result)
+		if result.ID == issue.PrimaryArtifactID || result.ID == issue.Key {
+			t.Fatalf("stale result = %#v", result)
 		}
 	}
 	latest := searchResponse(t, handler, "q=sextant")
-	if len(latest.Results) == 0 || latest.Results[0].Kind != "document" || latest.Results[0].ID != issue.PrimaryArtifactID {
-		t.Fatalf("results = %#v, want latest document %q", latest.Results, issue.PrimaryArtifactID)
+	if searchResultOf(latest, "document", issue.PrimaryArtifactID) == nil || searchResultOf(latest, "issue", issue.Key) == nil {
+		t.Fatalf("results = %#v, want the latest document %q and its issue %q", latest.Results, issue.PrimaryArtifactID, issue.Key)
 	}
 }
 
@@ -264,6 +264,49 @@ func TestSearchRanksTitleHitsAboveBodyHits(t *testing.T) {
 	if len(body.Results) == 0 || body.Results[0].Kind != "issue" || body.Results[0].ID != first.Key {
 		t.Fatalf("results = %#v, want title hit for %q first", body.Results, first.Key)
 	}
+}
+
+// An issue's keyword vector carries the text of its primary document, so an issue whose title
+// shares no word with its spec is found by the spec's words; and a title match still heads the
+// issue list ahead of a hit only a spec makes, because the spec rides at weight C and the key and
+// the title at A (store/migrations/20261105145242_issues_search_spec.up.sql).
+func TestSearchFindsAnIssueByItsSpecBelowATitleHit(t *testing.T) {
+	handler := newTestHandler(t)
+	bySpec := createInteractionIssue(t, handler, "SRCH", "Tide tables for the equinox",
+		"The rhumb lines of the Tyrrhenian portolan cross at Capo Testa.\n")
+	byTitle := createSearchIssue(t, handler, "SRCH", "Tyrrhenian survey", "Nothing of note.\n")
+
+	phrase := searchResponse(t, handler, url.Values{"q": {"rhumb lines"}}.Encode())
+	if !slices.Contains(searchIssueKeys(phrase), bySpec.Key) {
+		t.Fatalf("results = %#v, want issue %q for a phrase its spec alone holds", phrase.Results, bySpec.Key)
+	}
+
+	shared := searchResponse(t, handler, "q=Tyrrhenian")
+	if keys := searchIssueKeys(shared); !slices.Equal(keys, []string{byTitle, bySpec.Key}) {
+		t.Fatalf("issue results = %v, want the title hit %q before the spec-only hit %q (results %#v)",
+			keys, byTitle, bySpec.Key, shared.Results)
+	}
+}
+
+// searchIssueKeys is the keys of a response's issue results, in the order the page lists them.
+func searchIssueKeys(body model.SearchResponse) []string {
+	var keys []string
+	for _, result := range body.Results {
+		if result.Kind == "issue" {
+			keys = append(keys, result.ID)
+		}
+	}
+	return keys
+}
+
+// searchResultOf is the response's result of one kind and id, or nil when the page holds none.
+func searchResultOf(body model.SearchResponse, kind, id string) *model.SearchResult {
+	for index := range body.Results {
+		if body.Results[index].Kind == kind && body.Results[index].ID == id {
+			return &body.Results[index]
+		}
+	}
+	return nil
 }
 
 // createSearchIssue files another issue in a project that already exists, past the duplicate-title
