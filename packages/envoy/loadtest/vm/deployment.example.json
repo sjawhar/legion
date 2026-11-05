@@ -2,15 +2,31 @@
   "project": "theorem-agent-infra",
   "zone": "us-west1-a",
   "ssh_command": "ssh",
+  "login_service_account": "lt-oslogin@theorem-agent-infra.iam.gserviceaccount.com",
   "pprof_url": "http://10.138.0.21:6060",
   "pprof_tunnel_command": "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes",
   "embed_tokens_per_minute": 1000000,
   "token_url": "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
   "sqladmin": "https://sqladmin.googleapis.com",
   "compute": "https://compute.googleapis.com",
+  "iamcredentials": "https://iamcredentials.googleapis.com",
+  "oslogin": "https://oslogin.googleapis.com",
   "vms": {
-    "app": {"ssh": "lt@10.138.0.21", "host": "10.138.0.21", "instance": "lt-app"},
-    "generator": {"ssh": "lt@10.138.0.22", "host": "10.138.0.22", "instance": "lt-gen"}
+    "app": {"host": "10.138.0.21", "instance": "lt-app"},
+    "generator": {"host": "10.138.0.22", "instance": "lt-gen"},
+    "nats": {"host": "10.138.0.23", "instance": "lt-nats"}
+  },
+  "load_vm": "generator",
+  "containers": {
+    "dispatch": "app",
+    "auth-proxy": "app",
+    "dispatch-listener": "app",
+    "nats": "nats",
+    "hub-listener": "nats",
+    "load-listener-1": "generator",
+    "load-listener-2": "generator",
+    "load-listener-3": "generator",
+    "load-listener-4": "generator"
   },
   "cloudsql": {
     "instance": "lt-db",

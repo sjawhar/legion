@@ -5,18 +5,19 @@
 # network. cluster/cluster.test.sh is the model -- a $bin directory first on PATH holding one
 # small script per external program, each recording its argv and answering from $FAKE_DIR.
 #
-# The fakes: `ssh` records the call and runs the command here, so the two VMs' file systems are
-# this test's own directories and every program the driver runs on a VM (docker, nc, curl, tar,
-# sh, loadgen) is the fake or the real one on this PATH; `docker` keeps a container registry per
-# ssh target, computing from each `run` the NanoCpus, Memory, network mode and storage option
-# that docker itself would record, which its `inspect` then answers, so a reading the test wants
-# to differ is one file to rewrite; `curl` answers the metadata server, the Cloud SQL Admin API,
-# the Compute API, Dispatch's /healthz, the profiling port and, only while the fake tunnel of
-# that port runs, a read through the step's profiling tunnel; `psql` keeps a database list;
-# `nc` refuses every address unless the test says otherwise; `loadgen` records its argv and
-# writes the files the next step reads; `pprof-tunnel` is the deployment file's
-# pprof_tunnel_command, which stands for the `ssh -N -L ...` a step runs on the generator VM.
-# `jq` is the real one.
+# The fakes: `ssh` records the call and runs the command here, so the deployment's machines are
+# this test's own directories and every program the driver runs on a machine (docker, nc, curl,
+# tar, sh, loadgen) is the fake or the real one on this PATH; `docker` keeps a container
+# registry per ssh target, computing from each `run` the NanoCpus, Memory, network mode and
+# storage option that docker itself would record, which its `inspect` then answers, so a reading
+# the test wants to differ is one file to rewrite; `curl` answers the metadata server, the token
+# mint, the OS Login key import and login profile, the Cloud SQL Admin API, the Compute API,
+# Dispatch's /healthz, the profiling port and, only while the fake tunnel of that port runs, a
+# read through the step's profiling tunnel; `psql` keeps a database list; `nc` refuses every
+# address unless the test says otherwise; `loadgen` records its argv and writes the files the
+# next step reads; `pprof-tunnel` is the deployment file's pprof_tunnel_command, which stands
+# for the `ssh -N -L ...` a step runs on the load machine. `jq`, `ssh-keygen` and `sudo`'s own
+# commands are the real ones.
 #
 # Asserts that: (a) every subcommand refuses a missing --config, and refuses one that is not
 # readable JSON, before it reaches a VM; (b) up starts every container of the specification, in
@@ -33,29 +34,40 @@
 # then /healthz -- and records its duration; (g) step passes the loop's flags to loadgen run
 # (-loop-seed, -loop-factor, -generator-role, -unit-starts, -unit-life, -loop-listeners,
 # -driver-topics, -receipt-deadline, -route-mix and -event-mix), with the rates the factor gives,
-# fetches the profile from the application VM and runs cgroup-merge, cloudsql-cpu and tables;
+# fetches the profile from Dispatch's own machine and runs cgroup-merge, cloudsql-cpu and tables;
 # (h) a step at factor 0 is the baseline alone, at the baseline's own rates and mixes; (i) series
 # runs the baseline, 1x and 2x at the long duration after the long warm-up, stops the grid at the
 # first failing step, and then follows refine.txt until it is empty; (j) a step whose VM stopped
 # while it ran is discarded -- its directory removed, the VM named, no failure recorded -- and
 # so is one whose VM is already stopped, and series stops on it; (k) seed runs the plan, the
-# write on the generator VM, the check, the export and seed-finish with the embedding gate, and
+# write on the load machine, the check, the export and seed-finish with the embedding gate, and
 # records each phase's wall clock and the gate's progress; (l) down stops every container and
-# leaves the VMs and the instance alone; (m) step opens the profiling tunnel on the generator VM
-# and proves it with a read of /debug/pprof/goroutine?debug=1 through it before loadgen run,
-# gives loadgen that tunnel as -pprof, takes its local port from the deployment file and 16060
-# when it names none, closes it when the step ends -- no process and no pid file left on the
-# generator VM -- and refuses the step by name, before any load and leaving no directory, when
-# the tunnel does not answer; (n) up gives each VM's remote root a bind mount of a directory
-# under the stateful partition, made with sudo, remounted exec,nosuid,nodev and given to the ssh
-# user, all of it before the loadgen copy and any container, mounts nothing a second time over a
-# VM that already carries the mount, takes the backing directory's name from remote_root's own
-# last element unless the deployment file names another, and is refused by name, with no
-# container started, when that mount cannot be made or is not exec; (o) up and check both run on
-# deployment.example.json, with nothing of it changed but the paths that must point at this pod;
+# leaves the machines and the instance alone; (m) step opens the profiling tunnel on the load
+# machine and proves it with a read of /debug/pprof/goroutine?debug=1 through it before loadgen
+# run, gives loadgen that tunnel as -pprof, takes its local port from the deployment file and
+# 16060 when it names none, closes it when the step ends -- no process and no pid file left on
+# the load machine -- and refuses the step by name, before any load and leaving no directory,
+# when the tunnel does not answer; (n) up gives every machine's remote root a bind mount of a
+# directory under the stateful partition, made with sudo, remounted exec,nosuid,nodev and given
+# to the ssh user, all of it before the loadgen copy and any container, mounts nothing a second
+# time over a machine that already carries the mount, takes the backing directory's name from
+# remote_root's own last element unless the deployment file names another, and is refused by
+# name, with no container started, when that mount cannot be made or is not exec; (o) up and
+# check both run on deployment.example.json, with nothing of it changed but the paths that must
+# point at this pod;
 # (p) that example carries every key vm.sh reads and no other, both lists read out of the
 # script's own cfg, cfg_valid and jq filters rather than written here again; (q) the example is
-# valid JSON and names no routable address, no real machine and no credential.
+# valid JSON and names no routable address, no real machine and no credential; (r) the
+# deployment file, not the script, says which machine each container runs on -- a three-machine
+# deployment starts each container where the file puts it and check reads all three machines
+# back, a two-machine deployment that keeps NATS on the application machine works the same way,
+# and a container the file places nowhere, a container it does not run, a machine no container
+# runs on and a load_vm that is no machine of the file are each refused by name with nothing
+# started; (s) every ssh is OS Login's -- the token mint, the key import and the login profile
+# are read in that order before the first ssh, every ssh runs as the user that profile named
+# with the key the run made, a second up of one run makes no second key, a refusal of any of the
+# three refuses up by name with nothing started, and no minted token reaches a command line or
+# any file the run keeps.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -71,7 +83,7 @@ export FAKE_DIR=$fake
 export LOADTEST_VM_ROOT=$tmp/root
 
 # A case that fails while a step runs leaves the fake sampler, which vm.sh ends itself when the
-# step ends. Both fake loadgens -- this test's $bin one and the copy up put on the generator VM
+# step ends. Both fake loadgens -- this test's $bin one and the copy up put on the load machine
 # -- are under $tmp, and this test's own process is not, so the pattern reaches neither it nor
 # anything of another run.
 cleanup() {
@@ -96,12 +108,22 @@ mkdir -p "$fake" "$bin" "$tmp/root"
 
 cat >"$bin/ssh" <<'EOF'
 #!/usr/bin/env bash
-# The fake ssh: records the call and runs the command here, so a VM's file system is this test's
-# own directories. The target reaches the command in FAKE_SSH_TARGET, which the fake docker uses
-# to keep a container registry per VM.
+# The fake ssh: records the call and runs the command here, so a machine's file system is this
+# test's own directories. vm.sh runs `ssh <options> <user@host> -- <command>` and the options
+# carry the run's own OS Login key, so the target is the first argument that is not an option
+# or an option's value; the whole argv goes to ssh.log, which is where the OS Login cases read
+# the user and the key back from. The target reaches the command in FAKE_SSH_TARGET, which the
+# fake docker uses to keep a container registry per machine.
 set -u
-target=$1
-shift
+printf '%s\n' "$*" >>"$FAKE_DIR/ssh.log"
+target=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -F | -i | -o | -l | -p | -L) shift 2 ;;
+    -*) shift ;;
+    *) target=$1; shift; break ;;
+  esac
+done
 [ "${1:-}" != -- ] || shift
 printf 'ssh\t%s\t%s\n' "$target" "$*" >>"$FAKE_DIR/actions.log"
 export FAKE_SSH_TARGET=$target
@@ -187,12 +209,31 @@ EOF
 
 cat >"$bin/curl" <<'EOF'
 #!/usr/bin/env bash
-# The fake curl: the URL is the last argument of every call vm.sh makes.
+# The fake curl: the URL is the last argument of every call vm.sh makes. The whole argv goes to
+# curl.argv as well, which is where the OS Login cases prove that no minted token reached a
+# command line: vm.sh gives curl the Authorization header over its standard input.
 set -u
 url=${!#}
 printf 'curl\t%s\n' "$url" >>"$FAKE_DIR/actions.log"
+printf '%s\n' "$*" >>"$FAKE_DIR/curl.argv"
 case $url in
   *metadata*) printf '{"access_token": "fake-token", "expires_in": 3600}\n' ;;
+  *generateAccessToken)
+    [ ! -f "$FAKE_DIR/mint-refuses" ] ||
+      { printf 'curl: (22) The requested URL returned error: 403\n' >&2; exit 22; }
+    printf '{"accessToken": "minted-token", "expireTime": "2026-11-05T02:00:00Z"}\n'
+    ;;
+  *importSshPublicKey*)
+    [ ! -f "$FAKE_DIR/import-refuses" ] ||
+      { printf 'curl: (22) The requested URL returned error: 400\n' >&2; exit 22; }
+    printf '%s\n' "$*" >>"$FAKE_DIR/import.log"
+    printf '{"loginProfile": {"posixAccounts": []}}\n'
+    ;;
+  *loginProfile*)
+    [ ! -f "$FAKE_DIR/profile-refuses" ] ||
+      { printf 'curl: (22) The requested URL returned error: 404\n' >&2; exit 22; }
+    cat "$FAKE_DIR/loginprofile.json"
+    ;;
   *sqladmin*) cat "$FAKE_DIR/cloudsql.json" ;;
   *compute*/instances/*)
     name=${url##*/}
@@ -210,8 +251,8 @@ case $url in
     ;;
   */healthz) cat "$FAKE_DIR/healthz" ;;
   *debug/pprof/*)
-    # A read of the application VM's own profiling port always answers. A read of any other port
-    # is one through the step's tunnel, and answers only while the fake tunnel that forwards
+    # A read of the profiling port on Dispatch's own machine always answers. A read of any other
+    # port is one through the step's tunnel, and answers only while the fake tunnel that forwards
     # that port runs: the tunnel records its pid and its port in FAKE_DIR/tunnel-up, and this is
     # how a test proves the tunnel was opened before the step and closed when it ended.
     port=${url#http://127.0.0.1:}
@@ -372,10 +413,10 @@ REAL_SLEEP=$REAL_SLEEP
 EOF
 cat >>"$bin/pprof-tunnel" <<'EOF'
 # The fake tunnel: what the deployment file's pprof_tunnel_command names, standing for
-# `ssh -N -L <port>:127.0.0.1:<pprof port> <the application VM>` run on the generator VM. It
+# `ssh -N -L <port>:127.0.0.1:<pprof port> <Dispatch's machine>` run on the load machine. It
 # records its argv, says in FAKE_DIR/tunnel-up which port now answers and under which pid, and
 # ends on TERM as ssh does. FAKE_DIR/tunnel-refuses makes it exit at once, as ssh does when the
-# forward cannot be made (ExitOnForwardFailure) or the application VM refuses the connection.
+# forward cannot be made (ExitOnForwardFailure) or that machine refuses the connection.
 set -u
 printf 'tunnel\t%s\n' "$*" >>"$FAKE_DIR/actions.log"
 printf '%s\n' "$*" >>"$FAKE_DIR/tunnel.log"
@@ -475,17 +516,37 @@ readonly nats_image=mirror.gcr.io/library/nats@sha256:44444444444444444444444444
 
 readonly config=$tmp/deployment.json
 readonly tunnel_port=16161
+# The OS Login account the deployment file names, the POSIX user its login profile gives and
+# the ssh target each machine is then reached at. Every one of them is this test's own: the
+# fake curl answers the mint, the import and the profile, and the fake ssh runs what it is
+# given here.
+readonly login_account=lt-oslogin@theorem-agent-infra.iam.gserviceaccount.com
+readonly oslogin_user=sa_101234567890123456789
+readonly app_target=$oslogin_user@10.138.0.21
+readonly gen_target=$oslogin_user@10.138.0.22
+readonly nats_target=$oslogin_user@10.138.0.23
 jq -n --arg remote "$remote" --arg loadgen "$bin/loadgen" --arg tunnel "$bin/pprof-tunnel" \
-  --argjson tunnel_port "$tunnel_port" \
+  --argjson tunnel_port "$tunnel_port" --arg account "$login_account" \
   --arg dispatch "$dispatch_image" --arg listener "$listener_image" \
   --arg proxy "$proxy_image" --arg nats "$nats_image" '{
   project: "theorem-agent-infra", zone: "us-west1-a",
   token_url: "http://metadata.example/token",
   sqladmin: "https://sqladmin.googleapis.com",
   compute: "https://compute.googleapis.com",
+  iamcredentials: "https://iamcredentials.googleapis.com",
+  oslogin: "https://oslogin.googleapis.com",
+  login_service_account: $account,
   vms: {
-    app: {ssh: "lt@10.138.0.21", host: "10.138.0.21", instance: "lt-app"},
-    generator: {ssh: "lt@10.138.0.22", host: "10.138.0.22", instance: "lt-gen"}
+    app: {host: "10.138.0.21", instance: "lt-app"},
+    generator: {host: "10.138.0.22", instance: "lt-gen"},
+    nats: {host: "10.138.0.23", instance: "lt-nats"}
+  },
+  load_vm: "generator",
+  containers: {
+    dispatch: "app", "auth-proxy": "app", "dispatch-listener": "app",
+    nats: "nats", "hub-listener": "nats",
+    "load-listener-1": "generator", "load-listener-2": "generator",
+    "load-listener-3": "generator", "load-listener-4": "generator"
   },
   cloudsql: {
     instance: "lt-db", connection_name: "theorem-agent-infra:us-west1:lt-db",
@@ -511,9 +572,10 @@ write_fixtures() {
   jq -n '{databaseVersion: "POSTGRES_18",
     settings: {edition: "ENTERPRISE", tier: "db-custom-16-61440", availabilityType: "REGIONAL"}}' >"$fake/cloudsql.json"
   local name
-  for name in lt-app lt-gen; do
+  for name in lt-app lt-gen lt-nats; do
     jq -n --arg n "$name" '{name: $n, status: "RUNNING", scheduling: {maxRunDuration: "259200s"}}' >"$fake/compute-$name.json"
   done
+  jq -n --arg u "$oslogin_user" '{posixAccounts: [{username: $u, uid: 1000}]}' >"$fake/loginprofile.json"
   printf '{"status": "ok"}\n' >"$fake/healthz"
   printf '6060\n' >"$fake/pprof-port"
 }
@@ -640,9 +702,9 @@ stub_at=$(grep -n 'loadgen	stub-embed' "$fake/actions.log" | head -n1 | cut -d: 
 dispatch_at=$(grep -n 'docker	.*run --name dispatch ' "$fake/actions.log" | head -n1 | cut -d: -f1)
 [ -n "$stub_at" ] && [ -n "$dispatch_at" ] && ((stub_at < dispatch_at)) ||
   fail "up started Dispatch before the stub embedder it reads a certificate from"
-[ -f "$remote/app/stub-embed.pem" ] || fail "up left no stub embedder certificate on the application VM"
+[ -f "$remote/app/stub-embed.pem" ] || fail "up left no stub embedder certificate on Dispatch's machine"
 grep -q 'curl	.*healthz' "$fake/actions.log" || fail "up did not wait on Dispatch's /healthz"
-pass "up starts the stub embedder before Dispatch, copies its certificate to the application VM and waits on /healthz"
+pass "up starts the stub embedder before Dispatch, copies its certificate to Dispatch's machine and waits on /healthz"
 
 # ---- (c) up refuses an image named by tag ---------------------------------------------------------
 
@@ -685,7 +747,7 @@ grep -q 'dispatch-secret\|listener-secret\|embed-secret\|pg-secret' "$tmp/out" &
   fail "check printed a credential in its table"
 pass "check prints expected beside found for the containers, the instance, the run-time limit, the endpoints and the production addresses, and prints no credential"
 
-printf '/dispatch 16000000000 17179869184 %s\n' "$dispatch_image" >"$fake/docker/lt@10.138.0.21/dispatch.main"
+printf '/dispatch 16000000000 17179869184 %s\n' "$dispatch_image" >"$fake/docker/$app_target/dispatch.main"
 run_vm check --config "$config"
 ((RC != 0)) || fail "check exited 0 with Dispatch's memory at 16 GiB rather than 32"
 grep -q '^| dispatch name cpu memory image (app VM) | /dispatch 16000000000 34359738368 .* | /dispatch 16000000000 17179869184 .* | no |$' "$tmp/out" ||
@@ -784,20 +846,24 @@ pass "step runs loadgen run with the loop's flags and the rates its factor gives
 
 step=$(run_dir)/steps/2x
 [ -f "$step/cpu.pprof" ] || fail "step fetched no CPU profile"
-grep -q 'ssh	lt@10.138.0.21	curl .*127.0.0.1:6060/debug/pprof/profile?seconds=600' "$fake/actions.log" ||
-  fail "step did not fetch the profile from the application VM's own loopback"
+grep -q "ssh	$app_target	curl .*127.0.0.1:6060/debug/pprof/profile?seconds=600" "$fake/actions.log" ||
+  fail "step did not fetch the profile from the loopback of Dispatch's own machine"
 for file in goroutines.txt heap.pprof heap.txt; do
-  [ -f "$step/$file" ] || fail "step fetched no $file from the application VM"
+  [ -f "$step/$file" ] || fail "step fetched no $file from Dispatch's machine"
 done
 [ -f "$step/cgroup.json" ] || fail "step ran no loadgen cgroup-merge"
 [ -f "$step/cloudsql-cpu.json" ] || fail "step ran no loadgen cloudsql-cpu"
 [ -f "$step/TABLES.md" ] || fail "step ran no loadgen tables"
-[ -f "$step/summary.json" ] || fail "step copied no summary.json back from the generator VM"
+[ -f "$step/summary.json" ] || fail "step copied no summary.json back from the load machine"
 [ -f "$step/reset.json" ] || fail "step recorded no reset"
 grep -q 'cloudsql-cpu.*-instance lt-db' "$fake/loadgen.log" || fail "step's Cloud SQL read does not name the instance"
-grep -q -- '-vm lt@10.138.0.21:nats=.*,dispatch=' "$fake/vm-sample.log" || fail "step's sampler does not read the application VM's containers at their cgroups"
-grep -q -- '-vm lt@10.138.0.22:load-listener-1=' "$fake/vm-sample.log" || fail "step's sampler does not read the generator VM's containers at their cgroups"
-pass "step samples both VMs, fetches the profile from the application VM and runs the merge, the Cloud SQL read and the tables"
+grep -q -- "-vm $app_target:auth-proxy=.*,dispatch=" "$fake/vm-sample.log" ||
+  fail "step's sampler does not read the containers of Dispatch's machine at their cgroups"
+grep -q -- "-vm $gen_target:load-listener-1=" "$fake/vm-sample.log" ||
+  fail "step's sampler does not read the load machine's containers at their cgroups"
+grep -q -- "-vm $nats_target:nats=.*,hub-listener=" "$fake/vm-sample.log" ||
+  fail "step's sampler does not read the NATS machine's containers at their cgroups"
+pass "step samples every machine, fetches the profile from Dispatch's machine and runs the merge, the Cloud SQL read and the tables"
 
 run_vm step --config "$config" baseline 0 --duration 2m
 ((RC == 0)) || fail "the baseline step failed: see the output above"
@@ -841,10 +907,10 @@ reset_fake
 run_vm up --config "$config"
 ((RC == 0)) || fail "up failed before the stopped-VM case"
 seeded_run
-# The step's first reading of both VMs answers RUNNING; every reading after it answers
-# TERMINATED, as a VM stopped at its 72-hour run-time limit does.
+# The step's first reading of all three machines answers RUNNING; every reading after it
+# answers TERMINATED, as a machine stopped at its 72-hour run-time limit does.
 rm -f "$fake/compute-reads"
-printf '2\n' >"$fake/compute-stop-after"
+printf '3\n' >"$fake/compute-stop-after"
 run_vm step --config "$config" 1x 1 --duration 10m
 [ "$RC" = 3 ] || fail "a step whose VM stopped while it ran exited $RC, not 3"
 [ ! -e "$(run_dir)/steps/1x" ] || fail "a step whose VM stopped was recorded rather than discarded"
@@ -860,9 +926,9 @@ run_vm step --config "$config" 1x 1 --duration 10m
 [ ! -e "$(run_dir)/steps/1x" ] || fail "a step whose VM is already stopped left a directory"
 grep -q 'discarded before it started' "$tmp/out" || fail "a step refused before it started does not say so"
 run_vm series --config "$config" --duration 10m --long 60m --long-warmup 5m
-[ "$RC" = 3 ] || fail "series over a stopped VM exited $RC, not 3"
-grep -q 'because a VM is not running' "$tmp/out" || fail "series does not say that a VM stopped"
-pass "a step whose VM is already stopped is discarded before it starts, and series stops on it"
+[ "$RC" = 3 ] || fail "series over a stopped machine exited $RC, not 3"
+grep -q 'because a machine is not running' "$tmp/out" || fail "series does not say that a machine stopped"
+pass "a step whose machine is already stopped is discarded before it starts, and series stops on it"
 
 # ---- (k) seed ---------------------------------------------------------------------------------------
 
@@ -887,10 +953,10 @@ grep -q -- '-url http://10.138.0.21:8766' "$fake/seed-finish.log" ||
   fail "seed-finish ran without the embedding gate's -url: $(cat "$fake/seed-finish.log")"
 grep -q -- '-embed-timeout 8h' "$fake/seed-finish.log" || fail "seed-finish ran without the gate's bound"
 grep -q -- '-embed-progress' "$fake/seed-finish.log" || fail "seed-finish recorded no coverage progress"
-grep -q "ssh	lt@10.138.0.22	$remote/app/loadgen loop-seed-write" "$fake/actions.log" ||
-  fail "seed did not write the loop seed from the generator VM"
+grep -q "ssh	$gen_target	$remote/app/loadgen loop-seed-write" "$fake/actions.log" ||
+  fail "seed did not write the loop seed from the load machine"
 [ -e "$fake/db/dispatch_seed" ] || fail "seed left no template database"
-pass "seed plans, writes on the generator VM, checks, exports and finishes with the embedding gate, recording each phase's wall clock and the coverage progress"
+pass "seed plans, writes on the load machine, checks, exports and finishes with the embedding gate, recording each phase's wall clock and the coverage progress"
 
 run_vm seed --config "$config"
 ((RC != 0)) || fail "seed ran twice over one run"
@@ -930,10 +996,10 @@ seeded_run
 run_vm step --config "$config" 1x 1 --duration 10m
 ((RC == 0)) || fail "the step of the tunnel cases failed: see the output above"
 
-# The tunnel forwards a port of the generator VM, where loadgen run runs, to the profiling port
-# on the application VM's loopback, which is the one place that port answers.
-grep -q -- "^-L $tunnel_port:127.0.0.1:6060 lt@10.138.0.21$" "$fake/tunnel.log" ||
-  fail "the step's tunnel is not '-L $tunnel_port:127.0.0.1:6060 lt@10.138.0.21': $(cat "$fake/tunnel.log")"
+# The tunnel forwards a port of the load machine, where loadgen run runs, to the profiling port
+# on the loopback of Dispatch's own machine, which is the one place that port answers.
+grep -q -- "^-L $tunnel_port:127.0.0.1:6060 $app_target$" "$fake/tunnel.log" ||
+  fail "the step's tunnel is not '-L $tunnel_port:127.0.0.1:6060 $app_target': $(cat "$fake/tunnel.log")"
 tunnel_at=$(grep -n '^tunnel	' "$fake/actions.log" | head -n1 | cut -d: -f1)
 probe_at=$(grep -n "^curl	http://127.0.0.1:$tunnel_port/debug/pprof/goroutine?debug=1$" "$fake/actions.log" | head -n1 | cut -d: -f1)
 run_at=$(grep -n '^loadgen	run ' "$fake/actions.log" | head -n1 | cut -d: -f1)
@@ -945,21 +1011,21 @@ line=$(tail -n1 "$fake/loadgen-run.log")
 [[ $line == *"-pprof http://127.0.0.1:$tunnel_port"* ]] ||
   fail "step's loadgen run does not read the profiling port through the tunnel: $line"
 [[ $line == *"-pprof http://10.138.0.21"* ]] &&
-  fail "step gave loadgen an address of the application VM, which its sampler cannot reach: $line"
-pass "step opens the profiling tunnel on the generator VM and proves it with a read of /debug/pprof/goroutine?debug=1 before loadgen run, which reads the profiling port through it"
+  fail "step gave loadgen an address of Dispatch's machine, which its sampler cannot reach: $line"
+pass "step opens the profiling tunnel on the load machine and proves it with a read of /debug/pprof/goroutine?debug=1 before loadgen run, which reads the profiling port through it"
 
 tunnel_pid=$(awk '{print $1}' "$fake/tunnel-up")
 [ -n "$tunnel_pid" ] || fail "the fake tunnel recorded no pid"
 kill -0 "$tunnel_pid" 2>/dev/null &&
-  fail "the step left its profiling tunnel running on the generator VM (pid $tunnel_pid)"
-[ ! -e "$remote/work/pprof-tunnel.pid" ] || fail "the step left its tunnel's pid file on the generator VM"
-pass "the step's profiling tunnel is closed when the step ends, leaving no process and no pid file on the generator VM"
+  fail "the step left its profiling tunnel running on the load machine (pid $tunnel_pid)"
+[ ! -e "$remote/work/pprof-tunnel.pid" ] || fail "the step left its tunnel's pid file on the load machine"
+pass "the step's profiling tunnel is closed when the step ends, leaving no process and no pid file on the load machine"
 
 # The local port is the deployment file's, and 16060 when it names none.
 jq 'del(.ports.pprof_tunnel)' "$config" >"$tmp/default-tunnel.json"
 run_vm step --config "$tmp/default-tunnel.json" 3x 3 --duration 10m
 ((RC == 0)) || fail "a step on a deployment file with no ports.pprof_tunnel failed: see the output above"
-grep -q -- '^-L 16060:127.0.0.1:6060 lt@10.138.0.21$' "$fake/tunnel.log" ||
+grep -q -- "^-L 16060:127.0.0.1:6060 $app_target$" "$fake/tunnel.log" ||
   fail "a deployment file with no ports.pprof_tunnel did not take the default port: $(cat "$fake/tunnel.log")"
 [[ $(tail -n1 "$fake/loadgen-run.log") == *"-pprof http://127.0.0.1:16060"* ]] ||
   fail "a step on the default tunnel port did not give loadgen that port: $(tail -n1 "$fake/loadgen-run.log")"
@@ -988,7 +1054,7 @@ pass "a step whose profiling tunnel does not answer is refused by name, before a
 reset_fake
 run_vm up --config "$config"
 ((RC == 0)) || fail "up failed: see the output above"
-for target in lt@10.138.0.21 lt@10.138.0.22; do
+for target in "$app_target" "$gen_target" "$nats_target"; do
   sudo_log "$target" | grep -qxF -- "mkdir -p -- /mnt/stateful_partition/app" ||
     fail "up did not make the backing directory under the stateful partition with sudo on $target: $(sudo_log "$target")"
   sudo_log "$target" | grep -qxF -- "mount --bind -- /mnt/stateful_partition/app $remote/app" ||
@@ -999,18 +1065,18 @@ for target in lt@10.138.0.21 lt@10.138.0.22; do
     fail "up did not give the remote root to the ssh user on $target: $(sudo_log "$target")"
 done
 [ -d "$fake/stateful/app" ] || fail "up made no backing directory under the stateful partition"
-pass "up makes the backing directory under the stateful partition with sudo, bind-mounts it at the remote root, remounts it exec,nosuid,nodev and gives it to the ssh user, on both VMs"
+pass "up makes the backing directory under the stateful partition with sudo, bind-mounts it at the remote root, remounts it exec,nosuid,nodev and gives it to the ssh user, on every machine"
 
 mount_at=$(line_at 'chown -- ') copy_at=$(line_at "$remote/app/loadgen") start_at=$(line_at 'run --name ')
 [ -n "$mount_at" ] && [ -n "$copy_at" ] && [ -n "$start_at" ] && ((mount_at < copy_at)) && ((copy_at < start_at)) ||
-  fail "up did not mount both remote roots (through line ${mount_at:-none}) before the loadgen copy (${copy_at:-none}) and the first container (${start_at:-none})"
-pass "up mounts both remote roots before it copies loadgen onto the generator VM and before any container starts"
+  fail "up did not mount every remote root (through line ${mount_at:-none}) before the loadgen copy (${copy_at:-none}) and the first container (${start_at:-none})"
+pass "up mounts every remote root before it copies loadgen onto the load machine and before any container starts"
 
-# A second up over VMs that already carry the mount remounts it and stacks no second mount.
+# A second up over machines that already carry the mount remounts it and stacks no second mount.
 : >"$fake/actions.log"
 run_vm up --config "$config"
-((RC == 0)) || fail "a second up over VMs that already carry the mount failed: see the output above"
-for target in lt@10.138.0.21 lt@10.138.0.22; do
+((RC == 0)) || fail "a second up over machines that already carry the mount failed: see the output above"
+for target in "$app_target" "$gen_target" "$nats_target"; do
   sudo_log "$target" | grep -q -- '--bind --' &&
     fail "a second up mounted the remote root again on $target, stacking a second mount on it"
   sudo_log "$target" | grep -qxF -- "mount -o remount,bind,exec,nosuid,nodev -- /mnt/stateful_partition/app $remote/app" ||
@@ -1020,7 +1086,7 @@ done
   fail "a second up started $(actions | grep -c '^start ') containers, not the 9 of the specification"
 pass "a second up over a VM that already carries the mount remounts it, mounts it no second time, and starts the deployment all the same"
 
-# A mount that cannot be made refuses up by name, before a container is started: a generator VM
+# A mount that cannot be made refuses up by name, before a container is started: a load machine
 # that cannot exec loadgen runs no step at all.
 reset_fake
 : >"$fake/mount-refuses"
@@ -1050,7 +1116,7 @@ reset_fake
 jq --arg r "$remote/elsewhere" '.paths.remote_root = $r' "$config" >"$tmp/moved.json"
 run_vm up --config "$tmp/moved.json"
 ((RC == 0)) || fail "up failed on a deployment file whose remote root is elsewhere: see the output above"
-for target in lt@10.138.0.21 lt@10.138.0.22; do
+for target in "$app_target" "$gen_target" "$nats_target"; do
   sudo_log "$target" | grep -qxF -- "mkdir -p -- /mnt/stateful_partition/elsewhere" ||
     fail "the backing directory does not follow the remote root's last element on $target: $(sudo_log "$target")"
   sudo_log "$target" | grep -qxF -- "mount --bind -- /mnt/stateful_partition/elsewhere $remote/elsewhere" ||
@@ -1062,11 +1128,208 @@ reset_fake
 jq --arg r "$remote/elsewhere" '.paths.remote_root = $r | .paths.stateful_dir = "loadtest-backing"' "$config" >"$tmp/named.json"
 run_vm up --config "$tmp/named.json"
 ((RC == 0)) || fail "up failed on a deployment file that names its own stateful directory: see the output above"
-for target in lt@10.138.0.21 lt@10.138.0.22; do
+for target in "$app_target" "$gen_target" "$nats_target"; do
   sudo_log "$target" | grep -qxF -- "mount --bind -- /mnt/stateful_partition/loadtest-backing $remote/elsewhere" ||
     fail "paths.stateful_dir is not the backing directory on $target: $(sudo_log "$target")"
 done
 pass "the deployment file names the backing directory under the stateful partition"
+
+# ---- (r) the deployment file says which machine each container runs on ---------------------------
+
+# The deployment this test's file describes has three machines, as INFRA-1051's has: an
+# application machine, a load generator and a machine of their own for NATS and the hub
+# listener. Nothing of that is in vm.sh, so these cases prove the script reads it.
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed on the three-machine deployment: see the output above"
+for role in dispatch auth-proxy dispatch-listener; do
+  [ -f "$fake/docker/$app_target/$role.main" ] ||
+    fail "up did not start $role on the machine the deployment file names for it"
+done
+for role in nats hub-listener; do
+  [ -f "$fake/docker/$nats_target/$role.main" ] ||
+    fail "up did not start $role on the NATS machine the deployment file names for it"
+  [ ! -f "$fake/docker/$app_target/$role.main" ] ||
+    fail "up started $role on the application machine, which the deployment file does not name for it"
+done
+for n in 1 2 3 4; do
+  [ -f "$fake/docker/$gen_target/load-listener-$n.main" ] ||
+    fail "up did not start load-listener-$n on the load machine"
+done
+grep -q "ssh	$nats_target	mkdir -p -- $remote/app/nats" "$fake/actions.log" ||
+  fail "up made the JetStream store somewhere other than the machine NATS runs on"
+pass "up starts every container on the machine the deployment file names for it, over three machines"
+
+run_vm check --config "$config"
+((RC == 0)) || fail "check failed on the three-machine deployment: see the output above"
+grep -q '^| nats name cpu memory image (nats VM) | /nats 0 0 .* | /nats 0 0 .* | yes |$' "$tmp/out" ||
+  fail "check does not read NATS back from the machine the deployment file runs it on"
+grep -q '^| hub-listener name cpu memory image (nats VM) | .* | yes |$' "$tmp/out" ||
+  fail "check does not read the hub listener back from the NATS machine"
+grep -q '^| nats VM scheduling.maxRunDuration | 259200s | 259200s | yes |$' "$tmp/out" ||
+  fail "check does not read the NATS machine's run-time limit"
+for address in 10.139.0.2:5432 10.138.0.10:4222; do
+  grep -q "^| nats VM to production $address | refused | refused | yes |$" "$tmp/out" ||
+    fail "check does not prove $address refused from the NATS machine"
+done
+grep -q '^| dispatch env NATS_URLS | NATS_URLS=nats://10.138.0.23:4222 | NATS_URLS=nats://10.138.0.23:4222 | yes |$' "$tmp/out" ||
+  fail "Dispatch's NATS_URLS is not the address of the machine the deployment file runs NATS on"
+pass "check reads all three machines' containers, run-time limits and production-address refusals"
+
+seeded_run
+run_vm step --config "$config" 1x 1 --duration 10m
+((RC == 0)) || fail "the step of the three-machine case failed: see the output above"
+sample=$(tail -n1 "$fake/vm-sample.log")
+[ "$(grep -o -- '-vm ' <<<"$sample" | wc -l)" = 3 ] ||
+  fail "the sampler read $(grep -o -- '-vm ' <<<"$sample" | wc -l) machines, not the three of this deployment: $sample"
+[[ $sample == *"-vm $app_target:auth-proxy="*",dispatch-listener="*",dispatch="* ]] ||
+  fail "the sampler does not read the application machine's own containers: $sample"
+[[ $sample == *"-vm $gen_target:load-listener-1="*",load-listener-4="* ]] ||
+  fail "the sampler does not read the load machine's own containers: $sample"
+[[ $sample == *"-vm $nats_target:nats="*",hub-listener="* ]] ||
+  fail "the sampler does not read the NATS machine's own containers: $sample"
+[[ $sample == *"$nats_target:"*"load-listener"* ]] &&
+  fail "the sampler reads a container at a machine the deployment file does not run it on: $sample"
+pass "the sampler reads all three machines, each with its own containers' cgroups"
+
+# A container the file places nowhere, a machine no container runs on, a container this
+# deployment does not run and a load_vm that is no machine of the file: each refused by name
+# before anything is started.
+reset_fake
+jq 'del(.containers["hub-listener"])' "$config" >"$tmp/unplaced.json"
+run_vm up --config "$tmp/unplaced.json"
+((RC != 0)) || fail "up accepted a deployment file that places no machine for the hub listener"
+grep -q 'does not say which machine the container hub-listener runs on' "$tmp/out" ||
+  fail "up's refusal does not name the container the file places nowhere: $(cat "$tmp/out")"
+[ ! -s "$fake/actions.log" ] || fail "up reached a machine before refusing an unplaced container"
+
+jq '.containers["hub-listener"] = "elsewhere"' "$config" >"$tmp/nomachine.json"
+run_vm up --config "$tmp/nomachine.json"
+((RC != 0)) || fail "up accepted a container placed on a machine the file does not name"
+grep -q "runs the container hub-listener on the machine 'elsewhere', which is none of its machines" "$tmp/out" ||
+  fail "up's refusal does not name the machine the file does not have: $(cat "$tmp/out")"
+
+jq '.containers.nats = "app" | .containers["hub-listener"] = "app"' "$config" >"$tmp/idle.json"
+run_vm up --config "$tmp/idle.json"
+((RC != 0)) || fail "up accepted a deployment file with a machine no container runs on"
+grep -q 'names the machine nats, which no container of this deployment runs on' "$tmp/out" ||
+  fail "up's refusal does not name the machine no container runs on: $(cat "$tmp/out")"
+
+jq '.containers["load-listener-5"] = "generator"' "$config" >"$tmp/unknown.json"
+run_vm up --config "$tmp/unknown.json"
+((RC != 0)) || fail "up accepted a deployment file that places a container this deployment does not run"
+grep -q 'places the container load-listener-5, which this deployment does not run' "$tmp/out" ||
+  fail "up's refusal does not name the container this deployment does not run: $(cat "$tmp/out")"
+
+jq '.load_vm = "nowhere"' "$config" >"$tmp/noload.json"
+run_vm up --config "$tmp/noload.json"
+((RC != 0)) || fail "up accepted a load_vm that is no machine of the deployment file"
+grep -q "gives load_vm as 'nowhere', which is none of its machines" "$tmp/out" ||
+  fail "up's refusal does not name the load machine it could not find: $(cat "$tmp/out")"
+[ ! -s "$fake/actions.log" ] || fail "up reached a machine before refusing the deployment file's placement"
+[ ! -s "$fake/docker.log" ] || fail "up started a container although the deployment file's placement is wrong"
+pass "a container placed nowhere, one placed on a machine the file does not name, a machine no container runs on, a container this deployment does not run and a load_vm that is no machine are each refused by name, with nothing started"
+
+# The same script on a two-machine deployment, with NATS and the hub listener back on the
+# application machine: the third machine is the file's to have, never this script's to require.
+reset_fake
+jq 'del(.vms.nats) | .containers.nats = "app" | .containers["hub-listener"] = "app"' "$config" >"$tmp/two.json"
+run_vm up --config "$tmp/two.json"
+((RC == 0)) || fail "up failed on a two-machine deployment: see the output above"
+[ "$(actions | grep -c '^start ')" = 9 ] ||
+  fail "up started $(actions | grep -c '^start ') containers on the two-machine deployment, not the 9 of the specification"
+for role in nats hub-listener dispatch; do
+  [ -f "$fake/docker/$app_target/$role.main" ] ||
+    fail "up did not start $role on the application machine of the two-machine deployment"
+done
+[ ! -d "$fake/docker/$nats_target" ] ||
+  fail "up reached a third machine on a deployment file that names two"
+run_vm check --config "$tmp/two.json"
+((RC == 0)) || fail "check failed on the two-machine deployment: see the output above"
+grep -q '| no |' "$tmp/out" && fail "check read back a value of the two-machine deployment that differs"
+grep -q '^| nats name cpu memory image (app VM) | .* | yes |$' "$tmp/out" ||
+  fail "check does not read NATS back from the application machine of the two-machine deployment"
+grep -q 'nats VM' "$tmp/out" && fail "check read a machine the two-machine deployment file does not name"
+pass "a deployment file that keeps NATS on the application machine works, two machines and all"
+
+# ---- (s) every ssh is OS Login's ------------------------------------------------------------
+
+# The machines carry enable-oslogin and block-project-ssh-keys and this pod's identity has no
+# POSIX profile, so vm.sh mints a token for the deployment's login service account, imports the
+# run's own key for it and reads the POSIX user it was given, before its first ssh.
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the OS Login cases: see the output above"
+mint_at=$(line_at 'generateAccessToken')
+import_at=$(line_at 'importSshPublicKey')
+profile_at=$(line_at 'loginProfile')
+ssh_at=$(line_at 'ssh	')
+[ -n "$mint_at" ] || fail "up minted no access token for the login service account"
+[ -n "$import_at" ] || fail "up imported no public key for the login service account"
+[ -n "$profile_at" ] || fail "up read no login profile"
+[ -n "$ssh_at" ] || fail "up reached no machine at all"
+((mint_at < import_at)) && ((import_at < profile_at)) && ((profile_at < ssh_at)) ||
+  fail "up's mint ($mint_at), import ($import_at) and profile ($profile_at) did not all come before its first ssh ($ssh_at)"
+grep -q "importSshPublicKey?projectId=theorem-agent-infra" "$fake/actions.log" ||
+  fail "the key import does not name the project"
+grep -q "$login_account" "$fake/actions.log" ||
+  fail "the OS Login calls do not name the deployment file's login service account"
+pass "up mints a token, imports the run's key and reads the login profile, in that order, before its first ssh"
+
+key=$(run_dir)/oslogin
+[ -f "$key" ] && [ -f "$key.pub" ] || fail "up made no keypair in the run directory"
+[ "$(stat -c %a "$key")" = 600 ] || fail "the run's private key is mode $(stat -c %a "$key"), not 600"
+grep -q -- "-F /dev/null -i $key $app_target " "$fake/ssh.log" ||
+  fail "up's ssh does not run as the OS Login user with the run's own key: $(head -n1 "$fake/ssh.log")"
+grep -v -- "-i $key " "$fake/ssh.log" | grep -q . &&
+  fail "an ssh of this run ran without the run's own key: $(grep -v -- "-i $key " "$fake/ssh.log" | head -n1)"
+# The tunnel's own ssh is the deployment file's command, run on the load machine, so it carries
+# no key of this pod's: ssh.log holds this script's own ssh calls alone.
+pass "every ssh of the run goes as the user the login profile named, with the key the run made and no ssh config of this pod's"
+
+before=$(cat "$key.pub")
+run_vm up --config "$config" --run "$(cat "$LOADTEST_VM_ROOT/current")"
+((RC == 0)) || fail "a second up of the same run failed: see the output above"
+[ "$(cat "$key.pub")" = "$before" ] ||
+  fail "a second up of the same run made a second keypair"
+[ "$(grep -c 'importSshPublicKey' "$fake/actions.log")" -ge 2 ] ||
+  fail "a second up did not import the run's key again, so its expiry is never refreshed"
+pass "a second up of one run imports the key it already has and makes no second one"
+
+! grep -rqF 'minted-token' "$(run_dir)" ||
+  fail "the minted access token was written into a file the run keeps: $(grep -rlF 'minted-token' "$(run_dir)" | head -n1)"
+! grep -qF 'minted-token' "$fake/curl.argv" ||
+  fail "the minted access token reached a curl command line, where any process on this pod can read it"
+! grep -qF 'minted-token' "$fake/actions.log" || fail "the minted access token reached the action log"
+pass "the minted token reaches no command line and no file the run keeps"
+
+# A refusal of any of the three steps refuses up by name, with nothing started.
+for step in mint import profile; do
+  reset_fake
+  : >"$fake/$step-refuses"
+  run_vm up --config "$config"
+  ((RC != 0)) || fail "up ran although the OS Login $step was refused"
+  case $step in
+    mint) want='OS Login step 1 of 4' ;;
+    import) want='OS Login step 2 of 4' ;;
+    profile) want='OS Login step 3 of 4' ;;
+  esac
+  grep -q "$want" "$tmp/out" || fail "up's refusal does not say which OS Login step failed: $(cat "$tmp/out")"
+  grep -q '403\|400\|404' "$tmp/out" || fail "up's refusal does not say what the endpoint answered: $(cat "$tmp/out")"
+  grep -q 'ssh	' "$fake/actions.log" && fail "up reached a machine although the OS Login $step was refused"
+  [ ! -s "$fake/docker.log" ] || fail "up started a container although the OS Login $step was refused"
+  rm -f "$fake/$step-refuses"
+done
+pass "a refusal of the mint, the import or the login profile refuses up by name, naming the step and the answer, with nothing started"
+
+reset_fake
+jq '.posixAccounts = []' "$fake/loginprofile.json" >"$tmp/j" && mv "$tmp/j" "$fake/loginprofile.json"
+run_vm up --config "$config"
+((RC != 0)) || fail "up ran although the login profile gave no POSIX account"
+grep -q 'no POSIX account, so there is no user to ssh as' "$tmp/out" ||
+  fail "up's refusal does not say that the login profile holds no POSIX user: $(cat "$tmp/out")"
+[ ! -s "$fake/docker.log" ] || fail "up started a container although there is no user to ssh as"
+pass "a login profile with no POSIX account refuses up by name, with nothing started"
 
 # ---- (o) the example deployment file is one vm.sh runs on ---------------------------------------
 
@@ -1077,7 +1340,7 @@ readonly example=$here/deployment.example.json
 
 # The example with the five remote paths and the loadgen binary pointed at this pod, because
 # those alone name a file system the fakes stand in for. Everything else is the example's own --
-# the project, the zone, both VMs, the instance and the settings it expects, every image, port,
+# the project, the zone, every machine, the instance and the settings it expects, every image,
 # secret, load value and production address -- and up and check read it as a reader's own file.
 readonly example_local=$tmp/example-local.json
 jq --arg root "$remote/example" --arg loadgen "$bin/loadgen" '
@@ -1103,8 +1366,8 @@ pass "vm.sh check reads every value of deployment.example.json back and refuses 
 
 # ---- (p) the example carries the keys vm.sh reads, and only those --------------------------------
 
-# container_field N: field N of every line of vm.sh's own container table, once each. Field 2
-# names the VMs its .vms.<vm>.* filters are read for and field 3 the keys of .images.<key>.
+# container_field N: field N of every line of vm.sh's own container table, once each. Field 1
+# names the containers its .containers object must place and field 2 the keys of .images.<key>.
 container_field() {
   bash -c 'source "$1"; printf "%s\n" "${CONTAINERS[@]}"' _ "$vm" | awk -v n="$1" '{print $n}' | sort -u
 }
@@ -1112,15 +1375,18 @@ container_field() {
 # script_keys: every key of the deployment file vm.sh reads, one "KEY<tab>required" or
 # "KEY<tab>optional" a line, read out of the script's own text and not written here again: each
 # cfg and cfg_valid call gives its filter and, by its second argument, whether the key has a
-# default; the two objects it reads with jq give theirs by their "// {}"; the one array it reads
-# element by element gives its own by "// empty". A filter spelled with a parameter is expanded
-# over the arguments the script passes it -- the VMs and image keys of its container table, the
-# ports it asks port_of for, the values it asks load_value for -- and a parameter of a shape not
-# known here stays in the key, so the comparison below names it rather than dropping it.
+# default; the two objects it reads with jq give theirs by their "// {}"; the two it reads
+# element by element -- the ports of ports.load_listeners and the machine of one container --
+# give theirs by their "// empty". A filter spelled with a parameter is expanded over the
+# arguments the script passes it -- the image keys of its container table, the ports it asks
+# port_of for, the values it asks load_value for, and, for .vms.<machine>.*, the machines the
+# example itself names, since the script takes that list from the file and holds no list of its
+# own -- and a parameter of a shape not known here stays in the key, so the comparison below
+# names it rather than dropping it.
 script_keys() {
   local body vms images ports loads key kind list word expanded
   body=$(grep -v '^[[:space:]]*#' "$vm")
-  vms=$(container_field 2) images=$(container_field 3)
+  vms=$(jq -r '.vms | keys[]' "$example") images=$(container_field 2)
   ports=$(grep -oE '\bport_of [a-z_]+' <<<"$body" | awk '{print $2}' | sort -u)
   loads=$(grep -oE '\bload_value [a-z_.]+' <<<"$body" | awk '{print $2}' | sort -u)
   {
@@ -1192,8 +1458,8 @@ jq -e . "$example" >/dev/null || fail "deployment.example.json is not valid JSON
 
 # This repository is public, so every machine the example names is a placeholder: an address in
 # RFC 1918 or on the loopback, a host that is one of the public Google endpoints vm.sh defaults
-# to, an instance of the lt- register, an image digest that is one character repeated, and a
-# credential that is the placeholder "...".
+# to, an instance of the lt- register, a login service account of that register too, an image
+# digest that is one character repeated, and a credential that is the placeholder "...".
 while read -r address; do
   [[ $address =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.) ]] ||
     fail "deployment.example.json names the address $address, which is neither RFC 1918 nor loopback"
@@ -1201,7 +1467,7 @@ done < <(grep -oE '[0-9]+(\.[0-9]+){3}' "$example")
 
 while read -r host; do
   case $host in
-    10.* | 127.* | metadata.google.internal | sqladmin.googleapis.com | compute.googleapis.com) ;;
+    10.* | 127.* | metadata.google.internal | sqladmin.googleapis.com | compute.googleapis.com | iamcredentials.googleapis.com | oslogin.googleapis.com) ;;
     *) fail "deployment.example.json reaches the host $host, which is no placeholder and no public Google endpoint" ;;
   esac
 done < <(grep -oE '"[a-z]+://[^/"]+' "$example" | sed -E 's|^.*://||; s|^.*@||; s|:[0-9]+$||')
@@ -1210,6 +1476,10 @@ while read -r instance; do
   [[ $instance =~ ^lt-[a-z0-9-]+$ ]] ||
     fail "deployment.example.json names the instance $instance, which is not of the placeholder lt- register"
 done < <(jq -r '(.vms[].instance, .cloudsql.instance)' "$example")
+
+account=$(jq -r .login_service_account "$example")
+[[ $account =~ ^lt-[a-z0-9-]+@[a-z0-9-]+\.iam\.gserviceaccount\.com$ ]] ||
+  fail "deployment.example.json names the login service account $account, which is not of the placeholder lt- register"
 
 while read -r image; do
   digest=${image##*@sha256:}

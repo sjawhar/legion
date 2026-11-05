@@ -2743,29 +2743,30 @@ failed kill and the nap that would follow it included.
 
 ## Running on the deployment
 
-`vm/vm.sh` runs the spec loop's load on the deployment of [INFRA-988](dispatch://INFRA-988): an
-application VM, a load-generator VM and a Cloud SQL instance of its own
+`vm/vm.sh` runs the spec loop's load on the deployment of [INFRA-988](dispatch://INFRA-988): the
+virtual machines its deployment file names and a Cloud SQL instance of its own
 ([INFRA-1051](dispatch://INFRA-1051)), driven from a Legion worker pod over ssh.
 `cluster/cluster.sh` is the model — the same subcommands, the same flag parsing and refusals, the
-same run directory — and only the deployment changes, from a Kubernetes namespace to two virtual
-machines and a managed instance. The VMs and the instance are INFRA-1051's to create and to
-remove: no subcommand creates, resizes or removes one.
+same run directory — and only the deployment changes, from a Kubernetes namespace to a set of
+virtual machines and a managed instance. The machines and the instance are INFRA-1051's to create
+and to remove: no subcommand creates, resizes or removes one.
 
 Every subcommand needs `--config`, the deployment file (below); there is no default. After `up`,
 a subcommand takes the run named in `<root>/current` unless `--run` names another. The run
 directory is `${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>`, on the worker pod:
-`state.json` (mode 600), `cgroup.jsonl`, `steps/`, `curves/` and `logs/`.
+`state.json` (mode 600), the run's own OS Login keypair, `cgroup.jsonl`, `steps/`, `curves/` and
+`logs/`.
 
 | Subcommand | What it does |
 | --- | --- |
-| `up --config FILE [--run ID] [--loadgen PATH]` | Starts every container of the specification below by image digest, with its CPU, memory and ephemeral limits and nothing silently defaulted, installs `loadgen` and the stub embedder on the generator VM, and waits until Dispatch answers `/healthz`. It makes the run directory and names the run. |
-| `check --config FILE [--run ID]` | The read-back: every container's CPU, memory and image, Dispatch's network mode and ephemeral limit, the instance's own settings from the Cloud SQL Admin API, each VM's run-time limit from the Compute API, every endpoint setting of every container, and that each production address the file names is refused from each VM. One markdown table of expected beside found, and exit 1 on any difference. |
-| `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | `loop-seed-plan`, `loop-seed-write` on the generator VM, `loop-seed-check`, `loop-seed-export` and `seed-finish` with the embedding gate, each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. |
+| `up --config FILE [--run ID] [--loadgen PATH]` | Starts every container of the specification below by image digest, each on the machine the file puts it on, with its CPU, memory and ephemeral limits and nothing silently defaulted, installs `loadgen` and the stub embedder on the load machine, and waits until Dispatch answers `/healthz`. It makes the run directory and names the run. |
+| `check --config FILE [--run ID]` | The read-back: every container's CPU, memory and image, Dispatch's network mode and ephemeral limit, the instance's own settings from the Cloud SQL Admin API, every machine's run-time limit from the Compute API, every endpoint setting of every container, and that each production address the file names is refused from every machine. One markdown table of expected beside found, and exit 1 on any difference. |
+| `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | `loop-seed-plan`, `loop-seed-write` on the load machine, `loop-seed-check`, `loop-seed-export` and `seed-finish` with the embedding gate, each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. |
 | `reset --config FILE [--run ID]` | The whole reset (below), its duration recorded. |
-| `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), `loadgen run` at FACTOR, the profiles fetched from the application VM, then `cgroup-merge`, `cloudsql-cpu` and `tables`. |
+| `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), `loadgen run` at FACTOR, the profiles fetched from the machine Dispatch runs on, then `cgroup-merge`, `cloudsql-cpu` and `tables`. |
 | `series --config FILE [--run ID] [--duration 10m] [--long 60m] [--long-warmup 5m]` | The baseline, 1x and 2x at `--long` after a `--long-warmup` warm-up, then the grid 3, 4, 6, 8, 12, 16 and 20 at `--duration`, stopping at the first failing step, then the refinement `loadgen curves` asks for until `refine.txt` is empty. |
 | `collect --config FILE [--run ID]` | `loadgen curves -series loop` over the run's steps, in the order they ran, into `<run>/curves`. |
-| `down --config FILE [--run ID]` | Stops every container and the stub embedder. The VMs and the instance are left alone. |
+| `down --config FILE [--run ID]` | Stops every container and the stub embedder. The machines and the instance are left alone. |
 
 ```bash
 packages/envoy/loadtest/vm/vm.sh up --config <deployment file>
@@ -2775,19 +2776,73 @@ packages/envoy/loadtest/vm/vm.sh series --config <deployment file>
 packages/envoy/loadtest/vm/vm.sh collect --config <deployment file>
 ```
 
-A step whose VM is stopped is discarded, never recorded: each VM stops itself 72 hours after it
-starts, and a VM that is gone is no Dispatch failure. `step` reads both VMs' Compute status before
-the reset and again after the load; either one not `RUNNING` removes the step's directory, names
-the VM that stopped, and ends the step with status 3, which `series` reports and stops on.
+A step whose machine is stopped is discarded, never recorded: each machine stops itself 72 hours
+after it starts, and a machine that is gone is no Dispatch failure. `step` reads every machine's
+Compute status before the reset and again after the load; any one of them not `RUNNING` removes
+the step's directory, names the machine that stopped, and ends the step with status 3, which
+`series` reports and stops on.
 
-`vm.sh` needs `ssh`, `curl`, `jq`, `psql`, `tar`, `gzip` and `loadgen` on the worker pod, and
-`nc` on the VMs.
+`vm.sh` needs `ssh`, `ssh-keygen`, `curl`, `jq`, `psql`, `tar`, `gzip` and `loadgen` on the worker
+pod, and `nc` on the machines.
+
+### The machines, and the containers on them
+
+`vms` takes any number of machines, each one `{"host": ..., "instance": ...}`: the address the
+other machines reach it at, and its Compute instance name. `containers` says which of them each
+container of the specification below runs on. The deployment this was written for has three — an
+application machine, a load generator, and a machine of their own for NATS and the hub listener,
+which is production's own shape — and a file that keeps NATS on the application machine describes
+a deployment of two just as well.
+
+Two machines have a role the script's own work depends on, and the file names both:
+
+- **the load machine**, `load_vm`: `loadgen` is installed there, `loop-seed-write` and every
+  `loadgen run` run there, the stub embedder serves from there, `paths.remote_work` is there, and
+  the near end of a step's profiling tunnel listens there;
+- **the machine Dispatch runs on**, which `containers.dispatch` names, so the file says it once
+  and cannot say it twice over: it is the far end of that tunnel, the machine a step fetches its
+  profiles from, and the machine the stub embedder's certificate is copied to.
+
+A container `containers` places nowhere, a container it places that this deployment does not run,
+a container placed on a machine `vms` does not name, a machine no container runs on, and a
+`load_vm` that is no machine of the file are each refused **by name**, before anything is started.
+Everything that walks the machines follows the file: `up`'s mount of each remote root, `check`'s
+read-back, the sampler's `-vm` arguments, `down` and the reset's restarts.
+
+### Reaching the machines: OS Login
+
+The machines carry `enable-oslogin` and `block-project-ssh-keys`, and a Legion worker pod's Google
+identity is a federated Kubernetes principal with no POSIX profile of its own, so no key of the
+pod's authenticates anywhere. Before it reaches a machine, each subcommand:
+
+1. mints an access token for `login_service_account` — the account that holds
+   `roles/compute.osAdminLogin` on the machines — at `iamcredentials`, with the pod's own metadata
+   token;
+2. imports the run's public key for that account at `oslogin`, with an expiry of 24 hours: every
+   subcommand imports again at its start, so the expiry has only to outlast one subcommand's own
+   work, and no key of a finished run is left behind for long;
+3. reads that account's POSIX user name from its login profile;
+4. runs every ssh as `ssh -F /dev/null -i <the run's private key> <that user>@<the machine's
+   host>`, so no `~/.ssh/config` of the pod's can change where an ssh goes or who it goes as.
+   `docker` on a machine runs under `sudo`, because that user is not root and the docker socket
+   is.
+
+The keypair is the run's own, made once under the run directory, mode 600, and copied nowhere; a
+second `up` of one run imports the key it already has. The minted token lives in one shell
+variable and reaches no log, no command line another process can list — `curl` takes the
+`Authorization` header on its standard input — and no file the run keeps. A refusal names which of
+the four steps failed and what the endpoint answered, and `up` refuses before it starts anything.
+
+Because `vms.<name>` no longer carries a user, the file names a host and an instance alone. The
+profiling tunnel is the exception that proves it: its command runs **on the load machine**, not on
+this pod, so whatever credential that machine needs to reach the other is
+`pprof_tunnel_command`'s to give it.
 
 ### The deployment file
 
 Nothing of the deployment is named in the script. Every machine, address, port, image, credential
 and production address comes from the JSON file `--config` names, because the deployment's own
-shape has changed once under this issue and will change again. It is one object, and
+shape has changed twice under this issue and will change again. It is one object, and
 `packages/envoy/loadtest/vm/deployment.example.json` is one: every key the script reads, each
 optional one at its own default, with placeholder machines, addresses and credentials
 throughout. Copy it and edit it:
@@ -2804,7 +2859,7 @@ script does. What the example cannot carry is why each key is there, which is be
   answer and each value what that path must read, so a change of production's instance is a change
   of this file and not of the script.
 - `production_addresses` are the addresses the deployment may never reach; `check` proves each one
-  refuses a connection from each VM.
+  refuses a connection from every machine.
 - `load` holds what a step sends. The baseline is INFRA-598's 1x, which every step carries as it
   is, and the loop's own rates are multiplied by the step's factor: a step at factor F sends
   `baseline.events + loop.writes × F` events a second, `baseline.requests + loop.reads × F`
@@ -2816,7 +2871,7 @@ script does. What the example cannot carry is why each key is there, which is be
   "receipt_deadline": "1s", "session_delivery": "consumer"}`. A step at factor 0 is the baseline
   alone and takes the baseline's mixes; every step above it takes the loop's.
 - `paths.stateful_dir` is the directory under `/mnt/stateful_partition` that `up` bind-mounts at
-  `remote_root`, on both machines, at every run. The machines run Container-Optimized OS, where
+  `remote_root`, on every machine, at every run. The machines run Container-Optimized OS, where
   `/var` is mounted `noexec`, so a `loadgen` copied under `/var/lib/...` cannot be executed and
   every step would fail at its first command. `up` makes that directory with `sudo`, mounts it
   where it is not mounted already, remounts it `exec,nosuid,nodev`, gives it to the ssh user,
@@ -2830,23 +2885,26 @@ script does. What the example cannot carry is why each key is there, which is be
   `"$LOADTEST_ROOT/bin/loadgen"`, `paths.remote_loadgen`, `paths.remote_work`,
   `paths.nats_store`, `paths.cert`, `paths.cgroup`
   `"/sys/fs/cgroup/system.slice/docker-%s.scope"`, `pprof_url` (the profiling endpoint the
-  sampler is given when no step tunnel stands in for it, `http://<app host>:<ports.pprof>`),
-  `embed_tokens_per_minute` `1000000`, production's own quota, and `token_url`, `sqladmin` and
-  `compute`, the Google endpoints, for a test server.
+  sampler is given when no step tunnel stands in for it, `http://<the host of Dispatch's
+  machine>:<ports.pprof>`), `embed_tokens_per_minute` `1000000`, production's own quota, and
+  `token_url`, `sqladmin`, `compute`, `iamcredentials` and `oslogin`, the Google endpoints, for a
+  test server.
 
 ### The containers
 
 `up` starts these and `check` reads them back. Every container is started by image digest, never
-by a tag, so a run can name the bytes it measured:
+by a tag, so a run can name the bytes it measured. Which machine each one runs on is no part of
+this table: `containers` in the deployment file says it (The machines, and the containers on
+them, above):
 
-| Container | VM | CPU | Memory | Other |
-| --- | --- | --- | --- | --- |
-| `dispatch` | app | 16 | 32 GiB | 8 GiB ephemeral, `DISPATCH_PPROF_PORT`, host networking |
-| `auth-proxy` | app | 200m | 256 MiB | |
-| `dispatch-listener` | app | 500m | 512 MiB | |
-| `nats` | app | none | none | JetStream, its store on the VM's disk |
-| `hub-listener` | app | none | none | |
-| `load-listener-1` to `-4` | generator | 500m | 512 MiB | The listeners the loop's sessions register on: the unit sessions round-robin over the first three and the driver takes the fourth |
+| Container | CPU | Memory | Other |
+| --- | --- | --- | --- |
+| `dispatch` | 16 | 32 GiB | 8 GiB ephemeral, `DISPATCH_PPROF_PORT`, host networking |
+| `auth-proxy` | 200m | 256 MiB | |
+| `dispatch-listener` | 500m | 512 MiB | |
+| `nats` | none | none | JetStream, its store on its machine's disk |
+| `hub-listener` | none | none | |
+| `load-listener-1` to `-4` | 500m | 512 MiB | The listeners the loop's sessions register on: the unit sessions round-robin over the first three and the driver takes the fourth |
 
 NATS and the hub listener have no limit, as production's hub VM gives its two processes the whole
 machine. Dispatch's 8 GiB ephemeral limit is the setting that exists because Autopilot's 1Gi
@@ -2855,7 +2913,7 @@ default evicted production's Dispatch; `docker` takes it as `--storage-opt size=
 Dispatch's identity is `DISPATCH_IDENTITY=header:X-Dispatch-User` with
 `DISPATCH_IDENTITY_HEADER_TRUSTED=1` and a shared agent token, as `stack.sh` sets them: the
 deployment has no front door, no Tailscale and no OAuth, and the report says so. Its embedder is
-`loadgen stub-embed` on the generator VM, which `up` starts **before** Dispatch, because Dispatch
+`loadgen stub-embed` on the load machine, which `up` starts **before** Dispatch, because Dispatch
 reads the stub's certificate at startup (`SSL_CERT_FILE`) and a Dispatch started before it has
 nothing to trust (The embedding gate and the stub embedder, above). `check` proves every endpoint
 setting of every container, and a setting whose value is a credential by its presence alone, so no
@@ -2873,23 +2931,23 @@ threshold: without it, step N+1 would start with step N's consumers.
 ### The profiling tunnel
 
 Dispatch's profiling port binds `127.0.0.1` only (`cmd/dispatch/pprof.go`), and Dispatch runs with
-host networking, so that port answers on the application VM's own loopback and nowhere else. Two
-readers need it:
+host networking, so that port answers on its own machine's loopback and nowhere else. Two readers
+need it:
 
 - The profiles a step keeps (`cpu.pprof`, `goroutines.txt`, `heap.pprof`, `heap.txt`) are fetched
-  after the load from the application VM itself, over ssh. A fetch that fails is a note, never a
-  step failure: the step's measurements stand without its profile.
+  after the load from that machine itself, over ssh. A fetch that fails is a note, never a step
+  failure: the step's measurements stand without its profile.
 - The 5 s sampler inside `loadgen run` reads Dispatch's goroutines, its pool acquire waiters and
-  its heap **while the step runs**, and it runs on the generator VM.
+  its heap **while the step runs**, and it runs on the load machine.
 
 So `step` opens a tunnel for the life of the load — `ssh -N -L <ports.pprof_tunnel>:127.0.0.1:
-<ports.pprof> <the application VM>`, run on the generator VM — and gives `loadgen run -pprof
-http://127.0.0.1:<ports.pprof_tunnel>`. It is proven before any load, with a read of
+<ports.pprof> <the machine Dispatch runs on>`, run on the load machine — and gives `loadgen run
+-pprof http://127.0.0.1:<ports.pprof_tunnel>`. It is proven before any load, with a read of
 `/debug/pprof/goroutine?debug=1` through it, and a step whose tunnel does not answer is **refused
 by name**, its directory removed so it can run again under it: without that read the sampler
 measures no pool acquire waiters, pass criterion (e) is FAIL for want of a measurement, and the
 step is worth nothing. The tunnel is closed when the step ends, however it ends, and leaves no
-process and no pid file on the generator VM.
+process and no pid file on the load machine.
 
 The tunnel is the harness's, not the deployment's: `up` starts none, `down` stops none, and no row
 of `check`'s table reads it — `check` says so under its table, naming the ports it runs between,
