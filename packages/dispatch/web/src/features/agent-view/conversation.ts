@@ -386,32 +386,51 @@ export function sessionSettingsView(
 /**
  * A part the stream writes for a block it does not render: the block's kind in brackets, which
  * is what `conversationParts` (`@legion/pi-shared/agent-stream`) puts there for a picture
- * (`[image]`) and for any other kind a later build meets. It is the stream naming what the
- * message carried, not a word the person wrote.
+ * (`[image]`) and for any other kind a later build meets. A person writes such a word too -
+ * `[ack]`, `[done]`, `[LGTM]` - so the brackets alone say nothing about who wrote it: only a
+ * line the person's own body has nothing to account for is the stream naming what the message
+ * carried (`turnSaysBody`).
  */
 const PLACEHOLDER_PART = /^\[[A-Za-z][\w-]*\]$/;
 
 /** One streamed user message a person's Dispatch message became: the Dispatch message it says it
- *  delivered, and what the person wrote, its text parts joined as the session sent them with the
- *  placeholders left out. */
+ *  delivered, and what the session sent, its text parts joined in the order they arrived. */
 export interface DispatchTurn {
   readonly dispatchMessageId: string;
   readonly text: string;
 }
 
 /**
+ * Whether a streamed turn says exactly what the person wrote, so Dispatch's stored copy of that
+ * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
+ * body's own lines in order: each must be the body line that comes next, except a placeholder
+ * line the body has no line left for, which is the stream naming what the message carried rather
+ * than a word the person wrote. So a message carrying a picture, which reaches the session as the
+ * person's text and the picture beside it, says its body still: the `[image]` is the stream's. A
+ * body that is the bracketed word `[ack]` says itself, picture or no picture, because the body
+ * has that line of its own.
+ */
+export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
+  const lines = body.split("\n");
+  let next = 0;
+  for (const line of turn.text.split("\n")) {
+    if (line === lines[next]) next += 1;
+    else if (!PLACEHOLDER_PART.test(line)) return false;
+  }
+  return next === lines.length;
+}
+
+/**
  * The Dispatch message each streamed user message delivered, by streamed message id: a person's
  * direct message the session took as its own user turn is tagged with its Dispatch id, and the
- * view stops showing Dispatch's stored copy of it once the text is the same. A turn the session
- * left untagged is not in the map, so its stored copy keeps showing beside it
- * (`packages/pi-envoy/AGENTS.md` says which turns go untagged). The bus is open to
- * any client, so a tag counts only as the publisher's contract puts it, a string on a user
+ * view stops showing Dispatch's stored copy of it once the turn says what the person wrote
+ * (`turnSaysBody`). A turn the session left untagged is not in the map, so its stored copy keeps
+ * showing beside it (`packages/pi-envoy/AGENTS.md` says which turns go untagged). The bus is open
+ * to any client, so a tag counts only as the publisher's contract puts it, a string on a user
  * message; any other is ignored rather than taking the message with it, since a message shown
  * twice beats one lost. The text is read from the frame's own parts, which on a user message are
- * text alone (`isRenderableFrame`). A placeholder part is not read as something the person
- * wrote: a message carrying a picture reaches the session as the person's text and the picture
- * beside it, and the picture makes the row say more than the stored body, never something else,
- * so that stored copy gives way too (INFRA-1026).
+ * text alone (`isRenderableFrame`), every one of them: which of its lines the person wrote and
+ * which the stream named is for `turnSaysBody` to tell, against the stored body.
  */
 export function dispatchTurns(state: AgentConversation): Map<string, DispatchTurn> {
   const turns = new Map<string, DispatchTurn>();
@@ -419,11 +438,7 @@ export function dispatchTurns(state: AgentConversation): Map<string, DispatchTur
     if (message.role === "user" && typeof message.dispatchMessageId === "string") {
       turns.set(message.id, {
         dispatchMessageId: message.dispatchMessageId,
-        text: message.parts
-          .flatMap((part) =>
-            part.type === "text" && !PLACEHOLDER_PART.test(part.text) ? [part.text] : []
-          )
-          .join("\n"),
+        text: message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"),
       });
     }
   }

@@ -233,9 +233,12 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   the session has accepted the attempt with Dispatch, so the live view shows it from the stream,
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in
   `features/agent-view/conversation.ts`), the view hides Dispatch's stored copy only when the
-  streamed text equals it, and still names its author when that is not the viewer. A turn the
-  stream missed shows twice, as the streamed message and stored copy; so does a prompt template or
-  file command whose streamed message is its expansion rather than the stored `/name …`.
+  streamed row says what the person wrote (`turnSaysBody`: each of the row's lines is the body's
+  next line, except a bracketed word the body has no line left for, which is the stream naming a
+  block it did not render, such as a picture's `[image]`), and still names its author when that is
+  not the viewer. A turn the stream missed shows twice, as the streamed message and stored copy;
+  so does a prompt template or file command whose streamed message is its expansion rather than
+  the stored `/name …`.
   `packages/pi-envoy/AGENTS.md` says which turns the session leaves untagged. The live view's
   composer offers the modes the session advertises in `MODE_ORDER` (Send, Aside, BTW), so it opens
   on Send wherever the session takes a steer and on Aside otherwise. In Send or Aside, the

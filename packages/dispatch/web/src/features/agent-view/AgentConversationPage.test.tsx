@@ -592,6 +592,45 @@ test("a person's message that is a bracketed word of their own shows once", asyn
   ).toEqual(["[ack]"]);
 });
 
+// The two cases at once: a person sends the bracketed word `[ack]` with a picture attached, so the
+// session streams the person's `[ack]` and the stream's own `[image]` beside it. Driven live on a
+// Claude Code 2.1.310 session, where it drew two `agent-message-user` rows like the plain `[ack]`
+// did; the body's own lines say which of the two `[...]` lines the person wrote (INFRA-1026).
+test("a person's message that is a bracketed word with a picture shows once", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "[ack]"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [
+      {
+        kind: "message",
+        message: {
+          at,
+          dispatchMessageId: "m1",
+          id: `u${at}`,
+          parts: [
+            { text: "[ack]", type: "text" },
+            { text: "[image]", type: "text" },
+          ],
+          role: "user",
+          streaming: false,
+        },
+        seq: 1,
+        v: 1,
+      } as const satisfies AgentStreamFrame,
+    ],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("[image]");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["[ack][image]"]);
+});
+
 // Send is the terminal's Enter: the default wherever the session takes a steer. A session that
 // advertises Aside and no Send would refuse one, so Aside is its default.
 test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {
