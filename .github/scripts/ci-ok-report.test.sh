@@ -3,7 +3,8 @@
 # once lint and every job `changes` selected have reported, a merge-group run whose verdict a
 # failure or a cancellation already decided posts at once instead,
 # a re-run's report replaces the earlier
-# attempt's, the verdict is ci-ok.sh's, and a list GitHub refuses posts nothing.
+# attempt's, the verdict is ci-ok.sh's, an artifact list GitHub refuses posts nothing, and a
+# jobs list it refuses posts the verdict all the same once a merge-group run is decided.
 #
 # Each case writes the run's artifact names, which are the jobs' reports, and the `changes` the
 # reporting job saw, and runs the real scripts with a stand-in `gh` first on PATH: it answers the
@@ -270,15 +271,15 @@ check "posts one check run rather than waiting" "$(is "$(posted)" 1)"
 check "failing" "$(is "$(field .conclusion)" failure)"
 
 echo "case: a decided merge_group run whose jobs route GitHub refuses posts its verdict all the same"
-# The artifact list above it is read three times before the script gives up; the jobs route is
-# read once, inside an `&&` chain, so one refusal leaves `decision` untouched, `pending`
-# non-empty, and the script says it waits and exits 0. On a decided merge-group run nothing
-# posts later: the reporting job uploaded its own `failure` report before this step ran, so its
-# follower reads REPORT=failure and force-cancels the whole run, and a force-cancel leaves every
-# `if: always()` step skipped. The group then carries no ci-ok at all and holds the queue until
-# GitHub's 180-minute check timeout drops its pull request — the outcome this file's own header
-# names as the one to prevent. Nothing worse can come of posting a failing verdict on a group
-# that is about to be thrown away.
+# The artifact list above it is read three times before the script gives up, and the jobs route
+# is read three times too. On a decided merge-group run nothing posts later: the reporting job
+# uploaded its own `failure` report before this step ran, so its follower reads REPORT=failure
+# and force-cancels the whole run, and a force-cancel leaves every `if: always()` step skipped.
+# A run that waited for a read it could not make would carry no ci-ok at all and hold the queue
+# until GitHub's 180-minute check timeout dropped its pull request — the outcome this file's own
+# header names as the one to prevent. So every job still unreported is recorded `unread`, which
+# ci-ok.sh fails on, and the verdict goes up: nothing worse can come of posting a failing
+# verdict on a group that is about to be thrown away.
 report ci-ok-typecheck-1-failure
 run_report "$group_selects" merge_group
 check "exits 0" "$(is "$status" 0)"
