@@ -105,19 +105,27 @@ function inboxRowOfAsk(id: string): RefreshTarget {
   };
 }
 
-/** The Inbox's own thread reads (`inboxThreadsQuery`, either state), when one of their rows is a
- *  thread on issue `key`: a Reply row shows its issue's title and priority, and whether it is
- *  listed at all turns on who the issue is assigned to (`myRepliesOwner` in the server's
- *  replies.go leaves out an open ask on an open issue assigned to the reader, which the Inbox
- *  lists under Waiting on you instead). Built like `inboxRowsOf`: it needs no field of the
- *  event's, so an older server's event reaches it too. */
+/** The thread rows one of the Inbox's two reads holds: its own unpaged list, or the pages of
+ *  what the reader has dismissed (`dismissedThreadsQuery`, an infinite read, whose data is its
+ *  pages). */
+function threadRowsOf(data: unknown): readonly MyReplyRow[] {
+  const read = data as { pages?: readonly MyRepliesResponse[]; rows?: unknown } | undefined;
+  const pages = read?.pages;
+  if (Array.isArray(pages)) return pages.flatMap((page) => rowsOf<MyReplyRow>(page.rows));
+  return rowsOf<MyReplyRow>(read?.rows);
+}
+
+/** The Inbox's own thread reads (`inboxThreadsQuery` and `dismissedThreadsQuery`, so both the
+ *  Inbox and the Dismissed view), when one of their rows is a thread on issue `key`: a Reply row
+ *  shows its issue's title and priority, and whether it is listed at all turns on who the issue
+ *  is assigned to (`myRepliesOwner` in the server's replies.go leaves out an open ask on an open
+ *  issue assigned to the reader, which the Inbox lists under Waiting on you instead). Built like
+ *  `inboxRowsOf`: it needs no field of the event's, so an older server's event reaches it too. */
 function inboxThreadRowsOf(key: string): RefreshTarget {
   return {
     queryKey: inboxThreadsKey,
     when: (data) =>
-      rowsOf<MyReplyRow>((data as MyRepliesResponse | undefined)?.rows).some(
-        (row) => row.kind !== "agent" && row.issue?.key === key
-      ),
+      threadRowsOf(data).some((row) => row.kind !== "agent" && row.issue?.key === key),
   };
 }
 

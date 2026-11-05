@@ -1,6 +1,7 @@
 import { INBOX_THREAD_KINDS } from "@legion/contracts";
 
 import {
+  infiniteQueryOptions,
   keepPreviousData,
   type QueryFunctionContext,
   queryOptions,
@@ -20,6 +21,7 @@ import type {
   DeliveryTimelineResponse,
   InboxRow,
   IssueDetails,
+  MyRepliesResponse,
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
@@ -153,29 +155,36 @@ export const myRepliesCountQuery = () =>
     queryFn: async () => (await api.listMyReplies({ kind: INBOX_THREAD_KINDS, limit: 1 })).total,
   });
 
-/** The prefix both states of the Inbox's unpaged thread read share: what a refresh rule tests
- *  the listed rows under, whichever state the page is on (`api/event-refresh.ts`). */
+/** The prefix both of the Inbox's thread reads share - its own list and what the reader has
+ *  dismissed out of it: what a refresh rule tests the listed rows under, whichever view the page
+ *  is on (`api/event-refresh.ts`). */
 export const inboxThreadsKey = [...myRepliesKey, "inbox"] as const;
 
-/** Every thread row the Inbox lists, in one unpaged read: the Reply and Agent rows of the list,
- *  under **Unread** or, with the switch on, every one of them. The Inbox page and its drawer
- *  read this and nothing else does - a surface that wants one owner's unread set reads
- *  `myRepliesOwnerQuery` below. */
-export const inboxThreadsQuery = (state: "all" | "unread") =>
+/** Every thread row in the reader's Inbox, in one unpaged read: the Reply and Agent rows of the
+ *  list, read or not, less what they have dismissed. A thread stays here until it is dismissed,
+ *  so reading one leaves its row where it is. The Inbox page and its drawer read this and
+ *  nothing else does - a surface that wants one owner's unread set reads `myRepliesOwnerQuery`
+ *  below. */
+export const inboxThreadsQuery = () =>
   queryOptions({
-    queryKey: [...inboxThreadsKey, state],
-    queryFn: () => api.listMyReplies({ kind: INBOX_THREAD_KINDS, state }),
+    queryKey: [...inboxThreadsKey, "inbox"],
+    queryFn: () => api.listMyReplies({ kind: INBOX_THREAD_KINDS, state: "inbox" }),
   });
 
-/** How many thread rows the Inbox would hold with **Show read threads** on, from a one-row
- *  page's `total`. The unpaged read below answers only for the state the switch is on, so the
- *  View menu's other count is this count-only read: one extra request on the Inbox page, and
- *  nothing of the rows it counts. */
-export const inboxAllThreadCountQuery = () =>
-  queryOptions({
-    queryKey: [...myRepliesKey, "count", "all"],
-    queryFn: async () =>
-      (await api.listMyReplies({ kind: INBOX_THREAD_KINDS, limit: 1, state: "all" })).total,
+/** What the reader has dismissed out of their Inbox, newest dismissal first, which the View
+ *  menu's **Dismissed** draws: `INBOX_DISMISSED_PAGE` rows a page, each next page read from the
+ *  last one's `next_cursor` by the list's own **Show more**. */
+export const dismissedThreadsQuery = () =>
+  infiniteQueryOptions({
+    queryKey: [...inboxThreadsKey, "dismissed"],
+    queryFn: ({ pageParam }) =>
+      api.listMyReplies({
+        kind: INBOX_THREAD_KINDS,
+        state: "dismissed",
+        ...(pageParam === undefined ? {} : { cursor: pageParam }),
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last: MyRepliesResponse) => last.next_cursor,
   });
 
 /** One owner's unread threads, which every thread mounted on that owner's page reads to learn

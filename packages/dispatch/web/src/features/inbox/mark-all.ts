@@ -1,16 +1,18 @@
 /**
- * The Inbox's **Mark all read**: what one press sends, what it takes off the page before the
+ * The Inbox's **Mark all read**: what one press sends, what it changes on the page before the
  * server answers, and what comes back when the server refuses it.
  *
  * One press is one `POST /api/v1/me/inbox/read` (`markInboxReadRequest`), carrying the read mark
  * the list was read at (`as_of`) and the narrowing the list is under, so the server marks exactly
  * the threads the reader is looking at: no row that arrived after that read is swallowed, and no
- * row the Filter hid is marked. The press is applied here first - the rows leave the list and
- * every count drops - because the reader pressed it, and is taken back whole when the request
- * fails, which an old server with no such route is one way of doing.
+ * row the Filter hid is marked. The press is applied here first - the rows are drawn as read and
+ * every unread count drops - because the reader pressed it, and is taken back whole when the
+ * request fails, which an old server with no such route is one way of doing.
+ *
+ * It takes no row out of the list. A thread stays in the Inbox, read or not, until it is
+ * dismissed (`useInboxDismiss.ts`), as an email stays until it is archived.
  */
 
-import { INBOX_THREAD_KINDS, type InboxThreadKind } from "@legion/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -22,100 +24,43 @@ import {
   userAgentStateQuery,
 } from "../../api/queries";
 import type {
-  MarkInboxReadPriority,
   MarkInboxReadRequest,
   MarkInboxReadResponse,
   MyRepliesResponse,
   MyReplyRow,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
-import { INBOX_PRIORITY_VALUES, INBOX_URGENCY_VALUES } from "../refs/routes";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { inFieldFilter } from "./grouping";
 import type { InboxFilters } from "./InboxBar";
-import { type InboxListRow, rowId, rowType } from "./list-row";
+import { type InboxListRow, rowId } from "./list-row";
+import { inboxWriteScope, inWriteScope } from "./write-scope";
 
 /** What the page says when the server refused the press and nothing was marked. */
 export const MARK_ALL_REFUSED_TEXT = "Nothing was marked read.";
 
-/** The viewer `inFieldFilter` takes for the assignee field, which is not one of the fields read
- *  below: a thread row is the reader's own, so no press ever narrows by holder. */
-const NO_VIEWER = "";
-
-/** Whether a filter list, absent for every value, holds `value`. The server reads an absent list
- *  the same way (`parseInboxReadScope`), so a filter the reader has not touched is left out of
- *  the body rather than spelled as every value it could take. */
-function allows(values: readonly string[] | undefined, value: string): boolean {
-  return values === undefined || values.includes(value);
-}
-
-/** The chosen values of one field that this route's vocabulary holds. The address is parsed
- *  against that same vocabulary (`parseInboxSearch`), so this drops nothing a reader can pick;
- *  it is how the body is typed without a cast. */
-function chosen<T extends string>(
-  values: readonly string[] | undefined,
-  vocabulary: readonly T[]
-): T[] | undefined {
-  if (values === undefined || values.length === 0) return undefined;
-  const kept = values.filter((value): value is T =>
-    (vocabulary as readonly string[]).includes(value)
-  );
-  return kept.length === 0 ? [] : kept;
-}
-
-/** The kinds of thread row the Type filter is showing: both while it shows every type, since the
- *  button sits over one list of both. A Type filter naming only ask types shows no thread row at
- *  all, and the button is not offered then (`marksAnything`). */
-export function markAllKinds(filters: InboxFilters): InboxThreadKind[] {
-  const type = filters.type;
-  if (type === undefined || type.length === 0) return [...INBOX_THREAD_KINDS];
-  return INBOX_THREAD_KINDS.filter((kind) => type.includes(kind));
-}
-
 /**
- * The body one press sends: the read mark the list was read at, and the list's own narrowing -
- * the kinds the Type filter shows, and the priorities, urgencies and projects the other three
- * show. A field the reader has not narrowed is left out, which the route reads as every value.
- * The assignee filter is not here: a thread row is the reader's own and nobody else's, so a
- * selection naming anyone else leaves the list with no thread row to mark.
+ * The body one press sends: the read mark the list was read at, and the list's own narrowing
+ * (`inboxWriteScope`).
  */
 export function markAllReadBody(filters: InboxFilters, readThrough: string): MarkInboxReadRequest {
-  const priority = chosen<MarkInboxReadPriority>(filters.priority, INBOX_PRIORITY_VALUES);
-  const urgency = chosen(filters.urgency, INBOX_URGENCY_VALUES);
-  const project = filters.project;
-  return {
-    kind: markAllKinds(filters),
-    read_through: readThrough,
-    ...(priority === undefined ? {} : { priority }),
-    ...(urgency === undefined ? {} : { urgency }),
-    ...(project === undefined || project.length === 0 ? {} : { project: [...project] }),
-  };
+  return { ...inboxWriteScope(filters), read_through: readThrough };
 }
 
 /**
  * Whether one press marks `thread`: the server's own rule (`inboxReadScope`), read here so the
- * page takes off exactly the rows the request takes. A thread written in since the read mark
- * stays - the reader has not seen that write - and an Agent row, which carries no issue, no
- * project, no priority and no urgency, is marked only while each of those filters admits a row
- * that has none. Priority, urgency and project are read through the Filter's own rule
- * (`inFieldFilter`), so a value the list spells one way is marked by that same spelling.
+ * page draws as read exactly the rows the request marks. A thread written in since the read mark
+ * stays unread - the reader has not seen that write - and the list's narrowing decides the rest
+ * (`inWriteScope`).
  */
 export function marksThread(thread: MyReplyRow, body: MarkInboxReadRequest): boolean {
   if (!thread.unread) return false;
   if (compareTimestamps(thread.reply.created_at, body.read_through) > 0) return false;
-  const row: InboxListRow = { kind: "thread", thread };
-  if (!allows(body.kind, rowType(row))) return false;
-  return (
-    inFieldFilter(row, "priority", body.priority, NO_VIEWER) &&
-    inFieldFilter(row, "urgency", body.urgency, NO_VIEWER) &&
-    inFieldFilter(row, "project", body.project, NO_VIEWER)
-  );
+  return inWriteScope(thread, body);
 }
 
 /** A thread row as a read mark leaves it: read, with nothing unread in it. A Reply row's mark
  *  moves to `readThrough`; an Agent row has none - its replies are read by id - so only its
- *  unread ids are emptied. The press reads every row it marks through this, and so does a card
- *  the reader dwelt on (`pane-selection.ts`), which marks itself at its own newest reply. */
+ *  unread ids are emptied. The press reads every row it marks through this. */
 export function readRow(thread: MyReplyRow, readThrough: string): MyReplyRow {
   if (thread.kind === "agent") {
     return { ...thread, unread: false, unread_count: 0, unread_reply_ids: [] };
@@ -123,28 +68,21 @@ export function readRow(thread: MyReplyRow, readThrough: string): MyReplyRow {
   return { ...thread, read_through: readThrough, unread: false, unread_count: 0 };
 }
 
-/**
- * The list as the press leaves it. Under **Unread** the marked rows leave it, because the list
- * holds the unread ones and they no longer are; with **Show read threads** on they stay where
- * they are, drawn as read.
- */
+/** The list as the press leaves it: every row it marked drawn as read, and not one of them taken
+ *  out of the list. A read thread is still in the Inbox - only a dismiss takes it out - so the
+ *  rows stay where the reader can see what their press did. */
 export function applyMarkAll(
   answer: MyRepliesResponse,
   marked: ReadonlySet<string>,
-  readThrough: string,
-  state: "all" | "unread"
+  readThrough: string
 ): MyRepliesResponse {
   if (marked.size === 0) return answer;
-  if (state === "all") {
-    return {
-      ...answer,
-      rows: answer.rows.map((row) =>
-        marked.has(rowId({ kind: "thread", thread: row })) ? readRow(row, readThrough) : row
-      ),
-    };
-  }
-  const rows = answer.rows.filter((row) => !marked.has(rowId({ kind: "thread", thread: row })));
-  return { ...answer, rows, total: Math.max(0, answer.total - (answer.rows.length - rows.length)) };
+  return {
+    ...answer,
+    rows: answer.rows.map((row) =>
+      marked.has(rowId({ kind: "thread", thread: row })) ? readRow(row, readThrough) : row
+    ),
+  };
 }
 
 /** What the press rolls back to: the two reads it wrote, as they stood before it. */
@@ -166,17 +104,19 @@ export interface MarkAllRead {
  * The Inbox's **Mark all read**, for one list: its own filters, its own read mark, its own
  * optimistic apply and its own rollback. The drawer mounts its own Inbox, so it gets its own.
  *
- * The press writes two reads at once - the list the page is on, and the unread count every badge
- * shares - so the Unread switch, the Type filter's counts, the sidebar's Inbox count and the
- * compact header's Inbox link are all at zero before the server answers. The Agents page's **New
- * replies** badge is the server's own count of unread agent replies, so it drops when the answer
- * lands and the viewer's agent state is read again.
+ * The press writes two reads at once - the Inbox's own list and the unread count every badge
+ * shares - so the rows are drawn as read and the Type filter's counts, the sidebar's Inbox count
+ * and the compact header's Inbox link are all at zero before the server answers. The Agents
+ * page's **New replies** badge is the server's own count of unread agent replies, so it drops
+ * when the answer lands and the viewer's agent state is read again.
+ *
+ * The Dismissed view has no press of its own: it holds what the reader has already dealt with, so
+ * the Inbox passes no read mark there and nothing is offered (`asOf`).
  */
 export function useMarkAllRead({
   asOf,
   filters,
   rows,
-  state,
 }: {
   /** The `as_of` of the list read the page is showing, which is the read mark the press sends;
    *  undefined while the list has not been read, where the press is not offered. */
@@ -186,11 +126,10 @@ export function useMarkAllRead({
    *  while one of them is a thread this would mark, so a list with no thread row in it - an
    *  agent filter, `?section=needs-you`, a selection naming somebody else - offers none. */
   readonly rows: readonly InboxListRow[];
-  readonly state: "all" | "unread";
 }): MarkAllRead {
   const queryClient = useQueryClient();
   const [refused, setRefused] = useState(false);
-  const threadsKey = inboxThreadsQuery(state).queryKey;
+  const threadsKey = inboxThreadsQuery().queryKey;
   const countKey = myRepliesCountQuery().queryKey;
   const body = asOf === undefined ? undefined : markAllReadBody(filters, asOf);
   // The button is offered only while the list holds an unread Reply or Agent row, which is what
@@ -218,10 +157,7 @@ export function useMarkAllRead({
           .map((thread) => rowId({ kind: "thread", thread }))
       );
       if (threads !== undefined) {
-        queryClient.setQueryData(
-          threadsKey,
-          applyMarkAll(threads, marked, input.read_through, state)
-        );
+        queryClient.setQueryData(threadsKey, applyMarkAll(threads, marked, input.read_through));
       }
       // The count every badge shares drops by what this press marks, clamped at zero: an
       // unfiltered press marks every unread row and reads zero, and a filtered one takes away

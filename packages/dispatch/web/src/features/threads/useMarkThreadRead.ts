@@ -38,10 +38,6 @@ export interface MarkThreadReadOptions {
   /** The thread's writes, as the surface holds them, for the unread set below; none while the
    *  thread is still loading, and none at all from a surface that wants no set. */
   readonly writes?: readonly { readonly id: string; readonly created_at: string }[];
-  /** Told the moment that reply has been on screen long enough to count as read, as the mark is
-   *  made rather than when the server takes it: the Inbox holds the row it was read in on this
-   *  (`features/inbox/pane-selection.ts`). */
-  readonly onRead?: () => void;
 }
 
 /** What a thread's read mark answers: where the watch goes, and what the thread still holds
@@ -76,7 +72,6 @@ export interface ThreadRead {
 export function useMarkThreadRead({
   enabled,
   newestShownAt,
-  onRead,
   owner,
   threadId,
   writes,
@@ -100,9 +95,7 @@ export function useMarkThreadRead({
   const ref = useDwell({
     enabled: watched,
     onDwell: () => {
-      if (newestShownAt === undefined) return;
-      setSeen({ at: newestShownAt, threadId });
-      onRead?.();
+      if (newestShownAt !== undefined) setSeen({ at: newestShownAt, threadId });
     },
     resetKey: `${threadId} ${newestShownAt ?? ""}`,
   });

@@ -31,17 +31,18 @@ function noop(): void {}
  * the button and its refusal live on; the press itself is the Inbox's own hook.
  */
 function Bar({ filters = {} }: { filters?: InboxFilters }): ReactNode {
-  const read = useQuery(inboxThreadsQuery("unread"));
+  const read = useQuery(inboxThreadsQuery());
   const rows: readonly InboxListRow[] = (read.data?.rows ?? []).map((thread) => ({
     kind: "thread",
     thread,
   }));
-  const markAll = useMarkAllRead({ asOf: AS_OF, filters, rows, state: "unread" });
+  const markAll = useMarkAllRead({ asOf: AS_OF, filters, rows });
   const count = useUnreadThreadCount();
   return (
     <>
       <output data-testid="inbox-count">{count}</output>
       <output data-testid="listed">{rows.length}</output>
+      <output data-testid="unread">{(read.data?.rows ?? []).filter((t) => t.unread).length}</output>
       <InboxBar
         agentToken={undefined}
         assignees={undefined}
@@ -54,16 +55,14 @@ function Bar({ filters = {} }: { filters?: InboxFilters }): ReactNode {
         rows={rows}
         selection={["alice"]}
         view={{
-          allThreadCount: undefined,
           group: "priority",
           onGroupChange: noop,
-          onShowReadThreadsChange: noop,
+          onShowChange: noop,
           onSortChange: noop,
           onThreadOrderChange: noop,
-          showReadThreads: false,
+          show: "inbox",
           sort: "newest",
           threadOrder: "oldest",
-          unreadThreadCount: rows.length,
         }}
         viewer="alice"
       />
@@ -79,7 +78,7 @@ function renderBar(rows: readonly MyReplyRow[], count: number, filters?: InboxFi
     },
   });
   client.setQueryData(whoAmIQuery().queryKey, { event_head: "0", kind: "user", login: "alice" });
-  client.setQueryData(inboxThreadsQuery("unread").queryKey, threadsRead(rows));
+  client.setQueryData(inboxThreadsQuery().queryKey, threadsRead(rows));
   client.setQueryData(myRepliesCountQuery().queryKey, count);
   render(
     <MemoryRouter>
@@ -97,6 +96,10 @@ function inboxCount(): string {
 
 function listed(): string {
   return screen.getByTestId("listed").textContent ?? "";
+}
+
+function unread(): string {
+  return screen.getByTestId("unread").textContent ?? "";
 }
 
 test("the body carries the list's read mark and the filters the list is under", () => {
@@ -139,7 +142,7 @@ test("the button shows only while the list holds an unread Reply or Agent row", 
   expect(screen.getByRole("button", { name: "Mark all read" })).toBeTruthy();
 });
 
-test("one press zeroes the count and empties the list before the server answers, and sends the list's own body", async () => {
+test("one press zeroes the count and draws the rows read, without taking one out of the list", async () => {
   const marked = answerInboxReads();
   const settle = Promise.withResolvers<{ marked: number }>();
   marked.mockReturnValue(settle.promise);
@@ -150,9 +153,11 @@ test("one press zeroes the count and empties the list before the server answers,
   expect(inboxCount()).toBe("2");
   fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
 
-  // At once, with the request still out: the rows are gone and every badge reading the shared
-  // count is at zero.
-  await waitFor(() => expect(listed()).toBe("0"));
+  // At once, with the request still out: every badge reading the shared count is at zero and no
+  // row is unread any more - and both rows are still in the list, where a thread stays until it
+  // is dismissed.
+  await waitFor(() => expect(unread()).toBe("0"));
+  expect(listed()).toBe("2");
   expect(inboxCount()).toBe("0");
   expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
@@ -180,6 +185,6 @@ test("a refused press brings the rows and the counts back and says nothing was m
   // The sidebar's Inbox count and the compact header's Inbox link hold their pre-click number
   // again, and the rows are back in the list with the button over them.
   expect(inboxCount()).toBe("2");
+  expect(unread()).toBe("2");
   expect(listed()).toBe("2");
-  expect(screen.getByRole("button", { name: "Mark all read" })).toBeTruthy();
 });

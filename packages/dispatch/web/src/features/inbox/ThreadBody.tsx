@@ -16,7 +16,7 @@
  */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -63,7 +63,6 @@ import { threadLayout, unreadWrites } from "../threads/thread-layout";
 import { useThreadOrder } from "../threads/thread-order";
 import { type RepliesOwner, useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { AskCard } from "./AskCard";
-import { ReadHoldContext } from "./pane-selection";
 
 /** One message of a thread, whatever route it was read from. */
 interface ThreadTurn {
@@ -227,16 +226,15 @@ function threadSendKey(threadId: string): readonly unknown[] {
 
 /**
  * The read mark a Reply row's thread carries: the dwell rule the thread's own pages already use
- * (`useMarkThreadRead`, `features/shell/useDwell.ts`) over the row's own newest write, with the
- * list's hold on the row it was read in. The returned ref goes on the newest message.
+ * (`useMarkThreadRead`, `features/shell/useDwell.ts`) over the row's own newest write. The
+ * returned ref goes on the newest message. Reading a thread takes it out of no list - it stays in
+ * the Inbox until it is dismissed - so the mark is all this does.
  */
 function useThreadRead(thread: MyReplyThreadRow, owner: RepliesOwner | undefined): DwellRef {
-  const hold = useContext(ReadHoldContext);
   return useMarkThreadRead({
     // A row the reader has already read needs no mark, and reads no unread set to decide it.
     enabled: thread.unread,
     newestShownAt: thread.reply.created_at,
-    onRead: () => hold?.(thread),
     owner,
     threadId: thread.thread_id,
   }).ref;
@@ -253,7 +251,6 @@ const NO_REPLIES: readonly Message[] = [];
  * one of them at or before that newest message, since the body draws the thread whole.
  */
 function useAgentThreadRead(thread: MyReplyAgentRow, replies: readonly Message[]): DwellRef {
-  const hold = useContext(ReadHoldContext);
   const unreadIds = thread.unread_reply_ids;
   // Which set of unread replies has dwelled, as `useMarkThreadRead` keeps which reply has: a
   // reply that arrives while the thread is on screen is read only once it has dwelled too.
@@ -261,10 +258,7 @@ function useAgentThreadRead(thread: MyReplyAgentRow, replies: readonly Message[]
   const [read, setRead] = useState<string | undefined>(undefined);
   const ref = useDwell({
     enabled: thread.unread && unreadIds.length > 0,
-    onDwell: () => {
-      setRead(seen);
-      hold?.(thread);
-    },
+    onDwell: () => setRead(seen),
     resetKey: seen,
   });
   useMarkShownRepliesRead(

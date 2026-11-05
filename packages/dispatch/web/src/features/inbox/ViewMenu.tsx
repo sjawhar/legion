@@ -10,7 +10,14 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { INBOX_GROUP_BYS, INBOX_SORTS, type InboxGroupBy, type InboxSort } from "../refs/routes";
+import {
+  INBOX_GROUP_BYS,
+  INBOX_SHOWS,
+  INBOX_SORTS,
+  type InboxGroupBy,
+  type InboxShow,
+  type InboxSort,
+} from "../refs/routes";
 import { THREAD_ORDER_LABELS, THREAD_ORDERS, type ThreadOrder } from "../threads/thread-order";
 import { DIMENSION_LABELS } from "./grouping";
 
@@ -23,6 +30,9 @@ const GROUP_LABELS: Record<InboxGroupBy, string> = {
   none: "None",
   "waiting-on": "Waiting on",
 };
+
+/** Which list is showing, as the menu names each choice. */
+const SHOW_LABELS: Record<InboxShow, string> = { dismissed: "Dismissed", inbox: "Inbox" };
 
 /** One of a menu section's mutually exclusive choices. */
 function Choice<T extends string>({
@@ -72,48 +82,41 @@ function Section({ children, label }: { children: ReactNode; label: string }): R
   );
 }
 
-/** What the menu shows and changes. The bar owns `open` and `onOpenChange`; the other ten are
- *  the Inbox's, which the bar only passes on (`InboxBar`'s `view` prop). */
+/** What the menu shows and changes. The bar owns `open` and `onOpenChange`; the others are the
+ *  Inbox's, which the bar only passes on (`InboxBar`'s `view` prop). */
 export interface ViewMenuProps {
-  /** How many thread rows the list would hold with the switch on, or undefined while the list
-   *  is on Unread: that count is the read's own `total`, and the read the switch is off for
-   *  counts the unread alone. It is read only once the reader has opened this menu, the one
-   *  place it is drawn. */
-  allThreadCount: number | undefined;
   group: InboxGroupBy;
   onGroupChange: (next: InboxGroupBy) => void;
   onOpenChange: (open: boolean) => void;
-  onShowReadThreadsChange: (next: boolean) => void;
+  onShowChange: (next: InboxShow) => void;
   onSortChange: (next: InboxSort) => void;
   onThreadOrderChange: (next: ThreadOrder) => void;
   open: boolean;
-  showReadThreads: boolean;
+  /** Which of the reader's two lists is showing: their Inbox, or what they have dismissed. */
+  show: InboxShow;
   sort: InboxSort;
   threadOrder: ThreadOrder;
-  /** How many thread rows the list holds with the switch off, its default. */
-  unreadThreadCount: number;
 }
 
 /**
- * The Inbox bar's **View** menu: how the list is ordered, how it is banded, whether the threads
- * the reader has already read are in it, and which way a thread's own replies read.
+ * The Inbox bar's **View** menu: how the list is ordered, how it is banded, which of the reader's
+ * two lists is showing - their Inbox, or what they have dismissed out of it - and which way a
+ * thread's own replies read.
  *
  * The first three are the list's, so they ride in the address and a link carries them; the
  * thread order is the reader's own and is kept for their browser (`threads/thread-order.ts`).
  */
 export function ViewMenu({
-  allThreadCount,
   group,
   onGroupChange,
   onOpenChange,
-  onShowReadThreadsChange,
+  onShowChange,
   onSortChange,
   onThreadOrderChange,
   open,
-  showReadThreads,
+  show,
   sort,
   threadOrder,
-  unreadThreadCount,
 }: ViewMenuProps): ReactNode {
   const id = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -187,21 +190,17 @@ export function ViewMenu({
               />
             ))}
           </Section>
-          <Section label="Show read threads">
-            <Choice
-              chosen={!showReadThreads}
-              group={`${id}-threads`}
-              label={`Unread ${unreadThreadCount}`}
-              onChoose={() => onShowReadThreadsChange(false)}
-              value="unread"
-            />
-            <Choice
-              chosen={showReadThreads}
-              group={`${id}-threads`}
-              label={allThreadCount === undefined ? "All threads" : `All threads ${allThreadCount}`}
-              onChoose={() => onShowReadThreadsChange(true)}
-              value="all"
-            />
+          <Section label="Show">
+            {INBOX_SHOWS.map((value) => (
+              <Choice
+                chosen={value === show}
+                group={`${id}-show`}
+                key={value}
+                label={SHOW_LABELS[value]}
+                onChoose={onShowChange}
+                value={value}
+              />
+            ))}
           </Section>
           <Section label="Thread order">
             {THREAD_ORDERS.map((value) => (

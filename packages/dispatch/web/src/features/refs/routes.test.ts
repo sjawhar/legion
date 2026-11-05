@@ -988,11 +988,11 @@ test("the inbox's view and filters round-trip and leave their defaults out of th
     filters: { priority: ["P0", "none"], type: ["reply", "agent"] },
     group: "waiting-on",
     sort: "urgency",
-    threads: "all",
+    show: "dismissed",
   } as const;
   const path = buildInboxPath(route);
   expect(path).toBe(
-    "/?threads=all&sort=urgency&group=waiting-on&priority=P0%2Cnone&type=reply%2Cagent"
+    "/?show=dismissed&sort=urgency&group=waiting-on&priority=P0%2Cnone&type=reply%2Cagent"
   );
   expect(parseInboxSearch(path.slice(1))).toEqual(route);
 
@@ -1010,7 +1010,7 @@ test("the inbox's view and filters round-trip and leave their defaults out of th
 
 // A word this build does not know is dropped rather than refused: an older link still opens.
 test("the inbox drops filter values, sorts and groupings it does not know", () => {
-  expect(parseInboxSearch("?sort=sideways&group=colour&threads=some")).toEqual({});
+  expect(parseInboxSearch("?sort=sideways&group=colour&show=everything")).toEqual({});
   expect(parseInboxSearch("?priority=P9&urgency=mild&type=rumour")).toEqual({});
   expect(parseInboxSearch("?priority=P0,,P0,P1")).toEqual({ filters: { priority: ["P0", "P1"] } });
   // A project key is the workspace's own word, so only an empty one is dropped.

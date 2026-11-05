@@ -1,3 +1,4 @@
+import { INBOX_DISMISSED_PAGE } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 import {
   type FocusEvent,
@@ -16,9 +17,12 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import {
+  borderDefault,
   checkboxAccent,
   dangerText,
   focusVisibleRing,
+  linkHoverText,
+  linkText,
   surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurfaceMuted,
@@ -32,6 +36,7 @@ import {
   buildInboxPath,
   INBOX_FILTER_FIELDS,
   type InboxRoute,
+  type InboxShow,
   parseInboxSearch,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -47,8 +52,9 @@ import { formatAskAge } from "./ask-age";
 import { outsideAskCard } from "./ask-card";
 import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
-import { BulkSnoozeBar } from "./BulkSnoozeBar";
-import { group, inFieldFilter, LATER_GROUP_KEY, sortRows } from "./grouping";
+import { BulkBar } from "./BulkBar";
+import { DismissControl, RowDismissContext } from "./DismissControl";
+import { ALL_GROUP_KEY, group, inFieldFilter, LATER_GROUP_KEY, sortRows } from "./grouping";
 import { InboxBar, type InboxFilters, type InboxPopover } from "./InboxBar";
 import { GROUP_PAGE, groupItems } from "./InboxGroups";
 import { ROW_ATTRIBUTE, ROW_SELECTOR } from "./inbox-row";
@@ -64,7 +70,7 @@ import {
 import { useMarkAllRead } from "./mark-all";
 import { useMotionHold } from "./motion-hold";
 import { PaneDivider, usePaneWidth } from "./PaneDivider";
-import { type PlacedRow, ReadHoldContext, usePaneSelection } from "./pane-selection";
+import { type PlacedRow, usePaneSelection } from "./pane-selection";
 import { useFoldedGroups } from "./preferences";
 import { questionLine } from "./question-line";
 import { ReadingPane } from "./ReadingPane";
@@ -81,6 +87,7 @@ import {
 import { ThreadRowCard } from "./ThreadRowCard";
 import { ThreadTitle } from "./ThreadTitle";
 import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
+import { dismissRowId, useInboxDismiss } from "./useInboxDismiss";
 import { useInboxThreadRows } from "./useInboxThreadRows";
 
 /** When an agent replied last on a row that still needs the viewer, that reply is surfaced so
@@ -130,10 +137,11 @@ const ROW_CONTROL_SELECTOR = "a, button, input, label, select, textarea";
 interface InboxRowProps {
   /** The band this row is drawn under, for the fold and the held-row rule. */
   group: string;
-  /** Whether the reader has marked this row for a bulk action; never a thread row. */
+  /** Whether the reader has marked this row for a bulk action. */
   marked: boolean;
-  /** Marks or unmarks this ask; `x` and the row's own checkbox are the two ways in. */
-  onMark: (askId: string) => void;
+  /** Marks or unmarks this row, by its own `rowId`; `x` and the row's own checkbox are the two
+   *  ways in. */
+  onMark: (id: string) => void;
   /** Set on the held row - one the server dropped or moved to another band that stays where
    *  the reader last saw it while they are still on it; called when their focus or pointer
    *  leaves it. */
@@ -144,26 +152,26 @@ interface InboxRowProps {
   section: InboxSection;
 }
 
-/** The row's own checkbox, the pointer's way to the mark `x` makes. Snoozing, marking and the
- *  bulk bar are an open question's; a thread is read or it is not, so a thread row draws the
- *  space this takes and no control of its own (`ThreadShortRow`). */
+/** The row's own checkbox, the pointer's way to the mark `x` makes. Every row takes one: with
+ *  rows marked the bulk bar offers **Snooze** for the asks among them and **Dismiss** for the
+ *  threads. */
 function MarkCheckbox({
-  ask,
+  id,
   marked,
   name,
   onMark,
 }: {
-  ask: InboxRow;
+  id: string;
   marked: boolean;
   name: string;
-  onMark: (askId: string) => void;
+  onMark: (id: string) => void;
 }): ReactNode {
   return (
     <input
       aria-label={`Select ${name}`}
       checked={marked}
       className={`size-4 shrink-0 ${checkboxAccent}`}
-      onChange={() => onMark(ask.id)}
+      onChange={() => onMark(id)}
       type="checkbox"
     />
   );
@@ -205,7 +213,7 @@ function InboxRowShell({
        biome-ignore lint/a11y/useKeyWithClickEvents: explained just above. */
     <li
       aria-current={selected ? "true" : undefined}
-      className={`rounded-xl outline-none focus-visible:ring-2 ${focusVisibleRing} ${
+      className={`group rounded-xl outline-none focus-visible:ring-2 ${focusVisibleRing} ${
         selected ? surfaceMutedBg : ""
       }`}
       data-inbox-group={groupKey}
@@ -321,7 +329,12 @@ function AskShortRow({
     <ShortRowFrame
       age={formatAskAge(rowLastActivityAt(row))}
       check={
-        <MarkCheckbox ask={ask} marked={marked} name={controlName(ask, ordinal)} onMark={onMark} />
+        <MarkCheckbox
+          id={ask.id}
+          marked={marked}
+          name={controlName(ask, ordinal)}
+          onMark={onMark}
+        />
       }
       group={groupKey}
       onRelease={onRelease}
@@ -336,9 +349,12 @@ function AskShortRow({
 }
 
 /** A Reply or an Agent row beside the reading column: the thread's subject as a link to the
- *  thread itself, when it was last written in, and whose it is. */
+ *  thread itself, when it was last written in, whose it is, and the **Dismiss** that takes it out
+ *  of the list - drawn while the reader's hand is on the row, and always on the selected one. */
 function ThreadShortRow({
   group: groupKey,
+  marked,
+  onMark,
   onRelease,
   onSelect,
   row,
@@ -350,9 +366,14 @@ function ThreadShortRow({
   return (
     <ShortRowFrame
       age={<Timestamp at={rowLastActivityAt(row)} />}
-      // A thread takes no mark, so the row draws the space the checkbox would take: every
-      // row's title starts in the same place.
-      check={<span aria-hidden="true" className="size-4 shrink-0" />}
+      check={
+        <MarkCheckbox
+          id={rowId(row)}
+          marked={marked}
+          name={questionLine(thread.subject)}
+          onMark={onMark}
+        />
+      }
       group={groupKey}
       onRelease={onRelease}
       onSelect={onSelect}
@@ -360,6 +381,7 @@ function ThreadShortRow({
         <>
           <ThreadOwnerLine className={`truncate text-sm ${textMutedOnCanvas}`} thread={thread} />
           {reference === undefined ? null : <CopyRefButton route={reference} />}
+          <DismissControl shown={selected} thread={thread} />
         </>
       }
       row={row}
@@ -419,7 +441,7 @@ function InboxCardRow({
           Assign to me is a full-width row inside the right group, so it never draws over the
           issue key. */}
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <MarkCheckbox ask={ask} marked={marked} name={name} onMark={onMark} />
+        <MarkCheckbox id={ask.id} marked={marked} name={name} onMark={onMark} />
         <RowKindIcon type={rowType(row)} />
         <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
           <InboxOwnerLink ask={ask} rowOwner />
@@ -462,10 +484,12 @@ function InboxCardRow({
   );
 }
 
-/** A Reply or an Agent row where the question rows are cards: the card's shell, whose thread
- *  body is written elsewhere. */
+/** A Reply or an Agent row where the question rows are cards: the row's mark over the card's
+ *  shell, whose thread body - and whose **Dismiss** - is written elsewhere. */
 function ThreadCardRow({
   group: groupKey,
+  marked,
+  onMark,
   onRelease,
   row,
   section,
@@ -480,6 +504,15 @@ function ThreadCardRow({
       section={section}
       selected={false}
     >
+      {/* The mark sits where a question card's does, on a line of its own above the card. */}
+      <div className="mb-1.5 flex items-center gap-2">
+        <MarkCheckbox
+          id={rowId(row)}
+          marked={marked}
+          name={questionLine(thread.subject)}
+          onMark={onMark}
+        />
+      </div>
       <ThreadRowCard thread={thread} />
     </InboxRowShell>
   );
@@ -542,18 +575,20 @@ function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | 
   return `${head}, and ${others} other reason${others === 1 ? "" : "s"}.`;
 }
 
-/** What the Inbox says when no band has a row. An agent filter's line is about that agent's asks
- *  alone, naming it in plain text (`useAgentText`): the empty state is a message, not a byline.
- *  Otherwise the credential requests above the bands wait on the viewer as much as an ask
- *  whose turn is theirs, so it says nothing until their list has come back empty: while the list
- *  loads, or after it fails, the Inbox cannot say that nothing needs them. The three filtered
- *  lines differ because only the reader's own list is about them: a cleared filter is about
- *  everyone, and any other selection is about whoever it names. */
+/** What the Inbox says when no band has a row. The Dismissed view is about one thing only, so it
+ *  says that and nothing else. An agent filter's line is about that agent's asks alone, naming it
+ *  in plain text (`useAgentText`): the empty state is a message, not a byline. Otherwise the
+ *  credential requests above the bands wait on the viewer as much as an ask whose turn is theirs,
+ *  so it says nothing until their list has come back empty: while the list loads, or after it
+ *  fails, the Inbox cannot say that nothing needs them. The three filtered lines differ because
+ *  only the reader's own list is about them: a cleared filter is about everyone, and any other
+ *  selection is about whoever it names. */
 function emptyStateMessage({
   agent,
   agentTitle,
   credentials,
   selection,
+  show,
   viewer,
 }: {
   agent: string | undefined;
@@ -561,34 +596,14 @@ function emptyStateMessage({
   credentials: CredentialRequests;
   /** Who the list is filtered to, as `?assignee=` reads: empty is the cleared filter. */
   selection: readonly string[];
+  show: InboxShow;
   viewer: string;
 }): string | undefined {
+  if (show === "dismissed") return "Nothing dismissed";
   if (agent !== undefined) return `No open asks from ${agentTitle}`;
   if (credentials.status !== "listed" || credentials.requests.length > 0) return undefined;
   if (isOwnList(selection, viewer)) return "Nothing needs you";
   return selection.length === 0 ? "Nothing needs anyone" : "Nothing matches this filter";
-}
-
-/** The second line of an empty list, under the message above: where the threads are. Under
- *  **Unread** it says that the ones already read are behind the switch, and only while there
- *  are any; with the switch on it says there is no thread at all. An agent filter and
- *  `?section=needs-you` narrow the list to asks, so neither sentence is true there and neither
- *  is drawn. */
-function emptyThreadLine({
-  asksOnly,
-  readThreadsBehindSwitch,
-  showReadThreads,
-}: {
-  asksOnly: boolean;
-  /** Whether **Show read threads** would add a row this list is not showing. */
-  readThreadsBehindSwitch: boolean;
-  showReadThreads: boolean;
-}): string | undefined {
-  if (asksOnly) return undefined;
-  if (showReadThreads) return "No threads either, read or unread.";
-  return readThreadsBehindSwitch
-    ? "No unread threads. Show read threads, under View, lists the ones you have read."
-    : undefined;
 }
 
 /**
@@ -636,11 +651,10 @@ export function Inbox({
   // list below is a client-side partition of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
-  const threadState = filter.threads === "all" ? "all" : "unread";
-  // Whether the reader has opened the View menu, which is the only place the count of every
-  // thread is drawn - and the costliest shape this route answers, so nothing asks for it
-  // until they have (`useInboxThreadRows`).
-  const [viewOpened, setViewOpened] = useState(false);
+  /** Which of the reader's two lists is showing: their Inbox, or what they have dismissed out of
+   *  it. A thread stays in the Inbox, read or not, until it is dismissed. */
+  const show: InboxShow = filter.show ?? "inbox";
+  const showDismissed = show === "dismissed";
   const listRef = useRef<HTMLElement>(null);
   /** The list column, which scrolls in itself beside the reading column. */
   const listScroller = useRef<HTMLDivElement>(null);
@@ -671,14 +685,9 @@ export function Inbox({
   const showMore = useCallback((key: string) => {
     setPages((current) => new Map(current).set(key, (current.get(key) ?? 1) + 1));
   }, []);
-  // Which of the bar's popovers is open, so Escape is that popover's rather than the
-  // selection's, and so the View menu's own count is asked for once it has been opened.
+  // Which of the bar's popovers is open, so Escape is that popover's rather than the selection's.
   const [openPopover, setOpenPopover] = useState<InboxPopover | undefined>(undefined);
   const barOpen = openPopover !== undefined;
-  const onPopoverOpenChange = (open: InboxPopover | undefined) => {
-    setOpenPopover(open);
-    if (open === "view") setViewOpened(true);
-  };
   const changeFilter = (next: InboxRoute) => {
     if (onFilterChange) {
       onFilterChange(next);
@@ -715,42 +724,53 @@ export function Inbox({
       return next;
     });
   }, []);
-  // The rows the reader has marked, by ask id: `x` and the row's own checkbox are the two ways
-  // in. An id the server no longer lists drops out here, so a row that is listed again comes back
-  // unmarked; a mark whose row this view does not list, or whose band is folded shut, drops out
-  // of `selected` below, so the bar never counts - and `h` never writes - a row that is not on
-  // the page. The mark itself outlives both: open the band, or switch back, and it is still made.
+  // The rows the reader has marked, by `rowId` - asks and threads alike: `x` and the row's own
+  // checkbox are the two ways in. An id the list no longer holds drops out here, so a row that is
+  // listed again comes back unmarked; a mark whose row this view does not list, or whose band is
+  // folded shut, drops out of `selected` below, so the bar never counts - and `h` never writes -
+  // a row that is not on the page. The mark itself outlives both: open the band, or switch back,
+  // and it is still made.
   const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
-  // The bulk write lives here rather than in the bar, because the optimistic snooze can take
-  // every marked row off this view at once and a bar that owned the write would be unmounted
-  // before its own refusal arrived. The bar reports one pick downward and renders what it is
-  // told. The pick's size is held with it, because that same move empties the selection the bar
+  // Whether the reader pressed **Select all**, which takes in every row of the group, the ones no
+  // page has loaded included. A dismiss of that selection names the list's own narrowing rather
+  // than ids, since the ids are not all here to name. Any change to the marks ends it.
+  const [allRows, setAllRows] = useState(false);
+  // The bulk writes live here rather than in the bar, because an optimistic snooze or dismiss can
+  // take every marked row off this view at once and a bar that owned the write would be unmounted
+  // before its own refusal arrived. The bar reports one press downward and renders what it is
+  // told. The snooze's size is held with it, because that same move empties the selection the bar
   // would otherwise count: `0 selected` while two asks are being snoozed.
   const bulkWrite = useAskSnoozeMany();
   const [bulkSnoozing, setBulkSnoozing] = useState(0);
   const bulkBarRef = useRef<HTMLFieldSetElement>(null);
   const [bulkRefusal, setBulkRefusal] = useState<string | undefined>(undefined);
+  /** The rows the reader has pressed Dismiss on here, by `rowId`, while that press is out: the
+   *  hand-hold below skips them, so a row they dismissed leaves the list at once even with their
+   *  hand still on it. An id leaves once its press settles - the rollback of a refused one puts
+   *  an ordinary row back, and one the server took is out of the list - so the hold never stops
+   *  covering a row the reader can still see. */
+  const dismissedHere = useRef<Set<string>>(new Set());
+  // The one dismiss write every control on this list shares, the row's own and the bar's: the
+  // write takes the row - and every control drawn on it - off the page, so its refusal is the
+  // page's to show rather than the row's (`useInboxDismiss`).
+  const dismissWrite = useInboxDismiss({
+    onSettled: (ids) => {
+      for (const id of ids) dismissedHere.current.delete(id);
+    },
+  });
   const clearSelection = useCallback(() => {
     setMarked(new Set());
+    setAllRows(false);
     setBulkRefusal(undefined);
   }, []);
-  const onMark = useCallback((askId: string) => {
+  const onMark = useCallback((id: string) => {
+    setAllRows(false);
     setMarked((current) => {
       const next = new Set(current);
-      if (!next.delete(askId)) next.add(askId);
+      if (!next.delete(id)) next.add(id);
       return next;
     });
   }, []);
-  const listedIds = adoptedInbox?.map((row) => row.id).join(" ");
-  useEffect(() => {
-    if (listedIds === undefined) return;
-    const listed = new Set(listedIds === "" ? [] : listedIds.split(" "));
-    setMarked((current) =>
-      [...current].every((id) => listed.has(id))
-        ? current
-        : new Set([...current].filter((id) => listed.has(id)))
-    );
-  }, [listedIds]);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
   // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
@@ -783,7 +803,8 @@ export function Inbox({
   // below speak for exactly the rows on the page.
   const agent = filter.agent;
   // An agent filter and `?section=needs-you` both narrow the list to asks, so neither lists a
-  // thread: one is about what an agent asked, the other about what waits on the reader now.
+  // thread: one is about what an agent asked, the other about what waits on the reader now. The
+  // Dismissed view is the other way round - an ask is never dismissed, so it holds threads alone.
   const asksOnly = agent !== undefined || filter.section === "needs-you";
   const fromAgent =
     agent === undefined
@@ -791,19 +812,15 @@ export function Inbox({
       : (adoptedInbox ?? []).filter(
           (ask) => ask.author.kind === "session" && ask.author.id === agent
         );
-  const askRows: InboxListRow[] = (
-    filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent
-  ).map((ask) => ({ ask, kind: "ask" }));
-  // The thread side of this list, in one hook: the reader's own threads, the rows they read in
-  // place that the server's answer no longer holds, and the two numbers the **Show read
-  // threads** switch carries.
-  const threads = useInboxThreadRows({
-    asksOnly,
-    listRef,
-    readHeld: paneSelection.readHeld,
-    state: threadState,
-    viewOpened,
-  });
+  const askRows: InboxListRow[] = showDismissed
+    ? []
+    : (filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent).map((ask) => ({
+        ask,
+        kind: "ask",
+      }));
+  // The thread side of this list, in one hook: the reader's Inbox or what they dismissed out of
+  // it, the read mark a write over that list carries, and the page behind **Show more**.
+  const threads = useInboxThreadRows({ asksOnly, listRef, show });
   /** Every row this list could hold before its five fields narrow it: what the bar counts. */
   const candidates = [...askRows, ...threads.rows];
   // The filters decide what is listed, with one exception: a row whose "Assign to me" write is
@@ -818,15 +835,17 @@ export function Inbox({
           inFieldFilter(row, field, filters[field], viewer ?? "")
         ))
   );
-  const shown = sortRows(narrowed, sort, viewer ?? "");
+  // The Dismissed view keeps the server's own order, newest dismissal first, and bands nothing:
+  // it is one list of what the reader has already dealt with.
+  const shown = showDismissed ? narrowed : sortRows(narrowed, sort, viewer ?? "");
   const byId = new Map(shown.map((row) => [rowId(row), row]));
   // The bar's **Mark all read**, over exactly this list: its filters, the read mark of the list
-  // read it is showing, and the rows it is showing.
+  // read it is showing, and the rows it is showing. The Dismissed view offers none, so it passes
+  // no read mark.
   const markAll = useMarkAllRead({
-    asOf: threads.asOf,
+    asOf: showDismissed ? undefined : threads.asOf,
     filters,
     rows: shown,
-    state: threadState,
   });
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its band on
   // the first render after its moment passes. Computed here, with the selection, rather than
@@ -835,7 +854,11 @@ export function Inbox({
   // The bands as this list heads them: another person's question is not "Waiting on you".
   const titles = sectionTitles(selection, viewer ?? "");
   const bands =
-    place === undefined ? [] : group(shown, groupBy, { now: place, titles, viewer: viewer ?? "" });
+    place === undefined
+      ? []
+      : showDismissed
+        ? [{ key: ALL_GROUP_KEY, label: undefined, rows: shown }]
+        : group(shown, groupBy, { now: place, titles, viewer: viewer ?? "" });
   // A row in a band the reader has not opened is not on the page: the band renders its heading
   // and count and none of its rows, so there is no checkbox to untick, and the reader may well
   // have set that row's own moment since marking it - a pick that wrote it would overwrite what
@@ -845,18 +868,24 @@ export function Inbox({
     if (folded.has(bandKey)) {
       return rows.filter((row) => row.kind === "ask" && snoozing.has(row.ask.id));
     }
+    // The Dismissed view pages at the server: every row a page answered is drawn, and **Show
+    // more** reads the next 200 rather than revealing rows already here.
+    if (showDismissed) return rows;
     return rows.slice(0, (pages.get(bandKey) ?? 1) * GROUP_PAGE);
   };
   const drawnIds = new Set(
     bands.flatMap(({ key, rows }) => drawnIn(key, rows).map((row) => rowId(row)))
   );
-  const selected = [...marked].filter((id) => drawnIds.has(id) && byId.get(id)?.kind === "ask");
+  /** The marks the bar counts and a press writes: the rows this view is drawing. */
+  const selected = [...marked].filter((id) => drawnIds.has(id));
+  const selectedAsks = selected.filter((id) => byId.get(id)?.kind === "ask");
+  const selectedThreads = selected.filter((id) => byId.get(id)?.kind === "thread");
   // One pick, over the ids the bar is counting: the same optimistic move and rollback the per-row
   // control makes, once per ask. The ids the server took leave the selection; the ones it refused
   // are marked again under its own reason, even if Clear ran while the write was in flight, so a
   // second pick retries exactly those.
   const snoozePick = (until: string) => {
-    const ids = [...selected];
+    const ids = [...selectedAsks];
     setBulkRefusal(undefined);
     setBulkSnoozing(ids.length);
     void bulkWrite.submit(ids, until).then(({ failed }) => {
@@ -871,11 +900,43 @@ export function Inbox({
       });
     });
   };
+  /** One press of the reader's, from a row's own control, from `e`, or from the bar: the ids go
+   *  into the hold's exception list first, so the rows leave the list under their hand. */
+  const dismissRows = (ids: readonly string[]) => {
+    for (const id of ids) dismissedHere.current.add(id);
+    dismissWrite.submit({ restore: showDismissed, rows: [...ids] });
+  };
+  // One press over the threads the bar is counting, through the one dismiss write. With **Select
+  // all** on, the ids are not all loaded, so the request names the list's own narrowing and the
+  // read mark of the list the reader is looking at instead, as **Mark all read** does.
+  const dismissPick = () => {
+    if (allRows && threads.asOf !== undefined) {
+      for (const id of selectedThreads) dismissedHere.current.add(id);
+      dismissWrite.submit({ filters, restore: showDismissed, through: threads.asOf });
+    } else {
+      dismissRows(selectedThreads);
+    }
+    // The rows leave the view at once, so the marks on them go with them; a refusal puts them
+    // back under the line the page shows for it, not under a bar the reader must look for.
+    clearSelection();
+  };
   // The bar, and the Clear it carries, shows while a mark is on the page, a pick is in the air or a
   // refusal is showing. Escape with no row focused is the keyboard's Clear and is offered on this
   // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
   // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
   const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
+  // A mark whose row the list no longer holds at all - dismissed, answered, resolved elsewhere -
+  // drops out here, so a row that comes back is unmarked. Read against every row the two reads
+  // answered, which is what the marks are keyed by.
+  const candidateIds = candidates.map((row) => rowId(row)).join(" ");
+  useEffect(() => {
+    const listed = new Set(candidateIds === "" ? [] : candidateIds.split(" "));
+    setMarked((current) =>
+      [...current].every((id) => listed.has(id))
+        ? current
+        : new Set([...current].filter((id) => listed.has(id)))
+    );
+  }, [candidateIds]);
   // The refetch a recorded answer triggers returns the list the optimistic removal already
   // produced, so it re-renders nothing on its own; release explicitly. The reader's own answer
   // is one of the ways the selection is handed on, and only while it is still the selected
@@ -904,12 +965,22 @@ export function Inbox({
    *  only while the focus is in the list beside it. */
   const arrowsMove = paneShown ? focusInList : () => focusedRow() !== null;
   const arrowsWhen = paneShown ? "the focus is in the list" : "a row is focused";
-  /** The row `x` marks: the one the column is showing, or the one holding the focus - and only
-   *  ever an ask. Marking, `h` and the bulk bar are an open question's; a thread row is read or
-   *  it is not, and the bar's count never includes one. */
-  const markableRow = (): string | undefined => {
+  /** The row the keys act on: the one the column is showing, or the one holding the focus. */
+  const handRow = (): InboxListRow | undefined => {
     const id = paneShown ? paneSelection.id : focusedRow()?.dataset.inboxRow;
-    return id !== undefined && byId.get(id)?.kind === "ask" ? id : undefined;
+    return id === undefined ? undefined : byId.get(id);
+  };
+  /** The row `x` marks, by its own `rowId`: asks and threads alike, since the bulk bar now offers
+   *  each kind its own press. */
+  const markableRow = (): string | undefined => {
+    const row = handRow();
+    return row === undefined ? undefined : rowId(row);
+  };
+  /** The row `e` dismisses: the thread row in hand, by the id the route names it with. An Ask or
+   *  an Approval row has no Dismiss at all (`dismissRowId`). */
+  const dismissableRow = (): string | undefined => {
+    const row = handRow();
+    return row === undefined ? undefined : dismissRowId(row);
   };
   /** Where the Inbox's keys act: the reading column while it is on - its head's Snooze, owner
    *  link and Copy ref, and the answer form of whatever it is showing - else the row holding
@@ -1058,13 +1129,30 @@ export function Inbox({
       // Marking walks the list with the row in hand, as `j`/`k` do, so it is no palette row.
       id: "select",
       keys: "x",
-      label: `Select or deselect the ${acted} ask`,
+      label: `Select or deselect the ${acted} row`,
       palette: false,
       run: () => {
-        const askId = markableRow();
-        if (askId !== undefined) onMark(askId);
+        const id = markableRow();
+        if (id !== undefined) onMark(id);
       },
       when: () => markableRow() !== undefined,
+    },
+    {
+      id: "dismiss",
+      keys: "e",
+      // The row goes out of the Inbox, and in the Dismissed view back into it; the selection then
+      // moves to the next row, as it does after a snooze. An Ask or an Approval row has no
+      // Dismiss, so the key does nothing on one.
+      label: showDismissed
+        ? `Move the ${acted} thread back to the Inbox`
+        : `Dismiss the ${acted} thread`,
+      run: () => {
+        const id = dismissableRow();
+        if (id !== undefined) dismissRows([id]);
+      },
+      // Not from inside an ask the reader is answering, the rule `h` holds to: the card's own
+      // controls are not the list's, and a typed `e` belongs to whatever holds the focus.
+      when: () => dismissableRow() !== undefined && (!paneShown || outsideAskCard()),
     },
     {
       id: "snooze",
@@ -1072,7 +1160,7 @@ export function Inbox({
       // One key for both: with rows marked it is the whole selection, otherwise the row in hand.
       label: "Snooze the focused ask, or every selected ask",
       run: () => {
-        if (selected.length === 0) {
+        if (selectedAsks.length === 0) {
           // The short row carries no Snooze of its own: the reading column's head does, for the
           // row it is showing.
           inHand("[data-inbox-snooze]")?.focus();
@@ -1087,7 +1175,7 @@ export function Inbox({
       // Inside the column that rule covers the lone Snooze too, the card there being the
       // column's own.
       when: () =>
-        (selected.length > 0 && outsideAskCard()) ||
+        (selectedAsks.length > 0 && outsideAskCard()) ||
         (inHand("[data-inbox-snooze]") !== null && (!paneShown || outsideAskCard())),
     },
     {
@@ -1138,10 +1226,12 @@ export function Inbox({
   // column is merely showing is not held - the Inbox selects the first row for the reader the
   // moment it opens, and a question the server withdraws, resolves or answers elsewhere must
   // not stay in the list on the strength of a selection nobody made. What the column does with
-  // a selected question the server takes away is `paneRow` (`pane-selection.ts`).
+  // a selected question the server takes away is `paneRow` (`pane-selection.ts`). A row the
+  // reader dismissed under their own hand is not held either: they asked for it to go, as they
+  // do by answering one, so it goes at once and the next row takes its place.
   const handId = anchor?.id;
   const seen =
-    handId === undefined || handId === answered.current
+    handId === undefined || handId === answered.current || dismissedHere.current.has(handId)
       ? undefined
       : presented.current.find((placed) => rowId(placed.row) === handId);
   const listed = seen === undefined ? undefined : byId.get(rowId(seen.row));
@@ -1188,16 +1278,24 @@ export function Inbox({
   // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and
   // the refusal that comes back has to land somewhere the reader can see.
   const bulkBar = bulkBarShown ? (
-    <BulkSnoozeBar
+    <BulkBar
+      all={allRows}
+      askCount={selectedAsks.length}
       barRef={bulkBarRef}
-      count={selected.length}
       onClear={clearSelection}
+      onDismiss={dismissPick}
       onPick={snoozePick}
       onPickerFocus={(from) => {
         pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
       }}
+      onSelectAll={() => {
+        setMarked(new Set(shown.map((row) => rowId(row))));
+        setAllRows(true);
+      }}
       pending={bulkSnoozing}
       refusal={bulkRefusal}
+      show={show}
+      threadCount={selectedThreads.length}
     />
   ) : null;
   // Everything above the list, the same whether or not any band has a row, and a sibling of the
@@ -1215,31 +1313,37 @@ export function Inbox({
         onFiltersChange={(next) =>
           changeFilter({ ...filter, filters: Object.keys(next).length === 0 ? undefined : next })
         }
-        onPopoverOpenChange={onPopoverOpenChange}
+        onPopoverOpenChange={setOpenPopover}
         rows={candidates}
         selection={selection}
         view={{
-          allThreadCount: threads.allThreadCount,
           group: groupBy,
           onGroupChange: (next) => changeFilter({ ...filter, group: next }),
-          onShowReadThreadsChange: (next) =>
-            changeFilter({ ...filter, threads: next ? "all" : undefined }),
+          onShowChange: (next) =>
+            changeFilter({ ...filter, show: next === "dismissed" ? "dismissed" : undefined }),
           onSortChange: (next) => changeFilter({ ...filter, sort: next }),
           onThreadOrderChange: setThreadOrder,
-          showReadThreads: threadState === "all",
+          show,
           sort,
           threadOrder,
-          unreadThreadCount: threads.unreadThreadCount,
         }}
         viewer={viewer}
       />
-      {agent === undefined ? (
+      {agent === undefined && !showDismissed ? (
         <BlockedOnYou
           asks={adoptedInbox ?? []}
           credentialRequests={credentials.requests}
           viewer={viewer}
         />
       ) : null}
+      {/* A dismiss the server refused: the rows are back where they were, and the page says so
+          here, above the list, because the control that sent it was on a row this write had
+          already taken off the page. */}
+      {dismissWrite.refusal === undefined ? null : (
+        <p className={`text-sm ${dangerText}`} data-inbox-dismiss-refused="" role="alert">
+          {dismissWrite.refusal}
+        </p>
+      )}
       {bulkBar}
     </div>
   );
@@ -1254,9 +1358,15 @@ export function Inbox({
   // unmount the whole list, taking the keyboard's focus, the bulk bar and every row's state
   // with it and mounting a fresh one a commit later.
   const page = (listColumn: ReactNode, subject: InboxListRow | undefined): ReactNode => (
-    // Every thread this list draws - in the column, and in a card below its width - reports its
-    // own read here, which holds the row it was read in (`pane-selection.ts`).
-    <ReadHoldContext value={paneSelection.holdRead}>
+    // Every thread this list draws - in the column, and in a card below its width - draws its own
+    // Dismiss from here (`DismissControl`).
+    <RowDismissContext
+      value={{
+        dismiss: (id) => dismissRows([id]),
+        pending: dismissWrite.pending,
+        show,
+      }}
+    >
       <div className={paneShown ? "flex min-h-0 flex-1 flex-col gap-4" : "space-y-4"}>
         {header}
         {paneShown ? (
@@ -1299,7 +1409,7 @@ export function Inbox({
           listColumn
         )}
       </div>
-    </ReadHoldContext>
+    </RowDismissContext>
   );
 
   if (shown.length === 0 && held === undefined) {
@@ -1308,12 +1418,8 @@ export function Inbox({
       agentTitle,
       credentials,
       selection,
+      show,
       viewer,
-    });
-    const threadLine = emptyThreadLine({
-      asksOnly,
-      readThreadsBehindSwitch: (threads.allThreadCount ?? 0) > threads.unreadThreadCount,
-      showReadThreads: threadState === "all",
     });
     // Nothing to read, so nothing to select and no column beside the list. The one question that
     // outlives every row is the one the column is keeping for an unsent answer, and it keeps
@@ -1322,11 +1428,7 @@ export function Inbox({
     const empty = (
       <div data-testid="inbox-list">
         {emptyMessage === undefined ? null : (
-          <EmptyState
-            action={threadLine === undefined ? undefined : <p>{threadLine}</p>}
-            label="Inbox empty state"
-            message={emptyMessage}
-          />
+          <EmptyState label="Inbox empty state" message={emptyMessage} />
         )}
       </div>
     );
@@ -1372,7 +1474,7 @@ export function Inbox({
     const onRelease = held !== undefined && rowId(held.row) === id ? release : undefined;
     const shared = {
       group: bandKey,
-      marked: row.kind === "ask" && marked.has(row.ask.id),
+      marked: marked.has(id),
       onMark,
       onRelease,
       ordinal: row.kind === "ask" ? ordinals.get(row.ask.id) : undefined,
@@ -1449,6 +1551,19 @@ export function Inbox({
             })
           )}
         </ul>
+        {/* The Dismissed view's own **Show more**: the next page of dismissals, read from the
+            cursor the last page named, rather than rows this page is holding back. */}
+        {threads.showMore === undefined ? null : (
+          <button
+            className={`min-h-11 rounded-lg border px-3 py-1.5 text-sm font-medium ${borderDefault} ${linkText} ${linkHoverText}`}
+            data-inbox-show-more="dismissed"
+            disabled={threads.showingMore}
+            onClick={threads.showMore}
+            type="button"
+          >
+            {threads.showingMore ? "Loading…" : `Show ${INBOX_DISMISSED_PAGE} more`}
+          </button>
+        )}
       </ViewportAnchor>
     </div>
   );

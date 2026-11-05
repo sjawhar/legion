@@ -16,6 +16,7 @@ import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { InboxOwnerLink, ThreadOwnerLine } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
 import { askIssueKey, controlName } from "./ask-name";
+import { DismissControl } from "./DismissControl";
 import { EarlierApproval } from "./EarlierApproval";
 import { threadReferenceRoute } from "./list-row";
 import { SnoozeControl } from "./SnoozeControl";
@@ -155,8 +156,9 @@ export function ReadingPaneHead({
 /**
  * The reading column's head for a Reply or an Agent row: who the thread belongs to, **Open
  * page** - the thread's own page, which the server names in the row's `ref`: the document with
- * the thread open, the issue's conversation, or `/agents/<id>/live` for an Agent row - and
- * **Copy ref**.
+ * the thread open, the issue's conversation, or `/agents/<id>/live` for an Agent row - **Copy
+ * ref**, and the **Dismiss** that takes the row out of the Inbox, which in the Dismissed view
+ * reads **Move to Inbox** (`DismissControl`).
  *
  * **Open page** is what `o` follows here (`data-inbox-owner`), as the card's **Open** is below
  * this column's width: the key opens the thread, never the issue it happens to sit on, and it
@@ -190,6 +192,7 @@ export function ThreadPaneHead({
         Open page
       </Link>
       {reference === undefined ? null : <CopyRefButton route={reference} />}
+      <DismissControl shown thread={thread} />
     </header>
   );
 }

@@ -89,6 +89,12 @@ export type InboxSort = (typeof INBOX_SORTS)[number];
 export const INBOX_GROUP_BYS = [...INBOX_DIMENSIONS, "waiting-on", "none"] as const;
 export type InboxGroupBy = (typeof INBOX_GROUP_BYS)[number];
 
+/** Which of the reader's two lists is shown, the View menu's **Show**: their Inbox - every
+ *  undismissed row, read or not - or what they have dismissed out of it. `inbox` is the default
+ *  and is left out of the address, where the other is `?show=dismissed`. */
+export const INBOX_SHOWS = ["inbox", "dismissed"] as const;
+export type InboxShow = (typeof INBOX_SHOWS)[number];
+
 /** The value every filter uses for a row the field says nothing about: an issue with no
  *  priority, a thread with no urgency, a row belonging to no project. */
 export const NO_FILTER_VALUE = "none";
@@ -113,8 +119,10 @@ export interface InboxRoute {
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
    *  literal `unassigned`. */
   assignees?: readonly string[];
-  /** `?threads=all`, the **Show read threads** switch on. Absent is Unread, the default. */
-  threads?: "all";
+  /** `?show=dismissed`, the View menu's **Show** switch on **Dismissed**: what the reader has
+   *  dismissed out of their Inbox, newest dismissal first. Absent is the Inbox itself, every
+   *  undismissed row, read or not. */
+  show?: "dismissed";
   sort?: InboxSort;
   group?: InboxGroupBy;
   /** The chosen values of each filter field, one comma list per field in the address. A field
@@ -983,8 +991,8 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (assignees.length > 0 || everyone) {
     route.assignees = assignees;
   }
-  if (params.get("threads") === "all") {
-    route.threads = "all";
+  if (params.get("show") === "dismissed") {
+    route.show = "dismissed";
   }
   const sort = params.get("sort");
   if (sort !== null && sort !== "newest" && (INBOX_SORTS as readonly string[]).includes(sort)) {
@@ -1037,8 +1045,8 @@ export function buildInboxPath(route: InboxRoute = {}): string {
       query.append("assignee", assignee);
     }
   }
-  if (route.threads !== undefined) {
-    query.set("threads", route.threads);
+  if (route.show !== undefined) {
+    query.set("show", route.show);
   }
   if (route.sort !== undefined && route.sort !== "newest") {
     query.set("sort", route.sort);

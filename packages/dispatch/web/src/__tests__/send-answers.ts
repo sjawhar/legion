@@ -4,6 +4,8 @@ import { api, type WriteBounds, type WriteMethod, type WriteRequest } from "../a
 import type {
   AskSnooze,
   CreateAgentMessageInput,
+  InboxDismissRequest,
+  InboxDismissResponse,
   Issue,
   MarkInboxReadRequest,
   MarkInboxReadResponse,
@@ -151,6 +153,14 @@ export const answerInboxReads = () =>
   answerRoute<(body: MarkInboxReadRequest, bounds: WriteBounds) => Promise<MarkInboxReadResponse>>(
     "POST",
     "/api/v1/me/inbox/read"
+  );
+
+/** `POST /api/v1/me/inbox/dismiss` (`inboxDismissRequest`): the Inbox's Dismiss and its Move to
+ *  Inbox, called with the body and the bounds. */
+export const answerInboxDismisses = () =>
+  answerRoute<(body: InboxDismissRequest, bounds: WriteBounds) => Promise<InboxDismissResponse>>(
+    "POST",
+    "/api/v1/me/inbox/dismiss"
   );
 
 /** `PUT /api/v1/me/asks/{id}/snooze` (`askSnoozeRequest`). */

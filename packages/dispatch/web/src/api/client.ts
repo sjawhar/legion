@@ -69,6 +69,9 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  InboxDismissRequest,
+  InboxDismissResponse,
+  InboxListState,
   InboxRow,
   Issue,
   IssueAskRow,
@@ -480,6 +483,14 @@ export function markInboxReadRequest(
   body: MarkInboxReadRequest
 ): WriteRequest<MarkInboxReadResponse> {
   return { body, method: "POST", path: "/api/v1/me/inbox/read" };
+}
+
+/** `POST /api/v1/me/inbox/dismiss`: the Inbox's **Dismiss**, and the **Move to Inbox** that puts a
+ *  thread back (`restore`). One request names either the row ids it changes (`reply:<thread id>`
+ *  and `agent:<root message id>`, as `INBOX_DISMISS_ROW_PREFIXES` spells them) or the narrowing
+ *  the list is under with `dismiss_through`, that list read's own `as_of`; naming both is refused. */
+export function inboxDismissRequest(body: InboxDismissRequest): WriteRequest<InboxDismissResponse> {
+  return { body, method: "POST", path: "/api/v1/me/inbox/dismiss" };
 }
 
 /** `PUT /api/v1/me/documents/{id}/read`: the person's last read version of a document
@@ -1104,15 +1115,19 @@ export class DispatchApiClient {
 
   /** `GET /api/v1/me/replies`: the threads the signed-in person is reading, newest write first.
    *  `kind` is the comma list the route takes (`reply` alone by default, `reply,agent` for the
-   *  Inbox's own rows), `state` is `unread` (the default) or `all`, `issue` or `artifact`
-   *  narrows to one owner, and an absent `limit` asks for every matching row. Needs the
-   *  `person` scope. */
+   *  Inbox's own rows), `state` is `unread` (the default), `inbox` - every row of their Inbox,
+   *  read or not - or `dismissed`, `issue` or `artifact` narrows to one owner, and an absent
+   *  `limit` asks for every matching row. `state=dismissed` answers `INBOX_DISMISSED_PAGE` rows
+   *  at a time, newest dismissal first, and `cursor` reads the next page from its `next_cursor`;
+   *  `limit` or `offset` there, and `cursor` anywhere else, are refused. Needs the `person`
+   *  scope. */
   listMyReplies(page: {
     artifact?: string;
+    cursor?: string;
     issue?: string;
     kind?: readonly InboxThreadKind[];
     limit?: number;
-    state?: "all" | "unread";
+    state?: InboxListState;
   }): Promise<MyRepliesResponse> {
     // The route reads `kind` as one comma list, not as the repeated parameter `pathWithQuery`
     // writes an array as (`?label=`), so it is folded here. Spreading `page` keeps the caller's

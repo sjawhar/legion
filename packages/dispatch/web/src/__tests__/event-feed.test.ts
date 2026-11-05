@@ -85,7 +85,7 @@ const READS = {
   grandparent: { key: issueQuery("CORE-00").queryKey },
   handoffs: { key: ["handoffs", "CORE-1"] },
   inbox: { key: inboxQuery().queryKey },
-  inboxThreads: { key: inboxThreadsQuery("unread").queryKey },
+  inboxThreads: { key: inboxThreadsQuery().queryKey },
   issuePanel: {
     data: { edges: [], node: { id: "CORE-1", kind: "issue" } },
     key: ["references", "to", "dispatch://CORE-1"],

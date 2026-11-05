@@ -17,6 +17,7 @@ import { storeAgentState } from "../agents/unread";
 import { Timestamp } from "../refs/Timestamp";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { ThreadOwnerLine } from "./AskOwnerLink";
+import { DismissControl } from "./DismissControl";
 import { rowPriority, rowType } from "./list-row";
 import { RowKindIcon, RowPriorityTag } from "./RowMarks";
 import { ThreadBody } from "./ThreadBody";
@@ -28,9 +29,11 @@ import { ThreadTitle } from "./ThreadTitle";
  *
  * It draws the head - the kind icon, the title and the time of the last write, then the priority
  * tag and the whole issue key and title - then the thread itself, exactly as the reading pane
- * draws it and collapsed the same way (`ThreadBody`), and the two controls a thread row offers,
- * **Open** and **Mark read**. A thread anchored in a document shows the text it is anchored to
- * rather than the document: a card is no place to open one.
+ * draws it and collapsed the same way (`ThreadBody`), and the three controls a thread row offers:
+ * **Open**, **Mark read**, and the **Dismiss** that takes the row out of the Inbox - **Move to
+ * Inbox** in the Dismissed view - which the list it is drawn in provides (`DismissControl`). A
+ * thread anchored in a document shows the text it is anchored to rather than the document: a card
+ * is no place to open one.
  */
 export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
   const queryClient = useQueryClient();
@@ -91,6 +94,7 @@ export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
         >
           {markRead.isPending ? "Marking read…" : "Mark read"}
         </button>
+        <DismissControl shown thread={thread} />
       </div>
       {markRead.isError ? (
         <div className="mt-2">

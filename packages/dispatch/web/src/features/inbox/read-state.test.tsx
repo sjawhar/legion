@@ -1,6 +1,6 @@
 /**
- * What reading a thread in the Inbox does: the mark it writes, and the hold that keeps the row
- * where the reader read it (INFRA-450).
+ * What reading a thread in the Inbox does: the mark it writes, and the row it leaves exactly where
+ * it was, drawn as read (INFRA-450). Only a dismiss takes a row out of the list.
  */
 
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -104,7 +104,7 @@ function seeded(rows: readonly MyReplyRow[]): QueryClient {
   });
   client.setQueryData(whoAmIQuery().queryKey, { event_head: "0", kind: "user", login: "alice" });
   client.setQueryData(inboxQuery().queryKey, []);
-  client.setQueryData(inboxThreadsQuery("unread").queryKey, threadsRead(rows));
+  client.setQueryData(inboxThreadsQuery().queryKey, threadsRead(rows));
   client.setQueryData(myRepliesCountQuery().queryKey, rows.length);
   // The unread set `useMarkThreadRead` watches: without the thread in it nothing is marked.
   client.setQueryData(myRepliesOwnerQuery({ issue: "CORE-1" }).queryKey, threadsRead(rows));
@@ -168,11 +168,12 @@ function mockCommentReads(): void {
   ]);
 }
 
-test("a card read by the dwell rule stays, drawn as read, when the list read drops it", async () => {
+test("a card read by the dwell rule stays in the list, drawn as read", async () => {
   const viewport = installIntersectionObserver();
   const mark = answerThreadReads().mockResolvedValue(undefined);
   mockCommentReads();
-  const client = seeded([commentRow("comment-1", "The retry budget")]);
+  const row = commentRow("comment-1", "The retry budget");
+  const client = seeded([row]);
   renderInbox(client);
   try {
     await screen.findByTestId("inbox-thread-comment");
@@ -181,9 +182,13 @@ test("a card read by the dwell rule stays, drawn as read, when the list read dro
     await dwell(viewport, newestTurn("comment-2"));
     expect(mark.mock.calls).toEqual([["comment-1", { read_through: NEWEST }, keyedAttempt]]);
 
-    // The next read of the list no longer holds the row; the card stays where it was read.
+    // The next read of the Inbox still holds the row - a thread stays until it is dismissed - and
+    // says it is read now.
     act(() => {
-      client.setQueryData(inboxThreadsQuery("unread").queryKey, threadsRead([]));
+      client.setQueryData(
+        inboxThreadsQuery().queryKey,
+        threadsRead([{ ...row, unread: false, unread_count: 0 }])
+      );
     });
     expect(document.querySelector("[data-inbox-thread-card]")).not.toBeNull();
     expect(document.querySelector('[aria-label="Unread"]')).toBeNull();
@@ -193,7 +198,7 @@ test("a card read by the dwell rule stays, drawn as read, when the list read dro
   }
 });
 
-test("a selected row read in the column stays in the list until the selection moves off it", async () => {
+test("a row read in the column stays in the list after the selection moves off it", async () => {
   const narrow = widenToReadingPane();
   const viewport = installIntersectionObserver();
   const mark = answerThreadReads().mockResolvedValue(undefined);
@@ -213,21 +218,26 @@ test("a selected row read in the column stays in the list until the selection mo
 
     act(() => {
       client.setQueryData(
-        inboxThreadsQuery("unread").queryKey,
-        threadsRead([rows[1] as MyReplyRow])
+        inboxThreadsQuery().queryKey,
+        threadsRead([
+          { ...(rows[0] as MyReplyRow), unread: false, unread_count: 0 },
+          rows[1] as MyReplyRow,
+        ])
       );
     });
-    // Still in the list, under the reader's selection, and no longer drawn unread.
-    const held = document.querySelector('[data-inbox-row="reply:comment-1"]');
-    expect(held).not.toBeNull();
-    expect(held?.querySelector('[aria-label="Unread"]')).toBeNull();
+    const read = document.querySelector('[data-inbox-row="reply:comment-1"]');
+    expect(read).not.toBeNull();
+    expect(read?.querySelector('[aria-label="Unread"]')).toBeNull();
 
-    // The selection moves off it: the row the list no longer holds goes with it.
+    // The selection moves off it: the row the reader has read is still listed, drawn as read.
     const other = document.querySelector<HTMLElement>('[data-inbox-row="reply:comment-9"]');
     fireEvent.click(other as HTMLElement);
     await waitFor(() =>
-      expect(document.querySelector('[data-inbox-row="reply:comment-1"]')).toBeNull()
+      expect(
+        document.querySelector('[data-inbox-row="reply:comment-9"][data-inbox-selected]')
+      ).not.toBeNull()
     );
+    expect(document.querySelector('[data-inbox-row="reply:comment-1"]')).not.toBeNull();
   } finally {
     viewport.restore();
     narrow();
