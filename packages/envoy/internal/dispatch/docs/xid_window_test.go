@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -67,17 +68,19 @@ func TestXidWindowRigPassesBackToBackStatementsAfterTheFirstWrite(t *testing.T) 
 	t.Logf("%s\n%s", window.Summary(), window.Detail())
 }
 
-// rigInjectedGap is the statement-free gap the deliberate-fault self-tests put inside the window.
-// A sleep cannot run shorter than it asks for, so it is the floor every build's gap allowance must
-// stay under: were storetest.XidGapAllowance to reach it, those self-tests would report no
-// violation and would say so.
-const rigInjectedGap = 20 * time.Millisecond
+// rigInjectedGap is the statement-free gap the deliberate-fault self-tests put inside the window:
+// the fault gap of the build they run in (storetest.XidInjectedFaultGap), a multiple of that
+// build's bound for a window whose statements are as short as this transaction's. A sleep cannot
+// run shorter than it asks for, so it is also the floor that bound must stay under: were the
+// plain bound or the race floor ever raised to it, these self-tests would report no violation and
+// would say so.
+var rigInjectedGap = storetest.XidInjectedFaultGap()
 
 // The rig sees a gap inside the window: the same transaction with Go work between its write and
-// its commit breaks D6, and the report names the statement the gap follows. The injected gap is
-// far above the race build's allowance (storetest.XidRaceMaxGap), so this test says the same
-// thing under the race detector as without it; a fault the size of the scheduler's own stalls
-// would only say which build it ran in.
+// its commit breaks D6, and the report names the statement the gap follows. The gap is injected
+// behind the rig transaction's own short statements and is a multiple of what either build allows
+// there, so this test says the same thing under the race detector as without it; a fault the size
+// of the scheduler's own stalls would only say which build it ran in.
 func TestXidWindowRigCatchesAGapAfterTheFirstWrite(t *testing.T) {
 	_, database, tracer := xidService(t)
 	report := tracer.Measure(t, database.Pool, func() {
@@ -89,6 +92,81 @@ func TestXidWindowRigCatchesAGapAfterTheFirstWrite(t *testing.T) {
 		t.Fatalf("a %s gap after the write: verdict %v, want a D6 violation after the insert", rigInjectedGap, err)
 	}
 	t.Logf("the rig's verdict on a %s gap after the write:\n%v", rigInjectedGap, err)
+}
+
+// The control on every build's bound: the fault this change removed - a document call inside the
+// window - still breaks D6 in a plain build and under the race detector alike. The call is the
+// parse every write route does on the text it writes (parseInput), on a document the size of the
+// load harness's large specs, and the sleep it replaces is gone: nothing here waits. It is a long
+// gap behind about 3 ms of statements, so the race build judges it against its floor however slow
+// the box is, and a build whose bound reached what that parse costs would let the real fault
+// through: this is the test that would go red first if either bound were ever widened too far.
+func TestXidWindowCatchesADocumentCallInsideTheWindow(t *testing.T) {
+	_, database, tracer := xidService(t)
+	spec, _ := storetest.XidSpec("DOC", 1)
+	report := tracer.Measure(t, database.Pool, func() {
+		runRigTransactionDoing(t, database, func(context.Context, pgx.Tx) {
+			if _, err := parseInput(spec); err != nil {
+				t.Errorf("parse the %d-byte spec: %v", len(spec), err)
+			}
+		})
+	})
+	err := report.Err()
+	if err == nil || len(report.Problems) > 0 || !strings.Contains(err.Error(), "XID WINDOW VIOLATION") ||
+		!strings.Contains(err.Error(), "follows statement 0: insert into projects") {
+		t.Fatalf("a parse of the %d-byte spec after the write: verdict %v, want a D6 violation after the insert",
+			len(spec), err)
+	}
+	t.Logf("the rig's verdict on a parse of the %d-byte spec after the write:\n%v", len(spec), err)
+}
+
+// rigLongStatement is how long the proportionate-stall test below makes one statement of its
+// window run inside Postgres, and rigProportionateStall the Go stall it then puts behind it. The
+// stall stands above the race build's floor (storetest.XidRaceFloorGap), so the floor cannot be
+// what lets it pass, and far below that build's share of a window this long, so the stretch the
+// race detector puts on a sleep - up to six times its length in this plan's measurements - cannot
+// carry it over either.
+const (
+	rigLongStatement      = 1500 * time.Millisecond
+	rigProportionateStall = 50 * time.Millisecond
+)
+
+// The race build's rule read the other way round: a statement-free gap that is a modest share of
+// a long batch is the race detector's own scheduling and not document work, so the race build
+// allows it, while the plain build, whose bound is D6's own 5 ms whatever the window holds,
+// refuses it. The window's statements are made long by a statement and not by Go: a sleep
+// Postgres runs is time the transaction spends inside a statement, which is what the share is
+// taken of.
+func TestXidWindowRigPassesALongBatchWithAProportionateStall(t *testing.T) {
+	_, database, tracer := xidService(t)
+	report := tracer.Measure(t, database.Pool, func() {
+		runRigTransactionDoing(t, database, func(ctx context.Context, tx pgx.Tx) {
+			if _, err := tx.Exec(ctx, `select pg_sleep($1)`, rigLongStatement.Seconds()); err != nil {
+				t.Errorf("the long statement: %v", err)
+			}
+			time.Sleep(rigProportionateStall)
+		})
+	})
+	if len(report.Problems) > 0 || len(report.Windows) != 1 {
+		t.Fatalf("windows = %d, problems = %v, want the one transaction judged", len(report.Windows), report.Problems)
+	}
+	window := report.Windows[0]
+	if window.StatementTime < rigLongStatement {
+		t.Fatalf("the window's statements took %s, under the %s the long statement alone should take, so this run tested no long batch:\n%s",
+			storetest.XidMillis(window.StatementTime), rigLongStatement, window.Detail())
+	}
+	err := report.Err()
+	switch proportionate := storetest.XidGapAllowanceFor(rigLongStatement) > rigProportionateStall; {
+	case proportionate && err != nil:
+		t.Fatalf("a %s stall behind %s of statements broke the race build's rule, which allows %s here: %v",
+			rigProportionateStall, storetest.XidMillis(window.StatementTime),
+			storetest.XidMillis(storetest.XidGapAllowanceFor(window.StatementTime)), err)
+	case !proportionate && (err == nil || !strings.Contains(err.Error(), "XID WINDOW VIOLATION")):
+		t.Fatalf("a %s stall behind %s of statements: verdict %v, want the plain build's fixed %s to refuse it",
+			rigProportionateStall, storetest.XidMillis(window.StatementTime), err,
+			storetest.XidMillis(storetest.XidMaxGap))
+	}
+	t.Logf("%s\n%s", window.Summary(), window.Detail())
 }
 
 // A write phase that is one batch can hold its xid for less than the poller's interval, which on a
@@ -145,12 +223,13 @@ func TestXidWindowRigJudgesAWriteThePollerNeverSaw(t *testing.T) {
 // before its first write, writes, waits gap, reads twice more and commits.
 func runRigTransaction(t *testing.T, database *store.Store, gap time.Duration) {
 	t.Helper()
-	runRigTransactionDoing(t, database, func() { time.Sleep(gap) })
+	runRigTransactionDoing(t, database, func(context.Context, pgx.Tx) { time.Sleep(gap) })
 }
 
-// runRigTransactionDoing is runRigTransaction with between run after the write instead of a sleep:
-// what the transaction does in Go while it holds its transaction id.
-func runRigTransactionDoing(t *testing.T, database *store.Store, between func()) {
+// runRigTransactionDoing is runRigTransaction with between run after the write instead of a
+// sleep: what the transaction does while it holds its transaction id, in Go or in a statement of
+// its own, which it runs on the transaction it is handed.
+func runRigTransactionDoing(t *testing.T, database *store.Store, between func(ctx context.Context, tx pgx.Tx)) {
 	t.Helper()
 	ctx := storetest.MarkXid(context.Background())
 	tx, err := database.Pool.Begin(ctx)
@@ -166,7 +245,7 @@ func runRigTransactionDoing(t *testing.T, database *store.Store, between func())
 	if _, err := tx.Exec(ctx, `insert into projects (key, name) values ('RIG', 'Rig')`); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	between()
+	between(ctx, tx)
 	for range 2 {
 		if err := tx.QueryRow(ctx, `select count(*) from projects`).Scan(&count); err != nil {
 			t.Fatalf("read after the write: %v", err)

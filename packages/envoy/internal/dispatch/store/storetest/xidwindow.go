@@ -38,8 +38,8 @@ import (
 // poller never saw - a write phase that is one batch can hold its xid for less than a poll
 // interval - is judged from its statements alone; one that wrote nothing by either source holds
 // no xid to judge (MayHoldNoXid). Inside the window the rig checks D6 of the INFRA-636 plan:
-// every statement-free gap is at most the gap allowance of the build (XidGapAllowance), and the
-// gaps together take no longer than the statements do.
+// every statement-free gap is at most what the build allows that window (XidGapAllowanceFor), and
+// the gaps together take no longer than the statements do.
 //
 // Which transactions are judged is decided by context, not guessed from timing: the caller marks
 // the context its operation runs under (MarkXid) and the tracer marks every statement whose
@@ -53,34 +53,87 @@ import (
 // plain build holds every window to.
 const XidMaxGap = 5 * time.Millisecond
 
-// XidRaceMaxGap is the allowance under the race detector, whose instrumentation and scheduling
-// alone leave a goroutine off the processor for milliseconds between two statements of a window it
-// is not meant to be judged for: on this plan's two-core box, over 50 runs of the window tests of
-// every package, the widest gap the scheduler alone produced was MEASURED_WIDEST.
+// Under the race detector the bound is not a constant. The detector's instrumentation and the
+// scheduling it forces leave a goroutine off the processor between two statements of a window it
+// is not meant to be judged for, and how long it is off scales with how slow everything else in
+// that window has become: the widest such stall these tests have produced is 23.067 ms, and it
+// sits behind a write batch that itself took 291.690 ms (TestXidWindowSpecEdit, fifty race runs
+// of the api window tests on this plan's two-core box), while the widest on a GitHub runner is
+// 9.331 ms behind 27.368 ms of statements (TestXidWindowReconcileTaskProgress in
+// envoy-go-race-docs, job 127074699024 of run 41975931479, attempt 1, the only such reading CI
+// can show: those lanes run without -v and so print a gap only for a window that already broke
+// the bound). A constant chosen above the widest of those would be chased upward by the next
+// slower box, so under the race detector a window's allowance is a share of its own statement
+// time, with a floor:
 //
-// It is deliberately far from both numbers it sits between: wide enough that the scheduler alone
-// does not reach it, and narrow enough that the gaps the rig exists to catch still break it. The
-// deliberate-fault self-tests inject 20 ms, a floor a sleep cannot undercut, so a race build that
-// allowed 20 ms or more would report no violation at all.
-const XidRaceMaxGap = 12 * time.Millisecond
+//	XidRaceFloorGap, or XidRaceGapShare of the window's statement time, whichever is larger.
+//
+// XidRaceGapShare is 0.5 against the widest share any scheduler stall has shown, 0.341 (CI's
+// 9.331 ms over 27.368 ms; the pod's widest is 0.079, 23.067 ms over 291.690 ms), and
+// XidRaceFloorGap is 20 ms, twice CI's widest reading, for the windows whose statements are too
+// short for a share to stand above the scheduler: the rig's own back-to-back transactions take
+// about 3 ms of statements, where half of that is 1.5 ms and a stall of 2.8 ms has been seen.
+//
+// The rule still refuses what the rig exists to catch, because a document call inside a window
+// is a long gap behind short statements, not a share of a long one: the control the docs package
+// keeps (TestXidWindowCatchesADocumentCallInsideTheWindow) parses a 40 KB document after the
+// write and reports gaps of 288.328 to 553.421 ms under the race detector and 54.600 ms in a
+// plain build, all of them behind about 2.7 ms of statements, where the allowance is the floor.
+// TestXidWindowRigPassesALongBatchWithAProportionateStall is the rule read the other way: a stall
+// that is a modest share of a long batch, which the race build allows and the plain build, whose
+// bound is XidMaxGap whatever the window holds, still refuses.
+const (
+	XidRaceFloorGap = 20 * time.Millisecond
+	XidRaceGapShare = 0.5
+)
 
-// XidGapAllowance is the longest statement-free gap the rig allows inside an xid window in the
-// build it runs in: D6's own XidMaxGap, and under the race detector XidRaceMaxGap. The build tag
-// decides (raceDetector), never a measured duration.
-func XidGapAllowance() time.Duration {
-	if raceDetector {
-		return XidRaceMaxGap
+// XidGapAllowanceFor is the longest statement-free gap the rig allows inside a window whose
+// statements take statementTime, in the build it runs in: D6's own XidMaxGap in a plain build,
+// and under the race detector the larger of XidRaceFloorGap and XidRaceGapShare of that time.
+// The build tag decides which rule applies (raceDetector), never a measured duration.
+func XidGapAllowanceFor(statementTime time.Duration) time.Duration {
+	if !raceDetector {
+		return XidMaxGap
 	}
-	return XidMaxGap
+	if share := time.Duration(float64(statementTime) * XidRaceGapShare); share > XidRaceFloorGap {
+		return share
+	}
+	return XidRaceFloorGap
 }
 
-// xidGapAllowanceText names the allowance in force as a report quotes it, so a red run under the
-// race detector quotes the bound it actually broke and not D6's own.
-func xidGapAllowanceText() string {
+// XidFaultGap and XidRaceFaultGap are the statement-free gap the rig's deliberate-fault self-tests
+// inject behind the short statements of a rig transaction, in a plain build and under the race
+// detector: four times the plain bound and three times the race floor, so the fault each injects
+// is never read off the scheduler's own stalls, and both well under what a real document call
+// inside a window costs, so the control above still has room to be the test that goes red first
+// if either bound is ever widened too far.
+const (
+	XidFaultGap     = 20 * time.Millisecond
+	XidRaceFaultGap = 60 * time.Millisecond
+)
+
+// XidInjectedFaultGap is the fault gap of the build it runs in, as XidGapAllowanceFor is its
+// bound.
+func XidInjectedFaultGap() time.Duration {
 	if raceDetector {
-		return fmt.Sprintf("%s, the race build's allowance for D6's %s", XidMillis(XidRaceMaxGap), XidMillis(XidMaxGap))
+		return XidRaceFaultGap
 	}
-	return XidMillis(XidMaxGap)
+	return XidFaultGap
+}
+
+// xidGapAllowanceText names the allowance a window was held to as a report quotes it, so a red run
+// under the race detector quotes the bound it actually broke, and whether that bound was the floor
+// or this window's own share, rather than D6's own.
+func xidGapAllowanceText(statementTime time.Duration) string {
+	allowance := XidGapAllowanceFor(statementTime)
+	if !raceDetector {
+		return XidMillis(allowance)
+	}
+	if allowance == XidRaceFloorGap {
+		return fmt.Sprintf("%s, the race build's floor under D6's %s", XidMillis(allowance), XidMillis(XidMaxGap))
+	}
+	return fmt.Sprintf("%s, the race build's share (%.2f) of this window's %s of statements, under D6's %s",
+		XidMillis(allowance), XidRaceGapShare, XidMillis(statementTime), XidMillis(XidMaxGap))
 }
 
 // xidPollInterval is how often the poller reads pg_stat_activity: the plan's 0.5 ms. A poll's own
@@ -355,9 +408,9 @@ func (w XidWindow) Length() time.Duration { return w.End.Sub(w.Start) }
 // Violations are the D6 rules the window breaks, empty when it keeps them.
 func (w XidWindow) Violations() []string {
 	var broken []string
-	if w.MaxGap > XidGapAllowance() {
+	if w.MaxGap > XidGapAllowanceFor(w.StatementTime) {
 		broken = append(broken, fmt.Sprintf("a statement-free gap of %s (over %s) follows statement %d: %s",
-			XidMillis(w.MaxGap), xidGapAllowanceText(), w.MaxGapAfter, xidSQL(w.Statements[w.MaxGapAfter].SQL)))
+			XidMillis(w.MaxGap), xidGapAllowanceText(w.StatementTime), w.MaxGapAfter, xidSQL(w.Statements[w.MaxGapAfter].SQL)))
 	}
 	if w.GapTime > w.StatementTime {
 		broken = append(broken, fmt.Sprintf("its gaps take %s, more than its statements' %s",
@@ -392,8 +445,8 @@ func (w XidWindow) Detail() string {
 		if i > 0 {
 			gap := statement.Start.Sub(w.Statements[i-1].End)
 			flag := ""
-			if gap > XidGapAllowance() {
-				flag = "  <-- over " + xidGapAllowanceText()
+			if gap > XidGapAllowanceFor(w.StatementTime) {
+				flag = "  <-- over " + xidGapAllowanceText(w.StatementTime)
 			}
 			fmt.Fprintf(&b, "      gap %10s%s\n", XidMillis(gap), flag)
 		}
