@@ -2,6 +2,10 @@
 # Legion's pod baseline. The operator copies it into their own directory with models.yml and
 # applies both with apply.sh; to change the model a role uses, edit its line under modelRoles and
 # run apply.sh again (README.md beside this file).
+# modelRoles.default is the model every role's session runs on, a resumed one included: each launch
+# names --model @default, Oh My Pi's own name for that role. A settings set without that key is
+# refused nowhere — the session starts, silently, on one of Oh My Pi's built-in models, which this
+# route does not serve.
 #
 # Every model turn runs on the anthropic provider models.yml routes through the gateway, including a
 # retry on another model (retry below). Oh My Pi falls back from a failing provider without a word,

@@ -7,17 +7,20 @@ import (
 )
 
 // The OMP command inside the shim, as runtime-tmux.ts:430 builds it: prefix and invocation,
-// `--resume=<file>` when resuming, `--mode rpc`, the prompt word (processes.test.ts:1126 fresh,
-// :3950 resumed).
+// `--model @default`, `--resume=<file>` when resuming, `--mode rpc`, the prompt word
+// (processes.test.ts:1126 fresh, :3950 resumed). The model flag rides both launches: a resumed
+// session would otherwise run the model it saved rather than the one the pod's overlay puts on
+// the `default` role, and a launch under the flag records no model of its own, so a later launch
+// without it would read the saved pin again.
 func TestInnerCommand(t *testing.T) {
 	parts := runtime.PromptParts{RolePromptPaths: []string{"/roles/architect-root.md"}}
 	prompt := `--append-system-prompt "$(cat /roles/architect-root.md)"`
 	if got, want := innerCommand(nil, "/opt/oh-my-pi/18.0.3/omp", "", parts),
-		"/opt/oh-my-pi/18.0.3/omp --mode rpc "+prompt; got != want {
+		"/opt/oh-my-pi/18.0.3/omp --model @default --mode rpc "+prompt; got != want {
 		t.Errorf("fresh: got %q, want %q", got, want)
 	}
 	if got, want := innerCommand([]string{"env", "K=v", "--"}, "/opt/oh-my-pi/18.0.3/omp", "/state/trees/x/.omp/s 1.jsonl", parts),
-		"env 'K=v' -- /opt/oh-my-pi/18.0.3/omp --resume='/state/trees/x/.omp/s 1.jsonl' --mode rpc "+prompt; got != want {
+		"env 'K=v' -- /opt/oh-my-pi/18.0.3/omp --model @default --resume='/state/trees/x/.omp/s 1.jsonl' --mode rpc "+prompt; got != want {
 		t.Errorf("resumed: got %q, want %q", got, want)
 	}
 }
