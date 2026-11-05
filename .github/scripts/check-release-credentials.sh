@@ -5,9 +5,7 @@
 # credentials and runs no dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view
 # and npm publish and a handful of pinned actions, with no cache restored and the deploy key only
 # in the env of the steps that push. (release.yaml's one publish job publishes the packages of its
-# three build jobs, one after another.) claude-envoy-rebuild.yaml, which is no release but pushes
-# the built plugin to the claude-plugin branch with the same deploy key, takes the same split: a
-# build job that builds the plugin, and a push job.
+# four build jobs, one after another.)
 # This check pins that shape, so a later edit cannot undo it quietly:
 #
 # 1. A credentialed job — one whose `permissions` grants contents, id-token, attestations or
@@ -18,8 +16,7 @@
 #    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
 #    (the dot form) in the step-level `env:` of a step whose `run:` calls one of its workflow's push
-#    commands (PUSH_COMMANDS): `release-push.sh push-tag` in the three release workflows,
-#    `release-push.sh push-built` in claude-envoy-rebuild.yaml and nowhere else; the workflow's
+#    commands (PUSH_COMMANDS): `release-push.sh push-tag`, and nothing else; the workflow's
 #    `env:` reaches every job, so the key there is never allowed.
 # 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
@@ -99,11 +96,10 @@
 # the boundary; this check is a tripwire on that boundary, and the pass-through class above (a
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
-# Scope: exactly the four workflows WORKFLOWS lists, the keys of PUSH_COMMANDS: the three release
-# workflows (release.yaml, release-envoy-listener.yaml, release-envoy-infra.yaml) and
-# claude-envoy-rebuild.yaml, which is no release but pushes the claude-plugin branch with the
-# deploy key, so the same split binds it. Rules 1-3 read every job that has `steps:`; a job that
-# calls a reusable workflow (`uses:` and no steps, release.yaml's worker_image) is out of their
+# Scope: exactly the three workflows WORKFLOWS lists, the keys of PUSH_COMMANDS: release.yaml,
+# release-envoy-listener.yaml and release-envoy-infra.yaml. Rules 1-3 read every job that has
+# `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
+# worker_image) is out of their
 # scope, since what it runs is that workflow's own jobs. Rule 4 reads the job it names. Rule 5
 # reads every job's `if:`, steps or not.
 #
@@ -145,7 +141,6 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 RELEASE = Path(".github/workflows/release.yaml")
 LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
 INFRA = Path(".github/workflows/release-envoy-infra.yaml")
-REBUILD = Path(".github/workflows/claude-envoy-rebuild.yaml")
 
 # What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it, by
 # dot or by index (`secrets.DEPLOY_KEY`, `secrets['DEPLOY_KEY']`, `secrets["DEPLOY_KEY"]`), in any
@@ -159,14 +154,13 @@ DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNOREC
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
 # The release-push.sh commands a step holding the deploy key may run, by workflow: a release
-# pushes its tag, the rebuild lands its build, and neither runs the other's push. Its keys are the
-# workflows this check reads, in this order: a workflow joins the check here.
+# pushes its tag, and nothing else pushes. Its keys are the workflows this check reads, in this
+# order: a workflow joins the check here.
 RELEASE_PUSHES = ("release-push.sh push-tag",)
 PUSH_COMMANDS = {
     RELEASE: RELEASE_PUSHES,
     LISTENER: RELEASE_PUSHES,
     INFRA: RELEASE_PUSHES,
-    REBUILD: ("release-push.sh push-built",),
 }
 WORKFLOWS = list(PUSH_COMMANDS)
 # A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`

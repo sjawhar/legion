@@ -8,10 +8,8 @@
     {
       "name": "claude-envoy",
       "source": {
-        "source": "git-subdir",
-        "url": "https://github.com/cybermonklabs/legion.git",
-        "path": "packages/claude-envoy",
-        "ref": "claude-plugin"
+        "source": "npm",
+        "package": "@sjawhar/claude-envoy"
       },
       "description": "Delivers Envoy NATS notifications into Claude Code."
     }

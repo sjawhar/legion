@@ -14,14 +14,10 @@
 # leaves a lost version's commit to a later unfinished run or starts a run for
 # it, bounded, against a stub gh;
 # for `release-push.sh push-tag`, which pushes a tag with the deploy
-# key; for `release-push.sh push-built`, which lands a build of the Claude
-# Envoy plugin on the claude-plugin branch through land_on_plugin_branch, made on
-# main's tip when main moved, starts a fresh run when a build input changed or
-# main was rewritten, lands nothing when the branch holds a newer build, and
-# refuses a doctored one;
-# for `release-push.sh check-built`, which refuses
-# what push-built refuses without a checkout or a credential; for
-# `release-push.sh extract-built`, which replaces the checkout's two built
+# key;
+# for `release-push.sh check-built`, which refuses a build no release may
+# publish, without a checkout or a credential; for
+# `release-push.sh extract-built`, which replaces a checkout's two built
 # directories with a checked build and refuses a bad one untouched; for
 # `release-push.sh handed`, which checks the version and the files a build job
 # hands a publish job and prints the release tag; for `release-push.sh
@@ -65,50 +61,18 @@
 # more reach github.com itself: one with the pinned host keys, one with a copy
 # of the script whose pinned key GitHub does not hold. Those, and a comparison
 # of the pinned keys with `gh api meta`, print a SKIP line and count nothing
-# when the network or a gh sign-in is missing. The `push-built` cases seed a
-# bare origin's main with the real build input list, a source file of the
-# plugin, an excluded changelog and the plugin's built files under
-# packages/claude-envoy/dist and legion, give it a claude-plugin branch holding
-# the build main's tip already carries, check out main's tip detached as the
-# push job does, and run push-built on a tar each case makes (`tar -cf … -C
-# <tree> dist legion`) from a tree it may doctor, reaching origin through the
-# deploy key and the URL rewrite and starting runs through the restart cases'
-# stub gh. A changed build lands on claude-plugin as one commit on main's tip,
-# by github-actions[bot], under a subject with no skip keyword, and main itself
-# never moves; a build the branch already holds pushes nothing. With no
-# claude-plugin on the remote the branch is created, even by a build equal to
-# main's own tracked copies, and a second rebuild of the same base force-updates
-# the branch over a tip it does not descend from. With main moved past the base
-# by commits that touch no build input (an empty commit, docs, a changelog the
-# list excludes), the commit is made on the moved tip, changing only dist/ and
-# legion/, and starts no run; moved by a build input (a source file, a rename
-# out of the plugin, a rename inside it, the list itself) or with no list at the
-# base (a ::warning), it lands and starts one `gh workflow run
-# claude-envoy-rebuild.yaml`, and a failed one exits 1 saying the build landed.
-# The branch already holding github-actions[bot]'s rebuild of a newer commit, or
-# a person's commit under the rebuild subject, lands nothing and starts nothing.
-# Run from packages/claude-envoy instead of the checkout's root, it refuses the
-# branch's newer build all the same, and lands a tar named relative to that
-# subdirectory. Main rewritten past the base lands nothing and starts one run. A
-# `git` wrapper first on PATH lands a merge between push-built's fetch and its
-# push: nothing lands and land_on_plugin_branch's one run is the only one.
-# A push rejected while main's tip is still the base fails and starts nothing;
-# and no DEPLOY_KEY is refused before any push. A doctored tar is refused with
-# main moved by a docs-only commit or by a build input, before any fetch. Each
-# refusal — a symlink, a hard link,
-# a `..`, an absolute path, a member outside dist/ and legion/ or with another
-# character, an executable member, a missing bundle, manifest or agent, a base
-# that is not 40 lower-case hex, a HEAD not at the base, a dirty tree — leaves
-# origin's two branches, the clone and its work tree as they were. The landing
-# cases and those on a moved main also check nothing is left in TMPDIR.
-# The `check-built` cases run
-# it on the good tar and on refused ones (an executable member, a skill script
-# among them, a symlink, a name with a space, a missing dist/dispatch.js) from
-# an empty directory outside any repository, and check it writes nothing there,
-# in TMPDIR or beside the tars. The `extract-built` case runs it from inside a
-# clone of such an origin, whose two directories carry a file the build lacks,
-# on a refused tar (nothing changes) and on a good one (the directories become
-# exactly the tar's files). The `handed` cases fill a directory with the
+# when the network or a gh sign-in is missing.
+# The `check-built` cases pack a tar as a build job packs it (`tar -cf … -C
+# <tree> dist legion`) from a tree each one may doctor, and run it from an
+# empty directory outside any repository with an empty TMPDIR, checking it
+# writes nothing there or beside the tars. Each refusal — a symlink, a hard
+# link, a `..`, an absolute path, a member outside dist/ and legion/ or with
+# another character, an executable member (a skill script among them), a
+# missing bundle, manifest or agent, a tar that is not there and a second
+# argument — is named. The `extract-built` case runs it from inside a checkout
+# whose two directories, which nothing tracks, carry a file the build lacks:
+# on a refused tar nothing changes, and on a good one the directories become
+# exactly the tar's files. The `handed` cases fill a directory with the
 # archives a release ships, change one thing as a compromised build job could,
 # and run `handed` on it. The `no-credential`
 # cases run it under `env -i` with a throwaway HOME, plant one credential at a
@@ -135,8 +99,8 @@ set -euo pipefail
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # Nor may the Oh My Pi session it runs in, if any: CI runs it in no session,
 # and a session's tools act on the variables that name one (a commit made with
-# OMP_SESSION_ID set can carry a session trailer, which push-built's check of
-# the commit's exact subject would read as part of the message).
+# OMP_SESSION_ID set can carry a session trailer, which a test reading a
+# commit's exact subject would read as part of the message).
 unset OMP_SESSION_ID PI_SESSION_FILE
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -1248,33 +1212,14 @@ check "no GITHUB_REPOSITORY: exits non-zero, with an ::error:: naming it, making
   "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::release-push.sh push-tag: GITHUB_REPOSITORY')|$left" 'true|0' || echo false)"
 
 echo
-echo "Case: push-built lands a build of the Claude Envoy plugin on the claude-plugin branch, made on main's tip when main moved, and refuses a doctored one"
-# Each case builds a bare origin whose main holds two commits, whose claude-plugin branch holds the
-# build main's tip already carries, and a clone of it detached at main's tip, as the push job checks
-# out the commit its build job built from. The first commit holds a README, the real build input
-# list (packages/claude-envoy/scripts/build-inputs.txt, copied from this repository), a source file
-# of the plugin (packages/claude-envoy/src/channel.ts) and a changelog the list excludes
-# (packages/contracts/CHANGELOG.md); the second, main's built files under
-# packages/claude-envoy/dist and packages/claude-envoy/legion, as an ordinary commit by a person,
-# as a pull request's own committed build is and as main keeps them from this change on. Origin's
-# claude-plugin is github-actions[bot]'s rebuild of the first commit holding those same built
-# files, as the last rebuild left it; the first-run case leaves the branch off the remote. A case
-# then moves origin's main as merges do while the push job waits. The tar is made as the build job
-# makes it (`tar -cf … -C <dir> dist legion`), from a tree each case fills and may doctor.
-# push-built reaches origin as push-tag does, through the deploy key and the GitHub URL rewritten
-# to the local origin, and starts runs through the restart cases' stub gh, which logs every call. A
-# `git` wrapper first on PATH plays a merge landing between push-built's fetch and its push.
-pb="$work/pb"
-mkdir -p "$pb/trees"
-inputs_list="$script_dir/../../packages/claude-envoy/scripts/build-inputs.txt"
-bot='github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
-# The environment that commits as that bot, which is how release-push.sh commits a rebuild.
-bot_env=(
-  GIT_AUTHOR_NAME=github-actions[bot]
-  GIT_AUTHOR_EMAIL=41898282+github-actions[bot]@users.noreply.github.com
-  GIT_COMMITTER_NAME=github-actions[bot]
-  GIT_COMMITTER_EMAIL=41898282+github-actions[bot]@users.noreply.github.com
-)
+echo "Case: check-built accepts a build of the Claude Envoy plugin and refuses what no build holds, writing nothing"
+# The tars are made as a build job makes them (`tar -cf … -C <tree> dist legion`), from a tree
+# each case fills and may doctor. Each run is from an empty directory outside any repository,
+# with an empty TMPDIR, and the tars' directory is compared before and after: check-built needs
+# no checkout, no credential and no network, and writes nothing.
+pb="$work/built"
+tars="$pb/trees"
+mkdir -p "$tars"
 # plugin_tree <dir> <marker>: the files a build of the plugin holds, under <dir>/dist and
 # <dir>/legion, each naming itself and <marker>.
 plugin_tree() {
@@ -1286,86 +1231,11 @@ plugin_tree() {
     printf '%s %s\n' "$file" "$marker" > "$dir/$file"
   done
 }
-# built_setup <dir> [--no-list] [--no-branch]: origin.git, its seed repository and clone a under
-# <dir> (above). Main's built files carry the marker seed, and origin's claude-plugin holds
-# github-actions[bot]'s rebuild of main's first commit with those same files, the build the branch
-# already carries. --no-branch leaves the branch off the remote, as it is before the first rebuild
-# lands, and --no-list leaves the build input list out. Leaves main's first commit in first, its
-# tip, the clone's HEAD, in base, and the branch's tip, empty without the branch, in plugin_tip.
-built_setup() {
-  local dir=$1 arg list=true branch=true
-  shift
-  for arg in "$@"; do
-    case $arg in
-      --no-list) list=false ;;
-      --no-branch) branch=false ;;
-      *) echo "built_setup: unknown argument $arg" >&2; exit 1 ;;
-    esac
-  done
-  mkdir -p "$dir/seed/packages/claude-envoy/scripts" "$dir/seed/packages/claude-envoy/src" "$dir/seed/packages/contracts"
-  git init -q -b main "$dir/seed"
-  identity "$dir/seed"
-  printf 'seed line\n' > "$dir/seed/README.md"
-  if "$list"; then
-    cp "$inputs_list" "$dir/seed/packages/claude-envoy/scripts/build-inputs.txt"
-  fi
-  printf 'export const channel = 1;\n' > "$dir/seed/packages/claude-envoy/src/channel.ts"
-  printf '# Changelog\n' > "$dir/seed/packages/contracts/CHANGELOG.md"
-  git -C "$dir/seed" add -A
-  git -C "$dir/seed" commit -q -m "seed"
-  first=$(git -C "$dir/seed" rev-parse HEAD)
-  plugin_tree "$dir/seed/packages/claude-envoy" seed
-  git -C "$dir/seed" add -A
-  git -C "$dir/seed" commit -q -m "feat(claude-envoy): the built plugin"
-  base=$(git -C "$dir/seed" rev-parse HEAD)
-  git clone -q --bare "$dir/seed" "$dir/origin.git"
-  plugin_tip=''
-  if "$branch"; then
-    # The branch's commit carries the base's tree over the first commit, so the branch holds
-    # exactly the built files main tracks: a build equal to them has nothing to push.
-    plugin_tip=$(env "${bot_env[@]}" git -C "$dir/seed" commit-tree --no-gpg-sign -p "$first" \
-      -m "chore(claude-envoy): rebuild dist/ and legion/ from ${first:0:12}" "$base^{tree}")
-    git -C "$dir/seed" push -q "$dir/origin.git" "$plugin_tip:refs/heads/claude-plugin"
-  fi
-  git clone -q "$dir/origin.git" "$dir/a"
-  git -C "$dir/a" checkout -q --detach
-}
-# move_main <dir> <subject>: commit whatever the case changed in <dir>'s seed (nothing makes an
-# empty commit) with <subject>, as a merge landing after the build started, and push it to origin's
-# main; leaves it in moved.
-move_main() {
-  git -C "$1/seed" add -A
-  git -C "$1/seed" commit -q --allow-empty -m "$2"
-  git -C "$1/seed" push -q "$1/origin.git" main
-  moved=$(git -C "$1/seed" rev-parse HEAD)
-}
-# branch_rebuild <dir> <marker> <named> [--person]: force-update origin's claude-plugin under <dir>
-# to a commit over main's tip holding main's tree with the built files rewritten with <marker>,
-# under push-built's subject naming <named>, by github-actions[bot] or, with --person, by the
-# test's own identity; leaves it in plugin_tip and <dir>'s seed back on main.
-branch_rebuild() {
-  local dir=$1 marker=$2 named=$3 who=${4:-} subject
-  subject="chore(claude-envoy): rebuild dist/ and legion/ from ${named:0:12}"
-  git -C "$dir/seed" checkout -q -b plugin-build main
-  plugin_tree "$dir/seed/packages/claude-envoy" "$marker"
-  git -C "$dir/seed" add -A
-  # --allow-empty: a <marker> equal to main's own built files leaves the tree unchanged, which is
-  # the case where the branch already holds exactly the build push-built would commit.
-  if [ "$who" = --person ]; then
-    git -C "$dir/seed" commit -q --allow-empty -m "$subject"
-  else
-    env "${bot_env[@]}" git -C "$dir/seed" commit -q --allow-empty -m "$subject"
-  fi
-  plugin_tip=$(git -C "$dir/seed" rev-parse HEAD)
-  git -C "$dir/seed" push -q "$dir/origin.git" "+$plugin_tip:refs/heads/claude-plugin"
-  git -C "$dir/seed" checkout -q main
-  git -C "$dir/seed" branch -q -D plugin-build
-}
-# built_tar <name> <marker> [<mutation> [<tar argument>...]]: $pb/trees/<name>.tar, from a tree
+# built_tar <name> <marker> [<mutation> [<tar argument>...]]: $tars/<name>.tar, from a tree
 # plugin_tree fills with <marker>, the shell text <mutation> then run in it, packed with the tar
 # arguments (default: dist legion) after `-C <tree>`.
 built_tar() {
-  local name=$1 marker=$2 mutation=${3:-} dir="$pb/trees/$1"
+  local name=$1 marker=$2 mutation=${3:-} dir="$tars/$1"
   shift 2
   [ $# -eq 0 ] || shift
   [ $# -gt 0 ] || set -- dist legion
@@ -1374,511 +1244,6 @@ built_tar() {
   [ -z "$mutation" ] || (cd "$dir" && eval "$mutation")
   tar -cf "$dir.tar" -C "$dir" "$@" 2>/dev/null
 }
-# push_built <clone> <base> <tar> [VAR=value...]: runs `release-push.sh push-built <base> <tar>`
-# from <clone>, or from $PB_SUBDIR under it when that is set, with the deploy key, a fresh TMPDIR,
-# the GitHub URL rewritten to <clone>/../origin.git and the stub gh first on PATH; leaves its exit
-# code in rc, its combined output in out, the stub's call log in calls and what TMPDIR holds
-# afterwards in left.
-PB_SUBDIR=''
-push_built() {
-  local clone=$1 base=$2 tar=$3 dir
-  dir=$(dirname "$clone")
-  shift 3
-  rm -rf "$dir/tmp" && mkdir "$dir/tmp"
-  : > "$dir/calls"
-  set +e
-  out=$(cd "$clone${PB_SUBDIR:+/$PB_SUBDIR}" && env TMPDIR="$dir/tmp" GITHUB_REPOSITORY=example/repo \
-    DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    GH_TEST_DIR="$dir" GH_TEST_FAIL='' GH_TEST_QUIET='' GH_TEST_LAND='' PATH="$work/restart-bin:$PATH" \
-    "$@" "$release_push" push-built "$base" "$tar" 2>&1)
-  rc=$?
-  set -e
-  calls=$(<"$dir/calls")
-  left=$(find "$dir/tmp" -mindepth 1 | wc -l)
-}
-rebuild_run=$(argv workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main)
-fresh_url='https://github\.com/example/repo/actions/runs/7'
-# origin_refs <dir>: origin's main and claude-plugin under <dir>, as `<main>|<claude-plugin>`, the
-# branch's half empty when the remote holds no such branch. Every case that pushes nothing compares
-# it with what it was, so neither ref may have moved.
-origin_refs() {
-  printf '%s|%s' "$(git -C "$1/origin.git" rev-parse main)" \
-    "$(git -C "$1/origin.git" rev-parse -q --verify refs/heads/claude-plugin || true)"
-}
-# built_files <origin.git> <rev>: each file under the two directories at <rev>, its blob's hash and
-# its path, sorted by path.
-built_files() {
-  git -C "$1" ls-tree -r "$2" -- packages/claude-envoy/dist packages/claude-envoy/legion |
-    awk -F '\t' '{ split($1, f, " "); print f[3] " " $2 }' | LC_ALL=C sort -k2
-}
-# tree_files <tree>: the same for the files of a tar's tree under $pb/trees.
-tree_files() {
-  (cd "$1" && find dist legion -type f | while IFS= read -r file; do
-    printf '%s packages/claude-envoy/%s\n' "$(git hash-object "$file")" "$file"
-  done | LC_ALL=C sort -k2)
-}
-# built_landed <description> <dir> <tree> <onto> <onto-name>: origin's claude-plugin under <dir> is
-# exactly one commit on <onto> (named <onto-name> in the check) whose one parent is <onto>, changing
-# only paths under dist/ and legion/, its two directories exactly <tree>'s files with their bytes,
-# by github-actions[bot] with the subject naming $base and no skip keyword in it; main is still
-# <onto> itself, and nothing is left in TMPDIR.
-built_landed() {
-  local what=$1 o="$2/origin.git" tree=$3 onto=$4 tip
-  tip=$(git -C "$o" rev-parse claude-plugin)
-  check "$what: lands on claude-plugin as exactly one commit whose one parent is $5" \
-    "$(is "$(git -C "$o" rev-list --count "$onto..claude-plugin")|$(git -C "$o" rev-list --parents -n 1 claude-plugin)" "1|$tip $onto")"
-  check "$what: the commit changes only paths under dist/ and legion/" \
-    "$(is "$(git -C "$o" diff --name-only "$onto" claude-plugin | grep -cv '^packages/claude-envoy/\(dist\|legion\)/')" 0)"
-  check "$what: the branch's two directories hold exactly the tar's files, with its bytes" \
-    "$(is "$(built_files "$o" claude-plugin)" "$(tree_files "$tree")")"
-  check "$what: authored and committed by github-actions[bot], the subject naming the base, with no skip keyword" \
-    "$(is "$(git -C "$o" log -1 --format='%an <%ae>|%cn <%ce>|%B' claude-plugin)" \
-      "$bot|$bot|chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12}")"
-  check "$what: main itself does not move" "$(is "$(git -C "$o" rev-parse main)" "$onto")"
-  check "$what: nothing is left in TMPDIR" "$(is "$left" 0)"
-}
-# landing_notice <onto>: the regex of the notice push-built gives when the commit was made on
-# <onto>, main's moved tip, the commit it lands being origin's claude-plugin ($landed_commit).
-landing_notice() {
-  printf '%s' "^::notice title=Landing on claude-plugin::built from $base, landing on claude-plugin as $landed_commit, made on $1, main's tip, which changes only packages/claude-envoy/dist and packages/claude-envoy/legion: main moved since the build started$"
-}
-# fresh_notice <paths>: the regex of the notice push-built gives when it started a fresh run after
-# landing $landed_commit, the commit it made on $moved, <paths> (a regex) being the changed inputs
-# it names.
-fresh_notice() {
-  printf '%s' "^::notice title=A fresh run started::the build landed on claude-plugin as $landed_commit, but build inputs changed between $base and $moved: $1, so a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$"
-}
-
-built_setup "$pb/land"
-built_tar land rebuilt 'rm legion/agents/deep-worker.md && mkdir legion/skills/new-skill && printf "new\n" > legion/skills/new-skill/SKILL.md'
-push_built "$pb/land/a" "$base" "$pb/trees/land.tar"
-check "a changed build: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "a changed build" "$pb/land" "$pb/trees/land" "$base" "the base"
-check "a changed build: a file the tar lacks is deleted" \
-  "$(git -C "$pb/land/origin.git" cat-file -e claude-plugin:packages/claude-envoy/legion/agents/deep-worker.md 2>/dev/null && echo false || echo true)"
-check "a changed build: README.md and the plugin's source are untouched" \
-  "$(is "$(git -C "$pb/land/origin.git" diff --name-only "$base" claude-plugin -- README.md packages/claude-envoy/src packages/claude-envoy/scripts)" "")"
-check "a changed build on an unmoved main: no landing notice" "$(is "$(contains "$out" 'Landing on')" false)"
-
-# The first run after the marketplace named the branch: the remote holds no claude-plugin at all,
-# and the build equals main's own tracked copies of the two directories. The branch must be created
-# all the same - main's copies are frozen from here on, so a run that pushed nothing would leave the
-# plugin with no branch to install from.
-built_setup "$pb/first-run" --no-branch
-built_tar first-run seed
-push_built "$pb/first-run/a" "$base" "$pb/trees/first-run.tar"
-what="the first run, with no claude-plugin on the remote and a build equal to main's own files"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/first-run" "$pb/trees/first-run" "$base" "the base"
-check "$what: the branch's tree is main's tip's own" \
-  "$(is "$(git -C "$pb/first-run/origin.git" rev-parse 'claude-plugin^{tree}')" "$(git -C "$pb/first-run/origin.git" rev-parse "$base^{tree}")")"
-
-built_setup "$pb/same"
-built_tar same seed
-pb_refs=$(origin_refs "$pb/same")
-push_built "$pb/same/a" "$base" "$pb/trees/same.tar"
-what="the branch already holds this exact build"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls|$left" "0||0")"
-check "$what: a notice names the branch and its tip" \
-  "$(contains "$out" "^::notice title=Nothing to push::claude-plugin's packages/claude-envoy/dist and packages/claude-envoy/legion at $plugin_tip already match this build$")"
-check "$what: pushes nothing to either branch, leaves the clone clean" \
-  "$(is "$(origin_refs "$pb/same")|$(git -C "$pb/same/a" rev-parse HEAD)|$(git -C "$pb/same/a" status --porcelain)" "$pb_refs|$base|")"
-
-# A second rebuild of the same base: its commit is a sibling of the branch's tip and no descendant
-# of it, so nothing but a forced push moves the branch. The clone goes back to where the push job's
-# checkout leaves it, since the first run moved its HEAD to the commit it made.
-built_setup "$pb/force"
-built_tar force-first rebuilt
-push_built "$pb/force/a" "$base" "$pb/trees/force-first.tar"
-forced_from=$(git -C "$pb/force/origin.git" rev-parse claude-plugin)
-git -C "$pb/force/a" reset -q --hard "$base"
-git -C "$pb/force/a" clean -qfd
-built_tar force-second newer
-push_built "$pb/force/a" "$base" "$pb/trees/force-second.tar"
-what="a second rebuild of the same base"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/force" "$pb/trees/force-second" "$base" "the base"
-check "$what: the branch's old tip is no ancestor of its new one, so nothing but a force moved it" \
-  "$(git -C "$pb/force/origin.git" merge-base --is-ancestor "$forced_from" claude-plugin && echo false || echo true)"
-
-# Main moved by commits that change no build input: the commit is made on main's tip, starting no
-# run.
-built_setup "$pb/moved"
-# The hook goes in after move_main's seed push, which runs without PUSH_SEEN set and would fire it
-# with nowhere to write.
-move_main "$pb/moved" "fix: an empty merge landing after the build started"
-record_hook "$pb/moved/origin.git"
-built_tar moved rebuilt
-: > "$pb/moved/seen"
-push_built "$pb/moved/a" "$base" "$pb/trees/moved.tar" PUSH_SEEN="$pb/moved/seen"
-landed_commit=$(git -C "$pb/moved/origin.git" rev-parse claude-plugin)
-check "main moved by an empty commit: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "main moved by an empty commit" "$pb/moved" "$pb/trees/moved" "$moved" "main's moved tip"
-check "main moved by an empty commit: the notice names the base, the tip and the commit" "$(contains "$out" "$(landing_notice "$moved")")"
-check "main moved by an empty commit: one key directory for both fetches, and no temporary index left, while the push ran" \
-  "$(is "$(<"$pb/moved/seen")" "600 key"$'\n'"600 known_hosts")"
-
-built_setup "$pb/docs"
-mkdir -p "$pb/docs/seed/docs"
-printf 'notes\n' > "$pb/docs/seed/docs/notes.md"
-move_main "$pb/docs" "docs: notes landing after the build started"
-built_tar docs rebuilt
-push_built "$pb/docs/a" "$base" "$pb/trees/docs.tar"
-landed_commit=$(git -C "$pb/docs/origin.git" rev-parse claude-plugin)
-what="main moved by a docs-only commit"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/docs" "$pb/trees/docs" "$moved" "main's moved tip"
-check "$what: the branch's commit carries docs/notes.md and README.md, main's whole tree under the build" \
-  "$(is "$(git -C "$pb/docs/origin.git" show claude-plugin:docs/notes.md)|$(git -C "$pb/docs/origin.git" show claude-plugin:README.md)" 'notes|seed line')"
-check "$what: the notice names the base, the tip and the commit" "$(contains "$out" "$(landing_notice "$moved")")"
-check "$what: no fresh run notice" "$(is "$(contains "$out" 'A fresh run started')" false)"
-
-built_setup "$pb/excluded"
-printf -- '- a note\n' >> "$pb/excluded/seed/packages/contracts/CHANGELOG.md"
-move_main "$pb/excluded" "docs(contracts): a changelog line"
-built_tar excluded rebuilt
-push_built "$pb/excluded/a" "$base" "$pb/trees/excluded.tar"
-landed_commit=$(git -C "$pb/excluded/origin.git" rev-parse claude-plugin)
-what="main moved by a commit to packages/contracts/CHANGELOG.md, which the list excludes inside an input directory"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/excluded" "$pb/trees/excluded" "$moved" "main's moved tip"
-
-# Main moved by a build input: the commit is still made on the tip, and one fresh run is started.
-built_setup "$pb/input"
-printf 'export const reconnect = true;\n' >> "$pb/input/seed/packages/claude-envoy/src/channel.ts"
-move_main "$pb/input" "fix(claude-envoy): reconnect"
-built_tar input rebuilt
-push_built "$pb/input/a" "$base" "$pb/trees/input.tar"
-landed_commit=$(git -C "$pb/input/origin.git" rev-parse claude-plugin)
-what="main moved by a commit to packages/claude-envoy/src/channel.ts"
-check "$what: exits 0, starting exactly one fresh run of the workflow on main" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/input" "$pb/trees/input" "$moved" "main's moved tip"
-check "$what: the landing notice names the base, the tip and the commit" "$(contains "$out" "$(landing_notice "$moved")")"
-check "$what: the fresh run's notice names the changed input and the run" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/src/channel\.ts')")"
-
-built_setup "$pb/rename"
-mkdir -p "$pb/rename/seed/docs"
-git -C "$pb/rename/seed" mv packages/claude-envoy/src/channel.ts docs/channel.ts
-move_main "$pb/rename" "docs: move channel.ts out of the plugin"
-built_tar rename rebuilt
-push_built "$pb/rename/a" "$base" "$pb/trees/rename.tar"
-landed_commit=$(git -C "$pb/rename/origin.git" rev-parse claude-plugin)
-what="main moved by renaming packages/claude-envoy/src/channel.ts to docs/channel.ts"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/rename" "$pb/trees/rename" "$moved" "main's moved tip"
-check "$what: the fresh run's notice names the old path" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/src/channel\.ts')")"
-
-# git diff limits the paths before it pairs renames, so the rename out of the plugin above lists
-# the old path with or without --no-renames; a rename inside the inputs shows the difference.
-built_setup "$pb/rename-inside"
-git -C "$pb/rename-inside/seed" mv packages/claude-envoy/src/channel.ts packages/claude-envoy/src/transport.ts
-move_main "$pb/rename-inside" "refactor(claude-envoy): channel.ts becomes transport.ts"
-built_tar rename-inside rebuilt
-push_built "$pb/rename-inside/a" "$base" "$pb/trees/rename-inside.tar"
-landed_commit=$(git -C "$pb/rename-inside/origin.git" rev-parse claude-plugin)
-what="main moved by renaming packages/claude-envoy/src/channel.ts to packages/claude-envoy/src/transport.ts"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-check "$what: the fresh run's notice names the old path and the new one (git diff --no-renames)" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/src/channel\.ts packages/claude-envoy/src/transport\.ts')")"
-
-built_setup "$pb/list"
-printf '# a note on the list\n' >> "$pb/list/seed/packages/claude-envoy/scripts/build-inputs.txt"
-move_main "$pb/list" "docs(claude-envoy): a note on the build input list"
-built_tar list rebuilt
-push_built "$pb/list/a" "$base" "$pb/trees/list.tar"
-landed_commit=$(git -C "$pb/list/origin.git" rev-parse claude-plugin)
-what="main moved by a commit changing only the build input list"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/list" "$pb/trees/list" "$moved" "main's moved tip"
-check "$what: the fresh run's notice names the list" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/scripts/build-inputs\.txt')")"
-
-built_setup "$pb/nolist" --no-list
-mkdir -p "$pb/nolist/seed/docs"
-printf 'notes\n' > "$pb/nolist/seed/docs/notes.md"
-move_main "$pb/nolist" "docs: notes landing after the build started"
-built_tar nolist rebuilt
-push_built "$pb/nolist/a" "$base" "$pb/trees/nolist.tar"
-landed_commit=$(git -C "$pb/nolist/origin.git" rev-parse claude-plugin)
-what="a base without the build input list, main moved by a docs-only commit"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/nolist" "$pb/trees/nolist" "$moved" "main's moved tip"
-check "$what: a ::warning names the list file" \
-  "$(contains "$out" "^::warning title=No build input list::$base holds no pathspec in packages/claude-envoy/scripts/build-inputs\.txt, the list of the build's inputs, so every change since it counts as a build input$")"
-check "$what: the fresh run's notice says why" \
-  "$(contains "$out" "^::notice title=A fresh run started::the build landed on claude-plugin as $landed_commit, but $base holds no pathspec in packages/claude-envoy/scripts/build-inputs\.txt, .*, so a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
-
-built_setup "$pb/ghfail"
-printf 'export const reconnect = true;\n' >> "$pb/ghfail/seed/packages/claude-envoy/src/channel.ts"
-move_main "$pb/ghfail" "fix(claude-envoy): reconnect"
-built_tar ghfail rebuilt
-push_built "$pb/ghfail/a" "$base" "$pb/trees/ghfail.tar" GH_TEST_FAIL=run
-landed_commit=$(git -C "$pb/ghfail/origin.git" rev-parse claude-plugin)
-what="gh workflow run fails after a landing with a changed input"
-check "$what: exits 1, after one attempt to start a run" "$(is "$rc|$calls" "1|$rebuild_run")"
-check "$what: origin's claude-plugin holds the landed commit, made on the moved tip" \
-  "$(is "$(git -C "$pb/ghfail/origin.git" rev-list --parents -n 1 claude-plugin)|$left" "$landed_commit $moved|0")"
-check "$what: the error says the build landed and names the command a person runs" \
-  "$(contains "$out" "^::error::release-push\.sh push-built: the build already landed on claude-plugin as $landed_commit, but build inputs changed between $base and $moved: packages/claude-envoy/src/channel\.ts, so the plugin branch's build is one run behind its inputs, and starting a fresh run of claude-envoy-rebuild\.yaml on main failed; start one by hand: gh workflow run claude-envoy-rebuild\.yaml --repo example/repo --ref main$")"
-
-# The branch holds a build of a commit the base does not descend from: nothing lands, no run.
-built_setup "$pb/newer"
-printf 'notes\n' > "$pb/newer/seed/notes.md"
-move_main "$pb/newer" "docs: a merge after the base"
-newer_base=$moved
-branch_rebuild "$pb/newer" newer "$newer_base"
-built_tar newer rebuilt
-pb_refs=$(origin_refs "$pb/newer")
-push_built "$pb/newer/a" "$base" "$pb/trees/newer.tar"
-what="the branch already holds github-actions[bot]'s rebuild of a commit after the base"
-check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(origin_refs "$pb/newer")|$calls|$left" "0|$pb_refs||0")"
-check "$what: the notice names the commit the branch's build was made from" \
-  "$(contains "$out" "^::notice title=Nothing pushed; claude-plugin holds a newer build::claude-plugin already holds a build of $newer_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started$")"
-
-# Run from a subdirectory of the clone, as a job that moved into the package would: push-built
-# moves to the repository's root before it reads any repository path, so the branch's build is
-# still read and the newer-build rule still refuses, and a tar named relative to that subdirectory
-# still resolves from there.
-built_setup "$pb/subdir-newer"
-printf 'notes\n' > "$pb/subdir-newer/seed/notes.md"
-move_main "$pb/subdir-newer" "docs: a merge after the base"
-newer_base=$moved
-branch_rebuild "$pb/subdir-newer" newer "$newer_base"
-built_tar subdir-newer rebuilt
-pb_refs=$(origin_refs "$pb/subdir-newer")
-PB_SUBDIR=packages/claude-envoy
-push_built "$pb/subdir-newer/a" "$base" "$pb/trees/subdir-newer.tar"
-PB_SUBDIR=''
-what="run from packages/claude-envoy, the branch holding a newer build"
-check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(origin_refs "$pb/subdir-newer")|$calls|$left" "0|$pb_refs||0")"
-check "$what: the notice names the commit the branch's build was made from" \
-  "$(contains "$out" "^::notice title=Nothing pushed; claude-plugin holds a newer build::claude-plugin already holds a build of $newer_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started$")"
-
-built_setup "$pb/subdir-land"
-built_tar subdir-land rebuilt
-PB_SUBDIR=packages/claude-envoy
-# Four levels up from <clone>/packages/claude-envoy is $pb, which holds trees/.
-push_built "$pb/subdir-land/a" "$base" ../../../../trees/subdir-land.tar
-PB_SUBDIR=''
-what="run from packages/claude-envoy with a relative tar path"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/subdir-land" "$pb/trees/subdir-land" "$base" "the base"
-
-built_setup "$pb/forged"
-printf 'notes\n' > "$pb/forged/seed/notes.md"
-move_main "$pb/forged" "docs: a merge after the base"
-branch_rebuild "$pb/forged" forged "$base" --person
-forged=$plugin_tip
-built_tar forged rebuilt
-pb_refs=$(origin_refs "$pb/forged")
-push_built "$pb/forged/a" "$base" "$pb/trees/forged.tar"
-what="the branch's tip is a person's commit with the rebuild subject naming the base"
-check "$what: read as a build of that commit itself, newer than the base: nothing pushed, no gh call" \
-  "$(is "$rc|$(origin_refs "$pb/forged")|$calls|$left" "0|$pb_refs||0")"
-check "$what: the notice names that commit, not the base" \
-  "$(contains "$out" "^::notice title=Nothing pushed; claude-plugin holds a newer build::claude-plugin already holds a build of $forged, newer than $base, ")"
-
-# The branch holds this very build, made on main's moved tip, and an input changed since the base.
-built_setup "$pb/equal-input"
-printf 'export const reconnect = true;\n' >> "$pb/equal-input/seed/packages/claude-envoy/src/channel.ts"
-move_main "$pb/equal-input" "fix(claude-envoy): reconnect"
-branch_rebuild "$pb/equal-input" seed "$first"
-built_tar equal-input seed
-pb_refs=$(origin_refs "$pb/equal-input")
-push_built "$pb/equal-input/a" "$base" "$pb/trees/equal-input.tar"
-what="the branch already holds this build, and an input changed after it"
-check "$what: exits 0, pushing nothing, starting exactly one fresh run" \
-  "$(is "$rc|$(origin_refs "$pb/equal-input")|$calls|$left" "0|$pb_refs|$rebuild_run|0")"
-check "$what: the notices say nothing to push and name the changed input and the run" \
-  "$(is "$(contains "$out" "^::notice title=Nothing to push::claude-plugin's .* at $plugin_tip already match this build$")|$(contains "$out" "^::notice title=A fresh run started::build inputs changed between $base and $moved: packages/claude-envoy/src/channel\.ts, so a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")" 'true|true')"
-
-# Main rewritten, so its tip does not descend from the base: nothing lands, one fresh run.
-built_setup "$pb/rewritten"
-sibling=$(git -C "$pb/rewritten/seed" commit-tree -p "$first" -m "fix: main rewritten" "$first^{tree}")
-git -C "$pb/rewritten/seed" push -q "$pb/rewritten/origin.git" "+$sibling:refs/heads/main"
-built_tar rewritten rebuilt
-pb_refs=$(origin_refs "$pb/rewritten")
-push_built "$pb/rewritten/a" "$base" "$pb/trees/rewritten.tar"
-what="main rewritten to a sibling of the base"
-check "$what: exits 0, pushing nothing, starting exactly one fresh run, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(origin_refs "$pb/rewritten")|$calls|$left" "0|$pb_refs|$rebuild_run|0")"
-check "$what: the notice names both commits and the run" \
-  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main's tip $sibling does not descend from $base, the commit the build was made from, so main was rewritten; nothing was pushed, and a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
-push_built "$pb/rewritten/a" "$base" "$pb/trees/rewritten.tar" GH_TEST_FAIL=run
-check "$what, gh workflow run fails: exits 1, naming the command a person runs, origin as it was" \
-  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh push-built: main's tip $sibling does not descend from $base, .*, and starting a fresh run of claude-envoy-rebuild\.yaml on main failed; start one by hand: gh workflow run claude-envoy-rebuild\.yaml --repo example/repo --ref main$")|$(origin_refs "$pb/rewritten")" "1|true|$pb_refs")"
-
-# Main moves again between push-built's fetch and its push: the `git` wrapper runs the real git,
-# and after the first fetch alone it lands one more merge on origin's main from the seed.
-mkdir -p "$pb/race-bin"
-cat > "$pb/race-bin/git" <<'GIT'
-#!/usr/bin/env bash
-status=0
-"$REAL_GIT" "$@" || status=$?
-if [ "$1" = fetch ] && [ ! -e "$RACE_DIR/raced" ]; then
-  : > "$RACE_DIR/raced"
-  "$REAL_GIT" -C "$RACE_DIR/seed" commit -q --allow-empty -m "fix: a merge landing during the push"
-  "$REAL_GIT" -C "$RACE_DIR/seed" push -q "$RACE_DIR/origin.git" main
-fi
-exit "$status"
-GIT
-chmod +x "$pb/race-bin/git"
-real_git=$(command -v git)
-# race_run <name> [VAR=value...]: a case under $pb/<name> whose main moved by a build input, then
-# push_built through the wrapper; leaves main's new tip, the wrapper's merge, in raced.
-race_run() {
-  local dir="$pb/$1"
-  shift
-  built_setup "$dir"
-  printf 'export const reconnect = true;\n' >> "$dir/seed/packages/claude-envoy/src/channel.ts"
-  move_main "$dir" "fix(claude-envoy): reconnect"
-  built_tar "${dir##*/}" rebuilt
-  push_built "$dir/a" "$base" "$pb/trees/${dir##*/}.tar" PATH="$pb/race-bin:$work/restart-bin:$PATH" \
-    REAL_GIT="$real_git" RACE_DIR="$dir" "$@"
-  raced=$(git -C "$dir/origin.git" rev-parse main)
-  check "$what: the wrapper landed one merge on the moved tip, and nothing else landed" \
-    "$(is "$(git -C "$dir/origin.git" rev-list --parents -n 1 main)|$(git -C "$dir/origin.git" log -1 --format=%s main)|$(git -C "$dir/origin.git" rev-parse claude-plugin)" "$raced $moved|fix: a merge landing during the push|$plugin_tip")"
-}
-what="main moves again after push-built's fetch, with a changed input"
-race_run race
-check "$what: exits 0, starting exactly one fresh run (land_on_plugin_branch's, no second one)" \
-  "$(is "$rc|$calls|$left" "0|$rebuild_run|0")"
-check "$what: land_on_plugin_branch's notice names the tip the commit was made on and main's new tip" \
-  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main moved from $moved, the commit [0-9a-f]* was made on, to $raced, so [0-9a-f]* was not pushed; a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
-check "$what: no notice of push-built's own fresh run" "$(is "$(contains "$out" 'A fresh run started')" false)"
-what="main moves again after push-built's fetch, gh workflow run fails"
-race_run race-gh GH_TEST_FAIL=run
-check "$what: exits 1, after one attempt to start a run, leaving nothing in TMPDIR" \
-  "$(is "$rc|$calls|$left" "1|$rebuild_run|0")"
-check "$what: the error names both commits and the command a person runs" \
-  "$(contains "$out" "^::error::release-push\.sh push-built: main moved from $moved, the commit [0-9a-f]* was made on, to $raced, and starting a fresh run of claude-envoy-rebuild\.yaml on main failed; start one by hand: gh workflow run claude-envoy-rebuild\.yaml --repo example/repo --ref main$")"
-
-built_setup "$pb/rejected"
-printf '#!/bin/sh\necho "rejected by test hook" >&2\nexit 1\n' > "$pb/rejected/origin.git/hooks/pre-receive"
-chmod +x "$pb/rejected/origin.git/hooks/pre-receive"
-built_tar rejected rebuilt
-pb_refs=$(origin_refs "$pb/rejected")
-push_built "$pb/rejected/a" "$base" "$pb/trees/rejected.tar"
-check "a push rejected while main's tip is still the base: exits 1, calling no gh" "$(is "$rc|$calls" "1|")"
-check "a push rejected while main's tip is still the base: says so" \
-  "$(contains "$out" "^::error::release-push\.sh push-built: the push of [0-9a-f]* to claude-plugin was rejected while main's tip is still $base, the commit [0-9a-f]* was made on, so no newer commit beat it; the push itself failed$")"
-check "a push rejected while main's tip is still the base: origin is untouched" \
-  "$(is "$(origin_refs "$pb/rejected")|$left" "$pb_refs|0")"
-
-built_setup "$pb/nokey"
-record_hook "$pb/nokey/origin.git"
-built_tar nokey rebuilt
-pb_refs=$(origin_refs "$pb/nokey")
-: > "$pb/nokey/seen"
-push_built "$pb/nokey/a" "$base" "$pb/trees/nokey.tar" DEPLOY_KEY= PUSH_SEEN="$pb/nokey/seen"
-check "no DEPLOY_KEY: exits 1, with an ::error:: naming the command and the variable" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push\.sh push-built: DEPLOY_KEY')" '1|true')"
-check "no DEPLOY_KEY: nothing was pushed, origin is untouched, gh never called, nothing made in TMPDIR" \
-  "$(is "$(<"$pb/nokey/seen")|$(origin_refs "$pb/nokey")|$calls|$left" "|$pb_refs||0")"
-
-# A doctored tar is refused before any fetch, however main moved: exit 1, origin as it was, no gh
-# call, nothing in TMPDIR.
-built_tar symlink-moved rebuilt 'ln -s envoy-channel.js dist/link.js'
-for how in docs input; do
-  dir="$pb/doctored-$how"
-  built_setup "$dir"
-  if [ "$how" = docs ]; then
-    printf 'notes\n' > "$dir/seed/notes.md"
-    what="a symlink member, main moved by a docs-only commit"
-  else
-    printf 'export const reconnect = true;\n' >> "$dir/seed/packages/claude-envoy/src/channel.ts"
-    what="a symlink member, main moved by a build input"
-  fi
-  move_main "$dir" "fix: a merge landing after the build started"
-  pb_refs=$(origin_refs "$dir")
-  push_built "$dir/a" "$base" "$pb/trees/symlink-moved.tar"
-  check "$what: exits 1, naming the member" \
-    "$(is "$rc|$(contains "$out" "^::error::release-push\.sh push-built: member dist/link\.js of .*symlink-moved\.tar is a symlink")" "1|true")"
-  check "$what: origin as it was, no gh call, nothing in TMPDIR" \
-    "$(is "$(origin_refs "$dir")|$calls|$left" "$pb_refs||0")"
-done
-
-# The refusals share one origin and clone, since each must leave both as they were.
-built_setup "$pb/r"
-rbase=$base rfirst=$first rrefs=$(origin_refs "$pb/r")
-# built_refused <description> <regex>: exit 1, an ::error:: matching <regex>, origin's two branches,
-# the clone's HEAD and its work tree (`git status --porcelain`, against $rstatus) as they were, and
-# no gh call.
-rstatus=''
-built_refused() {
-  check "$1: exits 1" "$(is "$rc" 1)"
-  check "$1: the error names it" "$(contains "$out" "^::error::release-push\.sh push-built: $2")"
-  check "$1: origin, the clone and its work tree as they were; no gh call" \
-    "$(is "$(origin_refs "$pb/r")|$(git -C "$pb/r/a" rev-parse HEAD)|$(git -C "$pb/r/a" status --porcelain)|$calls" "$rrefs|$rbase|$rstatus|")"
-}
-tars="$pb/trees"
-built_tar symlink rebuilt 'ln -s envoy-channel.js dist/link.js'
-push_built "$pb/r/a" "$rbase" "$tars/symlink.tar"
-built_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
-built_tar hardlink rebuilt 'ln dist/dispatch.js dist/dispatch-copy.js'
-push_built "$pb/r/a" "$rbase" "$tars/hardlink.tar"
-built_refused "a hard link member" "member dist/dispatch[-a-z]*\.js of .*hardlink\.tar is a hard link"
-built_tar dotdot rebuilt '' --transform 's,^dist/dispatch\.js$,../dispatch.js,' dist legion
-check "the ../ tar holds ../dispatch.js" "$(contains "$(tar -tf "$tars/dotdot.tar" 2>/dev/null)" '^\.\./dispatch\.js$')"
-push_built "$pb/r/a" "$rbase" "$tars/dotdot.tar"
-built_refused "a ../ member" "member \.\./dispatch\.js of .* has a '\.\.' component"
-built_tar dotdot-inner rebuilt '' --transform 's,^dist/dispatch\.js$,dist/../../dispatch.js,' dist legion
-push_built "$pb/r/a" "$rbase" "$tars/dotdot-inner.tar"
-built_refused "a member climbing out through dist/../.." "member dist/\.\./\.\./dispatch\.js of .* has a '\.\.' component"
-built_tar absolute rebuilt '' --transform 's,^dist/dispatch\.js$,/dispatch.js,' -P dist legion
-check "the absolute tar holds /dispatch.js" "$(contains "$(tar -tf "$tars/absolute.tar" 2>/dev/null)" '^/dispatch\.js$')"
-push_built "$pb/r/a" "$rbase" "$tars/absolute.tar"
-built_refused "an absolute member" "member /dispatch\.js of .* is an absolute path"
-built_tar readme rebuilt 'printf "x\n" > README.md' dist legion README.md
-push_built "$pb/r/a" "$rbase" "$tars/readme.tar"
-built_refused "a member outside the two directories, README.md" "member README\.md of .* is not dist, legion or a path under them"
-built_tar src rebuilt 'mkdir src && printf "x\n" > src/x' dist legion src
-push_built "$pb/r/a" "$rbase" "$tars/src.tar"
-built_refused "a member outside the two directories, src/x" "member src/ of .* is not dist, legion or a path under them"
-built_tar space rebuilt 'printf "x\n" > "dist/a b.js"'
-push_built "$pb/r/a" "$rbase" "$tars/space.tar"
-# %q quotes the space as 'dist/a b.js' or dist/a\ b.js, by bash version.
-built_refused "a member whose name holds another character, a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
-built_tar executable rebuilt 'chmod +x dist/envoy-channel.js'
-push_built "$pb/r/a" "$rbase" "$tars/executable.tar"
-built_refused "an executable member" "member dist/envoy-channel\.js of .* has the mode -rwx[-rwx]*, with an execute"
-built_tar no-channel rebuilt 'rm dist/envoy-channel.js'
-push_built "$pb/r/a" "$rbase" "$tars/no-channel.tar"
-built_refused "a tar missing dist/envoy-channel.js" ".*no-channel\.tar lacks dist/envoy-channel\.js, a file every build of the plugin holds"
-built_tar no-manifest rebuilt 'rm legion/.claude-plugin/plugin.json'
-push_built "$pb/r/a" "$rbase" "$tars/no-manifest.tar"
-built_refused "a tar missing legion/.claude-plugin/plugin.json" ".*no-manifest\.tar lacks legion/\.claude-plugin/plugin\.json"
-built_tar no-agents rebuilt 'rm -r legion/agents'
-push_built "$pb/r/a" "$rbase" "$tars/no-agents.tar"
-built_refused "a tar with no file under legion/agents/" ".*no-agents\.tar holds no file under legion/agents/"
-built_tar good rebuilt
-for forged in HEAD "${rbase:0:12}" "${rbase^^}" "$rbase "; do
-  push_built "$pb/r/a" "$forged" "$tars/good.tar"
-  printf -v shown '%q' "$forged"
-  built_refused "a base that is not 40 lower-case hex, $shown" "the base commit .* is not 40 lower-case hex"
-done
-push_built "$pb/r/a" "$rfirst" "$tars/good.tar"
-built_refused "HEAD not at the base" "HEAD is $rbase, not $rfirst, the commit the build was made from"
-printf 'edited\n' >> "$pb/r/a/README.md"
-rstatus=' M README.md'
-push_built "$pb/r/a" "$rbase" "$tars/good.tar"
-built_refused "a dirty work tree" "the work tree is not clean ( M README\.md)"
-git -C "$pb/r/a" checkout -q -- README.md
-rstatus=''
-push_built "$pb/r/a" "$rbase" "$pb/trees/no-such.tar"
-built_refused "a tar that does not exist" "listing .*no-such\.tar failed"
-
-echo
-echo "Case: check-built accepts what push-built accepts and refuses what it refuses, writing nothing"
-# The tars above, plus a skill script made executable (as `cp -R` stages a skill's mode into
-# legion/) and a build lacking the dispatch bundle (a renamed entry in BUNDLE_ENTRYPOINTS). Each
-# run is from an empty directory outside any repository, with an empty TMPDIR, and the tar's
-# directory is compared before and after: check-built needs no checkout and writes nothing.
 cb="$pb/cb"
 # check_built <tar> [<arg>...]: runs `release-push.sh check-built <tar> [<arg>...]` from the empty
 # directory $cb/run with TMPDIR=$cb/tmp; leaves its exit code in rc, its combined output in out,
@@ -1900,20 +1265,52 @@ check_refused() {
   check "check-built, $1: exits 1, writing nothing" "$(is "$rc|$written" "1|0|true")"
   check "check-built, $1: the error names it" "$(contains "$out" "^::error::release-push\.sh check-built: $2")"
 }
+built_tar good rebuilt
 check_built "$tars/good.tar"
 check "check-built, a good build: exits 0, printing nothing and writing nothing" "$(is "$rc|$out|$written" "0||0|true")"
+built_tar symlink rebuilt 'ln -s envoy-channel.js dist/link.js'
+check_built "$tars/symlink.tar"
+check_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
+built_tar hardlink rebuilt 'ln dist/dispatch.js dist/dispatch-copy.js'
+check_built "$tars/hardlink.tar"
+check_refused "a hard link member" "member dist/dispatch[-a-z]*\.js of .*hardlink\.tar is a hard link"
+built_tar dotdot rebuilt '' --transform 's,^dist/dispatch\.js$,../dispatch.js,' dist legion
+check "the ../ tar holds ../dispatch.js" "$(contains "$(tar -tf "$tars/dotdot.tar" 2>/dev/null)" '^\.\./dispatch\.js$')"
+check_built "$tars/dotdot.tar"
+check_refused "a ../ member" "member \.\./dispatch\.js of .* has a '\.\.' component"
+built_tar dotdot-inner rebuilt '' --transform 's,^dist/dispatch\.js$,dist/../../dispatch.js,' dist legion
+check_built "$tars/dotdot-inner.tar"
+check_refused "a member climbing out through dist/../.." "member dist/\.\./\.\./dispatch\.js of .* has a '\.\.' component"
+built_tar absolute rebuilt '' --transform 's,^dist/dispatch\.js$,/dispatch.js,' -P dist legion
+check "the absolute tar holds /dispatch.js" "$(contains "$(tar -tf "$tars/absolute.tar" 2>/dev/null)" '^/dispatch\.js$')"
+check_built "$tars/absolute.tar"
+check_refused "an absolute member" "member /dispatch\.js of .* is an absolute path"
+built_tar readme rebuilt 'printf "x\n" > README.md' dist legion README.md
+check_built "$tars/readme.tar"
+check_refused "a member outside the two directories, README.md" "member README\.md of .* is not dist, legion or a path under them"
+built_tar src rebuilt 'mkdir src && printf "x\n" > src/x' dist legion src
+check_built "$tars/src.tar"
+check_refused "a member outside the two directories, src/x" "member src/ of .* is not dist, legion or a path under them"
+built_tar space rebuilt 'printf "x\n" > "dist/a b.js"'
+check_built "$tars/space.tar"
+# %q quotes the space as 'dist/a b.js' or dist/a\ b.js, by bash version.
+check_refused "a member whose name holds another character, a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
+built_tar executable rebuilt 'chmod +x dist/envoy-channel.js'
 check_built "$tars/executable.tar"
 check_refused "an executable member" "member dist/envoy-channel\.js of .*executable\.tar has the mode -rwx[-rwx]*, with an execute"
 built_tar skill-script rebuilt 'mkdir legion/skills/legion-worker/scripts && printf "x\n" > legion/skills/legion-worker/scripts/x.sh && chmod 755 legion/skills/legion-worker/scripts/x.sh'
 check_built "$tars/skill-script.tar"
 check_refused "an executable skill script" "member legion/skills/legion-worker/scripts/x\.sh of .* has the mode -rwxr-xr-x, with an execute"
-check_built "$tars/symlink.tar"
-check_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
-check_built "$tars/space.tar"
-check_refused "a member whose name holds a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
+built_tar no-channel rebuilt 'rm dist/envoy-channel.js'
+check_built "$tars/no-channel.tar"
+check_refused "a tar missing dist/envoy-channel.js" ".*no-channel\.tar lacks dist/envoy-channel\.js, a file every build of the plugin holds"
 built_tar no-dispatch rebuilt 'rm dist/dispatch.js'
 check_built "$tars/no-dispatch.tar"
 check_refused "a tar missing dist/dispatch.js" ".*no-dispatch\.tar lacks dist/dispatch\.js, a file every build of the plugin holds"
+built_tar no-manifest rebuilt 'rm legion/.claude-plugin/plugin.json'
+check_built "$tars/no-manifest.tar"
+check_refused "a tar missing legion/.claude-plugin/plugin.json" ".*no-manifest\.tar lacks legion/\.claude-plugin/plugin\.json"
+built_tar no-agents rebuilt 'rm -r legion/agents'
 check_built "$tars/no-agents.tar"
 check_refused "a tar with no file under legion/agents/" ".*no-agents\.tar holds no file under legion/agents/"
 check_built "$tars/no-such.tar"
@@ -1923,14 +1320,22 @@ check_refused "a second argument" "usage: release-push\.sh check-built <tar>$"
 
 echo
 echo "Case: extract-built replaces the two directories with exactly a checked build, and leaves them untouched when it refuses one"
-# A clone of a push-built origin, whose two directories hold the seed build and an untracked file
-# of their own. extract-built runs from a subdirectory of the clone with the tar's path relative to
-# it, with no credential in its environment, as the rebuild's build job and the claude-envoy job
-# run it.
-built_setup "$pb/x"
-xa="$pb/x/a"
-xbase=$base
+# A checkout whose two directories hold the seed build and an untracked file of their own, as a
+# job's checkout holds them once verify-build.sh has run. Neither directory is tracked: nothing
+# commits them. extract-built runs from a subdirectory of the checkout with the tar's path
+# relative to it, with no credential in its environment, as release.yaml's claude_envoy_build and
+# ci.yaml's claude-envoy job run it.
+xa="$pb/x"
+mkdir -p "$xa/packages/claude-envoy"
+git init -q -b main "$xa"
+identity "$xa"
+printf 'seed line\n' > "$xa/README.md"
+git -C "$xa" add -A
+git -C "$xa" commit -q -m "seed"
+xbase=$(git -C "$xa" rev-parse HEAD)
+plugin_tree "$xa/packages/claude-envoy" seed
 printf 'stale\n' > "$xa/packages/claude-envoy/dist/stale.js"
+built_tar land rebuilt 'rm legion/agents/deep-worker.md && mkdir legion/skills/new-skill && printf "new\n" > legion/skills/new-skill/SKILL.md'
 # extract_built <tar> [<arg>...]: runs `release-push.sh extract-built <tar> [<arg>...]` from
 # $xa/packages; leaves its exit code in rc and its combined output in out.
 extract_built() {
@@ -1939,21 +1344,21 @@ extract_built() {
   rc=$?
   set -e
 }
-# x_tree: every entry under the clone's two directories, with its type and mode, then every
+# x_tree: every entry under the checkout's two directories, with its type and mode, then every
 # file's checksum.
 x_tree() {
   (cd "$xa/packages/claude-envoy" && find dist legion -printf '%y %m %p\n' | LC_ALL=C sort &&
     find dist legion -type f -exec sha256sum {} + | LC_ALL=C sort)
 }
 x_before=$(x_tree)
-extract_built ../../../trees/executable.tar
+extract_built ../../trees/executable.tar
 check "extract-built, an executable member: exits 1, naming it" \
   "$(is "$rc|$(contains "$out" "^::error::release-push\.sh extract-built: member dist/envoy-channel\.js of .*executable\.tar has the mode -rwx[-rwx]*, with an execute")" "1|true")"
 check "extract-built, an executable member: the two directories are untouched" "$(is "$(x_tree)" "$x_before")"
-extract_built ../../../trees/land.tar extra
+extract_built ../../trees/land.tar extra
 check "extract-built, a second argument: exits 1 with its usage, the directories untouched" \
   "$(is "$rc|$(contains "$out" '^::error::release-push\.sh extract-built: usage: release-push\.sh extract-built <tar>$')|$(is "$(x_tree)" "$x_before")" "1|true|true")"
-extract_built ../../../trees/land.tar
+extract_built ../../trees/land.tar
 check "extract-built, a good build: exits 0, printing nothing" "$(is "$rc|$out" "0|")"
 check "extract-built, a good build: the two directories hold exactly the tar's files, the stale file and the one the build dropped deleted" \
   "$(is "$(cd "$xa/packages/claude-envoy" && find dist legion -type f | LC_ALL=C sort)" "$(cd "$tars/land" && find dist legion -type f | LC_ALL=C sort)")"
@@ -2618,4 +2023,4 @@ orphans_run
 check "fold-orphans: no spec is refused" \
   "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-orphans: no package spec given')" "1||true")"
 
-summary "release-push.sh version, tagged, tag, pair-version, release, release-section, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-notes, fold-check and fold-orphans, and release.yaml's worker_image_release step"
+summary "release-push.sh version, tagged, tag, pair-version, release, release-section, push-tag, check-built, extract-built, handed, no-credential, fold-notes, fold-check and fold-orphans, and release.yaml's worker_image_release step"

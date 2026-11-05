@@ -234,16 +234,12 @@ makes the same refusals:
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
 - `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
   `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
-  A checkout of the `claude-plugin` branch holds both (`AGENTS.md`, "Deploys come only from
-  main"): the Rebuild Claude Envoy plugin workflow puts a build of `main`'s own tree on that
-  branch after each merge, so every commit of it is a build of a commit `main` contains and its
-  tip is a build of a recent `main`. `bun run check-dist` in that package confirms them. The tip
-  is at most one run of that workflow behind `main`'s build inputs, its runner queues included, so
-  a checkout of the branch taken soon after a merge holds the build before it: to run that merge's
-  plugin, build it from a checkout of `main` with `bun scripts/build.ts --out <dir>` in that
-  package, into a directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>`
-  until the branch carries that build. That leaves either checkout's tracked files as they are, so
-  its next `git pull` fast-forwards.
+  No checkout holds either: nothing commits them. An operator gets a copy two ways. Unpack the
+  published package — `npm pack @sjawhar/claude-envoy` and `tar xzf` it, whose `package/`
+  directory is the plugin, built from the commit that release was cut at — or, to run a tree that
+  has not been released yet, build one with `bun scripts/build.ts --out <dir>` in that package,
+  into a directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>`. The
+  build leaves the checkout's tracked files as they are, so its next `git pull` fast-forwards.
 
 A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
 resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths

@@ -1,6 +1,4 @@
 import { expect, test } from "bun:test"
-import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -34,9 +32,6 @@ import { FakeNatsServer } from "./fake-nats-server"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
-
-/** The checkout's root, whose .github/scripts the marketplace case below reads. */
-const repositoryRoot = resolve(import.meta.dir, "..", "..", "..")
 
 /** The plugin's entries in the repository's marketplace, which the two cases below read. */
 const marketplaceEntries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
@@ -412,13 +407,14 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
   }
 })
 
-test("Claude Code versions the plugin by its commit; omp and the MCP server report package.json's", () => {
-  // Claude Code updates an installed plugin only when its computed version changes. With no
-  // version in plugin.json or the marketplace entry it takes the version from the commit it
-  // installed the plugin from, which for the git-subdir source below is the tip of the
-  // claude-plugin branch; every rebuild push moves that tip, so every rebuild reaches an update.
-  // A declared version nothing bumps would hold every install at the commit it was first
-  // installed from.
+test("the committed manifests declare no version the release would have to bump; omp and the MCP server report package.json's", () => {
+  // Claude Code names an installed plugin by the `version` of its .claude-plugin/plugin.json,
+  // never by the version the registry served: with none it calls the install `unknown`, caches
+  // it under that name and sees no later release as an update (measured on 2.1.311). So
+  // release.yaml's claude_envoy_build writes the release's version into the manifest it packs,
+  // and the committed one declares none — a string committed here would hold every install at it
+  // until someone changed it, and the release writes it anyway. The marketplace entry declares
+  // none either, so the npm source fetches `latest`.
   expect(plugin).not.toHaveProperty("version")
   expect(marketplaceEntries).toHaveLength(1)
   expect(marketplaceEntries[0]).not.toHaveProperty("version")
@@ -426,31 +422,12 @@ test("Claude Code versions the plugin by its commit; omp and the MCP server repo
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
 })
 
-test("the marketplace entry installs the plugin from the claude-plugin branch", () => {
-  // claude-envoy-rebuild.yaml's push job force-updates that branch with the build over main's
-  // tip, and nothing on main reads it, so the merge queue is left alone. The branch name is
-  // release-push.sh's plugin_branch constant, read here so the entry and the push cannot drift,
-  // and the URL is repo-paths.sh's repository_url with .git appended, so moving the repository
-  // fails this test instead of leaving a dead URL in the marketplace.
-  const repoPathsScript = join(repositoryRoot, ".github/scripts/repo-paths.sh")
-  const printed = execFileSync(repoPathsScript, ["repository_url"], { encoding: "utf8" })
-  const repositoryUrl = printed.trim()
-  const script = readFileSync(join(repositoryRoot, ".github/scripts/release-push.sh"), "utf8")
-  const declared = /^plugin_branch=(\S+)$/m.exec(script)?.[1]
-  if (declared === undefined) {
-    // Not an expect(): the entry's ref is built from this, so a release-push.sh that declares no
-    // plugin_branch must stop the test here rather than compare the entry with an undefined ref,
-    // which reads as "the marketplace names no branch" in the failure.
-    throw new Error(".github/scripts/release-push.sh declares no plugin_branch=<branch> line")
-  }
-  expect(declared).toBe("claude-plugin")
+test("the marketplace entry installs the plugin from npm, by this package's own name", () => {
+  // release.yaml's claude_envoy_build packs this package and its publish job uploads that tarball
+  // to npm, so the registry name is package.json's own, read here rather than written twice. With
+  // no version in the entry, the user's npm client fetches `latest`, which is the newest release.
   expect(marketplaceEntries).toHaveLength(1)
-  expect(marketplaceEntries[0]?.source).toEqual({
-    source: "git-subdir",
-    url: `${repositoryUrl}.git`,
-    path: "packages/claude-envoy",
-    ref: declared,
-  })
+  expect(marketplaceEntries[0]?.source).toEqual({ source: "npm", package: pkg.name })
 })
 
 test("the Oh My Pi manifest declares no MCP server", () => {

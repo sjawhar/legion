@@ -87,8 +87,7 @@ async function filesTheBuildReads(scratch: string): Promise<string[]> {
   return [...probes].sort()
 }
 
-/** The pathspecs of scripts/build-inputs.txt, under the list's one rule, as release-push.sh
- *  push-built applies it: drop empty and # lines. */
+/** The pathspecs of scripts/build-inputs.txt, under the list's one rule: drop empty and # lines. */
 async function buildInputPathspecs(): Promise<string[]> {
   const pathspecs = (await readFile(join(packageRoot, "scripts", "build-inputs.txt"), "utf8"))
     .split("\n")
@@ -98,10 +97,11 @@ async function buildInputPathspecs(): Promise<string[]> {
   return pathspecs
 }
 
-// Main's push job lands a build onto a moved main and decides from scripts/build-inputs.txt alone
-// whether the move changed the build, so the list must match every file the build reads. Git does
-// the matching, as it does in the push job, in a scratch repository holding an empty file at each
-// path, so the workspace's own git or jj state plays no part.
+// scripts/build-inputs.txt is the statement of what can change this plugin's build, and
+// release.yaml's $CLAUDE_ENVOY_VERSION_ARGS carries its package and content paths, so the list
+// must match every file the build reads or a release would publish a build from a source no
+// version was bumped for. Git does the matching, in a scratch repository holding an empty file at
+// each path, so the workspace's own git or jj state plays no part.
 test("scripts/build-inputs.txt matches every file the build reads", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-build-inputs-"))
   try {
@@ -124,64 +124,3 @@ test("scripts/build-inputs.txt matches every file the build reads", async () => 
     await rm(scratch, { recursive: true, force: true })
   }
 }, 120_000)
-
-/** `pattern` as GitHub matches an `on.push.paths` entry against a repository path: `*` matches any
- *  run of characters but `/`, `**` any run at all, and every other character is itself. GitHub's
- *  filter patterns also take `+`, `?` and character ranges, which this does not model, so a
- *  pattern holding one throws rather than being read wrongly as a literal. */
-function pathFilter(pattern: string): RegExp {
-  let expression = "^"
-  for (let i = 0; i < pattern.length; i++) {
-    const character = pattern[i] as string
-    if (character === "*") {
-      if (pattern[i + 1] === "*") {
-        expression += ".*"
-        i++
-      } else {
-        expression += "[^/]*"
-      }
-    } else if ("+?[]".includes(character)) {
-      throw new Error(
-        `the path filter ${pattern} holds ${character}, which this test does not read`,
-      )
-    } else {
-      expression += character.replace(/[.^${}()|\\]/g, "\\$&")
-    }
-  }
-  return new RegExp(`${expression}$`)
-}
-
-// The rebuild's `on.push.paths` decides which pushes to main are built at all, and
-// scripts/build-inputs.txt decides, in the push job, whether a move of main changed the build.
-// The two must name the same files: an input the paths leave out changes the build and starts no
-// run, and a file the paths take and the list calls a non-input starts a run that lands nothing.
-// So this holds the two decisions equal over every tracked file, git making the one and GitHub's
-// rules the other.
-test(".github/workflows/claude-envoy-rebuild.yaml's push paths are the build inputs", async () => {
-  const workflow = ".github/workflows/claude-envoy-rebuild.yaml"
-  const parsed = Bun.YAML.parse(await readFile(join(repoRoot, workflow), "utf8")) as {
-    on?: { push?: { paths?: string[] } }
-  }
-  const patterns = parsed.on?.push?.paths ?? []
-  expect(patterns.length).toBeGreaterThan(0)
-  const rules = patterns.map((pattern) => ({
-    negated: pattern.startsWith("!"),
-    matches: pathFilter(pattern.replace(/^!/, "")),
-  }))
-  // GitHub reads the patterns in order and the last one that matches decides, so a `!` pattern
-  // after the pattern it narrows excludes the path.
-  const starts = (path: string) =>
-    rules.reduce((on, rule) => (rule.matches.test(path) ? !rule.negated : on), false)
-
-  const lsFiles = async (pathspecs: string[]) =>
-    (await run(["git", "ls-files", "-z", "--", ...pathspecs], repoRoot))
-      .split("\0")
-      .filter((path) => path !== "")
-  const inputs = new Set(await lsFiles(await buildInputPathspecs()))
-  // An empty listing (outside a git checkout, say) would hold the patterns to nothing.
-  expect(inputs.size).toBeGreaterThan(0)
-  const tracked = await lsFiles(["."])
-
-  expect([...inputs].filter((input) => !starts(input)).sort()).toEqual([])
-  expect(tracked.filter((path) => !inputs.has(path) && starts(path)).sort()).toEqual([])
-})
