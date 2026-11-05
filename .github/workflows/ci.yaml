@@ -597,6 +597,9 @@ jobs:
               - '.github/actions/install-uv/**'
               - '.github/actions/install-changie/**'
               - '.github/actions/pull-test-images/**'
+              # release-push.test.sh's shipped-config fold-notes case copies pi-legion's changie
+              # configuration and renders it (its line 2549).
+              - 'packages/pi-legion/.changie.yaml'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-site.yaml holds those steps, and
             # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml

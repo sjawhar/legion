@@ -188,7 +188,7 @@ jobs:
     cache-mode: none
     steps:
       # The commit build built from, with history, for push-built's fetch of main's tip, its
-      # comparison of the two and land_on_branch's fetch.
+      # comparison of the two and land_on_plugin_branch's fetch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.build.outputs.base }}

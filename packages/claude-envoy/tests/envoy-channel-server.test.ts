@@ -38,6 +38,9 @@ isolatePaneEnvironment()
 /** The checkout's root, whose .github/scripts the marketplace case below reads. */
 const repositoryRoot = resolve(import.meta.dir, "..", "..", "..")
 
+/** The plugin's entries in the repository's marketplace, which the two cases below read. */
+const marketplaceEntries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
+
 /**
  * A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for,
  * under the key the listener minted for the publish behind the arbiter's forward mark.
@@ -417,9 +420,8 @@ test("Claude Code versions the plugin by its commit; omp and the MCP server repo
   // A declared version nothing bumps would hold every install at the commit it was first
   // installed from.
   expect(plugin).not.toHaveProperty("version")
-  const entries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
-  expect(entries).toHaveLength(1)
-  expect(entries[0]).not.toHaveProperty("version")
+  expect(marketplaceEntries).toHaveLength(1)
+  expect(marketplaceEntries[0]).not.toHaveProperty("version")
   expect(ompPlugin.version).toBe(pkg.version)
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
 })
@@ -436,9 +438,8 @@ test("the marketplace entry installs the plugin from the claude-plugin branch", 
   const script = readFileSync(join(repositoryRoot, ".github/scripts/release-push.sh"), "utf8")
   const branch = /^plugin_branch=(\S+)$/m.exec(script)?.[1]
   expect(branch).toBe("claude-plugin")
-  const entries = marketplace.plugins.filter((candidate) => candidate.name === plugin.name)
-  expect(entries).toHaveLength(1)
-  expect(entries[0]?.source).toEqual({
+  expect(marketplaceEntries).toHaveLength(1)
+  expect(marketplaceEntries[0]?.source).toEqual({
     source: "git-subdir",
     url: `${repositoryUrl}.git`,
     path: "packages/claude-envoy",

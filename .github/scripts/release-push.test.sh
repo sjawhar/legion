@@ -15,7 +15,7 @@
 # it, bounded, against a stub gh;
 # for `release-push.sh push-tag`, which pushes a tag with the deploy
 # key; for `release-push.sh push-built`, which lands a build of the Claude
-# Envoy plugin on the claude-plugin branch through land_on_branch, made on
+# Envoy plugin on the claude-plugin branch through land_on_plugin_branch, made on
 # main's tip when main moved, starts a fresh run when a build input changed or
 # main was rewritten, lands nothing when the branch holds a newer build, and
 # refuses a doctored one;
@@ -48,7 +48,8 @@
 # commit, then a re-run of both, with no commit added to either clone and
 # origin's main left where it was. The pair_member case reads both functions
 # out of release.yaml and runs them over a repository whose manifest holds an
-# older version than its newest tag.
+# older version than its newest tag, with the script under test reachable at
+# .github/scripts/release-push.sh, the path those functions read the tags by.
 # The `release` cases run against a stub `gh` first on PATH, which answers `gh
 # release view` for a release that does not exist, is a draft or is published,
 # can fail an upload, an edit or a create, and logs every call it gets. The
@@ -88,7 +89,7 @@
 # branch's newer build all the same, and lands a tar named relative to that
 # subdirectory. Main rewritten past the base lands nothing and starts one run. A
 # `git` wrapper first on PATH lands a merge between push-built's fetch and its
-# push: nothing lands and land_on_branch's one run is the only one.
+# push: nothing lands and land_on_plugin_branch's one run is the only one.
 # A push rejected while main's tip is still the base fails and starts nothing;
 # and no DEPLOY_KEY is refused before any push. A doctored tar is refused with
 # main moved by a docs-only commit or by a build input, before any fetch. Each
@@ -115,7 +116,9 @@
 # on a child of the built commit, one on the built commit itself, and a name
 # off <prefix>X.Y.Z), committed near midnight in zones other than UTC; the
 # `fold-notes` cases render that repository's fragments with the real changie,
-# and print a SKIP line where changie is not on PATH.
+# hold each label's own run equal to the whole plan's run for that label, byte
+# for byte, render one package from the shipped packages/pi-legion/.changie.yaml
+# itself, and print a SKIP line where changie is not on PATH.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in ci.yaml's test job.
@@ -144,10 +147,7 @@ identity() {
 }
 
 # seed_lock <file>: a bun.lock as `bun install` writes one, with a workspace
-# entry for packages/other at 2.0.0 and packages/pkg at 1.0.0, beside entries
-# no release touches: packages/pkg-ui, whose key starts with packages/pkg's, a
-# dependency named "version" nested in pkg's entry, and a "packages" section
-# naming pkg.
+# entry for packages/other at 2.0.0 and packages/pkg at 1.0.0.
 seed_lock() {
   cat > "$1" <<'LOCK'
 {
@@ -164,17 +164,7 @@ seed_lock() {
     "packages/pkg": {
       "name": "pkg",
       "version": "1.0.0",
-      "dependencies": {
-        "version": "1.0.0",
-      },
     },
-    "packages/pkg-ui": {
-      "name": "pkg-ui",
-      "version": "1.0.0",
-    },
-  },
-  "packages": {
-    "pkg": ["pkg@workspace:packages/pkg"],
   }
 }
 LOCK
@@ -198,7 +188,6 @@ setup() {
   identity "$dir/a"
   identity "$dir/b"
 }
-
 
 # change <clone> <path> <subject>: a commit with <subject> that appends a line
 # to <path>, creating it as needed.
@@ -605,7 +594,7 @@ before=$(state "$clone")
 tag_run "$clone" 1.0.1 pkg-v1.0.1
 check "the tag on another commit: exits 1" "$(is "$rc" 1)"
 check "the tag on another commit: the error names both commits" \
-  "$(contains "$out" "^::error::tag pkg-v1\.0\.1 already exists on $run, not $later, the commit this run releases$")"
+  "$(contains "$out" "^::error::release-push\.sh tag: tag pkg-v1\.0\.1 already exists on $run, not $later, the commit this run releases$")"
 check "the tag on another commit: the tag still names the commit it named" \
   "$(is "$(git -C "$clone" rev-list -n 1 pkg-v1.0.1)" "$run")"
 check "the tag on another commit: nothing else is tagged and nothing is committed" \
@@ -649,7 +638,7 @@ git -C "$work/t2/b" tag pkg-v1.3.0
 git -C "$work/t2/b" push -q origin pkg-v1.3.0
 tag_run "$work/t2/a" 1.3.0 pkg-v1.3.0
 check "a tag another run pushed for another commit: refused, naming both" \
-  "$(is "$rc|$(contains "$out" "^::error::tag pkg-v1\.3\.0 already exists on $other, not $run, the commit this run releases$")" '1|true')"
+  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh tag: tag pkg-v1\.3\.0 already exists on $other, not $run, the commit this run releases$")" '1|true')"
 check "a tag another run pushed for another commit: the clone made no tag of its own" \
   "$(is "$(git -C "$work/t2/a" tag -l)" "pkg-v1.2.0"$'\n'"pkg-v1.3.0")"
 check "tag pushes nothing: origin holds only the tags the other clone pushed" \
@@ -696,8 +685,8 @@ publish_package() {
   [ -z "$seen" ] || pushed=$((pushed + 1))
   [ "$rc" = 0 ] || failed=push-tag
 }
-# origin_refs: every ref origin holds, with the object it names.
-origin_refs() { git -C "$pj/origin.git" for-each-ref --format='%(refname) %(objectname)'; }
+# publish_refs: every ref the publish-job case's origin holds, with the object it names.
+publish_refs() { git -C "$pj/origin.git" for-each-ref --format='%(refname) %(objectname)'; }
 o="$pj/origin.git"
 
 # The run: its build jobs read the version from the run's commit, then publish releases both.
@@ -719,7 +708,7 @@ check "first attempt: origin's main is still the run's commit" "$(is "$(git -C "
 check "first attempt: the clone added no commit, and left the manifests and the lockfile as they were" \
   "$(is "$(state "$pj/job")" "$before")"
 check "first attempt: the pushes went through the deploy key" "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-refs=$(origin_refs)
+refs=$(publish_refs)
 
 # A re-run: the same commit, with every tag the first attempt pushed.
 git clone -q "$o" "$pj/rerun"
@@ -741,7 +730,7 @@ publish_package "$pj/rerun" 2.0.1 other-v2.0.1
 check "re-run, other: every step succeeds" "$(is "$failed" "")"
 check "re-run, other: tag reuses its own tag" "$(contains "$tag_out" '^Tag other-v2\.0\.1 already exists for version 2\.0\.1; reusing it$')"
 check "re-run: no commit is added to the clone" "$(is "$(state "$pj/rerun")" "$before")"
-check "re-run: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
+check "re-run: origin's main and tags are unchanged" "$(is "$(publish_refs)" "$refs")"
 
 echo
 echo "Case: release.yaml's pair_member reads the plugin pair from the tags, not from the manifest"
@@ -749,7 +738,9 @@ echo "Case: release.yaml's pair_member reads the plugin pair from the tags, not 
 # written to it and the tags alone say what npm carries. Both pair_member functions of
 # release.yaml — legion_build's "Resolve plugin versions for the smoke test and worker image" and
 # publish's "Check the plugin pair npm carries" — are read out of the workflow and run here over a
-# repository whose manifest holds an older version than its newest tag.
+# repository whose manifest holds an older version than its newest tag. Each reads the tags by
+# `release-push.sh newest-version`, at the path a job runs it from, so the repository gets the
+# script under test at .github/scripts/release-push.sh.
 workflow="$script_dir/../workflows/release.yaml"
 # pair_member_fn <step id>: the pair_member function that step defines, from its `pair_member() {`
 # line through the `}` that closes it, so the case runs the workflow's own code.
@@ -772,6 +763,8 @@ git -C "$pm" add -A
 git -C "$pm" commit -q -m "seed"
 git -C "$pm" tag pi-envoy-v1.9.0
 git -C "$pm" tag pi-envoy-v1.10.0
+mkdir -p "$pm/.github/scripts"
+ln -s "$release_push" "$pm/.github/scripts/release-push.sh"
 # run_pair_member <step id> <arg>...: that step's pair_member, run from the repository.
 run_pair_member() {
   local id=$1
@@ -1696,9 +1689,9 @@ race_run() {
 }
 what="main moves again after push-built's fetch, with a changed input"
 race_run race
-check "$what: exits 0, starting exactly one fresh run (land_on_branch's, no second one)" \
+check "$what: exits 0, starting exactly one fresh run (land_on_plugin_branch's, no second one)" \
   "$(is "$rc|$calls|$left" "0|$rebuild_run|0")"
-check "$what: land_on_branch's notice names the tip the commit was made on and main's new tip" \
+check "$what: land_on_plugin_branch's notice names the tip the commit was made on and main's new tip" \
   "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main moved from $moved, the commit [0-9a-f]* was made on, to $raced, so [0-9a-f]* was not pushed; a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
 check "$what: no notice of push-built's own fresh run" "$(is "$(contains "$out" 'A fresh run started')" false)"
 what="main moves again after push-built's fetch, gh workflow run fails"
@@ -2520,6 +2513,75 @@ if command -v changie >/dev/null; then
   notes_run notes-every-group
   check "fold-notes: without the option, every group of the plan is rendered" \
     "$(is "$rc|$listed" "0|plain_$main_label.md rel_1.10.0.md rel_1.9.0.md side_$main_label.md")"
+  notes_run notes-prerelease --label 1.11.0-rc.1
+  check "fold-notes --label: a label that is no X.Y.Z, though a tag of the prefix carries it, renders nothing" \
+    "$(is "$rc|$listed|$(contains "$out" '^Nothing to render$')" "0||true")"
+
+  echo
+  echo "Case: fold-notes --label writes exactly what the whole plan writes for that label"
+  # With a label and a tag prefix, a spec's group is read once from the tag's own commits; without
+  # one, each fragment asks the tags which release first shipped it. The two rules must answer the
+  # same, so every label the whole plan wrote above is rendered again on its own and compared byte
+  # for byte, the labels of the packages with no release of their own included.
+  every="$work/notes-every-group"
+  for label in $(for file in "$every"/*.md; do file=${file##*/}; printf '%s\n' "${file%.md}"; done |
+    sed 's/^[^_]*_//' | LC_ALL=C sort -u); do
+    notes_run "notes-one-$label" --label "$label"
+    want='' same=true
+    for file in "$every"/*_"$label".md; do
+      want+="${file##*/} "
+      cmp -s "$file" "$work/notes-one-$label/${file##*/}" || same=false
+    done
+    check "fold-notes --label $label: exactly that label's group of the whole plan, byte for byte" \
+      "$(is "$rc|$listed|$same" "0|${want% }|true")"
+  done
+
+  echo
+  echo "Case: fold-notes renders a package with the shipped packages/pi-legion/.changie.yaml"
+  # The configurations above are this file's own, minimal ones; this one is the shipped file
+  # itself, copied in beside fragments carrying the custom Issue field it requires, so a bad edit
+  # to a real .changie.yaml fails here rather than in a release's build job. ci.yaml's test filter
+  # and .github/scripts/ci_job_reads.py name that file for this copy.
+  sc="$work/fold-shipped-config"
+  mkdir -p "$sc/packages/shipped/$u"
+  git init -q -b main "$sc"
+  identity "$sc"
+  cp "$script_dir/../../packages/pi-legion/.changie.yaml" "$sc/packages/shipped/.changie.yaml"
+  printf '# Changelog\n' > "$sc/packages/shipped/CHANGELOG.md"
+  cat > "$sc/packages/shipped/$u/INFRA-20-Added-20260101-120000.yaml" <<'YAML'
+kind: Added
+body: a plain addition
+time: 2026-01-01T12:00:00Z
+custom:
+  Issue: INFRA-20
+YAML
+  cat > "$sc/packages/shipped/$u/INFRA-21-Changed-20260101-130000.yaml" <<'YAML'
+kind: Changed
+body: |-
+  a change whose entry runs
+  onto a second line
+
+  and a second paragraph
+time: 2026-01-01T13:00:00Z
+custom:
+  Issue: INFRA-21
+YAML
+  git -C "$sc" add -A
+  GIT_COMMITTER_DATE=2026-01-02T12:00:00+00:00 git -C "$sc" commit -q -m "feat: two entries"
+  git -C "$sc" tag shipped-v3.1.0
+  set +e
+  out=$(cd "$sc" && "$release_push" fold-notes --label 3.1.0 "$work/notes-shipped" packages/shipped=shipped-v 2>&1)
+  rc=$?
+  set -e
+  check "the shipped config: fold-notes exits 0, writing the release's one notes file" \
+    "$(is "$rc|$(ls -A "$work/notes-shipped")" "0|shipped_3.1.0.md")"
+  # What that config's kindFormat, changeFormat and newlines render, byte for byte: a heading per
+  # kind in the config's order, one bullet per entry, and the second and later lines of a body two
+  # spaces under the bullet, with its blank line left empty.
+  printf '\n\n### Added\n\n- a plain addition\n\n### Changed\n\n- a change whose entry runs\n  onto a second line\n\n  and a second paragraph' \
+    > "$work/shipped-expected.md"
+  check "the shipped config: the entries render under their kind, each body line after the first two spaces under the bullet" \
+    "$(cmp -s "$work/shipped-expected.md" "$work/notes-shipped/shipped_3.1.0.md" && echo true || echo false)"
 else
   echo "  SKIP: the fold-notes cases (changie is not on PATH)"
 fi

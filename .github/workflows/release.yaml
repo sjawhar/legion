@@ -208,16 +208,11 @@ jobs:
           # whose name is not <tag prefix>X.Y.Z, and no such tag at all, print nothing, which the
           # guards below refuse.
           pair_member() {
-            local tag version
             if [ "$(sed -n 's/^skip=//p' <<<"$1")" != true ]; then
               sed -n 's/^version=//p' <<<"$1"
               return 0
             fi
-            tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$2*")
-            version=${tag#"$2"}
-            if [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-              printf '%s\n' "$version"
-            fi
+            .github/scripts/release-push.sh newest-version "$2"
           }
           # The plugins' own build jobs write their "No release published" summary lines; with
           # GITHUB_STEP_SUMMARY empty these two calls write none into this job's summary.
@@ -307,8 +302,8 @@ jobs:
 
   # The Envoy Oh My Pi plugin, @sjawhar/pi-envoy. pi_envoy_build versions it, installs the
   # workspace and packs it (the dependencies' code, so no write scope and no secret), and hands the
-  # tarball to publish, which publishes those bytes to npm, commits and tags the version bump,
-  # creates the GitHub release and pushes the bump to main.
+  # tarball to publish, which publishes those bytes to npm, tags the release and creates the
+  # GitHub release. Nothing is committed: the tag records the version.
   pi_envoy_build:
     # Only main publishes: a workflow_dispatch from another branch skips this job and publish, so
     # no branch build ever reaches npm or moves `latest` (AGENTS.md, "Deploys come only from
@@ -369,21 +364,22 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # With --label the directory holds this release's one notes file or nothing at all, so
+          # the name release-push.sh gives that file is spelled nowhere in this workflow.
           .github/scripts/release-push.sh fold-notes --label "$VERSION" \
             "$RUNNER_TEMP/release-notes" packages/pi-envoy=pi-envoy-v
-          if [ -f "$RUNNER_TEMP/release-notes/pi-envoy_$VERSION.md" ]; then
+          if [ -n "$(ls -A "$RUNNER_TEMP/release-notes")" ]; then
             echo "notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "notes=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The entries, exactly as rendered, for publish; a release with none uploads nothing.
+      # The entries, exactly as rendered, for publish; a release with none uploads nothing at all.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.version.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
         with:
           name: pi-envoy-notes
           path: ${{ runner.temp }}/release-notes
-          if-no-files-found: ignore
 
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
@@ -407,8 +403,8 @@ jobs:
           # The committed manifest keeps the source path (extensions/envoy.ts) so repo checkouts
           # (dev sessions) load the source without a build. The published tarball ships only the
           # self-contained dist bundle, and scripts/pi-plugin-prepack.sh refuses to pack any other
-          # omp.extensions. Nothing restores the manifest: this job's tree is discarded, and
-          # publish commits the bump on its own checkout of the committed one.
+          # omp.extensions. Nothing restores the manifest: this job's tree is discarded, and no job
+          # commits a version, so the committed manifest keeps whatever it last held.
           jq '.omp.extensions = ["dist/envoy.js"]' \
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
@@ -508,21 +504,22 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # As in pi_envoy_build: with --label the directory holds this release's one notes file
+          # or nothing, so its name is spelled nowhere here either.
           .github/scripts/release-push.sh fold-notes --label "$VERSION" \
             "$RUNNER_TEMP/release-notes" packages/pi-legion=pi-legion-v
-          if [ -f "$RUNNER_TEMP/release-notes/pi-legion_$VERSION.md" ]; then
+          if [ -n "$(ls -A "$RUNNER_TEMP/release-notes")" ]; then
             echo "notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "notes=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The entries, exactly as rendered, for publish; a release with none uploads nothing.
+      # The entries, exactly as rendered, for publish; a release with none uploads nothing at all.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.version.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
         with:
           name: pi-legion-notes
           path: ${{ runner.temp }}/release-notes
-          if-no-files-found: ignore
 
       - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
@@ -549,8 +546,8 @@ jobs:
           # omp.extensions. legion.ts is inert without LEGION_TREE/LEGION_ROLE/LEGION_CONTROLLER in
           # the environment, so every installed session loading it is safe; the Legion daemon
           # relies on this single installed copy instead of a repo checkout. Nothing restores the
-          # manifest: this job's tree is discarded, and publish commits the bump on its own
-          # checkout of the committed one.
+          # manifest: this job's tree is discarded, and no job commits a version, so the committed
+          # manifest keeps whatever it last held.
           jq '.omp.extensions = ["dist/legion.js"]' \
             packages/pi-legion/package.json > tmp.json \
             && mv tmp.json packages/pi-legion/package.json
@@ -743,10 +740,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.pi_envoy_handed.outputs.tag }}
-          VERSION: ${{ needs.pi_envoy_build.outputs.version }}
         run: |
-          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
-            "$RUNNER_TEMP/pi-envoy-notes/pi-envoy_$VERSION.md"
+          # pi_envoy_build rendered one file with --label, whose name is release-push.sh's to
+          # choose, and the artifact holds that file alone.
+          shopt -s nullglob
+          notes=("$RUNNER_TEMP/pi-envoy-notes"/*)
+          if [ ${#notes[@]} -ne 1 ]; then
+            echo "::error::the pi-envoy-notes artifact holds ${#notes[@]} entries, not the one file the build job rendered"
+            exit 1
+          fi
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' "${notes[0]}"
 
       # pi-legion: what pi_legion_build packed, published as pi-envoy's above is.
       - name: "pi-legion: Download the tarball"
@@ -826,10 +829,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.pi_legion_handed.outputs.tag }}
-          VERSION: ${{ needs.pi_legion_build.outputs.version }}
         run: |
-          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
-            "$RUNNER_TEMP/pi-legion-notes/pi-legion_$VERSION.md"
+          # pi_legion_build's one rendered file, found as pi-envoy's is above.
+          shopt -s nullglob
+          notes=("$RUNNER_TEMP/pi-legion-notes"/*)
+          if [ ${#notes[@]} -ne 1 ]; then
+            echo "::error::the pi-legion-notes artifact holds ${#notes[@]} entries, not the one file the build job rendered"
+            exit 1
+          fi
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' "${notes[0]}"
 
       # The plugin pair npm carries for this run, which legion links and the worker image installs:
       # for each Oh My Pi plugin, the version its build released when "Create GitHub release", the
@@ -856,13 +864,8 @@ jobs:
           # the version npm carries for the package, or nothing when its release did not publish.
           # A package that released nothing in this run carries the version of its newest tag.
           pair_member() {
-            local tag version
             if [ "$1" = success ] && [ "$2" = true ]; then
-              tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$5*")
-              version=${tag#"$5"}
-              if [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-                printf '%s\n' "$version"
-              fi
+              .github/scripts/release-push.sh newest-version "$5"
             elif [ "$1" = success ] && [ "$3" = success ]; then
               printf '%s\n' "$4"
             fi
@@ -953,14 +956,11 @@ jobs:
         id: legion_tag
         if: ${{ !cancelled() && steps.legion_assets.outcome == 'success' }}
         env:
+          VERSION: ${{ needs.legion_build.outputs.version }}
           TAG: ${{ steps.legion_assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
-            exit 0
-          fi
-          git tag "$TAG" "$GITHUB_SHA"
+          .github/scripts/release-push.sh tag "$VERSION" "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
 
       # Build provenance for the archives a mise pin installs, which the release below uploads

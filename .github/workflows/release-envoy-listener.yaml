@@ -499,23 +499,24 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # With --label the directory holds this release's one notes file or nothing at all, so
+          # the name release-push.sh gives that file is spelled nowhere in this workflow.
           .github/scripts/release-push.sh fold-notes --label "$VERSION" \
             "$RUNNER_TEMP/release-notes" packages/envoy=legion-envoy-v
-          if [ -f "$RUNNER_TEMP/release-notes/envoy_$VERSION.md" ]; then
+          if [ -n "$(ls -A "$RUNNER_TEMP/release-notes")" ]; then
             echo "notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "notes=false" >> "$GITHUB_OUTPUT"
           fi
       # The entries, exactly as rendered, for release_publish; a release with none uploads
-      # nothing. The name must not start with `legion-envoy-`, as the image digests' must not
-      # (image_index above): release_publish downloads `pattern: legion-envoy-*` into the
+      # nothing at all. The name must not start with `legion-envoy-`, as the image digests' must
+      # not (image_index above): release_publish downloads `pattern: legion-envoy-*` into the
       # release's assets, and release-push.sh handed refuses anything there but the archives.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.version.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
         with:
           name: envoy-release-notes
           path: ${{ runner.temp }}/release-notes
-          if-no-files-found: ignore
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
@@ -888,14 +889,11 @@ jobs:
       - name: Tag release
         if: steps.confirm.outputs.release == 'true'
         env:
+          VERSION: ${{ needs.release_build.outputs.version }}
           TAG: ${{ steps.assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
-            exit 0
-          fi
-          git tag "$TAG"
+          .github/scripts/release-push.sh tag "$VERSION" "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
       # Build provenance for the host binaries a mise pin installs, linux or darwin, which the
       # release below uploads exactly. `--repo` alone accepts an archive any workflow of this
@@ -944,7 +942,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.assets.outputs.tag }}
-          VERSION: ${{ needs.release_build.outputs.version }}
         run: |
-          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
-            "$RUNNER_TEMP/release-notes/envoy_$VERSION.md"
+          # release_build rendered one file with --label, whose name is release-push.sh's to
+          # choose, and the artifact holds that file alone.
+          shopt -s nullglob
+          notes=("$RUNNER_TEMP/release-notes"/*)
+          if [ ${#notes[@]} -ne 1 ]; then
+            echo "::error::the envoy-release-notes artifact holds ${#notes[@]} entries, not the one file the build job rendered"
+            exit 1
+          fi
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' "${notes[0]}"

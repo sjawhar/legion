@@ -8,8 +8,8 @@
 # the credentials and runs no dependency code (the rebuild workflow's push job
 # is one). `version`, `check-built`, `extract-built`, `no-credential` and
 # `fold-notes` are the build job's; `release`, `release-section`, `restart`,
-# `push-tag` and `push-built` the publish job's; `tag`, `tagged`, `handed` and
-# `fold-plan` serve both.
+# `push-tag` and `push-built` the publish job's; `tag`, `tagged`,
+# `newest-version`, `handed` and `fold-plan` serve both.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -83,6 +83,14 @@
 #            chooses, so that tag must be <tag-prefix>X.Y.Z, each field a
 #            number without leading zeros: any other name fails with an
 #            ::error:: on stderr naming it.
+# newest-version: print the version of the newest <tag-prefix> tag, or nothing
+#            when that tag's name is not <tag-prefix>X.Y.Z and when the
+#            repository holds no such tag at all. The newest is the highest by
+#            version order of the name (`--sort=-v:refname`), picked first and
+#            checked after: a newest tag no release made prints nothing
+#            instead of reaching past it to an older one. release.yaml reads
+#            it for the version npm carries for a plugin that releases nothing
+#            in a run, and `version` bumps from the same tag.
 # release:   make the GitHub release of <tag>, in $GITHUB_REPOSITORY, carry
 #            this run's <asset>s and be published. A release that does not
 #            exist is created (`--verify-tag`, with generated notes, or the
@@ -212,8 +220,8 @@
 #            private-name check over the bundle already). When main had moved,
 #            a ::notice titled "Landing on claude-plugin" names the base, the
 #            tip and the commit, which changes only the two directories. The
-#            commit lands by land_on_branch (below) on the
-#            branch, over whatever it held.
+#            commit lands by land_on_plugin_branch (below) on the branch, over
+#            whatever it held.
 #
 #            A build of the base made on a newer tip leaves the branch's build
 #            one run behind its inputs when a build input changed between the
@@ -234,17 +242,17 @@
 #            landing, it says the build already landed.
 #
 #            Main can move again between push-built's fetch and the push.
-#            land_on_branch fetches main again and pushes only when main's tip
-#            is still the tip the commit was made on, so nothing lands that was
-#            built on a tip push-built did not check. Otherwise land_on_branch
-#            starts the one fresh run itself, and push-built starts no second
-#            one, whether or not an input changed. There is no retry loop: the
-#            fresh run is the retry.
+#            land_on_plugin_branch fetches main again and pushes only when
+#            main's tip is still the tip the commit was made on, so nothing
+#            lands that was built on a tip push-built did not check. Otherwise
+#            land_on_plugin_branch starts the one fresh run itself, and
+#            push-built starts no second one, whether or not an input changed.
+#            There is no retry loop: the fresh run is the retry.
 #
-#            land_on_branch <onto-sha> <workflow-file>, which push-built ends
-#            with, lands HEAD on $plugin_branch and never rebases, so
-#            push-built exits 0 whenever land_on_branch returns (unless the
-#            fresh run it then starts for a changed build input fails). It
+#            land_on_plugin_branch <onto-sha> <workflow-file>, which push-built
+#            ends with, lands HEAD on $plugin_branch and never rebases, so
+#            push-built exits 0 whenever it returns (unless the fresh run it
+#            then starts for a changed build input fails). It
 #            refuses a HEAD that is not exactly one commit whose one parent is
 #            <onto-sha>, which refuses any <onto-sha> but that parent's full
 #            sha (push-built has refused a base that is not 40 lower-case hex
@@ -260,9 +268,9 @@
 #            $GH_TOKEN), which builds main's tip, and a ::notice names both
 #            commits. In both cases it returns 0, and leaves which it did in
 #            $landed (pushed or restarted), so push-built starts no second run
-#            after land_on_branch started one. A failed fetch, a push rejected
-#            while main's tip is still <onto-sha>, or a failed `gh workflow
-#            run` is an ::error:: and exit 1.
+#            after land_on_plugin_branch started one. A failed fetch, a push
+#            rejected while main's tip is still <onto-sha>, or a failed `gh
+#            workflow run` is an ::error:: and exit 1.
 # handed:    check what a build job handed a publish job before the publish job
 #            acts on it, and print the release tag, <tag-prefix><version>. The
 #            version is the build job's output, so it must be X.Y.Z, each field
@@ -324,7 +332,7 @@
 #            followed. A fragment no such tag contains is in no release yet,
 #            and is unprinted until one ships it.
 #            The date is the tag's commit's committer date. Without a prefix (a
-#            package with no release of its own), every fragment is folded under
+#            package with no release of its own), every fragment's label is
 #            main@<HEAD's first 12 hex digits>, dated by HEAD's committer date.
 #            A fragment's path is one file to git, never a pattern: a name
 #            holding a glob character gets the commit that added that file. It
@@ -364,7 +372,7 @@
 #            output.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh release-section <tag> <heading> <content-file> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes [--label <label>] <notes-dir> <spec>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh newest-version <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh release-section <tag> <heading> <content-file> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes [--label <label>] <notes-dir> <spec>... | release-push.sh no-credential}
 
 # The identity of the commit this script makes, push-built's rebuild: GitHub
 # Actions' own bot.
@@ -432,7 +440,8 @@ ssh_dir=''
 # else, and $remote is the repository's SSH URL on GitHub. Before anything is
 # made, an unset or empty $DEPLOY_KEY or $GITHUB_REPOSITORY is an ::error::
 # naming it. A second call returns at once: push-built calls it before its own
-# fetch and land_on_branch again, and the first call's directory serves both.
+# fetch and land_on_plugin_branch again, and the first call's directory serves
+# both.
 deploy_key_env() {
   local key known_hosts
   [ -z "$ssh_dir" ] || return 0
@@ -471,6 +480,14 @@ fresh_run() {
   started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main) ||
     fail_error "$why, and starting a fresh run of $workflow on main failed; start one by hand: gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref main"
   echo "::notice title=$title::$lead a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
+}
+
+# newest_tag <tag-prefix>: print the newest <tag-prefix> tag, the highest by
+# version order of its whole name, or nothing when there is none. The name is
+# whatever its pusher chose: `newest-version` prints the version of this tag
+# when it is <tag-prefix>X.Y.Z, and `version` bumps from it.
+newest_tag() {
+  git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$1*"
 }
 
 # pushed_tag <tag-prefix>: print the release tag an earlier attempt pushed for
@@ -584,8 +601,8 @@ extract_built() {
 # always something to commit. The commit is not printed, because
 # `commit=$(commit_build_on ...)` would run it in a subshell, whose EXIT trap
 # removes every on_exit_remove directory, the deploy key's among them, before
-# land_on_branch pushes. The command runs from the repository's root, where
-# extract_built left it.
+# land_on_plugin_branch pushes. The command runs from the repository's root,
+# where extract_built left it.
 commit_build_on() {
   local tip=$1 base=$2 branch_tip=$3 index_dir tree branch_tree
   commit=''
@@ -788,14 +805,50 @@ check_specs() {
   done
 }
 
-# fold_plan <spec>...: set plan to the fold's plan, the lines fold-plan prints
-# (the header's fold-plan paragraph), each ending in a newline; empty when there
-# is nothing to fold. Sets groups to its distinct <package-dir><TAB><label>
-# pairs, in the plan's order.
+# group_commits <tag-prefix> <label>: set group_tag to the tag
+# <tag-prefix><label> and in_group to the commits it contains that no lower
+# <tag-prefix>X.Y.Z tag contains, one key each; true when there is such a tag,
+# false when <label> is no X.Y.Z or the repository holds no such tag, where no
+# fragment carries the label and the group is empty.
+#
+# Those commits are exactly the ones whose lowest tag of the prefix is this
+# label, which is the rule fold_plan applies to the commit that first added a
+# fragment. Reading them in one `git rev-list` is what keeps a release's build
+# job from walking every tag of the prefix once per fragment, and every
+# fragment a release ever shipped stays under .changes/unreleased/.
+group_commits() {
+  local prefix=$1 label=$2 candidate version commit
+  local -a lower=()
+  group_tag=$prefix$label
+  in_group=()
+  is_plain_version "$label" || return 1
+  git rev-parse -q --verify "refs/tags/$group_tag^{commit}" >/dev/null || return 1
+  for candidate in $(git tag --list "$prefix*"); do
+    version=${candidate#"$prefix"}
+    is_plain_version "$version" || continue
+    version_gt "$label" "$version" || continue
+    lower+=("$candidate")
+  done
+  while IFS= read -r commit; do
+    in_group[$commit]=1
+  done < <(git rev-list "$group_tag" --not "${lower[@]}")
+}
+
+# fold_plan <label> <spec>...: set plan to the lines fold-plan prints (the
+# header's fold-plan paragraph), each ending in a newline; empty when no
+# fragment of the <spec>s is in a release yet. Sets groups to its distinct
+# <package-dir><TAB><label> pairs, in the plan's order. <label> is empty for
+# the whole plan, or the one label fold-notes renders: a spec with a tag
+# prefix then reads that group's commits once (group_commits) instead of
+# asking the tags about each fragment.
 fold_plan() {
+  local only=$1
+  shift
   check_specs "$@"
   local spec dir prefix index=0 names=' ' head head_label head_date entry meta path commit candidate tag version label date lines=''
+  local group_tag='' group_date=''
   local unexpected=()
+  local -A in_group=() tag_dates=()
   head=$(git rev-parse HEAD)
   head_label="main@${head:0:12}"
   head_date=$(commit_date HEAD)
@@ -804,8 +857,14 @@ fold_plan() {
     [[ $spec != *=* ]] || prefix=${spec#*=}
     [[ $names != *" ${dir##*/} "* ]] || fail_error "two package specs name a directory ${dir##*/}; the notes files are named by it, so each must differ"
     names+="${dir##*/} "
-    git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD to fold its fragments into"
+    git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD, which every package whose fragments are rendered holds"
     index=$((index + 1))
+    if [ -n "$prefix" ] && [ -n "$only" ]; then
+      # The whole group at once, and the date of its tag with it: a spec whose
+      # label no tag of the prefix carries holds no fragment of the group.
+      group_commits "$prefix" "$only" || continue
+      group_date=$(commit_date "$group_tag^{commit}")
+    fi
     # Every entry directly in the unreleased directory, as HEAD's tree holds
     # them (no -r, so a subdirectory is one tree entry): a regular .yaml file
     # is a fragment, and anything else is refused below.
@@ -818,6 +877,10 @@ fold_plan() {
       [[ $path != *[$'\t\n']* ]] || fail_error "fragment $(quote_all "$path") has a tab or a newline in its name; rename it"
       if [ -z "$prefix" ]; then
         label=$head_label date=$head_date
+      elif [ -n "$only" ]; then
+        commit=$(first_added "$path")
+        [ -n "${in_group[$commit]:-}" ] || continue
+        label=$only date=$group_date
       else
         commit=$(first_added "$path")
         label='' tag=''
@@ -829,14 +892,18 @@ fold_plan() {
           fi
         done
         [ -n "$label" ] || continue
-        date=$(commit_date "$tag^{commit}")
+        # Every fragment of a group has the same tag, so its date is read once.
+        if [ -z "${tag_dates[$tag]:-}" ]; then
+          tag_dates[$tag]=$(commit_date "$tag^{commit}")
+        fi
+        date=${tag_dates[$tag]}
       fi
       lines+="$index"$'\t'"$dir"$'\t'"$label"$'\t'"$date"$'\t'"$path"$'\n'
     done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
   done
   if [ ${#unexpected[@]} -gt 0 ]; then
     mapfile -d '' -t unexpected < <(printf '%s\0' "${unexpected[@]}" | LC_ALL=C sort -z)
-    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or the fold never folds it; move it, rename it or remove it. Move or rename a fragment in one commit, with git mv: a fragment removed in one commit and added again in another is a new entry, which the release after it labels"
+    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or no release renders it; move it, rename it or remove it. Move or rename a fragment in one commit, with git mv: a fragment removed in one commit and added again in another is a new entry, which the release after it labels"
   fi
   set_plan "$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)"
 }
@@ -876,10 +943,10 @@ unlisted_message() {
   printf '%s at HEAD: each is under the .changes/ of a package this command was not given, here %s, and it reads the fragments of the packages it is given alone, so no release renders it and it stays where it is; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
 
-# group_column <dir> <label> <column>: the plan's <column> (4 the path) on each
-# line of that group.
-group_column() {
-  awk -F '\t' -v dir="$1" -v label="$2" -v column="$3" '$1 == dir && $2 == label { print $column }' <<<"$plan"
+# group_paths <dir> <label>: the path, the plan's fourth column, on each line
+# of that group.
+group_paths() {
+  awk -F '\t' -v dir="$1" -v label="$2" '$1 == dir && $2 == label { print $4 }' <<<"$plan"
 }
 
 # notes_name <package-dir> <label>: the name of the notes file of that group.
@@ -908,14 +975,14 @@ render_notes() {
   return "$status"
 }
 
-# land_on_branch <onto-sha> <workflow-file>: land HEAD, exactly one commit
-# whose one parent is <onto-sha>, on $plugin_branch with the deploy key when
-# main's tip is still <onto-sha>, and otherwise push nothing and start a fresh
-# run of <workflow-file> on main (the header's land_on_branch paragraph, under
-# push-built, which ends with it). Never rebases. Returns 0 when it pushed or
-# started a run, leaving which in $landed (pushed or restarted); every other
-# outcome is an ::error:: and exit 1.
-land_on_branch() {
+# land_on_plugin_branch <onto-sha> <workflow-file>: land HEAD, exactly one
+# commit whose one parent is <onto-sha>, on $plugin_branch with the deploy key
+# when main's tip is still <onto-sha>, and otherwise push nothing and start a
+# fresh run of <workflow-file> on main (the header's land_on_plugin_branch
+# paragraph, under push-built, which ends with it). Never rebases. Returns 0
+# when it pushed or started a run, leaving which in $landed (pushed or
+# restarted); every other outcome is an ::error:: and exit 1.
+land_on_plugin_branch() {
   local onto=$1 workflow=$2 shas head parents tip why
   landed=''
   # HEAD's sha, then its parents, space-separated: exactly one, onto.
@@ -966,10 +1033,9 @@ case "$command" in
     # commit the run started on, and the tags record every version.
     git fetch --tags origin
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-      tagged_commit=$(git rev-list -n 1 "$tag")
+      tagged_commit=$(git rev-parse "$tag^{commit}")
       if [ "$tagged_commit" != "$sha" ]; then
-        echo "::error::tag $tag already exists on $tagged_commit, not $sha, the commit this run releases"
-        exit 1
+        fail_error "tag $tag already exists on $tagged_commit, not $sha, the commit this run releases"
       fi
       echo "Tag $tag already exists for version $version; reusing it"
     else
@@ -978,6 +1044,16 @@ case "$command" in
     ;;
   tagged)
     pushed_tag "${2:?tag prefix}"
+    ;;
+  newest-version)
+    prefix=${2:?tag prefix}
+    tag=$(newest_tag "$prefix")
+    version=${tag#"$prefix"}
+    # The newest tag decides, and is checked after: a name no release made
+    # prints nothing rather than reaching past it to an older tag.
+    if is_plain_version "$version"; then
+      printf '%s\n' "$version"
+    fi
     ;;
   version)
     shift
@@ -1027,7 +1103,7 @@ case "$command" in
       skip=false on_head=true
       log="Releasing $tag, already pushed for this checkout"
     else
-      prev_tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$prefix*")
+      prev_tag=$(newest_tag "$prefix")
       if [ -n "$prev_tag" ]; then
         prev_version=${prev_tag#"$prefix"}
         range="$prev_tag..HEAD"
@@ -1334,10 +1410,10 @@ case "$command" in
     if [ "$tip" != "$base" ]; then
       echo "::notice title=Landing on $plugin_branch::built from $base, landing on $plugin_branch as $commit, made on $tip, main's tip, which changes only packages/claude-envoy/dist and packages/claude-envoy/legion: main moved since the build started" >&2
     fi
-    # land_on_branch fetches main again and pushes only when main's tip is still
-    # the tip the commit was made on; when main moved again since the fetch
-    # above, it starts the one fresh run itself.
-    land_on_branch "$tip" "$workflow"
+    # land_on_plugin_branch fetches main again and pushes only when main's tip
+    # is still the tip the commit was made on; when main moved again since the
+    # fetch above, it starts the one fresh run itself.
+    land_on_plugin_branch "$tip" "$workflow"
     if [ "$landed" = pushed ] && [ -n "$inputs_why" ]; then
       why="the build already landed on $plugin_branch as $commit, but $inputs_why, so the plugin branch's build is one run behind its inputs"
       fresh_run "$workflow" "$why" "A fresh run started" "the build landed on $plugin_branch as $commit, but $inputs_why, so"
@@ -1361,7 +1437,7 @@ case "$command" in
     ;;
   fold-plan)
     shift
-    fold_plan "$@"
+    fold_plan '' "$@"
     unlisted_files "$@"
     [ ${#unlisted[@]} -eq 0 ] || echo "::warning::release-push.sh $command: $(unlisted_message "$@")" >&2
     printf '%s' "$plan"
@@ -1396,10 +1472,11 @@ case "$command" in
         fail_error "$(quote_all "$notes_dir") exists and is not an empty directory; the notes go into a directory of their own"
       fi
     fi
-    fold_plan "$@"
-    # --label before anything is rendered: one release renders its own group,
-    # and the plan holds a group for every release the fragments have ever
-    # shipped in.
+    # The label reaches fold_plan, which renders one release's own group: the
+    # plan holds a group for every release the fragments have ever shipped in,
+    # and a spec with no tag prefix labels its fragments main@<commit> all the
+    # same, so the plan is narrowed here too.
+    fold_plan "$only_label" "$@"
     if [ -n "$only_label" ]; then
       set_plan "$(printf '%s' "$plan" | awk -F '\t' -v label="$only_label" '$2 == label')"
     fi
@@ -1410,7 +1487,7 @@ case "$command" in
     fi
     while IFS=$'\t' read -r dir label; do
       git cat-file -e "HEAD:$dir/.changie.yaml" 2>/dev/null || fail_error "$dir holds no .changie.yaml at HEAD to render its fragments with"
-      mapfile -t fragments < <(group_column "$dir" "$label" 4)
+      mapfile -t fragments < <(group_paths "$dir" "$label")
       notes_file="$notes_dir/$(notes_name "$dir" "$label")"
       if ! render_notes "$dir" "$notes_file" "${fragments[@]}"; then
         # changie does not name the fragment of every refusal (an unknown kind):

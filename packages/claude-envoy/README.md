@@ -616,8 +616,10 @@ bun run --cwd packages/claude-envoy test
 bun packages/claude-envoy/scripts/build.ts --out "$(mktemp -d)"
 ```
 
-`bun run --cwd packages/claude-envoy check-dist` compares main's committed `dist/` and `legion/`
-with a fresh build: run it at a commit on main, since a pull request's tree carries no fresh copy.
+`bun run --cwd packages/claude-envoy check-dist` compares the committed `dist/` and `legion/` with
+a fresh build: run it on a checkout of the `claude-plugin` branch, which the rebuild keeps fresh
+(`docs/deployment.md`). On `main` the two directories are frozen at the last build the old
+workflow committed, and a pull request's tree carries no fresh copy, so it fails on either.
 `tests/answers-claude.test.ts` runs the real Claude Code, the release `.claude-code-pin` at the
 repository root pins, against a stand-in Messages endpoint and Dispatch: the list reaches the model
 at startup, on `--resume`, after `/compact` and in a subagent. It skips without `LEGION_TEST_CLAUDE`
