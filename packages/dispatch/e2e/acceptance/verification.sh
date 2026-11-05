@@ -5,7 +5,9 @@
 # `dispatch read --ref`; the refusals a pointer earns — a block no document holds, a block of an
 # issue in another tree, a `needs` naming a block outside its own plan — and a `when` the schema
 # does not know; a requirement's id through a move; `dispatch result` and `dispatch results`, with
-# an unknown check and a pass that counts a skipped case refused; the one write a closed issue
+# an unknown check, a pass that counts a skipped case and a before-merge pass naming no negative
+# control refused; the exact passing commands in the daemon's implementer and tester prompts,
+# accepted with their negative control and refused without it; the one write a closed issue
 # takes, a result for an `after_merge` check, beside the two it still refuses; the coverage flags
 # `dispatch read --issue` prints, cleared by a check of the issue and by a check of a child, and
 # back when that check is deleted, with the missing plan task named only once a plan document
@@ -558,7 +560,7 @@ want_status 200 move "?to=r1 answers after the move"
 expect move "r1 keeps both edges that serve it through the move" 2 \
   '[.edges[] | select(.kind == "serves")] | length'
 
-# --- result: recording one, and the two refusals a result's own fields earn ----------------------
+# --- result: recording one, and the refusals a result's fields earn -------------------------------
 
 record result "record a pass for c1" "$root" --check c1 --role tester --verdict pass \
   --commit "$commit_one" --surface cli --run "bash e2e/acceptance/verification.sh" \
@@ -583,6 +585,43 @@ refused_result result "a pass counting a skipped case" "$root" \
   "$(jq -cn --arg s "$session" --arg c "$commit_one" \
     '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c, skipped: 1}')" \
   RESULT_CONTRADICTS 400
+refused_result result "a before-merge pass naming no negative control" "$root" \
+  "$(jq -cn --arg s "$session" --arg c "$commit_one" \
+    '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c}')" \
+  NEGATIVE_CONTROL_REQUIRED 400
+
+# --- prompt-example: the command the daemon's prompts show is the one the server takes ------------
+
+for prompt_file in implementer.md tester.md; do
+  mapfile -t prompt_commands < <(grep -o '`dispatch result --issue <issue>[^`]*`' \
+    "$script_dir/../../../daemon/internal/prompts/roles/$prompt_file")
+  [[ "${#prompt_commands[@]}" == 1 ]] ||
+    fail prompt-example "$prompt_file holds one result command" "found ${#prompt_commands[@]}"
+  prompt_command="${prompt_commands[0]}"
+  prompt_command="${prompt_command#\`}"
+  prompt_command="${prompt_command%\`}"
+  prompt_command="${prompt_command//<issue>/$root}"
+  prompt_command="${prompt_command//<block id>/c1}"
+  prompt_command="${prompt_command//<head sha>/$commit_one}"
+  # Split only the unquoted CLI words; keep the quoted negative-control text as one argument,
+  # verbatim. No shell evaluates the prompt's text.
+  prompt_pattern='^dispatch (.*) --negative-control "([^"]+)"$'
+  [[ "$prompt_command" =~ $prompt_pattern ]] ||
+    fail prompt-example "$prompt_file's command names its negative control" "$prompt_command"
+  prompt_negative_control="${BASH_REMATCH[2]}"
+  read -r -a prompt_args <<<"${BASH_REMATCH[1]}"
+  run prompt-example "$prompt_file's command" "${prompt_args[@]}" \
+    --negative-control "$prompt_negative_control"
+  grep -qF "Pull request body line:" "$work/out" ||
+    fail prompt-example "$prompt_file's command is accepted" "$(<"$work/out")"
+  pass prompt-example "$prompt_file's command is accepted"
+  if cli "${prompt_args[@]}" >"$work/out" 2>&1; then
+    fail prompt-example "$prompt_file's command without its negative control is refused" "$(<"$work/out")"
+  fi
+  grep -qF "NEGATIVE_CONTROL_REQUIRED" "$work/out" ||
+    fail prompt-example "$prompt_file's command without its negative control is refused" "$(<"$work/out")"
+  pass prompt-example "$prompt_file's command without its negative control is refused"
+done
 
 # --- closed: the one write a closed issue takes --------------------------------------------------
 
@@ -732,7 +771,8 @@ else
     pass currency "mapped $currency_repo as $project's default repository"
 
     record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
-      --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
+      --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh" \
+      --negative-control "Moved the head; the result read older."
     run currency "read the results of $root" results --issue "$root"
     grep -qE "^- c1 \(before_merge\): pass at ${commit_two:0:12} by tester, current\." "$work/out" ||
       fail currency "the newest result reads current" "$(<"$work/out")"

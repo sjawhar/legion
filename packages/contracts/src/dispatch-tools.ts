@@ -1335,6 +1335,7 @@ export const dispatchToolSpecs = [
       role: "implementer",
       verdict: "pass",
       commit: "1111111111111111111111111111111111111111",
+      negative_control: "Removed the guard; the run failed with exit 1.",
     },
     description:
       "Record one result of one check of an issue's Verification document, and print the " +
@@ -1343,7 +1344,10 @@ export const dispatchToolSpecs = [
       "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " +
       "id no Verification document of the issue or of an issue above it holds is 400 " +
       "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " +
-      "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " +
+      "and is 400 RESULT_CONTRADICTS. A pass on a before_merge check must name its " +
+      "negative_control — the deliberately broken input and the refusal it saw — or it is " +
+      "400 NEGATIVE_CONTROL_REQUIRED; an after_merge or default_branch pass, and any fail, " +
+      "may leave it empty. The result is recorded against the check's own issue, so " +
       "a child's run of a parent's check appears under that check. A closed issue takes a " +
       "result only for a check whose when is after_merge or default_branch — the production " +
       "check after the merge — and refuses every other one with 409 ISSUE_CLOSED, as it refuses " +
@@ -1369,7 +1373,9 @@ export const dispatchToolSpecs = [
       observed: z.string().describe("What the command printed.").optional(),
       negative_control: z
         .string()
-        .describe("The deliberately broken input and the refusal seen.")
+        .describe(
+          "Required for a pass on a before_merge check: the deliberately broken input and the refusal seen."
+        )
         .optional(),
       failed: z
         .number({ int: true, min: 0 })

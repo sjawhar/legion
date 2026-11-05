@@ -89,9 +89,10 @@ the requirements it serves, where a person reaches the change (`surface`: `brows
 be proved.
 
 **A result** is one run of one check, recorded with
-`dispatch result --issue <issue> --check <block id> --role <your role> --verdict pass --commit <sha>`,
-with `--surface`, `--run`, `--observed` and `--negative-control` as the check asks for them. The
-command prints the pull request body's line for it, and that line goes into the body unchanged.
+`dispatch result --issue <issue> --check <block id> --role <your role> --verdict pass --commit <sha> --negative-control "<the input you broke on purpose and the refusal it gave>"`,
+with `--surface`, `--run` and `--observed` as the check asks for them.
+`--negative-control` is required on a pass of a `before_merge` check: name what you broke and what refused it.
+The command prints the pull request body's line for it, and that line goes into the body unchanged.
 The surface is **production-like** — the repository's real-process test harness and fixtures, a
 sandbox repository, a real browser, a devN stack, staging, or a local stack with real migrations,
 one that has the resource the change touches — and `--run` or `--observed` carries a **link** to

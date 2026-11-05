@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -350,6 +351,35 @@ func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
 				t.Errorf("the composed %s prompt (root %t) still says %q", tc.role, tc.isRoot, phrase)
 			}
 		}
+	}
+}
+
+func TestEveryPassAPromptShowsNamesItsNegativeControl(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	passCommand := regexp.MustCompile("`dispatch result [^`]*--verdict pass[^`]*`")
+	negativeControl := regexp.MustCompile(`--negative-control "[^"\s][^"]*"`)
+	for _, tc := range []struct {
+		role   claim.Role
+		isRoot bool
+	}{
+		{claim.RolePlanner, false}, {claim.RoleImplementer, false}, {claim.RoleTester, false},
+		{claim.RoleReviewer, false}, {claim.RoleMerger, false},
+		{claim.RoleArchitect, true}, {claim.RoleArchitect, false},
+	} {
+		t.Run(fmt.Sprintf("%s/root=%t", tc.role, tc.isRoot), func(t *testing.T) {
+			commands := passCommand.FindAllString(composedText(t, composer, tc.role, tc.isRoot), -1)
+			if (tc.role == claim.RoleImplementer || tc.role == claim.RoleTester) && len(commands) == 0 {
+				t.Fatal("the prompt shows no passing dispatch result command")
+			}
+			for _, command := range commands {
+				if !negativeControl.MatchString(command) {
+					t.Errorf("passing command names no negative control: %s", command)
+				}
+			}
+		})
 	}
 }
 

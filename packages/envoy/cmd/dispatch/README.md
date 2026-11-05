@@ -2760,6 +2760,7 @@ Each item below names a path with its method and identity, then its purpose.
   POST records one result: `{check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?, actor?}`.
   `{key}` is the issue the result is recorded on; `check` names a check of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical block reference (`409 CHECK_AMBIGUOUS`); any other id is `400 UNKNOWN_CHECK`.
   `role` is at most 32 characters of `[a-z-]`, `verdict` is `pass` or `fail`, `commit` is 40 lowercase hex, and absent counts are 0; a `pass` counting any failed, skipped or excluded case is `400 RESULT_CONTRADICTS`, and any other malformed field `400 RESULT_INPUT`.
+  A pass on a `before_merge` check with an empty or blank `negative_control` is `400 NEGATIVE_CONTROL_REQUIRED`; an `after_merge` or `default_branch` pass, and any fail, may leave it empty.
   A screenshot names an image document of the recording issue or of the check's issue.
   The result is appended as `result.recorded` on the check's own issue, naming the recording issue.
   A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.

@@ -2646,7 +2646,10 @@ export interface CheckResultRecorded {
 }
 
 /** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
- *  them is refused `400 RESULT_CONTRADICTS`. */
+ *  them is refused `400 RESULT_CONTRADICTS`. A pass on a before_merge check must name its
+ *  negative_control — the deliberately broken input and the refusal it saw — or it is
+ *  400 NEGATIVE_CONTROL_REQUIRED; an after_merge or default_branch pass, and any fail, may leave
+ *  it empty. */
 export interface RecordCheckResultInput {
   readonly actor?: Actor;
   readonly check: string;

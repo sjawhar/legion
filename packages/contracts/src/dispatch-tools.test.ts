@@ -111,6 +111,7 @@ const validCalls = {
     role: "implementer",
     verdict: "pass",
     commit: "1111111111111111111111111111111111111111",
+    negative_control: "Removed the guard; the run failed with exit 1.",
   },
   dispatch_results: { issue: "DSP-1" },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },

@@ -1,0 +1,5 @@
+kind: Changed
+body: Include a negative control in the passing result commands shown to implementers and testers. Deploy this daemon before enabling the Dispatch refusal, or workers copy commands that the server rejects.
+time: 2026-11-05T08:42:20Z
+custom:
+  Issue: INFRA-1278

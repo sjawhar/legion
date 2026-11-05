@@ -62,6 +62,9 @@ type issueResults struct {
 // resultBody is a well-formed record body with the given check and verdict.
 func resultBody(check, verdict, commit string, fields map[string]any) map[string]any {
 	body := map[string]any{"check": check, "role": "implementer", "verdict": verdict, "commit": commit}
+	if verdict == "pass" {
+		body["negative_control"] = "Broke the input on purpose and saw the check fail."
+	}
 	for name, value := range fields {
 		body[name] = value
 	}
@@ -202,6 +205,62 @@ func TestResultRefusesAPassThatCountsASkippedCase(t *testing.T) {
 	// The same counts with a failing verdict are no contradiction.
 	if accepted := recordResult(t, handler, issue.Key, resultBody("k1", "fail", headCommit, map[string]any{"skipped": 1})); accepted.Code != http.StatusCreated {
 		t.Fatalf("a fail counting a skipped case: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+}
+
+func TestResultRefusesABeforeMergePassThatNamesNoNegativeControl(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "RESNC", "Negative control", "A spec\n")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+	for _, negativeControl := range []string{"", "   \t\n"} {
+		refused := recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit,
+			map[string]any{"negative_control": negativeControl}))
+		if refused.Code != http.StatusBadRequest {
+			t.Fatalf("negative control %q: status=%d body=%s", negativeControl, refused.Code, refused.Body.String())
+		}
+		code, message := refusalOf(t, refused)
+		if code != "NEGATIVE_CONTROL_REQUIRED" || !strings.Contains(message, "negative_control") || !strings.Contains(message, "k1") {
+			t.Fatalf("negative control %q: code=%s message=%s", negativeControl, code, message)
+		}
+	}
+	negativeControl := "Removed the route; the run failed with 404."
+	accepted := recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit,
+		map[string]any{"negative_control": negativeControl}))
+	if accepted.Code != http.StatusCreated {
+		t.Fatalf("a named negative control: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	if got := decodeBody[recordedResult](t, accepted).Result.NegativeControl; got != negativeControl {
+		t.Fatalf("stored negative_control = %q, want %q", got, negativeControl)
+	}
+}
+
+func TestResultTakesAPassWithNoNegativeControlWhereTheRuleDoesNotReach(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "RESNE", "Exempt results", "A spec\n")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks+
+		"\n:::check{#k3 when=\"default_branch\"}\nThe default branch answers.\n:::\n")
+	for _, tc := range []struct{ check, verdict string }{{"k2", "pass"}, {"k3", "pass"}, {"k1", "fail"}} {
+		accepted := recordResult(t, handler, issue.Key, resultBody(tc.check, tc.verdict, headCommit,
+			map[string]any{"negative_control": ""}))
+		if accepted.Code != http.StatusCreated {
+			t.Fatalf("%s %s with no negative control: status=%d body=%s", tc.check, tc.verdict, accepted.Code, accepted.Body.String())
+		}
+	}
+}
+
+func TestAClosedIssueRefusesABeforeMergeResultBeforeAskingForItsNegativeControl(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "RESNO", "Refusal order", "A spec\n")
+	owner := "/api/v1/issues/" + issue.Key
+	uploadDocument(t, handler, owner, "verification.md", twoChecks)
+	closed := dispatchRequest(t, handler, http.MethodPatch, owner, map[string]any{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close the issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	refused := recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit,
+		map[string]any{"negative_control": ""}))
+	if code, _ := refusalOf(t, refused); refused.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
+		t.Fatalf("a closed issue before negative control: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 }
 

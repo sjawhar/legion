@@ -1,0 +1,5 @@
+kind: Changed
+body: State when a check result needs a negative control and include it in the passing command example. Deploy the daemon with the updated result commands before enabling the Dispatch refusal, or workers copy commands that the server rejects.
+time: 2026-11-05T08:42:20Z
+custom:
+  Issue: INFRA-1278

@@ -167,6 +167,10 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("issue is closed: only a result for a check whose when is after_merge or default_branch is recorded there, and %s is %s", check.BlockID, check.When))
 		return
 	}
+	if err := refuseInertPass(check.BlockID, check.When, input.Verdict, input.NegativeControl); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := s.refuseResultScreenshots(r.Context(), tx, issueKey, check.IssueKey, input.Screenshots); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -285,6 +289,14 @@ func (input checkResultInput) refusal() error {
 		return errorf(http.StatusBadRequest, "RESULT_CONTRADICTS",
 			"a pass counts no failed, skipped or excluded case; this one counts %d failed, %d skipped and %d excluded",
 			input.Failed, input.Skipped, input.Excluded)
+	}
+	return nil
+}
+
+func refuseInertPass(blockID, when, verdict, negativeControl string) error {
+	if verdict == "pass" && when == checkWhenBeforeMerge && strings.TrimSpace(negativeControl) == "" {
+		return errorf(http.StatusBadRequest, "NEGATIVE_CONTROL_REQUIRED",
+			"negative_control is required for a pass on before_merge check %s: name the deliberately broken input and the refusal it saw", blockID)
 	}
 	return nil
 }
