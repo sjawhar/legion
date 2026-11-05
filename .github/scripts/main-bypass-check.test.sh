@@ -246,4 +246,14 @@ no_pipefail=$(SHELL_DEFAULT="$bypass_default_shell" yq -r '
 check "no run: step of main-bypass-check.yaml runs under a shell without pipefail" \
   "$(is "$no_pipefail" "")"
 
+echo "case: skip-checks last in a trailer block of its own is GitHub's trailer"
+# GitHub: "If you already have other trailers in your commit message, `skip-checks` should be
+# last" (docs.github.com, "Skipping workflow runs"). The rule here asks for an empty line
+# immediately before the trailer, which forbids every other trailer above it, so a commit GitHub
+# skipped every workflow for is read as untested and starts a full ci.yaml run of every job on
+# main — the most expensive run in this repository, for a commit that asked for none.
+trailer_block=$(list "$(commit "$bypassed" "$(printf 'plan: record handoff\n\nCo-authored-by: a <a@example.com>\nskip-checks: true\n')")")
+run_bypass "$trailer_block" "$(readings "$bypassed" '[]')" "$(readings "$bypassed" '[]')"
+check "a trailer block ending in skip-checks starts nothing" "$(is "$out" "")"
+
 summary "the main bypass check's decision"
