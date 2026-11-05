@@ -89,13 +89,16 @@ type Deps struct {
 	// itself rather than through embeddings_enqueue, so no notification announces what it makes
 	// pending, and Run's scan loop wakes on this instead. Nil for a caller that builds Deps itself.
 	enqueued chan struct{}
-	// idle and coverageEnded are the two ends of Run's work, for a test that must know the
+	// idle and coverageWaiting are the two ends of Run's work, for a test that must know the
 	// process has finished all of it: idle is called whenever the scan loop waits with nothing
-	// owed and nothing due (duty.WokenLoop.Idle), and coverageEnded once the coverage loop has
-	// returned. Nil in production and for a caller that builds Deps itself; a test of this
-	// package sets them (dispatch://INFRA-1075).
-	idle          func()
-	coverageEnded func()
+	// owed and nothing due (duty.WokenLoop.Idle), and coverageWaiting each time the coverage
+	// loop settles into its wait with nothing left to do (runCoverage). The coverage loop is
+	// not a thing that ends - it rechecks the identity for as long as the process runs - so
+	// what a test can wait for is the loop parked, not the loop returned. Nil in production and
+	// for a caller that builds Deps itself; a test of this package sets them
+	// (dispatch://INFRA-1075).
+	idle            func()
+	coverageWaiting func()
 }
 
 // proof is a record, set once, that an Embed call this process's queue made has succeeded.
@@ -192,12 +195,7 @@ func Run(ctx context.Context, deps Deps) {
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Go(func() {
-		runCoverage(coverageCtx, deps)
-		if deps.coverageEnded != nil {
-			deps.coverageEnded()
-		}
-	})
+	wg.Go(func() { runCoverage(coverageCtx, deps) })
 	if deps.Wake != nil {
 		wg.Go(func() { relayWakes(ctx, deps) })
 	}

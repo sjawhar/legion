@@ -409,6 +409,13 @@ func recheckIdentity(ctx context.Context, deps Deps) (identityRun, error) {
 // is logged and tried again after identityRecheckInterval, a failed boot pass as the whole pass
 // since it may have failed before its later steps: every step is idempotent, so nothing is lost
 // by waiting. The context ending returns at once.
+//
+// The loop reports each time it settles into a wait it owes nothing from (Deps.coverageWaiting):
+// the pass succeeded and left no step waiting for the embedder to answer, so until the interval
+// is out the loop reads nothing, writes nothing and wakes nobody. That report, not the
+// goroutine's return, is what a test waits for to know the pass is done, since this loop returns
+// only when the process stops. It is made with the wait already armed, so a test that takes it
+// and then measures a quiet period cannot catch the loop between its pass and its timer.
 func runCoverage(ctx context.Context, deps Deps) {
 	pass := coverPass
 	for {
@@ -426,6 +433,9 @@ func runCoverage(ctx context.Context, deps Deps) {
 			}
 		}
 		timer := time.NewTimer(duty.Jittered(identityRecheckInterval))
+		if err == nil && answered == nil && deps.coverageWaiting != nil {
+			deps.coverageWaiting()
+		}
 		select {
 		case <-ctx.Done():
 			timer.Stop()

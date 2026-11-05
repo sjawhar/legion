@@ -2766,7 +2766,10 @@ func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
 }
 
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
-	t.Parallel()
+	// Serial: it binds a durable consumer after closing the connection that held it, and that
+	// bind races at random (dispatch://INFRA-985, which owns the race itself). This branch made
+	// every other test of the package parallel; this one stays serial so the sweep does not make
+	// a known random failure more likely (dispatch://INFRA-1075).
 	_, uri := testnats.Start(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()

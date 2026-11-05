@@ -1,0 +1,4 @@
+kind: Fixed
+body: The embedding queue's coverage loop now reports when it settles into its wait with its
+  pass done and nothing owed, rather than only when it returns, which it does only as the
+  process stops; a caller waiting for the boot coverage pass to finish no longer waits for ever.

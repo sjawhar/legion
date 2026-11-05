@@ -1497,17 +1497,26 @@ func insertCommentWithWindow(t *testing.T, q querier, issueKey, body string) {
 // no due time, no further pass.
 //
 // It waits for the two ends of Run's own work, which Run reports, rather than for a window in
-// which nothing happened to be running. The coverage loop has returned, so it will write no more
-// rows and signal no more wakes; and the scan loop has reached the state the woken shape exists
-// for - nothing owed, nothing due, no timer armed, no wake waiting (duty.WokenLoop.Idle) - with
-// that report made after the coverage loop's last write, since an idle report held from before
-// it is drained first. Neither can come early: the coverage loop's return is its last act, and
-// the scan loop reports idle only from the top of its wait, after a pass that found nothing
-// pending. That is stronger than the quiet window this waited for, which failed at random on
-// main because a wake Cover left in the buffer earned a pass five seconds (retryInterval) into
-// the window the test had already called quiet (dispatch://INFRA-1075). The second below is no
-// longer what rules a period out - the idle report does that - but a guard on anything else in
-// the process that might still make a statement, and it stays far shorter than
+// which nothing happened to be running. The coverage loop reports itself parked
+// (Deps.coverageWaiting) with its pass done, nothing owed and its next recheck
+// identityRecheckInterval away, so it will write no more rows and signal no more wakes; and the
+// scan loop reports the state the woken shape exists for - nothing owed, nothing due, no timer
+// armed, no wake waiting (duty.WokenLoop.Idle). Neither can come early: the coverage loop
+// reports only with its wait armed, after a pass that succeeded and left no step waiting on the
+// embedder, and the scan loop reports idle only from the top of its wait, after a pass that
+// found nothing pending.
+//
+// The idle report has to be earned rather than waited for. The scan loop reports it each time
+// it settles, which here it does while the coverage pass is still running its queries, and with
+// nothing left to do it would never report again; an idle report made before the coverage
+// loop's last write says nothing about the rows it wrote. So this drops whatever report is in
+// hand and then wakes the queue itself (Deps.Wake), which buys one more pass, whose idle report
+// is necessarily made after everything the coverage pass wrote and after any wake it left in
+// the buffer. That is stronger than the quiet window this waited for on main, which failed at
+// random because a wake Cover left in the buffer earned a pass five seconds (retryInterval)
+// into the window the test had already called quiet (dispatch://INFRA-1075). The second below
+// is no longer what rules a period out - the two reports do that - but a guard on anything else
+// in the process that might still make a statement, and it stays far shorter than
 // identityRecheckInterval, which this test leaves at its ten minutes.
 func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	database := storetest.Open(t)
@@ -1515,12 +1524,14 @@ func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	insertCommentWithWindow(t, database.Pool, "IDLE-1", "A comment its indexer windowed")
 	counter := &storetest.StatementCounter{}
 	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
-	coverageEnded := make(chan struct{})
+	coverageWaiting := make(chan struct{})
 	idle := make(chan struct{}, 1)
+	wake := make(chan struct{})
 	runQueue(t, Deps{
-		Store:         counted,
-		Embedder:      newSyncEmbedder(configuredIdentity),
-		coverageEnded: sync.OnceFunc(func() { close(coverageEnded) }),
+		Store:           counted,
+		Embedder:        newSyncEmbedder(configuredIdentity),
+		Wake:            wake,
+		coverageWaiting: sync.OnceFunc(func() { close(coverageWaiting) }),
 		idle: func() {
 			select {
 			case idle <- struct{}{}:
@@ -1529,15 +1540,18 @@ func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 		},
 	})
 	select {
-	case <-coverageEnded:
+	case <-coverageWaiting:
 	case <-time.After(30 * time.Second):
-		t.Fatal("Run's coverage loop did not finish within 30s")
+		t.Fatal("Run's coverage loop did not report itself parked within 30s")
 	}
-	// An idle report made before the coverage loop's last write says nothing about the rows it
-	// wrote: take the one this waits for after that write.
 	select {
 	case <-idle:
 	default:
+	}
+	select {
+	case wake <- struct{}{}:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not take a wake within 30s of its coverage pass parking")
 	}
 	select {
 	case <-idle:
