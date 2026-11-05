@@ -238,11 +238,15 @@ echo "case: the workflow step that gathers the push runs under a shell with pipe
 # this backstop exists to prevent.
 bypass_workflow="$script_dir/../workflows/main-bypass-check.yaml"
 bypass_default_shell=$(yq -r '.defaults.run.shell // ""' "$bypass_workflow" 2>/dev/null)
+# The names are filled in over the collected array (`.[] |=`), never as a `|` stage of the
+# selection itself: yq reads a literal as a node of its own, so `… | (.name // "x")` over a
+# selection that matched nothing still yields "x", and this case would report a step the
+# workflow does not have and fail on every run.
 no_pipefail=$(SHELL_DEFAULT="$bypass_default_shell" yq -r '
   [.jobs[].steps[]
    | select(has("run"))
-   | select((.shell // strenv(SHELL_DEFAULT)) != "bash")
-   | (.name // "an unnamed step")] | join(", ")' "$bypass_workflow" 2>/dev/null)
+   | select((.shell // strenv(SHELL_DEFAULT)) != "bash")]
+  | .[] |= (.name // "an unnamed step") | join(", ")' "$bypass_workflow" 2>/dev/null)
 check "no run: step of main-bypass-check.yaml runs under a shell without pipefail" \
   "$(is "$no_pipefail" "")"
 
@@ -298,27 +302,26 @@ shape "the words as the whole message, which makes them its subject" 'skip-check
 shape "skip-checks: false, which is no marker of GitHub's" \
   "$(printf 'plan: record the handoff\n\nCo-authored-by: a <a@example.com>\nskip-checks: false\n')" read
 
-echo "case: the workflow's own read of the push payload, on each shape .commits can take"
-# main-bypass-check.yaml gathers the push from $GITHUB_EVENT_PATH before it runs the decision
-# script, and that read is the one input shape no test below the workflow can reach. A payload
-# whose `.commits` is not an array is a payload this job cannot read: the read must end the step
-# rather than hand the decision an empty push, which would go green having started nothing — the
-# outcome `shell: bash` is there to prevent. An empty array is no such payload: it is a push that
-# added no commit, which the case "a push that carries no commit" above reads as carrying nothing
-# to test.
+echo "case: the read of the push payload the workflow gathers COMMITS with, on each shape .commits can take"
+# .github/scripts/push-commits.sh is that read, and main-bypass-check.yaml's job runs this same
+# file: the case below runs the file, not a copy of the step's text, so the two cannot drift. A
+# payload whose `.commits` is not an array is a payload this job cannot read: the read must end
+# the step rather than hand the decision an empty push, which would go green having started
+# nothing — the outcome `shell: bash` is there to prevent. An empty array is no such payload: it
+# is a push that added no commit, which the case "a push that carries no commit" above reads as
+# carrying nothing to test.
 read_payload() { # read_payload <event payload>: sets out (the gathered COMMITS, or the error) and status
   printf '%s' "$1" > "$work/event.json"
-  local gather
-  gather=$(yq -r '.jobs[].steps[] | select(has("run")) | .run' "$bypass_workflow" |
-    awk '/COMMITS=\$\(jq -c/ {found = 1} found {print} found && /"\$GITHUB_EVENT_PATH"\)$/ {exit}')
   set +e
-  out=$(GITHUB_EVENT_PATH="$work/event.json" bash --noprofile --norc -eo pipefail \
-    -c "$gather"$'\nprintf %s "$COMMITS"' 2>&1)
+  out=$(GITHUB_EVENT_PATH="$work/event.json" timeout 60 "$script_dir/push-commits.sh" 2>&1)
   status=$?
   set -e
 }
 failed() { [ "$status" -ne 0 ] && echo true || echo false; }
 
+check "the workflow gathers COMMITS with that file and no read of its own" \
+  "$(is "$(yq -r '.jobs[].steps[] | select(has("run")) | .run' "$bypass_workflow" |
+      grep -c 'COMMITS=\$(\.github/scripts/push-commits\.sh)')" 1)"
 read_payload "$(jq -nc --arg id "$bypassed" '{commits: [{id: $id, message: "fix: a commit", author: {name: "a"}}]}')"
 check "a push payload is read into the commits the decision wants" \
   "$(is "$out" "$(jq -nc --arg id "$bypassed" '[{id: $id, message: "fix: a commit"}]')")"

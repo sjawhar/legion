@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `ci-ok.sh`: ci-ok passes only when `changes` and lint succeeded, every job `changes`
-# selected succeeded, and every job it did not select succeeded or was skipped.
+# selected succeeded, and every job it did not select succeeded or was skipped. The last case
+# holds the other half of `ci-ok.jq` — the two artifact names of the report step — to the
+# .github/actions/ci-ok-report that uploads them.
 #
 # ci-ok.sh reads only its environment, so each case hands it the NEEDS ci-ok-report.sh would build
 # and the SELECTED_BY and PULL_REQUEST_ONLY of ci.yaml's env, shrunk to four jobs: typecheck,
@@ -141,5 +143,34 @@ run_ci_ok "$(needs success "$selects" success typecheck=success worker-image=suc
 check "fails" "$(is "$status" 1)"
 check "names it as absent" "$(contains "$out" '^::error::envoy-client is absent from NEEDS')"
 check "prints it" "$(contains "$out" '^envoy-client: absent ')"
+
+echo "case: the artifact names ci-ok.jq reads are the names the report action uploads"
+# ci-ok.jq holds the one reading of both, for ci-ok-report.sh (every job's report) and
+# merge-group-report.sh (one job's, with its posted marker). The names themselves are written in
+# .github/actions/ci-ok-report/action.yml, which no jq of a run can read, so the two are held
+# together here: a rename only one side followed would leave every follower reading `absent` and
+# ci-ok waiting for reports it cannot see. The action's expressions are filled in for a
+# typecheck job of attempt 2 that ended `failure`.
+uploaded() { # uploaded <n>: the name: of the action's n-th upload-artifact step, filled in
+  yq -r '[.runs.steps[] | select((.uses // "") | test("actions/upload-artifact")) | .with.name]' \
+    "$script_dir/../actions/ci-ok-report/action.yml" |
+    yq -r ".[$1]" |
+    sed -e 's/${{ inputs.job }}/typecheck/' -e 's/${{ github.run_attempt }}/2/' \
+        -e 's/${{ inputs.job-status }}/failure/'
+}
+reading() { # reading <jq filter> <artifact name>...: that filter of ci-ok.jq over those names
+  local filter=$1
+  shift
+  jq -r -n -L "$script_dir" --argjson names "$(printf '%s\n' "$@" | jq -R . | jq -s .)" \
+    "include \"ci-ok\"; $filter"
+}
+report_name=$(uploaded 0)
+posted_name=$(uploaded 1)
+check "the report artifact's name reads back as that job's result" \
+  "$(is "$(reading 'reports($names)[0] | "\(.job) \(.attempt) \(.status)"' "$report_name")" "typecheck 2 failure")"
+check "the posted marker's name reads back as that job's posted verdict" \
+  "$(is "$(reading 'posted($names)[0] | "\(.job) \(.attempt)"' "$posted_name")" "typecheck 2")"
+check "the marker is no report" "$(is "$(reading 'reports($names) | length' "$posted_name")" 0)"
+check "the report is no marker" "$(is "$(reading 'posted($names) | length' "$report_name")" 0)"
 
 summary "ci-ok.sh fails unless every job changes selected succeeded"

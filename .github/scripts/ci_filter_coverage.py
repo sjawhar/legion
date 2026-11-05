@@ -761,13 +761,8 @@ REQUIRED_CHECKS = ("ci-ok", "pr-title")
 # doomed merge-group run, which runs only on merge_group, holds `actions: write`, runs no
 # dependency code, reports no result to ci-ok and is no job a verdict waits for.
 EXEMPT_LIST = "CI_OK_EXEMPT"
-# The composite action a follower cancel job runs, which is what makes a job a follower, and the
-# one condition every follower carries. The job a follower follows is named in its `needs:` and
-# nowhere else — the action reads the id from `toJSON(needs)` — so this text is the same in all
-# of them, and a hand-written variant of it is drift this check refuses.
-FOLLOWER_ACTION = "./.github/actions/merge-group-cancel"
-FOLLOWER_IF = ("${{ !cancelled() && github.event_name == 'merge_group' && github.run_attempt == '1' "
-               "&& (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}")
+# The cancel jobs EXEMPT_LIST names are held by ci_workflow_rules.check_followers, which reads
+# EXEMPT_LIST and the PULL_REQUEST_ONLY list of this module's EVENT_LISTS from the same env.
 
 
 def check_ci_ok(document: dict, problems: list) -> None:
@@ -779,10 +774,8 @@ def check_ci_ok(document: dict, problems: list) -> None:
     a workflow must hand that workflow `ci-ok-changes` for its job's report step. No job may be
     named for a required check. A job EXEMPT_LIST names is outside all of that: it is no job of
     CI_OK_SELECTED_BY, it needs no report step, and it must carry none, since ci-ok.sh fails a
-    result for a job CI_OK_SELECTED_BY cannot map. The followers, the jobs that run
-    FOLLOWER_ACTION, are one per job that can run on a merge group and is no cancel job of
-    EXEMPT_LIST's — the jobs ci-ok waits for there, plus `changes` — each following the one job
-    its `needs:` names, under FOLLOWER_IF and no other text."""
+    result for a job CI_OK_SELECTED_BY cannot map. Whether each name it holds is the follower
+    cancel job of a job that needs one is ci_workflow_rules.check_followers'."""
     jobs = document.get("jobs") or {}
     env = document.get("env") or {}
     try:
@@ -894,38 +887,6 @@ def check_ci_ok(document: dict, problems: list) -> None:
             problems.append(f"::error file={WORKFLOW}::job {job_id}'s last step is not `uses: {REPORT_ACTION}` with "
                             f"`if: always()`, `changes: {REPORT_CHANGES}` and `job-status: {REPORT_STATUS}`, so a run "
                             f"that {job_id} ends never gets ci-ok")
-    # One follower per job a merge-group run can run, and each written in the one text: a job
-    # with none leaves every group built on this one running to its end when it fails, and a
-    # follower whose condition drifts is a follower that fires in runs it was not written for.
-    # A follower follows the one job its `needs:` names, which is how the act knows whose
-    # report to read, and the pull-request-only jobs are left out: the queue never runs them.
-    followers = {}
-    for job_id, job in jobs.items():
-        job = job or {}
-        if not any((step or {}).get("uses") == FOLLOWER_ACTION for step in job.get("steps") or []):
-            continue
-        needed = job.get("needs") or []
-        followers[job_id] = [needed] if isinstance(needed, str) else list(needed)
-    waited = set(jobs) - set(exempt) - list_expected["CI_OK_PULL_REQUEST_ONLY"]
-    followed = {}
-    for job_id, needed in sorted(followers.items()):
-        if len(needed) != 1:
-            problems.append(f"::error file={WORKFLOW}::job {job_id} runs {FOLLOWER_ACTION} and needs "
-                            f"{len(needed)} jobs, not one; a follower names the job it follows in `needs:` and "
-                            f"nowhere else, and the act reads that one id from `toJSON(needs)`")
-            continue
-        followed[needed[0]] = job_id
-        if squash(str((jobs.get(job_id) or {}).get("if", ""))) != FOLLOWER_IF:
-            problems.append(f"::error file={WORKFLOW}::job {job_id}'s if: is not the one every follower carries, "
-                            f"`{FOLLOWER_IF}`; it is written once and names no job, so a variant of it is drift")
-    for job_id in sorted(waited - set(followed)):
-        problems.append(f"::error file={WORKFLOW}::job {job_id} can run on a merge group and has no follower, so "
-                        f"nothing cancels the groups built on this one when it fails; add a cancel-{job_id} job "
-                        f"that needs it, runs {FOLLOWER_ACTION} and is named in {EXEMPT_LIST}")
-    for job_id in sorted(set(followed) - waited):
-        problems.append(f"::error file={WORKFLOW}::job {followed[job_id]} follows {job_id}, which is no job a "
-                        f"merge-group run of this file runs outside the cancel jobs, so it could never fire; "
-                        f"drop it, or name the job it was meant for")
 
 
 def check_push_workflows(data, filters: dict, problems: list) -> list:
@@ -1007,6 +968,7 @@ def main() -> int:
     check_ci_ok(document, problems)
     rules.check_push_conditions(document, problems)
     rules.check_rerun_guard(document, problems)
+    rules.check_followers(document, problems)
     rules.check_cache_round_trip(document, problems)
     expander = Expander(files)
     check_dead_patterns(data, filters, expander, problems)

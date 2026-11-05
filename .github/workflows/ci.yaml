@@ -16,17 +16,22 @@ name: CI
 # deploy, are docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held
 # to the docs filter below.
 #
-# A new job joins the router in six places: a filter in `changes` that names every file the job
+# A new job joins the router in seven places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
-# output, an entry in CI_OK_SELECTED_BY (this file's env) mapping the job to that output (and in
+# output carrying the term that skips it on a re-run attempt of a merge-group run (the comment
+# above `changes` says why every job needs its own), an entry in CI_OK_SELECTED_BY (this file's
+# env) mapping the job to that output (and in
 # CI_OK_PULL_REQUEST_ONLY when its `if:` admits only pull_request), the ci-ok-report step as the
 # job's last step (a job that calls a workflow passes `ci-ok-changes` to it, and that workflow's
-# job ends with the step, as docs-site.yaml's and worker-image.yaml's do), and a gate in
+# job ends with the step, as docs-site.yaml's and worker-image.yaml's do), a `cancel-<job>`
+# follower named in CI_OK_EXEMPT (the comment above `cancel-started` says what it does; a job the
+# queue never runs takes none), and a gate in
 # .github/scripts/ci_job_reads.py. An output an event must force is written in `changes`' outputs
 # rather than left to its filter, as every output's workflow_dispatch case is, and so is one an
 # event must hold back, as the nine slow suites' pull-request case is (the comment on them
 # below). The ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to that gate,
-# CI_OK_SELECTED_BY to the `if:`s and the report step to every job.
+# CI_OK_SELECTED_BY to the `if:`s, the report step to every job, the re-run term to every job and
+# a follower to every job that needs one.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no job of this workflow saves an Actions cache entry. setup-go caches nothing here
@@ -2445,8 +2450,8 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       # go-envoy, restored only: each lane's run-server.sh builds the Dispatch server, not the
-      # listener and natsd the family's saving jobs build, so it saves none. Without it that build
-      # is a cold `go build` in every lane.
+      # listener and natsd ci-caches.yaml's envoy job builds to fill the family, and no job here
+      # saves it. Without it that build is a cold `go build` in every lane.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -3809,10 +3814,12 @@ jobs:
   #     the condition below ran and succeeded. A force-cancelled run leaves no follower
   #     running at all, so there is no third case to tell apart. It cancels every unfinished
   #     merge-group run built on this group, the nearest descendant first, and then this run.
-  #     That result is the trigger and not the decision: the act then reads the report the job
-  #     uploaded before it ended, so a job whose own work passed and whose report step alone
-  #     failed cancels nothing, and a job that uploaded no report leaves this run alive to post
-  #     the group's ci-ok (.github/actions/merge-group-cancel says what each answer does).
+  #     That result is the trigger and not the decision: the act then reads what that job
+  #     recorded for this run — its own report, and whether its ci-ok went up — so a job whose
+  #     own work passed and whose report step alone failed cancels nothing, and a job that
+  #     uploaded no report, or whose failing ci-ok was never posted, leaves this run alive to
+  #     post the group's verdict (.github/actions/merge-group-cancel says what each answer
+  #     does).
   #
   # Every follower's `if:` opens with `!cancelled()`, and one of them must name a status-check
   # function: a job `if:` that names none is given an implicit `success()`, which at job level
@@ -3842,7 +3849,9 @@ jobs:
   # the queue still holds could take an innocent pull request out of the queue. The run whose job
   # failed does post its own failing ci-ok first, from the merge-group branch of
   # .github/scripts/ci-ok-report.sh, which posts at once instead of waiting for the reports the
-  # follower is about to cancel.
+  # follower is about to cancel — and the follower force-cancels that run only once that post
+  # has gone up, so a verdict GitHub refused leaves the run alive to post it later rather than
+  # the group with no ci-ok at all.
   #
   # Every job of both acts follows the same rules:
   #   * it runs only on `merge_group` and only on attempt 1 (the comment above `changes` says why
@@ -3874,8 +3883,10 @@ jobs:
     permissions:
       actions: write
     steps:
-      # The job reads nothing of the tree but .github/scripts/merge-group-cancels.sh (a follower
-      # also the composite action beside it), so the .github cone is the whole checkout it needs.
+      # The job reads nothing of the tree but .github/scripts/merge-group-cancels.sh and the
+      # ci-ok-conclusion.sh beside it (a follower reads merge-group-cancels.sh,
+      # merge-group-report.sh, gh-read.sh and ci-ok.jq, through the composite action beside
+      # them), so the .github cone is the whole checkout it needs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: .github
@@ -3911,16 +3922,18 @@ jobs:
           # `filter=all`, as in main-bypass-check.yaml's read of the same check run: the
           # default, `latest`, returns one check run per name, and a commit can carry two — a
           # failing ci-ok from the run whose job failed, and a passing one from a later run of
-          # the same group. A head that carries both is no failed group, so a `success` among
-          # them is what this map holds for it and nothing below it is doomed by it.
+          # the same group. Which conclusion a page of them gives this map is
+          # .github/scripts/ci-ok-conclusion.sh's, the file merge-group-cancels.test.sh runs
+          # over pages of its own, so the reading here is the one that test holds: a `success`
+          # among them wins, since a head that carries one is no failed group, and nothing below
+          # it is doomed by it.
           heads=$(jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS")
           readings=$(mktemp)
           trap 'rm -f "$readings"' EXIT
           while read -r sha; do
             [ -n "$sha" ] || continue
-            if conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-              --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
-                    else ([.check_runs[]?] | sort_by(.id) | last | .conclusion // empty) end'); then
+            if page=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100"); then
+              conclusion=$(.github/scripts/ci-ok-conclusion.sh <<<"$page")
               [ -z "$conclusion" ] ||
                 jq -nc --arg sha "$sha" --arg conclusion "$conclusion" '{($sha): $conclusion}' >>"$readings"
             else
@@ -3940,7 +3953,8 @@ jobs:
   # this file's order. Each is the same act on a different job, and each is written in the same
   # text: the job it follows is named in `needs:` and nowhere else, `contains(needs.*.result,
   # …)` reads the result of that one job, and the step hands the action `toJSON(needs)`, from
-  # which it reads the job's id and then the report that job uploaded. The comment above
+  # which it reads the job's id and then, with .github/scripts/merge-group-report.sh, what that
+  # job recorded for this run. The comment above
   # `cancel-started` says what the act is and why, and
   # .github/scripts/merge-group-cancels.sh's header says what that report decides — including
   # what leaving this run alive trades for, which is written there and nowhere else.

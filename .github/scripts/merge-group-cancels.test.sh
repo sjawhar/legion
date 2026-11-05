@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Tests for `merge-group-cancels.sh`: which of ci.yaml's merge-group runs each cancel act must
-# cancel, and whether the asking run must end itself.
+# cancel, and whether the asking run must end itself. The two reads the cancel jobs make before
+# they ask are here too, each the file that workflow runs: `merge-group-report.sh`, the report a
+# follower reads for the job it follows, and `ci-ok-conclusion.sh`, the ci-ok `cancel-started`
+# reads for a head of the chain.
 #
 # merge-group-cancels.sh reads only its environment, so each case hands it the RUNS `gh run list`
 # would give for a queue of its own and the CI_OK map of those groups' heads. The fixtures carry
 # the real shapes: 40-character shas, `gh-readonly-queue/main/pr-<n>-<parent sha>` branches, and
-# gh's RFC3339 times. The script under test is the file CI runs, and every case runs it under
+# gh's RFC3339 times. The scripts under test are the files CI runs, and every case runs one under
 # `timeout`, so a chain walk that looped would fail its case instead of hanging the job.
 #
 # Run from anywhere: .github/scripts/merge-group-cancels.test.sh
@@ -197,9 +200,9 @@ check "the failed act without REPORT fails" "$(is "$status" 1)"
 check "names it" \
   "$(contains "$err" "^::error::the failed act reads the reporting job's own report, so it needs REPORT in its environment\$")"
 run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' passed
-check "a REPORT that is none of the five answers fails" "$(is "$status" 1)"
+check "a REPORT that is none of the six answers fails" "$(is "$status" 1)"
 check "names it" \
-  "$(contains "$err" "^::error::REPORT is the reporting job's own report, one of success, failure, cancelled, absent and unknown, not 'passed'\$")"
+  "$(contains "$err" "^::error::REPORT is the reporting job's own report, one of success, failure, cancelled, unposted, absent and unknown, not 'passed'\$")"
 
 echo "case: the started act cancels nothing when the list does not hold the asking run yet"
 run_cancels started 41999999999 "$head_2734" "$(queue_branch 2734 "$head_2720")" "$stack" '{}'
@@ -273,6 +276,20 @@ run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "
 check "a report of cancelled, which a job its own timeout cut off leaves, ends this run too" \
   "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\ncancel 41860898444')")"
 
+echo "case: a failure whose ci-ok was never posted leaves this run alive"
+# The job's own work failed, and the verdict it should have posted never went up: its report
+# step was refused three times, by the artifact list or by the check-run post. Force-cancelling
+# this run then takes away the one run that can still post this group's ci-ok, and the group
+# sits in the queue until GitHub's 180-minute check timeout. The caller tells that apart from a
+# posted failure by the marker the report step uploads only after its post succeeded
+# (.github/scripts/merge-group-report.sh), and says `unposted` when the failure carries none.
+run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "$stack" '' unposted
+check "it decides" "$(is "$status" 0)"
+check "it cancels the descendants, which are doomed either way" \
+  "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886')")"
+check "and never this run, the only one that can still post this group's ci-ok" \
+  "$(contains "$err" "^the job's own report says its work failed and this group's ci-ok was never posted: run 41860898444 is left running, after the descendants it had to cancel first, so that a job of it can post that verdict\$")"
+
 echo "case: the ci-ok cancel-started reads for a head does not depend on the order of .check_runs"
 # CI_OK is gathered by ci.yaml's `cancel-started` step, one check run read per head, and GitHub
 # documents no order for the check runs of a commit. A head the queue tested can carry more than
@@ -280,15 +297,15 @@ echo "case: the ci-ok cancel-started reads for a head does not depend on the ord
 # conclusion whichever order the page arrives in. A `success` among them wins, as it always has:
 # a head that carries one is no failed group. Otherwise the newest check run of the head decides
 # — the one GitHub and the Legion daemon read, since of two jobs that post, the later check run
-# is the one they show (.github/scripts/ci-ok-report.sh's header says so).
+# is the one they show (.github/scripts/ci-ok-report.sh's header says so). The read is
+# .github/scripts/ci-ok-conclusion.sh, which that step runs and this case runs, so neither is a
+# copy of the other.
 ci_ok_read() { # ci_ok_read <check-runs page>: the conclusion cancel-started's read gives that head
-  local filter
-  filter=$(yq -r '.jobs["cancel-started"].steps[] | select(has("run")) | .run' \
-    "$script_dir/../workflows/ci.yaml" |
-    awk '/--jq .if any\(\.check_runs/ {found = 1} found {print} found && /end.\); then$/ {exit}' |
-    sed "s/^ *--jq '//; s/'); then\$//")
-  jq -r "$filter" <<<"$1"
+  timeout 60 "$script_dir/ci-ok-conclusion.sh" <<<"$1"
 }
+check "cancel-started gathers CI_OK with that file and no read of its own" \
+  "$(is "$(yq -r '.jobs["cancel-started"].steps[] | select(has("run")) | .run' "$script_dir/../workflows/ci.yaml" |
+      grep -c 'conclusion=\$(\.github/scripts/ci-ok-conclusion\.sh <<<"\$page")')" 1)"
 # check_run <id> <conclusion>: one ci-ok check run of that read, an empty conclusion as the null
 # GitHub gives a check run that has not completed.
 check_run() {
@@ -319,5 +336,54 @@ check "and wins at the head of the page too" \
   "$(is "$(ci_ok_read "$(runs_page "$passed_earlier" "$(check_run 20 failure)")")" success)"
 
 check "a head with no ci-ok at all carries none here" "$(is "$(ci_ok_read '{"total_count": 0, "check_runs": []}')" "")"
+
+echo "case: the report a follower reads for the job it follows, out of the run's artifacts"
+# .github/actions/merge-group-cancel reads REPORT with .github/scripts/merge-group-report.sh
+# before it asks for the decision above, out of two artifacts of the run: the job's own report,
+# which says what its work did, and the ci-ok-posted marker beside it, which says that the
+# verdict for this group went up. A failure with no marker is the one the act must not
+# force-cancel this run for, since this run is then the only one that can still post that
+# verdict. The names are ci-ok.jq's reading, the same one ci-ok-report.sh uses.
+mkdir "$work/bin"
+cat > "$work/bin/gh" <<GH
+#!/usr/bin/env bash
+set -euo pipefail
+case "\$*" in
+  *"/actions/runs/77/artifacts?per_page=100"*)
+    if [ -e "$work/list-fails" ]; then echo "HTTP 502" >&2; exit 1; fi
+    cat "$work/artifacts" ;;
+  *) echo "unexpected gh \$*" >&2; exit 2 ;;
+esac
+GH
+chmod +x "$work/bin/gh"
+# read_report <artifact name>...: the word the follower of typecheck reads on attempt 2 of a run
+# whose artifacts are those names.
+read_report() {
+  printf '%s\n' "$@" > "$work/artifacts"
+  PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=77 GH_RETRY_SECONDS=0 \
+    JOB=typecheck RUN_ATTEMPT=2 timeout 60 "$script_dir/merge-group-report.sh" 2>"$work/err"
+}
+check "a failure whose ci-ok never went up is unposted" \
+  "$(is "$(read_report ci-ok-typecheck-2-failure ci-ok-lint-2-success)" unposted)"
+check "and says so, naming the job and the attempt" \
+  "$(contains "$(cat "$work/err")" "^typecheck reported failure for attempt 2, and no ci-ok of this group was posted for it\$")"
+check "the same failure beside its posted marker is a failure" \
+  "$(is "$(read_report ci-ok-typecheck-2-failure ci-ok-posted-typecheck-2)" failure)"
+check "a cancellation beside its posted marker is a cancellation" \
+  "$(is "$(read_report ci-ok-typecheck-2-cancelled ci-ok-posted-typecheck-2)" cancelled)"
+check "a cancellation whose ci-ok never went up is unposted" \
+  "$(is "$(read_report ci-ok-typecheck-2-cancelled)" unposted)"
+check "a job that reported success is success, marker or no marker" \
+  "$(is "$(read_report ci-ok-typecheck-2-success)" success)"
+check "a job that uploaded no report at all is absent, as changes always is" \
+  "$(is "$(read_report ci-ok-lint-2-success ci-ok-posted-lint-2)" absent)"
+check "an earlier attempt's report and marker are not this attempt's" \
+  "$(is "$(read_report ci-ok-typecheck-1-failure ci-ok-posted-typecheck-1)" absent)"
+check "another job's marker does not say this job's verdict went up" \
+  "$(is "$(read_report ci-ok-typecheck-2-failure ci-ok-posted-lint-2)" unposted)"
+touch "$work/list-fails"
+check "a list GitHub refused three times is unknown, which cancels nothing" \
+  "$(is "$(read_report ci-ok-typecheck-2-failure ci-ok-posted-typecheck-2)" unknown)"
+rm -f "$work/list-fails"
 
 summary "the merge-group cancel decision"

@@ -55,23 +55,30 @@
 #                        jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
 #                    done | jq -s 'add // {}'
 #   REPORT       the failed act's whole decision, which the caller reads from this run's
-#                artifacts before it asks: the report the job that fired the follower uploaded
-#                for this run attempt (.github/actions/ci-ok-report uploads it as
-#                `ci-ok-<job>-<run attempt>-<success|failure|cancelled>` before it posts
-#                anything), or `absent` when it uploaded none, or `unknown` when GitHub refused
-#                the list. The started act does not read it and needs none.
+#                artifacts before it asks (.github/scripts/merge-group-report.sh): one of
+#                `success`, `failure`, `cancelled`, `unposted`, `absent` and `unknown`, which
+#                that script's header defines over the two artifacts
+#                .github/actions/ci-ok-report uploads. The started act does not read it and
+#                needs none.
 #
 # ACT=failed — a job of the asking run reported `failure` or `cancelled` to its follower. That
 # result says the job ended badly, not that its own work did: a job whose tests all passed ends
 # `failure` when its ci-ok-report step cannot reach GitHub. REPORT is what tells the two apart,
 # and the act has one answer for each:
 #
-#   * `failure` or `cancelled` — the job's own work failed, so this group cannot merge and
-#     neither can any group built on it. It cancels every run of RUNS that has not completed
-#     and whose chain of parents reaches HEAD_SHA, the nearest descendant first, and then the
-#     asking run itself, whose id is the last `cancel` line: cancelling this run first would
-#     kill the job that has the descendants to cancel. The same report step posted this group's
-#     failing ci-ok before the follower started, so nothing here leaves the group unjudged.
+#   * `failure` or `cancelled` — the job's own work failed and the ci-ok its report step posted
+#     for this group says so, so this group cannot merge and neither can any group built on it.
+#     It cancels every run of RUNS that has not completed and whose chain of parents reaches
+#     HEAD_SHA, the nearest descendant first, and then the asking run itself, whose id is the
+#     last `cancel` line: cancelling this run first would kill the job that has the descendants
+#     to cancel. The caller gives these two words only for a report whose ci-ok went up, so
+#     nothing here leaves the group unjudged.
+#   * `unposted` — the job's own work failed and no ci-ok of this group was posted for it: its
+#     report step was refused three times, by the artifact list or by the check-run post. It
+#     cancels the descendants, which are doomed either way, and never the asking run, which is
+#     the only run that can still post this group's verdict: a later job of it finds that
+#     `failure` among the reports and posts the failing ci-ok. It trades what the `absent` case
+#     below trades, and for the same reason.
 #   * `absent` — the job uploaded no report, so this group carries no ci-ok of its own yet.
 #     `cancel-changes` always meets this: `changes` has no ci-ok-report step, and the jobs that
 #     post for a run whose `changes` did not succeed (lint, typecheck and test, whose `if:`
@@ -186,8 +193,8 @@ if [ "$ACT" = failed ]; then
   [ -n "$report" ] ||
     fail "the failed act reads the reporting job's own report, so it needs REPORT in its environment"
   case $report in
-    success | failure | cancelled | absent | unknown) ;;
-    *) fail "REPORT is the reporting job's own report, one of success, failure, cancelled, absent and unknown, not '$report'" ;;
+    success | failure | cancelled | unposted | absent | unknown) ;;
+    *) fail "REPORT is the reporting job's own report, one of success, failure, cancelled, unposted, absent and unknown, not '$report'" ;;
   esac
 fi
 
@@ -251,6 +258,8 @@ def ts: sub("[.][0-9]+Z$"; "Z") | fromdateiso8601;
            end),
         (if $report == "absent" then
            ["log", "the job uploaded no report, so this group's failing ci-ok is still unposted: run \($run_id) is left running, after the descendants it had to cancel first, so that a job of it can post that ci-ok"]
+         elif $report == "unposted" then
+           ["log", "the job's own report says its work failed and this group's ci-ok was never posted: run \($run_id) is left running, after the descendants it had to cancel first, so that a job of it can post that verdict"]
          else
            ["log", "run \($run_id)'s own remaining jobs are force-cancelled last, after the descendants it had to cancel first"],
            ["out", "cancel \($run_id)"]

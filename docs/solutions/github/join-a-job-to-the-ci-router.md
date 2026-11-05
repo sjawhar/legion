@@ -320,7 +320,7 @@ Two things a group's run alone carries.
 Every job of a re-run attempt skips, so a merge-group run is never re-run: a group is tested once, and the pull request is tested again when it is queued again.
 Each job carries the term that does it, which step 3 above gives.
 And the run of a group that can no longer merge is force-cancelled by jobs of the workflow itself — `cancel-started` and one follower per job `ci-ok` waits for, plus one for `changes` — which run only on `merge_group`, report nothing and are therefore named in `CI_OK_EXEMPT` rather than in `CI_OK_SELECTED_BY`.
-A follower reads the report its job uploaded before it ended, so it acts only when that job's own work failed: a job whose tests passed and whose `ci-ok-report` step alone failed cancels nothing, and a job that uploaded none leaves this run alive to post the group's `ci-ok`.
+A follower reads what its job recorded for the run — the report it uploaded before it ended, and whether its `ci-ok` went up — so it force-cancels the run only when that job's own work failed and the group's failing `ci-ok` is already posted: a job whose tests passed and whose `ci-ok-report` step alone failed cancels nothing, and a job that uploaded no report, or whose verdict GitHub refused, leaves this run alive to post the group's `ci-ok`.
 Step 6 above is the follower a new job takes with it.
 
 ## Drafts run no test job

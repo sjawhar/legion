@@ -7,7 +7,8 @@
 #
 # Every job of ci.yaml but `changes`, and the job of each workflow ci.yaml calls, ends with the
 # step .github/actions/ci-ok-report, which first uploads the job's result as an artifact of the
-# run named ci-ok-<job>-<run attempt>-<success|failure|cancelled>, then runs this script. The
+# run named ci-ok-<job>-<run attempt>-<success|failure|cancelled>, then runs this script, and
+# then uploads ci-ok-posted-<job>-<run attempt> if this script left POSTED_FILE behind. The
 # script lists the run's artifacts and posts ci-ok only when every job that runs has reported:
 # lint, and every job `changes` selected (ci-ok.jq, from CI_OK_SELECTED_BY and
 # CI_OK_PULL_REQUEST_ONLY in ci.yaml's env, the map check-ci-filters.sh holds to the jobs' `if:`s).
@@ -21,11 +22,19 @@
 # off reports — and the follower of a job whose own report says so then force-cancels the rest
 # of that run, so no later report can post at all: the failing ci-ok must be posted by that job
 # itself, before the cancel, or the group gets no ci-ok at all and sits in the queue until
-# GitHub's 180-minute check timeout takes it out. The artifact this step uploads is the very
-# signal the follower reads (.github/actions/merge-group-cancel), so the two never disagree
-# about which job's work failed. `changes` is the one decided case with no force-cancel behind
-# it: it uploads no report, so its follower cancels the groups built on this one and leaves
-# this run alive, and the first of lint, typecheck and test to report posts the verdict below.
+# GitHub's 180-minute check timeout takes it out. That cancel waits for this post. The follower
+# acts on a `failure` or `cancelled` report only when the run carries ci-ok-posted-<job>-<run
+# attempt> beside it, which the step above uploads from the POSTED_FILE this script writes once
+# post-check-run.sh has posted. So a job whose artifact list or whose post GitHub refused three
+# times force-cancels nothing: it posts no verdict, the run is left alive, its other jobs run
+# on, and the last of them to report posts the verdict — a failing one, since that job's
+# `failure` report is in the list it reads (.github/scripts/merge-group-report.sh reads the
+# report and the marker, and .github/scripts/merge-group-cancels.sh's header says what each
+# answer it gives does, and what each trades). The report artifact this step uploads is the very
+# signal the follower reads, so the two never disagree about which job's work failed. `changes`
+# is the other decided case with no force-cancel behind it: it uploads no report, so its
+# follower cancels the groups built on this one and leaves this run alive, and the first of
+# lint, typecheck and test to report posts the verdict below.
 # The `cancelled` half also admits a merge_group run a person or another workflow cancelled
 # gracefully, where this job's own `job.status` is `cancelled` and its `always()` steps still
 # run: that run is over and will post no ci-ok later either, so the failing one posted now takes
@@ -35,10 +44,11 @@
 # unreported job at its live status: a job GitHub shows completed at its conclusion, one still
 # queued or running at that status (`queued`, `in_progress`), one the route does not list at all
 # as `unlisted`. None of those is `success`, so ci-ok.sh's verdict is failure, which is right: a
-# selected job that did not succeed fails ci-ok, and the run is about to be thrown away. A read
+# selected job that did not succeed fails ci-ok, and the group this run tests cannot merge. A read
 # GitHub refuses three times there records those jobs as `unread`, which is no `success`
-# either: the verdict is posted all the same, because nothing of a force-cancelled run reports
-# after it. On a run that is not decided a refused read leaves the jobs unreported and the
+# either: the verdict is posted all the same, because this run's verdict is failing whatever
+# those jobs go on to do, and waiting for a read this job cannot make would leave the group with
+# no ci-ok at all. On a run that is not decided a refused read leaves the jobs unreported and the
 # script waits as usual.
 #
 # The report is uploaded before the list is read, and GitHub serves an artifact once its upload
@@ -58,7 +68,8 @@
 # and otherwise leaves ci-ok unposted by this run, which GitHub's merge box shows as expected and
 # the daemon as missing, never as passed.
 #
-# GH_RETRY_SECONDS is the tests' knob for the retry delay (below).
+# Every read here, and the post, is retried on gh-read.sh's one ladder, whose GH_RETRY_SECONDS is
+# the tests' knob for the delay.
 #
 # The verdict is ci-ok.sh's, over the NEEDS this script builds: `changes`' result and outputs as
 # `toJSON(needs.changes)` gave them to the reporting job, and every job's reported result.
@@ -70,18 +81,25 @@
 #   CHANGES            `toJSON(needs.changes)` of the reporting job.
 #   EVENT              `github.event_name`.
 #   HEAD_SHA           the commit ci-ok is for (post-check-run.sh).
+#   POSTED_FILE        the file this script writes once ci-ok is posted, and leaves absent
+#                      otherwise: the ci-ok-report action uploads it as
+#                      ci-ok-posted-<job>-<run attempt>, the signal this job's merge-group
+#                      follower waits for before it force-cancels the run (above).
 #   GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_SERVER_URL, as Actions sets them.
 #   CI_OK_WORKFLOW     optional: the router's file, .github/workflows/ci.yaml beside this script
 #                      by default (the copy of the commit the run checked out).
 #
-# Run from anywhere: JOB=... CHANGES=... EVENT=... HEAD_SHA=... .github/scripts/ci-ok-report.sh
+# Run from anywhere: JOB=... CHANGES=... EVENT=... HEAD_SHA=... POSTED_FILE=... \
+#   .github/scripts/ci-ok-report.sh
 # Its tests are in ci-ok-report.test.sh, which ci.yaml's test job runs.
 set -euo pipefail
 shopt -s inherit_errexit
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 workflow=${CI_OK_WORKFLOW:-$script_dir/../workflows/ci.yaml}
-for input in GH_TOKEN JOB CHANGES EVENT HEAD_SHA GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_SERVER_URL; do
+# shellcheck source=.github/scripts/gh-read.sh
+source "$script_dir/gh-read.sh"
+for input in GH_TOKEN JOB CHANGES EVENT HEAD_SHA POSTED_FILE GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_SERVER_URL; do
   if [ -z "${!input:-}" ]; then
     echo "::error::ci-ok-report.sh needs $input in its environment"
     exit 1
@@ -99,27 +117,19 @@ if ! jq -e 'type == "object"' <<<"$selected_by" >/dev/null 2>&1 \
   exit 1
 fi
 
-# Every artifact name of the run, one per line; a failed read is retried twice, GH_RETRY_SECONDS
-# (10 by default, as for post-check-run.sh) and then twice as many apart, then fails the step with
-# nothing posted.
-names=
-for attempt in 1 2 3; do
-  if names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-    --jq '.artifacts[].name'); then
-    break
-  fi
-  if [ "$attempt" -eq 3 ]; then
-    echo "::error::GitHub refused the run's artifact list three times, so this job cannot tell whether it is the last"
-    exit 1
-  fi
-  sleep $((attempt * ${GH_RETRY_SECONDS:-10}))
-done
+# Every artifact name of the run, one per line, read on gh-read.sh's ladder; three refusals fail
+# the step with nothing posted.
+if ! names=$(gh_read gh api --paginate \
+  "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+  --jq '.artifacts[].name'); then
+  echo "::error::GitHub refused the run's artifact list three times, so this job cannot tell whether it is the last"
+  exit 1
+fi
 
 read -r -d '' program <<'JQ' || true
 include "ci-ok";
 ($changes.outputs // {}) as $out
-| ($names
-   | map(capture("^ci-ok-(?<job>.+)-(?<attempt>[0-9]+)-(?<status>success|failure|cancelled)$") // empty)
+| (reports($names)
    | group_by(.job)
    | map(max_by(.attempt | tonumber) | {key: .job, value: .status})
    | from_entries) as $reports
@@ -140,29 +150,31 @@ decision=$(jq -n -L "$script_dir" --argjson changes "$CHANGES" --arg event "$EVE
 # list was read) is a failure or a cancellation — the result a job its `timeout-minutes` cut
 # off carries, and one ci.yaml's follower fires on just as it does on a failure. In the two
 # cases where this job's own report decided it, that follower force-cancels the rest of the
-# run, so a job that has not reported never will, and this job posts the verdict now rather
-# than waiting for a report the cancel prevents. In the two `changes` cases it does not:
-# `changes` uploads no report, so its follower cancels the groups built on this one and leaves
-# this run alive — and the verdict is posted now all the same, by the first of lint, typecheck
-# and test to report, rather than by the last of them (merge-group-cancels.sh's header says
-# what that trades). The line below
-# names which of the four it was, so the posted summary says what decided the run.
+# run as soon as this verdict is posted, so a job that has not reported never will, and this
+# job posts the verdict now rather than waiting for a report the cancel prevents. In the two
+# `changes` cases it does not: `changes` uploads no report, so its follower cancels the groups
+# built on this one and leaves this run alive — and the verdict is posted now all the same, by
+# the first of lint, typecheck and test to report, rather than by the last of them
+# (merge-group-cancels.sh's header says what that trades). The two lines below name the job
+# whose result decided the run and which of the four cases it was, so the posted title and
+# summary both say what decided it.
 decided=false
+decided_job=$JOB
 decided_by="the last job of the run to report"
 if [ "$EVENT" = merge_group ]; then
-  reason=$(jq -r --arg job "$JOB" '
+  decision_row=$(jq -r --arg job "$JOB" '
     if .needs[$job].result == "failure" then
-      "whose failure decides this merge-group run before its follower force-cancels the rest"
+      [$job, "whose failure decides this merge-group run before its follower force-cancels the rest, which it does once this verdict is posted"]
     elif .needs[$job].result == "cancelled" then
-      "whose cancellation decides this merge-group run before its follower force-cancels the rest"
+      [$job, "whose cancellation decides this merge-group run before its follower force-cancels the rest, which it does once this verdict is posted"]
     elif .needs.changes.result == "failure" then
-      "reporting after changes failed, which decides this merge-group run: the changes follower cancels the groups built on it and leaves this run to post this verdict"
+      ["changes", "reporting after changes failed, which decides this merge-group run: the changes follower cancels the groups built on it and leaves this run to post this verdict"]
     elif .needs.changes.result == "cancelled" then
-      "reporting after changes was cancelled, which decides this merge-group run: the changes follower cancels the groups built on it and leaves this run to post this verdict"
-    else "" end' <<<"$decision")
-  if [ -n "$reason" ]; then
+      ["changes", "reporting after changes was cancelled, which decides this merge-group run: the changes follower cancels the groups built on it and leaves this run to post this verdict"]
+    else empty end | @tsv' <<<"$decision")
+  if [ -n "$decision_row" ]; then
     decided=true
-    decided_by="$reason"
+    IFS=$'\t' read -r decided_job decided_by <<<"$decision_row"
   fi
 fi
 
@@ -179,27 +191,25 @@ fi
 # it at (`queued`, `in_progress`), and one the route does not list at all at `unlisted`: neither
 # is `success`, so ci-ok.sh fails it.
 #
-# The read is retried twice, on the same ladder as the artifact list above: GH_RETRY_SECONDS
-# (10 by default) and then twice as many apart. Three refusals leave the jobs unreported and the
-# script waits as usual — except on a merge_group run already decided, where waiting posts
-# nothing at all: the follower of this job's own report force-cancels the rest of the run, and a
-# force-cancel leaves every `if: always()` step skipped, so no later job of the run reports and
-# the group carries no ci-ok until that same timeout. There every job still unreported is
-# recorded `unread`, which is not `success`, so ci-ok.sh fails the verdict this job posts now.
-# It cannot be a pass: nothing this job can read shows those jobs succeeded, and the run is
-# being thrown away either way.
+# The read is retried on gh-read.sh's ladder, as the artifact list above is. Three refusals
+# leave the jobs unreported and the script waits as usual — except on a merge_group run already
+# decided, where waiting posts nothing at all: a run this job's own failing report decided is
+# force-cancelled by this job's follower as soon as this verdict goes up, and a force-cancel
+# leaves every `if: always()` step skipped, so no later job of the run reports and the group
+# carries no ci-ok until that same timeout; a run `changes` decided keeps running, and the jobs
+# read as unread here do report, which only posts this same failing verdict again. So there
+# every job still unreported is recorded `unread`, which is not `success`, and ci-ok.sh fails
+# the verdict this job posts now. It cannot be a pass: nothing this job can read shows those
+# jobs succeeded, and the group this run tests cannot merge either way.
 unreported=$(jq '.pending | length' <<<"$decision")
 if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]; }; then
   jobs=
   listed=false
-  for attempt in 1 2 3; do
-    if jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-      --jq '.jobs[] | {name, status, conclusion}'); then
-      listed=true
-      break
-    fi
-    [ "$attempt" -eq 3 ] || sleep $((attempt * ${GH_RETRY_SECONDS:-10}))
-  done
+  if jobs=$(gh_read gh api --paginate \
+    "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+    --jq '.jobs[] | {name, status, conclusion}'); then
+    listed=true
+  fi
   if [ "$listed" = true ]; then
     decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" --argjson decided "$decided" '
       def mine($job): [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))];
@@ -219,7 +229,7 @@ if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]
         | if $result == null then . else (.pending -= [$job]) | (.needs[$job].result = $result) end)' \
       <<<"$decision")
   elif [ "$decided" = true ]; then
-    echo "::warning::GitHub refused this run's job list three times, and this merge-group run is already decided: every job that has not reported is read as unread, because no job of this run reports once its follower force-cancels it"
+    echo "::warning::GitHub refused this run's job list three times, and this merge-group run is already decided: every job that has not reported is read as unread, because this run's verdict is failing whatever those jobs go on to do and a group with no ci-ok at all holds the queue for 180 minutes"
     decision=$(jq 'reduce .pending[] as $job (.;
       (.pending -= [$job]) | (.needs[$job].result = "unread"))' <<<"$decision")
   else
@@ -247,6 +257,12 @@ else
   title=$(grep -m1 '^::error::' <<<"$verdict" | sed 's/^::error:://' | cut -c1-200 || true)
   title=${title:-ci-ok.sh failed}
 fi
+# A decided run's title names the job whose result decided it, which is the one thing a person
+# reading the check beside the merge box needs and the summary below says at length: on such a
+# run most jobs never ran, so the verdict alone reads as if ci-ok judged a whole run.
+if [ "$decided" = true ]; then
+  title=$(cut -c1-200 <<<"$decided_job decided this merge-group run: $title")
+fi
 {
   echo "Decided by $JOB, $decided_by ([run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID))."
   echo
@@ -257,3 +273,8 @@ fi
 CHECK_NAME=ci-ok CONCLUSION=$conclusion TITLE=$title SUMMARY_FILE=$summary \
   DETAILS_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID \
   "$script_dir/post-check-run.sh"
+# The signal this job's merge-group follower waits for, written only here: post-check-run.sh
+# exits non-zero when GitHub refused the post three times, and `set -e` ends this script before
+# this line, so a verdict that never went up leaves no marker and the follower force-cancels
+# nothing (the header above, and .github/scripts/merge-group-report.sh).
+printf '%s\n' "$conclusion" >"$POSTED_FILE"

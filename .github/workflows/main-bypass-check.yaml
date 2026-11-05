@@ -50,8 +50,8 @@ jobs:
     permissions:
       actions: write
     steps:
-      # The job reads nothing of the tree but .github/scripts/main-bypass-check.sh, so the
-      # .github cone is the whole checkout it needs.
+      # The job reads nothing of the tree but .github/scripts/main-bypass-check.sh and the
+      # push-commits.sh beside it, so the .github cone is the whole checkout it needs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: .github
@@ -75,22 +75,11 @@ jobs:
           PUSHED_BEFORE: ${{ github.event.before }}
           PUSHED_AFTER: ${{ github.event.after }}
         run: |
-          # The push payload's `commits` array holds the push's commits, oldest first, each with
-          # its whole message. It is read from the event file, not from an env: of its own:
-          # GitHub documents the array as holding up to 2048 commits (docs.github.com, "Webhook
-          # events and payloads", push), and 2048 whole messages pass the 128 KiB Linux allows
-          # one environment string, which would kill this step at exec before it read anything.
-          # A payload whose `.commits` is not an array is one this step cannot read: the `jq`
-          # below ends the step on it, loudly, rather than handing the decision an empty push
-          # and going green having started nothing, the outcome `shell: bash` above is there to
-          # prevent. GitHub documents `commits` as present on every push, so only a payload
-          # this job was never meant to read reaches that error. An empty array is a shape of
-          # its own and no error: a push that adds no commit, as a force-push to a commit
-          # already on main is, carries nothing for this check to test, and the decision below
-          # says so and starts nothing.
-          COMMITS=$(jq -c 'if (.commits | type) == "array" then [.commits[] | {id, message}]
-                           else error("the push payload has no .commits array: .commits is \(.commits | type)") end' \
-            "$GITHUB_EVENT_PATH")
+          # The push's commits, read from the event file by
+          # .github/scripts/push-commits.sh, whose header says what that read takes and
+          # refuses; main-bypass-check.test.sh runs that same file over the payload shapes, so
+          # the read this job makes is the read that test holds.
+          COMMITS=$(.github/scripts/push-commits.sh)
           payload_commits=$(jq 'length' <<<"$COMMITS")
           # The fallback for a payload GitHub cut: an array of exactly 2048 commits is at that
           # documented cap, so the push may hold more, and the range is read again from the

@@ -165,7 +165,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # The engine (ci_filter_coverage.py), its data (ci_job_reads.py), the rules of ci.yaml that read
-# neither (ci_workflow_rules.py: rules 10, 11 and 13 above) and the path model
+# neither (ci_workflow_rules.py: rules 10, 11, 12 and 13 above) and the path model
 # (workflow_paths.py) sit beside this script in the repository it checks. The engine is imported,
 # not run as a script, so the data's `from ci_filter_coverage import ...` binds the same classes.
 # PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the tree.

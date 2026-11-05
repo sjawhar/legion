@@ -433,8 +433,9 @@ GATES = [
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
                               "ci_job_reads.py or release-bump.sh where a checker reads them)"),
         (".github/workflows/main-bypass-check.yaml",
-         at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:239-246 reads the "
-         "workflow and holds every run: step of it to a shell with pipefail"),
+         at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:239-249 reads the "
+         "workflow and holds every run: step of it to a shell with pipefail, and :323 holds its COMMITS to "
+         "push-commits.sh"),
         (".github/ci-images.yaml", f"{at('test', 'Test the CI image mirror')}: mirror-ci-images.test.sh:322-351 builds "
                                    "its ordering fixture from the repository's own rows"),
         (".github/e2e-scripts.json", f"{at('test', 'Test the e2e proof selector')}: select-e2e-proofs.test.sh runs the "
@@ -841,8 +842,9 @@ GATES = [
         (".github/scripts/check-ci-filters.sh", at("ci-filters", CHECK_STEP)),
         (".github/scripts/ci_filter_coverage.py", "check-ci-filters.sh's engine"),
         (".github/scripts/ci_job_reads.py", "check-ci-filters.sh's data"),
-        (".github/scripts/ci_workflow_rules.py", "check-ci-filters.sh's rules about ci.yaml's conditions and "
-                                                 "ci-caches.yaml, which ci_filter_coverage.main() runs"),
+        (".github/scripts/ci_workflow_rules.py", "check-ci-filters.sh's rules about ci.yaml's conditions, its "
+                                                 "follower cancel jobs and ci-caches.yaml, which "
+                                                 "ci_filter_coverage.main() runs"),
         (".github/scripts/workflow_paths.py", "ci_filter_coverage.py reads filters through it"),
         (GO_TARGETS, "ci_job_reads.py expands the notices and pack runs over it"),
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),

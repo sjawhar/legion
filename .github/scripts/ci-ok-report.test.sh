@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Tests for `ci-ok-report.sh` and the `post-check-run.sh` it posts with: a job posts ci-ok only
 # once lint and every job `changes` selected have reported, a merge-group run whose verdict a
-# failure or a cancellation already decided posts at once instead,
-# a re-run's report replaces the earlier
+# failure or a cancellation already decided posts at once instead and names the job that decided
+# it, a re-run's report replaces the earlier
 # attempt's, the verdict is ci-ok.sh's, an artifact list GitHub refuses posts nothing, and a
 # jobs list it refuses posts the verdict all the same once a merge-group run is decided.
+# POSTED_FILE is here too: the marker a job leaves only once its verdict went up, which the
+# ci-ok-report action uploads and this job's merge-group follower waits for before it
+# force-cancels the run.
 #
 # Each case writes the run's artifact names, which are the jobs' reports, and the `changes` the
 # reporting job saw, and runs the real scripts with a stand-in `gh` first on PATH: it answers the
@@ -35,8 +38,14 @@ case "\$*" in
     if [ ! -e "$work/jobs" ]; then echo "HTTP 502" >&2; exit 1; fi
     cat "$work/jobs" ;;
   *"--method POST repos/o/r/check-runs"*)
+    # post-check-run.sh sends the body as a file, so that a retried post can send it again.
     n=\$(find "$work" -maxdepth 1 -name 'posted.*.json' | wc -l)
-    cat > "$work/posted.\$n.json"
+    body=
+    while [ \$# -gt 0 ]; do
+      case \$1 in --input) body=\$2 ;; esac
+      shift
+    done
+    cp "\$body" "$work/posted.\$n.json"
     if [ -e "$work/post-fails" ]; then echo "HTTP 403" >&2; exit 1; fi
     echo "https://github.com/o/r/runs/\$n" ;;
   *) echo "unexpected gh \$*" >&2; exit 2 ;;
@@ -57,7 +66,7 @@ selects='{"result": "success", "outputs": {"typecheck": "true", "envoy_client": 
 # report <artifact name>...: the run's artifacts, which other jobs' uploads leave beside the reports.
 report() {
   printf '%s\n' pi-envoy-pr "$@" > "$work/artifacts"
-  rm -f "$work"/posted.*.json "$work/list-fails" "$work/post-fails" "$work/jobs"
+  rm -f "$work"/posted.*.json "$work/list-fails" "$work/post-fails" "$work/jobs" "$work/marker"
 }
 
 # jobs <name>=<status>[/<conclusion>]...: the run's jobs as the jobs route lists them, one JSON
@@ -78,13 +87,16 @@ run_report() {
   out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=41 \
     GITHUB_SERVER_URL=https://github.com GH_RETRY_SECONDS=0 JOB=typecheck CHANGES=$1 \
     EVENT=${2:-pull_request} HEAD_SHA=abc123 CI_OK_WORKFLOW=${3:-$work/ci.yaml} \
-    "$script_dir/ci-ok-report.sh" 2>&1)
+    POSTED_FILE=$work/marker "$script_dir/ci-ok-report.sh" 2>&1)
   status=$?
   set -e
 }
 
 posted() { find "$work" -maxdepth 1 -name 'posted.*.json' | wc -l | tr -d ' '; }
 field() { jq -r "$1" "$work/posted.0.json"; }
+# The marker the ci-ok-report action uploads as ci-ok-posted-<job>-<run attempt>, which this
+# job's merge-group follower waits for: its conclusion, or nothing when no verdict went up.
+marker() { cat "$work/marker" 2>/dev/null || true; }
 
 echo "case: a job changes selected has not reported"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success
@@ -110,6 +122,7 @@ check "completed" "$(is "$(field .status)" completed)"
 check "passing" "$(is "$(field .conclusion)" success)"
 check "linking the run" "$(is "$(field .details_url)" https://github.com/o/r/actions/runs/41)"
 check "summarising ci-ok.sh's verdict" "$(contains "$(field .output.summary)" '^envoy-client: skipped (not selected')"
+check "leaves the posted marker its action uploads, holding the conclusion" "$(is "$(marker)" success)"
 
 echo "case: a selected job reported failure"
 report ci-ok-lint-1-success ci-ok-typecheck-1-failure ci-ok-worker-image-1-success
@@ -177,6 +190,10 @@ check "records a queued job at its live status" \
   "$(contains "$(field .output.summary)" '^envoy-client: queued (selected')"
 check "says the failing job decided it" \
   "$(contains "$(field .output.summary)" 'Decided by typecheck, whose failure decides this merge-group run')"
+check "titles it with the job whose result decided the run" \
+  "$(contains "$(field .output.title)" '^typecheck decided this merge-group run: ')"
+check "leaves the posted marker, which lets its follower force-cancel the run" \
+  "$(is "$(marker)" failure)"
 
 echo "case: the same shape on a pull_request run waits"
 report ci-ok-typecheck-1-failure
@@ -227,6 +244,8 @@ check "posts one check run rather than waiting" "$(is "$(posted)" 1)"
 check "failing" "$(is "$(field .conclusion)" failure)"
 check "says the cancelled changes decided it" \
   "$(contains "$(field .output.summary)" 'reporting after changes was cancelled, which decides this merge-group run')"
+check "titles it with changes, the job whose result decided the run" \
+  "$(contains "$(field .output.title)" '^changes decided this merge-group run: ')"
 
 echo "case: GitHub refuses the artifact list"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success
@@ -235,6 +254,7 @@ run_report "$selects"
 check "fails the step" "$(is "$status" 1)"
 check "posts nothing" "$(is "$(posted)" 0)"
 check "says why" "$(contains "$out" "GitHub refused the run's artifact list three times")"
+check "leaves no posted marker, so a follower of this job force-cancels nothing" "$(is "$(marker)" "")"
 
 echo "case: GitHub refuses the post"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success
@@ -243,6 +263,8 @@ run_report "$selects"
 check "fails the step" "$(is "$status" 1)"
 check "tried three times" "$(is "$(posted)" 3)"
 check "says so" "$(contains "$out" 'GitHub refused the ci-ok check run on abc123 three times')"
+check "leaves no posted marker either: no verdict went up, and the run must stay alive to post one" \
+  "$(is "$(marker)" "")"
 
 echo "case: CHANGES is not toJSON(needs.changes)"
 report ci-ok-lint-1-success
