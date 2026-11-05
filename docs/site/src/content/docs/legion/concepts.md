@@ -62,9 +62,11 @@ reaches it through Dispatch. The daemon wakes it when something needs a judgment
 
 The daemon also wakes it when an admission slot frees and on a timer, every
 `controller_wake_interval_seconds` (an hour by default), and on its first turn of each UTC day the
-controller posts a report on what Legion finished, closed and is running. A free slot is never a
-reason for the controller to take an issue: it takes only what a person hands over and the clear
-defects Legion's agents report.
+controller posts a report on what Legion finished, closed and is running. That same timer runs the
+daemon's status repair, which puts back the Dispatch status of any issue Legion works whose status
+is not the status of the phase it stands in, so a longer interval slows that repair as well. A free
+slot is never a reason for the controller to take an issue: it takes only what a person hands over
+and the clear defects Legion's agents report.
 
 No Legion agent files an issue for a problem it finds outside its own issue. A defect with a clear
 fix in code the agent's own tree touches or depends on is fixed in that tree's pull request, while

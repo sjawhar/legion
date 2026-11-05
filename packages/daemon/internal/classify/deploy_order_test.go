@@ -41,7 +41,7 @@ var releaseBeforeDigests = map[string]string{
 // The release before this one judged these histories, every arrival naming its before but no
 // sender, to these digests (made as releaseBeforeDigests were, at #2436's e5c72dfb3, design (c′)
 // with the record keeping one push of each two heads as the release before did), and they were
-// re-made from this tree when contract 49 removed two keys from the judgement, as above.
+// re-made from this tree when contract 50 removed two keys from the judgement, as above.
 var beforeAloneDigests = map[string]string{
 	"run-1":          "b35092795466e37b4edaff40662752cb14963207422aa524793cf94d994683f5",
 	"run-7":          "5be0c529f78c85369357c222dd2955a50e7db121620e463951b1ec560ac14435",

@@ -59,7 +59,7 @@ worker image from the daemon's commit.
 ## Daemon contract
 
 The plugin speaks to the Legion daemon (`packages/daemon`) through the daemon client
-(`@legion/pi-shared/daemon-client`), which reads every response through the strict schemas of
+(`@legion/pi-shared/daemon-client`), which reads every response through the schemas of
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/claim-session.ts`) or, for the controller, the controller session
 (`src/controller-session.ts`). `package.json` declares the contract it was built against as
@@ -90,12 +90,17 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 49's turn-outcome report
+number is the one `DaemonAPIVersion` declares, last bumped by contract 50's turn-outcome report
 (this plugin's `agent_end` hook posts `POST /legion/v1/claims/turn-outcome` for every settled turn
 of a session holding a claim: the class the provider ended it with — `clean`, `refused` for a
 content filter, `provider-error` for any other failure — a refusal's own category, and the
 sequence the plugin counts itself within the launch generation; `src/turn-outcome.ts`), after
-contract 46's update round (the
+contract 49's memory group (each issue of `GET /legion/v1/state` carries its tree's `memoryGroup`,
+`memoryDrawMode` and `memoryDrawnAt`, which a strict reader before 49 refuses, and a caller from a
+pod below 49 is served the state without them), after contract 48's idle release (the plugin
+reports each session's activity on `POST /legion/v1/claims/activity`, and the `legion` tool's
+`read_release_records` op posts `POST /legion/v1/claims/release-records`), after contract 46's
+update round (the
 `legion` tool's `ready_for_update` op, which posts `POST /legion/v1/claims/ready-for-update` with
 the round its update task named and the head of `legion/<issue>@origin`, and the `updateRound` and
 `updateHead` fields every claim view gains), after contract 45's handoff records

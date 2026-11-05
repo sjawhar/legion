@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-  The plugin declares daemon API contract 49, which removed fix-attempt counting: a daemon's state
+  The plugin declares daemon API contract 50, which removed fix-attempt counting: a daemon's state
   no longer carries `max_fix_attempts` in its settings or `fixAttempts` on a pull request, and a
-  red CI verdict sends the work back to the implementer every time it stands. A plugin before 49
+  red CI verdict sends the work back to the implementer every time it stands. A plugin before 50
   and this daemon refuse each other at the boot gate and at `legion probe-image`.
