@@ -42,8 +42,8 @@ on:
   pull_request:
     types: [labeled]
   schedule:
-    # Nightly, at an hour no other workflow of this repository starts on (changelog-fold runs at
-    # 06:17 UTC, claude-envoy-rebuild at 05:23).
+    # Nightly, at an hour no other workflow of this repository starts on (claude-envoy-rebuild
+    # runs at 05:23 UTC).
     - cron: "41 4 * * *"
 
 # The jobs clone, download pinned tools and modules, and upload an artifact of the run's own.

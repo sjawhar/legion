@@ -591,9 +591,6 @@ jobs:
               - '.github/actions/install-uv/**'
               - '.github/actions/install-changie/**'
               - '.github/actions/pull-test-images/**'
-              # changelog-fold.test.sh copies pi-legion's changie config and changelog (its line 53).
-              - 'packages/pi-legion/.changie.yaml'
-              - 'packages/pi-legion/CHANGELOG.md'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-site.yaml holds those steps, and
             # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
@@ -1769,13 +1766,12 @@ jobs:
         run: bun test tests/build-inputs.test.ts
         working-directory: packages/claude-envoy
 
-      - name: Test release scripts
-        run: .github/scripts/release-push.test.sh
-
+      # release-push.test.sh renders its fold-notes cases with the real changie; where changie is
+      # absent, as on a developer's machine, those cases print a SKIP line and count nothing.
       - uses: ./.github/actions/install-changie
 
-      - name: Test the changelog fold with changie
-        run: .github/scripts/changelog-fold.test.sh
+      - name: Test release scripts
+        run: .github/scripts/release-push.test.sh
 
       - name: Test the release version bump
         run: .github/scripts/release-bump.test.sh

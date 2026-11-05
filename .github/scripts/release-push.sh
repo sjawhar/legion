@@ -7,10 +7,9 @@
 # dependencies' code and holds no credential, and a publish job, which holds
 # the credentials and runs no dependency code (the rebuild workflow's push job
 # is one). `version`, `check-built`, `extract-built`, `no-credential` and
-# `fold-notes` are the build job's; `tag`, `release`, `restart`, `push-tag`,
-# `push-fold` and `push-built` the publish job's; `tagged`, `handed` and
-# `fold-plan` serve both. changelog-fold.yaml splits each fold of the
-# packages' changelog fragments the same way.
+# `fold-notes` are the build job's; `release`, `restart`, `push-tag` and
+# `push-built` the publish job's; `tag`, `tagged`, `handed` and `fold-plan`
+# serve both.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -63,7 +62,10 @@
 #            nothing (`push-tag` pushes) and commits nothing. Nothing of a
 #            release is committed: the tags record every version, so no file
 #            of this checkout is written and a package's committed manifest
-#            keeps whatever version was last written to it. <version> is the
+#            keeps whatever version was last written to it. A release's build
+#            job runs it too, before `fold-notes`: there the tag is local, no
+#            step of that job pushes it, and it is what labels this release's
+#            fragments in the plan fold-notes renders. <version> is the
 #            release's version, X.Y.Z, and $GITHUB_SHA must be 40 lower-case
 #            hex; either one refused is an ::error:: and exit 1. The tags are
 #            fetched first, so a tag pushed since the checkout is seen. A tag
@@ -97,7 +99,7 @@
 #            no credential. The key and GitHub's host keys, pinned below, go
 #            into a directory of its own that only the runner's user can read,
 #            removed when the script exits, pushed or not (deploy_key_env,
-#            which push-fold and push-built share). ssh reads no config file,
+#            which push-built shares). ssh reads no config file,
 #            offers only that key, never prompts, and refuses any host key but
 #            the pinned ones; GitHub publishes them at `gh api meta --jq
 #            .ssh_keys`, which release-push.test.sh compares with these when
@@ -191,7 +193,7 @@
 #            private-name check over the bundle already). When main had moved,
 #            a ::notice titled "Landing on claude-plugin" names the base, the
 #            tip and the commit, which changes only the two directories. The
-#            commit lands by land_on_branch (below, under push-fold) on the
+#            commit lands by land_on_branch (below) on the
 #            branch, over whatever it held.
 #
 #            A build of the base made on a newer tip leaves the branch's build
@@ -219,6 +221,29 @@
 #            starts the one fresh run itself, and push-built starts no second
 #            one, whether or not an input changed. There is no retry loop: the
 #            fresh run is the retry.
+#
+#            land_on_branch <onto-sha> <workflow-file>, which push-built ends
+#            with, lands HEAD on $plugin_branch and never rebases, so
+#            push-built exits 0 whenever land_on_branch returns (unless the
+#            fresh run it then starts for a changed build input fails). It
+#            refuses a HEAD that is not exactly one commit whose one parent is
+#            <onto-sha>, which refuses any <onto-sha> but that parent's full
+#            sha (push-built has refused a base that is not 40 lower-case hex
+#            already), then fetches main again with the deploy key
+#            (deploy_key_env, as push-tag does): HEAD was made on main's tip,
+#            whichever branch it goes to, so main's tip is what decides. When
+#            main's tip is <onto-sha> it force-updates the branch to HEAD. The
+#            force is needed because the branch's tip is the previous
+#            rebuild's commit and never an ancestor of this one, so no push of
+#            it is a fast-forward. When main's tip is another commit, before
+#            the push or after a rejected push, it pushes nothing: it starts a
+#            fresh run of <workflow-file> on main (`gh workflow run`, with
+#            $GH_TOKEN), which builds main's tip, and a ::notice names both
+#            commits. In both cases it returns 0, and leaves which it did in
+#            $landed (pushed or restarted), so push-built starts no second run
+#            after land_on_branch started one. A failed fetch, a push rejected
+#            while main's tip is still <onto-sha>, or a failed `gh workflow
+#            run` is an ::error:: and exit 1.
 # handed:    check what a build job handed a publish job before the publish job
 #            acts on it, and print the release tag, <tag-prefix><version>. The
 #            version is the build job's output, so it must be X.Y.Z, each field
@@ -239,33 +264,36 @@
 #            ran in the job could have planted a `git` for this very step, so
 #            the build/publish split is the boundary and this only catches a
 #            credential wired into a build job by mistake.
-# fold-plan: print which changelog fragments a fold of main writes into which
-#            CHANGELOG.md, one tab-separated line per fragment:
+# fold-plan: print which release each changelog fragment of the <spec>s
+#            belongs to, one tab-separated line per fragment:
 #            <package-dir>, <label>, <date> (YYYY-MM-DD, UTC), <path>, sorted by
 #            package in the order of the specs, then by label as versions
-#            (`sort -V`), then by path; nothing printed means nothing to fold.
+#            (`sort -V`), then by path; nothing printed means no fragment of
+#            the specs is in a release yet. fold-notes renders the groups of
+#            this plan, and docs/site/generators/legion-changelogs.ts repeats
+#            the label rule below to render the same entries as pages.
 #            Each <spec> is <package-dir>[=<tag-prefix>], and the package must
 #            hold a CHANGELOG.md at HEAD. The fragments are the entries directly
 #            in <package-dir>/.changes/unreleased/ that HEAD holds (git's tree,
 #            never the working tree). Each must be a regular file (mode 100644
 #            or 100755) whose name ends in .yaml: any other entry there, such as
-#            a subdirectory, a symlink, a submodule or a .yml file, would never
-#            be folded, so fold-plan fails with one ::error:: that names every
-#            such entry of every spec, sorted, and tells the author to move or
-#            rename a fragment in one commit with `git mv`, and prints no plan.
+#            a subdirectory, a symlink, a submodule or a .yml file, is in no
+#            plan and is rendered nowhere, so fold-plan fails with one
+#            ::error:: that names every such entry of every spec, sorted, and
+#            tells the author to move or rename a fragment in one commit with
+#            `git mv`, and prints no plan.
 #            A file under the .changes/ of a package no <spec> names is not
-#            refused: the fold runs on main, where a refusal would stop the
-#            fold of every package. One ::warning:: on stderr names every such
-#            path HEAD's tree holds, sorted, and the specs it was given, and
-#            says the fold does not fold them; the plan is printed and the
-#            command exits 0 all the same. The warning says to remove the
-#            file, or to give its package a .changie.yaml and a CHANGELOG.md
-#            and add it to .github/changelog-packages. fold-orphans below is
-#            that check made strict, and ci.yaml's lint job runs it on every
-#            pull request, so such a file is caught before it reaches main;
-#            fold-notes and push-fold make neither check, since
-#            changelog-fold.yaml's build job runs fold-plan first and its
-#            publish job needs that job.
+#            refused: a refusal would leave the specs' own fragments unplanned
+#            with it. One ::warning:: on stderr names every such path HEAD's
+#            tree holds, sorted, and the specs it was given; the plan is
+#            printed and the command exits 0 all the same. The warning says to
+#            remove the file, or to give its package a .changie.yaml and a
+#            CHANGELOG.md and add it to .github/changelog-packages.
+#            fold-orphans below is that check made strict, and ci.yaml's lint
+#            job runs it on every pull request, so such a file is caught
+#            before it reaches main; fold-notes makes neither check, since it
+#            renders one release's group of the plan of that release's own
+#            package.
 #            With a tag prefix (a package with releases of its own), a
 #            fragment's label is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag
 #            that contains the commit which first added the entry, following
@@ -275,18 +303,15 @@
 #            deletes a file and adds one git pairs with it as a rename, as
 #            `git mv` does, renames the entry; a fragment deleted in one commit
 #            and added again in another is a new entry, and a copy is never
-#            followed. A fragment no such tag contains waits for a later run,
-#            unprinted.
+#            followed. A fragment no such tag contains is in no release yet,
+#            and is unprinted until one ships it.
 #            The date is the tag's commit's committer date. Without a prefix (a
 #            package with no release of its own), every fragment is folded under
 #            main@<HEAD's first 12 hex digits>, dated by HEAD's committer date.
 #            A fragment's path is one file to git, never a pattern: a name
 #            holding a glob character gets the commit that added that file. It
 #            reads only git, so it computes the same plan from the same
-#            checkout and tags. The build job and the publish job check out the
-#            same commit, but each fetches every tag, so a release tag pushed
-#            between the jobs can give the publish job's plan a version group
-#            the build job's lacks (push-fold defers it).
+#            checkout and tags.
 # fold-orphans: fail when HEAD's tree holds a file under the .changes/ of a
 #            package no <spec> names, the strict form of the warning fold-plan
 #            gives: one ::error:: naming every such path, sorted, the specs it
@@ -297,102 +322,34 @@
 #            alone - no history, no tag, no working tree, no CHANGELOG.md - so
 #            a shallow checkout without the tags is enough for it. ci.yaml's
 #            lint job runs it over .github/changelog-packages on every pull
-#            request, inside a required check: a fragment of a package the
-#            fold does not fold is refused there, while the fold on main only
-#            warns about it and folds the rest. Each <spec> is
+#            request, inside a required check: a fragment of a package no
+#            release and no documentation page renders is refused there, while
+#            fold-plan only warns about it. Each <spec> is
 #            <package-dir>[=<tag-prefix>], as fold-plan's is, and only the
 #            <package-dir> counts; no spec at all, or one of another shape, is
 #            refused as fold-plan refuses it.
-# fold-notes: the build job's half of a fold: render the plan's fragments with
-#            changie, which is dependency code, into <notes-dir>, which must be
-#            absent or empty and is created. Each (package, label) of the plan
-#            gets a directory of its own holding a copy of the package's
-#            .changie.yaml and only that group's fragments as HEAD holds them,
-#            where `changie batch 0.0.0` renders them, and the rendered notes
-#            become <notes-dir>/<package basename>_<label>.md. An empty plan
-#            writes nothing. A fragment changie refuses fails the command with
-#            an ::error:: naming the package, the label, each fragment changie
-#            refuses on its own and changie's output.
-# push-fold: the publish job's half: write the build job's notes into the
-#            CHANGELOG.md files and land the result on main, with git and gh
-#            and the base text tools only (coreutils, find, awk, sed and grep).
-#            HEAD must be <base-sha>, the commit the build job built, with a
-#            clean working tree and index; $DEPLOY_KEY and $GITHUB_REPOSITORY
-#            must be set before anything is written. The plan is computed again
-#            from git, never taken from the build job; an empty one prints
-#            "Nothing to fold" and exits 0. A group labelled X.Y.Z whose notes
-#            file does not exist at all is deferred:
-#            its release tag was pushed after the build job computed its plan,
-#            so the build rendered no notes for it. Its fragments stay on main,
-#            a ::notice titled "Fold deferred" names its package and label, and
-#            a later run folds it (the release's own completion starts one, and
-#            the daily run is the backstop); the other groups fold as below.
-#            When every group is deferred, it says so, pushes nothing, starts
-#            no run and exits 0. A main@ group is never deferred: its label
-#            depends only on HEAD, which is the base the build job planned
-#            from, so its notes are missing only when the build is faulty, and
-#            that is a refusal. <notes-dir> must hold exactly the files
-#            <package basename>_<label>.md of the groups not deferred, by
-#            `handed`'s rule (regular files, nothing else at any depth; a
-#            version group's notes path that exists as anything but a regular
-#            file is refused, not deferred), so the build job chooses the
-#            notes' bytes but not which packages and labels they go to. Each
-#            must hold something besides blank lines, no NUL byte and no line
-#            starting "## " (the heading is push-fold's to write), and no
-#            package's CHANGELOG.md may already hold the heading
-#            "## [<label>]" of its group. Every refusal is an ::error:: naming
-#            the file, package or label, before anything is written. Each group
-#            then becomes a block, applied in ascending label order:
-#            "## [<label>] - <date>", a blank line, the notes with leading and
-#            trailing blank lines trimmed, a blank line. A version's block goes
-#            above the first "## " line that is not the release heading
-#            "## [X.Y.Z]" of a higher version, so the newest release is on top
-#            and an older one goes below a newer one present; a main@ block
-#            goes above the first "## " line; with no such line the block is
-#            appended after a blank line. Every existing line is kept, byte for
-#            byte and in order. The fragments of the groups folded are removed,
-#            and the one commit, by github-actions[bot] as `tag`'s are, has the
-#            fixed subject "chore: fold changelog fragments [skip ci]" and no
-#            body: "[skip ci]" starts no workflow run from it, and
-#            release-bump.sh reads commit subjects and bodies, where a fixed
-#            chore subject bumps no release. The commit lands by land_on_branch
-#            (below) on main, which never rebases: a fold is of main's tip, so
-#            when main moved since the build, a new run folds the new tip,
-#            fragments and all, and is the retry.
-#
-#            push-fold and push-built each end with land_on_branch <onto-sha>
-#            <branch> <workflow-file>, so each exits 0 whenever land_on_branch
-#            returns (push-built unless the fresh run it then starts for a
-#            changed build input fails). push-fold passes its base, the commit
-#            its build job built, and main as the branch; push-built passes
-#            main's tip as its own fetch saw it, which is the base when main
-#            has not moved, and claude-plugin as the branch. land_on_branch
-#            never rebases. It refuses a HEAD that is not exactly one commit
-#            whose one parent is <onto-sha>, which refuses any <onto-sha> but
-#            that parent's full sha (each caller has refused a base that is not
-#            40 lower-case hex already), then fetches main again with the
-#            deploy key (deploy_key_env, as push-tag does): HEAD was made on
-#            main's tip, whichever branch it goes to, so main's tip is what
-#            decides. When main's tip is <onto-sha> it force-updates <branch>
-#            to HEAD. The force is for push-built's branch, whose tip is the
-#            previous rebuild's commit and never an ancestor of this one, so no
-#            push of it is a fast-forward; on main the push is a fast-forward
-#            anyway, HEAD's one parent being main's tip. When main's tip is
-#            another commit, before the push or after a rejected push, it
-#            pushes nothing: it starts a fresh run of <workflow-file> on main
-#            (`gh workflow run`, with $GH_TOKEN), which builds main's tip, and
-#            a ::notice names both commits. In both cases it returns 0, and
-#            leaves which it did in $landed (pushed or restarted), so
-#            push-built starts no second run after land_on_branch started one.
-#            A failed fetch, a push rejected while main's tip is still
-#            <onto-sha>, or a failed `gh workflow run` is an ::error:: and exit
-#            1.
+# fold-notes: render changelog entries with changie, which is dependency code,
+#            into <notes-dir>, which must be absent or empty and is created.
+#            Each (package, label) of fold-plan's plan gets a directory of its
+#            own holding a copy of the package's .changie.yaml and only that
+#            group's fragments as HEAD holds them, where `changie batch 0.0.0`
+#            renders them, and the rendered notes become
+#            <notes-dir>/<package basename>_<label>.md. --label <label> narrows
+#            the plan to the groups labelled <label> before anything is
+#            rendered: a release's build job renders the entries of its own
+#            release, and every fragment a release ever shipped stays under
+#            .changes/unreleased/, so rendering the whole plan would run one
+#            changie per release ever made. A plan left with no group writes
+#            nothing and exits 0, as an empty plan does. A fragment changie
+#            refuses fails the command with an ::error:: naming the package,
+#            the label, each fragment changie refuses on its own and changie's
+#            output.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <version> <tag> | release-push.sh tagged <tag-prefix> | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes [--label <label>] <notes-dir> <spec>... | release-push.sh no-credential}
 
-# The identity of the commits this script makes, push-fold's fold and
-# push-built's rebuild: GitHub Actions' own bot.
+# The identity of the commit this script makes, push-built's rebuild: GitHub
+# Actions' own bot.
 bot_name='github-actions[bot]'
 bot_email='41898282+github-actions[bot]@users.noreply.github.com'
 
@@ -788,7 +745,7 @@ first_added() {
   printf '%s\n' "$commit"
 }
 
-# A package spec, which fold-plan, fold-orphans, fold-notes and push-fold all
+# A package spec, which fold-plan, fold-orphans and fold-notes all
 # take: <package-dir>[=<tag-prefix>]. The package dir goes into paths and
 # pathspecs, the prefix into a tag pattern, and the dir's basename names the
 # notes file of each group. package_dir_re keeps the dir free of pathspec magic
@@ -901,8 +858,8 @@ unlisted_message() {
   printf '%s at HEAD: each is under the .changes/ of a package the fold was not given, here %s, and the fold folds the fragments of the packages it is given alone, so the fold does not fold it and it stays on main unfolded; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
 
-# group_column <dir> <label> <column>: the plan's <column> (3 the date, 4 the
-# path) on each line of that group.
+# group_column <dir> <label> <column>: the plan's <column> (4 the path) on each
+# line of that group.
 group_column() {
   awk -F '\t' -v dir="$1" -v label="$2" -v column="$3" '$1 == dir && $2 == label { print $column }' <<<"$plan"
 }
@@ -933,56 +890,15 @@ render_notes() {
   return "$status"
 }
 
-# has_heading <changelog> <label>: true when a line of <changelog> starts with
-# "## [<label>]".
-has_heading() {
-  awk -v heading="## [$2]" 'index($0, heading) == 1 { found = 1 } END { exit !found }' "$1"
-}
-
-# insert_block <changelog> <label> <date> <notes>: write the block of <label>
-# into <changelog> where the header's push-fold paragraph places it, keeping
-# every existing line as it is.
-insert_block() {
-  local changelog=$1 label=$2 date=$3 notes_file=$4 at='' number line version heading_re='^## \[([^]]+)\]'
-  while IFS=: read -r number line; do
-    if [[ $label != main@* && $line =~ $heading_re ]]; then
-      version=${BASH_REMATCH[1]}
-      if is_plain_version "$version" && version_gt "$version" "$label"; then
-        continue
-      fi
-    fi
-    at=$number
-    break
-  done < <(grep -n '^## ' "$changelog")
-  {
-    if [ -n "$at" ]; then
-      head -n "$((at - 1))" "$changelog"
-    elif [ -s "$changelog" ]; then
-      cat "$changelog"
-      # A last line without its newline gets one before the blank line.
-      [ -z "$(tail -c 1 "$changelog")" ] || echo
-      echo
-    fi
-    printf '## [%s] - %s\n\n' "$label" "$date"
-    awk 'NF { if (!first) first = NR; last = NR } { line[NR] = $0 } END { for (i = first; i <= last; i++) print line[i] }' "$notes_file"
-    echo
-    if [ -n "$at" ]; then tail -n "+$at" "$changelog"; fi
-  } > "$changelog.fold"
-  # Written over the file, not moved onto it, so the file keeps its mode.
-  cat "$changelog.fold" > "$changelog"
-  rm "$changelog.fold"
-}
-
-# land_on_branch <onto-sha> <branch> <workflow-file>: land HEAD, exactly one
-# commit whose one parent is <onto-sha>, on <branch> with the deploy key when
+# land_on_branch <onto-sha> <workflow-file>: land HEAD, exactly one commit
+# whose one parent is <onto-sha>, on $plugin_branch with the deploy key when
 # main's tip is still <onto-sha>, and otherwise push nothing and start a fresh
 # run of <workflow-file> on main (the header's land_on_branch paragraph, under
-# push-fold). push-fold ends with it on main itself and push-built on
-# $plugin_branch. Never rebases. Returns 0 when it pushed or started a run,
-# leaving which in $landed (pushed or restarted); every other outcome is an
-# ::error:: and exit 1.
+# push-built, which ends with it). Never rebases. Returns 0 when it pushed or
+# started a run, leaving which in $landed (pushed or restarted); every other
+# outcome is an ::error:: and exit 1.
 land_on_branch() {
-  local onto=$1 branch=$2 workflow=$3 shas head parents tip why
+  local onto=$1 workflow=$2 shas head parents tip why
   landed=''
   # HEAD's sha, then its parents, space-separated: exactly one, onto.
   shas=$(git rev-list --parents -n 1 HEAD) || fail_error "reading HEAD failed"
@@ -990,26 +906,24 @@ land_on_branch() {
   parents=${shas#"$head"}
   parents=${parents# }
   if [ "$parents" != "$onto" ]; then
-    fail_error "HEAD $head has the parents '$parents', not exactly the one parent $onto; only one commit made on $onto lands on $branch"
+    fail_error "HEAD $head has the parents '$parents', not exactly the one parent $onto; only one commit made on $onto lands on $plugin_branch"
   fi
   deploy_key_env
-  # main, whatever <branch> is: HEAD was made on main's tip, so main's tip is
+  # main, not $plugin_branch: HEAD was made on main's tip, so main's tip is
   # what decides whether this commit is still the one to push.
   git fetch "$remote" main || fail_error "fetching main failed"
   tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
   if [ "$tip" = "$onto" ]; then
     # Forced, because the plugin branch's tip is the previous build's commit and
-    # never an ancestor of this one, so no push of it is a fast-forward. On main
-    # the push is a fast-forward all the same, HEAD's one parent being main's
-    # tip, so forcing changes nothing there.
-    if git push --force "$remote" "HEAD:refs/heads/$branch"; then
+    # never an ancestor of this one, so no push of it is a fast-forward.
+    if git push --force "$remote" "HEAD:refs/heads/$plugin_branch"; then
       landed=pushed
       return 0
     fi
-    git fetch "$remote" main || fail_error "the push to $branch was rejected, and fetching main again failed"
+    git fetch "$remote" main || fail_error "the push to $plugin_branch was rejected, and fetching main again failed"
     tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
     if [ "$tip" = "$onto" ]; then
-      fail_error "the push of $head to $branch was rejected while main's tip is still $onto, the commit $head was made on, so no newer commit beat it; the push itself failed"
+      fail_error "the push of $head to $plugin_branch was rejected while main's tip is still $onto, the commit $head was made on, so no newer commit beat it; the push itself failed"
     fi
   fi
   # main moved past onto: what HEAD holds was made on an older main, so a fresh
@@ -1350,7 +1264,7 @@ case "$command" in
     # land_on_branch fetches main again and pushes only when main's tip is still
     # the tip the commit was made on; when main moved again since the fetch
     # above, it starts the one fresh run itself.
-    land_on_branch "$tip" "$plugin_branch" "$workflow"
+    land_on_branch "$tip" "$workflow"
     if [ "$landed" = pushed ] && [ -n "$inputs_why" ]; then
       why="the build already landed on $plugin_branch as $commit, but $inputs_why, so the plugin branch's build is one run behind its inputs"
       fresh_run "$workflow" "$why" "A fresh run started" "the build landed on $plugin_branch as $commit, but $inputs_why, so"
@@ -1386,18 +1300,39 @@ case "$command" in
     [ ${#unlisted[@]} -eq 0 ] || fail_error "$(unlisted_message "$@")"
     ;;
   fold-notes)
-    [ $# -ge 3 ] || fail_error "usage: release-push.sh fold-notes <notes-dir> <spec>..."
-    notes_dir=${2%/}
-    shift 2
+    shift
+    usage='usage: release-push.sh fold-notes [--label <label>] <notes-dir> <spec>...'
+    only_label=''
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --label)
+          [ $# -ge 2 ] || fail_error "--label needs a label; $usage"
+          only_label=$2
+          shift 2
+          ;;
+        --) shift; break ;;
+        -*) fail_error "unknown option $(quote_all "$1"); $usage" ;;
+        *) break ;;
+      esac
+    done
+    [ $# -ge 2 ] || fail_error "$usage"
+    notes_dir=${1%/}
+    shift
     if [ -e "$notes_dir" ] || [ -L "$notes_dir" ]; then
       if [ ! -d "$notes_dir" ] || [ -L "$notes_dir" ] || [ -n "$(ls -A "$notes_dir")" ]; then
         fail_error "$(quote_all "$notes_dir") exists and is not an empty directory; the notes go into a directory of their own"
       fi
     fi
     fold_plan "$@"
+    # --label before anything is rendered: one release renders its own group,
+    # and the plan holds a group for every release the fragments have ever
+    # shipped in.
+    if [ -n "$only_label" ]; then
+      set_plan "$(printf '%s' "$plan" | awk -F '\t' -v label="$only_label" '$2 == label')"
+    fi
     mkdir -p "$notes_dir"
     if [ -z "$plan" ]; then
-      echo "Nothing to fold"
+      echo "Nothing to render"
       exit 0
     fi
     while IFS=$'\t' read -r dir label; do
@@ -1419,76 +1354,6 @@ case "$command" in
       fi
       echo "Wrote $notes_file from ${#fragments[@]} fragments"
     done <<<"$groups"
-    ;;
-  push-fold)
-    [ $# -ge 4 ] || fail_error "usage: release-push.sh push-fold <base-sha> <notes-dir> <spec>..."
-    base=$2 notes_dir=${3%/}
-    shift 3
-    is_commit_sha "$base" || fail_error "the base $(quote_all "$base") is not a commit's 40 lower-case hex digits"
-    head=$(git rev-parse HEAD)
-    [ "$head" = "$base" ] || fail_error "HEAD is $head, not the base $base the build job built"
-    [ -z "$(git status --porcelain --untracked-files=no)" ] || fail_error "the working tree or the index differs from HEAD; the fold is written onto a clean checkout of the base"
-    for var in DEPLOY_KEY GITHUB_REPOSITORY; do
-      [ -n "${!var:-}" ] || fail_error "$var is unset or empty, and landing the fold on main needs it; nothing was written"
-    done
-    fold_plan "$@"
-    if [ -z "$plan" ]; then
-      echo "Nothing to fold"
-      exit 0
-    fi
-    # A version group whose notes file does not exist at all is deferred (the
-    # header's push-fold paragraph). The deferred groups are named here, before
-    # the hand-over check, so that check expects the notes of every other group:
-    # a version group's notes that exist but are not a regular file, and every
-    # main@ group's notes, stay its to refuse.
-    names=() deferred=''
-    while IFS=$'\t' read -r dir label; do
-      name=$(notes_name "$dir" "$label")
-      if [[ $label != main@* ]] && [ ! -e "$notes_dir/$name" ] && [ ! -L "$notes_dir/$name" ]; then
-        deferred+="$dir"$'\t'"$label"$'\n'
-      else
-        names+=("$name")
-      fi
-    done <<<"$groups"
-    check_hand_over "$notes_dir" "the fold's plan names no notes for" "${names[@]}"
-    if [ -n "$deferred" ]; then
-      while IFS=$'\t' read -r dir label; do
-        echo "::notice title=Fold deferred::$dir $label is not folded in this run and its fragments stay on main: the build rendered no notes for it, so its release tag is newer than the build; a later run folds it (the release's own completion starts one, and the daily run is the backstop)" >&2
-      done < <(printf '%s' "$deferred")
-      set_plan "$(printf '%s' "$plan" | awk -F '\t' 'NR == FNR { deferred[$1 FS $2]; next } !(($1 FS $2) in deferred)' <(printf '%s' "$deferred") -)"
-      if [ -z "$plan" ]; then
-        echo "Nothing to fold in this run: every group of the plan is deferred to a later run"
-        exit 0
-      fi
-    fi
-    while IFS=$'\t' read -r dir label; do
-      notes_file="$notes_dir/$(notes_name "$dir" "$label")"
-      shown=$(quote_all "$notes_file")
-      [ "$({ tr -dc '\000' | wc -c; } < "$notes_file")" = 0 ] || fail_error "$shown, the notes of $dir for $label, holds a NUL byte"
-      LC_ALL=C grep -q '[^[:space:]]' "$notes_file" || fail_error "$shown, the notes of $dir for $label, holds nothing but blank lines"
-      if LC_ALL=C grep -q '^## ' "$notes_file"; then
-        fail_error "$shown, the notes of $dir for $label, holds a line starting '## '; the heading is push-fold's to write"
-      fi
-      if has_heading "$dir/CHANGELOG.md" "$label"; then
-        fail_error "$dir/CHANGELOG.md already holds the heading ## [$label]"
-      fi
-    done <<<"$groups"
-    while IFS=$'\t' read -r dir label; do
-      date=$(group_column "$dir" "$label" 3 | sed -n 1p)
-      insert_block "$dir/CHANGELOG.md" "$label" "$date" "$notes_dir/$(notes_name "$dir" "$label")"
-    done <<<"$groups"
-    mapfile -t fragments < <(printf '%s' "$plan" | cut -f4)
-    mapfile -t changelogs < <(printf '%s\n' "$groups" | cut -f1 | uniq | sed 's|$|/CHANGELOG.md|')
-    git --literal-pathspecs rm -q -- "${fragments[@]}"
-    git --literal-pathspecs add -- "${changelogs[@]}"
-    # The identity through the environment, which outranks any configuration
-    # and any identity the job's environment already sets.
-    GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
-      git -c commit.gpgsign=false commit -q --no-verify -m "chore: fold changelog fragments [skip ci]"
-    echo "Folded ${#fragments[@]} fragments into ${changelogs[*]}"
-    # The fold is of main's tip and lands on main itself, the branch argument
-    # the plugin branch takes in push-built.
-    land_on_branch "$base" main changelog-fold.yaml
     ;;
   no-credential)
     status=0

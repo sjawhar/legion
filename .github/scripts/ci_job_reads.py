@@ -451,8 +451,6 @@ GATES = [
         (".github/actions/install-uv/**", at("test", "./.github/actions/install-uv")),
         (f"{DAEMON}/docker/worker.Dockerfile", ".github/actions/install-uv/action.yml:16-17 ARG UV_VERSION/UV_SHA256"),
         (".github/actions/install-changie/**", at("test", "./.github/actions/install-changie")),
-        ("packages/pi-legion/.changie.yaml", ".github/scripts/changelog-fold.test.sh:56 copies it"),
-        ("packages/pi-legion/CHANGELOG.md", ".github/scripts/changelog-fold.test.sh:56 copies it"),
         (".github/actions/pull-test-images/**", at("test", "Pull the NATS test container images")),
         (f"{DAEMON}/internal/testnats/nats.go", f"{at('test', 'Pull the NATS test container images')} const Image"),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('test', 'Pull the NATS test container images')} const HubImage"),

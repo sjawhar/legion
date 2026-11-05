@@ -56,11 +56,11 @@ on:
 # scope beyond docker's package push, and each ends in a tripwire (`release-push.sh
 # no-credential`) that fails when a credential is reachable from it anyway. attest and
 # release_publish hold the credentials and run no dependency code: attest runs one pinned action;
-# release_publish only release-push.sh, git, gh, jq, sha256sum, `docker buildx imagetools` and the
-# pinned actions below. Neither restores a cache (`cache-mode: none`), and the deploy key is in the
-# env of the one step that pushes the tag. image_index is neither: it holds docker's package push
-# alone and runs no dependency code, only `docker buildx imagetools` over the digests the docker
-# legs hand over.
+# release_publish only release-push.sh, git, gh, jq, awk, sha256sum, `docker buildx imagetools`
+# and the pinned actions below. Neither restores a cache (`cache-mode: none`), and the deploy key
+# is in the env of the one step that pushes the tag. image_index is neither: it holds docker's
+# package push alone and runs no dependency code, only `docker buildx imagetools` over the digests
+# the docker legs hand over.
 permissions: {}
 
 env:
@@ -459,6 +459,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version.outputs.skip }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -474,6 +475,47 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
           .github/scripts/release-push.sh version legion-envoy-v $LEGION_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
+      # The release tag, made in this checkout and nowhere else in this job: nothing here pushes
+      # it (release_publish's "Tag release" does, and this checkout is discarded), and it is what
+      # labels this release's changelog fragments for the step below, which gives each fragment
+      # the lowest legion-envoy-v tag that contains the commit which added it.
+      - name: Tag this release in this checkout
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: .github/scripts/release-push.sh tag "$VERSION" "$TAG"
+      - uses: ./.github/actions/install-changie
+        if: steps.version.outputs.skip != 'true'
+      # This release's own changelog entries, which release_publish writes into the GitHub
+      # release's body. A fragment stays under packages/envoy/.changes/unreleased/ after the
+      # release that ships it, so the plan holds one group per release of this package and --label
+      # keeps it to this release's own. A release no fragment belongs to renders nothing, and
+      # `notes` says which of the two it was, since release_publish cannot look into the artifact
+      # before it downloads it.
+      - name: Render this release's changelog entries
+        id: notes
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          .github/scripts/release-push.sh fold-notes --label "$VERSION" \
+            "$RUNNER_TEMP/release-notes" packages/envoy=legion-envoy-v
+          if [ -f "$RUNNER_TEMP/release-notes/envoy_$VERSION.md" ]; then
+            echo "notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notes=false" >> "$GITHUB_OUTPUT"
+          fi
+      # The entries, exactly as rendered, for release_publish; a release with none uploads
+      # nothing. The name must not start with `legion-envoy-`, as the image digests' must not
+      # (image_index above): release_publish downloads `pattern: legion-envoy-*` into the
+      # release's assets, and release-push.sh handed refuses anything there but the archives.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.version.outputs.skip != 'true'
+        with:
+          name: envoy-release-notes
+          path: ${{ runner.temp }}/release-notes
+          if-no-files-found: ignore
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
@@ -550,7 +592,7 @@ jobs:
   # writes SHA256SUMS, tags the commit, attests the host binaries and creates the GitHub release.
   # When another run took the version first, it publishes nothing and sees to it that a run
   # releases this commit ("Confirm the version").
-  # It runs no Go, no bun and no built binary, only release-push.sh, git, gh, jq, sha256sum,
+  # It runs no Go, no bun and no built binary, only release-push.sh, git, gh, jq, awk, sha256sum,
   # `docker buildx imagetools` and the pinned actions below, so the scopes and the deploy key it
   # holds never meet the code the build jobs run.
   release_publish:
@@ -870,6 +912,7 @@ jobs:
         with:
           subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create or update GitHub release
+        id: release
         if: steps.confirm.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -885,3 +928,42 @@ jobs:
           .github/scripts/release-push.sh release --upload-to-published \
             --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
             "$TAG" "$TAG" "${assets[@]}"
+      # The entries release_build rendered from this release's fragments, under the runner's
+      # temporary directory, outside the checkout.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: notes
+        if: steps.release.outcome == 'success' && needs.release_build.outputs.notes == 'true'
+        with:
+          name: envoy-release-notes
+          path: ${{ runner.temp }}/release-notes
+      # The entries go under one "## Changelog" heading in the release's body, below the fixed
+      # sentence above. A re-run renders the same entries again, so an existing section of that
+      # heading is replaced rather than added to: the read-replace-write release.yaml's "Name the
+      # worker image on the legion release" step makes, over this heading. gh, awk and the shell
+      # alone, as everything this job runs.
+      - name: Write the changelog into the release body
+        if: steps.notes.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.assets.outputs.tag }}
+          VERSION: ${{ needs.release_build.outputs.version }}
+        run: |
+          entries="$RUNNER_TEMP/release-notes/envoy_$VERSION.md"
+          test -s "$entries"
+          body="$RUNNER_TEMP/release-body.md"
+          new="$RUNNER_TEMP/release-new-body.md"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$body"
+          # The section runs to the next heading of level 1 or 2.
+          rest=$(awk '/^## Changelog[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' "$body")
+          if [ -n "$rest" ]; then
+            printf '%s\n\n' "$rest" > "$new"
+          else
+            : > "$new"
+          fi
+          { echo "## Changelog"; echo; cat "$entries"; } >> "$new"
+          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
+          if [ "$(<"$body")" = "$(<"$new")" ]; then
+            echo "Release $TAG already holds this release's entries"
+            exit 0
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$new"

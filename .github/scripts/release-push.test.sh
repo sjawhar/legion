@@ -23,7 +23,7 @@
 # `release-push.sh handed`, which checks the version and the files a build job
 # hands a publish job and prints the release tag; for `release-push.sh
 # no-credential`, the build job's tripwire; and for `release-push.sh
-# fold-plan`, `fold-orphans` and `push-fold`, the changelog fold.
+# fold-plan`, `fold-orphans` and `fold-notes`, the changelog fragments.
 #
 # The `tagged`, `version` and `tag` cases each build a bare origin holding one
 # seed commit (packages/pkg at 1.0.0, a bun.lock whose workspace entries hold
@@ -100,14 +100,13 @@
 # archives a release ships, change one thing as a compromised build job could,
 # and run `handed` on it. The `no-credential`
 # cases run it under `env -i` with a throwaway HOME, plant one credential at a
-# time, and check it is named but never shown. The `fold-plan` and `push-fold`
+# time, and check it is named but never shown. The `fold-plan` and `fold-notes`
 # cases build one repository with released and unreleased packages, fragments
 # added before, between and after hand-made release tags of both shapes (one
 # on a child of the built commit, one on the built commit itself, and a name
-# off <prefix>X.Y.Z), committed near midnight
-# in zones other than UTC; push-fold runs on a copy of it per case, with notes
-# the test writes (no changie), against a bare origin through the deploy key
-# and the URL rewrite push-tag uses, and a stub `gh` that logs each call.
+# off <prefix>X.Y.Z), committed near midnight in zones other than UTC; the
+# `fold-notes` cases render that repository's fragments with the real changie,
+# and print a SKIP line where changie is not on PATH.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in ci.yaml's test job.
@@ -118,8 +117,8 @@ set -euo pipefail
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # Nor may the Oh My Pi session it runs in, if any: CI runs it in no session,
 # and a session's tools act on the variables that name one (a commit made with
-# OMP_SESSION_ID set can carry a session trailer, which push-fold's check of the
-# commit's exact message would read as part of the message).
+# OMP_SESSION_ID set can carry a session trailer, which push-built's check of
+# the commit's exact subject would read as part of the message).
 unset OMP_SESSION_ID PI_SESSION_FILE
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -2033,7 +2032,7 @@ check "an unreadable git configuration: exits 1, naming git config's exit code" 
   "$(is "$rc|$(contains "$out" '^::error::git config --get-regexp exited 128, so the git configuration could not be read$')" '1|true')"
 
 echo
-echo "Case: fold-plan labels each fragment with the release that first shipped it, and push-fold lands the fold"
+echo "Case: fold-plan labels each fragment with the release that first shipped it"
 # The template: clone a, detached at the base (the fold's checkout), and a bare origin whose main
 # is the base. packages/rel is released under rel-v; packages/side and packages/plain have no
 # release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md and no
@@ -2089,6 +2088,26 @@ printf '%s\n' "$plain_log" > "$ft/a/packages/plain/CHANGELOG.md"
 printf '# Changelog\n' > "$ft/a/packages/empty/CHANGELOG.md"
 printf '{"name": "rel", "version": "1.5.0"}\n' > "$ft/a/packages/rel/package.json"
 printf 'no changelog\n' > "$ft/a/packages/nolog/README.md"
+# One changie configuration per package that holds fragments, which fold-notes renders them with.
+# No custom field, since the fragments below are written by hand with a kind and a body alone.
+for package in rel side plain empty; do
+  cat > "$ft/a/packages/$package/.changie.yaml" <<'CHANGIE'
+changesDir: .changes
+unreleasedDir: unreleased
+changelogPath: CHANGELOG.md
+versionExt: md
+versionFormat: ''
+kindFormat: '### {{.Kind}}'
+changeFormat: '- {{.Body}}'
+newlines:
+  beforeKind: 1
+  afterKind: 1
+kinds:
+  - label: Added
+  - label: Changed
+  - label: Fixed
+CHANGIE
+done
 commit_at 2026-02-01T12:00:00+00:00 "chore: seed"
 fragment rel INFRA-1-first Added "the first entry"
 fragment rel INFRA-1-another Added "another entry"
@@ -2227,11 +2246,12 @@ check "fold-plan: a fragment of a package no spec names is one ::warning::, not 
   "$(is "$rc|$out|$(grep -c "^::warning::release-push\.sh fold-plan: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")|$(grep -c '^::error::' <<<"$err")" "0|$envoy_plan|1|0")"
 check "fold-plan: that warning names the specs it was given and says what to do about the file" \
   "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
-# changelog-fold.yaml's build job runs fold-plan over .github/changelog-packages on main and fails
-# its step when fold-plan exits non-zero, so a refusal there folds no package at all. An orphan fragment
-# that reaches main must not stop the fold of the packages the fold is given: the plan still lists
-# packages/envoy's fragment, and the orphan is named on stderr for someone to remove.
-check "fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given" \
+# A release's build job runs fold-plan through fold-notes over its own package, and ci.yaml's
+# lint job runs fold-orphans over .github/changelog-packages on every pull request. An orphan
+# fragment that reaches main all the same must not stop the plan of the packages a command is
+# given: the plan still lists packages/envoy's fragment, and the orphan is named on stderr for
+# someone to remove.
+check "fold-plan: an orphan fragment on main does not stop the plan of the packages it is given" \
   "$(is "$rc|$out|$(contains "$err" "packages/daemon/$u/pr-1-daemon\.yaml")" "0|$envoy_plan|true")"
 # orphans_run <spec>...: runs fold-orphans in that repository; leaves rc, out and err.
 orphans_run() {
@@ -2336,280 +2356,42 @@ check "fold-plan: a fragment renamed with git mv gets the release of the commit 
   "$(is "$rc|$out" "0|packages/ren	1.0.0	2026-06-01	packages/ren/$u/sjawhar-fix.yaml
 packages/ren	1.1.0	2026-06-03	packages/ren/$u/INFRA-8-later.yaml")"
 
-# The stub gh, first on PATH in a directory of its own. It logs each call to $GH_TEST_DIR/calls as
-# one line, each argument in brackets; `gh workflow run` fails when $GH_TEST_FAIL is set, and any
-# other call fails as unexpected.
-mkdir -p "$work/fold-bin"
-cat > "$work/fold-bin/gh" <<'GH'
-#!/usr/bin/env bash
-{ printf '[%s]' "$@"; printf '\n'; } >> "$GH_TEST_DIR/calls"
-[ "$1 $2" = "workflow run" ] || { echo "unexpected gh call: $*" >&2; exit 3; }
-[ -z "$GH_TEST_FAIL" ] || { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
-GH
-chmod +x "$work/fold-bin/gh"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-# fold_case <name>: a copy of the template at $work/<name> ($fc), with the notes of the plan of
-# fold_specs in $fc/notes, as a build job hands them (blank lines around them are trimmed).
-fold_case() {
-  fc="$work/$1"
-  fold_base=$base fold_tip=$base
-  cp -a "$ft" "$fc"
-  mkdir "$fc/notes"
-  printf '\n\n### Added\n\n- the first entry\n- another entry\n\n\n' > "$fc/notes/rel_1.9.0.md"
-  printf '### Fixed\n\n- the second entry\n  continued\n' > "$fc/notes/rel_1.10.0.md"
-  printf '### Changed\n\n- side entries\n' > "$fc/notes/side_$main_label.md"
-  printf '### Added\n\n- a plain entry\n' > "$fc/notes/plain_$main_label.md"
-}
-# push_fold [VAR=value...]: runs `release-push.sh push-fold $fold_base $fc/notes <fold_specs>` in
-# the case's clone with the deploy key, a fresh TMPDIR, the GitHub URL rewritten to the case's
-# origin and the stub gh; leaves rc, out (combined), calls (the stub's log) and left (what TMPDIR
-# holds afterwards).
-push_fold() {
-  rm -rf "$fc/tmp" && mkdir "$fc/tmp"
-  : > "$fc/calls"
-  set +e
-  out=$(cd "$fc/a" && env TMPDIR="$fc/tmp" GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" \
-    GH_TEST_DIR="$fc" GH_TEST_FAIL='' PATH="$work/fold-bin:$PATH" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$fc/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$@" "$release_push" push-fold "$fold_base" "$fc/notes" "${fold_specs[@]}" 2>&1)
-  rc=$?
-  set -e
-  calls=$(<"$fc/calls")
-  left=$(find "$fc/tmp" -mindepth 1 | wc -l)
-}
-# untouched [<status>]: true when the case's clone is still at its checkout ($fold_tip) with the
-# working-tree status <status> (none by default), origin's main is still there and gh was not
-# called.
-untouched() {
-  [ "$(git -C "$fc/a" rev-parse HEAD)" = "$fold_tip" ] &&
-    [ "$(git -C "$fc/a" status --porcelain --untracked-files=no)" = "${1:-}" ] &&
-    [ "$(git -C "$fc/origin.git" rev-parse main)" = "$fold_tip" ] && [ -z "$calls" ] && echo true || echo false
-}
-# kept <old> <new>: true when every line of <old> is in <new>, in order (a diff deletes none).
-kept() { is "$(contains "$(diff <(printf '%s\n' "$1") <(printf '%s\n' "$2") || true)" '^<')" false; }
+# fold-notes renders the plan's groups with the real changie, which the release build jobs install
+# with .github/actions/install-changie. Without changie on PATH these cases are skipped, not
+# counted.
+echo
+echo "Case: fold-notes renders the plan's groups, and --label renders one release's own"
+if command -v changie >/dev/null; then
+  # notes_run <dir> [option]...: runs fold-notes over the template's three packages that hold
+  # fragments, writing into $work/<dir>; leaves rc, out, err and listed (the files written, in C
+  # order, space-separated).
+  notes_run() {
+    local out_dir="$work/$1"
+    shift
+    set +e
+    out=$(cd "$ft/a" && "$release_push" fold-notes "$@" "$out_dir" \
+      packages/rel=rel-v packages/side packages/plain 2>"$work/fold-notes.err")
+    rc=$?
+    set -e
+    err=$(<"$work/fold-notes.err")
+    listed=$(ls -A "$out_dir" | LC_ALL=C sort | tr '\n' ' ')
+    listed=${listed% }
+  }
+  notes_run notes-label --label 1.9.0
+  check "fold-notes --label: writes the notes of that label's group alone" \
+    "$(is "$rc|$err|$listed" "0||rel_1.9.0.md")"
+  rel_notes=$(<"$work/notes-label/rel_1.9.0.md")
+  check "fold-notes --label: those notes hold that release's entries under their kind, and no other release's" \
+    "$(is "$(contains "$rel_notes" '^### Added$')|$(contains "$rel_notes" '^- the first entry$')|$(contains "$rel_notes" '^- another entry$')|$(contains "$rel_notes" 'the second entry')" "true|true|true|false")"
+  notes_run notes-no-group --label 9.9.9
+  check "fold-notes --label: a label no group has writes nothing and exits 0" \
+    "$(is "$rc|$listed|$(contains "$out" '^Nothing to render$')" "0||true")"
+  notes_run notes-every-group
+  check "fold-notes: without the option, every group of the plan is rendered" \
+    "$(is "$rc|$listed" "0|plain_$main_label.md rel_1.10.0.md rel_1.9.0.md side_$main_label.md")"
+else
+  echo "  SKIP: the fold-notes cases (changie is not on PATH)"
+fi
 
-fold_case fold-accepted
-push_fold
-check "push-fold: exits 0, leaving nothing in TMPDIR" "$(is "$rc|$left" "0|0")"
-check "push-fold: says what it folded, and gives no notice" \
-  "$(is "$(contains "$out" '^Folded 6 fragments into packages/rel/CHANGELOG.md packages/side/CHANGELOG.md packages/plain/CHANGELOG.md$')|$(contains "$out" '::notice')" "true|false")"
-check "push-fold: calls no gh" "$(is "$calls" "")"
-o="$fc/origin.git"
-check "push-fold: origin's main is one commit over the base" \
-  "$(is "$(git -C "$o" rev-list --count "$base..main")|$(git -C "$o" log -1 --format=%P main)" "1|$base")"
-check "push-fold: the commit's message is the fixed subject alone" \
-  "$(is "$(git -C "$o" cat-file commit main | sed '1,/^$/d' | od -c)" "$(printf 'chore: fold changelog fragments [skip ci]\n' | od -c)")"
-check "push-fold: the commit's author and committer are github-actions[bot]" \
-  "$(is "$(git -C "$o" log -1 --format='%an <%ae>|%cn <%ce>' main)" \
-    "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>|github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>")"
-check "push-fold: the planned fragments are gone, the changelogs changed, and nothing else" \
-  "$(is "$(git -C "$o" diff --name-status "$base" main)" "D	packages/plain/$u/INFRA-3-plain.yaml
-M	packages/plain/CHANGELOG.md
-D	packages/rel/$u/INFRA-1-another.yaml
-D	packages/rel/$u/INFRA-1-first.yaml
-D	packages/rel/$u/INFRA-2-second.yaml
-M	packages/rel/CHANGELOG.md
-D	packages/side/$u/INFRA-1-side.yaml
-D	packages/side/$u/INFRA-3-side.yaml
-M	packages/side/CHANGELOG.md")"
-new_rel=$(git -C "$o" show main:packages/rel/CHANGELOG.md)
-check "push-fold: every old line of a changelog stays, in order" "$(kept "$rel_log" "$new_rel")"
-check "push-fold: both versions go below the higher one present, newest first, above [Unreleased]" \
-  "$(is "$new_rel" '# Changelog
-
-## [2.0.0] - 2026-01-01
-
-### Added
-
-- a release on top
-
-## [1.10.0] - 2026-03-04
-
-### Fixed
-
-- the second entry
-  continued
-
-## [1.9.0] - 2026-03-02
-
-### Added
-
-- the first entry
-- another entry
-
-## [Unreleased]
-
-### Added
-
-- an old unreleased entry
-
-## [1.5.0]
-
-### Fixed
-
-- an old fix')"
-check "push-fold: a main@ block goes above the first ## line" \
-  "$(is "$(git -C "$o" show main:packages/side/CHANGELOG.md)" "# Changelog
-
-## [$main_label] - 2026-04-11
-
-### Changed
-
-- side entries
-
-$(tail -n +3 <<<"$side_log")")"
-check "push-fold: a changelog without a ## line gets the block appended after a blank line" \
-  "$(is "$(git -C "$o" show main:packages/plain/CHANGELOG.md)" "$plain_log
-
-## [$main_label] - 2026-04-11
-
-### Added
-
-- a plain entry")"
-check "push-fold: the empty package's changelog and the unreleased entry stay" \
-  "$(git -C "$o" cat-file -e "main:packages/rel/$u/INFRA-3-third.yaml" && git -C "$o" diff --quiet "$base" main -- packages/empty && echo true || echo false)"
-
-fold_case fold-empty
-fold_specs=(packages/empty)
-push_fold
-check "push-fold, empty plan: exits 0, saying nothing to fold" "$(is "$rc|$(contains "$out" '^Nothing to fold$')" "0|true")"
-check "push-fold, empty plan: nothing written, origin untouched, gh not called" "$(is "$(untouched)" "true")"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-
-fold_case fold-moved
-moved=$(git -C "$fc/a" commit-tree -p "$base" -m "fix: landed meanwhile" "$base^{tree}")
-git -C "$fc/a" push -q "$fc/origin.git" "$moved:refs/heads/main"
-push_fold
-check "push-fold, main moved: exits 0" "$(is "$rc" 0)"
-check "push-fold, main moved: origin's main is left where it moved" "$(is "$(git -C "$fc/origin.git" rev-parse main)" "$moved")"
-check "push-fold, main moved: starts a run of changelog-fold.yaml on main" \
-  "$(is "$calls" "$(argv workflow run changelog-fold.yaml --repo example/repo --ref main)")"
-check "push-fold, main moved: the notice names both commits" \
-  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main moved from $base, the commit [0-9a-f]* was made on, to $moved, so ")"
-fold_case fold-moved-gh
-moved=$(git -C "$fc/a" commit-tree -p "$base" -m "fix: landed meanwhile" "$base^{tree}")
-git -C "$fc/a" push -q "$fc/origin.git" "$moved:refs/heads/main"
-push_fold GH_TEST_FAIL=1
-check "push-fold, main moved, gh fails: exits 1 with an ::error::" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push.sh push-fold: main moved .* starting a fresh run of changelog-fold.yaml on main failed')" "1|true")"
-
-fold_case fold-rejected
-printf '#!/usr/bin/env bash\necho "rejected by the test"\nexit 1\n' > "$fc/origin.git/hooks/pre-receive"
-chmod +x "$fc/origin.git/hooks/pre-receive"
-push_fold
-check "push-fold, push rejected while main stays: exits 1 with an ::error::" \
-  "$(is "$rc|$(contains "$out" "^::error::release-push.sh push-fold: the push of [0-9a-f]* to main was rejected while main's tip is still $base")" "1|true")"
-check "push-fold, push rejected while main stays: origin untouched, gh not called" \
-  "$(is "$(git -C "$fc/origin.git" rev-parse main)|$calls" "$base|")"
-
-# fold_refused <description> <regex> [<status>]: the checks every refusal shares: exit 1, an
-# ::error:: matching <regex>, and nothing written or pushed.
-fold_refused() {
-  check "push-fold refuses $1: exits 1 with an ::error::" \
-    "$(is "$rc|$(contains "$out" "^::error::release-push.sh push-fold: $2")" "1|true")"
-  check "push-fold refuses $1: nothing written, origin untouched" "$(untouched "${3:-}")"
-}
-fold_case fold-not-base
-fold_base=$c2
-push_fold
-fold_refused "a HEAD that is not the base" "HEAD is $base, not the base $c2"
-fold_case fold-dirty
-printf 'dirt\n' >> "$fc/a/packages/rel/package.json"
-push_fold
-fold_refused "a dirty tree" "the working tree or the index differs from HEAD" " M packages/rel/package.json"
-fold_case fold-missing
-rm "$fc/notes/side_$main_label.md"
-push_fold
-fold_refused "a notes file missing" ".*notes lacks side_main@${base:0:12}\.md"
-fold_case fold-extra
-printf '### Added\n\n- smuggled\n' > "$fc/notes/rel_2.1.0.md"
-push_fold
-fold_refused "an extra notes file" ".*notes holds what the fold.s plan names no notes for: rel_2\.1\.0\.md"
-fold_case fold-empty-notes
-printf '\n  \n\n' > "$fc/notes/rel_1.10.0.md"
-push_fold
-fold_refused "an empty notes file" ".*rel_1\.10\.0\.md, the notes of packages/rel for 1\.10\.0, holds nothing but blank lines"
-fold_case fold-nul
-printf '### Added\n\n- a\000b\n' > "$fc/notes/rel_1.9.0.md"
-push_fold
-fold_refused "a notes file holding a NUL byte" ".*rel_1\.9\.0\.md, the notes of packages/rel for 1\.9\.0, holds a NUL byte"
-fold_case fold-heading
-printf '\n## [9.9.9] - forged\n' >> "$fc/notes/plain_$main_label.md"
-push_fold
-fold_refused "a notes file holding a ## line" ".*plain_main@${base:0:12}\.md, the notes of packages/plain for $main_label, holds a line starting '## '"
-fold_case fold-symlink
-rm "$fc/notes/rel_1.9.0.md" && ln -s /etc/hostname "$fc/notes/rel_1.9.0.md"
-push_fold
-fold_refused "a notes file that is a symlink" "rel_1\.9\.0\.md in .* is not a regular file"
-fold_case fold-present
-# A changelog on main that already holds the 1.9.0 heading: the base is that commit.
-git -C "$fc/a" checkout -q --detach "$base"
-printf '\n## [1.9.0] - 2026-03-02\n' >> "$fc/a/packages/rel/CHANGELOG.md"
-git -C "$fc/a" commit -q -am "docs: a 1.9.0 heading by hand"
-fold_base=$(git -C "$fc/a" rev-parse HEAD) fold_tip=$(git -C "$fc/a" rev-parse HEAD)
-git -C "$fc/a" push -q "$fc/origin.git" HEAD:refs/heads/main
-fold_specs=(packages/rel=rel-v)
-rm "$fc/notes/side_$main_label.md" "$fc/notes/plain_$main_label.md"
-push_fold
-fold_refused "a label whose heading is already there" "packages/rel/CHANGELOG.md already holds the heading ## \[1\.9\.0\]"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-fold_case fold-no-key
-push_fold DEPLOY_KEY=
-fold_refused "a missing DEPLOY_KEY" "DEPLOY_KEY is unset or empty"
-check "push-fold refuses a missing DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
-
-# A release tag pushed between the two jobs: the build planned and rendered without it, and the
-# publish job's checkout fetches every tag again, so its plan holds a group the notes lack. A
-# release workflow running beside the fold does this (the listener pushes its tag in its publish
-# job). The fold of that run must not fail the run, and must not delete a fragment it holds no
-# notes for.
-fold_case fold-tag-between-jobs
-git -C "$fc/a" tag rel-v1.11.0 "$base"
-push_fold
-third_kept=$(git -C "$fc/origin.git" cat-file -e "main:packages/rel/$u/INFRA-3-third.yaml" 2>/dev/null && echo true || echo false)
-check "push-fold, a release tag pushed between the jobs: exits 0 and keeps the fragment the notes do not hold" \
-  "$(is "$rc|$third_kept" "0|true")"
-
-# The same run folds every group the notes hold, as a run without the new tag does (fold-accepted
-# above), and names the group it defers.
-o="$fc/origin.git"
-accepted="$work/fold-accepted/origin.git"
-check "push-fold, a release tag pushed between the jobs: origin's main is one commit over the base" \
-  "$(is "$(git -C "$o" rev-list --count "$base..main")|$(git -C "$o" log -1 --format=%P main)" "1|$base")"
-check "push-fold, a release tag pushed between the jobs: the groups the notes hold land, their fragments gone and nothing else changed" \
-  "$(is "$(git -C "$o" diff --name-status "$base" main)" "$(git -C "$accepted" diff --name-status "$base" main)")"
-check "push-fold, a release tag pushed between the jobs: their blocks are in the changelogs, and the deferred version's is not" \
-  "$(is "$(git -C "$o" show main:packages/rel/CHANGELOG.md)|$(git -C "$o" show main:packages/side/CHANGELOG.md)|$(git -C "$o" show main:packages/plain/CHANGELOG.md)" \
-    "$(git -C "$accepted" show main:packages/rel/CHANGELOG.md)|$(git -C "$accepted" show main:packages/side/CHANGELOG.md)|$(git -C "$accepted" show main:packages/plain/CHANGELOG.md)")"
-check "push-fold, a release tag pushed between the jobs: a notice names the deferred package and label" \
-  "$(contains "$out" '^::notice title=Fold deferred::packages/rel 1\.11\.0 is not folded in this run and its fragments stay on main: .*its release tag is newer than the build; a later run folds it')"
-check "push-fold, a release tag pushed between the jobs: one notice, for that group alone" \
-  "$(is "$(grep -c 'title=Fold deferred' <<<"$out")" 1)"
-
-# Every group of the plan is a version group the notes lack: nothing is left to fold.
-fold_case fold-all-deferred
-fold_specs=(packages/rel=rel-v)
-git -C "$fc/a" tag rel-v1.11.0 "$base"
-rm "$fc/notes/rel_1.9.0.md" "$fc/notes/rel_1.10.0.md" "$fc/notes/side_$main_label.md" "$fc/notes/plain_$main_label.md"
-push_fold
-check "push-fold, every group deferred: exits 0, saying nothing is folded in this run" \
-  "$(is "$rc|$(contains "$out" '^Nothing to fold in this run: every group of the plan is deferred')" "0|true")"
-check "push-fold, every group deferred: a notice for each group, in the plan's order" \
-  "$(is "$(sed -n 's/^::notice title=Fold deferred::\(packages\/rel [0-9.]*\) is not folded in this run.*/\1/p' <<<"$out")" "packages/rel 1.9.0
-packages/rel 1.10.0
-packages/rel 1.11.0")"
-check "push-fold, every group deferred: nothing written, origin untouched, gh not called" "$(is "$(untouched)" "true")"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-
-# Only a notes name that does not exist at all defers its group: one that is there as a symlink,
-# even a dangling one, is refused as the build's fault.
-fold_case fold-deferred-symlink
-git -C "$fc/a" tag rel-v1.11.0 "$base"
-ln -s "$fc/nowhere" "$fc/notes/rel_1.11.0.md"
-push_fold
-fold_refused "a version group's notes that are a dangling symlink" "rel_1\.11\.0\.md in .* is not a regular file"
-check "push-fold refuses a version group's notes that are a dangling symlink: defers nothing" \
-  "$(is "$(contains "$out" 'Fold deferred')" false)"
-
-summary "release-push.sh version, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and push-fold, and release.yaml's pair_member"
+summary "release-push.sh version, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and fold-notes, and release.yaml's pair_member"
 
