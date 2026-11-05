@@ -40,6 +40,17 @@ export async function clearAssigneeFilter(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Clear assignee" }).click();
 }
 
+/** The Inbox's own search box, beside the assignee filter in the header: the `?q=` the list
+ *  narrows itself by (`features/inbox/inbox-search.ts`), which `f` also puts the focus in. */
+export function inboxSearchBox(page: Page): Locator {
+  return page.getByRole("searchbox", { name: "Search asks" });
+}
+
+/** Types `text` into that box, as a reader does: the whole field, replacing whatever it held. */
+export async function searchInbox(page: Page, text: string): Promise<void> {
+  await inboxSearchBox(page).fill(text);
+}
+
 /** Closes the popover the way a reader does, and waits until it is gone, so whatever it covered
  *  is reachable again. Escape is handled by the search box, which holds focus while the popover
  *  is open (a row's press never takes it). */
