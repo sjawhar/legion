@@ -441,28 +441,41 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 }
 
 // DefaultGrantLifetime is how long a grant lasts when its request names no lifetime, unless every
-// name it grants carries default-grant=session (policy.TagDefaultGrant).
+// name it grants carries default-grant=session (policy.TagDefaultGrant), or one of them is human
+// tier (DefaultHumanGrantLifetime).
 const DefaultGrantLifetime = 12 * time.Hour
 
-// defaultLifetime is the lifetime a request's grant lasts: the one it signed, else
-// DefaultGrantLifetime, else nil (until its session ends) when every name opts out with
-// default-grant=session. A name the set does not serve (a malformed tag among them) keeps the
-// 12-hour default, so it never yields a session-long grant.
+// DefaultHumanGrantLifetime is how long a grant lasts when its request names no lifetime and any
+// name it grants is human tier. A person approves such a request by the action its reason names,
+// and the broker enforces only the duration, so a long default hands every later action of that
+// session the same approval; fifteen minutes is about one named action, and a second action asks
+// again. A session that needs longer says so with --ttl, which the approver reads on the card.
+const DefaultHumanGrantLifetime = 15 * time.Minute
+
+// defaultLifetime is the lifetime a request's grant lasts: the one it signed, else nil (until its
+// session ends) when every name opts out with default-grant=session, else
+// DefaultHumanGrantLifetime when any name is human tier, else DefaultGrantLifetime. A name the set
+// does not serve (a malformed tag among them) keeps the 12-hour default, so it never yields a
+// session-long grant; its tier is unknown, so it never shortens one either.
 func defaultLifetime(set *policy.Set, names []string, signed *int) *int {
 	if signed != nil {
 		return signed
 	}
+	fallback, optedOut := DefaultGrantLifetime, len(names) > 0
 	for _, name := range names {
-		if secret, ok := set.Secrets[name]; !ok || !secret.SessionDefault {
-			seconds := int(DefaultGrantLifetime / time.Second)
-			return &seconds
+		secret, ok := set.Secrets[name]
+		if !ok || !secret.SessionDefault {
+			optedOut = false
+		}
+		if ok && secret.Tier == policy.TierHuman {
+			fallback = DefaultHumanGrantLifetime
 		}
 	}
-	if len(names) == 0 {
-		seconds := int(DefaultGrantLifetime / time.Second)
-		return &seconds
+	if optedOut {
+		return nil
 	}
-	return nil
+	seconds := int(fallback / time.Second)
+	return &seconds
 }
 
 // overMaxGrant reports whether a request signing lifetime (nil: until its session ends) asks for

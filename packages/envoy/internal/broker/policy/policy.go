@@ -52,7 +52,7 @@ const (
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
 	// TagDefaultGrant, set to DefaultGrantSession, keeps a request that names no lifetime for this
-	// secret lasting until its session ends, rather than the broker's DefaultGrantLifetime.
+	// secret lasting until its session ends, rather than the broker's default grant lifetime.
 	TagDefaultGrant = "default-grant"
 	// DefaultGrantSession is the one value TagDefaultGrant takes.
 	DefaultGrantSession = "session"
