@@ -1180,6 +1180,7 @@ jobs:
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
+              - 'packages/envoy/migrationid/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
