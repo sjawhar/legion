@@ -32,16 +32,16 @@ type personNodes struct {
 
 const personNodesQuery = `
 	with related as (
-		select from_kind, from_id, array_agg(distinct kind order by kind) as relations from (
-			select g.from_kind, g.from_id, g.kind from ` + refs.AllEdgesSQL + ` g
+		select from_kind, from_id, array_agg(distinct kind order by kind) as relations, min(created_at) as related_at from (
+			select g.from_kind, g.from_id, g.kind, g.created_at from ` + refs.AllEdgesSQL + ` g
 			where g.kind = 'authored_by' and g.to_kind = 'person' and g.to_id = $1
 			  and g.from_kind in ('comment', 'message', 'ask')
 			union all
-			select g.from_kind, g.from_id, g.kind from person_aliases a
+			select g.from_kind, g.from_id, g.kind, g.created_at from person_aliases a
 			join ` + refs.AllEdgesSQL + ` g on g.to_kind = 'session' and g.to_id = a.alias and g.kind = 'delivered_to'
 			where a.person = $1 and a.alias_kind = 'session' and g.from_kind in ('comment', 'message', 'ask')
 			union all
-			select g.from_kind, g.from_id, g.kind from ` + refs.MentionEdgesSQL + ` g
+			select g.from_kind, g.from_id, g.kind, g.created_at from ` + refs.MentionEdgesSQL + ` g
 			where g.kind = 'mentions' and g.to_kind = 'person' and g.to_id = $1
 			  and g.from_kind in ('comment', 'message', 'block')
 		) edges group by from_kind, from_id
@@ -58,7 +58,7 @@ const personNodesQuery = `
 		from related r join asks k on r.from_kind = 'ask' and r.from_id = k.id::text
 		left join artifacts a on a.id = k.artifact_id
 		union all
-		select 'block', d.node_id, d.excerpt, d.changed_at, r.relations, a.issue_key, a.project_key, a.slug, d.block_id
+		select 'block', d.node_id, d.excerpt, r.related_at, r.relations, a.issue_key, a.project_key, a.slug, d.block_id
 		from related r join document_blocks d on r.from_kind = 'block' and r.from_id = d.node_id
 		join artifacts a on a.id = d.artifact_id
 	), page as (
@@ -68,14 +68,9 @@ const personNodesQuery = `
 	from (select count(*)::int as total from items) totals left join page p on true
 	order by p.created_at desc, p.kind, p.id desc`
 
-// listPersonNodes is a named graph read, not a graph traversal API. Like listAgentMessages it
-// is human-only: people may read direct conversations, while a bearer cannot use a person's
-// alias to reach another session's conversation. Session ownership affects receipt, not who
-// authored an item; an agent's own words remain authored by that session.
+// listPersonNodes reads a named person's nodes under the route's person scope.
+// Session ownership affects receipt, not authorship: an agent's words remain its own.
 func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
-		return
-	}
 	limit, offset, err := parseMyAnswersPage(r)
 	if err != nil {
 		s.writeHandlerError(w, err)
