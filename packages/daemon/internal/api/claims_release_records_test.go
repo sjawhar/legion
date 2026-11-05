@@ -41,7 +41,7 @@ func TestClaimReleaseRecordsServeAPodTheProjectsWindow(t *testing.T) {
 	var resumeID int64
 	if err := h.store.Tx(h.ctx, func(tx pgx.Tx) error {
 		var err error
-		resumeID, err = store.RecordPodWakeTx(h.ctx, tx, store.PodResume{
+		resumeID, _, err = store.RecordPodWakeTx(h.ctx, tx, store.PodResume{
 			Release: releaseID, Project: testProject, Issue: "LEGION-208", Role: "implementer",
 			Kind: "delivery", At: woke,
 		})

@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-    The Legion daemon API contract moves to 46, and three schemas move with it. The phase
+    The Legion daemon API contract moves to 50, and three schemas move with it. The phase
     vocabulary loses `awaiting_merge`, which no issue reaches any more: the merger merges the
     pull request itself, and the daemon's own reading of the merged pull request is what closes
     the issue. The claim schema gains the cause a claim died of, the cause a start failed with,

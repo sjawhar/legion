@@ -52,7 +52,7 @@ type Pods interface {
 	ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, session string) (supervise.Claim, bool, error)
 	// TakePodWake takes one wake of issue's role and answers whether this call took it; false is
 	// a wake another pass already took, which is already bringing the pod back.
-	TakePodWake(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, kind, key string, at time.Time) (bool, error)
+	TakePodWake(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, kind string, at time.Time) (bool, error)
 	// FirePodBackstop marks the backstop fired and answers whether this call fired it.
 	FirePodBackstop(ctx context.Context, tx pgx.Tx, id int64) (bool, error)
 }
@@ -220,7 +220,7 @@ func (e *Engine) wakeReleased(ctx context.Context, tx pgx.Tx, released supervise
 	if !pods.InWorkflowNotLingering(issue.Standing(), root.Standing(), record.OutOfWorkflow) {
 		return false, nil
 	}
-	taken, err := e.cfg.Pods.TakePodWake(ctx, tx, issue.Key, released.Role, kind, key, at)
+	taken, err := e.cfg.Pods.TakePodWake(ctx, tx, issue.Key, released.Role, kind, at)
 	if err != nil || !taken {
 		return false, err
 	}

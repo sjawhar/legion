@@ -768,7 +768,7 @@ func TestAWakeTakenAfterTheMarkCancelsTheRelease(t *testing.T) {
 			// is recorded against the release it ends and a wake reads the newest one.
 			recordRelease(t, st, at.Add(-2*time.Hour))
 			if taken, err := st.TakePodWake(ctx, "legion", rootIssue, claim.RoleArchitect,
-				pods.WakeDelivery, "row-1", at.Add(-time.Hour)); err != nil || !taken {
+				pods.WakeDelivery, at.Add(-time.Hour)); err != nil || !taken {
 				t.Fatalf("take the wake before the mark = %t, %v; want it taken", taken, err)
 			}
 
@@ -781,7 +781,7 @@ func TestAWakeTakenAfterTheMarkCancelsTheRelease(t *testing.T) {
 			}
 			if tc.woken {
 				if taken, err := st.TakePodWake(ctx, "legion", rootIssue, claim.RoleArchitect,
-					pods.WakeDelivery, "row-7", at); err != nil || !taken {
+					pods.WakeDelivery, at); err != nil || !taken {
 					t.Fatalf("take the wake after the mark = %t, %v; want it taken", taken, err)
 				}
 			}

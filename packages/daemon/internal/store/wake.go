@@ -76,21 +76,17 @@ func oneReleasedClaim(ctx context.Context, tx pgx.Tx, where, project, value, wha
 	return claims[0], true, nil
 }
 
-// MarkPodWake records that the wake of kind named by key has been taken for issue, and answers
-// whether this call was the one that took it. A wake that can be reported more than once — one
-// head settles again as each of its checks finishes, a listener that reports the same role
-// message twice — is taken once, because the mark's key is the wake's own identity and the insert
-// is conditional on it.
-func MarkPodWake(ctx context.Context, tx pgx.Tx, project, issue, kind, key string, at time.Time) (bool, error) {
-	if project == "" || issue == "" || kind == "" || key == "" {
-		return false, errors.New("a pod wake mark needs its project, issue, kind and key")
-	}
-	tag, err := tx.Exec(ctx, `insert into pod_wake_marks (project, issue, kind, key, at)
-		values ($1, $2, $3, $4, $5) on conflict do nothing`, project, issue, kind, key, at)
+// CloseOpenResumes closes every resume of issue no first turn has stamped, at the moment given:
+// what the transaction that marks a release writes, so the role's next wake records a resume of
+// its own rather than meeting the one left open by a pod that has come and gone. A resume closed
+// here reports as one whose first turn the daemon did not see, which is what it is.
+func CloseOpenResumes(ctx context.Context, tx pgx.Tx, project, issue string, at time.Time) error {
+	_, err := tx.Exec(ctx, `update pod_resumes set first_turn_at = $3
+		where project = $1 and issue = $2 and first_turn_at is null`, project, issue, at)
 	if err != nil {
-		return false, fmt.Errorf("mark the %s wake of %s: %w", kind, issue, err)
+		return fmt.Errorf("close the open resumes of %s: %w", issue, err)
 	}
-	return tag.RowsAffected() > 0, nil
+	return nil
 }
 
 // CancelPodBackstops drops the open backstops of issue that role armed, and every open backstop
@@ -109,13 +105,9 @@ func CancelPodBackstops(ctx context.Context, tx pgx.Tx, project, issue string, r
 	return nil
 }
 
-// ForgetPodWakes drops every wake mark and every open backstop of issue, which is what the start
-// of a release does — the marks of the release before it are spent — and what a path that takes
-// a released claim over does, so no later wake acts on it.
+// ForgetPodWakes drops every open backstop of issue, which is what a path that takes a released
+// claim over does, so no later backstop acts on it.
 func ForgetPodWakes(ctx context.Context, tx pgx.Tx, project, issue string) error {
-	if _, err := tx.Exec(ctx, `delete from pod_wake_marks where project = $1 and issue = $2`, project, issue); err != nil {
-		return fmt.Errorf("forget the wake marks of %s: %w", issue, err)
-	}
 	return CancelPodBackstops(ctx, tx, project, issue, "")
 }
 
@@ -133,12 +125,12 @@ func (s *Store) ForgetPodWakesOf(ctx context.Context, project, issue string) err
 // project is the project token the claim-keyed tables hold, as it is for every other
 // project-keyed method of this file: the daemon derives it once at boot (claim.ProjectToken,
 // internal/daemon/bootreads.go) and its outbox carries that, so nothing is derived again here.
-func (s *Store) TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
+func (s *Store) TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind string, at time.Time) (bool, error) {
 	records := &PodRecords{store: s, project: project}
 	var taken bool
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		var err error
-		taken, err = records.TakePodWake(ctx, tx, issue, role, kind, key, at)
+		taken, err = records.TakePodWake(ctx, tx, issue, role, kind, at)
 		return err
 	})
 	return taken, err
@@ -209,18 +201,27 @@ func (s *Store) DuePodBackstops(ctx context.Context, project string, now time.Ti
 // RecordPodWakeTx is RecordPodWake inside a caller's transaction: a wake decided by an intake
 // fact records itself with the outbox row that brings the pod back, so a committed wake is a
 // recorded wake and a rolled-back one is neither. It writes the same pod_resumes row.
-func RecordPodWakeTx(ctx context.Context, tx pgx.Tx, res PodResume) (int64, error) {
+//
+// The insert is the whole of taking a wake. A role has at most one resume no first turn has
+// stamped (pod_resumes_one_open_per_role), so a second wake of a role whose pod is already
+// coming back conflicts and writes nothing, and `taken` is false: the index decides it inside
+// the transaction, where a read could be overtaken between its answer and the insert. The
+// caller's transaction is what makes that atomic, so the workflow's four wakes and the outbox's
+// delivery wake are held to it alike.
+func RecordPodWakeTx(ctx context.Context, tx pgx.Tx, res PodResume) (id int64, taken bool, err error) {
 	if res.Project == "" || res.Issue == "" || res.Kind == "" {
-		return 0, errors.New("a pod resume record needs its project, issue and wake kind")
+		return 0, false, errors.New("a pod resume record needs its project, issue and wake kind")
 	}
-	var id int64
-	err := tx.QueryRow(ctx, `insert into pod_resumes (release_id, project, issue, role, kind, at)
-		values ($1, $2, $3, $4, $5, $6) returning id`,
+	err = tx.QueryRow(ctx, `insert into pod_resumes (release_id, project, issue, role, kind, at)
+		values ($1, $2, $3, $4, $5, $6) on conflict do nothing returning id`,
 		res.Release, res.Project, res.Issue, res.Role, res.Kind, res.At).Scan(&id)
-	if err != nil {
-		return 0, fmt.Errorf("record the wake of %s: %w", res.Issue, err)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
 	}
-	return id, nil
+	if err != nil {
+		return 0, false, fmt.Errorf("record the wake of %s: %w", res.Issue, err)
+	}
+	return id, true, nil
 }
 
 // LatestPodRelease is the newest release recorded for issue, or 0 when none is: the release a
@@ -376,76 +377,38 @@ func (p *PodRecords) ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, sess
 // took the wake; false is a wake another pass already took, and then the caller resumes nothing,
 // because the first wake is already bringing the pod back.
 //
-// A role is woken once while its pod is coming back, whatever else reaches it. The mark's key is
-// the wake's own identity, so it holds one wake reported twice but not two wakes of different
-// kinds: a CI settlement wakes the pod and, in the same transaction, sends that worker a role
-// message, whose listener report then arrives while the claim is still released. Both are the
-// same pod coming back for the same role, and recording the second would leave two resumes of
-// that role and two start rows for it — one describing the daemon's own settlement to the worker
-// as a message somebody published — against R6's one task per wake. Another role of the same pod
-// is not held by it: a wake resumes one claim, and a role whose wake was dropped would have no
-// process in a pod that is running.
+// A role is woken once while its pod is coming back, whatever else reaches it: at most one
+// resume of a role has no first turn stamped on it (pod_resumes_one_open_per_role), so the
+// insert that records this wake is also what takes it. A CI settlement wakes the pod and, in the
+// same transaction, sends that worker a role message, whose listener report then arrives while
+// the claim is still released; both are the same pod coming back for the same role, and the
+// second writes nothing rather than leaving two resumes and two start rows — one describing the
+// daemon's own settlement to the worker as a message somebody published — against R6's one task
+// per wake. Another role of the same pod is not held by it: a wake resumes one claim, and a role
+// whose wake was dropped would have no process in a pod that is running.
 //
-// What says the pod is already coming back is the resume the first wake wrote in its own
-// transaction, still open — no first turn stamped on it (podRoleComingBack) — and never the
-// release records: the lane writes a pod_releases row last, after the roles are stopped and the
-// Sandbox suspended, and only logs a write that fails, so between a role's stop and that row a
-// guard reading the newest release would answer for the release before this one and refuse every
-// wake of a role that release had woken. The guard runs before the mark, so a wake it refuses
-// leaves its key unspent and the same report can take the wake once the pod is back.
-//
-// A release in flight is the second half of it. Its mark (issue_releases) is written at the
-// release's start, in the transaction that queues its rows, so it is there from the first stop;
-// an open resume older than that mark belongs to a release that is over — a pod that came back
-// and whose role took no turn the daemon saw — and holds nothing back. With no mark, every open
-// resume of the role counts, which is a pod coming back right now.
+// The index decides it inside the caller's transaction, so the workflow's four wakes and the
+// outbox's delivery wake, which runs in a transaction of its own, are held to it alike; a read
+// could be overtaken between its answer and the insert, and this cannot. A wake refused here
+// leaves nothing behind: no mark to spend, no row, and the cause is not lost, since the message
+// or settlement that wakes a role still reaches it once the pod is back. The release's own
+// transaction closes the resumes left open (CloseOpenResumes), so a pod that came back and whose
+// role took no turn the daemon saw holds nothing back at the next release.
 //
 // Every wake runs through here — the four the workflow applies inside a fact's transaction and
 // the delivery wake the outbox takes in one of its own (Store.TakePodWake) — so there is one
 // account of what a wake writes and one order it writes it in.
-func (p *PodRecords) TakePodWake(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, kind, key string, at time.Time) (bool, error) {
-	coming, err := podRoleComingBack(ctx, tx, p.project, issue, role)
-	if err != nil || coming {
-		return false, err
-	}
-	first, err := MarkPodWake(ctx, tx, p.project, issue, kind, key, at)
-	if err != nil || !first {
-		return false, err
-	}
+func (p *PodRecords) TakePodWake(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, kind string, at time.Time) (bool, error) {
 	release, err := LatestPodRelease(ctx, tx, p.project, issue)
 	if err != nil {
 		return false, err
 	}
-	if _, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: p.project, Issue: issue,
-		Role: string(role), Kind: kind, At: at}); err != nil {
+	_, taken, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: p.project, Issue: issue,
+		Role: string(role), Kind: kind, At: at})
+	if err != nil || !taken {
 		return false, err
 	}
 	return true, CancelPodBackstops(ctx, tx, p.project, issue, role)
-}
-
-// podRoleComingBack is whether a wake of role is already bringing its pod back: a resume of that
-// role with no first turn stamped, recorded at or after the mark of the release in flight, or any
-// open resume of it when no release is in flight. It reads what the wake itself wrote and the
-// mark the release's own transaction wrote, so it answers the same between a role's stop and the
-// teardown as it does after one, and a release whose record the lane never wrote changes nothing.
-//
-// It is a read, not a lock. The four wakes the workflow applies run one at a time under the
-// apply-fact lock, so they see each other's resumes; the outbox's delivery wake runs in a
-// transaction of its own, and that one racing a workflow wake can still write a second resume,
-// as it could before this guard existed. What rules that out is a lock or a unique index on the
-// open resume, and neither is taken here: a second resume costs a duplicate record and one
-// start row the outbox's own pending-task rule drops, where a failed insert would cost the
-// wake itself.
-func podRoleComingBack(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role) (bool, error) {
-	var coming bool
-	if err := tx.QueryRow(ctx, `select exists (select 1 from pod_resumes r
-		where r.project = $1 and r.issue = $2 and r.role = $3 and r.first_turn_at is null
-		and r.at >= coalesce((select m.marked_at from issue_releases m
-			where m.project = $1 and m.issue = $2), r.at))`,
-		project, issue, string(role)).Scan(&coming); err != nil {
-		return false, fmt.Errorf("read whether %s's pod is already coming back for its %s: %w", issue, role, err)
-	}
-	return coming, nil
 }
 
 // FirePodBackstop marks backstop id fired and answers whether this call was the one that fired

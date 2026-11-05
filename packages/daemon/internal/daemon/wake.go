@@ -233,7 +233,7 @@ func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, key, de
 	if root == nil || !pods.InWorkflowNotLingering(issue.Standing(), root.Standing(), record.OutOfWorkflow) {
 		return false, nil
 	}
-	taken, err := r.trees.TakePodWake(ctx, r.project, issue.Key, held.Role, pods.WakeDelivery, key, r.now().UTC())
+	taken, err := r.trees.TakePodWake(ctx, r.project, issue.Key, held.Role, pods.WakeDelivery, r.now().UTC())
 	if err != nil {
 		return false, err
 	}

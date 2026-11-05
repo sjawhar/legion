@@ -163,7 +163,7 @@ type outboxTrees interface {
 	StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error)
 	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
-	TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind, key string, at time.Time) (bool, error)
+	TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind string, at time.Time) (bool, error)
 	ForgetPodWakesOf(ctx context.Context, project, issue string) error
 	ReleasedClaimsIn(ctx context.Context, project, issue string) ([]supervise.Claim, error)
 	ArmPodBackstop(ctx context.Context, backstop store.PodWakeBackstop) error
