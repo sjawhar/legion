@@ -7,16 +7,20 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
-// The three fixture profiles under testdata, each a root a reader is given: gvisor is this pod's
+// The four fixture profiles under testdata, each a root a reader is given: gvisor is this pod's
 // own kernel (cgroup v1 at the mount root, no smaps_rollup, a tiny Shmem), microvm is a unified
-// hierarchy with a child group and a real Shmem, and runcnode is a node's kubepods tree.
+// hierarchy with a child group and a real Shmem, runcnode is a node's kubepods tree under the
+// unified hierarchy, and v1node is a node whose kubelet runs the legacy one, whose pod cgroup
+// paths name no directory a group can be read from.
 const (
 	gvisor   = "gvisor"
 	microvm  = "microvm"
 	runcnode = "runcnode"
+	v1node   = "v1node"
 )
 
 // profile is one fixture root, named the way a caller names "/": a directory holding proc/… and
@@ -281,7 +285,10 @@ func TestReadProcCgroupIsTheWholeFile(t *testing.T) {
 // meminfo reports kB and the sampler publishes bytes. Shmem is read beside AnonPages because no
 // process's own anonymous total carries it: under gVisor it is 56 kB of nothing in particular,
 // and on a microVM half a gigabyte of tmpfs that a reading of AnonPages alone would lose.
-func TestReadMemInfoIsAnonPagesAndShmemInBytes(t *testing.T) {
+//
+// The reading is taken through a Reader, which is the one reader of that file: the parser is
+// parseMemInfo and the descriptor is what saves the open (reader.go).
+func TestMemInfoIsAnonPagesAndShmemInBytes(t *testing.T) {
 	for _, test := range []struct {
 		root string
 		want MemInfo
@@ -289,15 +296,149 @@ func TestReadMemInfoIsAnonPagesAndShmemInBytes(t *testing.T) {
 		{gvisor, MemInfo{AnonPages: 743092 * 1024, Shmem: 56 * 1024}},
 		{microvm, MemInfo{AnonPages: 2097152 * 1024, Shmem: 524288 * 1024}},
 	} {
-		info, err := ReadMemInfo(profile(test.root))
+		info, err := newReader(t, profile(test.root)).MemInfo()
 		if err != nil {
-			t.Fatalf("ReadMemInfo(%s) = %v", test.root, err)
+			t.Fatalf("Reader.MemInfo(%s) = %v", test.root, err)
 		}
 		if info != test.want {
-			t.Errorf("ReadMemInfo(%s) = %+v, want %+v", test.root, info, test.want)
+			t.Errorf("Reader.MemInfo(%s) = %+v, want %+v", test.root, info, test.want)
 		}
 	}
-	if _, err := ReadMemInfo(t.TempDir()); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("ReadMemInfo(a root with no /proc) error = %v, want one that is fs.ErrNotExist", err)
+	if _, err := newReader(t, t.TempDir()).MemInfo(); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Reader.MemInfo(a root with no /proc) error = %v, want one that is fs.ErrNotExist", err)
+	}
+}
+
+// A malformed meminfo is a refusal naming the file and the line, never a reading of what could be
+// parsed: a sampler that published AnonPages alone where Shmem was nonsense would serve a pod's
+// memory as less than it holds.
+func TestMemInfoRefusesALineItCannotRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "proc", "meminfo")
+	writeFile(t, path, "MemTotal:       16777216 kB\nAnonPages:      plenty kB\nShmem:    56 kB\n")
+	info, err := newReader(t, root).MemInfo()
+	if err == nil {
+		t.Fatalf("Reader.MemInfo(an AnonPages line that is no number) = %+v, want a refusal", info)
+	}
+	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "AnonPages") {
+		t.Errorf("the refusal is %q, want it to name %s and the line", err, path)
+	}
+}
+
+// The pod of a cgroup path, read out of the text of one /proc/<pid>/cgroup: both container
+// runtime drivers, a path naming no pod at all, and the legacy hierarchy's own lines, which name
+// a pod whose accounting stands under a controller's tree and not at the path the line holds —
+// so they are ErrCgroupV1 and never a directory a caller would read zeroes from (INFRA-1208
+// round 1). A host that writes both hierarchies is read from its unified line.
+func TestThePodOfACgroupPath(t *testing.T) {
+	root := "/host"
+	mount := filepath.Join(root, "sys", "fs", "cgroup")
+	const (
+		podUID        = "6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11"
+		podUnderscore = "6c2f1b1e_9a3d_4a6e_8f10_2b7b6a0c9d11"
+	)
+	for _, test := range []struct {
+		name, text, uid, dir string
+		legacy               bool
+	}{
+		{
+			name: "the systemd driver's burstable pod",
+			text: "0::/kubepods.slice/kubepods-burstable.slice/" +
+				"kubepods-burstable-pod" + podUnderscore + ".slice/cri-containerd-aa11.scope\n",
+			uid: podUID,
+			dir: filepath.Join(mount, "kubepods.slice", "kubepods-burstable.slice",
+				"kubepods-burstable-pod"+podUnderscore+".slice"),
+		},
+		{
+			name: "the systemd driver's guaranteed pod, which has no quality-of-service slice",
+			text: "0::/kubepods.slice/kubepods-pod" + podUnderscore + ".slice/cri-containerd-aa11.scope\n",
+			uid:  podUID,
+			dir:  filepath.Join(mount, "kubepods.slice", "kubepods-pod"+podUnderscore+".slice"),
+		},
+		{
+			name: "the cgroupfs driver",
+			text: "0::/kubepods/besteffort/pod" + podUID + "/aa11\n",
+			uid:  podUID,
+			dir:  filepath.Join(mount, "kubepods", "besteffort", "pod"+podUID),
+		},
+		{
+			name: "a host that writes both hierarchies, whose unified line is the reading",
+			text: "12:memory:/kubepods/burstable/pod" + podUID + "/aa11\n" +
+				"0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod" +
+				podUnderscore + ".slice/cri-containerd-aa11.scope\n",
+			uid: podUID,
+			dir: filepath.Join(mount, "kubepods.slice", "kubepods-burstable.slice",
+				"kubepods-burstable-pod"+podUnderscore+".slice"),
+		},
+		{
+			name: "a cgroup v1 file, one line for each controller",
+			text: "12:memory:/kubepods/burstable/pod" + podUID + "/aa11\n" +
+				"11:cpuacct:/kubepods/burstable/pod" + podUID + "/aa11\n",
+			legacy: true,
+		},
+		{name: "a process of no pod", text: "0::/system.slice/kubelet.service\n"},
+		{name: "the root cgroup", text: "0::/\n"},
+		{name: "nothing at all", text: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			uid, dir, err := parsePodCgroup(root, "/host/proc/100/cgroup", test.text)
+			switch {
+			case test.legacy && !errors.Is(err, ErrCgroupV1):
+				t.Fatalf("parsePodCgroup read %q and %q, %v; want ErrCgroupV1", uid, dir, err)
+			case !test.legacy && err != nil:
+				t.Fatalf("parsePodCgroup = %v", err)
+			}
+			if uid != test.uid || dir != test.dir {
+				t.Errorf("parsePodCgroup read %q and %q, want %q and %q", uid, dir, test.uid, test.dir)
+			}
+		})
+	}
+}
+
+// PodCgroup reads the process's own file: a pod of the node's unified tree answers its uid and
+// the directory its totals stand in, the kubelet answers none, a pod of a legacy node is refused,
+// and a process that has ended is the filesystem's own error, which a caller skips.
+func TestPodCgroupReadsTheProcessesOwnCgroupFile(t *testing.T) {
+	mount := filepath.Join(profile(runcnode), "sys", "fs", "cgroup")
+	for _, test := range []struct {
+		root     string
+		pid      int
+		uid, dir string
+	}{
+		{
+			root: profile(runcnode), pid: 4011,
+			uid: "6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11",
+			dir: filepath.Join(mount, "kubepods.slice", "kubepods-burstable.slice",
+				"kubepods-burstable-pod6c2f1b1e_9a3d_4a6e_8f10_2b7b6a0c9d11.slice"),
+		},
+		{
+			root: profile(runcnode), pid: 4012,
+			uid: "0f3c7a52-18b4-4d0e-9c21-5e8a44d7b602",
+			dir: filepath.Join(mount, "kubepods", "besteffort", "pod0f3c7a52-18b4-4d0e-9c21-5e8a44d7b602"),
+		},
+		{root: profile(runcnode), pid: 4087},
+	} {
+		uid, dir, err := PodCgroup(test.root, test.pid)
+		if err != nil {
+			t.Fatalf("PodCgroup(%s, %d) = %v", test.root, test.pid, err)
+		}
+		if uid != test.uid || dir != test.dir {
+			t.Errorf("PodCgroup(%s, %d) = %q and %q, want %q and %q",
+				test.root, test.pid, uid, dir, test.uid, test.dir)
+		}
+	}
+	path := filepath.Join(profile(v1node), "proc", "3300", "cgroup")
+	uid, dir, err := PodCgroup(profile(v1node), 3300)
+	if !errors.Is(err, ErrCgroupV1) {
+		t.Fatalf("PodCgroup(a node of the legacy hierarchy) = %q, %q, %v; want ErrCgroupV1", uid, dir, err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the refusal is %q, want it to name %s", err, path)
+	}
+	if uid != "" || dir != "" {
+		t.Errorf("PodCgroup(a node of the legacy hierarchy) = %q and %q beside its error, want neither", uid, dir)
+	}
+	if _, _, err := PodCgroup(profile(runcnode), 99999); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("PodCgroup(a pid that is gone) error = %v, want one that is fs.ErrNotExist", err)
 	}
 }

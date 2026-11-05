@@ -625,55 +625,46 @@ func useAnonymousReader(t *testing.T) *[]int {
 	return read
 }
 
-// The pod uid is read out of a cgroup path whichever driver wrote it, and a path naming no pod —
-// the kubelet's own services, the sampler's — names none.
-func TestThePodOfACgroupPath(t *testing.T) {
-	root := "/host"
-	mount := filepath.Join(root, "sys", "fs", "cgroup")
-	for _, tc := range []struct {
-		name, text string
-		uid        types.UID
-		dir        string
-	}{
-		{
-			name: "the systemd driver's burstable pod",
-			text: "0::/kubepods.slice/kubepods-burstable.slice/" +
-				"kubepods-burstable-pod6c2f1b1e_9a3d_4a6e_8f10_2b7b6a0c9d11.slice/cri-containerd-aa11.scope\n",
-			uid: buildPodUID,
-			dir: filepath.Join(mount, "kubepods.slice", "kubepods-burstable.slice",
-				"kubepods-burstable-pod6c2f1b1e_9a3d_4a6e_8f10_2b7b6a0c9d11.slice"),
-		},
-		{
-			name: "the systemd driver's guaranteed pod, which has no quality-of-service slice",
-			text: "0::/kubepods.slice/kubepods-pod6c2f1b1e_9a3d_4a6e_8f10_2b7b6a0c9d11.slice/" +
-				"cri-containerd-aa11.scope\n",
-			uid: buildPodUID,
-			dir: filepath.Join(mount, "kubepods.slice",
-				"kubepods-pod6c2f1b1e_9a3d_4a6e_8f10_2b7b6a0c9d11.slice"),
-		},
-		{
-			name: "the cgroupfs driver",
-			text: "0::/kubepods/besteffort/pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11/aa11\n",
-			uid:  buildPodUID,
-			dir:  filepath.Join(mount, "kubepods", "besteffort", "pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11"),
-		},
-		{
-			name: "a cgroup v1 file, one line for each controller",
-			text: "12:memory:/kubepods/burstable/pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11/aa11\n" +
-				"11:cpuacct:/kubepods/burstable/pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11/aa11\n",
-			uid: buildPodUID,
-			dir: filepath.Join(mount, "kubepods", "burstable", "pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11"),
-		},
-		{name: "a process of no pod", text: "0::/system.slice/kubelet.service\n"},
-		{name: "the root cgroup", text: "0::/\n"},
-		{name: "nothing at all", text: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			uid, dir := podCgroup(root, tc.text)
-			if uid != tc.uid || dir != tc.dir {
-				t.Errorf("podCgroup read %q and %q, want %q and %q", uid, dir, tc.uid, tc.dir)
-			}
-		})
+// A node whose kubelet runs the legacy hierarchy is refused and counted, never served as a node
+// of pods that spend nothing. Under cgroup v1 a pod's own cgroup path carries no controller
+// segment, so the directory that path names at the mount root holds neither cpu.stat nor
+// memory.current: reading it would answer zero every second with no read error at all, which is a
+// pod reported as idle while it builds (INFRA-1208 round 1). procread.PodCgroup refuses such a
+// path, and node mode counts the refusal as legion_sampler_read_errors_total{source="cgroup"}.
+//
+// Node mode reads a pod's totals from the unified hierarchy's own files, which is what a grade
+// node presents; building the per-controller paths instead would be a second group reader for a
+// hierarchy no node of this cluster runs, and one no fixture of a real v1 node could be written
+// from.
+func TestANodeOfTheLegacyHierarchyIsRefusedAndCounted(t *testing.T) {
+	f := newNodeFixture(t)
+	f.addPod(nodePodObject("grade-run-7-ab12", buildPodUID, map[string]string{ownerLabel: "alice"}))
+	f.writeProcesses(nodeProc{
+		fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 50, pages: 300,
+			args: []string{"go", "build", "./..."}},
+		cgroup: container(systemdPod(buildPodUID, "burstable"), "aa11"),
+	})
+	// The kernel's own file under the legacy hierarchy: one line for each controller, whose
+	// path stands under that controller's tree and not at the mount root.
+	legacy := "/kubepods/burstable/pod" + string(buildPodUID) + "/aa11"
+	f.write(filepath.Join(f.root, "proc", "100", "cgroup"),
+		"12:memory:"+legacy+"\n11:cpuacct:"+legacy+"\n")
+	// The directory that path names at the mount root, written as a unified group would be:
+	// a sampler that followed the v1 path would serve these as the pod's totals, so the test
+	// says the pod is unserved and not merely that the files are missing.
+	f.writePodCgroup(cgroupfsPod(buildPodUID, "burstable"), 3<<30, 12_500_000)
+
+	c := f.collector(f.options())
+	f.list(c)
+	c.pass(0)
+
+	e := f.scrape()
+	wantNoGradeSeries(t, e)
+	if got := e.value(t, readErrorsTotal, string(SourceCgroup)); got < 1 {
+		t.Errorf("%g cgroup reads failed, want the refused v1 pod cgroup counted:\n%s", got, e.text)
+	}
+	if got := e.value(t, readErrorsTotal, string(SourceProc)); got != 0 {
+		t.Errorf("%g reads of /proc failed, want none: the processes themselves read\n%s", got, e.text)
 	}
 }
 

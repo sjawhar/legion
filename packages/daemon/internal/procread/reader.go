@@ -50,8 +50,9 @@ const smapsBuffer = 64 << 10
 
 // Reader is the files a sampler reads every pass, kept open: <root>/proc/meminfo, the two cgroup
 // files a layout holds a pod's totals in, and the stat and the smaps of each process a caller is
-// holding. Every reading it answers is the reading the pure function of the same name answers;
-// what it saves is the open, which under gVisor is the whole cost of the read.
+// holding. Every reading it answers comes out of the same parser the read by path answers from,
+// so a kept descriptor cannot read a file differently: what it saves is the open, which under
+// gVisor is the whole cost of the read.
 //
 // A descriptor is opened on the first read of its file and kept until the caller forgets the
 // process (Forget) or the reader is closed (Close). One reader serves one collector's passes,
@@ -124,40 +125,32 @@ func NewReader(root string, layout Layout) *Reader {
 	return r
 }
 
-// MemInfo is <root>/proc/meminfo's AnonPages and Shmem in bytes, as ReadMemInfo answers them,
-// read through the descriptor this reader keeps on the file.
+// MemInfo is <root>/proc/meminfo's AnonPages and Shmem in bytes, read through the descriptor this
+// reader keeps on the file and parsed by parseMemInfo, the package's one reader of that file.
 func (r *Reader) MemInfo() (MemInfo, error) {
 	raw, err := r.read(&r.meminfo)
 	if err != nil {
 		return MemInfo{}, err
 	}
-	var info MemInfo
-	wanted := []struct {
-		into   *int64
-		prefix []byte
-	}{
-		{&info.AnonPages, []byte("AnonPages:")},
-		{&info.Shmem, []byte("Shmem:")},
-	}
-	for line := range bytes.Lines(raw) {
-		for _, want := range wanted {
-			rest, found := bytes.CutPrefix(line, want.prefix)
-			if !found {
-				continue
-			}
-			size, err := kilobytes(rest)
-			if err != nil {
-				return MemInfo{}, fmt.Errorf("%s: malformed %s line: %s",
-					r.meminfo.path, bytes.TrimSuffix(want.prefix, []byte(":")), bytes.TrimSpace(line))
-			}
-			*want.into = size
-		}
-	}
-	return info, nil
+	return parseMemInfo(raw, r.meminfo.path)
 }
 
-// PodCPUSeconds is the CPU the pod has spent at the cgroup mount root, as PodCPUSeconds answers
-// it for this reader's layout, read through the descriptor it keeps on the file that holds it.
+// PodCPUSeconds is the CPU the whole pod has spent, read at the cgroup mount root through the
+// descriptor this reader keeps on the file its layout holds it in: under v1, cpuacct/cpuacct.usage,
+// which counts nanoseconds; under v2, cpu.stat's usage_usec, which counts microseconds.
+//
+// A root with no cgroup filesystem (LayoutNone) is ErrNoLayout: there is no file to read, and a
+// collector that was handed a zero would serve the pod's CPU as none spent. A file the mount does
+// not hold answers zero rather than failing the pass — a kernel may mount the memory controller
+// and not cpuacct, and half a reading beats none — and a file that is there and holds something
+// that is no number is a refusal naming it, because that is this package reading a kernel wrongly
+// and not a kernel counting less.
+//
+// The pod's CPU and the pod's memory are read apart because they cost a sampler quite different
+// things: this one is 0.00 ms to 0.50 ms in a gVisor pod, where a read of the pod's memory is
+// 17 ms to 20 ms, since that kernel answers it by accounting for the pod's memory there and then
+// (INFRA-1208, measured 2026-11-05). So a sampler reads this every second and the memory at half
+// that rate (internal/sampler/pod.go's rates).
 func (r *Reader) PodCPUSeconds() (float64, error) {
 	switch r.layout {
 	case LayoutV1:
@@ -173,19 +166,19 @@ func (r *Reader) PodCPUSeconds() (float64, error) {
 		}
 		return float64(microseconds) / 1e6, nil
 	}
-	return 0, nil
+	return 0, ErrNoLayout
 }
 
-// PodMemoryBytes is the memory the pod holds at the cgroup mount root, as PodMemoryBytes answers
-// it for this reader's layout, read through the descriptor it keeps on that file. It is read
-// apart from the CPU beside it because it costs a gVisor pod some twenty times as much
-// (PodCPUSeconds).
+// PodMemoryBytes is the memory the whole pod holds now, read at the cgroup mount root through the
+// descriptor this reader keeps on that file: under v1, memory/memory.usage_in_bytes; under v2,
+// memory.current. It answers a root with no cgroup filesystem, a file the mount does not hold and
+// a file that holds no number as PodCPUSeconds does, and it is the dear half of a pod's totals.
 func (r *Reader) PodMemoryBytes() (int64, error) {
 	switch r.layout {
 	case LayoutV1, LayoutV2:
 		return r.number(&r.memory)
 	}
-	return 0, nil
+	return 0, ErrNoLayout
 }
 
 // Stat is <root>/proc/<pid>/stat parsed, as ReadStat answers it, read through the descriptor this
@@ -313,34 +306,6 @@ func (r *Reader) anonymousOf(k *kept) (int64, int64, error) {
 	}
 }
 
-// addAnonymous adds what one smaps line accounts to the process, and nothing for a line that is
-// no Anonymous line. A line that is one and holds no size at all is the end of a read the
-// kernel truncated — a process unmaps and exits while its smaps is being written, and gVisor was
-// measured writing a bare "Anonymous:" for such a mapping (INFRA-1208, 2026-11-05) — so it ends
-// the sum with what the pass had read rather than refusing: that process's reading is a little
-// low for one pass, where a refusal would raise legion_sampler_read_errors_total for a kernel
-// that did nothing wrong. A line holding something that is no number is still a refusal naming
-// the file, as ReadAnonymous answers it.
-func addAnonymous(total *int64, line []byte, path string) error {
-	rest, found := bytes.CutPrefix(line, []byte("Anonymous:"))
-	if !found {
-		return nil
-	}
-	if len(bytes.TrimSpace(rest)) == 0 {
-		return errTruncated
-	}
-	size, err := kilobytes(rest)
-	if err != nil {
-		return fmt.Errorf("%s: malformed Anonymous line: %s", path, bytes.TrimSpace(line))
-	}
-	*total += size
-	return nil
-}
-
-// errTruncated is how addAnonymous says that the smaps it is reading ended mid-line, which its
-// callers answer with the total they have and no error.
-var errTruncated = errors.New("procread: the smaps read ended mid-line")
-
 // Forget drops what this reader holds of one process, which is what bounds it: the caller walks
 // the processes that are there and tells the reader about every one it stops holding, so the
 // descriptors a reader keeps are the descriptors of processes that exist.
@@ -405,7 +370,7 @@ func (r *Reader) process(pid int) *keptProcess {
 
 // number is the one number a kept cgroup file holds, and zero for a file that is not there: a
 // cgroup file belongs to a controller, and a controller this kernel did not mount wrote nothing
-// to read. It is readInt's answer, read through a descriptor.
+// to read. It is parseInt's answer, read through a descriptor.
 func (r *Reader) number(k *kept) (int64, error) {
 	raw, err := r.read(k)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -414,16 +379,12 @@ func (r *Reader) number(k *kept) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	text := string(bytes.TrimSpace(raw))
-	value, err := strconv.ParseInt(text, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %q is no number", k.path, text)
-	}
-	return value, nil
+	return parseInt(raw, k.path)
 }
 
 // key is the value one key names in a kept cgroup file of "<key> <value>" lines, and zero for a
-// file that is not there or a key it does not carry, as readKeys answers them.
+// file that is not there or a key it does not carry. It is parseKey's answer, read through a
+// descriptor.
 func (r *Reader) key(k *kept, key string) (int64, error) {
 	raw, err := r.read(k)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -432,18 +393,7 @@ func (r *Reader) key(k *kept, key string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	for line := range bytes.Lines(raw) {
-		name, value, found := bytes.Cut(bytes.TrimSpace(line), []byte(" "))
-		if !found || string(name) != key {
-			continue
-		}
-		number, err := strconv.ParseInt(string(bytes.TrimSpace(value)), 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("%s: %s is %q, no number", k.path, key, bytes.TrimSpace(value))
-		}
-		return number, nil
-	}
-	return 0, nil
+	return parseKey(raw, key, k.path)
 }
 
 // read is the whole of one small file, taken with one pread from offset 0 through the descriptor

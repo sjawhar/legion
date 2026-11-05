@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -544,7 +542,7 @@ func (c *podCollector) readCPUTotal() {
 		cpu, err = readPodCPU(c.reader)
 	}
 	if err != nil {
-		c.failed(SourceCgroup, err)
+		c.noTotals(err)
 		return
 	}
 	c.opts.Registry.SetPodCPUSeconds(cpu)
@@ -553,6 +551,10 @@ func (c *podCollector) readCPUTotal() {
 // readMemoryTotals is the memory the pod holds and the memory its processes hold: the pod
 // cgroup's own memory and /proc/meminfo, the two dear readings of a gVisor pod, which the loop
 // takes every two seconds and every four while the window's allowance is spent (readsTotals).
+//
+// The pod's own memory and its processes' are two readings of two kernels' making: a pod with no
+// cgroup filesystem has no cgroup total to serve and its /proc/meminfo still answers, so the one
+// that is there is served whatever the other did.
 func (c *podCollector) readMemoryTotals() {
 	var memory int64
 	var err error
@@ -562,7 +564,7 @@ func (c *podCollector) readMemoryTotals() {
 		memory, err = readPodMemory(c.reader)
 	}
 	if err != nil {
-		c.failed(SourceCgroup, err)
+		c.noTotals(err)
 	} else {
 		c.opts.Registry.SetPodMemoryBytes(memory)
 	}
@@ -584,6 +586,22 @@ func (c *podCollector) readMemoryTotals() {
 	}
 	c.opts.Registry.SetPodProcessMemoryBytes(process)
 	c.opts.Registry.SetPodSharedMemoryBytes(info.Shmem)
+}
+
+// noTotals answers for a reading of the pod's own cgroup that did not come: a read that failed is
+// counted as legion_sampler_read_errors_total{source="cgroup"} and logged, and a root with no
+// cgroup filesystem at all (procread.ErrNoLayout) is neither, because nothing failed. Either way
+// the registry is handed nothing, so no pod total is served rather than a total of zero: a pod
+// whose cgroup files this kernel does not write has no total, and the series an operator reads
+// are left out instead (series.go's addTotals, docs/sampler-metrics.md).
+//
+// The layout is in the line newPodCollector logs when it starts, so a pod that serves no totals
+// says why once rather than every second.
+func (c *podCollector) noTotals(err error) {
+	if errors.Is(err, procread.ErrNoLayout) {
+		return
+	}
+	c.failed(SourceCgroup, err)
 }
 
 // readSelf is what the sampler costs the pod or the node it reads: its own CPU, the anonymous
@@ -986,7 +1004,7 @@ func (c *podCollector) groupRole(name string) string {
 // sampler's last read of it: its final numbers belong where every reading before them went, and
 // not under `tool` because the command that earned them has exited.
 func (c *podCollector) groupKind(dir string, kinds map[int]Kind, last Kind) Kind {
-	pids, err := groupProcesses(dir)
+	pids, err := procread.GroupProcesses(dir)
 	if err != nil {
 		c.failed(SourceCgroup, err)
 		pids = nil
@@ -1003,31 +1021,6 @@ func (c *podCollector) groupKind(dir string, kinds map[int]Kind, last Kind) Kind
 		return last
 	}
 	return KindTool
-}
-
-// groupProcesses are the process ids one cgroup holds. It is the one read of the cgroup
-// filesystem this package makes for itself: internal/procread reads what a cgroup accounts for,
-// and which processes are in it is not one of those files. A cgroup that has been removed holds
-// nobody, which is no failure — a command ends and its cgroup goes with it.
-func groupProcesses(dir string) ([]int, error) {
-	path := filepath.Join(dir, "cgroup.procs")
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	fields := strings.Fields(string(raw))
-	pids := make([]int, 0, len(fields))
-	for _, field := range fields {
-		pid, err := strconv.Atoi(field)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %q is no process id", path, field)
-		}
-		pids = append(pids, pid)
-	}
-	return pids, nil
 }
 
 // failed counts one read that failed under its own source and logs it once. The loop goes on:

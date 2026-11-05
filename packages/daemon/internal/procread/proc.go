@@ -19,11 +19,17 @@
 // is known is a zero rather than a failure — a cgroup file a controller never mounted did not
 // write, a cgroup directory the previous pass saw and this one does not — and anything else is the
 // error the filesystem gave, naming the file it gave it for.
+//
+// An absence a caller must tell apart from a reading is neither: it is one of this package's own
+// errors, which a caller reads with errors.Is and answers for. There are two — ErrNoLayout, a
+// root with no cgroup filesystem to read a pod's totals from, and ErrCgroupV1, a pod cgroup of
+// the legacy hierarchy — and both say "there is no reading here", never "the reading is none".
 package procread
 
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -172,10 +178,10 @@ func ReadCmdline(root string, pid int) ([]string, error) {
 // per-mapping file because this pod's gVisor kernel writes neither /proc/<pid>/smaps_rollup nor a
 // RssAnon line in /proc/<pid>/status (INFRA-1208, measured 2026-11-05).
 //
-// A bare `Anonymous:` line, with no size at all, is where the kernel stopped writing: a process
-// unmaps and exits while its smaps is being read, and gVisor was measured writing that line for
-// such a mapping. The sum ends there with what was read, since a process that is going is not a
-// kernel that is wrong. A line holding something that is no number is still a refusal.
+// Every line goes through addAnonymous, which is this package's one reader of a mapping, so what
+// this answers and what a Reader's kept descriptor answers (Reader.Anonymous) cannot differ: a
+// bare `Anonymous:` line ends the sum with what was read, and a line holding something that is no
+// number is a refusal naming the file.
 func ReadAnonymous(root string, pid int) (int64, error) {
 	path := filepath.Join(root, "proc", strconv.Itoa(pid), "smaps")
 	file, err := os.Open(path)
@@ -183,25 +189,19 @@ func ReadAnonymous(root string, pid int) (int64, error) {
 		return 0, err
 	}
 	defer file.Close()
-	// Every line is read as the scanner's own bytes and never as a string of its own: the
-	// smaps of a large process runs to thousands of lines, this is the costliest read the
+	// Every line is handed over as the scanner's own bytes and never as a string of its own:
+	// the smaps of a large process runs to thousands of lines, this is the costliest read the
 	// sampler makes, and a string for each line would be an allocation for each line.
-	anonymous := []byte("Anonymous:")
 	var total int64
 	lines := bufio.NewScanner(file)
 	for lines.Scan() {
-		rest, found := bytes.CutPrefix(lines.Bytes(), anonymous)
-		if !found {
-			continue
-		}
-		if len(bytes.TrimSpace(rest)) == 0 {
+		switch err := addAnonymous(&total, lines.Bytes(), path); {
+		case err == nil:
+		case errors.Is(err, errTruncated):
 			return total, nil
+		default:
+			return 0, err
 		}
-		size, err := kilobytes(rest)
-		if err != nil {
-			return 0, fmt.Errorf("%s: malformed Anonymous line: %s", path, bytes.TrimSpace(lines.Bytes()))
-		}
-		total += size
 	}
 	if err := lines.Err(); err != nil {
 		return 0, err
@@ -209,10 +209,44 @@ func ReadAnonymous(root string, pid int) (int64, error) {
 	return total, nil
 }
 
+// addAnonymous adds what one smaps line accounts to the process, and nothing for a line that is
+// no Anonymous line. It is the whole of this package's reading of that file, called from the read
+// by path above and from the read through a descriptor a Reader keeps (Reader.anonymousOf).
+//
+// A line that is an Anonymous line and holds no size at all is the end of a read the kernel
+// truncated — a process unmaps and exits while its smaps is being written, and gVisor was
+// measured writing a bare "Anonymous:" for such a mapping (INFRA-1208, 2026-11-05) — so it ends
+// the sum with what the pass had read rather than refusing: that process's reading is a little
+// low for one pass, where a refusal would raise legion_sampler_read_errors_total for a kernel
+// that did nothing wrong. A line holding something that is no number is still a refusal naming
+// the file.
+func addAnonymous(total *int64, line []byte, path string) error {
+	rest, found := bytes.CutPrefix(line, []byte("Anonymous:"))
+	if !found {
+		return nil
+	}
+	if len(bytes.TrimSpace(rest)) == 0 {
+		return errTruncated
+	}
+	size, err := kilobytes(rest)
+	if err != nil {
+		return fmt.Errorf("%s: malformed Anonymous line: %s", path, bytes.TrimSpace(line))
+	}
+	*total += size
+	return nil
+}
+
+// errTruncated is how addAnonymous says that the smaps it is reading ended mid-line, which its
+// callers answer with the total they have and no error.
+var errTruncated = errors.New("procread: the smaps read ended mid-line")
+
 // ReadProcCgroup is the whole text of <root>/proc/<pid>/cgroup, the controllers a process is in
-// and the path it holds in each. It is read as it stands and parsed nowhere here: under v2 one
-// line names the group, under v1 one line per controller does, and this pod's gVisor writes a path
-// that exists nowhere on the filesystem — which is why DetectLayout never reads it.
+// and the path it holds in each: under v2 one line names the group, under v1 one line per
+// controller does. It is the file as it stands, for a caller that wants the text itself; the pod
+// a Kubernetes node's process belongs to is read out of it by PodCgroup below.
+//
+// A layout is never read from this file. This pod's gVisor writes a path that exists nowhere on
+// the filesystem (INFRA-1208, measured 2026-11-05), which is why DetectLayout reads the mount.
 func ReadProcCgroup(root string, pid int) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(root, "proc", strconv.Itoa(pid), "cgroup"))
 	if err != nil {
@@ -221,24 +255,105 @@ func ReadProcCgroup(root string, pid int) (string, error) {
 	return string(raw), nil
 }
 
+// ErrCgroupV1 is how PodCgroup refuses a pod whose cgroup path the legacy hierarchy wrote. Such a
+// path names no directory of its own under the mount: the v1 hierarchy keeps one tree for each
+// controller (memory/…, cpuacct/…), and this package reads a group's accounting from the unified
+// hierarchy's files alone (ReadGroup, GroupCPUSeconds, GroupMemoryBytes). Answering the path
+// anyway would hand a caller a directory whose files do not exist, which reads as a pod spending
+// nothing at all, so the reading is refused and the caller counts a read error for it.
+var ErrCgroupV1 = errors.New("procread: a pod cgroup of the legacy hierarchy, which holds no group accounting this reads")
+
+// PodCgroup is the Kubernetes pod a process belongs to and that pod's own cgroup directory, read
+// from <root>/proc/<pid>/cgroup. Both container runtime drivers are accepted, since which one a
+// node runs is the kubelet's configuration and not something a sampler is told:
+//
+//	systemd    /kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod<uid>.slice/<container>.scope
+//	cgroupfs   /kubepods/burstable/pod<uid>/<container>
+//
+// The systemd driver writes the uid with its dashes as underscores, which is undone here, and a
+// guaranteed pod has no quality-of-service segment under either driver. A process in no pod's
+// cgroup — the kubelet, the container runtime, the sampler itself — answers an empty uid, an empty
+// directory and no error.
+//
+// A unified line (`0::<path>`) is the reading. A pod named by a legacy line alone is ErrCgroupV1:
+// a host running both hierarchies writes a line for each, and the unified one is taken wherever
+// the file carries it.
+func PodCgroup(root string, pid int) (string, string, error) {
+	path := filepath.Join(root, "proc", strconv.Itoa(pid), "cgroup")
+	text, err := ReadProcCgroup(root, pid)
+	if err != nil {
+		return "", "", err
+	}
+	return parsePodCgroup(root, path, text)
+}
+
+// parsePodCgroup is PodCgroup over the text of one cgroup file, path named for the refusal.
+func parsePodCgroup(root, path, text string) (string, string, error) {
+	var legacy string
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		// A line is hierarchy:controllers:path. The unified hierarchy writes one line,
+		// numbered 0 and naming no controller; the legacy one writes a line for each
+		// controller, whose path stands under that controller's own tree.
+		hierarchy, rest, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		controllers, group, found := strings.Cut(rest, ":")
+		if !found {
+			continue
+		}
+		segments := strings.Split(strings.Trim(group, "/"), "/")
+		for i, segment := range segments {
+			uid := podUID(segment)
+			if uid == "" {
+				continue
+			}
+			if hierarchy != "0" || controllers != "" {
+				if legacy == "" {
+					legacy = line
+				}
+				break
+			}
+			dir := filepath.Join(append([]string{cgroupMount(root)}, segments[:i+1]...)...)
+			return uid, dir, nil
+		}
+	}
+	if legacy != "" {
+		return "", "", fmt.Errorf("%s: %w: %s", path, ErrCgroupV1, legacy)
+	}
+	return "", "", nil
+}
+
+// podUID is the pod uid one segment of a cgroup path names, and empty where the segment names no
+// pod. The systemd driver's segment is `kubepods-<qos>-pod<uid>.slice`, or `kubepods-pod<uid>`
+// for a guaranteed pod, with the uid's dashes written as underscores; the cgroupfs driver's is
+// `pod<uid>`.
+func podUID(segment string) string {
+	name := strings.TrimSuffix(segment, ".slice")
+	if cut := strings.LastIndex(name, "-pod"); cut >= 0 {
+		name = name[cut+len("-"):]
+	}
+	uid, named := strings.CutPrefix(name, "pod")
+	if !named || uid == "" {
+		return ""
+	}
+	return strings.ReplaceAll(uid, "_", "-")
+}
+
 // MemInfo is the two /proc/meminfo lines a resource sampler reads, in bytes: AnonPages, the
 // anonymous memory of every process together, and Shmem, the shared memory a tmpfs and a POSIX
 // shared segment hold, which no process's own anonymous total carries. The file reports both in
 // kB. A line the file does not carry stays zero.
 type MemInfo struct{ AnonPages, Shmem int64 }
 
-// ReadMemInfo is <root>/proc/meminfo's AnonPages and Shmem, in bytes.
-func ReadMemInfo(root string) (MemInfo, error) {
-	path := filepath.Join(root, "proc", "meminfo")
-	file, err := os.Open(path)
-	if err != nil {
-		return MemInfo{}, err
-	}
-	defer file.Close()
+// parseMemInfo is the AnonPages and the Shmem of a /proc/meminfo, in bytes, path named for the
+// refusal. It is this package's one reader of that file: a Reader answers from it through the
+// descriptor it keeps on the file (Reader.MemInfo), and nothing else reads it.
+func parseMemInfo(raw []byte, path string) (MemInfo, error) {
 	var info MemInfo
 	// The line a pass is on is taken once and tried against both prefixes, rather than once
-	// for each of them, and as bytes rather than as a string: node mode reads a meminfo of
-	// fifty lines for every pod of the node every second.
+	// for each of them, and as bytes rather than as a string: a meminfo is fifty lines, read
+	// for the two of them.
 	wanted := []struct {
 		into   *int64
 		prefix []byte
@@ -246,9 +361,7 @@ func ReadMemInfo(root string) (MemInfo, error) {
 		{&info.AnonPages, []byte("AnonPages:")},
 		{&info.Shmem, []byte("Shmem:")},
 	}
-	lines := bufio.NewScanner(file)
-	for lines.Scan() {
-		line := lines.Bytes()
+	for line := range bytes.Lines(raw) {
 		for _, want := range wanted {
 			rest, found := bytes.CutPrefix(line, want.prefix)
 			if !found {
@@ -261,9 +374,6 @@ func ReadMemInfo(root string) (MemInfo, error) {
 			}
 			*want.into = size
 		}
-	}
-	if err := lines.Err(); err != nil {
-		return MemInfo{}, err
 	}
 	return info, nil
 }

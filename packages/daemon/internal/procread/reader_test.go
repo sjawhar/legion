@@ -32,10 +32,18 @@ func TestSleepHelper(t *testing.T) {
 	time.Sleep(time.Minute)
 }
 
-// newReader is a reader of this root whose descriptors the test releases when it ends.
+// newReader is a reader of this root, under the layout the root itself holds, whose descriptors
+// the test releases when it ends.
 func newReader(t *testing.T, root string) *Reader {
 	t.Helper()
-	reader := NewReader(root, DetectLayout(root))
+	return newReaderOf(t, root, DetectLayout(root))
+}
+
+// newReaderOf is newReader under a layout the test names, which is how a test reads a root as a
+// hierarchy it is not — a pod whose cgroup filesystem the sampler was told nothing of.
+func newReaderOf(t *testing.T, root string, layout Layout) *Reader {
+	t.Helper()
+	reader := NewReader(root, layout)
 	t.Cleanup(func() {
 		if err := reader.Close(); err != nil {
 			t.Errorf("the reader could not be closed: %v", err)
@@ -73,39 +81,46 @@ func descriptorsUnder(t *testing.T, dir string) []string {
 	return held
 }
 
-// A reader answers what the pure functions answer, over each of the three fixture profiles and
-// through every file it keeps: the pod's meminfo, the totals of its layout, and each process's
-// stat and smaps. Every reading is taken twice, because the second is the one that comes through
-// the descriptor the first opened, and a kept descriptor that answered yesterday's bytes would
-// be a sampler reporting a pod that has moved on.
+// A reader answers what the pure functions answer, over each of the fixture profiles and through
+// every file it keeps: each process's stat and smaps against ReadStat and ReadAnonymous, which
+// are the same parsers read by path, and the pod's meminfo and the totals of its layout — which
+// have no reader by path at all, since one parser reads each file and the descriptor is what
+// saves the open — against what the round before them read.
+//
+// Every reading is taken twice, because the second is the one that comes through the descriptor
+// the first opened, and a kept descriptor that answered yesterday's bytes would be a sampler
+// reporting a pod that has moved on.
 func TestTheReaderAnswersWhatThePureFunctionsAnswer(t *testing.T) {
 	for _, name := range []string{gvisor, microvm, runcnode} {
 		t.Run(name, func(t *testing.T) {
 			root := profile(name)
 			reader := newReader(t, root)
-			layout := DetectLayout(root)
+			var first struct {
+				info    MemInfo
+				seconds float64
+				memory  int64
+			}
 			for round := range 2 {
+				// A profile with no meminfo of its own — a node's, where the
+				// sampler reads none — is the filesystem's own error and no
+				// reading, which is what the collector counts and goes on from.
 				info, err := reader.MemInfo()
-				want, wantErr := ReadMemInfo(root)
-				if (err == nil) != (wantErr == nil) {
-					t.Fatalf("round %d: Reader.MemInfo() = %v, ReadMemInfo() = %v", round, err, wantErr)
-				}
-				if err == nil && info != want {
-					t.Errorf("round %d: Reader.MemInfo() = %+v, want %+v", round, info, want)
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("round %d: Reader.MemInfo() = %v", round, err)
 				}
 				seconds, err := reader.PodCPUSeconds()
 				if err != nil {
 					t.Fatalf("round %d: Reader.PodCPUSeconds() = %v", round, err)
 				}
-				if want, err := PodCPUSeconds(root, layout); err != nil || !sameSeconds(seconds, want) {
-					t.Errorf("round %d: Reader.PodCPUSeconds() = %g, want %g (%v)", round, seconds, want, err)
-				}
 				memory, err := reader.PodMemoryBytes()
 				if err != nil {
 					t.Fatalf("round %d: Reader.PodMemoryBytes() = %v", round, err)
 				}
-				if want, err := PodMemoryBytes(root, layout); err != nil || memory != want {
-					t.Errorf("round %d: Reader.PodMemoryBytes() = %d, want %d (%v)", round, memory, want, err)
+				if round == 0 {
+					first.info, first.seconds, first.memory = info, seconds, memory
+				} else if info != first.info || !sameSeconds(seconds, first.seconds) || memory != first.memory {
+					t.Errorf("the round through the kept descriptors read %+v, %g and %d; the round that opened them read %+v, %g and %d",
+						info, seconds, memory, first.info, first.seconds, first.memory)
 				}
 				pids, err := PIDs(root)
 				if err != nil && !errors.Is(err, fs.ErrNotExist) {

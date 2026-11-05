@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -71,11 +69,6 @@ const (
 	// jobKind is the owner reference node mode follows for the two labels.
 	jobKind = "Job"
 )
-
-// cgroupMount is the cgroup filesystem under a root, which is where a pod's own cgroup directory
-// is read: procread names the same path from the other side (DetectLayout), and this is the one
-// place node mode builds a path of the filesystem rather than being handed one.
-func cgroupMount(root string) string { return filepath.Join(root, "sys", "fs", "cgroup") }
 
 // NodeOptions is everything a node's sampler reads and everything it writes to. Every
 // collaborator is injected — the root each procread call is given, the clientset, the registry
@@ -400,6 +393,14 @@ func (c *nodeCollector) publish(uid types.UID, write func(GradePod)) {
 // Both reads happen once, on the pass that first saw the process: a process keeps the cgroup it
 // was made in and the program it runs, so a second read could only cost the pass the time it
 // takes.
+//
+// A pod whose cgroup path the legacy hierarchy wrote is refused and counted
+// (procread.ErrCgroupV1): node mode reads a pod's totals from the unified hierarchy's own files,
+// and the directory a v1 path names holds none of them, so the pod is left unread rather than
+// served as a pod spending nothing (readTotals). What is counted is one read error for each
+// process of such a pod, and what is logged is the sentinel itself rather than the refusal naming
+// that process's own file: every process of a legacy node answers the same way, so the log says
+// it once (failed) where those refusals would be a line for each of them.
 func (c *nodeCollector) seed(live []int, stats map[int]procread.Stat) {
 	for _, pid := range live {
 		if _, held := c.last[pid]; held {
@@ -407,18 +408,20 @@ func (c *nodeCollector) seed(live []int, stats map[int]procread.Stat) {
 		}
 		process := &nodeProcess{reading: reading{pid: pid, start: stats[pid].StartTicks}}
 		c.last[pid] = process
-		text, err := procread.ReadProcCgroup(c.opts.Root, pid)
-		if err != nil {
+		uid, dir, err := procread.PodCgroup(c.opts.Root, pid)
+		switch {
+		case errors.Is(err, procread.ErrCgroupV1):
+			c.failed(SourceCgroup, procread.ErrCgroupV1)
+			continue
+		case err != nil:
 			if !unreadable(err) {
 				c.failed(SourceProc, err)
 			}
 			continue
-		}
-		uid, dir := podCgroup(c.opts.Root, text)
-		if uid == "" {
+		case uid == "":
 			continue
 		}
-		process.uid, process.cgroup = uid, dir
+		process.uid, process.cgroup = types.UID(uid), dir
 		args, err := procread.ReadCmdline(c.opts.Root, pid)
 		if err != nil && !unreadable(err) {
 			c.failed(SourceProc, err)
@@ -476,69 +479,32 @@ func nodeKind(kind Kind) Kind {
 	return KindOther
 }
 
-// podCgroup is the pod a process belongs to and that pod's own cgroup directory, read from the
-// text of <root>/proc/<pid>/cgroup. Both container runtime drivers are accepted, since which one
-// a node runs is the kubelet's configuration and not something a sampler is told:
-//
-//	systemd    /kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod<uid>.slice/<container>.scope
-//	cgroupfs   /kubepods/burstable/pod<uid>/<container>
-//
-// The systemd driver writes the uid with its dashes as underscores, which is undone here, and a
-// guaranteed pod has no quality-of-service segment under either driver. A process in no pod's
-// cgroup — the kubelet, the container runtime, the sampler itself — answers an empty uid.
-func podCgroup(root, text string) (types.UID, string) {
-	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
-		// A line is hierarchy:controllers:path, under v2 one line and under v1 one for each
-		// controller, and the path is the same pod's whichever line it is read from.
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		segments := strings.Split(strings.Trim(parts[2], "/"), "/")
-		for i, segment := range segments {
-			uid := podUID(segment)
-			if uid == "" {
-				continue
-			}
-			dir := filepath.Join(append([]string{cgroupMount(root)}, segments[:i+1]...)...)
-			return types.UID(uid), dir
-		}
-	}
-	return "", ""
-}
-
-// podUID is the pod uid one segment of a cgroup path names, and empty where the segment names no
-// pod. The systemd driver's segment is `kubepods-<qos>-pod<uid>.slice`, or `kubepods-pod<uid>`
-// for a guaranteed pod, with the uid's dashes written as underscores; the cgroupfs driver's is
-// `pod<uid>`.
-func podUID(segment string) string {
-	name := strings.TrimSuffix(segment, ".slice")
-	if cut := strings.LastIndex(name, "-pod"); cut >= 0 {
-		name = name[cut+len("-"):]
-	}
-	uid, named := strings.CutPrefix(name, "pod")
-	if !named || uid == "" {
-		return ""
-	}
-	return strings.ReplaceAll(uid, "_", "-")
-}
-
 // readTotals is every served pod's own cgroup: the memory it holds and the CPU it has spent,
 // which is the reading every second buys. A pod no process of which has been read yet has no
 // cgroup directory to read, and is served its kinds alone until the next walk finds one.
+//
+// The two numbers are read as two files and not as a whole group: a pod's directory holds its
+// peak and its anonymous and shared parts too, and node mode serves none of those
+// (docs/sampler-metrics.md, "The series node mode serves"), so reading them would be two more
+// files opened for every pod of the node every second.
 func (c *nodeCollector) readTotals(pods map[types.UID]nodePod) {
 	for uid, pod := range pods {
 		if pod.cgroup == "" {
 			continue
 		}
-		group, err := procread.ReadGroup(pod.cgroup)
+		cpu, err := procread.GroupCPUSeconds(pod.cgroup)
+		if err != nil {
+			c.failed(SourceCgroup, err)
+			continue
+		}
+		memory, err := procread.GroupMemoryBytes(pod.cgroup)
 		if err != nil {
 			c.failed(SourceCgroup, err)
 			continue
 		}
 		c.publish(uid, func(pod GradePod) {
-			c.opts.Registry.SetGradePodMemoryBytes(pod, group.MemoryBytes)
-			c.opts.Registry.SetGradePodCPUSeconds(pod, group.CPUSeconds)
+			c.opts.Registry.SetGradePodMemoryBytes(pod, memory)
+			c.opts.Registry.SetGradePodCPUSeconds(pod, cpu)
 		})
 	}
 }

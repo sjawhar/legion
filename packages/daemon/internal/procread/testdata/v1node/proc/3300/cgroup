@@ -1,0 +1,3 @@
+12:memory:/kubepods/burstable/pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11/aa11
+11:cpuacct:/kubepods/burstable/pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11/aa11
+10:pids:/kubepods/burstable/pod6c2f1b1e-9a3d-4a6e-8f10-2b7b6a0c9d11/aa11

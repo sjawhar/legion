@@ -1,6 +1,7 @@
 package procread
 
 import (
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -75,8 +76,12 @@ func TestLayoutStringNamesTheHierarchy(t *testing.T) {
 
 // The pod's own totals come from the files its hierarchy keeps them in, each read apart from the
 // other and each out of the unit that file counts in: v1's cpuacct.usage is nanoseconds, v2's
-// cpu.stat usage_usec is microseconds. A root with no cgroup filesystem is zero and no error,
-// since there is nothing there to read and nothing wrong with that.
+// cpu.stat usage_usec is microseconds. A mount whose files are not there is zero and no error,
+// since a kernel may mount one controller and not another and half a reading beats none.
+//
+// There is one reader of them, the Reader of reader.go, because one open is the whole cost of
+// these reads under gVisor and a second reader would be a second parser to keep true
+// (INFRA-1208 round 1).
 func TestThePodsTotalsAreReadFromTheHierarchysOwnFiles(t *testing.T) {
 	for _, test := range []struct {
 		root    string
@@ -87,23 +92,47 @@ func TestThePodsTotalsAreReadFromTheHierarchysOwnFiles(t *testing.T) {
 		{profile(gvisor), LayoutV1, 798289920, 123.456789012},
 		{profile(microvm), LayoutV2, 1610612736, 91.234567},
 		{profile(runcnode), LayoutV2, 8589934592, 987.654321},
-		{profile(gvisor), LayoutNone, 0, 0},
 		{t.TempDir(), LayoutV2, 0, 0},
 	} {
-		seconds, err := PodCPUSeconds(test.root, test.layout)
+		reader := newReaderOf(t, test.root, test.layout)
+		seconds, err := reader.PodCPUSeconds()
 		if err != nil {
-			t.Fatalf("PodCPUSeconds(%s, %s) = %v", test.root, test.layout, err)
+			t.Fatalf("Reader.PodCPUSeconds(%s, %s) = %v", test.root, test.layout, err)
 		}
 		if !sameSeconds(seconds, test.seconds) {
-			t.Errorf("PodCPUSeconds(%s, %s) = %g, want %g", test.root, test.layout, seconds, test.seconds)
+			t.Errorf("Reader.PodCPUSeconds(%s, %s) = %g, want %g",
+				test.root, test.layout, seconds, test.seconds)
 		}
-		memory, err := PodMemoryBytes(test.root, test.layout)
+		memory, err := reader.PodMemoryBytes()
 		if err != nil {
-			t.Fatalf("PodMemoryBytes(%s, %s) = %v", test.root, test.layout, err)
+			t.Fatalf("Reader.PodMemoryBytes(%s, %s) = %v", test.root, test.layout, err)
 		}
 		if memory != test.memory {
-			t.Errorf("PodMemoryBytes(%s, %s) = %d, want %d", test.root, test.layout, memory, test.memory)
+			t.Errorf("Reader.PodMemoryBytes(%s, %s) = %d, want %d",
+				test.root, test.layout, memory, test.memory)
 		}
+	}
+}
+
+// A root with no cgroup filesystem has no pod totals to read, and says so: ErrNoLayout, which is
+// neither a reading nor a read that failed. A zero here would be served as a pod that holds no
+// memory and has spent no CPU, where the collector must serve no pod total at all
+// (internal/sampler/pod.go's noTotals, INFRA-1208 round 1).
+func TestThePodsTotalsUnderNoCgroupFilesystemAreNoLayout(t *testing.T) {
+	reader := newReaderOf(t, profile(gvisor), LayoutNone)
+	seconds, err := reader.PodCPUSeconds()
+	if !errors.Is(err, ErrNoLayout) {
+		t.Errorf("Reader.PodCPUSeconds(LayoutNone) = %g, %v; want ErrNoLayout", seconds, err)
+	}
+	if seconds != 0 {
+		t.Errorf("Reader.PodCPUSeconds(LayoutNone) = %g beside its error, want no reading", seconds)
+	}
+	memory, err := reader.PodMemoryBytes()
+	if !errors.Is(err, ErrNoLayout) {
+		t.Errorf("Reader.PodMemoryBytes(LayoutNone) = %d, %v; want ErrNoLayout", memory, err)
+	}
+	if memory != 0 {
+		t.Errorf("Reader.PodMemoryBytes(LayoutNone) = %d beside its error, want no reading", memory)
 	}
 }
 
@@ -114,27 +143,33 @@ func TestThePodsTotalsRefuseAFileTheyCannotParse(t *testing.T) {
 	root := t.TempDir()
 	usage := filepath.Join(root, "sys", "fs", "cgroup", "memory", "memory.usage_in_bytes")
 	writeFile(t, usage, "lots\n")
-	memory, err := PodMemoryBytes(root, LayoutV1)
-	if err == nil {
-		t.Fatalf("PodMemoryBytes(a root whose memory.usage_in_bytes is \"lots\") = %d, want an error", memory)
-	}
-	if !strings.Contains(err.Error(), usage) {
-		t.Errorf("PodMemoryBytes() error = %v, want it to name %s", err, usage)
-	}
 	cpuacct := filepath.Join(root, "sys", "fs", "cgroup", "cpuacct", "cpuacct.usage")
 	writeFile(t, cpuacct, "plenty\n")
-	seconds, err := PodCPUSeconds(root, LayoutV1)
+	reader := newReaderOf(t, root, LayoutV1)
+	memory, err := reader.PodMemoryBytes()
 	if err == nil {
-		t.Fatalf("PodCPUSeconds(a root whose cpuacct.usage is \"plenty\") = %g, want an error", seconds)
+		t.Fatalf("Reader.PodMemoryBytes(a memory.usage_in_bytes of \"lots\") = %d, want an error", memory)
+	}
+	if !strings.Contains(err.Error(), usage) {
+		t.Errorf("Reader.PodMemoryBytes() error = %v, want it to name %s", err, usage)
+	}
+	seconds, err := reader.PodCPUSeconds()
+	if err == nil {
+		t.Fatalf("Reader.PodCPUSeconds(a cpuacct.usage of \"plenty\") = %g, want an error", seconds)
 	}
 	if !strings.Contains(err.Error(), cpuacct) {
-		t.Errorf("PodCPUSeconds() error = %v, want it to name %s", err, cpuacct)
+		t.Errorf("Reader.PodCPUSeconds() error = %v, want it to name %s", err, cpuacct)
 	}
 }
 
-// One group's reading is the five files cgroup v2 keeps its accounting in. memory.peak is a
+// One group's reading is the four numbers of cgroup v2 a caller of this reads: its CPU, the
+// memory it holds, the most it has held and that memory's anonymous part. memory.peak is a
 // recent kernel's file: the burstable group has none, and its peak is zero rather than a refusal,
 // because a kernel that does not report a number has reported nothing, not a failure.
+//
+// The groups below hold a memory.events and a shmem line their reading leaves alone: a field no
+// series carries is a file opened for every pod every second (INFRA-1208 round 1), so the fixture
+// keeps them and the Group has no room for them.
 func TestReadGroupIsOneDirectorysOwnAccounting(t *testing.T) {
 	for _, test := range []struct {
 		dir  string
@@ -144,22 +179,19 @@ func TestReadGroupIsOneDirectorysOwnAccounting(t *testing.T) {
 			filepath.Join(mount(microvm), "legion.slice"),
 			Group{
 				CPUSeconds: 12.345678, MemoryBytes: 268435456, MemoryPeakBytes: 402653184,
-				AnonBytes: 201326592, ShmemBytes: 16777216, OOMKills: 2,
+				AnonBytes: 201326592,
 			},
 		},
 		{
 			filepath.Join(mount(runcnode), "kubepods.slice", "kubepods-besteffort.slice"),
 			Group{
 				CPUSeconds: 234.567890, MemoryBytes: 2147483648, MemoryPeakBytes: 3221225472,
-				AnonBytes: 1610612736, ShmemBytes: 268435456, OOMKills: 1,
+				AnonBytes: 1610612736,
 			},
 		},
 		{
 			filepath.Join(mount(runcnode), "kubepods.slice", "kubepods-burstable.slice"),
-			Group{
-				CPUSeconds: 45.678901, MemoryBytes: 1073741824,
-				AnonBytes: 805306368, ShmemBytes: 67108864,
-			},
+			Group{CPUSeconds: 45.678901, MemoryBytes: 1073741824, AnonBytes: 805306368},
 		},
 	} {
 		group, err := ReadGroup(test.dir)
@@ -259,5 +291,53 @@ func TestChildGroupsSurvivesAGroupRemovedBetweenTwoPasses(t *testing.T) {
 	}
 	if len(names) != 0 {
 		t.Errorf("ChildGroups(after the group itself was removed) = %q, want none", names)
+	}
+}
+
+// GroupProcesses is who is in a cgroup, which is the one thing a group's own files say that is
+// not a number: cgroup.procs, one process id a line. A sampler reads it to learn what the work in
+// a command's cgroup is (internal/sampler/pod.go's groupKind), and it is read here because every
+// read of the cgroup filesystem belongs to this package (INFRA-1208 round 1).
+func TestGroupProcessesAreTheProcessIdsOfACgroup(t *testing.T) {
+	kubepods := filepath.Join(mount(runcnode), "kubepods.slice")
+	pids, err := GroupProcesses(kubepods)
+	if err != nil {
+		t.Fatalf("GroupProcesses(%s) = %v", kubepods, err)
+	}
+	if want := []int{4011, 4012, 4087}; !slices.Equal(pids, want) {
+		t.Errorf("GroupProcesses(%s) = %v, want %v", kubepods, pids, want)
+	}
+
+	// A command ends and its cgroup goes with it: a group that is not there holds nobody,
+	// which is no failure of the pass that was about to read it.
+	gone := filepath.Join(t.TempDir(), "implementer-7")
+	pids, err = GroupProcesses(gone)
+	if err != nil {
+		t.Fatalf("GroupProcesses(a group that is gone) = %v", err)
+	}
+	if len(pids) != 0 {
+		t.Errorf("GroupProcesses(a group that is gone) = %v, want nobody", pids)
+	}
+
+	// An empty cgroup.procs is a group every process of which has ended, which the caller
+	// tells apart from a group it could not read.
+	empty := t.TempDir()
+	writeFile(t, filepath.Join(empty, "cgroup.procs"), "")
+	if pids, err := GroupProcesses(empty); err != nil || len(pids) != 0 {
+		t.Errorf("GroupProcesses(an empty cgroup.procs) = %v, %v; want nobody", pids, err)
+	}
+
+	// A line that is no process id is a refusal naming the file: that is this package reading
+	// a kernel wrongly, and a sampler that passed over it would charge a command's work to
+	// whatever the last pass thought was in its cgroup.
+	odd := t.TempDir()
+	path := filepath.Join(odd, "cgroup.procs")
+	writeFile(t, path, "4011\nnobody\n")
+	pids, err = GroupProcesses(odd)
+	if err == nil {
+		t.Fatalf("GroupProcesses(a cgroup.procs holding \"nobody\") = %v, want a refusal", pids)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the refusal is %q, want it to name %s", err, path)
 	}
 }

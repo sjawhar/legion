@@ -319,6 +319,45 @@ func TestTheProcProfileServesThePodItRead(t *testing.T) {
 	wantValue(t, e, 0, smapsDeferred)
 }
 
+// A pod with no cgroup filesystem to read serves no pod totals at all. The collector is given the
+// layout its root holds, and a root holding none answers procread.ErrNoLayout for both halves of
+// the totals: those series are left out rather than served as a zero, as every other series the
+// sampler has no reading for is (series.go's addTotals), and nothing is counted as a read that
+// failed, because nothing failed (INFRA-1208 round 1).
+//
+// What /proc alone tells it is served beside that: the memory the pod's processes hold and its
+// shared memory come from /proc/meminfo, which such a pod still has.
+func TestAPodWithNoCgroupFilesystemServesNoTotals(t *testing.T) {
+	f := newPodFixture(t)
+	f.writeProcesses(743092, 56, podTree()...)
+
+	c := f.collector()
+	if c.layout != procread.LayoutNone {
+		t.Fatalf("the fixture's root holds the %s layout, want no cgroup filesystem at all", c.layout)
+	}
+	// Two passes, so that a totals tick and a walk tick have both run and neither has put a
+	// zero in the registry.
+	c.pass(0)
+	c.pass(2)
+
+	e := f.scrape()
+	for _, id := range []metricID{podMemoryBytes, podMemoryPeakBytes, podCPUSecondsTotal} {
+		if e.has(id, podProject, podIssue) {
+			t.Errorf("%s is served for a pod with no cgroup filesystem:\n%s", metrics[id].name, e.text)
+		}
+	}
+	wantValue(t, e, 743092*1024, podProcessMemoryBytes, podProject, podIssue)
+	wantValue(t, e, 56*1024, podSharedMemoryBytes, podProject, podIssue)
+	for _, source := range readSources {
+		wantValue(t, e, 0, readErrorsTotal, string(source))
+	}
+	// Why there are no totals is in the line the collector logs when it starts, once, where an
+	// operator reads it: the passes themselves say nothing at all about it.
+	if !slices.ContainsFunc(f.log, func(line string) bool { return strings.Contains(line, "cgroup layout none") }) {
+		t.Errorf("the collector's log does not name the layout it found: %v", f.log)
+	}
+}
+
 // The cgroup profile reads the same series out of a pod that runs each command in a cgroup of its
 // own: the command's own cpu.stat, memory.current, memory.peak and memory.stat, its role from the
 // first segment of its cgroup's name and its kind from the first build or test process in it,
