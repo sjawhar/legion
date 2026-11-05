@@ -109,6 +109,7 @@
   "pendingStatusWrites": [],
   "heldOutboxRows": [],
   "strandedClaims": [],
+  "wakesWaiting": [],
   "controllerLocator": {
     "runtime": "kubernetes",
     "external": true,

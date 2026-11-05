@@ -500,4 +500,20 @@ package api
 // 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
-const DaemonAPIVersion = 46
+//
+// 49: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
+// (`legion.yaml`'s `worker_wakes_per_minute`, default 8, and `worker_wake_burst`, default 1, which
+// the settings carry as the two numbers they are), and `api.State` gains `wakesWaiting`, the wakes
+// that pace is holding until their turn: an array, never null, of `{claim, issue, role, kind,
+// dueAt}`, beside `strandedClaims` and `heldOutboxRows`, one row per wake of the three lanes it
+// paces — `launch`, a role process it is about to start, `plugin-task`, the update task a
+// stale-plugin round queues to a session already running, both held in the claim's machine, and
+// `catch-up`, the notice a start writes to an architect already running, which waits on its own
+// outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
+// a plugin wave. A strict reader before 49 refuses a state carrying it,
+// so the bump is why the two never meet; with `daemon.startedAt` and each claim's `updateRound` it
+// is what says whether a wave is still running. `legion state` prints a `wakes waiting:` line only
+// when something waits. This change adds no store migration. (46 is this daemon's number today, and
+// sjawhar/legion#2765 and #2751 take 47 and #2780 takes 48, so this change takes the next free
+// number above them, as the collision notes above say.)
+const DaemonAPIVersion = 49

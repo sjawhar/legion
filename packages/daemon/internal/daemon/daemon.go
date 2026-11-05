@@ -1062,6 +1062,64 @@ func wakeJitter(rate int) func() time.Duration {
 	return func() time.Duration { return rand.N(interval) }
 }
 
+// claimViews is every claim this daemon supervises as its machine last published it, which the
+// state's wakes waiting are read from (api.WakesWaitingOf, source.views): the view rather than the
+// claim, so the read never waits on a decision in flight — a Sandbox relaunch holds its machine
+// for as long as the runtime waits out its pods, and with many claims one is nearly always
+// relaunching — exactly as the operator's claim listing and the capability report read their
+// claims. It reads memory alone, which is where a machine's wake lives: no store holds one, and a
+// restart raises the wave again through its own paths.
+func (s *supervision) claimViews() []supervise.ClaimView {
+	if s.supervisor == nil {
+		return nil
+	}
+	machines := s.supervisor.supervised()
+	views := make([]supervise.ClaimView, 0, len(machines))
+	for _, m := range machines {
+		views = append(views, m.View())
+	}
+	return views
+}
+
+// pacedCatchUps is every catch-up the wake pacing is still holding, as the state names them beside
+// the machines' own wakes (api.State.WakesWaiting): the notice a start writes to an architect
+// already running in place of a launch waits on its row's next_at rather than in a machine
+// (workflow's claimReady, record.Notice.Paced), so this lane of the wave is read from the store —
+// in the state's own snapshot, with everything else the state reads, rather than from a second
+// transaction that could see another instant.
+//
+// The rows are the ones a ready would otherwise release and this mark holds back (the outbox's
+// releaseWaiting reads the same set through the same WaitingNotices), filtered to those still ahead
+// of now: a row whose moment has come is a wake that is running or about to, not one waiting. Each
+// goes to the root architect of its issue, whose token it is composed for exactly as the line that
+// wake writes composes it (the outbox's wakeRan), since the row names the issue and the kind alone.
+// A project whose outbox holds no such row allocates nothing.
+func pacedCatchUps(ctx context.Context, tx pgx.Tx, records record.Store, project, dispatchProject string, now time.Time) ([]api.WakeWaiting, error) {
+	waiting, err := records.WaitingNotices(ctx, tx, dispatchProject, now)
+	if err != nil {
+		return nil, err
+	}
+	var wakes []api.WakeWaiting
+	for _, row := range waiting {
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			return nil, fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
+		}
+		notice, ok := payload.(record.Notice)
+		if !ok || !notice.Paced || !row.NextAt.After(now) {
+			continue
+		}
+		architect, err := claim.NewToken(project, row.Issue, claim.RoleArchitect)
+		if err != nil {
+			return nil, fmt.Errorf("the architect of the catch-up on row %d: %w", row.ID, err)
+		}
+		wakes = append(wakes, api.WakeWaiting{
+			Claim: architect, Issue: row.Issue, Role: claim.RoleArchitect, Kind: wakeCatchUp, DueAt: row.NextAt.UTC(),
+		})
+	}
+	return wakes, nil
+}
+
 // openSupervision reads the claims the store holds and their sessions' capability reports, takes
 // the worker stream, and builds the runtime over it, for supervision's lifetime and with the
 // workflow's App tokens (nil without a workflow): every step of supervision that can refuse, so a
@@ -1597,6 +1655,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
+			views:        s.claimViews,
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
 			settings:     api.SettingsOf(cfg),
@@ -1723,6 +1782,9 @@ type source struct {
 	// reports is each claim's latest capability report (supervision.capabilityReports), which the
 	// projection shows on the claim's view whatever process reported it.
 	reports func() map[claim.Token]capabilities.Report
+	// views is every supervised claim as its machine last published it (supervision.claimViews),
+	// which the wakes the machines hold are read from; nil for a daemon that supervises nothing.
+	views func() []supervise.ClaimView
 	// repositories is the project's repository mapping as the workflow serves it, empty for a
 	// daemon with no workflow, whose state serves no repository.
 	repositories *repositories
@@ -1848,7 +1910,8 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
-	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), time.Now().UTC())
+	now := time.Now().UTC()
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), now)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -1857,6 +1920,19 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		return api.State{}, err
 	}
 	state.StrandedClaims = api.StrandedClaimsOf(stranded)
+	// A wake waits in one of two places, and the state names both as one list (api.WakesWaitingOf):
+	// a launch or a plugin task waits in its claim's machine, in memory alone, since no store holds
+	// one and a restart raises the wave again through its own paths; a paced catch-up waits on its
+	// outbox row, read here in the snapshot every other durable fact of this state is read from.
+	paced, err := pacedCatchUps(ctx, tx, records, s.projectToken, s.project, now)
+	if err != nil {
+		return api.State{}, err
+	}
+	var views []supervise.ClaimView
+	if s.views != nil {
+		views = s.views()
+	}
+	state.WakesWaiting = api.WakesWaitingOf(views, paced)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,

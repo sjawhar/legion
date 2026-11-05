@@ -608,5 +608,55 @@ func TestAPluginWakeWhoseClaimRegisteredCurrentOpensNoRound(t *testing.T) {
 	h.wantWakeLine(secondToken, "kind=plugin-task", "waited=true")
 }
 
+// What a machine tells a reader of every claim about the wake it is holding
+// (ClaimView.WakeWaiting, which the daemon's state is built from): its kind and the moment the
+// pacing gave it, for as long as it waits, and nothing at all once its turn has run it. The wake
+// travels on the published view rather than behind the machine's lock because the reader asking is
+// asking about every claim at once, and a claim mid-relaunch holds its lock for as long as the
+// runtime waits out its pods.
+func TestTheViewNamesTheWakeTheMachineHoldsUntilItHasRun(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.deps.PluginContract = PodUpdateContract + 1
+	launching := h.machineFor(wakeClaim(secondToken, StateQueued))
+	stale := h.machineFor(stalePluginClaim(wakeClaim(thirdToken, StateReady), PodUpdateContract))
+	reserved := h.clock.Now()
+
+	h.must(RequestSpawn{Claim: h.token})
+	h.mustPostTo(launching, RequestSpawn{Claim: secondToken})
+	h.mustPostTo(stale, StalePlugin{Claim: thirdToken, Trigger: "sweep"})
+
+	if held := h.m.View().WakeWaiting; held != nil {
+		t.Fatalf("the claim the burst let out names wake %+v, want none: it launched as it was raised", held)
+	}
+	for _, waiting := range []struct {
+		m     *Machine
+		kind  string
+		turns int
+	}{
+		{launching, wakeLaunch, 1},
+		{stale, wakePluginTask, 2},
+	} {
+		held := waiting.m.View().WakeWaiting
+		at := reserved.Add(time.Duration(waiting.turns) * (wakeInterval + wakePart))
+		if held == nil || held.Kind != waiting.kind || !held.At.Equal(at) {
+			t.Fatalf("%s names wake %+v, want a %s wake due at %s", waiting.m.View().Token, held, waiting.kind, at)
+		}
+	}
+
+	h.advance(2 * (wakeInterval + wakePart))
+	launching.Wait()
+	stale.Wait()
+
+	for _, m := range []*Machine{launching, stale} {
+		if held := m.View().WakeWaiting; held != nil {
+			t.Fatalf("%s still names wake %+v once its turn has run it, want none", m.View().Token, held)
+		}
+	}
+	h.wantStarts(secondToken, 1)
+	if got, want := stale.Claim().UpdateRound, PluginRound(h.deps.PluginContract); got != want {
+		t.Fatalf("the stale claim holds round %q at its turn, want %q", got, want)
+	}
+}
+
 // suspendHeld is whether err is the answer a suspension held for later gives its caller.
 func suspensionHeld(err error) bool { return errors.Is(err, ErrSuspendHeld) }

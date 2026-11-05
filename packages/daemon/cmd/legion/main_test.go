@@ -1628,6 +1628,53 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told which wakes the daemon's pacing is holding,
+// each by claim with its kind and when it is due, on one line however many there are
+// (api.State.WakesWaiting). The line is there only while something waits: outside a restart or a
+// plugin wave the queue is empty, and a line saying so on every read would be noise.
+func TestPlainStateNamesTheWakesThePacingHolds(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	for _, tc := range []struct {
+		name, wakes, want string
+	}{
+		{
+			name: "a launch and an update task",
+			wakes: `[{"claim":"legion-legion-legion-208-implementer","issue":"LEGION-208","role":"implementer","kind":"launch","dueAt":"2026-09-23T00:00:08Z"},` +
+				`{"claim":"legion-legion-legion-210-reviewer","issue":"LEGION-210","role":"reviewer","kind":"plugin-task","dueAt":"2026-09-23T00:00:15Z"}]`,
+			want: "wakes waiting: 2 — legion-legion-legion-208-implementer launch due 2026-09-23T00:00:08Z; " +
+				"legion-legion-legion-210-reviewer plugin-task due 2026-09-23T00:00:15Z\n",
+		},
+		{name: "none", wakes: `[]`, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"wakesWaiting":` + tc.wakes + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if tc.want == "" {
+				if strings.Contains(out.String(), "wakes waiting") {
+					t.Fatalf("legion state printed %q, want no wakes-waiting line while nothing waits", out.String())
+				}
+				return
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told each served repository Dispatch's GitHub App is
 // not known to be installed on, one line each with why, as the daemon serves the state; with none
 // the one line says so.

@@ -38,6 +38,7 @@
   "pendingStatusWrites": [],
   "heldOutboxRows": [],
   "strandedClaims": [],
+  "wakesWaiting": [],
   "capabilities": [],
   "repositories": {
     "owners": [],

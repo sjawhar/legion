@@ -303,6 +303,22 @@ type ClaimView struct {
 	// shows the state it is leaving. A process retired and relaunched in one decision
 	// (chargePrompt, the registration deadline) is not stopping: its claim keeps its role.
 	Stopping bool
+	// WakeWaiting is the wake the pacing holds over this claim until its turn (reserveWake), nil
+	// while none waits. It is published here rather than read through a method of its own because
+	// the one reader of it is a reader of every claim — the state route, through the daemon's
+	// supervision (api.State.WakesWaiting) — and such a reader must never wait on the decision in
+	// flight, which is the whole reason View exists.
+	WakeWaiting *WakeWaiting
+}
+
+// WakeWaiting is a machine's waiting wake as its view publishes it: what kind of wake it is
+// (wakeLaunch, wakePluginTask) and the moment the pacing gave it, which is when it runs (wakeNow).
+// It is the memory-only `wake` the machine holds, cut down to what a reader outside this package
+// is owed: never the launch itself, and never the state the gate found, which only an operator's
+// request that does not wait reads (dropWakeFor).
+type WakeWaiting struct {
+	Kind string
+	At   time.Time
 }
 
 // treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
@@ -1014,9 +1030,15 @@ func (m *Machine) current() Claim {
 	return c
 }
 
-// publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
+// publish makes the claim as the machine holds it now the one View reports, with the wake the
+// pacing holds over it, if any: a fresh value each time, since the view is read without mu. The
+// caller holds mu.
 func (m *Machine) publish() {
-	m.view.Store(&ClaimView{Claim: m.current(), Stopping: m.stopping})
+	view := &ClaimView{Claim: m.current(), Stopping: m.stopping}
+	if m.wake != nil {
+		view.WakeWaiting = &WakeWaiting{Kind: m.wake.kind, At: m.wake.at}
+	}
+	m.view.Store(view)
 }
 
 // stoppingProcess marks the claim's process as being stopped for good, for View, until the runtime

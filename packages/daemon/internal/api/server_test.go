@@ -117,9 +117,10 @@ func TestStateRouteServesTheRecord(t *testing.T) {
 		t.Fatalf("state = %+v, want the source's project, boots and cap", got)
 	}
 	// The plugin's reader is strict: a nil Go slice or map on the wire is `null`, which its
-	// schema refuses. The empty record must still be an array and an object.
+	// schema refuses. The empty record must still be an array and an object — `wakesWaiting`
+	// among them, which is empty at every moment outside a wave (contract 49).
 	body := recorder.Body.String()
-	for _, want := range []string{`"active":[]`, `"waiting":[]`, `"issues":{}`} {
+	for _, want := range []string{`"active":[]`, `"waiting":[]`, `"issues":{}`, `"wakesWaiting":[]`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s is missing %s", body, want)
 		}

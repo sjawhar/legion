@@ -369,6 +369,22 @@ func populatedState(t *testing.T) State {
 		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
 		// and nothing retries the claim until its architect retries the phase.
 		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
+		// A wave going out at the pace its operator set, with one wake of each lane still held:
+		// LEGION-207's implementer, working its production check in the pod the daemon keeps, waits
+		// for the update task its plugin round queues it; LEGION-208's architect, already running,
+		// waits for the catch-up a child's re-admission wrote it in place of a launch, which waits
+		// on its outbox row rather than in a machine; and LEGION-208's planner, whose pod answered
+		// its update round, waits for the launch that brings it up on the pod's replacement. The
+		// two machine wakes are over a process that still runs, which the queue holds like any
+		// other, and the three are one list in claim order whichever lane holds each.
+		WakesWaiting: []WakeWaiting{
+			{Claim: "legion-legion-legion-207-implementer", Issue: "LEGION-207", Role: claim.RoleImplementer,
+				Kind: "plugin-task", DueAt: time.Date(2026, 9, 22, 9, 17, 56, 0, time.UTC)},
+			{Claim: "legion-legion-legion-208-architect", Issue: "LEGION-208", Role: claim.RoleArchitect,
+				Kind: "catch-up", DueAt: time.Date(2026, 9, 22, 9, 18, 3, 0, time.UTC)},
+			{Claim: "legion-legion-legion-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner,
+				Kind: "launch", DueAt: time.Date(2026, 9, 22, 9, 18, 11, 0, time.UTC)},
+		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
 			External:     true,

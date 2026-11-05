@@ -8,8 +8,10 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,6 +46,14 @@ type State struct {
 	// role: the trees that will not move again until someone acts. Never null; empty while every
 	// claim is running or waits on something that will wake it.
 	StrandedClaims []StrandedClaim `json:"strandedClaims"`
+	// WakesWaiting is every wake the daemon's pacing holds until its turn
+	// (worker_wakes_per_minute), in claim order: the wave a restart, a re-admission or a plugin
+	// round raised, as far as it has not gone out. It is the two places a wake waits read as one
+	// list — the launches and plugin tasks the machines hold (supervise.ClaimView.WakeWaiting) and
+	// the catch-ups waiting on their outbox rows (WakesWaitingOf). Never null; empty while nothing
+	// waits, which is every moment outside a wave. With `daemon.startedAt` and each claim's
+	// `updateRound` it is what says whether a wave is still running.
+	WakesWaiting []WakeWaiting `json:"wakesWaiting"`
 	// ControllerLocator is the project's controller, absent until a session registers as it: with
 	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
 	// token of the daemon's own controller launch.
@@ -246,8 +256,8 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
-// `null`, which the plugin's strict reader refuses.
+// `strandedClaims`, `wakesWaiting`, `capabilities` and `consumers` arrays on the wire: a nil Go map
+// or slice is `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -262,6 +272,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.StrandedClaims == nil {
 		out.StrandedClaims = []StrandedClaim{}
+	}
+	if out.WakesWaiting == nil {
+		out.WakesWaiting = []WakeWaiting{}
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
@@ -623,6 +636,60 @@ func StrandedByMove(stranded []StrandedClaim) map[StrandedMove][]string {
 		grouped[c.Move()] = append(grouped[c.Move()], c.Issue+" "+string(c.Role))
 	}
 	return grouped
+}
+
+// WakeWaiting is one wake the daemon's pacing holds until its turn, as the state names it
+// (State.WakesWaiting): the claim it will wake, that claim's issue and role, what kind of wake it
+// is, and the moment the pacing gave it, which is when it runs. The kinds are the three lanes the
+// daemon paces, each named as the line that wake writes names it (supervise's wakeRan, the
+// outbox's):
+//
+//   - `launch`, a role process the daemon is about to start, held by the claim's machine;
+//   - `plugin-task`, the update task a stale-plugin round queues to a session already running,
+//     held by the claim's machine too;
+//   - `catch-up`, the notice a start writes to an architect already running in place of a launch,
+//     which waits on its own outbox row rather than in a machine.
+//
+// The project controller's own claim is exempt from the pacing and never waits, so it never
+// appears. A wake over a claim whose process still runs appears like any other: it is a wake the
+// queue holds, whatever the claim does meanwhile.
+type WakeWaiting struct {
+	Claim claim.Token `json:"claim"`
+	Issue string      `json:"issue"`
+	Role  claim.Role  `json:"role"`
+	Kind  string      `json:"kind"`
+	DueAt time.Time   `json:"dueAt"`
+}
+
+// WakesWaitingOf is every wake still waiting, from both of the places one can wait, in claim order:
+// views are the machines of the daemon's supervisor as each last published itself
+// (supervise.Machine.View), which hold the launches and the plugin tasks in memory, and queued are
+// the wakes that wait on a durable row, which the caller composes from the store — today the paced
+// catch-ups (daemon's pacedCatchUps). The two are merged here rather than at either source so that
+// one read of the state is one ordered list, whichever lane is holding a wave back: an operator or
+// a controller asking whether a wave is still running must not have to know which lane each wake of
+// it is in.
+//
+// The machines are read as the operator's claim listing and the capability report read theirs: a
+// reader of every claim never waits on the decision in flight, and reading the wake from the
+// published view rather than from a claim's stored state leaves what every other reader of that
+// state makes of it untouched. Outside a wave nothing waits, so nothing is allocated while both
+// sides are empty; the state's own marshalling is what keeps the empty list an array on the wire
+// (State.MarshalJSON). The sort is stable, so two wakes of one claim — a row and a machine's, or
+// two rows — keep the order their sources gave them.
+func WakesWaitingOf(views []supervise.ClaimView, queued []WakeWaiting) []WakeWaiting {
+	var wakes []WakeWaiting
+	for _, v := range views {
+		if v.WakeWaiting == nil {
+			continue
+		}
+		wakes = append(wakes, WakeWaiting{
+			Claim: v.Token, Issue: v.Issue, Role: v.Role, Kind: v.WakeWaiting.Kind, DueAt: v.WakeWaiting.At,
+		})
+	}
+	wakes = append(wakes, queued...)
+	slices.SortStableFunc(wakes, func(a, b WakeWaiting) int { return cmp.Compare(a.Claim, b.Claim) })
+	return wakes
 }
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route
