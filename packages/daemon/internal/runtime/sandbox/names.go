@@ -264,8 +264,20 @@ const (
 // without changing the launcher's binding.
 const GitHubDefaultKey = "github-default"
 
+// githubHostsPrefix is the one spelling of the hosts.yml keys' prefix, which GitHubHostsKey
+// writes and GitHubHostsOwner reads back.
+const githubHostsPrefix = "github-hosts-"
+
 // GitHubHostsKey is the role Secret's key holding owner's hosts.yml.
-func GitHubHostsKey(owner string) string { return "github-hosts-" + owner }
+func GitHubHostsKey(owner string) string { return githubHostsPrefix + owner }
+
+// GitHubHostsOwner is the owner a role Secret's key names the hosts.yml of, and whether key is
+// such a key at all: GitHubHostsKey read backwards, so a pod's gh projection can be read as the
+// owners it holds (movedGhOwners). One key of the pair names each owner, the config one naming
+// the same, so the hosts keys alone answer the whole set.
+func GitHubHostsOwner(key string) (owner string, ok bool) {
+	return strings.CutPrefix(key, githubHostsPrefix)
+}
 
 // GitHubConfigKey is the role Secret's key holding owner's config.yml.
 func GitHubConfigKey(owner string) string { return "github-config-" + owner }

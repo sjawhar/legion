@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ArchitectureSource, IssueSummary, ItemBlocks } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -44,7 +45,11 @@ describe("DispatchClient", () => {
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({ issues: [], total: 0, limit: 5, offset: 10 }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await client.listIssuePage(
       { project: "DSP", updated_since: "2026-09-10T12:00:00Z" },
@@ -60,7 +65,11 @@ describe("DispatchClient", () => {
   test("reads a paging Dispatch's page as served", async () => {
     const served = { issues: [issue("DSP-4")], total: 4, limit: 3, offset: 3 };
     const { fetchImpl } = fakeFetch([jsonResponse(served)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     // The page a paging Dispatch cut is the page: nothing is sliced out of it again.
     await expect(
@@ -76,7 +85,11 @@ describe("DispatchClient", () => {
     const { fetchImpl } = fakeFetch([
       jsonResponse(["DSP-1", "DSP-2", "DSP-3", "DSP-4"].map(issue)),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(
       client.listIssuePage({ project: "DSP", status: "todo" }, { limit: 2, offset: 1 })
@@ -99,7 +112,11 @@ describe("DispatchClient", () => {
       new Response("<html>bad gateway</html>", { status: 200 }),
       new Response("{truncat", { status: 200, headers: { "Content-Type": "application/json" } }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
     const refusal = () =>
       client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 }).then(
         () => "",
@@ -130,7 +147,11 @@ describe("DispatchClient", () => {
       jsonResponse({ issues: [issue("DSP-2")], total: 5, limit: 1 }),
       jsonResponse({ issues: [issue("DSP-2")], total: 5, limit: "1", offset: 1 }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     for (const lacking of [
       "a numeric limit or a numeric offset",
@@ -149,7 +170,11 @@ describe("DispatchClient", () => {
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({ issues: [issue("DSP-1")], total: 251, limit: 50, offset: 0 }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.listAllIssues({ project: "DSP", status: "needs_review" })).rejects.toThrow(
       "GET http://dispatch.test/api/v1/issues?project=DSP&status=needs_review asked for the " +
@@ -175,7 +200,11 @@ describe("DispatchClient", () => {
       { total: 1, reachable: 1, limit: 5, offset: 10, took_ms: 12 }
     );
     const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(
       client.search("astrolabe sextant", { project: "LEGION", limit: 5, offset: 10 })
@@ -202,7 +231,11 @@ describe("DispatchClient", () => {
       asks: [],
     };
     const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.openAsks("session-1", "2026-09-12T00:00:00Z")).resolves.toEqual(body);
 
@@ -227,7 +260,11 @@ describe("DispatchClient", () => {
       asks: [],
     };
     const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.openAsksForProject("CORE")).resolves.toEqual(body);
 
@@ -244,7 +281,11 @@ describe("DispatchClient", () => {
   test("reads a session's answers with since and max_chars, and the caller's signal aborts it", async () => {
     const body = { session_id: "session-1", since: "2026-10-24T00:00:00Z", total: 0, items: [] };
     const { fetchImpl, requests } = fakeFetch([jsonResponse(body), jsonResponse(body)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
     const controller = new AbortController();
 
     await expect(
@@ -273,7 +314,11 @@ describe("DispatchClient", () => {
     const { fetchImpl, requests } = fakeFetch(
       Array.from({ length: 14 }, () => jsonResponse({ ok: true }))
     );
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await client.listProjectArtifacts("CORE", true);
     await client.projectArtifact("CORE", { name: "runbook.md", content: "# Runbook", actor });
@@ -336,7 +381,11 @@ describe("DispatchClient", () => {
       jsonResponse({ last_seq: 4 }),
       jsonResponse([]),
     ]);
-    const client = new DispatchClient("http://dispatch.test/", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test/",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await client.issue({ project: "DSP", title: "Issue", spec: "# Spec", actor });
     await client.getIssue("DSP-1");
@@ -455,7 +504,11 @@ describe("DispatchClient", () => {
     const { fetchImpl } = fakeFetch([
       jsonResponse({ error: "quote is ambiguous", code: "TARGET_AMBIGUOUS", candidates }, 409),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(
       client.docEdit("artifact-1", { ops: [{ op: "delete", find: "same" }], actor })
@@ -494,7 +547,11 @@ describe("DispatchClient", () => {
         409
       ),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(
       client.docEdit("artifact-1", {
@@ -548,7 +605,11 @@ describe("DispatchClient", () => {
         headers: { "Content-Type": "text/html" },
       }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
     const refusal = () =>
       client.getIssueEvents("DSP-1", 4, 10).then(
         () => {
@@ -618,11 +679,17 @@ describe("DispatchClient", () => {
       page(429, "Too Many Requests"),
       page(404, "Not Found"),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, {
-      ...DISPATCH_WRITE_RETRY,
-      pausesMs: [],
-      withinMs: 0,
-    });
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl,
+      undefined,
+      {
+        ...DISPATCH_WRITE_RETRY,
+        pausesMs: [],
+        withinMs: 0,
+      }
+    );
     const refusal = () =>
       client.message("DSP-1", { body: "Shipped.", actor }).then(
         () => {
@@ -683,7 +750,7 @@ describe("DispatchClient", () => {
       new Response(null, { status: 502, statusText: `Denied for ${token} ${"x".repeat(200)}` }),
       new Response(`<p>token=${token}</p>`, { status: 401, statusText: "Unauthorized" }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", token, fetchImpl);
+    const client = new DispatchClient("http://dispatch.test", bearerCredential(token), fetchImpl);
     const refusal = (from: DispatchClient) =>
       from.getIssue("DSP-1").then(
         () => "",
@@ -708,7 +775,11 @@ describe("DispatchClient", () => {
       `${request}502 Denied for [redacted] ${"x".repeat(98)}… with an empty body${gateway}, so a ` +
         "retry may succeed."
     );
-    const untrimmed = new DispatchClient("http://dispatch.test", ` ${token}\n`, fetchImpl);
+    const untrimmed = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential(` ${token}\n`),
+      fetchImpl
+    );
     const echoedTrimmed = await refusal(untrimmed);
     expect(echoedTrimmed).toContain('("token=[redacted]")');
     for (const message of [unauthorized, echoedJson, reasonPhrase, echoedTrimmed]) {
@@ -741,7 +812,11 @@ describe("DispatchClient", () => {
       const { fetchImpl } = fakeFetch([
         new Response(hostile, { status: 502, headers: { "Content-Type": "text/html" } }),
       ]);
-      const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+      const client = new DispatchClient(
+        "http://dispatch.test",
+        bearerCredential("secret"),
+        fetchImpl
+      );
       const started = performance.now();
       const message = await client.getIssue("DSP-1").then(
         () => "",
@@ -774,7 +849,7 @@ describe("DispatchClient", () => {
         (body) => new Response(body, { status: 502, headers: { "Content-Type": "text/html" } })
       )
     );
-    const client = new DispatchClient("http://dispatch.test", bearer, fetchImpl);
+    const client = new DispatchClient("http://dispatch.test", bearerCredential(bearer), fetchImpl);
     const refusal = () =>
       client.getIssue("DSP-1").then(
         () => "",
@@ -834,7 +909,11 @@ describe("DispatchClient", () => {
     const { fetchImpl } = fakeFetch([
       new Response(body, { status: 502, headers: { "Content-Type": "text/html" } }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", pieceBearer, fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential(pieceBearer),
+      fetchImpl
+    );
 
     const message = await client.getIssue("DSP-1").then(
       () => "",
@@ -859,7 +938,11 @@ describe("DispatchClient", () => {
         headers: { "Content-Type": "text/html" },
       }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "x".repeat(2048), fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("x".repeat(2048)),
+      fetchImpl
+    );
     const started = performance.now();
 
     const message = await client.getIssue("DSP-1").then(
@@ -883,7 +966,11 @@ describe("DispatchClient", () => {
         headers: { "Content-Type": "text/html" },
       }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
     const refusal = () =>
       client.getIssue("DSP-1").then(
         () => "",
@@ -908,7 +995,11 @@ describe("DispatchClient", () => {
       jsonResponse({ code: "ISSUE_CLOSED", error: "issue is closed" }, 409),
       jsonResponse({ error: "no route for GET /api/v1/issues/DSP-1" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.getIssue("DSP-1")).rejects.toEqual(
       expect.objectContaining({ code: "ISSUE_CLOSED", status: 409, message: "issue is closed" })
@@ -928,7 +1019,11 @@ describe("DispatchClient", () => {
       jsonResponse({ key: "DSP-42", last_seq: 3 }),
       jsonResponse([]),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await client.read("owner/repo#42");
 
@@ -952,9 +1047,12 @@ describe("DispatchClient", () => {
       page(1, 200),
     ]);
     await expect(
-      new DispatchClient("http://dispatch.test", "secret", stuck.fetchImpl).read("DSP-1", {
-        events: "all",
-      })
+      new DispatchClient("http://dispatch.test", bearerCredential("secret"), stuck.fetchImpl).read(
+        "DSP-1",
+        {
+          events: "all",
+        }
+      )
     ).rejects.toThrow("GET /api/v1/issues/DSP-1/events?after=200 answered no event after seq 200");
     expect(stuck.requests.map((request) => new URL(request.url).search)).toEqual([
       "",
@@ -963,9 +1061,11 @@ describe("DispatchClient", () => {
     ]);
 
     const last = fakeFetch([jsonResponse({ key: "DSP-1", last_seq: 50 }), page(1, 10)]);
-    const read = await new DispatchClient("http://dispatch.test", "secret", last.fetchImpl).read(
-      "DSP-1"
-    );
+    const read = await new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      last.fetchImpl
+    ).read("DSP-1");
     expect(read.events.map((event) => event.seq)).toEqual(
       Array.from({ length: 10 }, (_, index) => index + 1)
     );
@@ -1003,7 +1103,11 @@ describe("DispatchClient", () => {
         ],
       }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await client.getComment("comment-1");
     expect(
@@ -1023,7 +1127,11 @@ describe("DispatchClient", () => {
       jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
       jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     expect(await client.commentBlocks("comment-1")).toEqual(blocks);
     await client.messageBlocks("message-1");
@@ -1052,7 +1160,7 @@ test("maps an ask resolution to the authenticated API", async () => {
       },
     }),
   ]);
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+  const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
   const resolveAsk = Reflect.get(client, "resolveAsk");
 
   expect(typeof resolveAsk).toBe("function");
@@ -1076,7 +1184,7 @@ test("maps an ask resolution to the authenticated API", async () => {
 test("createProject posts the key, name and actor and answers the created project", async () => {
   const project = { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-10-11T00:00:00Z" };
   const { fetchImpl, requests } = fakeFetch([jsonResponse(project, 201)]);
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+  const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
 
   expect(await client.createProject({ key: "CORE", name: "Core", actor })).toEqual(project);
   expect(requests.map((request) => [request.init.method, new URL(request.url).pathname])).toEqual([
@@ -1089,7 +1197,7 @@ test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => 
   const { fetchImpl } = fakeFetch([
     jsonResponse({ code: "PROJECT_EXISTS", error: "a project with this key already exists" }, 409),
   ]);
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+  const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
 
   await expect(client.createProject({ key: "CORE", name: "Core", actor })).rejects.toMatchObject({
     code: "PROJECT_EXISTS",
@@ -1115,7 +1223,7 @@ test("maps handoff writes and reads to the handoff routes, the body sent as its 
     jsonResponse({ ...summary, body }),
     jsonResponse({ ...summary, body }),
   ]);
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+  const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
 
   expect(await client.writeHandoff("DSP-1", "implement", { actor, body })).toEqual(summary);
   expect(await client.listHandoffs("DSP-1")).toEqual([summary]);
@@ -1132,7 +1240,7 @@ test("maps handoff writes and reads to the handoff routes, the body sent as its 
 
 test("syncArchitectureSource refuses a repository with an empty owner or name without a request", async () => {
   const { fetchImpl, requests } = fakeFetch([]);
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+  const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
 
   for (const repo of ["acme/", "/infra"]) {
     await expect(client.syncArchitectureSource("CORE", repo)).rejects.toThrow(
@@ -1176,7 +1284,11 @@ describe("listArchitectureSources against a server older than the list route", (
     ["a row as that one source", jsonResponse(source), [source]],
   ])("reads the singular route's %s", async (_answer, singular, want) => {
     const { fetchImpl, requests } = fakeFetch([noRoute.clone(), singular]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     expect(await client.listArchitectureSources("CORE")).toEqual(want);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
@@ -1190,7 +1302,11 @@ describe("listArchitectureSources against a server older than the list route", (
       noRoute.clone(),
       jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
       code: "NOT_FOUND",
@@ -1203,7 +1319,11 @@ describe("listArchitectureSources against a server older than the list route", (
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
       code: "NOT_FOUND",
@@ -1240,7 +1360,11 @@ describe("syncArchitectureSources against a server older than the every-source s
 
   test("returns the singular sync's row as that one source", async () => {
     const { fetchImpl, requests } = fakeFetch([noRoute.clone(), jsonResponse(source)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     expect(await client.syncArchitectureSources("CORE")).toEqual([source]);
     expect(
@@ -1256,7 +1380,11 @@ describe("syncArchitectureSources against a server older than the every-source s
       noRoute.clone(),
       jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
       code: "SOURCE_NOT_FOUND",
@@ -1269,7 +1397,11 @@ describe("syncArchitectureSources against a server older than the every-source s
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      bearerCredential("secret"),
+      fetchImpl
+    );
 
     await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
       code: "NOT_FOUND",

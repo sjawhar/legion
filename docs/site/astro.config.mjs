@@ -105,7 +105,7 @@ function thirdPartyNotices() {
 // Built by the docs job of .github/workflows/ci.yaml on pull requests and merge groups, and
 // built and published to GitHub Pages by .github/workflows/docs-pages.yaml on a push to main, at
 // the address .github/scripts/repo-paths.sh derives from the repository the build runs in -
-// https://sjawhar.github.io/legion/ today (repo-paths.ts).
+// https://cybermonklabs.github.io/legion/ today (repo-paths.ts).
 export default defineConfig({
   site: repoPaths.docs_site,
   base: repoPaths.docs_base,

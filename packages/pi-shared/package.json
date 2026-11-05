@@ -37,6 +37,10 @@
       "types": "./src/shell-command.ts",
       "bun": "./src/shell-command.ts"
     },
+    "./dispatch-session-id": {
+      "types": "./src/dispatch-session-id.ts",
+      "bun": "./src/dispatch-session-id.ts"
+    },
     "./daemon-client": {
       "types": "./src/daemon-client.ts",
       "bun": "./src/daemon-client.ts"
@@ -64,6 +68,10 @@
     "./phase-reminder": {
       "types": "./src/phase-reminder.ts",
       "bun": "./src/phase-reminder.ts"
+    },
+    "./session-activity": {
+      "types": "./src/session-activity.ts",
+      "bun": "./src/session-activity.ts"
     },
     "./stall-limits": {
       "types": "./src/stall-limits.ts",

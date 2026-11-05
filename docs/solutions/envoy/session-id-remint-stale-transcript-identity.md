@@ -79,7 +79,7 @@ Root cause was established from durable evidence, not point-in-time tool calls:
    `envoy_whoami` calls coexisted in the surviving transcript — the first id's whoami
    output was still being echoed after two rewinds.
 
-The fix (PR [sjawhar/legion#775](https://github.com/sjawhar/legion/pull/775),
+The fix (PR [sjawhar/legion#775](https://github.com/cybermonklabs/legion/pull/775),
 `packages/pi-envoy/extensions/envoy.ts`) adds an identity-change notice to `rebind`:
 
 ```ts

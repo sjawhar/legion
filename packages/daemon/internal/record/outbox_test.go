@@ -29,7 +29,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
 		ControllerNotice{Kind: TickNotice, OpenCapabilities: []string{"secrets", "resource-limits"}},
 		ControllerNotice{Kind: UpdateStalledNotice, Reason: "the round has waited 4h0m0s", Update: &UpdateStalled{
-			Round: "pod:9d3f0c7a", Pod: "9d3f0c7a", Reasons: "image ghcr.io/sjawhar/legion-worker:v1, now ghcr.io/sjawhar/legion-worker:v2",
+			Round: "pod:9d3f0c7a", Pod: "9d3f0c7a", Reasons: "image ghcr.io/cybermonklabs/legion-worker:v1, now ghcr.io/cybermonklabs/legion-worker:v2",
 			Waiting: []UpdateWaiting{{Claim: "legion-LEGION-208-implementer", Role: claim.RoleImplementer, State: "failed"}},
 		}},
 		ControllerNotice{Kind: ProviderErrorsNotice, Role: claim.RoleImplementer,
@@ -162,7 +162,7 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded}
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueBundle, OutboxKindIssueRelease}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {

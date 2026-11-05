@@ -3,7 +3,7 @@
 // repository. The docs build shells out to that bash script instead of deriving anything here so
 // that the workflows and the site read one source, and moving the repository to another owner or
 // name stays one environment value. Off a runner $GITHUB_REPOSITORY is unset and the script
-// answers today's sjawhar/legion, so a local `bun run docs:build` builds today's site.
+// answers today's cybermonklabs/legion, so a local `bun run docs:build` builds today's site.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 

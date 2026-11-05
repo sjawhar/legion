@@ -27,7 +27,7 @@ related_issues:
 ## Evidence
 
 The kept-decision model (`packages/daemon/internal/daemon/kept_decision_property_test.go`) flagged seed 41:
-a catch-up told a decision, its own telling write failed by injection, and a later catch-up told it again, which the architect ruled acceptable (https://github.com/sjawhar/legion/pull/2163#issuecomment-6542200410).
+a catch-up told a decision, its own telling write failed by injection, and a later catch-up told it again, which the architect ruled acceptable (https://github.com/cybermonklabs/legion/pull/2163#issuecomment-6542200410).
 The injector `keptForgetStore` records the failed telling by the outbox row its publish went out under (`failedTellings`, `:347`, read by `tellingFailed`, `:364`), and `keptRun.tell` (`:3162`) excuses a second telling only when that earlier telling's row is recorded, at most once and never beside a retold task.
 A throwaway driver of `tell` showed a repeat with no failed write, a third telling and a retold prompt after a failed catch-up each still rejected;
 the tester made the exception unconditional and saw a double telling with no failed write pass.

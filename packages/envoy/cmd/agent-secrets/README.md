@@ -44,32 +44,25 @@ any session. `agent-secrets enroll --helper` is open to any process of the user,
 can also enroll a box and read the operator's agent secrets. `agent-secrets --help` lists every
 form, and each form answers `-h`.
 
+A value is injected exactly as it is stored, line endings and all: a stored secret may
+legitimately be several lines, a PEM document among them. A one-line credential that ends in a
+line ending, though, is nearly always a seeding mistake — the trailing newline of whatever
+produced it, kept by a `gcloud secrets versions add --data-file=-` or an `aws secretsmanager
+put-secret-value` where a single trailing LF is what `secret set` would have removed. It is
+invisible where it is written
+and expensive where it is read: a caller that puts such a value straight into an HTTP header gets
+a rejected header, and the error reporting that can quote the whole secret into a log or a saved
+session (dispatch://INFRA-1042). So the exec form writes one more line to standard error before
+the command runs, naming each released secret whose value ends in a line ending and never any
+part of a value. Keep the ending where the value is meant to end that way; where it is not,
+store the value again with `agent-secrets secret set`, piping it with the ending already
+removed, because that form drops one final LF from its standard input and no carriage return —
+a value re-piped as it stands keeps the CR of a CRLF, keeps a lone CR, and keeps every LF but
+the last.
+
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
-
-A Google Cloud VM needs no credential a person installs and no machine login a person approves: it
-logs in and enrols itself with the identity token its own metadata server signs. It then holds a
-session key and its enrollment id in its key dir, as a box does, and a machine login, which
-Dispatch's machine-login page lists; each `enroll --vm` run logs in again with a launcher key it
-keeps only in memory.
-
-```sh
-export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
-export AGENT_SECRETS_AUDIENCE=example-vm-audience
-agent-secrets enroll --vm --service example-fleet
-agent-secrets renew --vm &
-agent-secrets DEMO_API_KEY --reason "Run the lane" -- ./lane.sh
-```
-
-`enroll --vm` writes `key.pem` and `enrollment` into `AGENT_SECRETS_KEY_DIR` (`--out` names
-another directory) and prints the enrollment id, alone, on stdout. Re-running it on the same
-directory keeps that key, gets its own live enrollment back and renews that enrollment's lease,
-so a VM that re-runs `enroll --vm` often enough needs no `renew --vm` at all; concurrent runs on
-one directory take turns on `<out>/enroll.lock`. `renew --vm` is the other way to hold the lease:
-it asks the metadata server for a fresh token before every renewal, since a VM enrollment's
-renewal must carry one. `GCE_METADATA_HOST` replaces the metadata server's host. Every other
-form then reads the key dir as a box's or a pod's.
 
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
@@ -87,14 +80,14 @@ with `set -eu`, so a failed download or checksum stops them before anything is i
 
 ```sh
 asset=${asset:-agent-secrets-amd64.tar.gz}
-tag=legion-envoy-$(curl -fsSL 'https://github.com/sjawhar/legion.git/info/refs?service=git-upload-pack' \
+tag=legion-envoy-$(curl -fsSL 'https://github.com/cybermonklabs/legion.git/info/refs?service=git-upload-pack' \
   | grep -aoE 'refs/tags/legion-envoy-v[0-9]+\.[0-9]+\.[0-9]+([^-0-9]|$)' | grep -aoE 'v[0-9.]+[0-9]' \
   | sort -u -t . -k 1.2,1n -k 2,2n -k 3,3n | tail -n 1)
 (
   set -eu
   test "$tag" != legion-envoy-
   echo "installing $tag"
-  base=https://github.com/sjawhar/legion/releases/download/$tag
+  base=https://github.com/cybermonklabs/legion/releases/download/$tag
   curl -fsSLO "$base/$asset"
   curl -fsSLO "$base/SHA256SUMS"
   grep " $asset\$" SHA256SUMS > "$asset.sha256"
@@ -116,10 +109,10 @@ workflow on `main` built the archive from the commit the tag names, run, in the 
 the GitHub CLI signed in:
 
 ```sh
-commit=$(gh api "repos/sjawhar/legion/commits/$tag" --jq .sha) &&
+commit=$(gh api "repos/cybermonklabs/legion/commits/$tag" --jq .sha) &&
   test -n "$commit" &&
-  gh attestation verify "$asset" --repo sjawhar/legion \
-    --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  gh attestation verify "$asset" --repo cybermonklabs/legion \
+    --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
     --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
 ```
 
@@ -158,7 +151,7 @@ agent-secrets register --wait 10 --exec -- <agent command>
 
 A Kubernetes pod or a Google Cloud VM does not use the helper or a person's approval: the Legion
 daemon enrolls its pods with their service-account tokens, and a VM enrolls itself (above). The
-docs site's [Log a machine in](https://sjawhar.github.io/legion/broker/guides/log-a-machine-in/)
+docs site's [Log a machine in](https://cybermonklabs.github.io/legion/broker/guides/log-a-machine-in/)
 guide covers each step in full.
 
 ## Common commands
@@ -170,7 +163,7 @@ Your own `tier=human` secret always goes to you for approval. A `shared` agent-t
 granted at once; a `shared` human-tier one waits for anyone who signs in to the broker. A
 service's secret goes only to that service's pods and VMs. Approvals happen on the broker's
 approval page, which the approver's Dispatch Inbox links to. The docs site's
-[Concepts](https://sjawhar.github.io/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) page has the full
+[Concepts](https://cybermonklabs.github.io/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) page has the full
 table.
 
 ```sh

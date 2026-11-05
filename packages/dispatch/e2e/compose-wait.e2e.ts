@@ -1,14 +1,18 @@
 /** A person takes as long as they like to write a comment on a document (dispatch://INFRA-727).
  *
  *  Each row opens the margin composer from a selection, leaves it open while something that can
- *  take the provisional mark away happens, and then presses Send. Every row records, each second,
- *  whether the mark's span is still in the page, and prints that line with the row's result: it is
- *  what tells a sweep (the span goes at about 62 s, one `unrecordedMarkTTL` after the settlement
- *  that first saw it) from a reconnect (the span goes when the socket does).
+ *  take the provisional mark away happens, and then presses Send. Every row records, every
+ *  `SAMPLE_MS`, whether the mark's span is still in the page, and prints that line with the row's
+ *  result: it is what tells a sweep (the span goes at `SWEPT_AT_MS`, one unrecorded-mark TTL
+ *  after the settlement that first saw it) from a reconnect (the span goes when the socket does).
  *
- *  Real server timings are used throughout - `Settle` 2 s, `unrecordedMarkTTL` 1 minute,
- *  `markWait` 1 s - so these rows exercise the default path a person meets. That is why each sets
- *  its own 240 s timeout, as `deep-links.e2e.ts:47` and `failed-room.e2e.ts:115` do. */
+ *  All three waits these rows turn on are the server's own timers, which no page clock reaches,
+ *  so each is shortened at the server: the harness runs it with `DISPATCH_TEST_SETTLE_DELAY`,
+ *  `DISPATCH_TEST_UNRECORDED_MARK_TTL` and `DISPATCH_TEST_MARK_WAIT` (`e2e/run-server.sh`) in
+ *  place of the document service's own 2 s, minute and second. The path is the one a person
+ *  meets; only its scale is the harness's, and the constants below are where that scale is
+ *  written down. At that scale no row needs a timeout of its own: each fits the suite's 30 s
+ *  (`e2e/playwright.config.ts`). */
 import { expect, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, editArtifact, listComments } from "./api";
@@ -37,10 +41,23 @@ const SPEC = [
 ].join("\n");
 /** A passage that occurs once in SPEC, so an anchor on it is unambiguous. */
 const QUOTE = "jumps over the lazy dog";
-/** How long after the mark is written the unrecorded-mark sweep has had its chance: the
- *  settlement that records the mark's first-seen time runs 2 s after it arrives, and the sweep
- *  expires it one `unrecordedMarkTTL` (1 minute) after that. */
-const PAST_THE_SWEEP_MS = 70_000;
+/** The settlement delay this harness runs the server with: `DISPATCH_TEST_SETTLE_DELAY` in
+ *  `e2e/run-server.sh`, in place of the document service's own 2 s. */
+const SETTLE_MS = 250;
+/** The unrecorded-mark TTL this harness runs the server with: `DISPATCH_TEST_UNRECORDED_MARK_TTL`
+ *  in `e2e/run-server.sh`, in place of the document service's own minute. */
+const UNRECORDED_MARK_TTL_MS = 4_000;
+/** How often a row reads the mark's span. The settle delay is the shortest step the server takes
+ *  here, so a sample that often resolves every one of them. */
+const SAMPLE_MS = SETTLE_MS;
+/** When the sweep takes a mark no row records and no connected author keeps: the settlement that
+ *  records its first-seen time runs one settle delay after the mark arrives, and the sweep
+ *  expires it one TTL after that. */
+const SWEPT_AT_MS = SETTLE_MS + UNRECORDED_MARK_TTL_MS;
+/** How long after the mark is written the sweep has had its chance: past `SWEPT_AT_MS` by the
+ *  margin the settlement that carries the sweep, and the sync that takes the span off the page,
+ *  need to land. */
+const PAST_THE_SWEEP_MS = SWEPT_AT_MS + 4 * SAMPLE_MS;
 /** The composer's message when the selected text is gone and nothing can be anchored to it. */
 const GONE_MESSAGE =
   "The text you selected was changed or deleted, so this comment has nothing to attach to. " +
@@ -57,9 +74,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-/** Samples whether `markId`'s span is in `page` once a second until `untilMs` after `writtenAt`,
- *  appending `<seconds>s:<present|gone>` to `log`. The row waits by sampling, so nothing else
- *  touches the page while it runs. */
+/** Samples whether `markId`'s span is in `page` every `SAMPLE_MS` until `untilMs` after
+ *  `writtenAt`, appending `<milliseconds>ms:<present|gone>` to `log`. The row waits by sampling,
+ *  so nothing else touches the page while it runs. */
 async function watchMark(
   page: Page,
   markId: string,
@@ -69,21 +86,21 @@ async function watchMark(
 ): Promise<void> {
   while (Date.now() - writtenAt < untilMs) {
     const present = (await markSpan(page, markId).count()) > 0;
-    const second = Math.round((Date.now() - writtenAt) / 1000);
-    log.push(`${second}s:${present ? "present" : "gone"}`);
-    await page.waitForTimeout(1_000);
+    const at = Math.round((Date.now() - writtenAt) / SAMPLE_MS) * SAMPLE_MS;
+    log.push(`${at}ms:${present ? "present" : "gone"}`);
+    await page.waitForTimeout(SAMPLE_MS);
   }
 }
 
-/** Whether the mark's span was in the page at about `second` seconds after it was written: the
- *  first sample taken at or after it, since the sampler loses a second now and then on a loaded
+/** Whether the mark's span was in the page at about `at` milliseconds after it was written: the
+ *  first sample taken at or after it, since the sampler loses a period now and then on a loaded
  *  two-core box and an exact label would make the row flake rather than measure. */
-function presentAt(log: readonly string[], second: number): boolean {
+function presentAt(log: readonly string[], at: number): boolean {
   return (
     log
       .find((sample) => {
-        const at = Number.parseInt(sample, 10);
-        return Number.isFinite(at) && at >= second;
+        const taken = Number.parseInt(sample, 10);
+        return Number.isFinite(taken) && taken >= at;
       })
       ?.endsWith(":present") ?? false
   );
@@ -127,10 +144,11 @@ async function reviewIssue() {
   return createIssue({ project: "CORE", spec: SPEC, title: "Review the spec" });
 }
 
+// SLOW(>=2s): the row watches the sweep's own window go by on the server, which no page clock
+// reaches: one settle delay and one unrecorded-mark TTL, plus the margin the sweep lands in.
 test("a comment written for longer than the unrecorded-mark TTL keeps its anchor", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(240_000);
   const issue = await reviewIssue();
   const alice = await asUser(browser, "alice");
   const log: string[] = [];
@@ -142,7 +160,9 @@ test("a comment written for longer than the unrecorded-mark TTL keeps its anchor
     await watchMark(page, markId, writtenAt, PAST_THE_SWEEP_MS, log);
     await testInfo.attach("mark-span-presence", { body: log.join(" "), contentType: "text/plain" });
     console.log(`long compose: ${log.join(" ")}`);
-    expect(presentAt(log, 10)).toBe(true);
+    // Her browser is on the room, so the sweep keeps the mark however long she writes: it is
+    // still there at the moment a mark no connected author keeps would have gone.
+    expect(presentAt(log, SWEPT_AT_MS)).toBe(true);
 
     await send(page);
     const comment = await theComment(issue.key, issue.primary_artifact_id);
@@ -157,10 +177,11 @@ test("a comment written for longer than the unrecorded-mark TTL keeps its anchor
   }
 });
 
+// SLOW(>=2s): the span has to be read past the moment the sweep would have taken it, so the row
+// outlasts one settle delay and one unrecorded-mark TTL of the server's.
 test("a comment written across a socket reconnect keeps its anchor", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(240_000);
   const issue = await reviewIssue();
   const alice = await asUser(browser, "alice");
   const log: string[] = [];
@@ -168,14 +189,19 @@ test("a comment written across a socket reconnect keeps its anchor", async ({
     const page = await alice.newPage();
     const transport = await documentTransport(page);
     const { markId, writtenAt } = await openComposer(page, issue.key, "Reconnected mid-sentence.");
-    await watchMark(page, markId, writtenAt, 5_000, log);
+    // A sample or two first, past the settlement that records the mark's first-seen time.
+    await watchMark(page, markId, writtenAt, SETTLE_MS + SAMPLE_MS, log);
     log.push("severed");
     await transport.sever();
     await expect(connectedDot(page)).toHaveText("connected");
     log.push("reconnected");
-    await watchMark(page, markId, writtenAt, 15_000, log);
+    await watchMark(page, markId, writtenAt, PAST_THE_SWEEP_MS, log);
     await testInfo.attach("mark-span-presence", { body: log.join(" "), contentType: "text/plain" });
     console.log(`reconnect: ${log.join(" ")}`);
+    // The tab was away for the reconnect, and a browser that comes back keeps its author's mark:
+    // the span is still there at the moment the sweep would have taken it. That is the one
+    // reading of this log that a reconnect mistaken for a sweep does not give.
+    expect(presentAt(log, SWEPT_AT_MS)).toBe(true);
 
     await send(page);
     const comment = await theComment(issue.key, issue.primary_artifact_id);
@@ -190,10 +216,11 @@ test("a comment written across a socket reconnect keeps its anchor", async ({
   }
 });
 
+// SLOW(>=2s): the sweep this row waits out is the server's, a settle delay and an
+// unrecorded-mark TTL after the mark was written, with nothing on the page to drive it.
 test("a comment written while its author is offline past the TTL keeps its anchor", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(240_000);
   const issue = await reviewIssue();
   const alice = await asUser(browser, "alice");
   const log: string[] = [];
@@ -210,7 +237,9 @@ test("a comment written while its author is offline past the TTL keeps its ancho
     await transport.release();
     await expect(connectedDot(page)).toHaveText("connected");
     log.push("online");
-    await watchMark(page, markId, writtenAt, PAST_THE_SWEEP_MS + 5_000, log);
+    // A couple of samples with the tab back, which is where the log shows the span gone for good
+    // rather than gone with the socket.
+    await watchMark(page, markId, writtenAt, Date.now() - writtenAt + 2 * SAMPLE_MS, log);
     await testInfo.attach("mark-span-presence", { body: log.join(" "), contentType: "text/plain" });
     console.log(`offline: ${log.join(" ")}`);
 
@@ -233,7 +262,6 @@ test("a comment written while its author is offline past the TTL keeps its ancho
 test("a comment whose mark another writer's edit removed re-anchors to the same text", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   const issue = await reviewIssue();
   const alice = await asUser(browser, "alice");
   try {
@@ -272,7 +300,6 @@ test("a comment whose mark another writer's edit removed re-anchors to the same 
 test("a comment whose selected text another writer deleted says so and keeps its draft", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   const issue = await reviewIssue();
   const alice = await asUser(browser, "alice");
   try {
@@ -379,10 +406,11 @@ function markOffsets(page: Page): Promise<{ id: string; offset: number }[]> {
  *  never changes: the sweep takes the mark while the tab is away, and Send has to put the comment
  *  on the reading its author selected - the second one here, at character 62 of the paragraph -
  *  not refuse it as text that "was changed or deleted" (dispatch://INFRA-727 acceptance 2). */
+// SLOW(>=2s): the mark goes to the server's sweep while the tab is away, one settle delay and
+// one unrecorded-mark TTL after it was written, which no page clock can bring forward.
 test("a comment on words that read twice keeps the reading its author selected", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   const issue = await repeatedIssue();
   const alice = await asUser(browser, "alice");
   try {
@@ -423,7 +451,6 @@ test("a comment on words that read twice keeps the reading its author selected",
 test("an ask whose selected text another writer deleted is not called a comment", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   const issue = await reviewIssue();
   const alice = await asUser(browser, "alice");
   try {
@@ -487,7 +514,6 @@ function readingOffsets(page: Page): Promise<number[]> {
 test("a comment keeps its own reading when another writer adds an earlier one", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -571,7 +597,6 @@ const TWO_PARAGRAPH_SPEC = [
 test("a comment whose own paragraph lost the words is not moved to another paragraph", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -621,7 +646,6 @@ test("a comment whose own paragraph lost the words is not moved to another parag
 test("a comment is not moved to the block's other reading when its own words are deleted", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -712,8 +736,9 @@ async function selectAcrossBlocks(page: Page, from: string, to: string): Promise
  *  to be found: the editor reads the document as one text, break and all, and attaches where
  *  those words read once. Here the sweep takes the mark while the author is away and the
  *  document's own text never changes. */
+// SLOW(>=2s): the mark goes to the server's sweep while the tab is away, one settle delay and
+// one unrecorded-mark TTL after it was written, which no page clock can bring forward.
 test("a comment on words that run across two paragraphs keeps its anchor", async ({ browser }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -772,7 +797,6 @@ const ACROSS_BLOCKS_TWICE_SPEC = [
 test("a cross-block refusal does not claim the words moved while they are where they were", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -840,10 +864,11 @@ const WHOLE_BLOCK_ELSEWHERE_SPEC = [
  *  reader's tab is away long enough for the sweep to take the mark while another writer rewrites
  *  that block to read those words twice, among different text both times. Neither reading is the
  *  reader's, so Send attaches to neither and says so. */
+// SLOW(>=2s): the mark goes to the server's sweep while the tab is away, one settle delay and
+// one unrecorded-mark TTL after it was written, which no page clock can bring forward.
 test("a comment on a whole block is not attached to either reading a rewrite of that block leaves", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -901,10 +926,11 @@ test("a comment on a whole block is not attached to either reading a rewrite of 
  *  take the mark, and the same words read once more somewhere else, among words they never read
  *  beside them. That is another passage, so the comment stays unattached and the reader is told,
  *  rather than being moved there with nothing said. */
+// SLOW(>=2s): the mark goes to the server's sweep while the tab is away, one settle delay and
+// one unrecorded-mark TTL after it was written, which no page clock can bring forward.
 test("a comment on a whole block that is deleted is not moved to the one reading left elsewhere", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -975,10 +1001,11 @@ const HARD_BREAK_SPEC = [
  *  edges, however much the document's text reads like it does: a hard break is a newline there,
  *  and so is every line of a code block. The comment belongs to neither, so once the reader's own
  *  block has lost the words Send attaches nothing and says so. */
+// SLOW(>=2s): the mark goes to the server's sweep while the tab is away, one settle delay and
+// one unrecorded-mark TTL after it was written, which no page clock can bring forward.
 test("a comment on a whole block is not moved to a line of another paragraph", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",

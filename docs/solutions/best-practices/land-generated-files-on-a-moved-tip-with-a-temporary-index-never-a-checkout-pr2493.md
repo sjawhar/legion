@@ -39,6 +39,6 @@ module: .github/scripts
   hazard in rule 2 ("Checking out the tip rewrites the running script", plan D3.7).
 - `built_landed` (`.github/scripts/release-push.test.sh`, push-built section) asserts rule 4 on a
   local bare origin for every landing case.
-- The real-history run on a clone of sjawhar/legion landed one github-actions[bot] commit whose one
+- The real-history run on a clone of cybermonklabs/legion landed one github-actions[bot] commit whose one
   parent was main's moved tip, with 0 paths outside `dist/` and `legion/`
   (sjawhar/legion#2493, comment 6491547551).

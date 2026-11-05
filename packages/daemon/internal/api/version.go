@@ -262,7 +262,7 @@ package api
 // declaring it, then sjawhar/legion#2009 at 32 and released pi-legion v10.10.0 declaring it, each
 // without these shapes, so this branch takes the number above it, as the collision note says.)
 //
-// 34: sjawhar/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
+// 34: cybermonklabs/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
 // `/legion/scratch` (scratchRoot), and the values `mainEnvironment` sets name its directories:
 // every role container of a pod, a workflow role's and the controller's, is told the same
 // `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR` —
@@ -298,14 +298,14 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// 36: INFRA-229 (cybermonklabs/legion) -- `api.PullRequestView` gains `state`, the pull request's
 // `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
 // issue beneath it is still in the workflow and a merged root's close waits for the rest of its
 // tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
 // request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
 // request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
 //
-// 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
+// 37: cybermonklabs/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
 // generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
 // with the pod and deletes with it, so an issue's Sandbox owns no volume claim template and a
 // stopped issue's Sandbox is always deleted. Nothing carries a disk from one pod to the next, so
@@ -329,7 +329,7 @@ package api
 // released pi-legion declaring it, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 38: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// 38: cybermonklabs/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
 // issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
 // and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
 // keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no
@@ -501,22 +501,44 @@ package api
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
 //
-// 47: INFRA-956 -- the turn-outcome report. `POST /legion/v1/claims/turn-outcome` is a new claim
-// route in the shape of `claims/ready` (`claim.TurnOutcomeRequest`: `claimToken`, `sessionId`,
-// `secret`, `generation`, a `sequence` counted from 1 within that generation, an `outcome` of
-// `clean`, `refused` or `provider-error`, and an optional `category`), answering 204. It is how
-// the agent's own plugin tells the daemon a provider's content filter refused the turn, which
-// the same session often takes on a weaker model, apart from a 429 or a malformed request, which
-// may not clear that way. The plugin classifies the turn and the daemon parses no provider text:
-// `category` is the refusal's own category (`reasoning_extraction`) and no field carries the
-// provider's words. pi-legion reports every settled turn of a claim's session from its
-// `agent_end` hook (`packages/pi-legion/src/turn-outcome.ts`); a plugin before 47 reports none,
-// and a daemon before 47 answers the post a 404, so the boot gate and `legion probe-image`
-// refuse either pair. The daemon keeps the newest report on the claim's machine, in memory, and
-// nothing else: it is read within two minutes of the turn it is about, so no store write and no
-// migration come with it (`internal/supervise/turnoutcome.go`).
+// 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// released claim is a new suspension source. Each session reports its activity to the daemon on
+// POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
+// runs background work and of which kinds, and when the phase reminder armed in it is due, if
+// one still is. The daemon releases an issue pod no claim of which has reported
+// background work and none of whose phase workers is due a reminder inside the idle period
+// (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
+// `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
+// which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
+// which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
+// knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
+// and the image that runs its roles together. A claim may read the deployment's release, resume
+// and hold records on POST /legion/v1/claims/release-records, which names its claim, that
+// claim's secret and the window's start in its body, as the other claim routes do: the secret is
+// a credential, and a query string reaches every proxy and access log between the pod and the
+// daemon. No session-facing body carries the new `suspendedBy` value: the state's
+// `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
+// claim apart from a suspended one on the operator claim routes, which no plugin calls. This
+// change adds ten store migrations. (This branch took 47 while main's #2538 was unmerged; main
+// then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
+// branch takes the number above them, as the collision note says.)
 //
-// 48: INFRA-956 R4 -- fix-attempt counting is gone. `legion.yaml` no longer takes
+// 49: INFRA-956 -- the turn-outcome report, and fix-attempt counting gone.
+// `POST /legion/v1/claims/turn-outcome` is a new claim route in the shape of `claims/ready`
+// (`claim.TurnOutcomeRequest`: `claimToken`, `sessionId`, `secret`, `generation`, a `sequence`
+// counted from 1 within that generation, an `outcome` of `clean`, `refused` or `provider-error`,
+// and an optional `category`), answering 204. It is how the agent's own plugin tells the daemon a
+// provider's content filter refused the turn, which the same session often takes on a weaker
+// model, apart from a 429 or a malformed request, which may not clear that way. The plugin
+// classifies the turn and the daemon parses no provider text: `category` is the refusal's own
+// category (`reasoning_extraction`) and no field carries the provider's words. pi-legion reports
+// every settled turn of a claim's session from its `agent_end` hook
+// (`packages/pi-legion/src/turn-outcome.ts`); a plugin before 49 reports none, and a daemon
+// before 49 answers the post a 404. The daemon keeps the newest report on the claim's machine, in
+// memory, and nothing else: it is read within two minutes of the turn it is about, so no store
+// write comes with it (`internal/supervise/turnoutcome.go`).
+// The same number carries the end of fix-attempt counting: `legion.yaml` no longer takes
 // `max_fix_attempts`, and a file carrying it is refused by name, so the settings block of `GET
 // /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer models it.
 // Each issue's pull request in that state loses `fixAttempts` (`api.PullRequestView`), which
@@ -524,9 +546,13 @@ package api
 // implementer every time it stands, however many came before, and the architect decides when to
 // stop; no pull request is marked blocked and no `pr-blocked` notice is published for a count.
 // `packages/contracts/src/legion-api.ts` mirrors both removals, and its reader of the settings
-// block is loose, so a plugin from 47 reads a state without `max_fix_attempts` — but its strict
-// pull-request reader refuses one without `fixAttempts`, which is what this number is for: the
-// boot gate and `legion probe-image` refuse a 47 plugin against a 48 daemon. This change adds no
-// store migration; `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped columns
-// that nothing reads, each given its zero on an insert (`record`'s PutPullRequest).
-const DaemonAPIVersion = 48
+// block is loose, so a plugin before 49 reads a state without `max_fix_attempts` — but its strict
+// pull-request reader refuses one without `fixAttempts`, which is the second thing this number is
+// for: the boot gate and `legion probe-image` refuse a plugin before 49 against this daemon, and
+// this daemon's own 404 refuses the other order. This change adds no store migration;
+// `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped columns that nothing
+// reads, each given its zero on an insert (`record`'s PutPullRequest). (This branch took 47 for
+// the route and 48 for the removal; main then merged the idle-pod release at 48 while this branch
+// was open, so both paragraphs are one paragraph at the number above it, as the collision note
+// says.)
+const DaemonAPIVersion = 49

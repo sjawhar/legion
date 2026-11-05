@@ -131,8 +131,8 @@ every round of that workflow:
 
 Thread ids are the `PRRT_…` node ids the reviewer records in its handoff (`findings[*].threadId`
 in `review.json` while a handoff was a file; in the Dispatch record since sjawhar/legion#2354);
-they are stable across pushes even when the thread goes `isOutdated`. On `sjawhar/legion`, `main`'s
-ruleset (id 12331919, read with `legion gh -- api repos/sjawhar/legion/rules/branches/main`) sets
+they are stable across pushes even when the thread goes `isOutdated`. On `cybermonklabs/legion`, `main`'s
+ruleset (id 12331919, read with `legion gh -- api repos/cybermonklabs/legion/rules/branches/main`) sets
 `required_review_thread_resolution: false`, so an unresolved thread does not stop the merge queue
 there today; the command keeps the Threads record truthful whatever that setting is.
 

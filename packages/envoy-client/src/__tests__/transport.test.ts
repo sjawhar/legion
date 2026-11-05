@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MINTED_DEDUPE_KEY_PATTERN } from "@legion/contracts";
+import { bearerCredential, type RequestCredential } from "../bearer";
 import { machineID } from "../machine";
 import {
   createEnvoyClient,
@@ -1155,7 +1156,7 @@ describe("EnvoyClient", () => {
     const client = createEnvoyClient({
       baseUrl: "http://listener",
       fetch: recorded.fetch,
-      token: "listener-token",
+      credential: bearerCredential("listener-token"),
     });
 
     await client.unregisterSession({ sessionID: "ses_closed" });
@@ -1177,6 +1178,39 @@ describe("EnvoyClient", () => {
       if (previous === undefined) delete process.env.ENVOY_TOKEN;
       else process.env.ENVOY_TOKEN = previous;
     }
+  });
+
+  test("a credential this machine could not mint leaves a listener that asks for none working", async () => {
+    // The broker is down, or has refused this machine's trade. A listener that asks for no
+    // credential answers the same with or without one, so its calls stand; one that did want it
+    // answers 401, and the error names the trade that failed rather than the status alone.
+    const unmintable: RequestCredential = {
+      scheme: "DPoP",
+      headers: () => Promise.reject(new Error("the secrets broker did not answer")),
+      secret: () => "",
+    };
+    const open = recordFetch([new Response(null, { status: 200 })]);
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: open.fetch,
+      credential: unmintable,
+    });
+
+    await client.unregisterSession({ sessionID: "ses_closed" });
+
+    expect(open.requests[0]?.headers.has("Authorization")).toBe(false);
+
+    const closed = recordFetch([
+      new Response(null, { status: 401 }),
+      new Response(null, { status: 401 }),
+    ]);
+    await expect(
+      createEnvoyClient({
+        baseUrl: "http://listener",
+        fetch: closed.fetch,
+        credential: unmintable,
+      }).unregisterSession({ sessionID: "ses_closed" })
+    ).rejects.toThrow("the secrets broker did not answer");
   });
 
   test("asks for a replay in the listener's request shape and parses its answer", async () => {
@@ -1251,6 +1285,31 @@ describe("EnvoyClient", () => {
     expect((failure as EnvoyApiError).code).toBe("REPLAY_UNAVAILABLE");
     expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
     expect(recorded.requests).toHaveLength(1);
+  });
+
+  // The deadline is AbortSignal.timeout's, on the platform's clock, which no fake timer moves: the
+  // case holds the request until its signal aborts and checks that a short deadline gave up first.
+  test("gives up a replay at the deadline its caller names", async () => {
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async (_input, init) => {
+        const signal = init?.signal;
+        if (signal === undefined || signal === null) throw new Error("no deadline was set");
+        const aborted = Promise.withResolvers<never>();
+        signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+        return aborted.promise;
+      },
+    });
+    const started = performance.now();
+    const failure = await client
+      .replay({
+        sessionID: "ses_a",
+        subjects: [{ subject: "notifications.agent.ses_a" }],
+        timeoutMs: 50,
+      })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(performance.now() - started).toBeLessThan(5_000);
   });
 });
 
