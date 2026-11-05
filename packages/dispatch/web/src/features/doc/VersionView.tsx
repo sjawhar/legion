@@ -17,7 +17,6 @@ import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
-import { installTypedBlocks } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
 import { setDecisionNotes } from "./decision-notes";
@@ -144,8 +143,10 @@ export function VersionView({
         awareness: null,
         blockSchema,
         heatMapMode: "hidden",
+        onAskBlockHosts: setAskBlockHosts,
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
+        watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
         ydoc: doc,
       });
       handle = editor;
@@ -153,9 +154,6 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
-        watchPicturePath(queryClient, route, onPicture)
-      );
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);

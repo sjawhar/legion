@@ -20,6 +20,8 @@ function item(decision: Partial<Decision>): DecisionMarginItem {
     replaced: false,
     text: "A table keeps them through a restart.",
     text_sha256: "sum-d-1",
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure: false,
     waiting_review: true,
     ...decision,
@@ -62,6 +64,15 @@ test("an unsure decision is drawn in the unsure colour and says so; a person's s
     expect(card.getAttribute("data-decision-unsure")).toBe("true");
     expect(screen.getByText("Unsure")).toBeDefined();
     expect(screen.getByText("A person's decision")).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision an agent made alone names how sure it is", () => {
+  const view = renderCard({ uncertainty: "high", unsure: true });
+  try {
+    expect(screen.getByText("Unsure: high")).toBeDefined();
   } finally {
     view.unmount();
   }

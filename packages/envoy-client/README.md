@@ -101,9 +101,14 @@ frame was delivered in while the host shuts down: it writes while the host's opt
 ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
 turn and before any reply is posted).
 
-The state holds each followed subject's `since` and `after`, the stream's `id` (`stream_id`, the
-`envoy_stream_id` the listener answers as `stream.id`) and `created` time, and the one-time
-notices raised but not told yet (`notices`);
+The state holds each followed subject's `since` and `after`, or `from_start` on the session's own
+agent subject while its first sweep still owes it from the oldest message the stream holds, the
+stream's `id` (`stream_id`, the `envoy_stream_id` the listener answers as `stream.id`) and
+`created` time, and the one-time notices raised but not told yet (`notices`). A host that
+registers before it can open its subscriptions (NATS down) calls `startCursors()` first: each
+followed subject with no cursor starts at the stream's end, and a read that fails marks the own
+agent subject `from_start` instead; `startPending()` says whether such a mark stands, and while
+one does the host asks for no consumer delivery.
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
 state at any age. A write carries the state only when it changed; a sweep that handled no message
 and only moved its cursors to the stream's end goes with the next write, or once the state last

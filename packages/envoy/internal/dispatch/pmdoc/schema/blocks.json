@@ -80,7 +80,9 @@
         "replaced": { "kind": "bool", "default": false },
         "shaped": { "kind": "block[]", "scope": "spec" },
         "from_ask": { "kind": "ask" },
-        "decided_by": { "kind": "person" }
+        "decided_by": { "kind": "person" },
+        "uncertainty": { "kind": "enum", "choices": ["low", "medium", "high"] },
+        "uncertainty_reason": { "kind": "string" }
       }
     },
     {

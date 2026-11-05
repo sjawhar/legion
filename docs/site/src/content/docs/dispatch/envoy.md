@@ -65,8 +65,15 @@ example `https://envoy.internal.example/webhook/slack`, and subscribe it to the 
 event (its `app_mentions:read` scope). The listener answers Slack's `url_verification` challenge,
 and checks every other delivery's signature against `ENVOY_SLACK_SIGNING_SECRET`, the app's
 signing secret, answering `401` to one that does not match. The repository's
-`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read` and
-`chat:write` bot scopes and the `app_mention` bot event.
+`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read`,
+`chat:write`, `channels:history` and `groups:history` bot scopes and the `app_mention` bot event.
+
+The two history scopes are what a thread read needs: Slack's `conversations.replies`, which the
+Legion controller calls to read the thread of a mention posted inside one, needs
+`channels:history` in a public channel and `groups:history` in a private one, and answers
+`missing_scope` without them. An app made from an earlier version of the manifest, which listed
+only `app_mentions:read` and `chat:write`, does not hold them: an operator adds them to the app's
+bot scopes and reinstalls the app to the workspace.
 
 A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
 thread a second time under the thread's root, its timestamp's dot written `_`:
@@ -293,7 +300,7 @@ read from its row:
   release cut after the change that added these fields merged (the first whose changelog lists
   `plugin_version`).
 - **Claude Code:** it does when its commit contains that change's squash commit:
-  `gh api repos/sjawhar/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
+  `gh api repos/cybermonklabs/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
   `ahead` or `identical`.
 - **Anything else:** `source` and a row without the fields are checked by hand, or counted as not
   having it.
@@ -354,7 +361,7 @@ credential is configured.
 
 ## Running the listener
 
-The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image. Pin it by digest and
+The listener is `envoy-listener` in the `ghcr.io/cybermonklabs/legion/envoy` image. Pin it by digest and
 verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 
 | Setting | What it is |
@@ -443,7 +450,7 @@ servers on a GKE cluster whose optional tailnet hosts also run the listener. It 
 Dispatch on Google Cloud as `envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private
 Cloud SQL, and the tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders
 the NATS user `envoy-dispatch` shares with its listener. Its
-[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
+[README](https://github.com/cybermonklabs/legion/blob/main/packages/envoy/infra/README.md) says how to
 install it, what each component deploys and which settings it sets.
 
 ### Health and readiness

@@ -723,6 +723,8 @@ function decisionOf(
     replaced,
     text: "We decided.",
     text_sha256: `sum-${blockId}`,
+    uncertainty: "",
+    uncertainty_reason: "",
     unsure,
     waiting_review: true,
   };

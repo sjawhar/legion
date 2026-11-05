@@ -6,9 +6,70 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
+
+// The OAuth scopes a credential can hold. ScopePerson is "this credential acts as its person",
+// which every route a person reaches through the dashboard requires; ScopeApprove is the right to
+// settle what a person settles — an approval, an ask's answer — which no credential holds without
+// ScopePerson, since a credential that does not act as its person has nobody to approve for.
+const (
+	ScopePerson  = "person"
+	ScopeApprove = "approve"
+)
+
+// Scopes is every OAuth scope this deployment knows, in the order a credential holding both
+// carries them: the whole set a person's own credential holds, and the set a mint gives a token
+// when its body names none. Read it, never write it — every such credential shares this one
+// slice, as every surface shares DISPATCH_SCOPES in @legion/contracts.
+var Scopes = []string{ScopePerson, ScopeApprove}
+
+// ActorAct names the agent that acted when a credential acted for its person, so a write records
+// which credential made it and not only whom it was made for: Session is the session a
+// broker-issued token proved, TokenID and TokenName the personal token presented, and Scopes the
+// scopes that credential holds. A browser's cookie is the person themselves acting, so it names
+// no agent and carries none of this.
+//
+// Scopes is a snapshot of the credential as it stood at the act, and is never read back from the
+// token: a person who narrows a token afterwards narrows what it may do next, and must not
+// retroactively un-approve what it approved while it held approve (docs.carryVerdict reads these
+// scopes to decide whether an answer can carry an approval).
+type ActorAct struct {
+	Session   string   `json:"session,omitempty"`
+	TokenID   string   `json:"token_id,omitempty"`
+	TokenName string   `json:"token_name,omitempty"`
+	Scopes    []string `json:"scopes,omitempty"`
+}
+
+// Holds reports whether the act was made under one scope, as Credential.Holds reports it of the
+// live credential. A nil act is the person themselves acting, who holds every scope, so it holds
+// each one: a reader asking "was this act allowed to approve" must read a browser's answer as
+// allowed.
+func (a *ActorAct) Holds(scope string) bool {
+	return a == nil || slices.Contains(a.Scopes, scope)
+}
+
+// Credential is the request's credential as optionalActor resolved it: the scopes it holds, and
+// the agent it names. A pointer, so Actor stays comparable with ==, which this package's callers
+// and its tests rely on.
+type Credential struct {
+	// Scopes are the OAuth scopes the credential holds: ScopePerson, ScopeApprove, or neither.
+	Scopes []string
+	// Session is the session a broker-issued token proved, and is empty for every other
+	// credential, none of which proves one.
+	Session string
+	// TokenID and TokenName name a personal token, and are empty for every other credential.
+	TokenID   string
+	TokenName string
+}
+
+// Holds reports whether the credential holds one scope. A nil Credential holds none, so a
+// caller that resolved to no credential at all is refused by the same test.
+func (c *Credential) Holds(scope string) bool {
+	return c != nil && slices.Contains(c.Scopes, scope)
+}
 
 // Actor identifies the user or agent session that caused a change. Service is
 // the verified Kubernetes subject of the projected service-account token a
@@ -24,6 +85,31 @@ type Actor struct {
 	Owner   *string      `json:"owner,omitempty"`
 	Service *string      `json:"service,omitempty"`
 	Project *string      `json:"project,omitempty"`
+	// Act names the agent that made this act for the person, and is set only where a
+	// credential acted as its person (actingPerson). A browser's act carries none, and so
+	// does an agent's own write on a route that always took tokens, which is recorded as the
+	// session it always was.
+	Act *ActorAct `json:"act,omitempty"`
+	// Credential is what authenticated the request: the OAuth scopes it holds and how it names
+	// the agent behind it. It is a fact of the request and never of the record, so it is not
+	// serialised; the scope gate and actingPerson read it, actingPerson copies what it needs
+	// onto Act, and Recorded drops it from the actor a handler writes and compares.
+	Credential *Credential `json:"-"`
+}
+
+// Recorded is the actor as a write records it: the request's credential dropped. A stored actor
+// is decoded from JSON, which carries no credential, so the credential never reaches a row.
+// Dispatch decides "the same writer" by kind and id (SameAs); the one == left is the document
+// rooms' lost-write notice (docs/lostedit.go), so an actor handed to the document service must
+// carry none. actorFrom drops it here, bearerSessionActor builds a session actor without it, and
+// actingPerson answers the person with its Act alone. The handlers that record optionalActor's
+// own actor for a browser caller (messages.go, message_delivery.go, comment_delivery.go,
+// issue_claim.go) keep the cookie's credential in memory and hand that actor to no document
+// write. A layer that needs the request's own credential reads it from optionalActor
+// (callerHoldsScope).
+func (a Actor) Recorded() Actor {
+	a.Credential = nil
+	return a
 }
 
 // SameAs reports whether two actors are the same writer: one session id, or one human login.
@@ -50,11 +136,13 @@ type ActorOrigin struct {
 	SessionTitle string `json:"session_title,omitempty"`
 }
 
-// AgentToken is the safely displayable metadata for a human-owned agent token.
+// AgentToken is the safely displayable metadata for a human-owned agent token. Scopes is the
+// OAuth scopes the token holds, the set its bearer may act within.
 type AgentToken struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
 	Prefix     string     `json:"prefix"`
+	Scopes     []string   `json:"scopes"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	RevokedAt  *time.Time `json:"revoked_at"`
@@ -1301,13 +1389,18 @@ type AskOption struct {
 
 // AskAnswer is a human response to an ask. ID is the id of the block the ask's current answer is
 // stored as, read as an option's is and never written by a caller; a superseded answer, which no
-// part of the ask holds, carries none.
+// part of the ask holds, carries none. Act names the agent that made this answer for the person
+// User names, and is absent when the person answered themselves at a browser; the answer is the
+// person's either way, which every reader that matches User against the answering actor relies
+// on. The asks row's answer is jsonb, so an answer stored before this field existed simply
+// carries no act.
 type AskAnswer struct {
 	ID       string    `json:"id,omitempty"`
 	User     string    `json:"user"`
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+	Act      *ActorAct `json:"act,omitempty"`
 }
 
 // UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
@@ -2070,21 +2163,27 @@ type DecisionLink struct {
 // Decision is an actual typed node of an issue document. A person's decision is its answered
 // ask, read verbatim; an agent's is a decision block. ChangedVersion/ChangedAt belong to this
 // stable block. Keep carries TextSHA256, the sum of Text; WaitingReview compares that sum.
+// Uncertainty is how sure the agent that made the choice is, one of low, medium and high, and
+// is empty on a person's decision and on one whose author recorded none; UncertaintyReason is
+// the plain text that author wrote about what would change the choice. Unsure is true when the
+// node carries a level or the text holds an Unsure: paragraph.
 type Decision struct {
-	BlockID        string         `json:"block_id"`
-	Heading        string         `json:"heading"`
-	Ref            string         `json:"ref"`
-	Text           string         `json:"text"`
-	TextSHA256     string         `json:"text_sha256"`
-	Kind           string         `json:"kind"`
-	Unsure         bool           `json:"unsure"`
-	Replaced       bool           `json:"replaced"`
-	Asks           []string       `json:"asks"`
-	Links          []DecisionLink `json:"links"`
-	ChangedVersion int            `json:"changed_version"`
-	ChangedAt      *time.Time     `json:"changed_at"`
-	Kept           *DecisionKeep  `json:"kept"`
-	WaitingReview  bool           `json:"waiting_review"`
+	BlockID           string         `json:"block_id"`
+	Heading           string         `json:"heading"`
+	Ref               string         `json:"ref"`
+	Text              string         `json:"text"`
+	TextSHA256        string         `json:"text_sha256"`
+	Kind              string         `json:"kind"`
+	Unsure            bool           `json:"unsure"`
+	Uncertainty       string         `json:"uncertainty"`
+	UncertaintyReason string         `json:"uncertainty_reason"`
+	Replaced          bool           `json:"replaced"`
+	Asks              []string       `json:"asks"`
+	Links             []DecisionLink `json:"links"`
+	ChangedVersion    int            `json:"changed_version"`
+	ChangedAt         *time.Time     `json:"changed_at"`
+	Kept              *DecisionKeep  `json:"kept"`
+	WaitingReview     bool           `json:"waiting_review"`
 }
 
 // DocumentRead is one person's last read version of a document: null when they have read none.

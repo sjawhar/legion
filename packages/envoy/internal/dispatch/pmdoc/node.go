@@ -276,6 +276,9 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
 		}
 	}
+	if err := validateDecisionUncertainty(n); err != nil {
+		return err
+	}
 	for _, definition := range typ.Attributes {
 		if definition.Default == nil {
 			continue
@@ -283,6 +286,27 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 		if _, present := n.Attrs[definition.Name]; !present {
 			return fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, definition.Name)
 		}
+	}
+	return nil
+}
+
+// validateDecisionUncertainty holds a decision node's two uncertainty attributes to the decision
+// they describe. `uncertainty` says how sure the agent that made the choice is, so a reason
+// without a level gives a reader nothing to rank, and a level on a decision whose `decided_by`
+// names a person is refused: that person's answer is read from their ask row word for word, and
+// an agent never qualifies it.
+func validateDecisionUncertainty(n *Node) error {
+	if n.Type != "decision" {
+		return nil
+	}
+	level, _ := n.Attrs["uncertainty"].(string)
+	reason, _ := n.Attrs["uncertainty_reason"].(string)
+	decidedBy, _ := n.Attrs["decided_by"].(string)
+	if level == "" && reason != "" {
+		return fmt.Errorf("%w: typed block %q attribute \"uncertainty_reason\" needs \"uncertainty\", the level it gives the reason for", ErrSchema, n.Type)
+	}
+	if level != "" && decidedBy != "" {
+		return fmt.Errorf("%w: typed block %q holds \"uncertainty\" and \"decided_by\"; uncertainty belongs to a decision an agent made alone", ErrSchema, n.Type)
 	}
 	return nil
 }
