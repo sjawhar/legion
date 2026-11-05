@@ -12,8 +12,9 @@ import (
 // TestEnrollingUnderANameAnotherPrincipalHoldsIs403SessionHeld: one person's box enrols a session
 // name, a second person's box enrols that very name, and the broker refuses the second — a grant
 // follows a name under one principal, so the name belongs to one principal
-// (enroll.ErrSessionHeld). The body names the session and says what to do; it names no holder,
-// since whose the name is, is not the refused caller's to learn.
+// (enroll.ErrSessionHeld). The body names the session, so an operator reading it knows which name
+// is taken, and names no holder, since whose the name is, is not the refused caller's to learn.
+// What the refusal says beyond the session is nobody's to depend on, so none of it is pinned here.
 func TestEnrollingUnderANameAnotherPrincipalHoldsIs403SessionHeld(t *testing.T) {
 	ts := newTestServer(t)
 	session := "role-" + t.Name()
@@ -38,8 +39,8 @@ func TestEnrollingUnderANameAnotherPrincipalHoldsIs403SessionHeld(t *testing.T) 
 	if refusal.Code != "SESSION_HELD" {
 		t.Fatalf("the refusal's code = %q, want SESSION_HELD: %s", refusal.Code, body)
 	}
-	if !strings.Contains(refusal.Error, session) || !strings.Contains(refusal.Error, "name of your own") {
-		t.Fatalf("the refusal reads %q, want it to name the session %s and say to enrol under a name of its own", refusal.Error, session)
+	if !strings.Contains(refusal.Error, session) {
+		t.Fatalf("the refusal reads %q, want it to name the session %s so the operator knows which name is taken", refusal.Error, session)
 	}
 	for _, leaked := range []string{testApprover, "person:", "mallory@example.com"} {
 		if strings.Contains(refusal.Error, leaked) {

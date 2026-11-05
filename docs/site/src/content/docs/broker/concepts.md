@@ -519,12 +519,21 @@ The name rides in the enrollment request's body, outside the launcher proof, whi
 method and URL and nothing else
 (`packages/envoy/internal/broker/proof/proof.go`, `Verify`).
 So any holder of a launcher credential of the same person, or of the same Google account, can enrol
-under a moved session's name and take that session's grants.
-Four things bound it.
-The holder could have asked for the same secrets under a name of its own and been answered the same
-way, because owner and tier are decided by the enrollment's operator or service and not by its
-session name
-([owner and tier](#owner-and-tier-who-may-have-which-secret)).
+under that session's name and take what the session holds.
+The session it takes from need not have ended: a carry takes from every enrollment of the pair that
+still holds something and has not been ended for good, a live one included
+(`enroll.go`, `adopt`).
+The box it took from keeps its enrollment and loses the grant: the grant hangs off the new
+enrollment now, and the old enrollment's read of it is refused `NOT_YOURS`
+(`packages/envoy/internal/broker/requests/machine_read.go`, `Values`).
+Taking a grant releases its values at once and asks nobody, where a request for the same human-tier
+secret under a name of its own would wait for the person who owns the secret
+(`packages/envoy/internal/broker/policy/policy.go`, `Evaluate`).
+So a holder of that person's or that account's credential who knows a session's name gets what that
+session was approved for, with no approval of its own.
+Within one principal what stands between a caller and a secret is the sign-in on a box, or the
+account, and never the session name.
+Three things bound it.
 Another principal is refused the name outright.
 Every adoption is in the audit record, naming both enrollments.
 And a person's revoke ends the grant at once.

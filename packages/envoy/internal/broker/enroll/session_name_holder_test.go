@@ -106,8 +106,21 @@ func TestASessionNameAnotherPrincipalHoldsIsRefusedAndTakesNothing(t *testing.T)
 			if !errors.Is(err, ErrSessionHeld) {
 				t.Fatalf("the second principal's enrollment = %v, want ErrSessionHeld: a session name belongs to one principal", err)
 			}
-			if !strings.Contains(err.Error(), session) || !strings.Contains(err.Error(), "name of your own") {
-				t.Fatalf("the refusal reads %q, want it to name the session and say to enrol under a name of its own", err)
+			if !strings.Contains(err.Error(), session) {
+				t.Fatalf("the refusal reads %q, want it to name the session %s the caller reached for", err, session)
+			}
+			// The refusal gives the refused caller nothing of whoever holds the name: neither the
+			// principal the broker recorded nor the login or account inside it, which is the half
+			// a reader would recognise. What the refusal says beyond the session is nobody's to
+			// depend on, so none of its wording is pinned here.
+			_, identity, split := strings.Cut(held, ":")
+			if !split || identity == "" {
+				t.Fatalf("the first principal reads %q, want <kind>:<identity>: both halves are measured against the refusal", held)
+			}
+			for _, leaked := range []string{held, identity} {
+				if strings.Contains(err.Error(), leaked) {
+					t.Fatalf("the refusal reads %q, want nothing of who holds the name in it (%q)", err, leaked)
+				}
 			}
 			if rows := enrollmentsNaming(t, svc, session); rows != 1 {
 				t.Fatalf("%d enrollments name %s, want the first principal's alone: a refused enrolment writes nothing", rows, session)
