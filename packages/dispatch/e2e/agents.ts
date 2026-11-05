@@ -1,4 +1,4 @@
-import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES, type LegionRole } from "@legion/contracts";
 import { expect, type Locator, type Page } from "@playwright/test";
 
 import type { BroadcastCreated, CreateBroadcastInput } from "../web/src/api/types";
@@ -89,6 +89,27 @@ export async function setSessionLive(sessionID: string, live: boolean): Promise<
  *  caller must retry rather than read as an ended session. */
 export async function setSessionRecord(sessionID: string, record: SessionRecord): Promise<void> {
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
+}
+
+/** One Legion agent registry entry as the daemon writes it to the listener
+ *  (`packages/envoy/internal/legionagents` `Entry`); `role_token` is
+ *  `roleToken(legion_project, issue, role)` from `@legion/contracts`. */
+export interface FakeLegionAgent {
+  session_id: string;
+  legion_project: string;
+  issue: string;
+  role: LegionRole;
+  role_token: string;
+  title: string;
+  harness: "omp" | "claude";
+  started_at: string;
+  recorded_at?: string;
+}
+
+/** Replaces the fake listener's Legion agent registry, which the three registry reads answer from
+ *  with `live`, `replaced_by` and `replaced_at` derived at the read. A session reseed keeps it. */
+export async function setLegionAgents(rows: FakeLegionAgent[]): Promise<void> {
+  await fixtureRequest("/__fixture/legion-agents", "PUT", rows);
 }
 
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {

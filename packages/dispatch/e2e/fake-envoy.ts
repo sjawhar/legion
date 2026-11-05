@@ -1,3 +1,5 @@
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
+
 import { harnessPorts } from "./harness-ports";
 
 interface FakeSession {
@@ -41,11 +43,27 @@ interface FakeInterest {
  *  ended. `unreadable` is the bucket read that did not answer at all. */
 type SessionRecord = "present" | "absent" | "unreadable";
 
+/** One Legion agent registry entry as the daemon writes it (`packages/envoy/internal/legionagents`
+ *  `Entry`). `recorded_at` is the listener's own stamp, defaulted to `started_at` when a seed
+ *  leaves it out. */
+interface FakeLegionAgent {
+  readonly session_id: string;
+  readonly legion_project: string;
+  readonly issue: string;
+  readonly role: LegionRole;
+  readonly role_token: string;
+  readonly title: string;
+  readonly harness: "omp" | "claude";
+  readonly started_at: string;
+  readonly recorded_at?: string;
+}
+
 /** Every piece of fixture state this listener holds. `PUT /__fixture/reset` replaces it whole, so
- *  a field added here is reset with the rest without being listed anywhere else. A session reseed
- *  replaces it whole too, so a handler reads its request body before it touches `state`: a write
- *  through a `state` read before that await lands in an object a reseed may already have
- *  dropped. */
+ *  a field added here is cleared with the rest without being listed anywhere else; the session
+ *  reseed replaces it whole too, so a field that is to outlive a reseed - the Legion agent
+ *  registry is one - is carried over by name in that handler. A handler reads its request body
+ *  before it touches `state`: a write through a `state` read before that await lands in an object
+ *  a reseed may already have dropped. */
 interface FakeEnvoyState {
   readonly sessions: FakeSession[];
   readonly liveSessions: Set<string>;
@@ -57,6 +75,9 @@ interface FakeEnvoyState {
    *  slow to take it would hold it; an id named by no entry here is answered at once. */
   readonly sendDelays: Map<string, number>;
   interests: FakeInterest[];
+  /** The Legion agent registry's entries, which outlive a session reseed as the real bucket
+   *  outlives a session ending. */
+  legionAgents: FakeLegionAgent[];
   readonly sentMessages: SentMessage[];
   /** (idempotency key, recipient) pairs this stand-in has already published, the stream's own
    *  duplicate window for the life of the fixture. Cleared with the session seed. */
@@ -67,6 +88,7 @@ interface FakeEnvoyState {
 function emptyState(): FakeEnvoyState {
   return {
     interests: [],
+    legionAgents: [],
     liveSessions: new Set(),
     publishedKeys: new Set(),
     records: new Map(),
@@ -95,6 +117,59 @@ function asSeen(session: FakeSession, now: number): FakeSession {
  *  `absent` has really ended, and then no answer may name it however the live set stands. */
 function isLive(sessionID: string): boolean {
   return state.liveSessions.has(sessionID) && state.records.get(sessionID) !== "absent";
+}
+
+/** One role token's sessions oldest first, by start, then by when they were recorded, then by
+ *  id - the listener's `oldestFirst`. */
+function oldestFirst(left: FakeLegionAgent, right: FakeLegionAgent): number {
+  return (
+    Date.parse(left.started_at) - Date.parse(right.started_at) ||
+    (left.recorded_at ?? left.started_at).localeCompare(right.recorded_at ?? right.started_at) ||
+    left.session_id.localeCompare(right.session_id)
+  );
+}
+
+/** Where a role token sits in the listener's order: its role in workflow order, then the token.
+ *  A token with no session cannot occur - a group exists because an entry made it - and sorts
+ *  last if it ever did. */
+function tokenOrder(sessions: readonly FakeLegionAgent[]): [number, string] {
+  const first = sessions[0];
+  return first === undefined
+    ? [LEGION_ROLES.length, ""]
+    : [LEGION_ROLES.indexOf(first.role), first.role_token];
+}
+
+/** A registry read's answer for `agents`, every one of them of one role token or many: each entry
+ *  with `live` from this listener's live sessions and, within its role token ordered by start,
+ *  the session that replaced it and when (`replaced_by`/`replaced_at`, null for the newest), as
+ *  the listener derives them at the read (`legionAgentAnswer`, `legionagents.succession`). Newest
+ *  first within a role token; across tokens by role in workflow order, then by token. */
+function legionAnswer(agents: readonly FakeLegionAgent[]): Record<string, unknown>[] {
+  const byToken = new Map<string, FakeLegionAgent[]>();
+  for (const agent of agents) {
+    byToken.set(agent.role_token, [...(byToken.get(agent.role_token) ?? []), agent]);
+  }
+  return [...byToken.values()]
+    .sort((left, right) => {
+      const [leftRole, leftToken] = tokenOrder(left);
+      const [rightRole, rightToken] = tokenOrder(right);
+      return leftRole - rightRole || leftToken.localeCompare(rightToken);
+    })
+    .flatMap((sessions) => {
+      const ordered = [...sessions].sort(oldestFirst);
+      return ordered
+        .map((agent, index) => {
+          const next = ordered[index + 1];
+          return {
+            ...agent,
+            live: isLive(agent.session_id),
+            recorded_at: agent.recorded_at ?? agent.started_at,
+            replaced_at: next?.started_at ?? null,
+            replaced_by: next?.session_id ?? null,
+          };
+        })
+        .reverse();
+    });
 }
 
 // FAKE_ENVOY_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
@@ -148,6 +223,36 @@ const server = Bun.serve({
       state.liveSessions.add(sessionID);
       return Response.json(asSeen(session, Date.now()));
     }
+    // The Legion agent registry's three reads (packages/envoy/cmd/listener/api.go,
+    // legionAgentsHandler, legionAgentRoleHandler and legionAgentSessionHandler).
+    if (request.method === "GET" && url.pathname === "/v1/legion/agents") {
+      const issue = url.searchParams.get("issue");
+      if (issue === null || issue === "") {
+        return Response.json({ error: "issue is required", field: "issue" }, { status: 400 });
+      }
+      return Response.json({
+        entries: legionAnswer(state.legionAgents.filter((agent) => agent.issue === issue)),
+      });
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/v1/legion/agents/roles/")) {
+      const token = decodeURIComponent(url.pathname.slice("/v1/legion/agents/roles/".length));
+      return Response.json({
+        entries: legionAnswer(state.legionAgents.filter((agent) => agent.role_token === token)),
+      });
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/v1/legion/agents/sessions/")) {
+      const sessionID = decodeURIComponent(
+        url.pathname.slice("/v1/legion/agents/sessions/".length)
+      );
+      const agent = state.legionAgents.find((item) => item.session_id === sessionID);
+      if (agent === undefined) {
+        return Response.json({ error: `unknown legion agent ${sessionID}` }, { status: 404 });
+      }
+      const answer = legionAnswer(
+        state.legionAgents.filter((item) => item.role_token === agent.role_token)
+      ).find((item) => item.session_id === sessionID);
+      return Response.json(answer);
+    }
     if (request.method === "POST" && url.pathname === "/v1/messages/send") {
       const message = (await request.json()) as SentMessage;
       state.sentMessages.push(message);
@@ -181,18 +286,26 @@ const server = Bun.serve({
       return Response.json({ ok: true });
     }
     // A reseed starts the sessions over (their live set, send statuses, sends and duplicate
-    // window) and keeps the persisted subscriptions, which a test seeds on their own.
+    // window) and keeps the persisted subscriptions and the Legion agent registry, which a test
+    // seeds on their own.
     if (request.method === "PUT" && url.pathname === "/__fixture/sessions") {
       const sessions = (await request.json()) as FakeSession[];
       const ids = sessions.map((session) => session.session_id);
       state = {
         ...emptyState(),
         interests: state.interests,
+        legionAgents: state.legionAgents,
         liveSessions: new Set(ids),
         sendStatuses: new Map(ids.map((id) => [id, 200] as const)),
         sessions,
         unsubscribeCalls: state.unsubscribeCalls,
       };
+      return Response.json({ ok: true });
+    }
+    // The registry's entries, replaced whole; the daemon is the real bucket's only writer.
+    if (request.method === "PUT" && url.pathname === "/__fixture/legion-agents") {
+      const agents = (await request.json()) as FakeLegionAgent[];
+      state.legionAgents = agents;
       return Response.json({ ok: true });
     }
     if (request.method === "PATCH" && url.pathname.startsWith("/__fixture/sessions/")) {
