@@ -1,15 +1,16 @@
 // Bundle the plugin's executables into self-contained files the Claude Code
-// plugin cache can run: the cache holds main's git tree with no node_modules,
-// so every dependency (workspace packages included) is inlined here, with
-// `THIRD_PARTY_NOTICES` beside the bundles holding the license of every
-// third-party package they inline. The same build generates `legion/`, the
+// plugin cache can run: the cache holds the claude-plugin branch's tree with no
+// node_modules, so every dependency (workspace packages included) is inlined
+// here, with `THIRD_PARTY_NOTICES` beside the bundles holding the license of
+// every third-party package they inline. The same build generates `legion/`, the
 // Legion plugin a Claude Code pane loads beside this one (`buildLegionPlugin`).
 //
-// `dist/` and `legion/` stay tracked on main, written only by main's Rebuild
-// Claude Envoy plugin workflow after each merge, from a checked `--out` build
-// (scripts/verify-build.sh); a pull request never commits them, and no mode
-// writes them. Every mode builds only on the Bun the repo-root `.bun-version`
-// pins, because bundler output depends on the exact Bun build (LEGION-568):
+// `dist/` and `legion/` are tracked on the claude-plugin branch, written there
+// only by the Rebuild Claude Envoy plugin workflow after each merge, from a
+// checked `--out` build (scripts/verify-build.sh); main keeps the last build it
+// carried, a pull request never commits them, and no mode writes them. Every
+// mode builds only on the Bun the repo-root `.bun-version` pins, because
+// bundler output depends on the exact Bun build (LEGION-568):
 //   --check      build into a scratch directory and fail when the tracked files
 //                differ from it;
 //   --out <dir>  make <dir>, a new or empty directory outside the repository, a
@@ -313,7 +314,7 @@ export function assertPinnedBun(running: string, pinned: string): void {
  *  against. Bun writes each inlined module's path into the bundle relative to the working
  *  directory (`// ../envoy-client/bin/dispatch.ts` from the package, `// packages/envoy-client/...`
  *  from the repository root), so the build runs from the package root whatever the caller's
- *  directory: main's committed bytes and every check of them then agree. */
+ *  directory: the committed bytes and every check of them then agree. */
 export async function buildBundles(outdir: string): Promise<string[]> {
   assertPinnedBun(Bun.version, pinnedBunVersion)
   const target = resolve(outdir)
@@ -432,7 +433,8 @@ async function buildOut(out: string): Promise<void> {
 
 const USAGE =
   "usage: bun scripts/build.ts --check | --out <dir>. The tracked dist/ and legion/ are written " +
-  "only by main's Rebuild Claude Envoy plugin workflow, and a pull request never commits them."
+  "only by the Rebuild Claude Envoy plugin workflow, on the claude-plugin branch, and a pull " +
+  "request never commits them."
 
 type Mode = { readonly kind: "check" } | { readonly kind: "out"; readonly dir: string }
 
@@ -466,7 +468,7 @@ if (import.meta.main) {
     ]
     if (stale.length > 0) {
       process.stderr.write(
-        `generated files are stale (${stale.join(", ")}); main's Rebuild Claude Envoy plugin workflow commits a fresh build after each merge, and a pull request never commits these files\n`,
+        `generated files are stale (${stale.join(", ")}); the Rebuild Claude Envoy plugin workflow commits a fresh build to the claude-plugin branch after each merge, and a pull request never commits these files\n`,
       )
       process.exit(1)
     }

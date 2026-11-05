@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# verify-build.sh <tar> — build the plugin from this tree, check the build is one main's Rebuild
-# Claude Envoy plugin workflow lands, and pack it into <tar>, leaving the checkout as it found it.
+# verify-build.sh <tar> — build the plugin from this tree, check the build is one the Rebuild
+# Claude Envoy plugin workflow pushes to the claude-plugin branch, and pack it into <tar>, leaving
+# the checkout as it found it.
 #
-# This is the one statement of what main's rebuild must accept. The rebuild's build job
+# This is the one statement of what that rebuild must accept. The rebuild's build job
 # (.github/workflows/claude-envoy-rebuild.yaml) runs it and hands <tar> to its push job, whose
 # `release-push.sh push-built` checks the same tar again before it commits it; ci.yaml's required
 # test job and its claude-envoy job run the very same command on a pull request, so a pull request
@@ -15,7 +16,7 @@
 # checkout are named at `release-push.sh extract-built`.
 #
 # Every file this script and scripts/build.ts read is a build input, so scripts/build-inputs.txt
-# must name it: main's push job lands a build on a moved main and decides from that list alone
+# must name it: the push job commits a build over a moved main and decides from that list alone
 # whether the move changed the build. tests/build-inputs.test.ts checks the list against what the
 # bundles and the Legion plugin read, but not against what this script, build.ts or the workflow
 # read by path, which the list's header names as listed by hand (check-private-names.sh, the
@@ -88,11 +89,11 @@ git -c init.defaultBranch=main init -q "$scratch/first"
 
 # A generated file at a path a .gitignore matches (a skill's `logs/`, `out/`, `*.log` or
 # `coverage`, force-added under skills/ and staged into legion/, or a file named by a .gitignore a
-# skill ships inside legion/) is skipped by push-built's `git add -A`, so main would silently lack it
-# while the tar holds it. The scratch repository gets this repository's .gitignore files on the path
-# to the build, and git applies them and any .gitignore the build carries, as `git add -A` would.
-# Nothing there is tracked, so git lists every ignored file of the two directories; a failing git
-# stops the script.
+# skill ships inside legion/) is skipped by push-built's `git add -A`, so the branch would silently
+# lack it while the tar holds it. The scratch repository gets this repository's .gitignore files on
+# the path to the build, and git applies them and any .gitignore the build carries, as `git add -A`
+# would. Nothing there is tracked, so git lists every ignored file of the two directories; a failing
+# git stops the script.
 for gitignore in .gitignore packages/.gitignore packages/claude-envoy/.gitignore; do
   if [ -f "$repo_root/$gitignore" ]; then
     cp "$repo_root/$gitignore" "$scratch/first/$gitignore"
@@ -104,11 +105,11 @@ ignored=$(git -C "$scratch/first" ls-files -o -i --exclude-standard -- packages/
 }
 if [ -n "$ignored" ]; then
   while IFS= read -r path; do
-    printf '::error::verify-build.sh: %q is a generated file git ignores, so the rebuild would never commit it to main; rename its source, or make .gitignore stop matching it\n' "$path" >&2
+    printf '::error::verify-build.sh: %q is a generated file git ignores, so the rebuild would never commit it; rename its source, or make .gitignore stop matching it\n' "$path" >&2
   done <<<"$ignored"
   exit 1
 fi
 
 tar -cf "$tar_file" -C "$first" dist legion
 "$repo_root/.github/scripts/release-push.sh" check-built "$tar_file"
-echo "verify-build.sh: $tar_file holds a build main's rebuild accepts"
+echo "verify-build.sh: $tar_file holds a build the rebuild accepts"

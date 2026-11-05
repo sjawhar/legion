@@ -1,5 +1,8 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `legion-envoy-v*` tag.
+
 ## [29.9.0] - 2026-11-05
 
 ### Added

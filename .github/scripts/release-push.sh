@@ -289,8 +289,7 @@
 #            package in the order of the specs, then by label as versions
 #            (`sort -V`), then by path; nothing printed means no fragment of
 #            the specs is in a release yet. fold-notes renders the groups of
-#            this plan, and docs/site/generators/legion-changelogs.ts repeats
-#            the label rule below to render the same entries as pages.
+#            this plan, one of which is a release's own entries.
 #            Each <spec> is <package-dir>[=<tag-prefix>], and the package must
 #            hold a CHANGELOG.md at HEAD. The fragments are the entries directly
 #            in <package-dir>/.changes/unreleased/ that HEAD holds (git's tree,
@@ -874,7 +873,7 @@ unlisted_files() {
 # ::error:: both say about the paths unlisted_files left in unlisted: every one
 # of them, the specs the command was given, and what to do with the file.
 unlisted_message() {
-  printf '%s at HEAD: each is under the .changes/ of a package the fold was not given, here %s, and the fold reads the fragments of the packages it is given alone, so no release and no documentation page renders it and it stays where it is; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
+  printf '%s at HEAD: each is under the .changes/ of a package this command was not given, here %s, and it reads the fragments of the packages it is given alone, so no release renders it and it stays where it is; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
 
 # group_column <dir> <label> <column>: the plan's <column> (4 the path) on each

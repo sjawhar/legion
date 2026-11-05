@@ -1,5 +1,8 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
 ## [main@804d3695e12e] - 2026-11-05
 
 ### Added
