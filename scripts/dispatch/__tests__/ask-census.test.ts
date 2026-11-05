@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
+import { bearerCredential } from "../../../packages/envoy-client/src/bearer.ts";
 import {
   DISPATCH_TOOL_DEADLINE_MS,
   DispatchClient,
@@ -215,7 +216,11 @@ describe("ask census", () => {
     };
 
     const fetched = await fetchIssueEvents(
-      new DispatchClient("https://dispatch.example", "token", fetchImpl as typeof fetch),
+      new DispatchClient(
+        "https://dispatch.example",
+        bearerCredential("token"),
+        fetchImpl as typeof fetch
+      ),
       "LEGION-470"
     );
 
@@ -370,7 +375,7 @@ describe("ask census", () => {
     try {
       const started = performance.now();
       const census = await censusIssues(
-        { url: `http://127.0.0.1:${server.port}`, token: "token" },
+        { url: `http://127.0.0.1:${server.port}`, credential: bearerCredential("token") },
         issues,
         {
           from: recordedAt(0),

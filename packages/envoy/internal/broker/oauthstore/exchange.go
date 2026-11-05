@@ -84,12 +84,14 @@ type ExchangeSession struct {
 	*oauth2.DefaultSession
 
 	// SubjectToken is the verified claims of the subject token the exchange was made against: a
-	// pod's service-account token, a workflow run's GitHub token, or a machine access token.
+	// pod's service-account token, a workflow run's GitHub token, a machine's Google identity
+	// token, a person's own Google identity token, or a machine access token.
 	SubjectToken map[string]any `json:"subject_token,omitempty"`
 
-	// ActorToken is the verified claims of the actor token of a delegation. The broker's exchange
-	// client permits no actor token, so it is empty for every token this provider mints today,
-	// and is kept because the library sets it and an introspection must read back what was set.
+	// ActorToken is the verified claims of the actor token of a delegation: the Google identity
+	// token of the machine a person signed in on, which the exchange client is registered for
+	// and no other kind of token is. It is empty for every other trade, none of which has an
+	// actor, and it is stored because an introspection of the token answers from the row.
 	ActorToken map[string]any `json:"actor_token,omitempty"`
 
 	// Principal is who the session name the exchange decided on belongs to
@@ -106,6 +108,13 @@ type ExchangeSession struct {
 	// session name only while a registration says it may. Like Principal it is no claim of the
 	// token and is not stored.
 	Instance string `json:"-"`
+
+	// Fleet is the service the machine's Google account is listed for
+	// (exchange.Claims.Fleet), empty for every other kind of caller. The provider records it on
+	// the launcher credential it mints for that machine in the exchange's own transaction, which
+	// is what lets the machine enroll afterwards. Like Principal it is no claim of the token and
+	// is not stored.
+	Fleet string `json:"-"`
 }
 
 // NewExchangeSession is an empty exchange session with its extra claims ready to be written, the
@@ -162,6 +171,7 @@ func (s *ExchangeSession) Clone() oauth2.Session {
 		ActorToken:   maps.Clone(s.ActorToken),
 		Principal:    s.Principal,
 		Instance:     s.Instance,
+		Fleet:        s.Fleet,
 	}
 	if s.DefaultSession != nil {
 		cloned.DefaultSession, _ = s.DefaultSession.Clone().(*oauth2.DefaultSession)

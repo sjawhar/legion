@@ -24,14 +24,30 @@ and URL, signed with the session's key, used once, and valid only within
 `BROKER_PROOF_SKEW_SECONDS` of the broker's clock. There is no bearer token for a session to leak.
 
 A **launcher** is the program that enrolls sessions: `agent-secrets-helper`, a per-user daemon on
-a machine, for that machine's sessions, the Legion daemon for the pods it runs, or a Google Compute
-Engine VM for itself. An enrollment has one of three kinds:
+a machine, for that machine's sessions, or the Legion daemon for the pods it runs. An enrollment
+has one of two kinds:
 
 | Kind | What it is | Who holds its key | Who enrolls it |
 | --- | --- | --- | --- |
 | `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
-| `vm` | A Google Compute Engine VM of a fleet `BROKER_VM_SERVICES` binds to a service. | The VM, in `key.pem` under its key directory. | The VM itself, with `agent-secrets enroll --vm`: it logs in with the identity token its metadata server signs for its service account (no person approves it), and proves itself with the same token. The enrollment is keyed by `<account>@<project>/<zone>/<instance id>`, since an instance id is unique only within a project and a zone, so each VM of a fleet that shares one account holds a login and an enrollment of its own. |
+
+A machine holding a Google identity token enrols a `session` too: it trades that token at the
+broker's token exchange, which answers a Dispatch access token and the machine login that trade
+minted, and the machine enrols with that login. That login names the machine's fleet and no
+person, so the session acts for the fleet's service: it reads the secrets that service owns and
+the shared agent-tier ones, and no person's. The person a fleet's
+`BROKER_VM_EXCHANGE_ACCOUNTS` entry names reaches the Dispatch token alone; that person reaches
+their own secrets on the machine only by signing in on it.
+
+A person signs in on a machine with `agent-secrets login`, which runs Google's device flow and then
+trades the person's own identity token at the exchange with the machine's as the actor token. That
+trade mints a machine login of its own, carrying the person rather than the fleet, so a session
+enrolled under it is that person's: it reads the secrets that person owns and the shared agent-tier
+ones, and no other person's and none of the fleet's. Each sign-in is bound to a box key the command
+makes there, so one person signed in on two machines holds a login on each, and two people signed
+in on one machine hold one each. Revoking a sign-in on Dispatch ends its machine login with it:
+every session it enrolled ends, and the box signs in again to work on.
 
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
@@ -52,15 +68,16 @@ its pods enroll only once a person approves the daemon's new login, and a pod th
 enrolls never renews with its token, so its UID stays open as an old-image pod's does. A grant lasts
 until its session ends, so a copy that keeps renewing keeps the grant one approval gave it.
 
-A `vm` enrollment renews with `agent-secrets renew --vm`, or by running `agent-secrets enroll --vm`
-again over the same key directory. Every renewal of it carries the VM's current identity token,
-which must name the VM and account the enrollment was made for (`VM_IDENTITY_MISMATCH`, or
-`VM_TOKEN_EXPIRED`); a renewal with no token is refused `VM_TOKEN_REQUIRED`. So a copy of a VM's
-key renews nothing off the VM, since only that VM can fetch its tokens. A VM its fleet's settings
-no longer allow, after its account was dropped or its project or instance-name glob changed, has
-no identity from then on: every call it makes is refused as an ended session's is, so it gets no
-secret, releases no grant it holds, opens no request and renews nothing, and a person's approval of
-a request it left pending grants nothing. Its enrollment then ends with its lease.
+A machine's own session is held to its machine login as well: the broker reads that login on every
+renewal, and refuses one whose login has ended — revoked, past the hour's expiry its Google
+identity token gave it, or its account no longer listed for its service in `BROKER_VM_SERVICES`.
+So a box dropped from its fleet's settings, and one that stops being able to prove its identity,
+lose their sessions within one `BROKER_LEASE_SECONDS`: the renewal is refused
+`ENROLLMENT_NOT_LIVE`, the broker logs `broker: machine session renewal refused: its machine login
+has ended`, and the sweep ends the enrollment at its lease. A copy of such a session's key and
+enrollment id taken off the box renews nothing once that box's login has ended. Only a machine's
+own session is held this way: a pod's renewal proves the pod's own projected token, and a person's
+session on such a box runs until they revoke the sign-in, which ends it at once.
 
 An enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that
@@ -70,12 +87,7 @@ lease lapses. A `pod` enrollment's launcher is the one machine login that made i
 even another login of the same service, such as the Legion daemon's after a restart or after its
 login reached its expiry and it logged in again, is refused
 `NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
-login. A `vm` enrollment is ended by no launcher at all (`VM_ENDS_BY_LOGIN_REVOKE`): a VM's machine
-login moves to whoever last logged in with that VM's token, so it is ended by revoking that login
-or by its lease. Revoking it does not revoke the VM's identity token: someone holding a copy of the
-token logs in again with it within its hour, under a new login, and enrolls a key of their own;
-only taking the VM out of its fleet's settings ends that before the token expires
-([a copied VM token](/legion/broker/operate/#a-copied-vm-token)). From the moment the lease lapses, its next renewal is refused
+login. From the moment the lease lapses, its next renewal is refused
 `ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
 every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
 enrollment any of these ways revokes every grant it held and cancels every request it still had
@@ -152,6 +164,11 @@ broker's own endpoints:
 4. On approval the broker mints the launcher credential bound to the machine's key, and the
    machine's next poll gets a refresh token for it, bound to the same key (DPoP, RFC 9449).
 
+The device grant is served only while the broker is given a page for a person to type the code
+into (`BROKER_MACHINE_LOGIN_URL`). A deployment whose machines hold a Google identity leaves that
+unset: nothing prints a code, Dispatch serves no page to type one into, and each machine gets its
+launcher credential from the trade above instead, with nobody to approve it.
+
 The helper keeps the login (its key, the credential's id and expiry, and the current refresh
 token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` by default),
 readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
@@ -181,13 +198,16 @@ revoked from Dispatch's machine-login page by the person who approved it and no 
 any of their machines under its machine login (`agent-secrets machine revoke`), before or after it
 expires, which also ends every session it enrolled and every refresh token it holds
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). Its
-sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
-credential, so a box keeps working after the machine's credential expires, and the page lists an
-expired login, marked as expired with sessions still running, until its last session ends. Whoever
+sessions outlive its expiry: a session renews its lease with its own key, and the broker reads no
+credential to renew one a person's machine login enrolled, so a box keeps working after the
+machine's credential expires, and the page lists an expired login, marked as expired with sessions
+still running, until its last session ends. (A machine's own session, enrolled under the login its
+Google identity traded for, is the one exception: it renews only while that login is live, as
+[Sessions and enrollment](#sessions-and-enrollment) says.) Whoever
 approved a person's machine login is its operator. A lapsed or revoked login means logging the
 machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
-a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A machine logs in
-through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
+a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A person's machine
+logs in through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
 `405 Method Not Allowed` and its poll `GET /v1/launcher-credentials/{pending}` `404`. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before
@@ -272,12 +292,12 @@ that service's accounts: the Legion daemon's worker pods, for `legion-daemon`. A
 as a service with its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token
 proving the pods' account is what makes a pod the service's.
 
-`BROKER_VM_SERVICES` binds a service to the Google service accounts its Compute Engine VMs run as,
-one entry per account, each account bound to one service; for each account, `BROKER_VM_PROJECTS`
-names the one project its VMs run in and `BROKER_VM_INSTANCES` the glob their names match. A VM of
-a bound account, from that account's project and with a matching name, logs in as that service
-with its own identity token and enrolls itself as a `vm`; that VM is then the service's own
-session, so the service's secrets go to it at once.
+`BROKER_VM_SERVICES` binds a service to the Google service accounts its machines run as, one entry
+per account, each account bound to one service; for each account, `BROKER_VM_PROJECTS` and
+`BROKER_VM_INSTANCES` may pin the one Compute Engine project its machines run in and the glob
+their instance names match. Those entries are what the broker's token exchange decides a machine's
+Google identity token on, and a machine of a bound account is then that service's own session, so
+the service's secrets go to it at once.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service

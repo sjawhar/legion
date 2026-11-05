@@ -17,6 +17,7 @@ import {
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import { newAsks } from "@legion/envoy-client/askgate-new-asks";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
@@ -453,7 +454,12 @@ function dispatchServing(
     return body(documentBlocks(doc.markdown));
   }) as typeof fetch;
   const session = (_directory: string, signal: AbortSignal): DispatchSession => ({
-    client: new DispatchClient("https://dispatch.example", "token", fetchImpl, signal),
+    client: new DispatchClient(
+      "https://dispatch.example",
+      bearerCredential("token"),
+      fetchImpl,
+      signal
+    ),
     serverUrls: ["https://dispatch.example"],
   });
   return { requests, session };
@@ -5241,6 +5247,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: (message: string) => warnings.push(message) },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     ).loaded;
     const roles = opts.roles ?? { askgate: MODEL };
@@ -5333,6 +5340,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: () => {} },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     );
     const { loaded } = registration;

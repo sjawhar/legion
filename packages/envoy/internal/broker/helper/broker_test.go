@@ -59,7 +59,8 @@ const failAlways = 1 << 30
 // revokeFailFirst, so a test can poll for exactly when an attempt has been answered instead of
 // guessing with a raw sleep. revokeForbidden answers a DELETE of each id it names with 403
 // OPERATOR_MISMATCH, as the broker does for an enrollment made under another operator's launcher
-// credential.
+// credential, and revokeNotEnrolling with 403 NOT_ENROLLING_CREDENTIAL, as it does for one made
+// under another credential of no operator — a machine whose credential was replaced.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
 // claim instead of a bearer token: enrollUnauthorizedNext simulates an
@@ -74,24 +75,25 @@ const failAlways = 1 << 30
 // token and moves the expiry, "invalid_grant" refuses it, "unavailable" answers 503,
 // "rate_limited" answers the broker's 429 invalid_request with Retry-After 1).
 type fakeBroker struct {
-	mu               sync.Mutex
-	srv              *httptest.Server
-	enrolled         map[string]string    // enrollment id -> thumbprint
-	byTP             map[string]string    // thumbprint -> enrollment id
-	runtimeIDToID    map[string]string    // runtime_id -> the currently live enrollment id for it
-	leaseExpiry      map[string]time.Time // enrollment id -> its current lease expiry
-	posts            []map[string]any
-	deletes          []string
-	renews           int
-	conflicts        int           // 409 ALREADY_ENROLLED answers from the runtime_id-keyed conflict path
-	failFirst        int           // 503 this many enroll calls first
-	revokeFirstDelay time.Duration // sleep this long before the first DELETE actually removes its row
-	revokeFailFirst  int           // 503 this many DELETE calls first, row untouched (an unreachable broker)
-	revokeAttempts   int           // every DELETE this fake received, failed or not
-	lease            time.Duration // lease length the fake grants; 900 s unless a test shortens it
-	seen             map[string]bool
-	revokeForbidden  map[string]bool
-	next             int // ids are minted, never derived from the key, like the broker's uuids
+	mu                 sync.Mutex
+	srv                *httptest.Server
+	enrolled           map[string]string    // enrollment id -> thumbprint
+	byTP               map[string]string    // thumbprint -> enrollment id
+	runtimeIDToID      map[string]string    // runtime_id -> the currently live enrollment id for it
+	leaseExpiry        map[string]time.Time // enrollment id -> its current lease expiry
+	posts              []map[string]any
+	deletes            []string
+	renews             int
+	conflicts          int           // 409 ALREADY_ENROLLED answers from the runtime_id-keyed conflict path
+	failFirst          int           // 503 this many enroll calls first
+	revokeFirstDelay   time.Duration // sleep this long before the first DELETE actually removes its row
+	revokeFailFirst    int           // 503 this many DELETE calls first, row untouched (an unreachable broker)
+	revokeAttempts     int           // every DELETE this fake received, failed or not
+	lease              time.Duration // lease length the fake grants; 900 s unless a test shortens it
+	seen               map[string]bool
+	revokeForbidden    map[string]bool
+	revokeNotEnrolling map[string]bool
+	next               int // ids are minted, never derived from the key, like the broker's uuids
 
 	lastAuthorization      string // the Authorization header the most recent Enroll call carried; must stay empty
 	enrollUnauthorizedNext int    // fail the next N Enroll calls with 401 LAUNCHER_INVALID (an expired/revoked credential)
@@ -230,6 +232,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		if f.revokeForbidden[r.PathValue("id")] {
 			f.mu.Unlock()
 			writeJSON(w, 403, map[string]string{"code": "OPERATOR_MISMATCH", "error": "the enrollment belongs to another operator"})
+			return
+		}
+		if f.revokeNotEnrolling[r.PathValue("id")] {
+			f.mu.Unlock()
+			writeJSON(w, 403, map[string]string{"code": "NOT_ENROLLING_CREDENTIAL", "error": "only the launcher credential that created this enrollment may revoke it"})
 			return
 		}
 		if f.revokeFailFirst > 0 {
