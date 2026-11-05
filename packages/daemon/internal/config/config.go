@@ -162,7 +162,6 @@ type Config struct {
 	PodUpdateRetask time.Duration
 	PodUpdateNotice time.Duration
 	ReviewRoundCap  int
-	MaxFixAttempts  int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
@@ -239,6 +238,7 @@ var tossedKeys = map[string]string{
 	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
+	"max_fix_attempts":           "nothing counts fix attempts: CI red always sends the work back to the implementer, and the architect decides when to stop (dispatch://INFRA-956 R4)",
 }
 
 // migrationKeys are the keys refused with a migration message, mapped to that message verbatim.
@@ -292,7 +292,6 @@ type fileConfig struct {
 	PodUpdateRetask        *time.Duration
 	PodUpdateNotice        *time.Duration
 	ReviewRoundCap         *int
-	MaxFixAttempts         *int
 	Controller             *string
 	Capabilities           *Capabilities
 	Durations              map[string]int
@@ -431,8 +430,6 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.PodUpdateNotice, err = readHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
-		case "max_fix_attempts":
-			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		case "controller":
 			file.Controller, err = readString(value, key)
 		case "capabilities":
@@ -897,7 +894,6 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		PodUpdateRetask:      time.Hour,
 		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
-		MaxFixAttempts:       3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

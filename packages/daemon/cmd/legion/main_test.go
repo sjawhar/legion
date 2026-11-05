@@ -772,6 +772,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	legionState(t)
 	for _, variant := range []struct{ extra, drop, says string }{
 		{extra: "worker_cap: 3\n", says: "worker_cap"},
+		{extra: "max_fix_attempts: 3\n", says: "max_fix_attempts"},
 		{extra: "admission_cap: 0\n", says: "admission_cap"},
 		{extra: "gates: { design: sometimes }\n", says: "gates.design"},
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},

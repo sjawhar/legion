@@ -1717,7 +1717,7 @@ describe("Legion OMP extension", () => {
           withoutWebhookApp: [],
           caches: [],
         },
-        settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+        settings: { worker_boot_timeout_seconds: 120 },
         consumers: [],
       };
       const booted = await bootPane({

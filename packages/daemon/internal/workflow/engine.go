@@ -30,7 +30,6 @@ type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
-	MaxFixAttempts int
 	Linger         time.Duration
 	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
@@ -79,14 +78,11 @@ type Engine struct {
 
 var _ intake.Handler = (*Engine)(nil)
 
-// New constructs a workflow engine with the shipped review and fix caps when callers omit them.
+// New constructs a workflow engine with the shipped review cap when callers omit it.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 	cfg.DesignGate = cfg.DesignGate.OrDefault()
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
-	}
-	if cfg.MaxFixAttempts <= 0 {
-		cfg.MaxFixAttempts = 3
 	}
 	if cfg.ProductionCheckBound <= 0 {
 		cfg.ProductionCheckBound = 336 * time.Hour
@@ -168,6 +164,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.claimFailed(ctx, tx, fact)
 	case intake.RetryOrEscalate:
 		return e.retryOrEscalate(ctx, tx, fact)
+	case intake.RestartPhase:
+		return e.restartPhase(ctx, tx, fact)
 	case intake.BackwardMove:
 		return e.backward(ctx, tx, fact)
 	case intake.SignOff:
@@ -715,48 +713,84 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return intake.Result{}, err
 	}
-	from := issue.Hold.From
-	issue.Phase, issue.Hold = from, nil
-	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+	return intake.Result{}, e.retryPhase(ctx, tx, *issue, issue.Hold.From, "retry held phase")
+}
+
+// restartPhase is the operator's retry of a phase worker whose issue stands in that worker's own
+// phase, through `legion claims retry` (api's retryClaim): the worker failed, or an operator
+// stopped it, and a stop is no death, so no hold is waiting for its architect to decide. The
+// phase is started again, which is what gives the worker — a new session when the operator asked
+// for one — the task of the phase it is to work. An issue whose phase another role works, or that
+// has left the workflow, is refused, since starting that phase under this claim's name would run
+// the wrong role; an issue held for this role is the architect's RetryOrEscalate's, which the
+// route applies instead.
+func (e *Engine) restartPhase(ctx context.Context, tx pgx.Tx, fact intake.RestartPhase) (intake.Result, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	// A settlement that reached the issue while it was held is acted on first, whatever phase the
-	// hold was from: held, the issue has no checks_red row (Table), so the settlement moved nothing,
-	// and the retry that restores the phase is the fact that lets its red stand there. A red
-	// standing for the head sends the work back to implementing as it would have on arrival
-	// (standingRed), and the restored phase's worker is not started. A phase with no checks_red row
-	// - implementing, planning - moves nothing (sendBack), and a hold from before the pull request
-	// opened has none to read, on which standingRed moves nothing. Only when nothing moved is the
-	// restored phase's worker started. From reviewing a review round held open may already have both
-	// of its halves - the reviewer completed before the hold, and its review was recorded while
-	// held - and ends here (reviewRound); the reviewer is started only if the round is still open,
-	// since a second completion of the same commit would be refused as not new. A round its reviewer
-	// completed that nothing would end is stuck: the reviewer's task says why, so the restarted
-	// reviewer decides it. The architect, who ordered the retry, is told nothing: a notice now would
-	// read as the reviewer's answer to its request.
-	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	working := workingPhase(*issue)
+	if !InWorkflow(*issue) || RoleFor(working) != fact.Role {
+		return refused("PHASE_NOT_RESTARTED", fmt.Sprintf("the %s does not work %s's phase %s, so nothing restarted it",
+			fact.Role, issue.Key, working)), nil
+	}
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
-		return intake.Result{}, err
+	if lingers {
+		return refusedLingering(*issue, fmt.Sprintf("the operator's restart of the %s", fact.Role)), nil
 	}
-	reason := "retry held phase"
+	return intake.Result{}, e.retryPhase(ctx, tx, *issue, working, "the operator retried this phase's worker")
+}
+
+// retryPhase gives issue the phase from back — a held issue leaves its hold — and starts that
+// phase's worker, told why it runs again.
+//
+// A settlement that reached the issue while it was held is acted on first, whatever phase the
+// hold was from: held, the issue has no checks_red row (Table), so the settlement moved nothing,
+// and the retry that restores the phase is the fact that lets its red stand there. A red
+// standing for the head sends the work back to implementing as it would have on arrival
+// (standingRed), and the restored phase's worker is not started. A phase with no checks_red row
+// - implementing, planning - moves nothing (sendBack), and a hold from before the pull request
+// opened has none to read, on which standingRed moves nothing. Only when nothing moved is the
+// restored phase's worker started. From reviewing a review round held open may already have both
+// of its halves - the reviewer completed before the hold, and its review was recorded while
+// held - and ends here (reviewRound); the reviewer is started only if the round is still open,
+// since a second completion of the same commit would be refused as not new. A round its reviewer
+// completed that nothing would end is stuck: the reviewer's task says why, so the restarted
+// reviewer decides it. The architect, who ordered the retry, is told nothing: a notice now would
+// read as the reviewer's answer to its request.
+//
+// Its callers have established that the tree does not linger, which is what holds every member
+// where it stood.
+func (e *Engine) retryPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, from phase.Phase, reason string) error {
+	issue.Phase, issue.Hold = from, nil
+	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+		return err
+	}
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return err
+	}
+	if moved, err := e.standingRed(ctx, tx, issue, pr); err != nil || moved {
+		return err
+	}
 	if from == phase.Reviewing {
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 		if err != nil {
-			return intake.Result{}, err
+			return err
 		}
 		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
-		r := e.reviewRound(*issue, reviewer, pr)
-		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, ""); err != nil || moved {
-			return intake.Result{}, err
+		r := e.reviewRound(issue, reviewer, pr)
+		if moved, err := e.settleRound(ctx, tx, issue, reviewer, pr, r, ""); err != nil || moved {
+			return err
 		}
 		if r.outcome == roundStuck {
 			reason += ": " + r.reason
 		}
 	}
-	return intake.Result{}, e.restart(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, pr, reason))
+	return e.restart(ctx, tx, issue, RoleFor(from), task(issue, record.PhaseRow{}, pr, reason))
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {

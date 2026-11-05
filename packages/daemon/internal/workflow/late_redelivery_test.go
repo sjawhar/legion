@@ -350,9 +350,9 @@ func TestALatePushAfterThePassRebuiltItsChainDecidesNothing(t *testing.T) {
 	apply("push-read:code...red-tests", tests)
 	apply("push-read:red-tests...more-red-tests", more)
 	apply("head-read:more-red-tests", passHead("more-red-tests", lateApplied))
-	if got := latePullRequest(t, pool); got.HeadSHA != "more-red-tests" || got.Run != nil || !got.PlannedRed || got.FixAttempts != 0 {
-		t.Fatalf("after the pass the record is at %q, run %+v, plannedRed=%t, fixAttempts=%d; want more-red-tests judged by its pushes, the red planned and no attempt counted",
-			got.HeadSHA, got.Run, got.PlannedRed, got.FixAttempts)
+	if got := latePullRequest(t, pool); got.HeadSHA != "more-red-tests" || got.Run != nil || !got.PlannedRed {
+		t.Fatalf("after the pass the record is at %q, run %+v, plannedRed=%t; want more-red-tests judged by its pushes and the red planned",
+			got.HeadSHA, got.Run, got.PlannedRed)
 	}
 	for _, late := range []struct {
 		id   string

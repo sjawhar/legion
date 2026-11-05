@@ -436,20 +436,15 @@ func TestForgetSessionRefusesAStillLiveClaimEvenWithAnExplicitSession(t *testing
 		"forget-session refused: legion-legion-legion-208-architect is ready; suspend, fail, or retire it before starting fresh")
 }
 
-// The operator's retry is for a failed claim alone. A live claim has not failed, a suspended one is
-// resumed, and a retired one runs again only when the workflow starts it: each is refused, naming
-// its state, and left as it was.
+// The operator's retry is for a claim that runs nothing. A live claim has not failed and a
+// suspended one is resumed: each is refused, naming its state, and left as it was. A retired
+// claim is no longer one of them (dispatch://INFRA-956 R3): it runs again, which
+// TestTheOperatorsRetryOfAStoppedArchitectRelaunchesIt and
+// TestTheOperatorsRetryOfAStoppedPhaseWorkerRestartsItsPhase hold to.
 func TestTheOperatorsRetryOfAClaimThatHasNotFailedIsRefused(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
 	h.ready(architectToken, "ses_architect", 1)
-	worker := spawnBody()
-	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
-	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
-	workerToken, err := claim.NewToken(testProject, worker.Issue, worker.Role)
-	if err != nil {
-		t.Fatal(err)
-	}
 	route := func(token claim.Token, action string) string {
 		return "/legion/v1/operator/claims/" + string(token) + "/" + action
 	}
@@ -462,7 +457,6 @@ func TestTheOperatorsRetryOfAClaimThatHasNotFailedIsRefused(t *testing.T) {
 	}{
 		{supervise.StateReady, architectToken, "", "retry refused: the claim is ready (the claim has not failed)"},
 		{supervise.StateSuspended, architectToken, "suspend", "retry refused: the claim is suspended (a suspended claim is resumed, not retried)"},
-		{supervise.StateRetired, workerToken, "stop", "retry refused: the claim is retired (a retired claim runs again only when the workflow starts it)"},
 	} {
 		if step.reach != "" {
 			if recorder := h.operator(http.MethodPost, route(step.token, step.reach), nil); recorder.Code != http.StatusOK {
@@ -487,10 +481,10 @@ func TestTheOperatorsRetryOfAClaimThatHasNotFailedIsRefused(t *testing.T) {
 	}
 }
 
-// The operator's retry is an architect's alone: a failed phase worker is retried by its architect's
-// retry_or_escalate while its issue is held, and by the next start of its role otherwise, so the
-// operator's retry of one is refused, naming who retries it, and the worker stays failed.
-func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
+// A daemon that holds no workflow records — no pool, no record store, no role-for — cannot start
+// a phase, so the operator's retry of a failed phase worker is the machine's alone: it relaunches
+// the claim on its recorded session with fresh budgets, applying no fact and reading no issue.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerWithNoRecordsRelaunchesIt(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
 	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
@@ -504,20 +498,21 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, calls := h.stored(workerToken), len(h.runtime.Calls())
+	before, spawns := h.stored(workerToken), len(h.runtime.CallsOf("Spawn"))
 	if before.State != supervise.StateFailed {
 		t.Fatalf("the worker is %s, want failed before its retry", before.State)
 	}
 
-	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
-		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil)
 
-	after := h.stored(workerToken)
-	if after.State != before.State || after.Generation != before.Generation || after.Budgets != before.Budgets {
-		t.Errorf("the refused retry moved the worker: %+v -> %+v", before, after)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retry of a failed worker = %d, want 200; body %s", recorder.Code, recorder.Body)
 	}
-	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
-		t.Errorf("the refused retry asked the runtime %+v", got)
+	if after := h.stored(workerToken); after.State != supervise.StateLaunching || after.Budgets != (supervise.Budgets{}) {
+		t.Errorf("the retried worker is %+v, want a launching claim with fresh budgets", after)
+	}
+	if got := len(h.runtime.CallsOf("Spawn")); got != spawns+1 {
+		t.Errorf("the retry made %d spawns, want one more than the %d before it", got, spawns)
 	}
 }
 
@@ -636,21 +631,141 @@ func TestTheOperatorsRetryOfAHeldPhaseThatStaysHeldIsRefused(t *testing.T) {
 }
 
 // A failed phase worker whose issue is held for another role's phase is not the held phase's
-// worker: retrying the phase would relaunch that other role under this claim's name. The route
-// applies nothing and the machine refuses it, as for a phase worker whose issue holds no phase.
-func TestTheOperatorsRetryOfAFailedPhaseWorkerHeldForAnotherRoleIsRefused(t *testing.T) {
+// worker: starting that phase would relaunch the other role under this claim's name. The route
+// applies nothing, and the claim is relaunched on its own, with whatever task it still holds.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerHeldForAnotherRoleStartsNoPhase(t *testing.T) {
 	facts := &heldRetrier{}
 	h, workerToken := failedImplementer(t, facts)
 	heldIssue(t, h, phase.Testing)
-	calls := len(h.runtime.Calls())
+	spawns := len(h.runtime.CallsOf("Spawn"))
 
-	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
-		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retry of a worker held for the tester's phase = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
 	if applied := facts.recorded(); len(applied) != 0 {
 		t.Errorf("the retry applied %#v, want nothing: the issue is held for the tester", applied)
 	}
+	if got := len(h.runtime.CallsOf("Spawn")); got != spawns+1 {
+		t.Errorf("the retry made %d spawns, want one more than the %d before it", got, spawns)
+	}
+}
+
+// phaseRestarter stands in for the workflow's restart of a phase: it records every fact and
+// changes no issue, as a restart of an issue already standing in its phase leaves it.
+type phaseRestarter struct{ factRecorder }
+
+// workingIssue records LEGION-209, a child of LEGION-208, standing in the phase at — where an
+// operator's stop leaves an issue, since a stop is no death and holds nothing.
+func workingIssue(t *testing.T, h *harness, at phase.Phase) {
+	t.Helper()
+	parent := "LEGION-208"
+	h.recordIssue(record.Issue{
+		Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject,
+		Title: "LEGION-209", Parent: &parent, Phase: at, Generation: 1, Status: "in_progress",
+	})
+}
+
+// stoppedImplementer is the harness of failedImplementer with LEGION-209's implementer registered
+// on a session, standing in its phase, and then stopped: what `legion claims stop` leaves, which
+// is a retired claim and an issue no hold waits on.
+func stoppedImplementer(t *testing.T, handler intake.Handler) (*harness, claim.Token) {
+	t.Helper()
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
+		Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store, Handlers: []intake.Handler{handler}, RoleFor: workflow.RoleFor,
+	}).Handler
+	token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleImplementer)
+	h.ready(token, "ses_implementer", 1)
+	workingIssue(t, h, phase.Implementing)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("stop = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if got := h.stored(token); got.State != supervise.StateRetired {
+		t.Fatalf("the stopped worker is %s, want retired", got.State)
+	}
+	return h, token
+}
+
+// A phase worker an operator stopped is retired, and until dispatch://INFRA-956 R3 the operator's
+// retry refused it, so starting it again took an edit of the claims store. The retry now starts
+// the phase the worker works (intake.RestartPhase), which is what hands the relaunched role that
+// phase's task, and answers 202 with the claim as it is until that start runs.
+func TestTheOperatorsRetryOfAStoppedPhaseWorkerRestartsItsPhase(t *testing.T) {
+	facts := &phaseRestarter{}
+	h, workerToken := stoppedImplementer(t, facts)
+	calls := len(h.runtime.Calls())
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("retry of a stopped worker = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.Token != workerToken || got.State != string(supervise.StateRetired) {
+		t.Errorf("retry answered %+v, want the worker as it is until the phase's start runs", got)
+	}
+	applied := facts.recorded()
+	if len(applied) != 1 {
+		t.Fatalf("the retry applied %d facts, want the phase's restart alone: %#v", len(applied), applied)
+	}
+	if fact, ok := applied[0].(intake.RestartPhase); !ok || fact.Issue != "LEGION-209" || fact.Role != claim.RoleImplementer {
+		t.Errorf("the retry applied %#v, want RestartPhase{LEGION-209, implementer}", applied[0])
+	}
+	if after := h.stored(workerToken); after.Session != "ses_implementer" {
+		t.Errorf("the retry left session %q on the claim, want the recorded one: no --fresh-session was asked for", after.Session)
+	}
 	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
-		t.Errorf("the refused retry asked the runtime %+v", got)
+		t.Errorf("the route asked the runtime %+v itself, want the phase's start to", got)
+	}
+}
+
+// --fresh-session has the claim leave its recorded session behind before the phase is started, so
+// the start spawns a new agent and gives it the phase's task: what a session the provider refuses
+// needs, since resuming it would be refused again.
+func TestTheOperatorsFreshSessionRetryForgetsTheSessionBeforeTheRestart(t *testing.T) {
+	facts := &phaseRestarter{}
+	h, workerToken := stoppedImplementer(t, facts)
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", RetryRequest{FreshSession: true})
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("fresh-session retry = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	after := h.stored(workerToken)
+	if after.Session != "" || after.SessionFile != "" {
+		t.Errorf("the fresh-session retry left session %q (%q) on the claim, want both forgotten", after.Session, after.SessionFile)
+	}
+	if applied := facts.recorded(); len(applied) != 1 {
+		t.Fatalf("the fresh-session retry applied %#v, want the phase's restart alone", applied)
+	}
+}
+
+// An architect an operator stopped is relaunched by its retry: no phase start reaches an
+// architect, so the machine is what runs it again, on the session it recorded.
+func TestTheOperatorsRetryOfAStoppedArchitectRelaunchesIt(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleArchitect)
+	h.ready(token, "ses_sub_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("stop = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	resumes := len(h.runtime.CallsOf("Resume"))
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/retry", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retry of a stopped architect = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if after := h.stored(token); after.State != supervise.StateLaunching || after.Budgets != (supervise.Budgets{}) {
+		t.Errorf("the retried architect is %+v, want a launching claim with fresh budgets", after)
+	}
+	if got := len(h.runtime.CallsOf("Resume")); got != resumes+1 {
+		t.Errorf("the retry made %d resumes, want one more than the %d before it", got, resumes)
 	}
 }
 

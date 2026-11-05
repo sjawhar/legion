@@ -654,7 +654,7 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 			return err
 		}
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: key, Repo: "acme/widgets", Number: 86, Branch: "legion/" + key, HeadSHA: "sha-1",
-			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, FixAttempts: 2})
+			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, CheckedHead: "sha-1"})
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -683,12 +683,12 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 	if current != phase.Testing || generation != 2 {
 		t.Fatalf("generation %d is in %s after its implementer completed, want generation 2 in testing on the open pull request #86", generation, current)
 	}
-	var fixAttempts int
-	if err := pool.QueryRow(ctx, "select fix_attempts from pull_requests where issue = $1 and number = 86", key).Scan(&fixAttempts); err != nil {
+	var checkedHead string
+	if err := pool.QueryRow(ctx, "select checked_head from pull_requests where issue = $1 and number = 86", key).Scan(&checkedHead); err != nil {
 		t.Fatalf("read the kept pull request: %v", err)
 	}
-	if fixAttempts != 0 {
-		t.Fatalf("kept pull request fix attempts = %d, want generation 1's count reset", fixAttempts)
+	if checkedHead != "" {
+		t.Fatalf("kept pull request checked head = %q, want generation 1's reading cleared", checkedHead)
 	}
 }
 

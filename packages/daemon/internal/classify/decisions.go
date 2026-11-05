@@ -114,10 +114,8 @@ func inWindow(named record.Named, start string, since time.Time) bool {
 
 // advance moves the pull request to a new head, by the move arrival names, and says whether a
 // chain of recorded pushes led to it from the recorded head (chained) with nothing left for it to
-// wait for (arrivalPushes), and returns the named moves its judgement left (names, the run's). A red
-// prior verdict counts once, unless the red was planned (PlannedRed: the review App's red tests) or
-// the recorded pushes show the move spares the count (sparedMove): a chain of pushes from the
-// recorded head to the new one, each the review App's (sparesAttempt). The recorded CI settlement
+// wait for (arrivalPushes), and returns the named moves its judgement left (names, the run's). The
+// recorded CI settlement
 // stays, as CheckedHead's, but stands for nothing at the new head (HeadVerdict): a settlement
 // stands only for the head it names, and the new head's own replaces it (SettlementFor). The move
 // and the chain's pushes join the moves made (madeMoves), and the pushes they spend go
@@ -126,18 +124,12 @@ func inWindow(named record.Named, start string, since time.Time) bool {
 // The move's planned mark is the push on the chain that left the new head (arrivalPlan, pathPlan):
 // the review App's sets it, anyone else's clears it. With no chain, the pushes that left the head
 // decide (unchainedPlan), and a head whose push has not arrived carries the mark.
-//
-// HeadCounted names the head the count last counted, and the attempt it marks runs on through every
-// head pushed on top of it until one is pushed onto a green verdict, or onto a settled head whose
-// base branch requires no check and no workflow (nothingRequired), which clears it: CI sent nothing
-// back from either, so the push is a fresh start. A push onto a head CI has not judged yet, or onto
-// a red that counts nothing, is the same attempt, not a new one.
 func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []record.Named) (record.PullRequest, bool, []record.Named) {
 	read := arrivalPushes(pr, arrival, headSHA, names)
-	var planned, decided, chained, spared bool
+	var planned, decided, chained bool
 	var chain []record.ClassifiedPush
 	if read.path {
-		chained, spared, chain = true, pathSpares(read.pushes), read.pushes
+		chained, chain = true, read.pushes
 		planned, decided = pathPlan(read.pushes), chained
 	} else {
 		planned, chained = arrivalPlan(read.pushes, pr.HeadSHA, headSHA)
@@ -145,7 +137,7 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 		if !chained {
 			planned, decided = unchainedPlan(read.pushes, pr.HeadSHA, headSHA)
 		}
-		spared, chain = sparedMove(read.pushes, pr.HeadSHA, headSHA), chainOf(read.pushes, pr.HeadSHA, headSHA)
+		chain = chainOf(read.pushes, pr.HeadSHA, headSHA)
 	}
 	if !read.waits {
 		// An arrival that waits is judged for now by pushes that may not be its own (provisional),
@@ -153,13 +145,6 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 		pr.Moves = madeMoves(pr.Moves, pr.HeadSHA, headSHA, chain, pr.Pushes)
 	}
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
-	switch verdict := HeadVerdict(pr); {
-	case verdict == "red" && !pr.PlannedRed && !spared:
-		pr.FixAttempts++
-		pr.HeadCounted = headSHA
-	case verdict == "green" || nothingRequired(pr):
-		pr.HeadCounted = ""
-	}
 	if decided {
 		pr.PlannedRed = planned
 	}
@@ -173,17 +158,6 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 // pushes made, so path always holds one.
 func pathPlan(path []record.ClassifiedPush) (planned bool) {
 	return path[len(path)-1].ByReviewApp
-}
-
-// pathSpares is whether path, the pushes of a move in the order the branch made them, is no fix
-// attempt: each of its pushes spares the attempt (sparesAttempt; sparedMove, over a chain).
-func pathSpares(path []record.ClassifiedPush) bool {
-	for _, p := range path {
-		if !sparesAttempt(p) {
-			return false
-		}
-	}
-	return len(path) > 0
 }
 
 // maxMoves bounds the moves a pull request remembers (record.PullRequest.Moves): a push for a move
@@ -837,39 +811,6 @@ func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival 
 	return kept
 }
 
-// sparesAttempt is whether a push onto a red is no fix attempt: it said which head it replaced, and
-// it was the review App's (its red tests, a red it plans), which who pushed it says.
-func sparesAttempt(p record.ClassifiedPush) bool {
-	return p.Before != "" && p.ByReviewApp
-}
-
-// sparedMove is whether the recorded pushes show the move from from to to is no fix attempt: a
-// chain of pushes leads from from to to, each sparing the attempt (sparesAttempt). Each such push is
-// a fact about two commits, true whenever it is learned, so once every push of the move is recorded
-// the answer does not depend on the order the pushes arrived in, or on whether the daemon recorded
-// the heads between from and to.
-func sparedMove(pushes []record.ClassifiedPush, from, to string) bool {
-	if from == "" || from == to {
-		return false
-	}
-	reached := map[string]bool{to: true}
-	for frontier := []string{to}; len(frontier) > 0; {
-		current := frontier[0]
-		frontier = frontier[1:]
-		for _, p := range pushes {
-			if p.SHA != current || !sparesAttempt(p) || reached[p.Before] {
-				continue
-			}
-			if p.Before == from {
-				return true
-			}
-			reached[p.Before] = true
-			frontier = append(frontier, p.Before)
-		}
-	}
-	return false
-}
-
 // arrivalPlan reads the move from from to to off a chain of recorded pushes between them, each of
 // which said which head it replaced. chained is whether such a chain leads from from to to;
 // planned is whether its last push - the one that left to - was the review App's.
@@ -1168,8 +1109,8 @@ func CodeOnItsWay(pr record.PullRequest) bool {
 // App did not plan it (PlannedRed, the tester's own failing tests, which the implementer is meant
 // to make pass). A red a required workflow alone makes is no exception: CI is the daemon's own
 // rule, read beside the review round and never by it (workflow's decideChecks), so the reviewer's
-// approval and a red at its head are two facts, each acted on as it arrives. The fix-attempt cap
-// is the caller's (FixAttemptCapHolds).
+// approval and a red at its head are two facts, each acted on as it arrives. Nothing counts how
+// many reds came before: a red always sends the work back (dispatch://INFRA-956 R4).
 func RedSendsBack(pr record.PullRequest) bool {
 	return HeadVerdict(pr) == "red" && !pr.PlannedRed
 }
@@ -1201,34 +1142,6 @@ func RedWithdrawsReady(pr record.PullRequest) bool {
 // own mergeability handler).
 func ConflictWithdrawsReady(pr record.PullRequest) bool {
 	return pr.State == record.PullRequestOpen && pr.Mergeability == record.MergeabilityConflicting
-}
-
-// FixAttemptCapHolds says whether the red verdict standing for the head is one the fix-attempt cap
-// holds: the pull request's fix attempts are at cap, and the head belongs to the attempt the count
-// last counted (HeadCounted): the counted head itself, or a head pushed on top of it before any
-// push landed on a green verdict or on a settled head whose base branch requires nothing
-// (AdvancePullRequestHead). That attempt is the loop the cap bounds, so its red no longer sends the
-// work back from testing, reviewing, retro or merging by itself, however often it returns - a
-// re-run failing again, a red after the head read green, a second push before CI settled - and the
-// architect decides what follows (workflow's standingRed). A head pushed onto a green verdict, or
-// onto a settled head whose base requires nothing, is not that loop: it raised no count and left
-// the attempt, so its red is new. A green head is the fix that worked.
-func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
-	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
-}
-
-// BlockFixAttempt marks and reports one exhausted fix-attempt count when the verdict that stands
-// for the head is red after a settlement or a new required set, as the shipped reducer decides
-// pr-blocked on ci-settled-red alone: once per count, never again on a later red at the same count.
-// A green head at an exhausted count is the fix that worked. A zero BlockedAttempts means no count
-// has been reported, because fix attempts begin at one before they can exhaust a positive cap. The
-// caller asks it only of a red that sent nothing back (workflow's decideChecks).
-func BlockFixAttempt(pr record.PullRequest, cap int) (record.PullRequest, bool) {
-	if cap <= 0 || HeadVerdict(pr) != "red" || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
-		return pr, false
-	}
-	pr.BlockedAttempts = pr.FixAttempts
-	return pr, true
 }
 
 // DesignGateEventKind is the Dispatch artifact observation that changes a registered gate.

@@ -259,12 +259,11 @@ func TestASynchronizesSenderPicksItsPushInTheWorkflow(t *testing.T) {
 	pool := migratedPool(t)
 	seedReviewOf(t, pool, "head", "red")
 	engine := testEngine(config.DesignGateRootIssues, nil)
-	before := probePullRequest(t, pool)
 	applyRefusingNothing(t, pool, engine, sentPush("head", "h1", testReviewApp), sentPush("head", "h1", dev),
 		namedSync("head", "h1", dev, time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)))
 	after := probePullRequest(t, pool)
-	if after.HeadSHA != "h1" || after.Run != nil || after.FixAttempts != before.FixAttempts+1 || after.PlannedRed {
-		t.Fatalf("at %s, run open %v, fix=%d planned=%v; want h1, closed, fix=%d and unplanned: the implementer's push", after.HeadSHA, after.Run != nil, after.FixAttempts, after.PlannedRed, before.FixAttempts+1)
+	if after.HeadSHA != "h1" || after.Run != nil || after.PlannedRed {
+		t.Fatalf("at %s, run open %v, planned=%v; want h1, closed and unplanned: the implementer's push", after.HeadSHA, after.Run != nil, after.PlannedRed)
 	}
 	for _, p := range append(append([]record.ClassifiedPush{}, after.Pushes...), after.Moves[len(after.Moves)-1].Repeats...) {
 		if p.Before == "head" && p.SHA == "h1" && p.Sender == "" {

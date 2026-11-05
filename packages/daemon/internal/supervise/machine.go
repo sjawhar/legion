@@ -581,10 +581,9 @@ var ErrForeignUpdateRound = errors.New("the answer names an update round this cl
 // adds the round the claim left and what the worker does next.
 var ErrLeftPodRound = errors.New("the answer comes from a process in another pod than the update round's own")
 
-// ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
-// phase worker and the daemon's controller each have their own retry (operatorRetry). The refusal
-// adds who retries the claim.
-var ErrRetryArchitectOnly = errors.New("the operator's retry relaunches only an architect")
+// ErrRetryNotTheController is the operator's retry of the daemon's own controller claim, which the
+// controller keeper retries instead (operatorRetry). The refusal adds who retries the claim.
+var ErrRetryNotTheController = errors.New("the operator's retry does not relaunch the daemon's controller")
 
 // ErrHeldByOperator is the daemon's start or task meeting an operator's suspension, which no rule
 // overrides (Claim.RuleHolds): a wait, ended only by the operator's resume. RuleHoldError wraps it

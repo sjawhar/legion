@@ -169,7 +169,8 @@ const legionPhaseView = z.strictObject({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. `state` is always present: a recorded pull request is open, merged or closed. */
+ * round decides. `state` is always present: a recorded pull request is open, merged or closed.
+ * `fixAttempts` counted the heads pushed onto a red verdict until contract 48 removed the count. */
 const legionPullRequestView = z.strictObject({
   /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
@@ -179,7 +180,6 @@ const legionPullRequestView = z.strictObject({
   state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
-  fixAttempts: z.number().int().nonnegative(),
 });
 
 /** `api.GateView` — the design gate; `approvedVersion` is null until a human approves one, and
@@ -409,11 +409,10 @@ const legionCapabilityState = z.strictObject({
 });
 
 /** `api.Settings` — the daemon's resolved legion.yaml with every credential, credential source and
- * credential file path left out (contract 35). Its keys are legion.yaml's own; the two the spec
- * names are typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
- * contract change. */
+ * credential file path left out (contract 35). Its keys are legion.yaml's own; the one the spec
+ * names is typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
+ * contract change. `max_fix_attempts` was typed here until contract 48 removed the key. */
 const legionSettings = z.looseObject({
-  max_fix_attempts: z.number().int().positive(),
   worker_boot_timeout_seconds: z.number().int().positive(),
 });
 

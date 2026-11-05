@@ -369,14 +369,13 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
 		HeadSHA: "b1c2d3", HeadUpdatedAt: updatedAt,
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
-		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
 		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"},
 			{Before: "a0b1c2", SHA: "b1c2d3", Pushed: true, Repeats: []ClassifiedPush{{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true}, {SHA: "b1c2d3", Before: "a0b1c2", Sender: "legion-implement[bot]"}}}},
-		HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
+		PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
 		// A run's anchor keeps a set never read apart from an empty one, and so do its steps.
 		Run: &HeadRun{
-			Anchor: Judgement{HeadSHA: "a0b1c2", FixAttempts: 1, HeadCounted: "a0b1c2", CheckedHead: "a0b1c2", Failing: []string{"unit"},
+			Anchor: Judgement{HeadSHA: "a0b1c2", CheckedHead: "a0b1c2", Failing: []string{"unit"},
 				CheckRuns: []AttemptRun{{Name: "unit", ID: 90}}, Generation: 3, Snapshot: "snapshot-3", Workflows: []RequiredWorkflow{}},
 			Pushes: pushes[:1],
 			Steps: []RunStep{{Head: "b1c2d3", Before: "a0b1c2", At: time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)}, {Settlement: &Settlement{Head: "b1c2d3", CheckRuns: []AttemptRun{{Name: "unit", ID: 91}}, Generation: 4,
@@ -718,10 +717,9 @@ func samePullRequest(got, want PullRequest) bool {
 		got.Branch == want.Branch && got.HeadSHA == want.HeadSHA && got.HeadUpdatedAt.Equal(want.HeadUpdatedAt) &&
 		got.CheckedHead == want.CheckedHead && reflect.DeepEqual(got.Failing, want.Failing) &&
 		reflect.DeepEqual(append([]string{}, got.Cancelled...), append([]string{}, want.Cancelled...)) &&
-		got.FixAttempts == want.FixAttempts &&
-		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
+		reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
-		reflect.DeepEqual(got.Pushes, want.Pushes) && reflect.DeepEqual(got.Moves, want.Moves) && got.HeadCounted == want.HeadCounted &&
+		reflect.DeepEqual(got.Pushes, want.Pushes) && reflect.DeepEqual(got.Moves, want.Moves) &&
 		reflect.DeepEqual(got.Run, want.Run) &&
 		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
 		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead && got.MergeSHA == want.MergeSHA
@@ -819,10 +817,10 @@ func sameInstant(got, want *time.Time) bool {
 	return got.Equal(*want)
 }
 
-// A new generation keeps an open pull request but none of the old generation's fix-attempt
-// accounting: its counts, its counted head and the mark that count replaced, and its planned mark,
-// which would otherwise exempt the new generation's first red from counting.
-func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
+// A new generation keeps an open pull request but none of the old generation's reading of it: its
+// CI settlement, its head run and its planned mark, which would otherwise carry the tester's last
+// round into the new generation's first red.
+func TestClearGenerationResetsAnOpenPullRequestsReading(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
@@ -831,7 +829,7 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
 		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
-		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", Run: &HeadRun{Anchor: Judgement{HeadSHA: "fix"}, Steps: []RunStep{{Head: "red-tests"}}},
+		Run:        &HeadRun{Anchor: Judgement{HeadSHA: "fix"}, Steps: []RunStep{{Head: "red-tests"}}},
 		PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
@@ -845,9 +843,9 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got == nil {
 			t.Fatal("the open pull request is gone, want it kept")
 		}
-		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.Run != nil || got.PlannedRed {
-			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q run=%+v plannedRed=%v, want 0, 0, \"\", nil and false",
-				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.Run, got.PlannedRed)
+		if got.CheckedHead != "" || got.Run != nil || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: checkedHead=%q run=%+v plannedRed=%v, want \"\", nil and false",
+				got.CheckedHead, got.Run, got.PlannedRed)
 		}
 	})
 }

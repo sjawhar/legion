@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  The plugin declares daemon API contract 48, which removed fix-attempt counting: a daemon's state
+  no longer carries `max_fix_attempts` in its settings or `fixAttempts` on a pull request, and a
+  red CI verdict sends the work back to the implementer every time it stands. A 47 plugin and a 48
+  daemon refuse each other at the boot gate and at `legion probe-image`.

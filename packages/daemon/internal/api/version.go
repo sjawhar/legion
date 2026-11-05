@@ -515,4 +515,18 @@ package api
 // refuse either pair. The daemon keeps the newest report on the claim's machine, in memory, and
 // nothing else: it is read within two minutes of the turn it is about, so no store write and no
 // migration come with it (`internal/supervise/turnoutcome.go`).
-const DaemonAPIVersion = 47
+//
+// 48: INFRA-956 R4 -- fix-attempt counting is gone. `legion.yaml` no longer takes
+// `max_fix_attempts`, and a file carrying it is refused by name, so the settings block of `GET
+// /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer models it.
+// Each issue's pull request in that state loses `fixAttempts` (`api.PullRequestView`), which
+// counted the heads pushed onto a red verdict. A red CI verdict now sends the work back to the
+// implementer every time it stands, however many came before, and the architect decides when to
+// stop; no pull request is marked blocked and no `pr-blocked` notice is published for a count.
+// `packages/contracts/src/legion-api.ts` mirrors both removals, and its reader of the settings
+// block is loose, so a plugin from 47 reads a state without `max_fix_attempts` — but its strict
+// pull-request reader refuses one without `fixAttempts`, which is what this number is for: the
+// boot gate and `legion probe-image` refuse a 47 plugin against a 48 daemon. This change adds no
+// store migration; `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped columns
+// that nothing reads, each given its zero on an insert (`record`'s PutPullRequest).
+const DaemonAPIVersion = 48

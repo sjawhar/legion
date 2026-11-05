@@ -2,10 +2,8 @@
 
 // The live proof's driver for the rule this change makes: a pull request whose base branch requires
 // no check and no workflow has no CI verdict (classify.HeadVerdict's "", so no checksVerdict on GET
-// /legion/v1/state), where it read green before, so a failed check there sends nothing back; and a
-// code head pushed onto such a settled head leaves the attempt the fix-attempt count last counted,
-// as a push onto green does (classify.AdvancePullRequestHead's nothingRequired), so a red once the
-// base requires the check again is new and sends the work back. scripts/e2e/no-required-checks.sh
+// /legion/v1/state), where it read green before, so a failed check there sends nothing back.
+// scripts/e2e/no-required-checks.sh
 // builds this driver with `-tags e2e` and owns the nats-server and the PostgreSQL it runs against.
 //
 // The daemon is the whole daemon: run, the function `legion start` calls, through this package's
@@ -73,11 +71,10 @@ const noRequiredChecksRead = requiredChecksInterval + time.Minute
 type noRequiredChecksLive struct {
 	liveProof
 	github *noRequiredChecksGitHub
-	// nothing is the issue on a base that requires nothing (steps 1 and 2), green the one on a base
-	// that requires ci (step 3), and pushed the one at an exhausted fix-attempt count whose base
-	// stops requiring anything under it (step 4). Each is a root of its own tree, and each pull
+	// nothing is the issue on a base that requires nothing (steps 1 and 2), and green the one on a
+	// base that requires ci (step 3). Each is a root of its own tree, and each pull
 	// request is on a base branch of its own, so each has its own required set.
-	nothing, green, pushed noRequiredChecksIssue
+	nothing, green noRequiredChecksIssue
 	// seq numbers the envelopes the driver publishes, so each event id is the run's own.
 	seq int
 }
@@ -94,32 +91,25 @@ type noRequiredChecksIssue struct {
 // branch is the issue's pull request's head branch, as Legion names it.
 func (i noRequiredChecksIssue) branch() string { return "legion/" + i.key }
 
-// TestABaseThatRequiresNothingGivesNoVerdictLive drives the four steps of the proof against one
+// TestABaseThatRequiresNothingGivesNoVerdictLive drives the three steps of the proof against one
 // booted daemon: a failed check on a base that requires nothing gives no verdict and sends nothing
 // back; the same failure once the base requires the check is red and sends the work back, which is
 // step 1's control that its absence came from the empty set and not from an unread set or a lost
-// settlement; a passing required check is still green; and at an exhausted fix-attempt count, a
-// push onto the counted head once its base requires nothing leaves the counted attempt, so the new
-// head's red, once the base requires the check again, sends the work back.
+// settlement; and a passing required check is still green.
 func TestABaseThatRequiresNothingGivesNoVerdictLive(t *testing.T) {
 	fixtureenv.Live(t)
 	r := newNoRequiredChecksLive(t)
 	r.step("nothing-required-failed-check", r.nothingRequiredFailedCheck)
 	r.step("the-same-failure-once-required-is-red", r.theSameFailureOnceRequiredIsRed)
 	r.step("a-passing-required-check-is-green", r.aPassingRequiredCheckIsGreen)
-	r.step("a-push-onto-a-base-that-requires-nothing-leaves-the-attempt", r.aPushOntoABaseThatRequiresNothingLeavesTheAttempt)
 }
 
-// newNoRequiredChecksLive boots the daemon over the script's broker, with max_fix_attempts 1, and
-// the three issues already recorded: the first in testing on a base that requires nothing, its
-// required set not yet read; the second in reviewing on a base that requires ci; and the third in
-// testing on a base that requires ci, its one fix attempt counted at its head.
+// newNoRequiredChecksLive boots the daemon over the script's broker with the two issues already
+// recorded: the first in testing on a base that requires nothing, its required set not yet read,
+// and the second in reviewing on a base that requires ci.
 func newNoRequiredChecksLive(t *testing.T) *noRequiredChecksLive {
 	t.Helper()
 	proof := newLiveProof(t, "scripts/e2e/no-required-checks.sh")
-	// One counted attempt exhausts the count, so step 4's first red is held and reported, and its
-	// last is held too unless the push onto the base that required nothing left that attempt.
-	proof.cfg.MaxFixAttempts = 1
 	number, err := strconv.ParseInt(randomSuffix(t)[:6], 16, 64)
 	if err != nil {
 		t.Fatal(err)
@@ -128,12 +118,10 @@ func newNoRequiredChecksLive(t *testing.T) *noRequiredChecksLive {
 		liveProof: proof,
 		nothing:   noRequiredChecksIssue{key: proof.cfg.Project + "-1", number: int(number) + 1, base: "base-nothing"},
 		green:     noRequiredChecksIssue{key: proof.cfg.Project + "-2", number: int(number) + 2, base: "base-green"},
-		pushed:    noRequiredChecksIssue{key: proof.cfg.Project + "-3", number: int(number) + 3, base: "base-pushed"},
 	}
 	r.github = newNoRequiredChecksGitHub(t)
 	r.github.pull(r.nothing, "a1")
 	r.github.pull(r.green, "c1", noRequiredChecksCheck)
-	r.github.pull(r.pushed, "b1", noRequiredChecksCheck)
 	r.showOnBoard()
 	r.seed()
 	// The runtime provisions each claim's workspace itself (fake.Runtime's InPod), so a send-back's
@@ -152,10 +140,9 @@ func newNoRequiredChecksLive(t *testing.T) *noRequiredChecksLive {
 func (r *noRequiredChecksLive) showOnBoard() {
 	r.board.show(r.nothing.key, "testing")
 	r.board.show(r.green.key, "needs_review")
-	r.board.show(r.pushed.key, "testing")
 }
 
-// seed records the three issues as the daemon would hold them: each a root handed to Legion,
+// seed records the two issues as the daemon would hold them: each a root handed to Legion,
 // holding its tree's admission slot, its lifecycle open under the workflow, on an open pull request
 // at its first head. The first's pull request has no required set yet, which the boot's pass reads
 // as the empty set its base requires; the other two record the [ci] their bases require, and the
@@ -173,7 +160,6 @@ func (r *noRequiredChecksLive) seed() {
 	}{
 		{r.nothing, phase.Testing, "testing", "U", record.PullRequest{HeadSHA: "a1"}},
 		{r.green, phase.Reviewing, "needs_review", "V", record.PullRequest{HeadSHA: "c1", Required: []string{noRequiredChecksCheck}}},
-		{r.pushed, phase.Testing, "testing", "W", record.PullRequest{HeadSHA: "b1", Required: []string{noRequiredChecksCheck}, FixAttempts: 1, HeadCounted: "b1"}},
 	}
 	if err := r.st.Tx(ctx, func(tx pgx.Tx) error {
 		for _, seeded := range issues {
@@ -191,7 +177,7 @@ func (r *noRequiredChecksLive) seed() {
 				return err
 			}
 		}
-		return r.admit(ctx, tx, r.nothing.key, r.green.key, r.pushed.key)
+		return r.admit(ctx, tx, r.nothing.key, r.green.key)
 	}); err != nil {
 		t.Fatalf("seed the three issues: %v", err)
 	}
@@ -203,8 +189,8 @@ func (r *noRequiredChecksLive) seed() {
 		if seeded.pr.Required != nil {
 			required = fmt.Sprint(seeded.pr.Required)
 		}
-		r.note("seeded: %s in %s on pull request #%d at %s, base %s, required set %s, fix attempts %d",
-			seeded.issue.key, seeded.phase, seeded.issue.number, seeded.pr.HeadSHA, seeded.issue.base, required, seeded.pr.FixAttempts)
+		r.note("seeded: %s in %s on pull request #%d at %s, base %s, required set %s",
+			seeded.issue.key, seeded.phase, seeded.issue.number, seeded.pr.HeadSHA, seeded.issue.base, required)
 	}
 }
 
@@ -270,80 +256,6 @@ func (r *noRequiredChecksLive) aPassingRequiredCheckIsGreen() {
 		t.Fatalf("%s is in %s after a green settlement, want reviewing", issue.key, got.Phase)
 	}
 	r.note("read back: checksVerdict %s, %s in %s", got.PullRequest.ChecksVerdict, issue.key, got.Phase)
-}
-
-// Step 4. At an exhausted count (max_fix_attempts 1, one attempt counted at b1), the counted head's
-// red is held: the issue stays in testing and the count is reported once. The base then stops
-// requiring anything, so b1 has no verdict, and the implementer pushes b2 onto it: the push raises
-// no count and leaves the counted attempt, as a push onto green does. Once the base requires ci
-// again, b2's red is new, not the held attempt's: it sends the work back with a checks-red naming
-// ci, and the count is still 1. Had HeadVerdict's change dropped this reset (AdvancePullRequestHead
-// without nothingRequired), the push would have stayed in the attempt, and b2's red would have been
-// held with the issue left in testing.
-func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt() {
-	t := r.t
-	issue := r.pushed
-	r.publishSettlement(issue, "b1", true)
-	r.note("drove CI's settlement of %s at b1 with %s failed", issue.key, noRequiredChecksCheck)
-	r.waitSettled(issue, "b1")
-	got := r.issue(issue.key)
-	if got.Phase != phase.Testing || got.PullRequest == nil || got.PullRequest.ChecksVerdict != "red" || got.PullRequest.FixAttempts != 1 {
-		t.Fatalf("after the red at the counted head b1 %s is in %s on %+v, want testing, checksVerdict red, fixAttempts 1: the cap holds the attempt's red", issue.key, got.Phase, got.PullRequest)
-	}
-	blocked := r.waitArchitectNotices(issue.key, "pr-blocked", 1)
-	r.note("read back: %s held in %s, checksVerdict %s, fixAttempts %d; one pr-blocked notice: %s",
-		issue.key, got.Phase, got.PullRequest.ChecksVerdict, got.PullRequest.FixAttempts, blocked[0].Payload)
-	if red := r.architectNotices(issue.key, "checks-red"); len(red) != 0 {
-		t.Fatalf("the held red told %s's architect %d checks-red notices, want none", issue.key, len(red))
-	}
-
-	r.github.require(issue.base)
-	r.note("switched the GitHub stand-in: %s's rulesets now require nothing", issue.base)
-	r.waitRequired(issue, []string{})
-	r.note("read back: the daemon's pass read %s as requiring nothing (required [])", issue.base)
-	pullRequest := r.rawPullRequest(issue.key)
-	if verdict, ok := pullRequest["checksVerdict"]; ok {
-		t.Fatalf("issues[%s].pullRequest carries checksVerdict %s once its base requires nothing, want no checksVerdict key: %s", issue.key, verdict, r.rawJSON(pullRequest))
-	}
-	if got := r.issue(issue.key); got.Phase != phase.Testing {
-		t.Fatalf("%s is in %s once its base requires nothing, want testing", issue.key, got.Phase)
-	}
-	r.note("read back: issues[%s].pullRequest has no checksVerdict key, %s still in testing: %s", issue.key, issue.key, r.rawJSON(pullRequest))
-
-	r.github.head(issue, "b2")
-	pushed := r.publishPush(issue, "b1", "b2")
-	synchronized := r.publishSynchronize(issue, "b2")
-	r.note("drove the implementer's push of b2 onto b1 (src/widget.go, pusher legion-implement[bot]) and GitHub's synchronize of #%d to b2", issue.number)
-	r.waitProcessed(pushed)
-	r.waitProcessed(synchronized)
-	got = r.issue(issue.key)
-	if got.PullRequest == nil || got.PullRequest.Head != "b2" || got.PullRequest.FixAttempts != 1 {
-		t.Fatalf("after the push of b2 issues[%s].pullRequest is %+v, want head b2 and fixAttempts still 1: a push onto a head with no verdict counts nothing", issue.key, got.PullRequest)
-	}
-	r.note("read back: the daemon took both envelopes (processed_events); head %s, fixAttempts %d", got.PullRequest.Head, got.PullRequest.FixAttempts)
-
-	r.github.require(issue.base, noRequiredChecksCheck)
-	r.note("switched the GitHub stand-in: %s's rulesets require %s again", issue.base, noRequiredChecksCheck)
-	r.waitRequired(issue, []string{noRequiredChecksCheck})
-	r.note("read back: the daemon's pass read %s as requiring [%s]", issue.base, noRequiredChecksCheck)
-
-	r.publishSettlement(issue, "b2", true)
-	r.note("drove CI's settlement of %s at b2 with %s failed", issue.key, noRequiredChecksCheck)
-	r.waitSettled(issue, "b2")
-	got = r.issue(issue.key)
-	if got.Phase != phase.Implementing {
-		t.Fatalf("after the red at b2 %s is in %s on %+v, want implementing: the push onto b1 while its base required nothing must leave the counted attempt, so b2's red is new", issue.key, got.Phase, got.PullRequest)
-	}
-	if got.PullRequest == nil || got.PullRequest.ChecksVerdict != "red" || got.PullRequest.FixAttempts != 1 {
-		t.Fatalf("after the red at b2 issues[%s].pullRequest is %+v, want checksVerdict red and fixAttempts 1", issue.key, got.PullRequest)
-	}
-	r.note("read back: %s in %s, checksVerdict %s, fixAttempts %d", issue.key, got.Phase, got.PullRequest.ChecksVerdict, got.PullRequest.FixAttempts)
-	told := r.waitArchitectNotices(issue.key, "checks-red", 1)
-	r.wantRedAt(issue, told[0], "b2")
-	if blocked := r.architectNotices(issue.key, "pr-blocked"); len(blocked) != 1 {
-		t.Fatalf("%s's architect was told %d pr-blocked notices over the step, want the one the held red reported", issue.key, len(blocked))
-	}
-	r.note("read back: one checks-red notice on %s's architect's topic: %s; still the one pr-blocked", issue.key, told[0].Payload)
 }
 
 // rawPullRequest is issues[key].pullRequest as GET /legion/v1/state sends it, each key as it is on

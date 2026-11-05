@@ -359,13 +359,27 @@ type RequestOperatorClose struct{ Claim claim.Token }
 // re-admitted after its linger stopped every claim.
 type RequestRetry struct{ Claim claim.Token }
 
-// RequestOperatorRetry is the operator relaunching a failed architect through the API: the retry
-// RequestRetry makes, fresh budgets and the same session, from failed alone, for the root and
-// sub-architects nothing else relaunches (operatorRetry). A retired claim belongs to its tree's
-// lifecycle, which the workflow decides, so the operator's retry refuses it, as it refuses every
-// claim that has not failed. It is its own event, as the closes are, so the table answers each
-// caller's retry its own way.
-type RequestOperatorRetry struct{ Claim claim.Token }
+// RequestOperatorRetry is the operator relaunching a claim through the API: the retry RequestRetry
+// makes, fresh budgets and the same session, for an architect and for a phase worker
+// (operatorRetry). It is its own event, as the closes are, so the table answers each caller's
+// retry its own way.
+//
+// It reaches a retired claim as well as a failed one. `legion claims stop` retires a claim, and
+// while the operator's retry refused that state an operator who stopped a worker could start it
+// again only by editing the claims store with the daemon stopped; that is the recovery
+// dispatch://INFRA-956 R3 asked to be made of `legion` commands alone. The claim's tree lifecycle
+// still decides whether the relaunch runs at all: a tree whose cleanup is reserved refuses the
+// launch (revive, Store.AdmitClaim), as it refuses the workflow's own retry of a retired claim.
+//
+// FreshSession is `legion claims retry --fresh-session`: the claim forgets its recorded session
+// before the relaunch, so the role starts a new one. It is a field rather than an event of its
+// own, as the closes are, because both answers are the same decision made by the same caller —
+// the claim runs again — and neither skips a check the other makes: it says only which session
+// the retry starts.
+type RequestOperatorRetry struct {
+	Claim        claim.Token
+	FreshSession bool
+}
 
 // RequestForgetSession drops the named recorded session of a suspended, failed, or retired claim.
 // Its next resume, retry, or workflow start provisions a fresh session rather than resuming one
@@ -856,13 +870,15 @@ func fillTable(t *builder) {
 	t.ignore(onRetry, "the claim has not failed", live...)
 	t.ignore(onRetry, "a suspended claim is resumed, not retried", StateSuspended)
 
-	t.row(onOperatorRetry, "the operator's retry of an architect: fresh budgets, and the same session relaunched", operatorRetry,
-		[]ClaimState{StateLaunching, StateFailed}, StateFailed)
+	// A retired claim is retried here as the workflow's own retry retries one: `legion claims stop`
+	// retires a claim, and while this row refused that state the only way to start a stopped worker
+	// again was an edit of the claims store with the daemon stopped (dispatch://INFRA-956 R3).
+	t.row(onOperatorRetry, "the operator's retry of an architect or a phase worker, failed or stopped: fresh budgets, and the same session relaunched unless the retry asked for a new one", operatorRetry,
+		[]ClaimState{StateLaunching, StateFailed}, StateFailed, StateRetired)
 	t.ignore(onOperatorRetry, "a queued claim is spawned, not retried", StateQueued)
 	t.ignore(onOperatorRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onOperatorRetry, "the claim has not failed", live...)
 	t.ignore(onOperatorRetry, "a suspended claim is resumed, not retried", StateSuspended)
-	t.ignore(onOperatorRetry, "a retired claim runs again only when the workflow starts it", StateRetired)
 
 	t.row(onForgetSession, "drop the session so the next launch is fresh", forgetSession, nil,
 		StateQueued, StateSuspended, StateFailed, StateRetired)
@@ -1648,22 +1664,28 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 	return m.revive(ctx)
 }
 
-// operatorRetry is the operator's retry of a failed claim: retry, for an architect, whether its
-// tree's root or a sub-architect, which nothing else relaunches. Any other claim has a retry of its
-// own, so it is refused, naming that retry: a phase worker's is its architect's retry_or_escalate
-// while its issue is held and the next start of its role otherwise, and the daemon's controller's is
-// its keeper. A claim's role never changes, so the refusal cannot race the decision it guards.
+// operatorRetry is the operator's retry of a claim that runs nothing: retry, for an architect —
+// its tree's root or a sub-architect, which nothing else relaunches — and for a phase worker
+// whose issue works no phase of its role, which the route has already established before it
+// reaches the machine (api's retryClaim starts the phase itself for every other one). The
+// daemon's controller has a retry of its own, its keeper, so it alone is refused. A claim's role
+// never changes, so the refusal cannot race the decision it guards.
+//
+// A retry that asks for a new session forgets the recorded one before the relaunch
+// (RequestOperatorRetry.FreshSession), so the launch spawns a fresh agent, as the forget-session
+// route's own action leaves a claim: resuming a session whose turns the provider refused would be
+// refused again.
 func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
-	switch m.claim.Role {
-	case claim.RoleArchitect:
-		return retry(m, ctx, ev)
-	case claim.RoleController:
+	if m.claim.Role == claim.RoleController {
 		return &RefusedError{State: m.claim.State, Request: "retry",
-			Err: fmt.Errorf("%w; the daemon's controller keeper retries the controller", ErrRetryArchitectOnly)}
-	default:
-		return &RefusedError{State: m.claim.State, Request: "retry",
-			Err: fmt.Errorf("%w; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise", ErrRetryArchitectOnly)}
+			Err: fmt.Errorf("%w; the daemon's controller keeper retries the controller", ErrRetryNotTheController)}
 	}
+	if ev.(RequestOperatorRetry).FreshSession {
+		m.log.Info("supervise: the operator's retry starts a new session", "session", m.claim.Session,
+			"sessionFile", m.claim.SessionFile)
+		m.forgetSession()
+	}
+	return retry(m, ctx, ev)
 }
 
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes

@@ -98,7 +98,6 @@ github_apps:
 linger_hours: 1.5
 production_check_hours: 240
 review_round_cap: 4
-max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
 repository_renames:
@@ -288,7 +287,6 @@ func populatedState(t *testing.T) State {
 					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
-					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
 					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",

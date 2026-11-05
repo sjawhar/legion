@@ -34,7 +34,7 @@ const maxRunSteps = 32
 // other lists are compared by what they hold, which the store and the run keep in either form.
 func JudgementChanged(before, after record.PullRequest) bool {
 	b, a := judgementOf(before), judgementOf(after)
-	return b.HeadSHA != a.HeadSHA || b.FixAttempts != a.FixAttempts || b.HeadCounted != a.HeadCounted || b.PlannedRed != a.PlannedRed ||
+	return b.HeadSHA != a.HeadSHA || b.PlannedRed != a.PlannedRed ||
 		b.CheckedHead != a.CheckedHead || !sameItems(b.Failing, a.Failing) || !sameItems(b.Cancelled, a.Cancelled) || !same(b.CheckRuns, a.CheckRuns) ||
 		b.Generation != a.Generation || b.Snapshot != a.Snapshot || !same(b.Required, a.Required) || !sameItems(b.Workflows, a.Workflows) ||
 		b.WorkflowsHead != a.WorkflowsHead
@@ -58,13 +58,10 @@ func runStep(pr record.PullRequest, step record.RunStep) (record.PullRequest, bo
 // recorded, each spent by the arrival that took it. The run stays open from its first head judged
 // with no chain of pushes, or still waiting for what its synchronize named, its anchor the
 // judgement before that head, and closes when there is none; past maxRunSteps its oldest steps
-// fold into the anchor too. The pull request keeps its own pushes. BlockedAttempts is what was
-// reported, so it stays, unless the count it reported is no longer reached, as when a count is
-// taken back. It says whether the run's last step, a settlement, adopted the fence
-// (ApplySettlement).
+// fold into the anchor too. The pull request keeps its own pushes. It says whether the run's last
+// step, a settlement, adopted the fence (ApplySettlement).
 func replayRun(pr record.PullRequest) (record.PullRequest, bool) {
 	run, live := pr.Run, pr.Pushes
-	blocked := pr.BlockedAttempts
 	at := withJudgement(pr, run.Anchor)
 	at.Pushes, at.Run = clone(run.Pushes), nil
 	for _, p := range at.Pushes {
@@ -103,10 +100,7 @@ func replayRun(pr record.PullRequest) (record.PullRequest, bool) {
 		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Names: clone(before[waiting].names),
 			Since: before[waiting].since, Steps: clone(run.Steps[waiting:]), Decided: run.Decided}
 	}
-	at.Pushes, at.BlockedAttempts = unspentPushes(live, at.Moves, false), blocked
-	if at.FixAttempts < blocked {
-		at.BlockedAttempts = 0
-	}
+	at.Pushes = unspentPushes(live, at.Moves, false)
 	return at, adopted
 }
 
@@ -235,7 +229,7 @@ func candidateOf(s record.Settlement) SettlementCandidate {
 
 // judgementOf is the part of pr a head run replays.
 func judgementOf(pr record.PullRequest) record.Judgement {
-	return record.Judgement{HeadSHA: pr.HeadSHA, FixAttempts: pr.FixAttempts, HeadCounted: pr.HeadCounted, PlannedRed: pr.PlannedRed,
+	return record.Judgement{HeadSHA: pr.HeadSHA, PlannedRed: pr.PlannedRed,
 		CheckedHead: pr.CheckedHead, Failing: clone(pr.Failing), Cancelled: clone(pr.Cancelled), CheckRuns: clone(pr.CheckRuns),
 		Generation: pr.Generation, Snapshot: pr.Snapshot, Required: clone(pr.Required), Workflows: clone(pr.Workflows), WorkflowsHead: pr.WorkflowsHead,
 		Moves: clone(pr.Moves)}
@@ -243,7 +237,7 @@ func judgementOf(pr record.PullRequest) record.Judgement {
 
 // withJudgement is pr with j as its judgement.
 func withJudgement(pr record.PullRequest, j record.Judgement) record.PullRequest {
-	pr.HeadSHA, pr.FixAttempts, pr.HeadCounted, pr.PlannedRed = j.HeadSHA, j.FixAttempts, j.HeadCounted, j.PlannedRed
+	pr.HeadSHA, pr.PlannedRed = j.HeadSHA, j.PlannedRed
 	pr.CheckedHead, pr.Failing, pr.Cancelled, pr.CheckRuns = j.CheckedHead, clone(j.Failing), clone(j.Cancelled), clone(j.CheckRuns)
 	pr.Generation, pr.Snapshot = j.Generation, j.Snapshot
 	pr.Required, pr.Workflows, pr.WorkflowsHead = clone(j.Required), clone(j.Workflows), j.WorkflowsHead

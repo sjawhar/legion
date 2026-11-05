@@ -16,16 +16,14 @@ import (
 )
 
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
-// request: its fix and blocked attempts are what bound the review rounds, so they are carried
-// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is the counted attempt the cap holds a red in (classify.FixAttemptCapHolds), and its newest
+// request: its newest
 // review, which orders every review it will have, and what its base branch requires - its required
 // checks, and its required workflows with their runs at the head they were read at - as last read,
-// so the reopened head's first settlement is judged by all of it (classify.HeadChecks). A reopen at
+// so the reopened head's first settlement is judged by all of it (classify.HeadChecks), are
+// carried over rather than rebuilt. A reopen at
 // another head than the recorded one - commits pushed while the pull request was closed, which no
 // synchronize reports - is judged as a synchronize to that head would be
-// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one, or onto a
-// settled head whose base branch requires nothing, it leaves the counted attempt. A new generation
+// (classify.AdvancePullRequestHead). A new generation
 // deletes a pull request that is not open, and all of them with it. An issue that waits to close on
 // its recorded merge (awaitsMerge) keeps that merge: GitHub never sends the merge again, so a pull
 // request opened from its branch is not recorded, while an issue set back to todo reruns and its
@@ -69,12 +67,12 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 			(recorded.State == record.PullRequestOpen && !fact.UpdatedAt.After(recorded.HeadUpdatedAt)) {
 			return intake.Result{}, nil
 		}
-		// The reopen keeps the count, the planned mark, the pushes - facts about commits - and the
+		// The reopen keeps the planned mark, the pushes - facts about commits - and the
 		// head run, so a push that arrives after the reopen settles the move the reopen made as it
 		// would have had it arrived first (classify.Reopen); the CI settlement starts afresh.
 		carried := classify.Reopen(*recorded, fact.HeadSHA)
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
-		pr.HeadCounted, pr.PlannedRed, pr.Pushes, pr.Moves, pr.Run = carried.HeadCounted, carried.PlannedRed, carried.Pushes, carried.Moves, carried.Run
+		pr.ReviewSeen = recorded.ReviewSeen
+		pr.PlannedRed, pr.Pushes, pr.Moves, pr.Run = carried.PlannedRed, carried.Pushes, carried.Moves, carried.Run
 		e.stampRun(&pr)
 		pr.Required, pr.Workflows, pr.WorkflowsHead = carried.Required, carried.Workflows, carried.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)

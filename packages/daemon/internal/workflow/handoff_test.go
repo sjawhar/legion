@@ -172,7 +172,7 @@ func TestAnExhaustedCountPublishesPRBlockedOnlyOnARedSettlement(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FixAttempts: 3, HeadCounted: "head", Required: []string{"ci"}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Required: []string{"ci"}})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	settle := func(eventID string, generation int64, failing []string) {
 		t.Helper()

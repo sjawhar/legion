@@ -573,14 +573,14 @@ func TestThePassRecordsAReopenLostInReviewing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim"})
 	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
-		pr.State, pr.HeadUpdatedAt, pr.FixAttempts = record.PullRequestClosed, at.Add(-time.Hour), 2
+		pr.State, pr.HeadUpdatedAt = record.PullRequestClosed, at.Add(-time.Hour)
 	})
 	pull := passPull(86, "legion/CAPTURE-1", "code", "open", at, "")
 	w := requiredRuntime(pool, lostStandIn(t, map[int]string{86: pull}, "["+pull+"]", &pathReads{}).URL, quietLogger())
 	w.readRequiredChecks(context.Background())
 	got, pr := capturePhase(t, pool)
-	if got != phase.Reviewing || pr == nil || pr.State != record.PullRequestOpen || pr.FixAttempts != 2 || !pr.HeadUpdatedAt.Equal(at) {
-		t.Fatalf("after the pass the issue is in %s with %+v, want reviewing with #86 open again, its two fix attempts carried", got, pr)
+	if got != phase.Reviewing || pr == nil || pr.State != record.PullRequestOpen || !pr.HeadUpdatedAt.Equal(at) {
+		t.Fatalf("after the pass the issue is in %s with %+v, want reviewing with #86 open again", got, pr)
 	}
 	lateWebhookChangesNothing(t, pool, w, intake.PullRequestOpened{Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code",
 		URL: "https://github.com/acme/widgets/pull/86", UpdatedAt: at, Reopened: true})
@@ -1058,9 +1058,9 @@ func TestThePassRebuildsTheReviewAppsRedTestPushesLost(t *testing.T) {
 	if pr.HeadSHA != "more-red-tests" || pr.Run != nil {
 		t.Fatalf("after the pass the record is at %q with a head run %+v, want more-red-tests judged with its pushes", pr.HeadSHA, pr.Run)
 	}
-	if !pr.PlannedRed || pr.FixAttempts != 0 || pr.HeadCounted != "" {
-		t.Fatalf("after the pass plannedRed=%t fixAttempts=%d headCounted=%q, want the review App's red planned and no attempt counted (pushes %+v)",
-			pr.PlannedRed, pr.FixAttempts, pr.HeadCounted, pr.Pushes)
+	if !pr.PlannedRed {
+		t.Fatalf("after the pass plannedRed=%t, want the review App's red planned (pushes %+v)",
+			pr.PlannedRed, pr.Pushes)
 	}
 	if got := headReads(t, pool, "push-read"); got != 2 {
 		t.Fatalf("the pass applied %d push facts, want 2", got)
@@ -1093,9 +1093,9 @@ func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 	w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
 	w.readRequiredChecks(context.Background())
 	_, pr := capturePhase(t, pool)
-	if pr.HeadSHA != "fix" || pr.Run != nil || pr.PlannedRed || pr.FixAttempts != 0 {
-		t.Fatalf("after the pass head %q plannedRed=%t fixAttempts=%d run %+v, want fix with the planned mark cleared, no attempt counted and no head run",
-			pr.HeadSHA, pr.PlannedRed, pr.FixAttempts, pr.Run)
+	if pr.HeadSHA != "fix" || pr.Run != nil || pr.PlannedRed {
+		t.Fatalf("after the pass head %q plannedRed=%t run %+v, want fix with the planned mark cleared and no head run",
+			pr.HeadSHA, pr.PlannedRed, pr.Run)
 	}
 	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("red-tests", "fix", implementerLogin))
 
@@ -1106,16 +1106,16 @@ func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 	github.moved("fix-2", at.Add(time.Minute), activityEntry("legion/CAPTURE-1", "push", "fix", "fix-2", implementerLogin, at.Add(30*time.Second)), fix, tests)
 	w.readRequiredChecks(context.Background())
 	_, pr = capturePhase(t, pool)
-	if pr.HeadSHA != "fix-2" || pr.FixAttempts != 1 || pr.HeadCounted != "fix-2" || pr.PlannedRed {
-		t.Fatalf("after the next pass head %q fixAttempts=%d headCounted=%q plannedRed=%t, want fix-2 counted as one fix attempt against the fix's red",
-			pr.HeadSHA, pr.FixAttempts, pr.HeadCounted, pr.PlannedRed)
+	if pr.HeadSHA != "fix-2" || pr.PlannedRed {
+		t.Fatalf("after the next pass head %q plannedRed=%t, want fix-2 with the planned mark clear",
+			pr.HeadSHA, pr.PlannedRed)
 	}
 }
 
 // The implementer pushes onto a red head and the push webhook is lost with the synchronize,
 // whether the branch's activity calls the move a push or a force push. The pass rebuilds it from
-// that activity: any push may change code, so it is a counted fix attempt. Either way the head
-// is judged with its push, and the push webhook arriving afterwards decides nothing.
+// that activity, so the head is judged with its push, and the push webhook arriving afterwards
+// decides nothing.
 func TestThePassRebuildsAPushLostWhateverTheActivityCallsIt(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, kind := range []string{"push", "force_push"} {
@@ -1128,8 +1128,8 @@ func TestThePassRebuildsAPushLostWhateverTheActivityCallsIt(t *testing.T) {
 			w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
 			w.readRequiredChecks(context.Background())
 			_, pr := capturePhase(t, pool)
-			if pr.HeadSHA != "rewritten" || pr.Run != nil || pr.FixAttempts != 1 {
-				t.Fatalf("after the pass head %q fixAttempts=%d run %+v, want rewritten judged with its push, one attempt counted", pr.HeadSHA, pr.FixAttempts, pr.Run)
+			if pr.HeadSHA != "rewritten" || pr.Run != nil {
+				t.Fatalf("after the pass head %q run %+v, want rewritten judged with its push", pr.HeadSHA, pr.Run)
 			}
 			lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "rewritten", implementerLogin))
 		})

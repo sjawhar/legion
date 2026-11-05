@@ -476,13 +476,11 @@ type PullRequest struct {
 	// settlement comes to is the required set's to say (classify.HeadVerdict).
 	CheckedHead string
 	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
-	Failing         []string
-	Cancelled       []string
-	FixAttempts     int
-	BlockedAttempts int
-	CheckRuns       []AttemptRun
-	Generation      int64
-	Snapshot        string
+	Failing    []string
+	Cancelled  []string
+	CheckRuns  []AttemptRun
+	Generation int64
+	Snapshot   string
 	// Pushes are the branch's pushes the daemon still reads: every push whose own move, its two
 	// heads, the record has not made (Moves) - a push still on its way from the head, a link of a
 	// chain still to complete, or one that returns the branch to a commit it held before
@@ -496,12 +494,6 @@ type PullRequest struct {
 	// and otherwise queued on the move (Move.Repeats). A push for a move not made yet - one that
 	// returns the branch to a commit it held before, say - is not spent.
 	Moves []Move
-	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
-	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
-	// settled head whose base branch requires no check and no workflow
-	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
-	// a red within that attempt (classify.FixAttemptCapHolds).
-	HeadCounted string
 	// Run is the head run: the pull request's judgement as it stood before the first head still
 	// waiting for a push of its move, and every head, settlement, required read, clearing of the
 	// head the required workflows were read at, and reopen applied since, replayed at each step and
@@ -575,13 +567,10 @@ type Named struct {
 	At     time.Time `json:"at,omitzero"`
 }
 
-// Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
-// marks, its planned mark, its CI settlement, what its base branch requires, and the moves it has
-// made. BlockedAttempts is what was reported, and is not replayed.
+// Judgement is the part of a pull request a head run replays: its head, its planned mark, its CI
+// settlement, what its base branch requires, and the moves it has made.
 type Judgement struct {
 	HeadSHA       string             `json:"headSha"`
-	FixAttempts   int                `json:"fixAttempts"`
-	HeadCounted   string             `json:"headCounted,omitempty"`
 	PlannedRed    bool               `json:"plannedRed,omitempty"`
 	CheckedHead   string             `json:"checkedHead,omitempty"`
 	Failing       []string           `json:"failing"`

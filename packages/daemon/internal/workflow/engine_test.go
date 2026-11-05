@@ -49,7 +49,6 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		Project:        "LEGION",
 		DesignGate:     config.DesignGateOff,
 		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
 		Linger:         time.Hour,
 		Clock:          func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, nil)
@@ -195,19 +194,16 @@ func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testin
 	}
 }
 
-// A pull request GitHub reopens is the same pull request. Its fix attempts and blocked attempts
-// are what bound the review rounds, and rebuilding the record from the reopen zeroed them: closing
-// and reopening a pull request bought a fresh set of attempts, which is the cap the workflow has.
-// The head the count last counted is carried with them, since the fix-attempt cap holds a red at
-// the attempt it marks (classify.FixAttemptCapHolds) and a reopen judges no head green.
-func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
+// A pull request GitHub reopens is the same pull request: the record is not rebuilt from the
+// reopen, and the head the reopen names becomes the pull request's.
+func TestAReopenedPullRequestKeepsItsRecord(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{
 		Issue: "LEGION-208", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "old",
 		HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), Failing: []string{},
-		FixAttempts: 2, BlockedAttempts: 1, HeadCounted: "old", State: record.PullRequestOpen,
+		State: record.PullRequestOpen,
 	})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
@@ -218,13 +214,9 @@ func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
 		t.Fatalf("ApplyFact reopened: %v", err)
 	}
 
-	var fix, blocked int
-	var head, counted string
-	if err := pool.QueryRow(ctx, "select fix_attempts, blocked_attempts, head_sha, head_counted from pull_requests where issue = $1", "LEGION-208").Scan(&fix, &blocked, &head, &counted); err != nil {
+	var head string
+	if err := pool.QueryRow(ctx, "select head_sha from pull_requests where issue = $1", "LEGION-208").Scan(&head); err != nil {
 		t.Fatalf("read the reopened pull request: %v", err)
-	}
-	if fix != 2 || blocked != 1 || counted != "old" {
-		t.Fatalf("reopened pull request counters = %d/%d, counted head %q, want the 2/1 and %q it carried", fix, blocked, counted, "old")
 	}
 	if head != "new" {
 		t.Fatalf("reopened pull request head = %q, want the head the reopen named", head)
@@ -337,7 +329,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "CAPTURE-4", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "CAPTURE-4", Project: "CAPTURE", Title: "captured gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
-	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
+	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "register-captured-gate", intake.GateRegistered{Issue: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Version: 1}, engine, admissionStub{}); err != nil {
 		t.Fatalf("register gate: %v", err)
 	}
@@ -956,7 +948,7 @@ const testReviewApp = "legion-reviewer[bot]"
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }

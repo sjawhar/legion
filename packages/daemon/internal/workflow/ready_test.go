@@ -603,7 +603,7 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 }
 
 // Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
-// approval, green checks, red checks that send a head back or exhaust max_fix_attempts, a
+// approval, green checks, red checks that send a head back, a
 // conflicting head awaiting merge, changes requested, reviewer's comment on a round no review
 // decided, backward move, retry of a held phase or failed claim moves a member, counts a review
 // round, posts or notifies, or starts a worker, whose start would resume a suspended claim inside
@@ -629,8 +629,6 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{}}},
 		{name: "the reviewer's comment on a round no review decided", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "a thought"}},
-		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
-			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
 		{name: "red checks that send a code head back", at: phase.Testing,
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
 		{name: "a conflicting head at awaiting_merge", at: phase.AwaitingMerge,
