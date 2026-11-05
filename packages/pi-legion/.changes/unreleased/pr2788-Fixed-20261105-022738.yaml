@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A pod whose plugin is one daemon contract behind no longer loses every `legion` tool call to one field the daemon added: the reader this plugin bundles ignores a key it does not name. Every worker and architect is also told, beside the update task it already reads, not to retry a `legion` call its plugin refused because the daemon''s answer is not the shape it reads: it pushes what it wants kept and ends the turn, and a turn answering an update task still calls `ready_for_update` with the round the task named, when its tool has that operation, before it ends.'
+time: 2026-11-05T02:27:38.713985696Z
+custom:
+    Issue: pr2788

@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -141,9 +143,12 @@ func (s *memoryClaims) ClaimByBootTokenHash(_ context.Context, hash []byte) (sup
 }
 
 // The tree barrier is the store's, held to its own tests: here every tree is open at epoch 1, and
-// a close's cleanup releases the tree through the runtime at once.
-func (s *memoryClaims) OpenTreeLifecycle(_ context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
-	return treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority}, nil
+// a close's cleanup releases the tree through the runtime at once. No tree is ever created here
+// (treelifecycle.Lifecycle.Created), so the open runs its created for none of them: this fake
+// holds no transaction for one to write in.
+func (s *memoryClaims) OpenOperatorTreeLifecycle(_ context.Context, project, tree string,
+	_ func(context.Context, pgx.Tx) error) (treelifecycle.Lifecycle, error) {
+	return treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: treelifecycle.AuthorityOperator}, nil
 }
 
 func (s *memoryClaims) ReserveOperatorTreeCleanup(_ context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error) {

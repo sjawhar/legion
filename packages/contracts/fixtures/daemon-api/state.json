@@ -175,7 +175,22 @@
       "slot": {
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
-      }
+      },
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
     },
     "LEGION-210": {
       "key": "LEGION-210",
@@ -538,7 +553,10 @@
             "workflow": ".github/workflows/release.yaml",
             "step": "Apply"
           }
-        ]
+        ],
+        "memory": {
+          "config_files": []
+        }
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -549,7 +567,10 @@
           ]
         },
         "slack_channels": [],
-        "deploys": []
+        "deploys": [],
+        "memory": {
+          "config_files": []
+        }
       }
     },
     "gates": {

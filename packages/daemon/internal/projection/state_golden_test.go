@@ -25,11 +25,12 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 
 // The daemon's own controller (`controller: daemon`) holds a claim on no issue and no tree. It is
 // the project's controller, which the state shows as controllerLocator, and no issue's worker: an
-// issue keyed "" with a `controller` worker refuses the whole document at every strict client,
-// among them the daemon-launched controller's own claim, which reads the state before it
-// registers, and every agent's read_record. The document is what Project emits for that claim
-// beside a tree's architect, completed as the state route completes it (internal/daemon's
-// source.State), and it is packages/contracts' state-controller-claim fixture: the contract's own
+// issue keyed "" with a `controller` worker refuses the whole document at every client, which
+// reads an issue's `key` as a non-empty string — among them the daemon-launched controller's own
+// claim, which reads the state before it registers, and every agent's read_record. The document
+// is what Project emits for that claim beside a tree's architect, completed as the state route
+// completes it (internal/daemon's source.State), and it is packages/contracts'
+// state-controller-claim fixture: the contract's own
 // schema parses it (packages/contracts/src/legion-api.test.ts), and the plugin's daemon-launched
 // controller reads it as its daemon's state (packages/pi-legion/extensions/legion.test.ts).
 //
@@ -146,11 +147,12 @@ func sandboxLocator(token claim.Token, sandbox, podUID string, generation uint64
 }
 
 // golden pins the state document Project's caller serves: Go writes it (`-update`), and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema the plugin reads
-// the state with. A fixture that differs from what Go now writes is stale. It is internal/api's
-// golden helper with this package's command in its message: the daemon-api fixtures are written
-// from two packages, so a state-shape change takes both `-update` runs whether or not the helper is
-// shared. Once a third package writes one, the helper moves into an internal/testgolden package.
+// `packages/contracts/src/legion-api.test.ts` parses it through the schema the plugin reads the
+// state with and holds the parse equal to the file. A fixture that differs from what Go now
+// writes is stale. It is internal/api's golden helper with this package's command in its message:
+// the daemon-api fixtures are written from two packages, so a state-shape change takes both
+// `-update` runs whether or not the helper is shared. Once a third package writes one, the
+// helper moves into an internal/testgolden package.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()
 	encoded, err := json.MarshalIndent(value, "", "  ")
