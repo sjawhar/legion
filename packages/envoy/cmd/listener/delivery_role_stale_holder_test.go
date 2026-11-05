@@ -89,9 +89,6 @@ func newStaleHolderRig(t *testing.T, role, holder string, since time.Duration) s
 		case forwards <- message:
 		default:
 		}
-		if message.Reply != "" {
-			_ = message.Respond(nil)
-		}
 	})
 	if err != nil {
 		t.Fatalf("subscribe the holder's subject: %v", err)

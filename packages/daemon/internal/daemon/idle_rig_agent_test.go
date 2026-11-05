@@ -306,11 +306,9 @@ const (
 )
 
 // idleRigEnvelope is what the rig reads of an Envoy envelope, the frame's data unchanged: the
-// event it carries, the topic it was sent on (which tells a role-lane forward from a message
-// stored on the session's own agent subject), and the message itself.
+// event it carries and the message itself.
 type idleRigEnvelope struct {
 	EventID        string `json:"event_id"`
-	Topic          string `json:"topic"`
 	PayloadSummary string `json:"payload_summary"`
 	Payload        string `json:"payload"`
 }
@@ -506,12 +504,13 @@ func (p *idleRigRoleProcess) dial(bootToken string) error {
 // openDelivery opens the session's own NATS connection and takes the one subject a session is
 // reached on, as a plugin in consumer mode does (packages/envoy's "Session consumers", and the
 // Go stand-ins of packages/envoy/cmd/listener's session_relay_test.go and
-// current_registration_test.go): its relay subject, notifications.envoy.deliver.<session id>,
-// where the listener that owns the session publishes each message of the session's durable
-// consumer. Every message the session is given arrives there, and that is where the rig records
-// it; a role-lane forward and an ad-hoc topic's forward are stored on the session's agent
-// subject, so each comes back as a frame of that consumer, and nothing of the session's is sent
-// to the agent subject itself.
+// current_registration_test.go's captureLaneForwards, neither of which answers anything on the
+// agent subject either): its relay subject, notifications.envoy.deliver.<session id>, where the
+// listener that owns the session publishes each message of the session's durable consumer. Every
+// message the session is given arrives there, and that is where the rig records it. A role-lane
+// forward and an ad-hoc topic's forward are published into the stream on the session's agent
+// subject, so each comes back as a frame of that consumer; the session subscribes to that subject
+// for nothing and answers nothing on it.
 //
 // It is taken, and flushed to the server, before the session registers, so nothing the
 // listener relays or forwards once it knows the session can arrive before this process listens.

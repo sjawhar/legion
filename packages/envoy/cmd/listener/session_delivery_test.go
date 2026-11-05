@@ -664,13 +664,18 @@ func TestSessionConsumerInvalidSessionIDIsRefused(t *testing.T) {
 
 // A registration carrying no delivery field is a plugin older than consumer delivery. Nothing
 // would deliver to it, so it is refused 409 and leaves no row, no entry and no consumer: the
-// plugin learns it must ask for a consumer instead of waiting on a subscription of its own.
+// plugin learns it must ask for a consumer instead of waiting on a subscription of its own, and,
+// since this body names no plugin either - every build before those fields - the refusal says so,
+// nothing else in the answer saying which session process it was.
 func TestSessionConsumerRegistrationWithoutDeliveryIsRefused(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 
 	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_plain","self_subscribed":true,"topics":["notifications.dispatch.issue.A.>"]}`)
 
 	refusal.requireRefused(t, http.StatusConflict, "not_requested")
+	if !strings.Contains(refusal.Error, "a client naming no plugin") {
+		t.Fatalf("refusal %q does not say the client named no plugin", refusal.Error)
+	}
 	if _, err := rig.consumers.Info(context.Background(), "ses_plain"); !errors.Is(err, bus.ErrSessionConsumerNotFound) {
 		t.Fatalf("consumer of ses_plain: %v, want none", err)
 	}
@@ -687,34 +692,82 @@ func TestSessionConsumerRegistrationAskingForNoConsumerIsRefused(t *testing.T) {
 	rig.requireNothingWritten(t, "ses_no_ask")
 }
 
-// A session running a plugin older than consumer delivery receives nothing from this listener, and
-// whoever runs that build reads why in the session's own transcript: the refusal names the release
-// to upgrade to and the build the registration came from. A refusal that only said the field was
-// missing would leave an operator to find the version themselves.
-func TestSessionConsumerRefusalNamesTheUpgradeAndTheBuildItCameFrom(t *testing.T) {
-	rig := newSessionConsumerRig(t)
+// A session that receives nothing reads why in its own transcript, from this refusal, so the
+// refusal has to say what that session's own client must do. A build older than consumer delivery,
+// another client, or one that names its build vaguely is told the release to upgrade to and what
+// it registered as; a pi-envoy at or above that release is told the truth about itself instead,
+// since it asks for a consumer whenever its relay subject is open and that subject was not open -
+// telling it to upgrade to a release it already runs would name the wrong cause.
+func TestSessionConsumerRefusalSaysWhatTheClientMustDo(t *testing.T) {
+	const upgrade = "upgrade to @sjawhar/pi-envoy 14.1.0 or later"
+	for _, c := range []struct {
+		name      string
+		sessionID string
+		client    string
+		want      []string
+		unwanted  string
+	}{
+		{
+			name:      "a pi-envoy older than consumer delivery",
+			sessionID: "ses_old_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.0.0"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy 14.0.0"},
+		},
+		{
+			name:      "a pi-envoy at the release that asks for one",
+			sessionID: "ses_floor_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"14.1.0"`,
+			want:      []string{"@sjawhar/pi-envoy 14.1.0 asks for a consumer only while its relay subject is open"},
+			unwanted:  upgrade,
+		},
+		{
+			name:      "a pi-envoy newer than it",
+			sessionID: "ses_current_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"16.5.0"`,
+			want:      []string{"@sjawhar/pi-envoy 16.5.0 asks for a consumer only while its relay subject is open", "next heartbeat"},
+			unwanted:  upgrade,
+		},
+		{
+			name:      "a pi-envoy whose build is no version at all",
+			sessionID: "ses_unparsed_plugin",
+			client:    `"plugin":"@sjawhar/pi-envoy","plugin_version":"source"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy source"},
+		},
+		{
+			name:      "another plugin at a bundle commit",
+			sessionID: "ses_other_plugin",
+			client:    `"plugin":"@sjawhar/claude-envoy","plugin_version":"68de3e90c155"`,
+			want:      []string{upgrade, "@sjawhar/claude-envoy 68de3e90c155"},
+		},
+		{
+			name:      "a client naming a package and no version",
+			sessionID: "ses_no_version",
+			client:    `"plugin":"@sjawhar/pi-envoy"`,
+			want:      []string{upgrade, "@sjawhar/pi-envoy, which names no version"},
+		},
+		{
+			name:      "a client naming a version and no package",
+			sessionID: "ses_no_package",
+			client:    `"plugin_version":"16.5.0"`,
+			want:      []string{upgrade, "a client naming version 16.5.0 and no package"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rig := newSessionConsumerRig(t)
 
-	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_old_plugin","self_subscribed":true,"topics":[],
-		"plugin":"@sjawhar/pi-envoy","plugin_version":"14.0.0"}`)
+			refusal := rig.refusedSubscribe(t, `{"session_id":"`+c.sessionID+`","self_subscribed":true,"topics":[],`+c.client+`}`)
 
-	refusal.requireRefused(t, http.StatusConflict, "not_requested")
-	for _, want := range []string{"@sjawhar/pi-envoy 14.1.0 or later", "@sjawhar/pi-envoy 14.0.0"} {
-		if !strings.Contains(refusal.Error, want) {
-			t.Fatalf("refusal %q names no %q", refusal.Error, want)
-		}
-	}
-}
-
-// A client that names no plugin at all - every build before those fields - is told so in the same
-// refusal, since nothing else in the answer says which session process it was.
-func TestSessionConsumerRefusalSaysWhenTheClientNamesNoPlugin(t *testing.T) {
-	rig := newSessionConsumerRig(t)
-
-	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_no_plugin","self_subscribed":true,"topics":[]}`)
-
-	refusal.requireRefused(t, http.StatusConflict, "not_requested")
-	if !strings.Contains(refusal.Error, "a client naming no plugin") {
-		t.Fatalf("refusal %q does not say the client named no plugin", refusal.Error)
+			refusal.requireRefused(t, http.StatusConflict, "not_requested")
+			for _, want := range c.want {
+				if !strings.Contains(refusal.Error, want) {
+					t.Fatalf("refusal %q names no %q", refusal.Error, want)
+				}
+			}
+			if c.unwanted != "" && strings.Contains(refusal.Error, c.unwanted) {
+				t.Fatalf("refusal %q names %q, which this client already runs", refusal.Error, c.unwanted)
+			}
+			rig.requireNothingWritten(t, c.sessionID)
+		})
 	}
 }
 

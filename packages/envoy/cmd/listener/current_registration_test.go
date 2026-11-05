@@ -35,18 +35,18 @@ func consumerRegistrationIn(t *testing.T, sessionID, epoch, dir string, topics .
 	return string(body)
 }
 
-// answerLaneReceipts subscribes to sessionID's agent subject on a NATS connection of the session's
-// own, as a plugin in consumer mode holds one beside its relay subject, and answers the receipt of
-// every role forward that arrives there: a frame whose envelope names another topic and asks for a
-// reply (envoy-client's expectsLaneReceipt). It returns those forwards. The session's own messages
-// arrive on this subject too, from the stream's publish and carrying its acknowledgement inbox as
-// their reply, and are neither answered nor returned: their envelope names the subject itself.
+// captureLaneForwards subscribes to sessionID's agent subject on a NATS connection of the session's
+// own, as a plugin in consumer mode holds one beside its relay subject, and returns every role
+// forward that arrives there: a frame whose envelope names another topic. It answers nothing, as
+// no session does - a forward is published into the stream for the holder's consumer, and the only
+// answer on that publish is the server's acknowledgement, which the sender reads. The session's
+// own messages arrive on this subject too and are not returned: their envelope names the subject
+// itself.
 //
-// The forward is the handshake that tells the role message's sender it was taken. The message
-// itself reaches the session as a frame of its consumer, which the stream's stored copy of the
-// forward feeds, so a role message counted once here and counted once on the relay subject reached
-// the session once on each lane, as it does in production.
-func answerLaneReceipts(t *testing.T, url, sessionID string) <-chan contracts.Envelope {
+// The message reaches the session as a frame of its consumer, which the stream's stored copy of
+// the forward feeds, so a role message counted once here and counted once on the relay subject
+// reached the session once on each lane, as it does in production.
+func captureLaneForwards(t *testing.T, url, sessionID string) <-chan contracts.Envelope {
 	t.Helper()
 	conn := testnats.Connect(t, url)
 	t.Cleanup(conn.Close)
@@ -58,11 +58,7 @@ func answerLaneReceipts(t *testing.T, url, sessionID string) <-chan contracts.En
 			t.Errorf("decode what %s received on %s: %v", sessionID, agent, err)
 			return
 		}
-		if msg.Reply == "" || item.Topic == agent {
-			return
-		}
-		if err := msg.Respond(nil); err != nil {
-			t.Errorf("answer the receipt of a forward to %s: %v", sessionID, err)
+		if item.Topic == agent {
 			return
 		}
 		forwards <- item
@@ -147,7 +143,7 @@ func TestASessionRegisteredAgainThroughAnotherListenerIsReachedAndStampedThrough
 	ownTopic := "notifications.team.current-registration-" + run
 
 	standIn := startSessionStandIn(t, uri, sessionID, answerDone)
-	forwards := answerLaneReceipts(t, uri, sessionID)
+	forwards := captureLaneForwards(t, uri, sessionID)
 	consumers := observeConsumers(t, uri)
 	publisher := connectPublisher(t, uri)
 	ownMessages := subscribeCore(t, uri, ownTopic)
