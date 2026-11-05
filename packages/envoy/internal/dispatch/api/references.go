@@ -466,9 +466,10 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		members = append(members, model.ReferenceMember{
-			Artifact: *artifact,
-			Depth:    closureMember.Depth,
-			Via:      closureMember.Via,
+			Artifact:  *artifact,
+			Depth:     closureMember.Depth,
+			Via:       closureMember.Via,
+			ViaBlocks: closureMember.ViaBlocks,
 		})
 	}
 	etag := referencesETag(issue.LastSeq, members, truncated, latestOnly)
@@ -504,7 +505,11 @@ func (s *server) getArtifactReferences(w http.ResponseWriter, r *http.Request) {
 
 // referencesETag hashes what an issue references answer depends on. The trimmed answer
 // (latestOnly) hashes one more line naming its variant, so the full and trimmed answers of one
-// issue never share an ETag; the full answer hashes no such line.
+// issue never share an ETag; the full answer hashes no such line. A member's line carries the
+// blocks citing it as well as its document and its version, because the hash decides 304 and so
+// must cover every field of the answer: a client holding an ETag taken before this field
+// existed, or before a citation moved from one block of a document to another, would otherwise
+// be told 304 for an answer that now names a different block.
 func referencesETag(lastSeq int, members []model.ReferenceMember, truncated, latestOnly bool) string {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(hash, "%d\n%t\n", lastSeq, truncated)
@@ -512,7 +517,11 @@ func referencesETag(lastSeq int, members []model.ReferenceMember, truncated, lat
 		_, _ = io.WriteString(hash, "versions=latest\n")
 	}
 	for _, member := range members {
-		_, _ = fmt.Fprintf(hash, "%s@%d\n", member.Artifact.ID, member.Artifact.Versions[len(member.Artifact.Versions)-1].Number)
+		_, _ = fmt.Fprintf(hash, "%s@%d", member.Artifact.ID, member.Artifact.Versions[len(member.Artifact.Versions)-1].Number)
+		for _, block := range member.ViaBlocks {
+			_, _ = fmt.Fprintf(hash, " %s", block)
+		}
+		_, _ = io.WriteString(hash, "\n")
 	}
 	return `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 }

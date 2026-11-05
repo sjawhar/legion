@@ -120,7 +120,10 @@ func insertDocumentBlock(t *testing.T, tx pgx.Tx, artifactID, blockID, nodeID st
 	}
 }
 
-// closureStatementRows runs statement and answers its rows in the order it gave them.
+// closureStatementRows runs one closure statement and answers the four columns both it and
+// main's oracle carry, in the order the statement gave them, which is how the two statements'
+// answers are compared here. The closure answers a fifth column main's did not — the blocks of
+// the member's via that cite it — which is read through Closure itself, whose members carry it.
 func closureStatementRows(t *testing.T, database *store.Store, statement, issueKey string) []closureRow {
 	t.Helper()
 	rows, err := database.Pool.Query(context.Background(), statement, issueKey)
@@ -131,7 +134,12 @@ func closureStatementRows(t *testing.T, database *store.Store, statement, issueK
 	var got []closureRow
 	for rows.Next() {
 		var row closureRow
-		if err := rows.Scan(&row.refKey, &row.depth, &row.viaKind, &row.viaID); err != nil {
+		var viaBlocks []string
+		targets := []any{&row.refKey, &row.depth, &row.viaKind, &row.viaID}
+		if len(rows.FieldDescriptions()) == len(targets)+1 {
+			targets = append(targets, &viaBlocks)
+		}
+		if err := rows.Scan(targets...); err != nil {
 			t.Fatalf("scan a closure row: %v", err)
 		}
 		got = append(got, row)

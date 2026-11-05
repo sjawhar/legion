@@ -20,6 +20,8 @@ const issue: IssueDetails = {
       subtree_total: 2,
       active_at: "2026-09-15T12:00:00Z",
       external_links: [{ url: "https://github.com/owner/repo/pull/12", kind: "github_pr" }],
+      blocked_by: ["CORE-4"],
+      claim: { actor: { id: "alice", kind: "user" }, at: "2026-09-15T11:00:00Z" },
     },
     {
       key: "CORE-3",
@@ -29,6 +31,8 @@ const issue: IssueDetails = {
       subtree_total: 1,
       active_at: "2026-09-14T08:00:00Z",
       external_links: [],
+      blocked_by: [],
+      claim: null,
     },
   ],
   closed_at: null,

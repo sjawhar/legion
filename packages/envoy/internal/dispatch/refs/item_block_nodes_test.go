@@ -210,7 +210,8 @@ func TestAnItemBlocksLinkReachesItsItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read closure: %v", err)
 	}
-	if want := []Member{{RefKey: handbook, Depth: 1, Via: model.ReferenceVia{Kind: "comment", ID: comment}}}; truncated || !reflect.DeepEqual(members, want) {
+	want := []Member{{RefKey: handbook, Depth: 1, Via: model.ReferenceVia{Kind: "comment", ID: comment}, ViaBlocks: []string{"b2"}}}
+	if truncated || !reflect.DeepEqual(members, want) {
 		t.Errorf("closure = %#v (truncated %t); want %#v", members, truncated, want)
 	}
 	citers, err := ReferencedBy(ctx, tx, handbook)
@@ -253,7 +254,8 @@ func TestAnAskOptionsLinkJoinsItsIssuesClosure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read closure: %v", err)
 	}
-	if want := []Member{{RefKey: handbook, Depth: 1, Via: model.ReferenceVia{Kind: "ask", ID: ask.ID}}}; truncated || !reflect.DeepEqual(members, want) {
+	want := []Member{{RefKey: handbook, Depth: 1, Via: model.ReferenceVia{Kind: "ask", ID: ask.ID}, ViaBlocks: []string{"b2"}}}
+	if truncated || !reflect.DeepEqual(members, want) {
 		t.Errorf("closure = %#v (truncated %t); want %#v", members, truncated, want)
 	}
 }

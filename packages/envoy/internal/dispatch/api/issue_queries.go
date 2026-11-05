@@ -652,6 +652,15 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 // statement's 8,097 buffers on the measurement database. The two columns are functionally
 // determined by the key the walk already carries, so `union` removes exactly the rows it
 // removed before.
+//
+// A child's blockers are one lateral over issue_links keyed by the child's own key, which the
+// table's primary key (issue_key, kind, target_key) leads with, so the statement makes one
+// keyed read per child and no read of the table by anything else: this is the single-issue
+// read, where issueProgressLateral counts one issue's children the same way and the listing
+// counts its whole page's in one grouped read instead (issueSummaryJoins). Written as that
+// grouped read, over the direct children the rollup already names, the planner dropped the
+// child keys from the condition and read issue_links by kind alone. The claim is two columns of
+// the child's own row, which this statement already reads, so it costs no join at all.
 var issueChildrenQuery = `
 		with recursive subtree as (
 			select key as root, key, 1 as depth, status, updated_at from issues where parent_key = $1
@@ -667,11 +676,17 @@ var issueChildrenQuery = `
 			from subtree s
 			group by s.root
 		)
-		select c.key, c.title, c.status, r.done, r.total, r.active_at,
+		select i.key, i.title, i.status, r.done, r.total, r.active_at,
 		       coalesce((select json_agg(json_build_object('url', l.url, 'kind', l.kind) order by l.url)
-		                 from issue_external_links l where l.issue_key = c.key), '[]')
-		from issues c join rollup r on r.root = c.key
-		where c.parent_key = $1 order by c.key
+		                 from issue_external_links l where l.issue_key = i.key), '[]'),
+		       coalesce(blockers.keys, '{}'),
+		       ` + issueClaimColumns + `
+		from issues i join rollup r on r.root = i.key
+		left join lateral (
+			select array_agg(l.target_key order by l.target_key) as keys
+			from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'
+		) blockers on true
+		where i.parent_key = $1 order by i.key
 	`
 
 func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
@@ -684,13 +699,20 @@ func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]mod
 	for rows.Next() {
 		var child model.IssueChild
 		var links []byte
-		if err := rows.Scan(&child.Key, &child.Title, &child.Status,
-			&child.SubtreeDone, &child.SubtreeTotal, &child.ActiveAt, &links); err != nil {
+		var claim claimScan
+		targets := []any{&child.Key, &child.Title, &child.Status,
+			&child.SubtreeDone, &child.SubtreeTotal, &child.ActiveAt, &links, &child.BlockedBy}
+		if err := rows.Scan(append(targets, claim.targets()...)...); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(links, &child.ExternalLinks); err != nil {
 			return nil, err
 		}
+		claimed, err := claim.resolve(child.Key)
+		if err != nil {
+			return nil, err
+		}
+		child.Claim = claimed
 		children = append(children, child)
 	}
 	return children, rows.Err()

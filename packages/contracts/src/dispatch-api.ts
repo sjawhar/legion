@@ -575,6 +575,10 @@ export interface IssueChild {
   /** The newest `updated_at` anywhere in the child's subtree (RFC3339). */
   readonly active_at: string;
   readonly external_links: ExternalLink[];
+  /** The sorted keys the child waits on, as `Issue.blocked_by`; empty when it waits on none. */
+  readonly blocked_by: string[];
+  /** The claim holding the child, as `Issue.claim`; `null` when nobody holds it. */
+  readonly claim: IssueClaim | null;
 }
 
 /**
@@ -2285,7 +2289,12 @@ export interface ReferenceVia {
 export interface ReferenceMember {
   readonly artifact: Artifact;
   readonly depth: number;
+  /** The document, comment, message or ask the member was reached through. */
   readonly via: ReferenceVia;
+  /** The ids of `via`'s blocks that cite the member, sorted, so a reader can put the document
+   *  under the block citing it; `null` when no block cites it — a structural edge, an
+   *  attachment, or an item citing it from its body rather than from one of its blocks. */
+  readonly via_blocks: string[] | null;
 }
 
 // IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
