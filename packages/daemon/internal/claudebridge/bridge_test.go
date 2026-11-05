@@ -53,6 +53,7 @@ func TestMain(m *testing.M) {
 //     names no api_error_status, as a result that failed on nothing the provider gave a status
 //     for does;
 //   - "fail-529 <text>": the same, with the result naming api_error_status 529;
+//   - "max-turns": a result Claude Code's own turn limit ended, which is no provider failure;
 //   - "replay <file>": no init of the fake's own — the lines of testdata/<file>, a recorded Claude
 //     Code stream, written as they were recorded, the last held back until the gate opens;
 //   - anything else: an assistant message "done".
@@ -147,6 +148,16 @@ func fakeClaude() int {
 			assistant(text(strings.TrimPrefix(body, "fail ")))
 			failed(0)
 			continue
+		case body == "max-turns":
+			// Claude Code's own end of a turn it ran out of turns in. This line is written here
+			// rather than taken from a recording: no result of the measurement carries this
+			// subtype (dispatch://INFRA-956/artifact/claude-code-2-1-310-refusal-measurement-tgz),
+			// so it names the one terminal_reason that was measured, which is the value that
+			// would make this turn a provider error were the subtype not excluded by name
+			// (turnoutcome.go's classify).
+			emit(map[string]any{"type": "result", "subtype": "error_max_turns", "is_error": true,
+				"terminal_reason": "api_error", "errors": []string{"Reached max turns (30)"}})
+			continue
 		case strings.HasPrefix(body, "wait "):
 			released(strings.TrimPrefix(body, "wait "))
 			assistant(text("done"))
@@ -161,6 +172,11 @@ func fakeClaude() int {
 // gate opens. The recordings are of the pinned Claude Code (2.1.310, the version
 // docker/claude-code/package-lock.json pins) under claudelaunch.Argv's flags of the day, before
 // --replay-user-messages was one of them: a line is what that binary wrote, never written by hand.
+// background-turn.jsonl and background-during-prompt.jsonl were recorded against the provider;
+// refusal-turn.jsonl, api-error-529.jsonl and api-error-429.jsonl against a stand-in endpoint
+// that answered one refusal, one 529 and one 429
+// (dispatch://INFRA-956/artifact/claude-code-2-1-310-refusal-measurement-tgz, whose
+// out-refusal.jsonl, out-e529.jsonl and out-e429.jsonl these are).
 func replay(record *os.File, file string) {
 	raw, err := os.ReadFile(filepath.Join("testdata", file))
 	if err != nil {
@@ -205,11 +221,22 @@ type rig struct {
 
 func newRig(t *testing.T, args ...string) *rig {
 	t.Helper()
+	return newRigEnv(t, nil, args...)
+}
+
+// newRigEnv runs one bridge with extra environment beyond the fake Claude's own. The report's
+// three variables are blanked first and then overridden by extra, so a bridge under test reports
+// a turn only to the stand-in a case gave it, never to the daemon whose pane the test itself may
+// be running in (turnoutcome_test.go).
+func newRigEnv(t *testing.T, extra []string, args ...string) *rig {
+	t.Helper()
 	dir := t.TempDir()
 	record, gate := filepath.Join(dir, "record"), filepath.Join(dir, "gate")
 	argv := append([]string{os.Args[0]}, args...)
 	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record, fakeClaudeGateEnv+"="+gate,
-		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7")
+		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7",
+		"LEGION_DAEMON_URL=", "LEGION_BOOT_TOKEN_FILE=", "LEGION_GENERATION=")
+	env = append(env, extra...)
 	cfg, err := Configure(argv, env)
 	if err != nil {
 		t.Fatal(err)

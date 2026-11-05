@@ -189,7 +189,12 @@ func startClaudeBridge(t *testing.T, script string, stdout *os.File) *claudeBrid
 	defer stderr.Close()
 	ready := filepath.Join(dir, "ready")
 	p.cmd = exec.Command(os.Args[0], "claude-bridge", "--", claude, "--resume", "s")
+	// The three variables the report reads are blanked: this test runs the bridge as a real
+	// process from os.Environ(), and on a Legion pane that environment names a live daemon and a
+	// boot-token file, so the bridge would post this test's turn outcomes to it
+	// (internal/claudebridge's Configure, and its own rig, which blanks the same three).
 	p.cmd.Env = append(os.Environ(), testMainEnv+"=1", "TMPDIR="+p.tmp, "CLAUDE_CONFIG_DIR="+t.TempDir(),
+		"LEGION_DAEMON_URL=", "LEGION_BOOT_TOKEN_FILE=", "LEGION_GENERATION=",
 		"LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7", "CLAUDE_STANDIN_READY="+ready)
 	p.cmd.Stdout, p.cmd.Stderr = stdout, stderr
 	// Its own process group, so the cleanup kills Claude Code with it whatever the bridge did.

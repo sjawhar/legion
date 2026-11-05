@@ -901,11 +901,12 @@ func fillTable(t *builder) {
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 
 	// How a turn of this claim's agent ended, as the agent's own plugin classified it. Only a
-	// registered claim has a report: the route authenticates the registration's secret, and a
-	// claim holds the hash that secret is checked against in exactly these four states
-	// (HoldsCapability, read in internal/api's staleClaim). A report that settles a provider
-	// error the machine is waiting on decides it in this same step (decideProviderError), which
-	// is how such a claim reaches failed here.
+	// registered claim has a report: the route takes either the registration's secret, whose hash
+	// a claim holds in exactly these four states (HoldsCapability, read in internal/api's
+	// staleClaim), or the launch's own boot token, which the Claude bridge presents because the
+	// registration and its secret are claude-envoy's, inside Claude Code. A report that settles a
+	// provider error the machine is waiting on decides it in this same step (decideProviderError),
+	// which is how such a claim reaches failed here.
 	t.row(onTurnOutcome, "keep the newest turn outcome the claim's plugin has reported", turnOutcome,
 		[]ClaimState{StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onTurnOutcome, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)

@@ -16,7 +16,7 @@ The daemon (`packages/daemon`, Go) runs every root architect and phase worker as
 one pane of its private tmux server per process under `runtime: tmux`, or, under `runtime: kubernetes`, one Agent Sandbox pod per issue running the published worker image, with one container whose `legion launcher` runs every resident role (`docs/kubernetes.md`;
 `scripts/e2e/stage4a-sandbox-runtime.sh` is that runtime's live proof).
 A phase worker whose role `legion.yaml`'s `worker_backends` puts on `claude` runs Claude Code in Oh My Pi's place under either runtime:
-the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's Oh My Pi RPC frames on one side and Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`, transport only), with `packages/claude-envoy` as the worker's MCP server and plugins
+the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's Oh My Pi RPC frames on one side and Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`, transport and the turn-outcome report alone), with `packages/claude-envoy` as the worker's MCP server and plugins
 — a built checkout of it under tmux, the worker image's copy in a pod.
 
 - **Daemon** — Dispatch and GitHub intake, the fixed workflow table, the durable issue record in Postgres, admission, process supervision under either runtime, each role's GitHub App credential, session grants, and recovery.
@@ -165,7 +165,8 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   What `legion worker-shim` runs in Oh My Pi's place for a phase worker whose role `worker_backends` puts on claude, under either runtime (the daemon builds the argv, `claude -p --input-format stream-json --output-format stream-json …` with `--session-id <new id>` on a fresh launch or `--resume <id>` on a relaunch;
   one definition of it, `packages/daemon/internal/claudelaunch`):
   turns the daemon's prompt, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, with the prompt_result behind each turn's agent_end that names which prompt that turn was — a background task finishing makes Claude Code start a turn of its own, reported as agent_start…agent_end like any other, and the result is the only thing that tells the daemon which of the turns was its task's — seeds a fresh session with `/rename` so its transcript exists before registration, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status.
-  It is transport: the phase reminder runs in the worker's own MCP server (`packages/claude-envoy`), driven by Claude Code's hooks
+  It is transport, and the one report it makes of its own: how each turn ended, which it posts to `POST /legion/v1/claims/turn-outcome` under the launch's boot token, since the registration and its secret are claude-envoy's inside Claude Code (`internal/claudebridge/turnoutcome.go`).
+  The phase reminder runs in the worker's own MCP server (`packages/claude-envoy`), driven by Claude Code's hooks
 
 - `legion launcher --connect tcp://<host>:<port> --sandbox <name> --roles-dir <dir> --role <r>… [--pod-uid <uid>] [--stop-grace <d>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] | legion launcher --connect tcp://<host>:<port> --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] [--stop-grace <d>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] --private-dir <dir>`
 

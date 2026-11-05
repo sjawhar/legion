@@ -585,22 +585,49 @@ export const LegionReadyForUpdateRequest = z.strictObject({
 
 export type LegionReadyForUpdateRequestBody = z.output<typeof LegionReadyForUpdateRequest>;
 
-/** `claim.TurnOutcomeRequest`, the body of `POST /legion/v1/claims/turn-outcome`: how one turn
- * of the claim's session ended, as the agent's own plugin classified it, under the sequence that
- * plugin counts itself from 1 within `generation`. `outcome` is `clean`, `refused` — a
- * provider's content filter, which the same session often takes on a weaker model — or
- * `provider-error`, every other provider failure, which may not clear that way. `category` is a
- * refusal's own category (`reasoning_extraction`); the daemon parses no provider text, and no
- * field of this body carries the provider's words. The route answers 204. */
-export const LegionTurnOutcomeRequest = z.strictObject({
-  claimToken: nonEmptyString,
-  sessionId: nonEmptyString,
-  secret: nonEmptyString,
+/** The half of `claim.TurnOutcomeRequest` that is the turn rather than the caller: `sequence` is
+ * the producer's own count of the turns it has ended at `generation`, from 1, and the daemon
+ * keeps the newest report under the pair, so a report that arrives out of order never replaces a
+ * newer one. `outcome` is `clean`, `refused` — a provider's content filter, which the same
+ * session often takes on a weaker model — or `provider-error`, every other provider failure,
+ * which may not clear that way. `category` is a refusal's own category
+ * (`reasoning_extraction`); the daemon parses no provider text, and no field of this body
+ * carries the provider's words. */
+const turnOutcomeFields = {
   generation: z.number().int().positive(),
   sequence: z.number().int().positive(),
   outcome: z.enum(["clean", "refused", "provider-error"]),
   category: nonEmptyString.optional(),
+};
+
+/** `claim.AgentCaller`'s report: the producer inside the agent's own session — pi-legion's
+ * `agent_end` hook for an Oh My Pi session — which holds the secret its registration was issued
+ * and names the claim with it, as the ready does. */
+export const LegionTurnOutcomeAgentRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  ...turnOutcomeFields,
 });
+
+/** `claim.BootCaller`'s report: the producer beside the agent rather than inside it, which holds
+ * no secret — `legion claude-bridge`, whose pane's registration is claude-envoy's, inside Claude
+ * Code. It presents the launch's own boot token, which names the same claim, and the route holds
+ * it to that launch: a token of a launch the claim has moved past, and a report for any other
+ * generation, are refused. */
+export const LegionTurnOutcomeBootRequest = z.strictObject({
+  bootToken: nonEmptyString,
+  ...turnOutcomeFields,
+});
+
+/** `claim.TurnOutcomeRequest`, the body of `POST /legion/v1/claims/turn-outcome`: how one turn of
+ * the claim's session ended, as the producer that ended it classified it, under exactly one of
+ * the two caller identities above. A body that names both, or neither, is refused
+ * (`claim.TurnOutcomeRequest.Caller`). The route answers 204. */
+export const LegionTurnOutcomeRequest = z.union([
+  LegionTurnOutcomeAgentRequest,
+  LegionTurnOutcomeBootRequest,
+]);
 
 export type LegionTurnOutcomeRequestBody = z.output<typeof LegionTurnOutcomeRequest>;
 

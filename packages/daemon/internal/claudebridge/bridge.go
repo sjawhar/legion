@@ -100,6 +100,9 @@ type bridge struct {
 	// queue is the Envoy deliveries waiting for the next step or turn; taking is those sent to
 	// Claude Code that it has yet to re-emit, each answered when it does.
 	queue, taking []delivery
+	// outcomes reports how each turn the bridge ends settled (turnoutcome.go), and is nil for a
+	// bridge the environment told nothing to report with.
+	outcomes *turnReporter
 
 	// heldBack is the shim having once fallen framesHighWater frames behind, which is logged once.
 	heldBack bool
@@ -133,6 +136,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	}
 	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0)}
 	b.frames = shimwire.NewWriter(&b.encoded)
+	b.outcomes = newTurnReporter(ctx, cfg, b.log)
 	// stop ends the outputs' writers and every reader's send, once Run returns. It does not
 	// interrupt a readLines blocked in ReadBytes, and Run does not wait for those readers.
 	stop := make(chan struct{})
@@ -473,6 +477,12 @@ func (b *bridge) fromClaude(line []byte) {
 		RequestID string          `json:"request_id"`
 		IsError   bool            `json:"is_error"`
 		Errors    []string        `json:"errors"`
+		// StopReason and TerminalReason are what a result says of how the turn ended: the class
+		// the daemon is told is read from them (turnoutcome.go's classify). Both are members of
+		// the result line itself, measured on the pinned Claude Code
+		// (testdata/refusal-turn.jsonl:5).
+		StopReason     string `json:"stop_reason"`
+		TerminalReason string `json:"terminal_reason"`
 		// APIErrorStatus is the HTTP status of the provider request a result failed on, read raw
 		// because it is `null` on a result that did not fail
 		// (testdata/background-turn.jsonl:12) and because a value of an unexpected shape must
@@ -502,13 +512,34 @@ func (b *bridge) fromClaude(line []byte) {
 		b.writeClaude(map[string]any{"type": "control_response", "response": map[string]string{
 			"subtype": "error", "request_id": head.RequestID, "error": "the Legion Claude Code bridge serves no control request"}})
 	case "result":
-		b.result(head.Subtype, head.IsError, head.Errors, httpStatusOf(head.APIErrorStatus))
+		b.result(resultLine{
+			subtype:        head.Subtype,
+			isError:        head.IsError,
+			errors:         head.Errors,
+			httpStatus:     httpStatusOf(head.APIErrorStatus),
+			stopReason:     head.StopReason,
+			terminalReason: head.TerminalReason,
+		})
 	}
 }
 
+// resultLine is what the bridge reads of one `result` line: what ended the step or the turn, and
+// how. Its halves are the two answers a turn's end carries — the class the turn-outcome report
+// says (stopReason, isError, terminalReason) and what Claude Code returned, which the
+// prompt_result says (subtype, errors, httpStatus).
+type resultLine struct {
+	subtype        string
+	isError        bool
+	errors         []string
+	httpStatus     int
+	stopReason     string
+	terminalReason string
+}
+
 // httpStatusOf is the HTTP status a result's api_error_status holds, and zero for one that holds
-// no number: the member is absent or `null` on every result of the recordings
-// (testdata/background-turn.jsonl:12), and a shape this does not expect costs the status alone.
+// no number: the member is absent or `null` on every result of the background recordings
+// (testdata/background-turn.jsonl:12) and a number on one that failed on the provider
+// (testdata/api-error-529.jsonl:5), and a shape this does not expect costs the status alone.
 func httpStatusOf(raw json.RawMessage) int {
 	var status int
 	if err := json.Unmarshal(raw, &status); err != nil {
@@ -596,11 +627,16 @@ func answerAll(deliveries []delivery, err error) {
 // turn's ends that turn, no step of the bridge's being open in it, and the next Envoy delivery
 // then starts a turn of the bridge's own. A delivery the step sent that Claude Code ended it
 // without taking never will be.
-func (b *bridge) result(subtype string, isError bool, errs []string, httpStatus int) {
+//
+// The turn's end is where its outcome is reported to the daemon (turnoutcome.go): one report per
+// turn, under the class this result gives. A result that ends a step and not the turn reports
+// nothing — the turn runs on — so a turn of several steps is reported under the class of the
+// result that ended it.
+func (b *bridge) result(res resultLine) {
 	if b.seeding {
 		b.seeding = false
-		if isError {
-			b.log.Printf("the session's seed failed (%s: %s); the claim registers no transcript until one is written", subtype, strings.Join(errs, "; "))
+		if res.isError {
+			b.log.Printf("the session's seed failed (%s: %s); the claim registers no transcript until one is written", res.subtype, strings.Join(res.errors, "; "))
 		} else {
 			b.log.Printf("seeded session %s as %q", b.cfg.SessionID, b.cfg.Title)
 		}
@@ -615,7 +651,7 @@ func (b *bridge) result(subtype string, isError bool, errs []string, httpStatus 
 		return
 	}
 	if !b.inRun {
-		b.log.Printf("ignoring a %s result outside any turn", subtype)
+		b.log.Printf("ignoring a %s result outside any turn", res.subtype)
 		return
 	}
 	stepped := b.stepping
@@ -623,10 +659,10 @@ func (b *bridge) result(subtype string, isError bool, errs []string, httpStatus 
 	answerAll(b.taking, errNotTaken)
 	b.taking = nil
 	failure := ""
-	if isError {
+	if res.isError {
 		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
 		// the daemon reads neither, so the log line is what puts the failure on the pane.
-		failure = "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
+		failure = "Claude Code: " + res.subtype + " " + strings.Join(res.errors, "; ")
 		b.log.Printf("the turn failed: %s", failure)
 		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
@@ -636,6 +672,9 @@ func (b *bridge) result(subtype string, isError bool, errs []string, httpStatus 
 		return
 	}
 	b.inRun = false
+	if b.outcomes != nil {
+		b.outcomes.report(classify(res))
+	}
 	b.emit(shimwire.AgentEnd{})
 	if prompt := b.promptRun; prompt != "" {
 		// The turn that ran the daemon's prompt is over, and this is what says it was that
@@ -648,11 +687,13 @@ func (b *bridge) result(subtype string, isError bool, errs []string, httpStatus 
 		// message_end above carries, and the status is the one Claude Code named, zero when it
 		// named none. Retryable stays false: nothing Claude Code reports says the error can
 		// clear, and the daemon reads a failure that claims nothing as one that may, so the task
-		// is sent again rather than the issue held on it.
+		// is sent again rather than the issue held on it. What that failure was — a content
+		// filter's refusal, or a provider failure of another kind — is the turn-outcome report's
+		// to say, and the daemon's rule reads the failed turn's own report beside this frame.
 		b.promptRun = ""
 		result := shimwire.PromptResult{ID: prompt, AgentInvoked: true}
 		if failure != "" {
-			result.Error = &shimwire.PromptError{Message: failure, HTTPStatus: httpStatus}
+			result.Error = &shimwire.PromptError{Message: failure, HTTPStatus: res.httpStatus}
 		}
 		b.emit(result)
 	}

@@ -544,17 +544,25 @@ package api
 // note says.)
 //
 // 50: INFRA-956 -- the turn-outcome report, and fix-attempt counting gone.
-// `POST /legion/v1/claims/turn-outcome` is a new claim route in the shape of `claims/ready`
-// (`claim.TurnOutcomeRequest`: `claimToken`, `sessionId`, `secret`, `generation`, a `sequence`
-// counted from 1 within that generation, an `outcome` of `clean`, `refused` or `provider-error`,
-// and an optional `category`), answering 204. It is how the agent's own plugin tells the daemon a
-// provider's content filter refused the turn, which the same session often takes on a weaker
-// model, apart from a 429 or a malformed request, which may not clear that way. The plugin
-// classifies the turn and the daemon parses no provider text: `category` is the refusal's own
-// category (`reasoning_extraction`) and no field carries the provider's words. pi-legion reports
-// every settled turn of a claim's session from its `agent_end` hook
-// (`packages/pi-legion/src/turn-outcome.ts`); a plugin before 50 reports none, and a daemon
-// before 50 answers the post a 404. The daemon keeps the newest report on the claim's machine, in
+// `POST /legion/v1/claims/turn-outcome` is a new claim route (`claim.TurnOutcomeRequest`:
+// `generation`, a `sequence` counted from 1 within that generation, an `outcome` of `clean`,
+// `refused` or `provider-error`, an optional `category`, and the caller's own identity),
+// answering 204. The body names its caller one of two ways, and exactly one: `claimToken`,
+// `sessionId` and `secret`, the shape `claims/ready` takes, which is the agent's own plugin
+// inside the session; or `bootToken`, the launch's own 0600 token its pane is told, which is a
+// producer beside the agent that holds no secret — `legion claude-bridge`, whose pane's
+// registration is claude-envoy's, inside Claude Code. A body naming both, or neither, is refused
+// 400; one naming the agent's identity in part is refused by the field it left out; a boot token
+// of a launch the claim has moved past is refused 403, and a report for any generation but that
+// launch's 409. It is how a worker's own process tells the daemon a provider's content filter
+// refused the turn, which the same session often takes on a weaker model, apart from a 429 or a
+// malformed request, which may not clear that way. The producer classifies the turn and the
+// daemon parses no provider text: `category` is the refusal's own category
+// (`reasoning_extraction`) and no field carries the provider's words. pi-legion reports every
+// settled turn of a claim's session from its `agent_end` hook
+// (`packages/pi-legion/src/turn-outcome.ts`), and the Claude bridge every turn it ends
+// (`internal/claudebridge/turnoutcome.go`); a plugin before 50 reports none, and a daemon before
+// 50 answers the post a 404. The daemon keeps the newest report on the claim's machine, in
 // memory, and nothing else: it is read within two minutes of the turn it is about, so no store
 // write comes with it (`internal/supervise/turnoutcome.go`).
 // The same number carries the end of fix-attempt counting: `legion.yaml` no longer takes

@@ -634,18 +634,32 @@ func TestReadyForUpdateRequestGolden(t *testing.T) {
 	})
 }
 
-// The turn-outcome request is the agent's own plugin reporting how one turn of its session
-// ended: the class it read, a refusal's category, and the plugin's own sequence within the
-// launch generation. No field carries the provider's own words.
+// The turn-outcome request is a producer reporting how one turn of its agent's session ended:
+// the class it read, a refusal's category, and its own sequence within the launch generation. No
+// field carries the provider's own words. Two goldens, because the body names its caller one of
+// two ways and each is a shape of its own on the wire: the agent's own plugin, which holds the
+// registration's secret, and the Claude bridge, which holds the launch's boot token and no
+// secret.
 func TestTurnOutcomeRequestGolden(t *testing.T) {
 	golden(t, "turn-outcome.json", claim.TurnOutcomeRequest{
-		ClaimToken: "legion-legion-legion-208-implementer",
-		SessionID:  "ses_implementer_208",
-		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		AgentCaller: claim.AgentCaller{
+			ClaimToken: "legion-legion-legion-208-implementer",
+			SessionID:  "ses_implementer_208",
+			Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		},
 		Generation: 5,
 		Sequence:   12,
 		Outcome:    claim.TurnRefused,
 		Category:   "reasoning_extraction",
+	})
+}
+
+func TestTurnOutcomeBootRequestGolden(t *testing.T) {
+	golden(t, "turn-outcome-boot.json", claim.TurnOutcomeRequest{
+		BootCaller: claim.BootCaller{BootToken: "Qm9vdFRva2VuRml4dHVyZQ"},
+		Generation: 5,
+		Sequence:   12,
+		Outcome:    claim.TurnProviderError,
 	})
 }
 

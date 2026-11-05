@@ -60,9 +60,12 @@ const schemas: Record<string, z.ZodType> = {
   // `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
   // pushed everything it wants kept and its process may be replaced.
   "ready-for-update.json": LegionReadyForUpdateRequest,
-  // `claim.TurnOutcomeRequest`: how one turn of a claim's session ended, as the agent's own
-  // plugin classified it.
+  // `claim.TurnOutcomeRequest`: how one turn of a claim's session ended, as the producer that
+  // ended it classified it, under each of the two caller identities the body may name — the
+  // agent's own plugin with the registration's secret, the Claude bridge with the launch's boot
+  // token.
   "turn-outcome.json": LegionTurnOutcomeRequest,
+  "turn-outcome-boot.json": LegionTurnOutcomeRequest,
   // What a pod reads of its deployment's idle release: every release, resume and hold of the
   // window it named (`api.ReleaseRecordsResponse`).
   "release-records.json": LegionReleaseRecordsResponse,
@@ -741,6 +744,8 @@ test("every request-side object refuses a key it does not name", () => {
 test("every request the plugin sends parses and names its required fields", () => {
   const ready = fixtureBody("ready.json");
   const readyForUpdate = fixtureBody("ready-for-update.json");
+  const turnOutcome = fixtureBody("turn-outcome.json");
+  const turnOutcomeBoot = fixtureBody("turn-outcome-boot.json");
   const report = LegionCapabilityReport.parse(ready.capabilities);
   const activity = {
     at: "2026-11-05T05:10:00Z",
@@ -820,6 +825,9 @@ test("every request the plugin sends parses and names its required fields", () =
     // writes rather than invented here.
     ["ready", LegionReadyRequest, ready],
     ["ready for update", LegionReadyForUpdateRequest, readyForUpdate],
+    // Each caller shape of the turn-outcome body, both goldens the Go side writes.
+    ["turn outcome, the agent's own plugin", LegionTurnOutcomeRequest, turnOutcome],
+    ["turn outcome, the Claude bridge", LegionTurnOutcomeRequest, turnOutcomeBoot],
     ["capability report", LegionCapabilityReport, report],
     // The claim wire's activity report and the window a pod reads its release records over.
     ["activity", LegionActivityRequest, activityRequest],
@@ -845,6 +853,26 @@ test("every request the plugin sends parses and names its required fields", () =
       `${name} refuses a missing required field`
     ).toBeFalse();
   }
+});
+
+// The body names its caller one of two ways and exactly one: a report that names both says who
+// is calling twice over, and the daemon answers neither (`claim.TurnOutcomeRequest.Caller`).
+test("a turn outcome names exactly one caller", () => {
+  const turn = { generation: 5, sequence: 12, outcome: "clean" } as const;
+  const agent = {
+    claimToken: "legion-legion-legion-208-implementer",
+    sessionId: "ses_implementer_208",
+    secret: "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+  };
+  const boot = { bootToken: "Qm9vdFRva2VuRml4dHVyZQ" };
+  expect(LegionTurnOutcomeRequest.safeParse({ ...turn, ...agent }).success).toBeTrue();
+  expect(LegionTurnOutcomeRequest.safeParse({ ...turn, ...boot }).success).toBeTrue();
+  expect(LegionTurnOutcomeRequest.safeParse({ ...turn, ...agent, ...boot }).success).toBeFalse();
+  expect(LegionTurnOutcomeRequest.safeParse(turn).success).toBeFalse();
+  // The agent's identity given in part is no boot caller: neither branch takes it.
+  expect(
+    LegionTurnOutcomeRequest.safeParse({ ...turn, claimToken: agent.claimToken }).success
+  ).toBeFalse();
 });
 
 test("an escalation rejects empty required fields", () => {

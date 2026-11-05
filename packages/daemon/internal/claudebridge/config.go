@@ -18,6 +18,12 @@
 //     `agent_end`. Claude Code's background tasks are on under either runtime
 //     (`claudelaunch.Environment`), so a role may leave work running past a turn's end and read
 //     its result in the turn it starts.
+//   - every turn the bridge ends is reported to the daemon over HTTP as well, on
+//     `POST /legion/v1/claims/turn-outcome`, under the class that turn's `result` gives:
+//     `refused` for a content filter's refusal, `provider-error` for another failure the provider
+//     marked final, `clean` for everything else (turnoutcome.go). The frames above say the turn
+//     ended and what Claude Code returned; this says what ended it, which is what the daemon's
+//     provider-error rule reads.
 //
 // The bridge is transport: the phase-stall machine — a worker whose turn ends with its phase still
 // open is reminded — runs in the pane's `legion` MCP server
@@ -35,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +56,15 @@ type Config struct {
 	SessionID string
 	Seed      bool
 	Title     string
+	// DaemonURL, BootTokenFile and Generation are what the turn-outcome report is sent with
+	// (turnoutcome.go): the daemon's API root every pane is told (LEGION_DAEMON_URL), the 0600
+	// file holding the launch's own boot token (LEGION_BOOT_TOKEN_FILE), which names this claim,
+	// and the launch's generation (LEGION_GENERATION), which the report counts its sequence
+	// within. A bridge told none of them — one run by hand, or a test — reports no turn outcome
+	// and says so once (newTurnReporter).
+	DaemonURL     string
+	BootTokenFile string
+	Generation    uint64
 	// Stdin carries the daemon's frames from the shim, Stdout the frames back to it. Log receives
 	// the bridge's own lines and Claude Code's stderr: what the pane shows.
 	Stdin  io.Reader
@@ -57,8 +73,13 @@ type Config struct {
 }
 
 // Configure reads a bridge's configuration from the claude argv and the environment the runtime
-// gave it: the session from argv and the seed title from LEGION_ROLE and LEGION_ISSUE. Every
-// refusal names what is missing.
+// gave it: the session from argv, the seed title from LEGION_ROLE and LEGION_ISSUE, and the
+// turn-outcome report's three values from LEGION_DAEMON_URL, LEGION_BOOT_TOKEN_FILE and
+// LEGION_GENERATION, each of which every pane is told by its runtime
+// (internal/runtime/tmux's runtimeOwned, internal/runtime/sandbox's mainEnvironment). Every
+// refusal names what is missing; the report's three are no refusal, since a bridge told none of
+// them still bridges, and a generation that is no number is read as none at all — the reporter
+// names the variable either way.
 func Configure(argv, env []string) (Config, error) {
 	if len(argv) == 0 {
 		return Config{}, errors.New("no claude command to run after --")
@@ -67,11 +88,15 @@ func Configure(argv, env []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	generation, _ := strconv.ParseUint(envValue(env, "LEGION_GENERATION"), 10, 64)
 	cfg := Config{
-		Argv:      argv,
-		Env:       env,
-		SessionID: session,
-		Seed:      fresh,
+		Argv:          argv,
+		Env:           env,
+		SessionID:     session,
+		Seed:          fresh,
+		DaemonURL:     strings.TrimRight(envValue(env, "LEGION_DAEMON_URL"), "/"),
+		BootTokenFile: envValue(env, "LEGION_BOOT_TOKEN_FILE"),
+		Generation:    generation,
 	}
 	if fresh {
 		role, issue := envValue(env, "LEGION_ROLE"), envValue(env, "LEGION_ISSUE")
