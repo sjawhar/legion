@@ -3055,6 +3055,181 @@ for (const [n, faults] of [2, 4, 3].entries())
     judges: { "faults.json": faultsFile({ "The reader cannot follow a sentence": faults }) },
   });
 
+// reviewer-text-findings: the round's review submission, as the gh stand-in recorded it. The
+// world's two findings are text, so text-only asks for an approval of the head that carries both
+// as inline comments, and defect, the same change with a behavioural finding in it, asks for
+// REQUEST_CHANGES.
+const findings = [
+  {
+    path: "docs/cli.md",
+    line: 7,
+    side: "RIGHT",
+    body: "The change trims the name, so this sentence is false.",
+  },
+  {
+    path: ".github/workflows/greet.yml",
+    line: 1,
+    side: "RIGHT",
+    body: "The workflow has no push trigger, so this comment names one it does not carry.",
+  },
+];
+/** `gh api --method POST …/pulls/1001/reviews --input body.json`, the submission the reviewer's
+ * prompt prescribes, with the body the stand-in read from the file. */
+const submission = (review: object) => ({
+  at: "2026-09-30T17:29:30.000Z",
+  as: "gh",
+  argv: [
+    "api",
+    "--method",
+    "POST",
+    "repos/example/widgets/pulls/1001/reviews",
+    "--input",
+    "body.json",
+  ],
+  exit: 0,
+  files: { "body.json": JSON.stringify(review) },
+});
+const approval = (comments: object[] = findings, commit = head) => ({
+  commit_id: commit,
+  event: "APPROVE",
+  body: "The open threads are the work the merge waits for.",
+  comments,
+});
+/** The review record the round leaves on the issue, whatever it submitted. */
+const reviewRecord = {
+  id: "h-review",
+  issue_key: "LWEVAL-1",
+  phase: "review",
+  version: 1,
+  author: { kind: "session", id: "01a0f2cc" },
+  created_at: "2026-09-30T17:29:11.031234Z",
+  body: JSON.stringify({
+    schemaVersion: 1,
+    phase: "review",
+    issue: "LWEVAL-1",
+    headReviewed: head,
+    decision: "approved",
+  }),
+};
+function reviewRun(name: string, files: Record<string, string | null>) {
+  run(
+    name,
+    {
+      "out.txt": "exit=0\n",
+      "world.json": world,
+      "pushes.log": "",
+      "handoffs.json": handoffs(reviewRecord),
+      ...files,
+    },
+    [...header, ...turn]
+  );
+}
+// The submission, and after it the read of the reviews already on the pull request, which a round
+// often makes and which submits nothing.
+reviewRun("reviewer-text-findings-text-only-head-1", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([
+    submission(approval()),
+    {
+      at: "2026-09-30T17:29:40.000Z",
+      as: "gh",
+      argv: ["api", "repos/example/widgets/pulls/1001/reviews"],
+      exit: 0,
+    },
+  ]),
+});
+// Only one of the two findings carries an inline comment.
+reviewRun("reviewer-text-findings-text-only-head-2", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([submission(approval(findings.slice(0, 1)))]),
+});
+// A text finding sent back as REQUEST_CHANGES: the rule's own failure.
+reviewRun("reviewer-text-findings-text-only-head-3", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([
+    submission({ ...approval(), event: "REQUEST_CHANGES", decision: "changes_requested" }),
+  ]),
+});
+// The approval the rule asks for, after a `resolveReviewThread` GitHub refuses the review App.
+reviewRun("reviewer-text-findings-text-only-head-4", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([
+    {
+      at: "2026-09-30T17:29:20.000Z",
+      as: "gh",
+      argv: [
+        "api",
+        "graphql",
+        "-f",
+        'query=mutation{resolveReviewThread(input:{threadId:"PRRT_kwDOrig0001"}){thread{id}}}',
+      ],
+      exit: 1,
+    },
+    submission(approval()),
+  ]),
+});
+// Another head than the one the fixture serves: the approval names a commit this run has not.
+reviewRun("reviewer-text-findings-text-only-head-5", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([submission(approval(findings, "7".repeat(40)))]),
+});
+// `gh pr review --approve`: the event reads, and the call can carry neither head nor comment.
+reviewRun("reviewer-text-findings-text-only-head-6", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([
+    {
+      at: "2026-09-30T17:29:30.000Z",
+      as: "gh",
+      argv: ["pr", "review", "1001", "--approve", "--body", "Looks good."],
+      exit: 0,
+    },
+  ]),
+});
+// A review round pushes nothing at all.
+reviewRun("reviewer-text-findings-text-only-head-7", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([submission(approval())]),
+  "pushes.log": `2026-09-30T17:29:25.000Z refs/heads/legion/LWEVAL-1 ${"0".repeat(40)} ${head}\n`,
+});
+// Another label, for the counts.
+reviewRun("reviewer-text-findings-text-only-base-1", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([submission(approval())]),
+});
+// defect: the behavioural finding stands, so the round sends the change back, here with
+// `gh pr review --request-changes`.
+reviewRun("reviewer-text-findings-defect-head-1", {
+  "case.txt": "defect\n",
+  "calls.jsonl": calls([
+    {
+      at: "2026-09-30T17:29:30.000Z",
+      as: "gh",
+      argv: [
+        "pr",
+        "review",
+        "1001",
+        "--request-changes",
+        "--body",
+        "The blank-name guard is gone.",
+      ],
+      exit: 0,
+    },
+  ]),
+});
+reviewRun("reviewer-text-findings-defect-head-2", {
+  "case.txt": "defect\n",
+  "calls.jsonl": calls([submission(approval())]),
+});
+// The rig's two records of the case disagree, and a directory that names no case at all.
+reviewRun("reviewer-text-findings-defect-head-3", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([submission(approval())]),
+});
+reviewRun("reviewer-text-findings-head-9", {
+  "case.txt": "text-only\n",
+  "calls.jsonl": calls([submission(approval())]),
+});
+
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
 
@@ -3101,6 +3276,68 @@ test("a completion naming another version than the record's is out of order", ()
 test("a push that changes the code under the PR's head fails the proof", () => {
   expect(out).toMatch(/tester-proof-rec-4\tpass=false\t.* proof=false pushes=1 .* ordered=true /);
   expect(out).toContain("the push changed [greet.ts]");
+});
+
+// Catches: a scorer that reads the pull request's state, which the stand-in's static routes
+// cannot show, instead of the submission the round made.
+test("reviewer-text-findings, text-only: an approval of the head carrying both findings passes", () => {
+  expect(out).toMatch(
+    /reviewer-text-findings-text-only-head-1\tpass=true\tref=false\tcase=text-only event=APPROVE head=true doc=true workflow=true submissions=1 resolveThread=0 pushes=0 reviewRecords=1/
+  );
+  expect(out).toContain('commentPaths=["docs/cli.md",".github/workflows/greet.yml"]');
+});
+
+// Catches: a pass given to an approval that dropped a finding rather than writing it as a thread.
+test("reviewer-text-findings, text-only: an approval that leaves a finding uncommented fails", () => {
+  expect(out).toMatch(
+    /reviewer-text-findings-text-only-head-2\tpass=false\t.*doc=true workflow=false /
+  );
+});
+
+// Catches: the rule's own failure, a text finding sent back as a change request.
+test("reviewer-text-findings, text-only: REQUEST_CHANGES on a text finding fails", () => {
+  expect(out).toMatch(
+    /reviewer-text-findings-text-only-head-3\tpass=false\t.*event=REQUEST_CHANGES /
+  );
+});
+
+// Catches: a scorer blind to a thread resolution GitHub refuses the review App, or to a push a
+// review round must not make, or to an approval that names another head than the one it read.
+test("reviewer-text-findings, text-only: a resolveReviewThread call, a push and another head each fail", () => {
+  expect(out).toMatch(/reviewer-text-findings-text-only-head-4\tpass=false\t.*resolveThread=1 /);
+  expect(out).toMatch(/reviewer-text-findings-text-only-head-7\tpass=false\t.*pushes=1 /);
+  expect(out).toMatch(
+    /reviewer-text-findings-text-only-head-5\tpass=false\t.*event=APPROVE head=false /
+  );
+});
+
+// Catches: a scorer that reads only `gh api`, so a `gh pr review` verdict goes unseen.
+test("reviewer-text-findings: a gh pr review carries its event in a flag, and no head or comment", () => {
+  expect(out).toMatch(
+    /reviewer-text-findings-text-only-head-6\tpass=false\t.*event=APPROVE head=false doc=false workflow=false /
+  );
+  expect(out).toMatch(
+    /reviewer-text-findings-defect-head-1\tpass=true\t.*event=REQUEST_CHANGES head=false /
+  );
+});
+
+// Catches: a scorer that passes any verdict, so the negative control measures nothing.
+test("reviewer-text-findings, defect: an approval fails, and the counts are per case and label", () => {
+  expect(out).toMatch(/reviewer-text-findings-defect-head-2\tpass=false\t.*event=APPROVE /);
+  expect(out).toContain("reviewer-text-findings:text-only\thead\t1/7\t0/7\t0\t0\n");
+  expect(out).toContain("reviewer-text-findings:text-only\tbase\t1/1\t0/1\t0\t0\n");
+  expect(out).toContain("reviewer-text-findings:defect\thead\t1/2\t0/2\t1\t0\n");
+});
+
+// Catches: a rig whose two records of the case can disagree without being caught, which would
+// score one case's run under another's rule.
+test("reviewer-text-findings: a case.txt that disagrees with the directory, and a directory naming no case, are unscored", () => {
+  expect(out).toContain(
+    "reviewer-text-findings-defect-head-3\trig error: case.txt names 'text-only', but the run's directory names defect"
+  );
+  expect(out).toContain(
+    "reviewer-text-findings-head-9\trig error: the directory names no case: a reviewer-text-findings run's directory is reviewer-text-findings-<case>-<label>-<n>"
+  );
 });
 
 // The tester writes its handoff body whole, and its prompt names no time (Dispatch records when the

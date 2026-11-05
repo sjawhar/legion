@@ -8,11 +8,12 @@
 //     newline, whether the result spilled to an artifact, and so whether the file arrived whole;
 //     then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
-//     One row per run, then counts per scenario and label (for askgate, per case and label), and a
-//     legend saying what each count is. Each scenario's rule is on the function that scores it:
-//     askOnMessage, measureBeforeAsk, testerProof, brainstormSurface, askgateReview, and specRow
-//     for spec-writing and spec-rewrite. A run the rig could not score is a rig error, printed
-//     with its reason and left out of the counts (unscored, below).
+//     One row per run, then counts per scenario and label (for a cased scenario — askgate and
+//     reviewer-text-findings — per case and label), and a legend saying what each count is. Each
+//     scenario's rule is on the function that scores it: askOnMessage, measureBeforeAsk,
+//     testerProof, reviewerTextFindings, brainstormSurface, askgateReview, and specRow for
+//     spec-writing and spec-rewrite. A run the rig could not score is a rig error, printed with
+//     its reason and left out of the counts (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
@@ -802,6 +803,165 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   ];
   return { run, scenario: "tester-proof", label, pass, ref, notes: notes.join(" ") };
 }
+
+/** Every case rig.sh's run_reviewer_text_findings builds a world for. */
+const REVIEWER_CASES = ["text-only", "defect"];
+/** A reviewer-text-findings run's directory, reviewer-text-findings-<case>-<label>-<n>, read as
+ * its case and its label; the longest case first, as ASKGATE_RUN sorts its own, so a label that
+ * starts like a case's tail is read right. The scorer holds this case to the one <run>/case.txt
+ * names, the rig's other record of it. */
+const REVIEWER_RUN = new RegExp(
+  `^reviewer-text-findings-(${REVIEWER_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
+);
+/** The two files worker_fixture puts a text finding in (rig.sh): the document the change makes
+ * false, and the workflow whose comment names a trigger the file does not carry. */
+const FINDING_DOC = "docs/cli.md";
+const FINDING_WORKFLOW = ".github/workflows/";
+/** A review submission as the reviewer's own prompt writes it: the head it reviewed, its verdict,
+ * and one inline comment per finding. */
+const Review = z.looseObject({
+  commit_id: z.string().optional(),
+  event: z.string().optional(),
+  comments: z.array(z.looseObject({ path: z.string().optional() })).optional(),
+});
+/** The event each `gh pr review` flag submits. */
+const REVIEW_FLAGS: Record<string, string> = {
+  "-a": "APPROVE",
+  "--approve": "APPROVE",
+  "-r": "REQUEST_CHANGES",
+  "--request-changes": "REQUEST_CHANGES",
+  "-c": "COMMENT",
+  "--comment": "COMMENT",
+};
+/** The review `call` submitted, or undefined when it submitted none: the
+ * `gh api --method POST repos/{owner}/{repo}/pulls/{n}/reviews` the reviewer's prompt prescribes,
+ * whose JSON body comes from `--input <file>` (the stand-in records the file it read),
+ * `--input -` (its stdin) or `-f`/`--raw-field` fields; or a `gh pr review`, which carries its
+ * event as a flag and can name neither the head nor an inline comment. A call on that route that
+ * carries no body submits nothing: `gh api repos/…/pulls/<n>/reviews` is the read of the reviews
+ * already there, which a round often makes after it submitted. */
+function reviewOf(
+  call: z.infer<typeof Call>
+): { event: string; head: string; comments: string[] } | undefined {
+  if (call.argv[0] === "pr" && call.argv[1] === "review") {
+    const flag = call.argv.find((arg) => REVIEW_FLAGS[arg] !== undefined) ?? "";
+    return { event: REVIEW_FLAGS[flag] ?? "", head: "", comments: [] };
+  }
+  if (call.argv[0] !== "api" || !call.argv.some((arg) => /pulls\/\d+\/reviews$/.test(arg)))
+    return undefined;
+  const fields = new Map<string, string>();
+  let text: string | undefined;
+  for (const [index, arg] of call.argv.entries()) {
+    const next = call.argv[index + 1];
+    if (next === undefined) continue;
+    if (arg === "--input") text = next === "-" ? call.stdin : call.files?.[next];
+    else if (arg === "-f" || arg === "--raw-field" || arg === "-F" || arg === "--field") {
+      const [key = "", ...value] = next.split("=");
+      fields.set(key, value.join("="));
+    }
+  }
+  if (text === undefined && fields.size === 0) return undefined;
+  let body: unknown;
+  try {
+    body = text === undefined ? {} : JSON.parse(text);
+  } catch {
+    body = {};
+  }
+  const read = Review.safeParse(body);
+  const review = read.success ? read.data : {};
+  return {
+    event: review.event ?? fields.get("event") ?? "",
+    head: review.commit_id ?? fields.get("commit_id") ?? "",
+    comments: (review.comments ?? []).map((comment) => comment.path ?? ""),
+  };
+}
+
+/** reviewer-text-findings: the reviewer's verdict rule, which `skill://legion-worker` states and
+ * `references/merge-gate.md` defines — `REQUEST_CHANGES` only when a behavioural finding stands,
+ * one whose closing changes code that runs, and otherwise the approval of the head it read, named
+ * by SHA, with every text finding left as the inline thread the same submission writes.
+ *
+ * The score reads the round's submission, never the pull request's state: the gh stand-in answers
+ * static routes, so a thread's state after the run says nothing. The submission is the last review
+ * the stand-in recorded (reviewOf, calls.jsonl), and the run's world is rig.sh's worker_fixture
+ * under the case <run>/case.txt and the run's directory both name, which must agree. Both cases
+ * carry the same two text findings, and neither is behavioural:
+ *   text-only  the change's code is correct, so the round is clean: the submission is `APPROVE`
+ *              at the fixture head, carrying an inline comment on each of the two findings' files
+ *              (docs/cli.md and the workflow), with no `resolveReviewThread` call — GitHub lets
+ *              only the pull request's author's App resolve a thread — and no push to the run's
+ *              own remote, since a review round pushes nothing at all;
+ *   defect     the same change with the CLI's blank-name guard dropped, so a behavioural finding
+ *              stands and the submission is `REQUEST_CHANGES`: the negative control, which fails
+ *              a reviewer that approves whatever it reads.
+ * `ref`: the agent read skill://legion-worker/references/merge-gate.md, where the rule is
+ * defined. */
+function reviewerTextFindings(runDir: string, run: string, label: string, dirCase: string): Row {
+  const reviewCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
+  if (!REVIEWER_CASES.includes(reviewCase))
+    throw new Error(
+      `reviewer case.txt names '${reviewCase}', not one of ${REVIEWER_CASES.join(", ")}`
+    );
+  if (reviewCase !== dirCase)
+    throw new Error(`case.txt names '${reviewCase}', but the run's directory names ${dirCase}`);
+  const world = json(path.join(runDir, "world.json"), World);
+  const calls = parsed(path.join(runDir, "calls.jsonl"), Call);
+  const reviews = calls
+    .filter((call) => call.as === "gh" && call.exit === 0)
+    .flatMap((call) => {
+      const review = reviewOf(call);
+      return review === undefined ? [] : [review];
+    });
+  const review = reviews.at(-1);
+  const resolves = calls.filter((call) =>
+    call.argv.join(" ").includes("resolveReviewThread")
+  ).length;
+  const pushes = lines(path.join(runDir, "pushes.log")).length;
+  const paths = review?.comments ?? [];
+  const onDoc = paths.includes(FINDING_DOC);
+  const onWorkflow = paths.some((named) => named.startsWith(FINDING_WORKFLOW));
+  const head =
+    review !== undefined && review.head.length >= 7 && world.head.startsWith(review.head);
+  const pass =
+    reviewCase === "defect"
+      ? review?.event === "REQUEST_CHANGES"
+      : review?.event === "APPROVE" &&
+        head &&
+        onDoc &&
+        onWorkflow &&
+        resolves === 0 &&
+        pushes === 0;
+  const records = json(path.join(runDir, "handoffs.json"), Handoffs).filter(
+    (record) => record.phase === "review"
+  ).length;
+  const ref = readCalls(session(runDir)).some((call) =>
+    call.target.includes("skill://legion-worker/references/merge-gate.md")
+  );
+  const notes = [
+    `case=${reviewCase} event=${review?.event || "none"} head=${head} doc=${onDoc} workflow=${onWorkflow} submissions=${reviews.length} resolveThread=${resolves} pushes=${pushes} reviewRecords=${records}`,
+    `commentPaths=${JSON.stringify(paths)}`,
+    lines(path.join(runDir, "out.txt")).at(-1) ?? "",
+  ];
+  // The row's scenario carries the case, as an askgate row's does, so the counts are per case and
+  // label and they key as the rig errors of the same pair do.
+  return {
+    run,
+    scenario: `reviewer-text-findings:${reviewCase}`,
+    label,
+    pass,
+    ref,
+    notes: notes.join(" "),
+  };
+}
+/** Each cased scenario: how its run directory names its case and its label, and what a directory
+ * that names none should have looked like. A scenario absent here takes no case. */
+const CASED: Record<string, { run: RegExp; shape: string }> = {
+  askgate: { run: ASKGATE_RUN, shape: "an askgate run's directory is askgate-<case>-<label>-<n>" },
+  "reviewer-text-findings": {
+    run: REVIEWER_RUN,
+    shape: "a reviewer-text-findings run's directory is reviewer-text-findings-<case>-<label>-<n>",
+  },
+};
 
 /** rig.sh's own_dispatch record, <run>/dispatch.json: the run's own Dispatch, a database in the
  * batch's Postgres container (its id) and the server on it. */
@@ -3337,13 +3497,14 @@ function scoreRuns(runsDir: string, only: string | undefined) {
   }
   // Every checkout a spec run's agent can reach, so that a check naming one is no spec-only check.
   const reach = checkouts(path.dirname(runsDir));
-  // Each scenario's scorer, keyed by the name its runs' directories start with. An askgate run's
-  // case comes from its directory (ASKGATE_RUN).
-  const scorers: Record<string, (dir: string, run: string, label: string, askCase: string) => Row> =
+  // Each scenario's scorer, keyed by the name its runs' directories start with. A cased
+  // scenario's case comes from its directory (CASED).
+  const scorers: Record<string, (dir: string, run: string, label: string, runCase: string) => Row> =
     {
       "ask-on-message": askOnMessage,
       "measure-before-ask": measureBeforeAsk,
       "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
+      "reviewer-text-findings": reviewerTextFindings,
       brainstorm: brainstormSurface,
       askgate: askgateReview,
       "spec-writing": (dir, run, label) => specRow(dir, run, "spec-writing", label, reach),
@@ -3357,16 +3518,15 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     const [, scenario = "", named = ""] = match;
     if (only && scenario !== only) continue;
     const dir = path.join(runsDir, run);
-    // undefined for every other scenario, null for an askgate directory that names no case.
-    const askgate = scenario === "askgate" ? ASKGATE_RUN.exec(run) : undefined;
-    const [, askCase = "", label = named] = askgate ?? [];
-    const key = `${askgate ? `askgate:${askCase}` : scenario}\t${label}`;
+    // undefined for a scenario that takes no case, null for a cased scenario's directory that
+    // names none.
+    const cased = CASED[scenario];
+    const casedRun = cased === undefined ? undefined : cased.run.exec(run);
+    const [, runCase = "", label = named] = casedRun ?? [];
+    const key = `${casedRun ? `${scenario}:${runCase}` : scenario}\t${label}`;
     let reason: string | undefined;
     try {
-      if (askgate === null)
-        throw new Error(
-          "the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
-        );
+      if (casedRun === null) throw new Error(`the directory names no case: ${cased?.shape ?? ""}`);
       const dispatch = dispatchOf(dir);
       const calls = runCalls(dir);
       // The paths the run had when it ran, which its transcripts name, never those of a copy
@@ -3378,7 +3538,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       const own = [ran, profile, labels.get(label) ?? profile].map((place) => `${place}/`);
       reason = unscored(dir, scenario, dispatch, label, labels, sharing, calls, own);
       if (reason === undefined) {
-        const scored = score(dir, run, label, askCase);
+        const scored = score(dir, run, label, runCase);
         const outside = outsideReaches(calls, [work, labels.get(label) ?? work]);
         const skills = skillReaches(calls, own, label, labels);
         const flags = [
@@ -3470,6 +3630,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           counts follow",
       "           them, and the source table gives each source and label's median fault count",
       "           askgate: the rule for the run's label and case (askgateReview)",
+      "           reviewer-text-findings: the verdict the case asks for, in the review submission",
+      "           the gh stand-in recorded (reviewerTextFindings)",
       "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",
       "rig errors runs the rig could not score (unscored), left out of both counts",
       "flagged    counted runs whose row carries a flag (outside=, skills=, writes_seen=,",

@@ -185,6 +185,35 @@ describe("install_model_route", () => {
     );
   });
 
+  // Catches: a profile whose one model is disabled because the operator's block carries a bundled
+  // provider's name, which Oh My Pi refuses to start on ("No model available matching
+  // enabledModels (anthropic/claude-opus-4-8) with usable credentials").
+  test("provider leaves its own name out of the disabled providers", () => {
+    const dir = profileDir();
+    // The operator's own block, under a bundled provider's name: the deployment's gateway block
+    // is often `anthropic`, since that is the API it speaks.
+    const file = providerFile("!cat /run/user/1000/box/gateway-key");
+    writeFileSync(
+      file,
+      `${readFileSync(file, "utf8")}  anthropic:
+    baseUrl: http://gateway.internal.example:4000
+    apiKey: "!cat /run/user/1000/box/gateway-key"
+    api: anthropic-messages
+`
+    );
+    const { code, stderr } = route(dir, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: file,
+      LEGION_E2E_MODEL_PROVIDER: "anthropic",
+    });
+    expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
+    const agent = path.join(dir, "home/.omp/profiles/skills-test/agent");
+    const config = readFileSync(path.join(agent, "config.yml"), "utf8");
+    expect(config).toContain("enabledModels:\n  - anthropic/claude-opus-4-8\n");
+    expect(config).toContain("disabledProviders:\n  - amazon-bedrock\n");
+    expect(config).not.toContain("  - anthropic\n");
+  });
+
   test("provider without LEGION_E2E_MODEL_PROVIDER_FILE fails, naming the variable", () => {
     const dir = profileDir();
     const { code, stderr } = route(dir, {
@@ -514,6 +543,68 @@ describe("next_run", () => {
   // Catches: a first batch that fails because $work/runs does not exist yet.
   test("1 when the label has no run of the scenario", () => {
     expect(next(freshDir("numbering-empty"), "spec-rewrite", "s1").stdout).toBe("1\n");
+  });
+});
+
+// A cased scenario's case reaches four places that must agree: cmd_batch refuses a case before it
+// starts a service, cmd_run puts it in the run's directory name, the run writes it to
+// <run>/case.txt, and score.ts reads the name and the file and holds them to each other. All four
+// read it through scenario_case.
+describe("scenario_case", () => {
+  const cases = (scenario: string, env: Record<string, string> = {}) =>
+    bash(
+      `${fn("fail")}\n${fn("scenario_case")}\n${fn("askgate_case")}\n${fn("reviewer_case")}\nscenario_case "$1"`,
+      [scenario],
+      env
+    );
+
+  // Catches: a reviewer case the rig takes in one place and refuses in another.
+  test("reviewer-text-findings takes text-only and defect", () => {
+    for (const name of ["text-only", "defect"])
+      expect(cases("reviewer-text-findings", { SKILL_SCENARIOS_REVIEWER_CASE: name })).toEqual({
+        code: 0,
+        stdout: `${name}\n`,
+        stderr: "",
+      });
+  });
+
+  // Catches: a batch that runs the wrong world because the variable is unset or misspelt, which
+  // would score as the reviewer's own verdict.
+  test("an unset or unknown reviewer case fails, naming the variable and both cases", () => {
+    for (const env of [{}, { SKILL_SCENARIOS_REVIEWER_CASE: "text" }]) {
+      const result = cases("reviewer-text-findings", env);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("SKILL_SCENARIOS_REVIEWER_CASE");
+      expect(result.stderr).toContain("not text-only or defect");
+    }
+  });
+
+  // Catches: a generalisation that drops askgate's own cases, or that gives an uncased scenario a
+  // case and so a directory name no scorer reads.
+  test("askgate keeps its cases, and a scenario that takes none prints nothing", () => {
+    expect(cases("askgate", { SKILL_SCENARIOS_ASKGATE_CASE: "nochange-block" }).stdout).toBe(
+      "nochange-block\n"
+    );
+    expect(cases("askgate", { SKILL_SCENARIOS_ASKGATE_CASE: "nope" }).code).toBe(1);
+    expect(cases("tester-proof", { SKILL_SCENARIOS_REVIEWER_CASE: "defect" })).toEqual({
+      code: 0,
+      stdout: "",
+      stderr: "",
+    });
+  });
+
+  // Catches: a batch that starts its services and its runs before it reads the case (cmd_batch
+  // calls scenario_case before it loads a label or locks the services).
+  test("a batch of a cased scenario refuses an unset case before it starts anything", () => {
+    const dir = freshDir("reviewer-batch");
+    const result = Bun.spawnSync(
+      ["bash", path.join(import.meta.dir, "rig.sh"), "batch", "reviewer-text-findings", "1", "x"],
+      { env: { ...childEnv, SKILL_SCENARIOS_WORK: dir } }
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("SKILL_SCENARIOS_REVIEWER_CASE");
+    expect(existsSync(path.join(dir, "services"))).toBe(false);
   });
 });
 
