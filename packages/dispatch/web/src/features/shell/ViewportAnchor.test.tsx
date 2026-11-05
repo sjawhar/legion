@@ -54,14 +54,16 @@ function List({
   );
 }
 
-// A fixed geometry: rows are ROW_HEIGHT tall, stacked from LIST_TOP in DOM order, in a
+// A fixed geometry: rows are ROW_HEIGHT tall, stacked from `listTop` in DOM order, in a
 // VIEWPORT_HEIGHT window that scrolls through `window.scrollY` - or, where the list is rendered
 // in a scroller, through that element's `scrollTop`, the scroller itself filling the window and
-// never moving.
+// never moving. `listTop` starts at LIST_TOP; a test lowers it to shrink content above the rows
+// without moving what scrolls them, which is what a card collapsing in a commit of its own does.
 const rows = () => [...document.querySelectorAll<HTMLElement>("[data-row]")];
 const viewportTop = (id: string) =>
   document.querySelector(`[data-row="${id}"]`)?.getBoundingClientRect().top;
 
+let listTop = LIST_TOP;
 let scrollYDescriptor: PropertyDescriptor | undefined;
 let originalScrollBy: typeof window.scrollBy;
 let restoreSpies: (() => void)[] = [];
@@ -73,6 +75,7 @@ function setScrollY(value: number): void {
 beforeEach(() => {
   scrollYDescriptor = Object.getOwnPropertyDescriptor(window, "scrollY");
   originalScrollBy = window.scrollBy;
+  listTop = LIST_TOP;
   setScrollY(0);
   window.scrollBy = ((x: number | ScrollToOptions, y?: number) => {
     const top = typeof x === "number" ? y : x.top;
@@ -94,8 +97,8 @@ beforeEach(() => {
     const top = isScroller
       ? 0
       : isRow
-        ? LIST_TOP + all.indexOf(this as HTMLElement) * ROW_HEIGHT - offset
-        : LIST_TOP - offset;
+        ? listTop + all.indexOf(this as HTMLElement) * ROW_HEIGHT - offset
+        : listTop - offset;
     const height = isScroller ? VIEWPORT_HEIGHT : isRow ? ROW_HEIGHT : all.length * ROW_HEIGHT;
     return {
       bottom: top + height,
@@ -111,7 +114,7 @@ beforeEach(() => {
   });
   const point = spyOn(document, "elementFromPoint").mockImplementation((_x, y) => {
     const offset = scrollerRef.current?.scrollTop ?? window.scrollY;
-    const index = Math.floor((offset + y - LIST_TOP) / ROW_HEIGHT);
+    const index = Math.floor((offset + y - listTop) / ROW_HEIGHT);
     return rows()[index] ?? null;
   });
   restoreSpies = [() => rect.mockRestore(), () => point.mockRestore()];
@@ -330,13 +333,69 @@ test("a row moving under a pointer that has not moved does not become the place 
     const held = viewportTop("r4");
 
     // Content above the hand's row loses 50 px with no commit of this anchor's, so the row
-    // slides up under a pointer that has not moved, and the browser says so again.
-    scroller.scrollTop = 150;
+    // slides up under a pointer that has not moved, and the browser says so again. The box's
+    // own scrollTop does not move: the content shrank, the reader did not scroll.
+    listTop -= ROW_HEIGHT;
     expect(viewportTop("r4")).toBe((held ?? 0) - ROW_HEIGHT);
     fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
 
     view.rerender(<List rows={["a", ...ids(12)]} scroller={scrollerRef} />);
     expect(viewportTop("r4")).toBe(held);
+  } finally {
+    view.unmount();
+  }
+});
+
+// A commit landing between a scroll and the scroll event it raises: following a reference from
+// a Conversation card scrolls the page, and the thread-open commit arrives before the event
+// does. Where the document scrolls the rows nothing is kept for that commit to restore, so the
+// reader stays where they put themselves.
+test("a window scroll whose event has not arrived yet is not undone by the next commit", () => {
+  const view = render(<List rows={ids(12)} />);
+  try {
+    setScrollY(100);
+    const hovered = document.querySelector<HTMLElement>('[data-row="r4"]');
+    if (hovered === null) throw new Error("r4 missing");
+    fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
+
+    // The page moved to the reference's target and the `scroll` event has not run yet.
+    setScrollY(250);
+    const at = viewportTop("r4");
+
+    // A row arrives below the hand's row, which leaves that row where it is.
+    view.rerender(<List rows={[...ids(4), "new", ...ids(8, 5)]} />);
+    expect(window.scrollY).toBe(250);
+    expect(viewportTop("r4")).toBe(at);
+  } finally {
+    view.unmount();
+  }
+});
+
+// The reader gave the row under their hand another priority while the Inbox is grouped by it:
+// the row left its section in an earlier commit, and the place kept for it is where it used to
+// sit. A row that changed group was relocated, not shifted, so the view does not follow it.
+test("a held row that changed group is not followed to the section it moved to", () => {
+  const view = render(<List rows={ids(12)} scroller={scrollerRef} />);
+  try {
+    const scroller = scrollerRef.current;
+    if (scroller === null) throw new Error("scroller missing");
+    scroller.scrollTop = 100;
+    const hovered = document.querySelector<HTMLElement>('[data-row="r4"]');
+    if (hovered === null) throw new Error("r4 missing");
+    fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
+
+    // r4 leaves its section for the end of the list. The commit that moves it finds it in a
+    // group it was not measured in, and leaves the view alone.
+    const moved = [...ids(12).filter((id) => id !== "r4"), "r4"];
+    view.rerender(<List groups={{ r4: "other" }} rows={moved} scroller={scrollerRef} />);
+    expect(scroller.scrollTop).toBe(100);
+
+    // The next commit finds it in its new section, where the kept place is no longer its own.
+    view.rerender(
+      <List groups={{ r4: "other" }} rows={[...moved, "r13"]} scroller={scrollerRef} />
+    );
+    expect(scroller.scrollTop).toBe(100);
+    expect(viewportTop("r4")).toBe(LIST_TOP + 11 * ROW_HEIGHT - 100);
   } finally {
     view.unmount();
   }
