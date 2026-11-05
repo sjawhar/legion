@@ -178,3 +178,101 @@ func TestDecisionBrowserOriginKeepsItsWriterThroughDelayedObservation(t *testing
 		t.Fatalf("delayed Bob update wrote person edges: %#v", rows)
 	}
 }
+
+func TestDecisionReloadRecoversVersionedClaimsAndDropsUnprovenClaims(t *testing.T) {
+	for _, test := range []struct {
+		name, introducer   string
+		versioned, removed bool
+	}{
+		{"unversioned own decision", "alice", false, false},
+		{"unversioned forgery", "bob", false, false},
+		{"latest version's decision", "alice", true, false},
+		{"historical version's decision", "alice", true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			database, service := blockIndexService(t)
+			source := writeIndexedDocument(t, database, service, "source", "Context.\n")
+			settleCurrentGeneration(t, service, source)
+			const choice = ":::decision{#d1 title=\"\" replaced=\"false\" decided_by=\"alice\"}\nHer choice.\n:::\n"
+			const unattributed = ":::decision{#d1 title=\"\" replaced=\"false\"}\nHer choice.\n:::\n"
+			browserReplaceText(t, service, source, choice, model.Actor{Kind: "user", ID: test.introducer})
+			if test.versioned {
+				settleCurrentGeneration(t, service, source)
+				if test.removed {
+					browserReplaceText(t, service, source, unattributed, model.Actor{Kind: "user", ID: "alice"})
+					settleCurrentGeneration(t, service, source)
+				}
+			}
+			before := latestVersionNumber(t, service, source)
+			pending := choice + "\nPending prose.\n"
+			browserReplaceText(t, service, source, pending, model.Actor{Kind: "user", ID: test.introducer})
+			waitForPersistedProofText(t, database, source, pending)
+			if err := service.Evict(t.Context(), source); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.Text(t.Context(), source); err != nil {
+				t.Fatalf("warm evicted document: %v", err)
+			}
+			if err := service.SettleIssueDocuments(t.Context(), "CORE-1"); err != nil {
+				t.Fatalf("settle reloaded attribution: %v", err)
+			}
+			if got := latestVersionNumber(t, service, source); got != before+1 {
+				t.Fatalf("reloaded prose reached version %d, want %d", got, before+1)
+			}
+			markdown, err := service.Text(t.Context(), source)
+			if err != nil || !strings.Contains(markdown, "Her choice.") || !strings.Contains(markdown, "Pending prose.") {
+				t.Fatalf("reload lost document content: %q (%v)", markdown, err)
+			}
+			if attributed := strings.Contains(markdown, "decided_by="); attributed != test.versioned {
+				t.Fatalf("reloaded attribution = %v, want %v: %s", attributed, test.versioned, markdown)
+			}
+			if !test.versioned && (!strings.Contains(logs.String(), "dropped unproven decision attribution after reload") || !strings.Contains(logs.String(), "no immutable version records its introducing authority")) {
+				t.Fatalf("no reason logged for dropped attribution: %s", logs.String())
+			}
+			if err := service.Evict(t.Context(), source); err != nil {
+				t.Fatal(err)
+			}
+			if durable, err := service.Text(t.Context(), source); err != nil || durable != markdown {
+				t.Fatalf("reloaded repair was not durable: %q (%v), want %q", durable, err, markdown)
+			}
+			if err := joinedWrite(service, func(ctx context.Context) error {
+				_, err := service.SnapshotVersion(ctx, source, model.Actor{Kind: "user", ID: "alice"})
+				return err
+			}); err != nil {
+				t.Fatalf("own snapshot after reload: %v", err)
+			}
+			browserReplaceText(t, service, source, markdown+"\nA later unrelated edit.\n", model.Actor{Kind: "user", ID: "bob"})
+			settleCurrentGeneration(t, service, source)
+			if got := latestVersionNumber(t, service, source); got != before+2 {
+				t.Fatalf("later prose reached version %d, want %d", got, before+2)
+			}
+			rows := pointerRowsOf(t, database, source)
+			if test.versioned && (len(rows) != 1 || rows[0].ToID != "alice") || !test.versioned && len(rows) != 0 {
+				t.Fatalf("recovered attribution edges = %#v", rows)
+			}
+			state := service.room(source)
+			state.mu.Lock()
+			failed, failures := state.failed, state.settleFailures
+			state.mu.Unlock()
+			if failed != nil || failures != 0 {
+				t.Fatalf("reload repair failed its room: %v (%d failures)", failed, failures)
+			}
+		})
+	}
+}
+
+func TestDecisionAttributionSettlementRefusalIsLoggedAndReturned(t *testing.T) {
+	logs := captureLogs(t)
+	database, service := blockIndexService(t)
+	source := writeIndexedDocument(t, database, service, "source", "Context.\n")
+	settleCurrentGeneration(t, service, source)
+	browserReplaceText(t, service, source, ":::decision{#d1 decided_by=\"alice\"}\nA forged choice.\n:::\n", model.Actor{Kind: "user", ID: "bob"})
+	var refused *ErrDecisionAttribution
+	if err := service.SettleIssueDocuments(t.Context(), "CORE-1"); !errors.As(err, &refused) || refused.BlockID != "d1" || refused.Decider != "alice" {
+		t.Fatalf("settlement refusal = %v, want d1's attribution refusal", err)
+	}
+	if !strings.Contains(logs.String(), "document settlement refused decision attribution") || !strings.Contains(logs.String(), source) || !strings.Contains(logs.String(), "alice") {
+		t.Fatalf("no surfaced settlement refusal: %s", logs.String())
+	}
+}

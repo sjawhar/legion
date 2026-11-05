@@ -629,19 +629,17 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	default:
 		askBlocks = askBlockIDs(tree)
 	}
+	claims, err := loadedDecisionClaims(ctx, rooms, room, tree)
+	if err != nil {
+		return err
+	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
 	// (releaseIfUnusedLocked).
 	state := s.lockState(room)
 	state.closed = !open
-	// Loaded live content has no per-update proof; only attribution already in an immutable
-	// version is trusted until a newly observed write authorizes a changed value.
-	state.decisionClaims = nil
-	for block, person := range decisionPersonClaims(tree) {
-		if state.decisionClaims == nil {
-			state.decisionClaims = make(map[string]decisionClaim)
-		}
-		state.decisionClaims[block] = decisionClaim{person: person}
-	}
+	// Immutable history restores authority; a claim whose introducing writer was lost is
+	// removed by settlement, not left to block unrelated prose forever.
+	state.decisionClaims = claims
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {

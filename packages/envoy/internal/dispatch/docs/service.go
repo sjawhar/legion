@@ -1355,8 +1355,8 @@ const (
 // settleOutcome is how a settlement ended (settleRoomWithin).
 type settleOutcome struct {
 	next settleNext
-	// err is why the settlement stopped short; it is nil for settleEnded and settleReloaded, after
-	// which the pending-settlement row alone says whether the settlement is still owed.
+	// err is why the settlement stopped short, including a non-retrying pointer-policy refusal.
+	// A successful settleEnded and settleReloaded leave it nil.
 	err error
 	// generation is the room generation the settlement stood at when it stopped short, which a
 	// retry counts its failure against (retrySettle). Once the room is warm, it is the generation
@@ -1412,6 +1412,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			// or target change may make it valid; repeated retries cannot repair it.
 			next = settleEnded
 		case errors.As(err, &attribution):
+			slog.Warn("dispatch: document settlement refused decision attribution", "room", room, "block", attribution.BlockID, "person", attribution.Decider, "error", err)
 			next = settleEnded
 		case parent.Err() != nil:
 			next = settleOutOfBudget
@@ -1574,6 +1575,13 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if err != nil {
 		return stoppedShort(err)
 	}
+	// A reload may have lost the introducing author of a pointer no immutable version proves.
+	// Remove just that value from this private read before policy checks, then repair the live
+	// tree through the same durable, broadcast path as settlement's other repairs.
+	lostClaims := s.lostDecisionClaims(room, read)
+	if len(lostClaims) > 0 {
+		dropDecisionClaims(read, lostClaims, nil)
+	}
 
 	// What the document renders as read. The version reuses this rendering, offsets included,
 	// when it is rendered from this same tree unchanged (below).
@@ -1639,6 +1647,29 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		return abandon(err)
 	}
+	var lostUpdate []byte
+	var droppedClaims map[string]string
+	if len(lostClaims) > 0 {
+		droppedClaims = make(map[string]string, len(lostClaims))
+		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) error {
+			_, err := rewriteLive(doc, origin, func(tree *pmdoc.Node) bool {
+				return dropDecisionClaims(tree, lostClaims, droppedClaims)
+			})
+			return err
+		})
+		keep(slot, update)
+		if err != nil {
+			return abandon(fmt.Errorf("remove reloaded attribution without authority: %w", err))
+		}
+		if slot != nil {
+			lostUpdate = update
+		}
+	}
+	logDroppedClaims := func() {
+		for block, person := range droppedClaims {
+			slog.Warn("dispatch: dropped unproven decision attribution after reload", "room", room, "block", block, "person", person, "reason", "no immutable version records its introducing authority")
+		}
+	}
 	reconciled := read
 	var renamed []stampedAsk
 	// stamp is the block-id stamp this settlement wrote into the room, nil for none. It is stored
@@ -1683,8 +1714,15 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if len(slots) == 0 {
 			return settleOutcome{}
 		}
-		if err := ledger.storeRepair(ctx, tx, room, cursor, stamp); err != nil {
-			return abandon(fmt.Errorf("store superseded document identity update: %w", err))
+		if lostUpdate != nil {
+			if err := ledger.storeRepair(ctx, tx, room, cursor, lostUpdate); err != nil {
+				return abandon(fmt.Errorf("store superseded attribution repair: %w", err))
+			}
+		}
+		if stamp != nil {
+			if err := ledger.storeRepair(ctx, tx, room, cursor, stamp); err != nil {
+				return abandon(fmt.Errorf("store superseded document identity update: %w", err))
+			}
 		}
 		identityUpdate, err := mergeUpdates(updates)
 		if err != nil {
@@ -1697,6 +1735,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return commitFailed(advanced, fmt.Errorf("commit superseded document identity update: %w", err))
 		}
 		finishSlots()
+		logDroppedClaims()
 		return settleOutcome{}
 	}
 	// The ask blocks' sources are read now, after the tree they are reconciled on: an update in that
@@ -1717,6 +1756,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// read its version is rendered from.
 	if err := ledger.flushThrough(ctx, tx, room, first.point); err != nil {
 		return abandon(fmt.Errorf("store the room's updates through the settlement's read: %w", err))
+	}
+	if lostUpdate != nil {
+		if err := ledger.storeRepair(ctx, tx, room, cursor, lostUpdate); err != nil {
+			return abandon(fmt.Errorf("store reloaded attribution repair: %w", err))
+		}
 	}
 	if stamp != nil {
 		if err := ledger.storeRepair(ctx, tx, room, cursor, stamp); err != nil {
@@ -1932,6 +1976,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.events.Publish(event)
 	}
 	reconciliation.logCopiedBlocks(room)
+	logDroppedClaims()
 	// A copy of an ask this settlement retracted opens its own ask at its next settlement, which
 	// its pending row (reconcileAskBlocks, owedCopiesOf) also leaves to the resumption should this
 	// process stop first.

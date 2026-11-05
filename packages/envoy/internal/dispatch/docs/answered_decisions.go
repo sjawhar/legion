@@ -170,6 +170,8 @@ func decisionPersonClaims(tree *pmdoc.Node) map[string]string {
 type decisionClaim struct {
 	person     string
 	authorized bool
+	// lostAuthor marks a value loaded without an immutable version proving its authority.
+	lostAuthor bool
 }
 
 // A browser claim is authorized by the update that introduced its value, never by a later
