@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+  A document's settlement runs as seven named stages - `take`, `readLocked`, `applyStamp`, `commitStamp`, `planRepairs`, `commitRepairs` and `commitVersion` - each a method of one settlement type that passes the room, the generation, the ledger, the transaction, the read tree, the credit and the outcome between them, where it was one 527-line method of the document service.
+  Each stage has a test that calls that stage alone over a live service, so a change to one is judged where it stands rather than through a whole settlement.
+  The order of the lock, the crediting of edits, the version write and the publish does not change, every existing settlement test passes with nothing in it changed, and each test hook still fires where it fired.
+time: 2026-11-05T16:00:00.000000000Z
+custom:
+    Issue: pr2712

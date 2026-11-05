@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+  Dispatch stores the display tree of every stored text it writes, so a read copies those bytes instead of reading the markdown again.
+  One table, `text_trees`, holds one row per whole text, keyed by the text's SHA-256, the display mode and a display-parser version of `pmdoc`'s own - separate from the renderer's version, because the display read, the wire encoding and the dashboard's schema each move a tree and none of them moves a rendering.
+  A quoted reply, a carried version and two identical option labels therefore share one row.
+  Each write path stores its text's tree right after its transaction commits, in the same request and before the answer, and an event's publish stores the trees of the texts its payload carries, an ask edit's replaced question and option labels among them, which no text write would ever store.
+  A tree that cannot be stored never fails the write: the read makes it then, as it does for every text written before this change.
+  A read collects its answer's texts and reads their trees in one statement, serves the bytes as they are stored, and stores afterwards, on a connection of its own and outside the caller's transaction, whichever trees it had to read - which is what makes a past version's tree reach the table, since no write produces the version mode's reading.
+  A write never fills the cache of trees readers were served, so one writer's long document no longer evicts the bodies a hundred readers are re-reading.
+time: 2026-11-05T16:02:00.000000000Z
+custom:
+    Issue: pr2712
