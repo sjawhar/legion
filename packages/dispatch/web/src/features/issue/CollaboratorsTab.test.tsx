@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import type { LegionRole } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -205,4 +206,37 @@ test("collaboratorSections orders the three sections the tab draws", () => {
   ]);
   expect(sections.others.map((agent) => agent.session_id)).toEqual(["loud", "quiet"]);
   expect(sections.people.map((person) => person.login)).toEqual(["alice"]);
+});
+
+// What the page does with a registry this build does not understand: a role it has no section
+// for, and a start time it cannot order. Both come from the Legion daemon through the listener,
+// so neither is this app's to guarantee, and neither may lose a row or throw inside a render.
+test("collaboratorSections keeps an agent whose role or timestamps it cannot read", () => {
+  const skewed = {
+    ...legionAgent("future-role", "tester", "2026-10-26T00:00:00Z"),
+    legion: {
+      replaced_at: null,
+      replaced_by: null,
+      role: "archivist" as LegionRole,
+      role_token: "legion-archivist",
+      started_at: "2026-10-26T00:00:00Z",
+    },
+  };
+  const sections = collaboratorSections({
+    agents: [
+      skewed,
+      legionAgent("early", "tester", "2026-10-26T01:00:00Z"),
+      { ...legionAgent("unreadable", "tester", "yesterday"), last_at: null },
+    ],
+    issue_key: "CORE-1",
+    legion_registry: "ok",
+    people: [],
+  });
+
+  // The unknown role is listed rather than dropped, and the session whose start cannot be ordered
+  // sorts after the one that can.
+  expect(sections.others.map((agent) => agent.session_id)).toEqual(["future-role"]);
+  expect(
+    sections.legion.map(({ agents, role }) => [role, agents.map((a) => a.session_id)])
+  ).toEqual([["tester", ["early", "unreadable"]]]);
 });

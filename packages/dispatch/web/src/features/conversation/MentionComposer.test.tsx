@@ -826,6 +826,25 @@ test("the picker offers a stopped role once under Not running and sends it as a 
   }
 });
 
+// The case this feature exists for: every agent of the issue has stopped, so the picker holds the
+// "Not running" group alone. It must not say no agent matches underneath the list it is showing.
+test("a picker holding only stopped roles does not say no agent matches", async () => {
+  const collaborators = spyOn(api, "getIssueCollaborators").mockResolvedValue(collaboratorsAnswer);
+  const { view } = renderComposer({ agents: [] });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "@" } });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const stopped = await within(listbox).findByRole("group", { name: "Not running" });
+    await waitFor(() => expect(collaborators).toHaveBeenCalledWith("CORE-1"));
+    expect(within(stopped).getAllByRole("option").length).toBeGreaterThan(0);
+    expect(screen.queryByText("No live agents match.")).toBeNull();
+  } finally {
+    view.unmount();
+    collaborators.mockRestore();
+  }
+});
+
 // The rule the "Not running" options follow: a role a live agent holds is the live options'
 // (never offered twice), a role is offered once by its newest session whatever replaced it, and a
 // live list whose state is unknown adds none, since any role could be held.
@@ -844,6 +863,15 @@ test("stopped role options leave out held roles, name each role once and wait on
   ).toEqual(["role:legion-planner", "role:legion-p-core-1-reviewer"]);
   // A live list not read yet, or whose read failed, adds no stopped option.
   expect(stoppedRoleOptions(undefined, collaboratorsAnswer.agents, storedNames)).toEqual([]);
+  // A session the live list names is no stopped option, whatever roles it claims: offered here it
+  // would draw its own `Running` mark inside the "Not running" group.
+  expect(
+    stoppedRoleOptions(
+      [{ ...worker, session_id: "new-reviewer" }],
+      collaboratorsAnswer.agents,
+      storedNames
+    ).map((option) => option.target)
+  ).toEqual(["role:legion-planner"]);
 });
 
 // The composer reads the live list itself when its host supplies none: until that read lands, or
