@@ -83,6 +83,7 @@ func agentActivityRows(t *testing.T, database *store.Store, statement string) []
 // session, no row for a session whose only events carry another actor kind, and no row for a
 // session the events table has never heard of.
 func TestTheAgentsLastActivityAnswersWhatMainsStatementDid(t *testing.T) {
+	t.Parallel()
 	database := newAgentActivityFixture(t)
 	want := agentActivityRows(t, database, mainAgentLastActivityQuery)
 	if len(want) != 2 {
@@ -140,6 +141,7 @@ func seedAgentActivityHistory(t *testing.T, database *store.Store) {
 // row a session, and the plan says so in the loops and the rows of the one node that reads
 // events.
 func TestTheAgentsLastActivityReadsEventsThroughTheSessionActorIndex(t *testing.T) {
+	t.Parallel()
 	database := newAgentActivityFixture(t)
 	seedAgentActivityHistory(t, database)
 	plan := planOf(t, database, agentLastActivityQuery, agentActivitySessions)

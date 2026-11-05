@@ -222,32 +222,23 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 	const rounds = 160
 	for round := range rounds {
 		marker := fmt.Sprintf("DOOMED-%d under the browser's cursor", round)
-		editLiveTree(t, service, artifactID, appendBlocks(t, marker))
+		live := editLiveTree(t, service, artifactID, appendBlocks(t, marker))
 
 		// Precompute the tree the browser's delete will write, so that when it fires it does
-		// nothing but take the document's mutex and apply.
-		var want *pmdoc.Node
-		if err := service.srv.Apply(context.Background(), artifactID,
-			func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-				tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
-				if err != nil {
-					return
-				}
-				kept := tree.Children[:0]
-				for _, child := range tree.Children {
-					rendered, renderErr := renderTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{child}})
-					if renderErr != nil || strings.Contains(rendered, marker) {
-						continue
-					}
-					kept = append(kept, child)
-				}
-				tree.Children = kept
-				want = tree
-			}); err != nil && !strings.Contains(err.Error(), "no changes") {
-			t.Fatalf("round %d: precompute the browser's delete: %v", round, err)
+		// nothing but take the document's mutex and apply. It is the tree the append above
+		// wrote, without the marker paragraph, which its own text names. Built from a second
+		// Apply on the room, a second read of all twelve hundred blocks and a render of each
+		// of them to markdown, as it was, it spent a Server.Apply and about 7 ms of processor
+		// on every one of the hundred and sixty rounds (dispatch://INFRA-1075).
+		want := &pmdoc.Node{Type: live.Type, Attrs: live.Attrs}
+		for _, child := range live.Children {
+			if blockOwnText(child) == marker {
+				continue
+			}
+			want.Children = append(want.Children, child)
 		}
-		if want == nil {
-			t.Fatalf("round %d: could not precompute the browser's delete", round)
+		if len(want.Children) == len(live.Children) {
+			t.Fatalf("round %d: the marker paragraph is in no block of the tree the append wrote", round)
 		}
 
 		ctx := context.Background()

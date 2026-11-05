@@ -5941,9 +5941,12 @@ func waitForPersistedProofText(t *testing.T, database *store.Store, artifactID, 
 	t.Fatalf("persisted document = %q (%v), want %q", markdown, err, want)
 }
 
-// editLiveTree writes a browser-style tree change through the live Yjs room.
-func editLiveTree(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) {
+// editLiveTree writes a browser-style tree change through the live Yjs room, and returns the tree
+// it wrote, which a caller that needs the document as it now stands reads instead of reading the
+// room again.
+func editLiveTree(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) *pmdoc.Node {
 	t.Helper()
+	var written *pmdoc.Node
 	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := pmdoc.Read(fragment)
@@ -5956,10 +5959,12 @@ func editLiveTree(t *testing.T, service *Service, artifactID string, edit func(*
 				t.Errorf("update live tree: %v", err)
 			}
 		})
+		written = want
 	})
 	if err != nil {
 		t.Fatalf("apply browser edit: %v", err)
 	}
+	return written
 }
 
 // browserReplaceText writes markdown as the whole live document the way a browser peer's edit

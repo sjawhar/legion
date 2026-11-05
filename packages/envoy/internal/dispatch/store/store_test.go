@@ -51,23 +51,15 @@ var shared struct {
 	template string
 }
 
-// TestMain runs the package's tests and then drops the templates its clones came from - the
-// set's head and each older version a test asked for (templateThrough); each clone is dropped
-// by the test that took it.
+// TestMain runs the package's tests and then drops the template its clones came from; each
+// clone is dropped by the test that took it.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if shared.admin != nil {
-		templates := []string{}
 		if shared.template != "" {
-			templates = append(templates, shared.template)
-		}
-		for _, name := range migratedTemplates.built {
-			templates = append(templates, name)
-		}
-		for _, name := range templates {
-			// No force: nothing is connected to a template, which is why they take clones.
-			if _, err := shared.admin.Exec(context.Background(), "drop database "+name); err != nil {
-				fmt.Fprintf(os.Stderr, "store test: drop template database %s: %v\n", name, err)
+			// No force: nothing is connected to the template, which is why it takes clones.
+			if _, err := shared.admin.Exec(context.Background(), "drop database "+shared.template); err != nil {
+				fmt.Fprintf(os.Stderr, "store test: drop template database %s: %v\n", shared.template, err)
 				if code == 0 {
 					code = 1
 				}
@@ -147,83 +139,16 @@ func openEmptyTestStore(t *testing.T) *Store {
 // test of the give-up names the number it proves.
 var testLocking = pgmigrate.Locking{Timeout: 500 * time.Millisecond, Attempts: 3, RetryPause: 150 * time.Millisecond}
 
-// migratedTemplates are the databases a test clones a schema older than the set's head from, one
-// per version asked for, built once for the whole run and dropped by TestMain. A test that needs
-// the schema as of version N used to apply every migration up to N itself, a second or more of
-// Postgres work each; thirty-odd tests of this package do, several of them at the same version
-// (dispatch://INFRA-1075). Each template is built by cloning the nearest lower one already built
-// and applying the migrations between, so the run applies each migration a handful of times
-// rather than once per test, and a test pays one create database for its schema.
-//
-// A build holds mu for its whole length: two tests asking for one version build it once, and a
-// test asking for a version above another's waits for that one and starts from it rather than
-// from an empty database. Each template is closed to connections once it is built, as the head
-// template is, since Postgres refuses to clone a database another session is connected to.
-var migratedTemplates struct {
-	mu    sync.Mutex
-	built map[int]string
-}
-
-// templateThrough names the database carrying the embedded set through version, building it when
-// this run has not already.
-func templateThrough(t *testing.T, version int) string {
-	t.Helper()
-	ctx := context.Background()
-	migratedTemplates.mu.Lock()
-	defer migratedTemplates.mu.Unlock()
-	if name, built := migratedTemplates.built[version]; built {
-		return name
-	}
-	// The highest template already built that is no higher than the one wanted: its clone needs
-	// only the migrations above it.
-	from, at := "", 0
-	for built, name := range migratedTemplates.built {
-		if built <= version && built > at {
-			at, from = built, name
-		}
-	}
-	source := ""
-	if from != "" {
-		source = "template " + from + " "
-	}
-	suffix, err := randomSuffix()
-	if err != nil {
-		t.Fatalf("name the template at version %d: %v", version, err)
-	}
-	name := "dispatch_store_at_" + strconv.Itoa(version) + "_" + suffix
-	if _, err := shared.admin.Exec(ctx, "create database "+name+" "+source+"strategy file_copy"); err != nil {
-		t.Fatalf("create the template at version %d: %v", version, err)
-	}
-	store, err := Open(ctx, databaseURLOf(shared.server, name), WithMaxConns(testPoolSize))
-	if err != nil {
-		t.Fatalf("open the template at version %d: %v", version, err)
-	}
-	store.Locking = testLocking
-	// The migrations at or below the clone's own version are recorded in it already, so this
-	// applies only those above (applyMigrationOnce).
-	migrateThrough(t, store, version)
-	store.Pool.Close()
-	if _, err := shared.admin.Exec(ctx, "alter database "+name+" with allow_connections false"); err != nil {
-		t.Fatalf("close the template at version %d to connections: %v", version, err)
-	}
-	if migratedTemplates.built == nil {
-		migratedTemplates.built = map[int]string{}
-	}
-	migratedTemplates.built[version] = name
-	return name
-}
-
 // openMigratedThrough returns a store on a database of t's own carrying the embedded set through
-// version, cloned from that version's template rather than migrated here, and dropped when t
-// ends.
+// version, and dropped when t ends. The migrations run here rather than once into a template
+// this clones: a template is a create database, which forces a checkpoint every package testing
+// against the server queues on, so a per-version template cost every package of the module more
+// than it saved this one (dispatch://INFRA-1075, CI run 41939604288).
 func openMigratedThrough(t *testing.T, version int) *Store {
 	t.Helper()
-	databaseURL := testDatabaseURL(t)
-	shared.once.Do(func() { shared.err = prepareShared(databaseURL) })
-	if shared.err != nil {
-		t.Fatalf("prepare the migrated template database: %v", shared.err)
-	}
-	return openClone(t, "template "+templateThrough(t, version)+" ")
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, version)
+	return store
 }
 
 // testPoolSize bounds the shared pool of every store openClone hands a test, in place of
@@ -926,6 +851,17 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	if err != nil {
 		t.Fatalf("load migrations: %v", err)
 	}
+	// Every pending migration in one script, each in a transaction of its own as the runner
+	// applies it, sent in one round trip (pgx takes an argument-free Exec over the simple
+	// protocol). The runner's own path costs five round trips a migration - the advisory lock,
+	// the applied check, the statements, the version record, the commit - which for the fifty
+	// tests that set a schema up version by version is tens of thousands of round trips, and on
+	// a loaded server most of this package's time (dispatch://INFRA-1075). Nothing here is the
+	// runner under test: the per-migration transaction is kept because 0043 and 0044 each make
+	// an `on commit drop` temporary table of the same name, and 0066 sets its own lock_timeout
+	// with SET LOCAL.
+	var script strings.Builder
+	pending := 0
 	for _, migration := range migrations {
 		if migration.Version > maxVersion {
 			break
@@ -933,9 +869,26 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 		if recorded[migration.Version] {
 			continue
 		}
-		if err := store.applyMigration(ctx, migration); err != nil {
-			t.Fatalf("apply %s: %v", migration.Name, err)
+		pending++
+		fmt.Fprintf(&script, "begin;\n%s;\ninsert into schema_migrations (version) values (%d);\ncommit;\n",
+			strings.TrimRight(strings.TrimSpace(migration.SQL), ";"), migration.Version)
+	}
+	if pending == 0 {
+		return
+	}
+	if _, err := store.Pool.Exec(ctx, script.String()); err != nil {
+		// Postgres names a position in the script, not a file. The runner's own path applies
+		// what is left one migration at a time and so names the one that failed; it is only
+		// reached when the script already has.
+		for _, migration := range migrations {
+			if migration.Version > maxVersion {
+				break
+			}
+			if applyErr := store.applyMigration(ctx, migration); applyErr != nil {
+				t.Fatalf("apply %s: %v", migration.Name, applyErr)
+			}
 		}
+		t.Fatalf("apply the migrations through %d in one script: %v", maxVersion, err)
 	}
 }
 

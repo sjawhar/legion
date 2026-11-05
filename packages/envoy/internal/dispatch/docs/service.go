@@ -162,6 +162,13 @@ type Service struct {
 	// (staleRoomEvictInterval, whose comment states the rule). New sets it to that constant; a
 	// test that drives the evictor on a clock of its own sets a short one.
 	staleRoomEvictInterval time.Duration
+	// taskProgressBootRetryFirst is how long RunTaskProgressReconciliation waits after its boot
+	// pass before the first of its retries (taskProgressBootRetryFirst, whose comment states the
+	// rule), and taskProgressRetryBackoff the step one pass's own retries back off by
+	// (taskProgressRetryBackoffStep). New sets each to its constant; a test that drives the
+	// retries sets short ones rather than waiting four seconds of them out.
+	taskProgressBootRetryFirst time.Duration
+	taskProgressRetryBackoff   time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -707,6 +714,9 @@ func New(deps Deps) *Service {
 		editNoticeSweep:        editNoticeSweepSchedule,
 		referenceExcerptSweep:  referenceExcerptSchedule,
 		staleRoomEvictInterval: staleRoomEvictInterval,
+
+		taskProgressBootRetryFirst: taskProgressBootRetryFirst,
+		taskProgressRetryBackoff:   taskProgressRetryBackoffStep,
 	}
 	service.compactions = startCompactionQueue(service.compactionStep)
 	// The store tells the queue of every append it commits and every load it reads; a store that

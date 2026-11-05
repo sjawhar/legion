@@ -106,8 +106,8 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
 	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
 	// sizes is mostly the request's own cost and the runner's load, over as many replacements, each
-	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). No test
-	// in this package calls t.Parallel.
+	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). This
+	// test calls no t.Parallel, so that CPU is this rung's alone.
 	t.Run("replacing many blocks", func(t *testing.T) {
 		const from, to = "> #\n", "> ***\n"
 		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {

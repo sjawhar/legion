@@ -42,15 +42,11 @@ var (
 // statements on purpose.
 func TestEveryReviewReadOrdersByReviewOrder(t *testing.T) {
 	t.Parallel()
-	sources := moduleSources(t, "../../..")
-	constants, err := stringConstants(sources)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scan := scanModule(t)
 	var offences []string
 	seen := map[string]struct{}{}
-	for _, source := range sources {
-		for _, statement := range sqlStatements(source.file, constants) {
+	for _, source := range scan.sources {
+		for _, statement := range scan.statementsOf(source) {
 			if !readsReviewTable.MatchString(statement) || !ordersRows.MatchString(statement) {
 				continue
 			}

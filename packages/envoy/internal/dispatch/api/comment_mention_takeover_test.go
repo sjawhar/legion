@@ -86,8 +86,15 @@ func TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce(t *testing.T) 
 // sessions answers within one take-over window, well inside the dispatch CLI's 60 s request
 // abort, which would otherwise fire after the comment committed and make its retry post the
 // comment a second time.
+//
+// The window is this test's own rather than the production twelve seconds (listenerTakeoverWindow):
+// what it proves is that two mentions cost one window and not two, and it holds the answer to one
+// window plus two seconds, which stays under two windows for any window over two seconds. Four
+// seconds leaves the same two-second margin a loaded runner had at twelve, and costs eight
+// seconds less.
 func TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow(t *testing.T) {
 	t.Parallel()
+	const window = 4 * time.Second
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/") {
 			writeSessionRecord(t, w, `[]`, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
@@ -96,7 +103,7 @@ func TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow(t 
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer listener.Close()
-	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL, takeoverWindow: listenerTakeoverWindow})
+	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL, takeoverWindow: window})
 	issue := createInteractionIssue(t, handler, "TEST", "Ended sessions", "before")
 
 	ended := []string{"ended-1", "ended-2"}
@@ -129,11 +136,11 @@ func TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow(t 
 			t.Fatalf("delivery = %#v, want failed: the mentioned session is ended", attempt)
 		}
 	}
-	if limit := listenerTakeoverWindow + 2*time.Second; took > limit {
+	if limit := window + 2*time.Second; took > limit {
 		t.Fatalf("the comment mentioning %d ended sessions answered after %v, want within %v: each mention waited out "+
 			"its own %v take-over window one after another before the response, so the wait grows with every "+
 			"mention and the dispatch CLI's %v abort fires after the comment committed",
-			len(ended), took.Round(100*time.Millisecond), limit, listenerTakeoverWindow, clientAbort)
+			len(ended), took.Round(100*time.Millisecond), limit, window, clientAbort)
 	}
 }
 

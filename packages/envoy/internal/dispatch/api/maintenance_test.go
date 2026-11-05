@@ -30,6 +30,9 @@ func startOfPeriodAfterNext(interval time.Duration) time.Time {
 // deliveries a dead process owed need one pass per period across the two, not one per process:
 // each pass records its period under the lease (duty.RunLeased), so the other process's tick
 // inside a period already served makes no statement of its own.
+//
+// It runs on its own: it counts the passes two runners make over a handful of 300 ms periods,
+// which is a bound on how long each pass took, and a test running beside it moves that count.
 func TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners(t *testing.T) {
 	database := storetest.Open(t)
 	second := storetest.SecondProcess(t, database)

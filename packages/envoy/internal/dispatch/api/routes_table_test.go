@@ -310,6 +310,7 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 // and the scope map names no route the table does not mount: the two halves register's panic
 // protects (scopedRoutesNotMounted), proved from the table alone with nothing mounted.
 func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
+	t.Parallel()
 	browserOnly := []string{
 		"GET /api/v1/settings/project-default-assignees",
 		"PUT /api/v1/projects/{key}/default-assignee",

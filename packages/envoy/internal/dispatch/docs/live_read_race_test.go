@@ -112,25 +112,34 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	}
 
 	// A version's capture reads the room inside the Apply that holds it, between a transaction's
-	// database work and the version's, so a run counts as overlapping only when the first peer's
-	// update reached the room after the capture held the room (afterReadWarm), and its document
-	// leads with a longer run of rules, as settlement's does. A capture that walks the room's
-	// replica holds the replica's lock across the walk, which the update observer of a peer's
-	// update takes next, so each peer lands at most one update in that walk: a second peer types
-	// beside the first.
+	// database work and the version's, so a run counts as overlapping only when a peer's update
+	// reached the room after the capture held the room (afterReadWarm), and its document leads
+	// with a longer run of rules, as settlement's does. A capture that walks the room's replica
+	// holds the replica's lock across the walk, which the update observer of a peer's update
+	// takes next, so each peer lands at most one update in that walk: a second peer types beside
+	// the first, and either one's update counts. Counting both rather than the first peer alone
+	// did not shorten the subtest - 338 runs for the fifty overlaps against 340 - because what
+	// makes a run overlap is how fast the room applies and stores updates at all, which keepUp
+	// holds the peers to, not which peer's update landed; it is counted this way because that is
+	// what the second peer is here for (dispatch://INFRA-1075).
 	t.Run("version capture", func(t *testing.T) {
 		t.Parallel()
 		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
 		// The hook is set before the peers type, as settlement's are.
-		var peer atomic.Value
+		var peers atomic.Value
 		var held atomic.Uint64
 		applied := func() uint64 {
-			client, _ := peer.Load().(crdt.ClientID)
-			return peerApplied(service, artifactID, client)
+			clients, _ := peers.Load().([]crdt.ClientID)
+			var total uint64
+			for _, client := range clients {
+				total += peerApplied(service, artifactID, client)
+			}
+			return total
 		}
 		service.afterReadWarm = func(string) { held.Store(applied() + 1) }
-		peer.Store(typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond))
-		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
+		first := typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
+		peers.Store([]crdt.ClientID{first})
+		peers.Store([]crdt.ClientID{first, typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)})
 		ctx := context.Background()
 		overlapping(t, func() bool {
 			held.Store(0)

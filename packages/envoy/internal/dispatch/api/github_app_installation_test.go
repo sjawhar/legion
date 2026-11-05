@@ -9,20 +9,30 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
+// testAppKeyPEM is the GitHub App private key every fixture here runs its Dispatch on, generated
+// once for the test binary. Generating an RSA-2048 key costs about 150 ms of this process's CPU,
+// and the thirty-odd fixtures that each made one of their own spent that on a key no test reads:
+// what they prove is what the App client asks GitHub and what GitHub answers, never the key's own
+// bytes. A test about a key - a malformed PEM, a missing one - still writes its own.
+var testAppKeyPEM = sync.OnceValue(func() string {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic("generate the test App key: " + err.Error())
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+})
+
 // appInstallationServer is Dispatch holding an App key, its GitHub answering the installation
 // lookup with github.
 func appInstallationServer(t *testing.T, github http.HandlerFunc) http.Handler {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate fixture key: %v", err)
-	}
-	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	pemText := testAppKeyPEM()
 	upstream := httptest.NewServer(github)
 	t.Cleanup(upstream.Close)
 	handler, _, _ := newTestServer(t, testServerOptions{

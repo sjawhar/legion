@@ -374,6 +374,7 @@ func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 // not say". A personal token holding the person scope is still kind `agent`, since the kind
 // names the credential and the owner names the person it acts for.
 func TestWhoamiAnswersTheScopesEachCredentialHolds(t *testing.T) {
+	t.Parallel()
 	issuer := newServiceTokenIssuer(t)
 	handler, database, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 	for _, test := range []struct {

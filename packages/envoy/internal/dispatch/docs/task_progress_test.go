@@ -132,6 +132,13 @@ func TestTaskProgressLockedThroughTheBootPassIsCountedByARetry(t *testing.T) {
 		t.Fatalf("hold %s: %v", held, err)
 	}
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	// The retries' own waits are no part of what this proves: the boot pass gives up on a row it
+	// cannot lock whatever they are. Short ones spend tenths of a second where the production
+	// pair spends four (dispatch://INFRA-1075). The first boot retry stays long enough that the
+	// six of them, doubling, still run for half a minute, so the release below falls inside the
+	// first of their waits as it does at the production pair.
+	service.taskProgressBootRetryFirst = 500 * time.Millisecond
+	service.taskProgressRetryBackoff = 2 * time.Millisecond
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
 	done := runTaskProgress(t, service)

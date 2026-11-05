@@ -275,8 +275,11 @@ func TestSuggestionsDecisionIsNotReorderedByOwnerStatus(t *testing.T) {
 
 // lockedSuggestionAllowance bounds only the time from the call's start to its query queuing
 // behind the test's lock: the project lookup's first statement, or the term picker's statement.
-// The worst whole filing on record under load was 737 ms.
-const lockedSuggestionAllowance = 5 * time.Second
+// The worst whole filing on record under load was 737 ms, so two seconds is most of three times
+// that, and a call that answers before its backend has queued fails the test by name
+// (suggestionsBehindLock) rather than passing short. It is the production five seconds
+// (relatedCheckAllowance) divided down because every one of these tests waits it out in full.
+const lockedSuggestionAllowance = 2 * time.Second
 
 // suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs the related-item check on a
 // server whose allowance is lockedSuggestionAllowance, and answers what it returned. The call
@@ -356,7 +359,7 @@ func TestRelatedCheckRespectsDeadlineUnderLock(t *testing.T) {
 
 	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
 	suggestions := suggestionsBehindLock(t, deps, "asks", "DEADLINE", "Should the service use REST or GraphQL for its public API?", source)
-	if suggestions.Outcome != "not_made" || suggestions.Missing != "the search behind it did not answer within 5s" {
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the search behind it did not answer within "+lockedSuggestionAllowance.String() {
 		t.Fatalf("suggestions = %+v, want not made for time: the allowance ended while the search waited behind the lock on asks", suggestions)
 	}
 }
@@ -377,7 +380,7 @@ func TestRelatedCheckRespectsDeadlineWhenProjectLookupIsLocked(t *testing.T) {
 
 	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-project-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
 	suggestions := suggestionsBehindLock(t, deps, "issues", "", "Should the service use REST or GraphQL for its public API?", source)
-	if suggestions.Outcome != "not_made" || suggestions.Missing != "the project lookup behind it did not answer within 5s" {
+	if suggestions.Outcome != "not_made" || suggestions.Missing != "the project lookup behind it did not answer within "+lockedSuggestionAllowance.String() {
 		t.Fatalf("suggestions = %+v, want not made for time: the allowance ended while the project lookup waited behind the lock on issues", suggestions)
 	}
 }

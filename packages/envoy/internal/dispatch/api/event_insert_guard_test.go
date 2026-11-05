@@ -37,16 +37,12 @@ var eventInsertStatement = regexp.MustCompile(`\binsert into events\b`)
 // shape to serve -- so test sources are outside it, as they are outside that scan.
 func TestOnlyTheBrokerInsertsEvents(t *testing.T) {
 	t.Parallel()
-	sources := moduleSources(t, "../../..")
-	constants, err := stringConstants(sources)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scan := scanModule(t)
 	var offences []string
 	broker := 0
-	for _, source := range sources {
+	for _, source := range scan.sources {
 		path := filepath.ToSlash(source.path)
-		for _, statement := range sqlStatements(source.file, constants) {
+		for _, statement := range scan.statementsOf(source) {
 			if !eventInsertStatement.MatchString(statement) {
 				continue
 			}
