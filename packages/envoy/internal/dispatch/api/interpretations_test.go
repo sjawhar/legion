@@ -148,3 +148,111 @@ func TestNestedInterpretationIsNeverDecisionText(t *testing.T) {
 		t.Fatalf("decision includes interpretation prose: %q", text)
 	}
 }
+
+func TestInterpretationAdditionsAndEditsCarrySpecApproval(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "Approved prose.\n\n:::decision{#choice title=\"A choice\"}\nUse a table.\n:::\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/interpretations", map[string]any{
+		"decision": "choice", "body": "Original reading.", "actor": sessionActor(),
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("interpret: %d %s", response.Code, response.Body.String())
+	}
+	item := decodeBody[model.Interpretation](t, response)
+	requireReviewCarriedWith(t, handler, issue.PrimaryArtifactID, 2, 1, "Carried forward from the approval of version 1: only interpretation blocks were added or edited.", nil)
+	advice := adviceFromResponse(t, response.Code, response.Body.String())
+	if advice.SupersededApproval != nil {
+		t.Fatalf("interpretation superseded approval: %#v", advice.SupersededApproval)
+	}
+	edited := agentEdit(t, handler, issue.PrimaryArtifactID, 3, replaceOp("Original reading.", "Edited reading."))
+	requireReviewCarriedWith(t, handler, issue.PrimaryArtifactID, 3, 2, "Carried forward from the approval of version 2: only interpretation blocks were added or edited.", nil)
+	if edited.SupersededApproval != nil {
+		t.Fatalf("interpretation edit superseded approval: %#v", edited.SupersededApproval)
+	}
+	// Removing an interpretation is not an addition or edit covered by this rule.
+	agentEdit(t, handler, issue.PrimaryArtifactID, 4, map[string]string{"op": "delete", "block": item.BlockID})
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 3, "stale")
+}
+
+func TestInterpretationCannotCarryApprovalAcrossChangedSpecText(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "Approved prose.\n\n:::decision{#choice}\nUse a table.\n:::\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	agentEdit(t, handler, issue.PrimaryArtifactID, 2, replaceOp("Approved prose.", "Unapproved prose."))
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/interpretations", map[string]any{
+		"decision": "choice", "body": "A reading of the changed spec.", "actor": sessionActor(),
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("interpret: %d %s", response.Code, response.Body.String())
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}
+
+func TestInterpretationsFollowDocumentPosition(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", ":::decision{#choice}\nUse a table.\n:::\n")
+	for _, id := range []string{"z-first", "a-second"} {
+		editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": ":::interpretation{#" + id + " interprets=\"dispatch://" + issue.Key + "/spec#b-choice\"}\n" + id + " reading.\n:::\n"}})
+	}
+	items := readInterpretations(t, handler, issue.Key)
+	if len(items) != 2 || items[0].BlockID != "z-first" || items[1].BlockID != "a-second" {
+		t.Fatalf("document order: %#v", items)
+	}
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "move", "block": "a-second", "after": "block:choice"}})
+	items = readInterpretations(t, handler, issue.Key)
+	if len(items) != 2 || items[0].BlockID != "a-second" || items[1].BlockID != "z-first" {
+		t.Fatalf("moved document order: %#v", items)
+	}
+}
+
+func TestInterpretationReportsLiveInsertSurvival(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", ":::decision{#choice}\nUse a table.\n:::\n")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/interpretations", map[string]any{
+		"decision": "choice", "body": "An uncontended reading.", "actor": sessionActor(),
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("interpret: %d %s", response.Code, response.Body.String())
+	}
+	body := decodeBody[struct {
+		LostOps *[]int `json:"lost_ops"`
+	}](t, response)
+	if body.LostOps == nil || len(*body.LostOps) != 0 {
+		t.Fatalf("insert survival verdict: %s", response.Body.String())
+	}
+}
+
+func TestInterpretationReportsApprovalSupersededByUnsettledSpecEdit(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "Approved prose.\n\n:::decision{#choice}\nUse a table.\n:::\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	// A committed live edit has not been captured by a version yet. The interpretation's
+	// snapshot will capture both changes, so it must report the approval it supersedes.
+	tx, err := database.Pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	ctx, ledger := deps.Docs.Join(t.Context(), tx)
+	defer ledger.Discard()
+	if _, err := deps.Docs.ApplyOps(ctx, issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "Approved prose.", With: "Unapproved prose."}}, model.Actor{Kind: "session", ID: "live-editor"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/interpretations", map[string]any{
+		"decision": "choice", "body": "A reading alongside a live edit.", "actor": sessionActor(),
+	})
+	advice := adviceFromResponse(t, response.Code, response.Body.String())
+	if advice.SupersededApproval == nil || advice.SupersededApproval.ApprovedVersion != 1 || advice.SupersededApproval.Version != 2 || advice.SupersededApproval.ApprovedBy != "alice" {
+		t.Fatalf("superseded approval advice: %s", response.Body.String())
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}

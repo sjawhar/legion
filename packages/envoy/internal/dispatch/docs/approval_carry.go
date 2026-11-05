@@ -84,6 +84,8 @@ const carryReason = "Carried forward from the approval of version %d: the answer
 // tells a carry from a person's own approval (intake.CarriedApprovalReasonPrefix).
 const restoreReason = "Carried forward from the approval of version %d: this version's text is that version's, unchanged."
 
+const interpretationReason = "Carried forward from the approval of version %d: only interpretation blocks were added or edited."
+
 // carryInput is what the rule is decided on once H, the version he approved, A, and when he
 // approved it are known: the blocks of N by block id, each its row (rowBackedBlocks); the block
 // ids of A, each whether its stored block is as that row has it (heldAsItsRow); and the two
@@ -105,10 +107,9 @@ type approvedVersion struct {
 	cut   string
 }
 
-// carryApproval carries a human's approval to version, just written from rendered, when his answer
-// to a decision block is the whole change since the version he approved, or when version's text is
-// the text of the version the document's newest review approved (the rules above). It returns the
-// events it appended - the open approval request's ask.answered, when one is open, then
+// carryApproval carries a human's approval to version when their own answer is the whole change,
+// the approved text is restored, or only interpretation blocks were added or edited.
+// It returns the events it appended - the open approval request's ask.answered, when one is open, then
 // artifact.approved - and nothing when the version carries no approval. It reads rendered.tree and
 // never changes it: the tree is the live document's.
 func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree) ([]model.Event, error) {
@@ -130,14 +131,9 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	return writeCarriedReview(ctx, tx, s.events, artifactID, version.Number, *review, fmt.Sprintf(carryReason, review.Version), s.serverURL)
 }
 
-// CarryRestoredApproval is the restore alone, for the route that writes a document version itself
-// rather than through writeVersionTx - an upload that replaces a document (the api package's
-// storeArtifact) - once that version, number, is written with markdown and the open approval
-// request has moved to it (MoveApprovalAsk). tree is markdown's read-back, which the caller holds
-// when its write left one, and nil otherwise, when markdown is parsed here if the bytes match.
-// The answer carry has nothing to read there: an upload's markdown writes no answer, since the
-// server takes a block's server-owned attributes off an upload. It returns the events it
-// appended, as carryApproval does.
+// CarryRestoredApproval applies the text and interpretation carry rules to a version an upload
+// writes outside writeVersionTx. The upload strips server-owned ask attributes, so it cannot
+// carry an approval through the answer rule. tree is the upload's read-back, or nil to parse here.
 func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, serverURL string) ([]model.Event, error) {
 	newest, err := NewestReview(ctx, tx, artifactID)
 	if err != nil || newest == nil || newest.State != "approved" {
@@ -146,23 +142,25 @@ func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker
 	return restoreApproval(ctx, tx, broker, artifactID, number, markdown, tree, *newest, serverURL)
 }
 
-// restoreApproval carries newest, the document's newest review and an approval, to version number
-// of artifactID when that version's markdown is the text newest approved (restoresApprovedText)
-// and every decision block it holds is as its row has it, and appends nothing otherwise. The text
-// alone is not the approved document: a block the approved version showed open, answered by
-// someone since, comes back in the same bytes while its row holds a decision nobody approved,
-// which settlement then writes into the next version. So the blocks are read as the answer carry
-// reads N's (askNodes, rowBackedBlocks), from tree, the version's own, or from markdown parsed
-// when tree is nil; that read is made only once the bytes match.
+// restoreApproval carries the newest approval when the text is unchanged except for added or
+// edited interpretations, and every ask block still agrees with its server-owned row.
 func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, newest model.ArtifactReview, serverURL string) ([]model.Event, error) {
 	restored, err := restoresApprovedText(ctx, tx, artifactID, newest.Version, markdown)
-	if err != nil || !restored {
+	if err != nil {
 		return nil, err
 	}
+	reason := restoreReason
 	if tree == nil {
 		if tree, err = pmdoc.ParseRendering(markdown); err != nil {
 			return nil, skipUnreadableVersion(artifactID, number, err)
 		}
+	}
+	if !restored {
+		onlyInterpretations, err := interpretationOnlyChange(ctx, tx, artifactID, newest.Version, tree)
+		if err != nil || !onlyInterpretations {
+			return nil, err
+		}
+		reason = interpretationReason
 	}
 	nodes, readable := askNodes(tree)
 	if !readable {
@@ -177,7 +175,56 @@ func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 			return nil, nil
 		}
 	}
-	return writeCarriedReview(ctx, tx, broker, artifactID, number, newest, fmt.Sprintf(restoreReason, newest.Version), serverURL)
+	return writeCarriedReview(ctx, tx, broker, artifactID, number, newest, fmt.Sprintf(reason, newest.Version), serverURL)
+}
+
+func interpretationOnlyChange(ctx context.Context, tx pgx.Tx, artifactID string, approved int, tree *pmdoc.Node) (bool, error) {
+	var ids map[string]bool
+	readable := true
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type == "interpretation" {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			if id == "" || ids[id] {
+				readable = false
+				return false
+			}
+			if ids == nil {
+				ids = make(map[string]bool)
+			}
+			ids[id] = true
+		}
+		return true
+	})
+	if !readable || len(ids) == 0 {
+		return false, nil
+	}
+	var markdown string
+	if err := tx.QueryRow(ctx, `select markdown from artifact_versions where artifact_id=$1 and number=$2`, artifactID, approved).Scan(&markdown); err != nil {
+		return false, err
+	}
+	before, err := pmdoc.ParseRendering(markdown)
+	if err != nil {
+		return false, skipUnreadableVersion(artifactID, approved, err)
+	}
+	pmdoc.Walk(before, func(node *pmdoc.Node) bool {
+		if node.Type == "interpretation" {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			if !ids[id] {
+				readable = false
+				return false
+			}
+		}
+		return true
+	})
+	if !readable {
+		return false, nil
+	}
+	approvedText, err := pmdoc.Render(withoutBlocks(before, "interpretation"))
+	if err != nil {
+		return false, skipUnreadableVersion(artifactID, approved, err)
+	}
+	currentText, err := pmdoc.Render(withoutBlocks(tree, "interpretation"))
+	return approvedText == currentText, err
 }
 
 // writeCarriedReview writes the carry of review to version number of artifactID with reason: the
@@ -622,26 +669,36 @@ func CutDecisionBlocks(markdown string) (string, error) {
 	return renderWithoutAskBlocks(tree)
 }
 
-// renderWithoutAskBlocks renders a copy of tree with its ask blocks left out (withoutAskBlocks).
+// renderWithoutAskBlocks renders a copy of tree with its ask blocks left out.
 func renderWithoutAskBlocks(tree *pmdoc.Node) (string, error) {
-	return pmdoc.Render(withoutAskBlocks(tree))
+	return pmdoc.Render(withoutBlocks(tree, "ask"))
 }
 
-// withoutAskBlocks is a copy of node's tree with every ask block left out. Each container on the
-// way is a fresh node with its own children; the nodes below the last container - text, inline
-// nodes, leaves - are the parsed tree's own, which nothing here changes.
-func withoutAskBlocks(node *pmdoc.Node) *pmdoc.Node {
+func withoutBlocks(node *pmdoc.Node, excluded string) *pmdoc.Node {
 	if node.Type == "text" || len(node.Children) == 0 {
 		return node
 	}
-	copied := *node
-	copied.Children = make([]*pmdoc.Node, 0, len(node.Children))
-	for _, child := range node.Children {
-		if child.Type == "ask" {
+	var children []*pmdoc.Node
+	for index, child := range node.Children {
+		if child.Type == excluded {
+			if children == nil {
+				children = append(make([]*pmdoc.Node, 0, len(node.Children)), node.Children[:index]...)
+			}
 			continue
 		}
-		copied.Children = append(copied.Children, withoutAskBlocks(child))
+		filtered := withoutBlocks(child, excluded)
+		if children == nil && filtered != child {
+			children = append(make([]*pmdoc.Node, 0, len(node.Children)), node.Children[:index]...)
+		}
+		if children != nil {
+			children = append(children, filtered)
+		}
 	}
+	if children == nil {
+		return node
+	}
+	copied := *node
+	copied.Children = children
 	if len(copied.Children) == 0 {
 		copied.Children = append(copied.Children, &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{}})
 	}

@@ -339,7 +339,10 @@ function renderAdvice(
   // rule about editing a spec, because the server sends it only on the write that superseded the
   // approval.
   const superseded = advice.superseded_approval;
-  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+  if (
+    superseded !== undefined &&
+    (tool === "dispatch_doc_edit" || tool === "dispatch_artifact" || tool === "dispatch_interpret")
+  ) {
     lines.push(
       `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
     );
@@ -4744,9 +4747,23 @@ export async function executeDispatchTool(
         body: stringArg(args, "body"),
         actor,
       });
+      const lost = item.lost_ops;
+      const headline =
+        lost === null
+          ? "Could not confirm this interpretation survived; re-read the document."
+          : lost !== undefined && lost.length > 0
+            ? "A concurrent change removed this interpretation; re-read the document."
+            : `Interpretation by ${actor.id}: ${item.ref}`;
       return {
-        text: `Interpretation by ${actor.id}: ${item.ref}`,
-        details: { interpretation: item },
+        text: [
+          headline,
+          ...renderAdvice(input.tool, resolvedTopic(resolved).label, item.advice, {}),
+        ].join("\n"),
+        details: {
+          interpretation: item,
+          ...(lost === undefined ? {} : { lost_ops: lost }),
+          ...(item.advice === undefined ? {} : { advice: item.advice }),
+        },
       };
     }
     case "dispatch_doc_edit": {

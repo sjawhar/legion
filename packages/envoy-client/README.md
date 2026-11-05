@@ -477,9 +477,12 @@ adds the agent's interpretation of a decision or ask block in that document.
 The document holds one `interpretation` block with a same-document `interprets` pointer;
 the Decisions tab shows it beneath the decision, labelled with the session that wrote it.
 The server records that author in the write's audit event, not a caller-supplied block attribute.
-Hand-made interpretation blocks have no recorded author and say **author not recorded**.
+Hand-made interpretation blocks have no recorded author and are labelled **Interpretation**.
 Interpretations contain Markdown paragraphs and never count as decisions or change a decision's Keep token.
-The command needs a server supporting schema version 4 interpretation blocks;
+Adding or editing only interpretation blocks preserves the document's approval; other live edits captured by the same version still supersede it, and the command reports that approval advice.
+The write returns `lost_ops` like a document edit: `[]` confirms survival, `[0]` reports a concurrent change removed the insert, and `null` means the check reached no verdict.
+The command warns on a lost or unconfirmed insert rather than claiming it succeeded.
+The command needs a server supporting schema version 5 interpretation blocks;
 older builds refuse unknown block types with `409 DOC_SCHEMA`, and have no interpretation write route.
 
 Every write `DispatchClient` makes carries one key. `#send`, which every JSON, multipart and file

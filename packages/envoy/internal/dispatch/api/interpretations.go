@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -104,13 +105,21 @@ func (s *server) createInterpretation(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	superseded := s.supersededApprovalAdvice(r.Context(), tx, "POST /api/v1/artifacts/{id}/interpretations", artifactIssueKey(artifact), artifact.ID, written.Version.Number)
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	s.deps.Docs.ScheduleSettlement(artifact.ID)
 	s.publish(versionEvent, event)
-	WriteJSON(w, http.StatusCreated, model.Interpretation{BlockID: id, DecisionRef: refs.BlockRef(reference, input.Decision), Ref: refs.BlockRef(reference, id), Text: strings.TrimSpace(input.Body), Author: &actor})
+	response := struct {
+		model.Interpretation
+		LostOps []int `json:"lost_ops"`
+	}{
+		Interpretation: model.Interpretation{BlockID: id, DecisionRef: refs.BlockRef(reference, input.Decision), Ref: refs.BlockRef(reference, id), Text: strings.TrimSpace(input.Body), Author: &actor},
+		LostOps:        lostOps(ledger, artifact.ID),
+	}
+	WriteJSON(w, http.StatusCreated, withRawAdvice(response, documentWriteAdvice{SupersededApproval: superseded}))
 }
 
 // interpretationEdgesQuery follows only same-document typed pointers in this issue. Unknown
@@ -122,7 +131,7 @@ const interpretationEdgesQuery = `
  join graph_edges g on g.from_kind='block' and g.from_id=b.node_id and g.kind='interprets' and g.to_kind='block'
  join document_blocks target on target.artifact_id=a.id and target.node_id=g.to_id and target.type in ('decision','ask')
  where a.issue_key=$1 and a.kind='doc'
- order by a.id,b.block_id,target.block_id`
+ order by a.is_primary desc,a.created_at,a.id,target.block_id`
 
 // A deleted id reused by hand is not the original agent's writing. History's tombstone breaks
 // the attribution, while edits and moves of the original node retain its recorded author.
@@ -223,6 +232,19 @@ func (s *server) issueInterpretations(ctx context.Context, key string) ([]model.
 			}
 			documents[e.document] = read
 		}
+	}
+	for first := 0; first < len(edges); {
+		last := first + 1
+		for last < len(edges) && edges[last].document == edges[first].document {
+			last++
+		}
+		group := edges[first:last]
+		blocks := documents[edges[first].document].blocks
+		sort.SliceStable(group, func(i, j int) bool { return blocks[group[i].block].From < blocks[group[j].block].From })
+		first = last
+	}
+	for _, e := range edges {
+		read := documents[e.document]
 		block, found := read.blocks[e.block]
 		if !found || block.Type != "interpretation" {
 			continue

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -307,6 +308,56 @@ func TestAnEditReportsTextTheRoomLostBetweenTheVersionAndThePublish(t *testing.T
 	}
 	if strings.Contains(live, "Alpha paragraph edited.") {
 		t.Fatalf("live document = %q, want the agent's text absent, which is what the verdict reports", live)
+	}
+}
+
+func TestInterpretationInsertReportsDeletionBetweenCommitAndPublish(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::decision{#choice}\nUse a table.\n:::\n\nTail.\n")
+	if err := service.warmLiveDocument(t.Context(), artifactID); err != nil {
+		t.Fatal(err)
+	}
+	var reference string
+	if err := service.store.Pool.QueryRow(t.Context(), `select issue_key || '/artifact/' || slug from artifacts where id=$1`, artifactID).Scan(&reference); err != nil {
+		t.Fatal(err)
+	}
+	edit := startEditInFlight(t, service, artifactID, model.EditOp{
+		Op: "insert", After: "block:choice", Markdown: ":::interpretation{#reading interprets=\"dispatch://" + reference + "#b-choice\"}\nNew reading.\n:::\n",
+	})
+	written, err := service.SnapshotVersion(edit.ctx, artifactID, lostEditAgent)
+	if err != nil || !written.Wrote {
+		t.Fatalf("snapshot: %#v %v", written, err)
+	}
+	if err := edit.ledger.commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// Another process can deliver the committed update before this writer publishes it.
+	live := service.srv.GetDoc(artifactID)
+	if err := crdt.ApplyUpdateV1(live, crdt.EncodeStateAsUpdateV1(joinedLiveWrite(edit.ctx, artifactID).fork, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	edit.browserWrites(t, func(tree *pmdoc.Node) *pmdoc.Node {
+		removed := false
+		out := &pmdoc.Node{Type: tree.Type, Attrs: tree.Attrs}
+		for _, child := range tree.Children {
+			if child.Type == "interpretation" && child.Attrs[pmdoc.BlockIDAttr] == "reading" {
+				removed = true
+				continue
+			}
+			out.Children = append(out.Children, child)
+		}
+		if !removed {
+			t.Fatal("committed interpretation was not visible to the browser")
+		}
+		return out
+	})
+	edit.ledger.publish()
+	if lost, known := edit.ledger.LostOps(artifactID); !known || !reflect.DeepEqual(lost, []int{0}) {
+		t.Fatalf("lost interpretation after version: %v, known=%t", lost, known)
+	}
+	if text, err := service.Text(t.Context(), artifactID); err != nil || strings.Contains(text, "New reading.") {
+		t.Fatalf("lost interpretation still in live text: %q %v", text, err)
 	}
 }
 

@@ -1270,7 +1270,7 @@ Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 21474
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current, and a typed block's pointer only while its target has a type the pointer allows (`block_ref_listed`, below the typed block rules).
 
-An issue's decisions are the `decision` and `ask` nodes of its documents (`api/decision_nodes.go`), declared in block schema version 4.
+An issue's decisions are the `decision` and `ask` nodes of its documents (`api/decision_nodes.go`); the current block schema is version 5 and also declares `interpretation`.
 A person's answered ask is the decision itself: the query reads its question, options, selected labels and answer from that ask row, without an agent restatement.
 A `decision` block is an agent's choice, with `title`, `replaced`, `shaped` (`block[]`, scoped to the same issue's spec), `from_ask` (an ask reference), `decided_by` (a canonical person login), `uncertainty` (`low`, `medium` or `high`) and `uncertainty_reason` (plain text: what would change the choice).
 A write that gives `uncertainty_reason` without `uncertainty`, or `uncertainty` on a block whose `decided_by` names a person, is refused by the schema (`pmdoc.validateDecisionUncertainty`): a person's answer is read from their ask row word for word, and an agent never qualifies it.
@@ -1285,6 +1285,10 @@ The link's `to.pin` also retains the shaped passage's explicit target version, o
 `?artifact=<id>&version=N` reads the historical shaped passages of a document on this issue; a document on another issue is refused.
 The dashboard shows each shaping decision beside the passage itself; historical untyped blocks without stored ids match their recorded text, with every identical candidate shown and explicitly labelled rather than assigned an invented position.
 `GET /api/v1/issues/{key}/decisions-shadow` compares the typed source nodes with the graph projection and reports source/node counts, missing/extra references and the difference count.
+`POST /api/v1/artifacts/{id}/interpretations` inserts an agent's reading with a same-document `interprets` pointer and records its author in the write's event.
+`GET /api/v1/issues/{key}/interpretations` lists those readings in document order, the primary document first; a handmade block has no recorded author and is labelled `Interpretation`.
+An approval remains current when only interpretation blocks were added or edited and each ask still agrees with its row; removing an interpretation or changing any other text carries no approval by this rule.
+The write returns superseded-approval advice for other live edits its snapshot captured, and `lost_ops` reports whether the live document kept the insert, with the same list/null meaning as the edit route.
 `POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (the `person` scope: a person at a browser, or a credential of theirs that holds it) records a person's agreement with the actual, current, unreplaced agent decision node in an issue document.
 The sum is the SHA-256 of the decision's served text; text changed since that read is `409 DECISION_CHANGED`, with nothing written, and a missing sum is `400 INVALID_KEEP`.
 Any block that is not such a decision node is `404 TARGET_NOT_FOUND`.

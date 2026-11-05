@@ -37,7 +37,7 @@ import type {
   Handoff,
   HandoffSummary,
   InboxRow,
-  Interpretation,
+  InterpretationWriteResponse,
   Issue,
   IssueCheckResults,
   IssueCoverage,
@@ -1463,7 +1463,7 @@ export class DispatchClient {
   async interpret(
     id: string,
     input: { decision: string; body: string; actor: Actor }
-  ): Promise<Interpretation> {
+  ): Promise<InterpretationWriteResponse> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "interpretations"], input);
   }
 

@@ -2505,6 +2505,12 @@ export interface Interpretation {
   readonly author: Actor | null;
 }
 
+/** The interpretation write also reports document-edit survival and approval advice. */
+export interface InterpretationWriteResponse extends Interpretation {
+  readonly lost_ops?: EditArtifactResponse["lost_ops"];
+  readonly advice?: WriteAdvice;
+}
+
 // IssueDecisions is GET /api/v1/issues/{key}/decisions: open document asks oldest first and
 // typed decisions in document order, primary document first. document is the first document
 // holding a decision, or null; each decision's ref names its own source node.
