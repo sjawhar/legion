@@ -1,5 +1,13 @@
 # Changelog
 
+## [main@94a8820232f0] - 2026-11-05
+
+### Added
+
+- The plugin ships `claude-envoy:agent-secrets`, the secrets broker's client skill, as its
+  eighth skill: a Claude Code session that needs a token, a key or a password reads how to get
+  one, and what to check before it reports a service out of reach.
+
 ## [main@6f23228e01f0] - 2026-11-04
 
 ### Changed

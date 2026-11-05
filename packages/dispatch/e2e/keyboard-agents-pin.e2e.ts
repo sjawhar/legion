@@ -15,6 +15,10 @@ import { resetDatabase } from "./seed";
 import { holdPosts, MESSAGE_REFUSED, pasteFile, refusePosts } from "./sends";
 import { asUser } from "./users";
 
+// The reader's dwell on a row before its read mark is written: `DWELL_MS`,
+// `web/src/features/shell/useDwell.ts`, which exports nothing a spec can import.
+const DWELL_MS = 1_000;
+
 // What an Agents row keeps when it moves between the open list and a fold - by Shift+P, or by
 // its fold closing - or when a filter hides it. The page keeps every row in one keyed list
 // (`AgentsPage.tsx`), so the row that moves is the same row: these rows pin what it still holds
@@ -492,6 +496,9 @@ test.describe("agents page pins", () => {
           readMarks.push(request.postData() ?? "");
         }
       });
+      // The read mark a visible list would write is armed by the reader's dwell, a page timer:
+      // the page's own clock is what spends it below.
+      await page.clock.install();
       await openAgents(page);
       const staleRow = agentRow(page, stale.session_id);
       const conversation = staleRow.getByRole("list", { name: "Conversation with Stale" });
@@ -521,9 +528,11 @@ test.describe("agents page pins", () => {
       await replyToMessageDelivery(second.id, { attempt: 1, body: "Second answer" }, actor);
       await refetched;
       await expect.poll(unread).toBe(1);
-      // Nothing may mark it read from here, so the check waits out the render and effect a
-      // hidden list would take to write one.
-      await page.waitForTimeout(1_500);
+      // Nothing may mark it read from here. The write a visible list would make waits out the
+      // reader's dwell (`DWELL_MS`), a page timer the jump fires; the round trip after it is
+      // answered only once any `PUT` that jump started had left the page.
+      await page.clock.runFor(DWELL_MS * 2);
+      await page.evaluate(() => fetch("/api/v1/me/agents/state").then(({ status }) => status));
       expect(readMarks).toHaveLength(marked);
       expect(await unread()).toBe(1);
 
@@ -538,6 +547,9 @@ test.describe("agents page pins", () => {
 
   // The same loss by the other road into a closed fold: Shift+P hands an open, pinned row back
   // to it.
+  // SLOW(>=2s): the reply has to reach a page that is already loaded, twice - hidden in the
+  // fold, then on screen - and each arrival waits out the page's own refresh of the agents
+  // list, which is the path the read mark is written on.
   test("an open row Shift+P unpins into a closed fold marks nothing read there", async ({
     browser,
   }) => {
@@ -557,6 +569,9 @@ test.describe("agents page pins", () => {
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
+      // The read mark a visible list would write is armed by the reader's dwell, a page timer:
+      // the page's own clock is what spends it below.
+      await page.clock.install();
       await openAgents(page);
       const fold = page.getByRole("button", { name: /^Inactive/ });
       const staleRow = agentRow(page, stale.session_id);
@@ -591,7 +606,8 @@ test.describe("agents page pins", () => {
       );
       // The hidden row's list has the reply: a row reading it would mark it now.
       await expect(staleRow.getByText("Yes, here")).toBeAttached();
-      await page.waitForTimeout(1_000);
+      await page.clock.runFor(DWELL_MS * 2);
+      await page.evaluate(() => fetch("/api/v1/me/agents/state").then(({ status }) => status));
       expect(marks).toEqual([]);
       expect(await unread()).toBe(1);
 
