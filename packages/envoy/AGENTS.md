@@ -683,7 +683,7 @@ see Critical conventions for what keeps those filters current.
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
 `Server.Apply` holds no lock across its callback, so the service never walks the room's tree there:
-a write reads and writes its transaction's fork, and builds the fork from the room's replica cloned under the replica's lock, or from an encode taken under the document's lock where no replica holds the room's state (`forkLive`, `warmFork`);
+a write reads and writes its transaction's fork, and builds the fork from the room's replica cloned under the replica's lock, or, where the room lists no replica, from an encode taken under the document's lock; a room whose replica holds no state has that encode start the replica instead, which the fork read then clones (`forkLive`, `warmFork`, `renderedReplica.atPoint`);
 the room has one writer slot (`openLiveWrite`); and a committed write reaches the room in a transaction and is read back through `readLive`.
 A helper that walks the room inside `Server.Apply` outside a transaction, as an unjoined write once did, races every peer's update; no production path does.
 `TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the document, until 50 of its edits have overlapped their typing.

@@ -89,9 +89,9 @@ import (
 // The replica starts from the room as of its last commit, which is either the state the log
 // records as of just before the room's first transaction since its load (start) or, for a room
 // that has committed nothing since the log opened, the copy a read of that room takes
-// (startFromRead for a plain read, readPoint for an exact one). The second is why a room in use
+// (startFromRead for a plain read, atPoint for an exact one). The second is why a room in use
 // holds one copy of its document rather than a fresh one for every read: a read of a room with
-// no replica copies the whole document under the room's lock (holdLive, readPoint), and a room
+// no replica copies the whole document under the room's lock (holdLive, atPoint), and a room
 // nothing has written in this process - the room a cold write's settlement loads
 // (publishLiveWrite), or one opened to be read - would be copied like that for as long as it
 // stands. Handing the first such copy to the replica also keeps the room's next commit from
@@ -115,7 +115,7 @@ type renderedReplica struct {
 	// base rendered before any (replicaRendering): the markdown and the pmdoc.Layout recorded
 	// with it. It is nil while the document is outside the schema, and replaced whole, never
 	// written in place, so a holder of one the replica has let go of keeps a markdown and a
-	// layout that go together (readPoint).
+	// layout that go together (atPoint).
 	rendering *replicaRendering
 	// touched records the top-level blocks of fragment the update being applied changed, and
 	// whether it is to be rendered whole (touchedBlocks). noteChangedTypes records into it as
@@ -294,7 +294,7 @@ func (r *renderedReplica) observe(room string) (settles, changed, local bool) {
 func (r *renderedReplica) drainLocked(room string) (settles, changed, local bool) {
 	base, updates := r.log.Drain()
 	// A base recorded for a replica that already holds a copy is the state that copy was taken
-	// at (startFromRead, readPoint), so it starts nothing: the first commit after a read started
+	// at (startFromRead, atPoint), so it starts nothing: the first commit after a read started
 	// the replica records the room as it stood when that read copied it, and no transaction
 	// moved it since.
 	return r.takeLocked(room, base, updates)
@@ -462,7 +462,7 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 }
 
 // start makes the replica from base, the room's state as of just before the first update its log
-// hands over, or as an exact read of a room with no replica copied it (readPoint), and takes
+// hands over, or as an exact read of a room with no replica copied it (atPoint), and takes
 // base's rendering (replicaRendering) as the one the replica's next update is measured against.
 // It subscribes noteChangedTypes to the new document's transactions once base is applied, with
 // that document's own fragment, so what it records is each later update's (startAt). A base that
@@ -789,7 +789,7 @@ func (s *Service) liveTree(room string, live *crdt.Doc) (*pmdoc.Node, error) {
 // room has committed - its log holds none the observer has yet to classify - so it is the room as
 // of the last commit. It returns nil, holding nothing, for a replica another holds mu on (the
 // update observer, or another read) or the observer waits for (lockForUpdate), one neither a
-// commit nor a read has started yet (start, startFromRead, readPoint), and one behind the room's
+// commit nor a read has started yet (start, startFromRead, atPoint), and one behind the room's
 // latest commit: a read never moves the replica, since an update applied by a read would be
 // rendered by no observer and credited to nobody, which is the loss the log exists to prevent
 // (renderedReplica).
