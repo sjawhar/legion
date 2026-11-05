@@ -495,8 +495,9 @@ export function Inbox({
   const listRef = useRef<HTMLElement>(null);
   /** The list column, which scrolls in itself beside the reading column. */
   const listScroller = useRef<HTMLDivElement>(null);
-  /** The reading column, where `h`, `o`, `y`, Enter and `1`-`9` act while it is on. */
-  const paneRef = useRef<HTMLDivElement>(null);
+  /** The reading column, where `h`, `o`, `y`, Enter and `1`-`9` act while it is on. Written by
+   *  `holdPane` below rather than handed to the wrapper, so the column's unmount is seen. */
+  const paneRef = useRef<HTMLDivElement | null>(null);
   // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
   const adoptedInbox = useMotionHold(inbox.data, listRef);
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
@@ -730,47 +731,72 @@ export function Inbox({
    *  focus stayed in the list. Null for every other way into the column, where Escape returns
    *  to the row the column is showing, as it always has.
    *
-   *  Three review rounds have each found another way for this one ref to go stale, so the
-   *  whole contract is written down here, as the list a branch that touches the column is to
-   *  be checked against:
+   *  The record stands exactly while two things are true of the reader: the column still shows
+   *  the question the record was made on, and their focus has not left the column. It is
+   *  written by one key - `read-pane`'s `run`, and only by the press that carries the focus in
+   *  from outside, so a second `l` cannot write the row the column is showing over the row the
+   *  reader came from - and read by one accessor, `paneWayBack`, which both halves of Escape
+   *  ask, so the `when` and the `run` cannot disagree about where the key goes.
    *
-   *  - One writer: `read-pane`'s `run`, and only the press that carries the focus in from
-   *    outside the column. A press from inside moves the focus to the scroller and leaves the
-   *    record alone, so a second `l` never overwrites the row the reader came from with the
-   *    row the column is showing.
-   *  - One reader: `paneWayBack` below, which both halves of Escape, its `when` and its `run`,
-   *    ask, so neither can disagree with the other about where the key goes.
-   *  - Dropped wherever the focus leaves the column inside the document: `forgetPaneReturn`,
-   *    the wrapper's `onBlur`, which covers every route out at once - `f` to the search box,
-   *    Escape to the row, a Tab onto a row's checkbox, a click into the list, and the row a
-   *    step out of the column focuses on its way.
-   *  - Dropped by a step that moves the selection while no row takes the focus: `move`, for the
-   *    one step no blur fires for - a column held open over a hidden row has no selected row to
-   *    hand the focus to, so the scroller keeps it - where the recorded row is a question the
-   *    reader has stepped off and Escape owes them the one the column is showing now.
-   *  - Kept through a step that moves nothing, which leaves the selection and the focus exactly
-   *    where they were: with no row to step to and none to take the focus the reader has gone
-   *    nowhere, so they are still on the question they pressed `l` on and the record is the
-   *    only way out the column has.
-   *  - Kept through a window or tab blur, which reaches the handler naming no target while the
-   *    reader has not moved at all and is still in the column.
-   *  - Nothing else drops it: it is this component's ref, so it ends with the Inbox itself. */
+   *  Three drops keep that pair true, and between them no route can outlive the record:
+   *
+   *  - The column shows another question: the effect below, which reads `paneSelection.id`
+   *    after every commit. Every way the selection moves is one of those - the reader's own
+   *    answer, a snooze of theirs, a question the server withdraws, a step of `j` or `k` - so
+   *    no route is handled a second time where it happens.
+   *  - The column unmounts: `holdPane`, its wrapper's own ref. React delivers no `onBlur` for
+   *    a focused node it removes, so the blur below cannot stand in for this.
+   *  - The focus leaves the column inside the document: `forgetPaneReturn`, the wrapper's
+   *    `onBlur`, which covers every route out at once - `f` to the search box, Escape to the
+   *    row, a Tab onto a row's checkbox, a click into the list, and the row a step out of the
+   *    column focuses on its way.
+   *
+   *  Two cases look like one of those and keep the record, because neither breaks that pair. A
+   *  window or tab blur moves no focus at all: the scroller still holds it, and back on the tab
+   *  Escape owes the reader the row they came from. An unmount inside the column - the head's
+   *  Snooze going, one body component swapped for another - while the column still shows the
+   *  question the record was made on leaves the reader on that question, so the record is still
+   *  theirs; only the wrapper's own unmount is the column going. */
   const paneReturn = useRef<string | null>(null);
+  /** The question the column was showing when this component last looked, which is how the
+   *  effect below tells a commit that changed it from one that did not. Nothing else writes
+   *  it, so the record itself still names a row and nothing more. */
+  const shownQuestion = useRef<string | undefined>(undefined);
+  // The column shows another question, so the record is spent: the row it names belongs to a
+  // question the reader has been carried off, whichever route carried them. Read after every
+  // commit, as the selection's own settling is (`pane-selection.ts`), and dropped here rather
+  // than tested against the question at Escape, because a record kept past its question would
+  // come back the moment the reader selected that question again.
+  useEffect(() => {
+    if (shownQuestion.current === paneSelection.id) return;
+    shownQuestion.current = paneSelection.id;
+    paneReturn.current = null;
+  });
+  /** The column wrapper: the node the keys above act in, and the drop its unmount makes. React
+   *  calls a ref callback with null whenever the callback's identity changes, so this one is
+   *  stable - an arrow written into the JSX would be a new callback every render, called with
+   *  null each time, and would drop a record the reader is still owed. */
+  const holdPane = useCallback((node: HTMLDivElement | null) => {
+    paneRef.current = node;
+    // The column has gone, taking the question the record was made on off the screen and the
+    // focus the scroller held to `document.body` with it. No blur reports that, so this is the
+    // drop that covers the commit a question leaves the column with none selected, before the
+    // next one is handed the selection, and the only one that covers the Inbox falling below
+    // the column's width, where the selection stands and the column goes.
+    if (node === null) paneReturn.current = null;
+  }, []);
   /** The drop the focus leaving the column makes, as one rule over every route out: React's
    *  `onBlur` bubbles from the column's descendants, so the record is dropped exactly while the
-   *  reader is no longer in there, rather than in the three bindings that used to clear it by
-   *  hand and left every other way out holding a stale row. `l` focuses the scroller from a row
-   *  outside this wrapper, so no blur of it fires and the record `l` has just made stands;
-   *  Escape's own run reads the record before it focuses the row, so the blur that follows
-   *  drops nothing it still needs.
+   *  reader is no longer in there, rather than by each binding that moves the focus out. `l`
+   *  focuses the scroller from a row outside this wrapper, so no blur of it fires and the
+   *  record `l` has just made stands; Escape's own run reads the record before it focuses the
+   *  row, so the blur that follows drops nothing it still needs.
    *
    *  Where the focus went is `relatedTarget`, and `document.activeElement` where the event
-   *  names none, because those two nulls mean opposite things. A window or tab blur moves no
-   *  focus at all: the scroller still holds it, the reader is still in the column, and back on
-   *  the tab Escape owes them the row they came from - in a column held open over a hidden row
-   *  it is the only row it has to return to. A focus that went nowhere, the node holding it
-   *  having unmounted, leaves `document.activeElement` on `document.body`, which is outside
-   *  this wrapper, so that one clears the record as it must. */
+   *  names none, because those two nulls mean opposite things: a window or tab blur moves no
+   *  focus and keeps the record, while a focus that moved to a node outside the column drops
+   *  it. A focus the column itself takes - the head's Snooze under `h`, a link in the drawn
+   *  document - stays inside this wrapper and changes nothing. */
   const forgetPaneReturn = (event: FocusEvent<HTMLDivElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget ?? document.activeElement)) {
       paneReturn.current = null;
@@ -792,24 +818,10 @@ export function Inbox({
    *  focus to `document.body` - where neither of Escape's branches holds and the key would do
    *  nothing. The reader then stands exactly where a click and then `j` leaves them today. */
   const move = (delta: 1 | -1) => {
-    const fromPane = paneShown && focusInPane();
-    // Read before the step and again after it, because only a step that moved the selection
-    // moved the reader: `paneSelection.step` selects synchronously, and `select` writes
-    // `selectedNow` as it goes, so these two reads are either side of the whole step.
-    const selectedBefore = paneSelection.selectedNow.current;
-    if (fromPane) {
+    if (paneShown && focusInPane()) {
       paneSelection.selectedRow()?.focus();
     }
     stepInMode(delta);
-    // The record goes with the step that carried the reader off the question they pressed `l`
-    // on. The row taking the focus blurs the scroller, and that blur drops it in the ordinary
-    // case; this covers the step no blur fires for - a column held open over a hidden row has
-    // no selected row to hand the focus to, so the scroller keeps it. A step that found no row
-    // to step to moved neither the selection nor the focus, and there the reader is still on
-    // the recorded question, which is the only row Escape has to return them to.
-    if (fromPane && paneSelection.selectedNow.current !== selectedBefore) {
-      paneReturn.current = null;
-    }
   };
   /** What the keys act on, for the bindings' labels: the row the column is showing, or the row
    *  holding the focus. */
@@ -1231,7 +1243,7 @@ export function Inbox({
       {listColumn}
       {subject === undefined ? null : (
         // biome-ignore lint/a11y/noStaticElementInteractions: nothing here is made interactive - the handler only reads where the focus has already gone, so the column needs no role of its own.
-        <div className="min-w-0 flex-1" onBlur={forgetPaneReturn} ref={paneRef}>
+        <div className="min-w-0 flex-1" onBlur={forgetPaneReturn} ref={holdPane}>
           <ReadingPane
             ask={subject}
             onAnswered={recordAnswered}
