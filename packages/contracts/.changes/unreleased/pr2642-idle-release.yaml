@@ -1,7 +1,0 @@
-kind: Added
-body: |-
-  The Legion daemon API carries an idle issue pod's release: a claim posts what its session is
-  doing to `claims/activity` (whether it runs background work, and when a phase worker's next
-  reminder is due), a claim the daemon suspended because its idle pod was released reads
-  `suspendedBy: released`, and an issue pod reads the deployment's releases, resumes and holds
-  from `claims/release-records`.

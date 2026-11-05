@@ -3,6 +3,15 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.5.0] - 2026-11-05
+
+### Added
+
+- Every claimed Oh My Pi session tells the Legion daemon what it is doing — whether it runs
+  background work, and for a phase worker when its next phase reminder is due — at each turn's
+  end and whenever the reading changes. That is what lets the daemon release an issue pod no
+  role of which has a turn in progress or a turn due, and bring it back on the next wake.
+
 ## [18.4.0] - 2026-11-05
 
 ### Changed

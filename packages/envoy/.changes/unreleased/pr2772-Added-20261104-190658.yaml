@@ -1,5 +1,0 @@
-kind: Added
-body: The listener publishes each GitHub envelope of a renamed repository a second time under its former name, for every pair `ENVOY_GITHUB_REPOSITORY_RENAMES` configures as `<former owner>/<name>=<current owner>/<name>`, so a session that subscribed before the rename keeps receiving the repository's events. The copy differs from the envelope it copies in its topic and in nothing else, so a client subscribed under both names drops the repeat by `event_id` and sees one event. Dispatch's GitHub intake ignores a message whose subject names a repository other than the one its payload names, so one event is handled once however many names it is published under. The mapping is one-way, and a value the listener cannot read refuses its start naming the variable.
-time: 2026-11-04T19:06:58.770526836Z
-custom:
-    Issue: pr2772
