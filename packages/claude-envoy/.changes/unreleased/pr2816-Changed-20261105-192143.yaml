@@ -1,5 +1,13 @@
 kind: Changed
-body: This plugin is published to npm as `@sjawhar/claude-envoy`, a third released package of `release.yaml`'s build and publish split beside `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, versioned and tagged from the tags as they are. `.claude-plugin/marketplace.json` names it as an `npm` source with no version, so Claude Code installs the newest published release. Nothing commits the built `dist/` and `legion/` any more, on `main` or on a branch: the release's build job builds them and packs them into the tarball it publishes, so a merge no longer re-parents the merge queue behind a build commit. The version Claude Code reports is now the published version rather than the first 12 characters of a commit.
+body: |-
+  This plugin is published to npm as `@sjawhar/claude-envoy`, a third released package of
+  `release.yaml`'s build and publish split beside `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`,
+  versioned and tagged from the tags as they are. `.claude-plugin/marketplace.json` names it as an
+  `npm` source with no version, so Claude Code installs the newest published release. Nothing
+  commits the built `dist/` and `legion/` any more, on `main` or anywhere else: the release's build
+  job builds them and packs them into the tarball it publishes, so a merge no longer re-parents the
+  merge queue behind a build commit. The version Claude Code reports is the published version
+  rather than the first 12 characters of a commit.
 time: 2026-11-05T19:21:43.069206255Z
 custom:
     Issue: pr2816
