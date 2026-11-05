@@ -1,0 +1,5 @@
+kind: Added
+body: '`dispatch ask` prints the proxy skill its target has, and that person''s earlier answers on the issue and its parent, under the related-item check''s lines.'
+time: 2026-11-05T20:40:41.681167532Z
+custom:
+    Issue: pr2819

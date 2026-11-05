@@ -1,0 +1,5 @@
+kind: Added
+body: '`Suggestions.proxy` (`AskProxy`): the proxy skill a new ask''s target has, and that person''s earlier answers on the ask''s issue and its parent.'
+time: 2026-11-05T20:40:39.250485611Z
+custom:
+    Issue: pr2819
