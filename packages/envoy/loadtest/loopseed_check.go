@@ -187,29 +187,54 @@ func printLoopCheck(w io.Writer, lines []loopCheckLine, rehearsal int) int {
 	return failed
 }
 
+// loopSeedCheckFlags are loop-seed-check's own flags. The Postgres URL carries the database's
+// password, so it has the file form every credential of this package has (readCredentials):
+// vm/vm.sh runs this phase on the pod that drives the deployment, where a value would be an
+// argument anything that can list processes reads.
+type loopSeedCheckFlags struct {
+	plan, pg, pgFile string
+}
+
+func (f *loopSeedCheckFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&f.plan, "plan", "", "the plan the seed was written from (loopseed.plan.json)")
+	fs.StringVar(&f.pg, "pg", "", "direct Postgres URL of the dispatch database the seed was written to")
+	fs.StringVar(&f.pgFile, "pg-file", "", "file holding the -pg value, so no password reaches the command line")
+}
+
+// resolve reads the credential file and judges every value, before the first connection.
+func (f *loopSeedCheckFlags) resolve() error {
+	if err := readCredentials(credentialFile{"-pg", "-pg-file", f.pgFile, &f.pg}); err != nil {
+		return err
+	}
+	if f.plan == "" || f.pg == "" {
+		return fmt.Errorf("-plan and -pg (or -pg-file) are required")
+	}
+	if _, ok := parsePG(f.pg); !ok {
+		return fmt.Errorf("-pg %s is not a Postgres URL", redactPG(f.pg))
+	}
+	return nil
+}
+
 // runLoopSeedCheck prints what a seeded database holds against what its plan expected, and exits
 // non-zero when any line fails.
 func runLoopSeedCheck(args []string) error {
 	fs := flag.NewFlagSet("loop-seed-check", flag.ExitOnError)
-	plan := fs.String("plan", "", "the plan the seed was written from (loopseed.plan.json)")
-	pg := fs.String("pg", "", "direct Postgres URL of the dispatch database the seed was written to")
+	var f loopSeedCheckFlags
+	f.register(fs)
 	_ = fs.Parse(args)
 
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if *plan == "" || *pg == "" {
-		return fmt.Errorf("-plan and -pg are required")
+	if err := f.resolve(); err != nil {
+		return err
 	}
-	if _, ok := parsePG(*pg); !ok {
-		return fmt.Errorf("-pg %s is not a Postgres URL", redactPG(*pg))
-	}
-	p, err := readLoopPlan(*plan)
+	p, err := readLoopPlan(f.plan)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, *pg)
+	conn, err := pgx.Connect(ctx, f.pg)
 	if err != nil {
 		return err
 	}

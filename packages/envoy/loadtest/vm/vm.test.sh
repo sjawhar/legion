@@ -78,9 +78,12 @@
 # when the instance lacks it, what wait_healthz takes for ready and when it refuses at once,
 # the run-time limit read out of the object the Compute API answers, and every production
 # address tried from every machine; and (u) no credential of the deployment -- Dispatch's agent
-# token, the listener's token or the instance's password -- reaches the command line of an ssh,
-# a docker, a psql or a loadgen of an up and a step, or a file the run keeps, while each still
-# reaches loadgen in a file of mode 600 on the load machine and psql in a passfile.
+# token, the listener's token, the embedder's api-key or the instance's password -- reaches the
+# command line of an ssh, a docker, a psql or a loadgen of an up, a seed and a step, or a file
+# the run keeps, while each still reaches the command that needs it in a file of mode 600 -- on
+# the load machine for the commands that run there, under the run's directory on this pod for
+# the seed's own phases, which is removed when the seed ends -- and psql in a passfile, and down
+# removes the run's credential files from the load machine, leaving none of them there.
 set -euo pipefail
 # Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
 # given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
@@ -399,6 +402,17 @@ tail_dirs() {
   done
   printf '%s\n' "${out[@]:-}"
 }
+# Every credential file this loadgen was given, as it was at the moment loadgen read it: the
+# subcommand, the flag, the path, the file's mode and its content. The copy up puts on the load
+# machine is this same script, so the line says what that machine held too. It is how the
+# credential case proves a command was given the credential it needs while no value of one
+# reached any command line.
+for credflag in key-file pg-file token-file listener-token-file; do
+  credpath=$(flag "$credflag") || continue
+  printf '%s\t-%s\t%s\t%s\t%s\n' "$cmd" "$credflag" "$credpath" \
+    "$(stat -c %a "$credpath" 2>/dev/null || echo none)" \
+    "$(cat "$credpath" 2>/dev/null || echo unreadable)" >>"$FAKE_DIR/credentials.log"
+done
 case $cmd in
   loop-seed-plan) printf '{"proposals": 891}\n' >"$(flag out)" ;;
   loop-seed-write)
@@ -1822,29 +1836,29 @@ pass "wait_healthz returns on ok and nats, waits while NATS is not up, and refus
 
 # ---- (u) no credential of the deployment reaches a command line ----------------------------
 
-# dispatch://INFRA-988. Driving this script against the deployment showed its three secrets --
-# Dispatch's agent token, the listener's token and the Postgres URL with its password -- in the
-# argv of `loadgen` on the load machine and of the ssh that carried it there, where `ps -eo args`
-# hands them to anything that can list processes on either machine. They go in files of mode 600
-# now, written over ssh's standard input (put_file) under the run's own directory on the load
-# machine, and loadgen reads them with -token-file, -listener-token-file and -pg-file (guard.go).
-# psql is given a URL with no password in it and takes the password from a passfile.
+# dispatch://INFRA-988. Driving this script against the deployment showed its secrets -- the
+# agent token, the listener's token and the Postgres URL with its password -- in the argv of
+# `loadgen` on the load machine and of the ssh that carried it there, where `ps -eo args` hands
+# them to anything that can list processes on either machine; the embedder's api-key and the
+# seed's own phases followed, the key for the whole life of the deployment. Every one of them
+# goes in a file of mode 600 now, and loadgen reads it with the -…-file form of its flag
+# (guard.go's readCredentials). A command that runs on the load machine reads its file from the
+# run's own directory there, written over ssh's standard input (put_file); the seed's phases run
+# on this pod and read theirs from the run's directory here, which is removed when the seed
+# ends. psql is given a URL with no password in it and takes the password from a passfile.
 #
 # What this case reads is every argv the fakes record: ssh.log holds each ssh whole, and what
 # follows the target is what the machine ran, so that is the machine's own process table too;
 # docker.log each docker call, psql.argv each psql call, and loadgen.log every loadgen this pod
-# or a machine ran.
-#
-# The embedder's key is the one credential an up or a step leaves on a command line: `loadgen
-# stub-embed` takes it as -key and has no file form (stubembed.go), so up's start of the stub
-# embedder carries it. (The seed phases that run on this pod take -pg the same way and for the
-# same reason; this case runs an up and a step.) The case holds the key to that one command
-# rather than passing over it, so a second place that put it on a command line fails here.
+# or a machine ran. No credential of the deployment is allowed in any of them: this case runs an
+# up, the whole seed and a step, so every command of a deployment's life is in those logs, and
+# credentials.log says what each command read its credential file from while it ran.
 
 reset_fake
 run_vm up --config "$config"
 ((RC == 0)) || fail "up failed before the credential case"
-seeded_run
+run_vm seed --config "$config" --embed-timeout 8h
+((RC == 0)) || fail "the seed of the credential case failed: see the output above"
 run_vm step --config "$config" 1x 1 --duration 10m
 ((RC == 0)) || fail "the step of the credential case failed: see the output above"
 
@@ -1852,6 +1866,12 @@ argv_logs=("$fake/ssh.log" "$fake/docker.log" "$fake/psql.argv" "$fake/loadgen.l
 for log in "${argv_logs[@]}"; do
   [ -s "$log" ] || fail "no fake wrote $log, so this case proves nothing of the commands it records"
 done
+# The deployment's credentials, each by name, read out of the deployment file itself.
+credentials() {
+  jq -r '{"agent token": .secrets.dispatch_token, "listener token": .secrets.listener_token,
+    "embedder key": .secrets.embed_key, "database password": .cloudsql.password} |
+    to_entries[] | "\(.key)\t\(.value)"' "$config"
+}
 while IFS=$'\t' read -r name value; do
   for log in "${argv_logs[@]}"; do
     ! grep -qF -- "$value" "$log" ||
@@ -1859,9 +1879,8 @@ while IFS=$'\t' read -r name value; do
   done
   ! grep -rqF -- "$value" "$(run_dir)" ||
     fail "the deployment's $name reached a file the run keeps: $(grep -rlF -- "$value" "$(run_dir)" | head -n1)"
-done < <(jq -r '{"agent token": .secrets.dispatch_token, "listener token": .secrets.listener_token,
-  "database password": .cloudsql.password} | to_entries[] | "\(.key)\t\(.value)"' "$config")
-pass "no token and no password of the deployment reaches the command line of an ssh, a docker, a psql or a loadgen, or a file the run keeps"
+done < <(credentials)
+pass "no token, no api-key and no password of the deployment reaches the command line of an ssh, a docker, a psql or a loadgen of an up, a seed and a step, or a file the run keeps"
 
 # The run works all the same: each credential reached the load machine in a file of its own, and
 # loadgen was given that file.
@@ -1898,14 +1917,60 @@ passfile=$(awk 'NR == 1 {print $1}' "$fake/psql.passfile")
 [ ! -e "$passfile" ] || fail "the passfile $passfile is still on this pod after the call that read it"
 pass "psql takes the instance's password from a passfile of mode 600, written for the call and removed with it"
 
-# The embedder's key, the one credential with no file form, reaches the stub embedder's own
-# start and nothing else.
+# credential_read CMD FLAG: the path, the mode and the content of the file the loadgen
+# subcommand CMD read FLAG from, as they were at the moment it read them (credentials.log).
+credential_read() {
+  awk -F'\t' -v c="$1" -v f="$2" '$1 == c && $2 == f { print $3 "\t" $4 "\t" $5; exit }' "$fake/credentials.log"
+}
+
+# The embedder's key has a file form now, so the stub embedder takes it like every other
+# credential of the load machine: a key given as -key would be in the stub's argv, and in the
+# ssh's, for as long as the deployment stands.
 embed_key=$(jq -r '.secrets.embed_key' "$config")
-elsewhere=$(grep -hF -- "$embed_key" "${argv_logs[@]}" | grep -v 'stub-embed' || true)
-[ -z "$elsewhere" ] ||
-  fail "the embedder's key reached a command line that is not the stub embedder's own: $(head -n1 <<<"$elsewhere")"
-grep -q -- "stub-embed -key $embed_key" "$fake/loadgen.log" ||
-  fail "loadgen stub-embed no longer takes its key as an argument: it has a file form now, so vm.sh must give it and this case must stop allowing the key here"
-pass "the embedder's key reaches the stub embedder's own start alone, which is the only credential an up or a step leaves on a command line"
+IFS=$'\t' read -r path mode content < <(credential_read stub-embed -key-file) || true
+[ -n "${path:-}" ] || fail "the stub embedder was given no -key-file: $(grep 'stub-embed' "$fake/loadgen.log" | head -n1)"
+[ "$path" = "$run_secrets/embed-key" ] ||
+  fail "the stub embedder read its key from $path, not from the run's own directory on the load machine ($run_secrets/embed-key)"
+[ "$content" = "$embed_key" ] || fail "$path held '$content', not the deployment file's own embedder key"
+[ "$mode" = 600 ] || fail "$path is mode $mode on the load machine, not 600"
+grep -q -- 'stub-embed -key ' "$fake/loadgen.log" &&
+  fail "the stub embedder still takes its key as a value: $(grep -m1 -- 'stub-embed' "$fake/loadgen.log")"
+pass "the stub embedder reads its api-key from a file of mode 600 on the load machine"
+
+# The seed's own phases run on this pod, so each reads its credential from a file of mode 600
+# under the run's directory here, and every one of those files is gone once the seed has ended:
+# the run directory is what this pod keeps of the run.
+pg_url=postgres://dispatch:pg-secret@10.139.0.3:5432/dispatch?sslmode=require
+while IFS=$'\t' read -r phase flag want; do
+  IFS=$'\t' read -r path mode content < <(credential_read "$phase" "$flag") || true
+  [ -n "${path:-}" ] || fail "the seed's $phase phase was given no $flag: $(grep -m1 -- "$phase" "$fake/loadgen.log")"
+  [[ $path == "$(run_dir)"/* ]] ||
+    fail "$phase read $flag from $path, which is not under the run's own directory on this pod"
+  [ "$content" = "$want" ] || fail "$phase's $flag held '$content', not the deployment file's own value"
+  [ "$mode" = 600 ] || fail "$phase's $flag ($path) is mode $mode, not 600"
+  [ ! -e "$path" ] || fail "$path is still on this pod after the seed that wrote it"
+done <<EOF
+loop-seed-check	-pg-file	$pg_url
+loop-seed-export	-pg-file	$pg_url
+seed-finish	-pg-file	$pg_url
+seed-finish	-token-file	dispatch-secret
+EOF
+pass "the seed's own phases read their credentials from files of mode 600 under the run's directory on this pod, each removed when the seed ends"
+
+# down removes the run's credential files from the load machine and says so: a deployment that
+# is turned off should leave no token, no key and no database password on a disk that outlives
+# it. The containers' environment files are the machines' own and stay with them.
+[ -d "$run_secrets" ] || fail "the run wrote no credential directory on the load machine before down"
+run_vm down --config "$config"
+((RC == 0)) || fail "down failed after the credential case: see the output above"
+[ ! -e "$run_secrets" ] ||
+  fail "down left the run's credential files on the load machine: $(ls -A "$run_secrets" | tr '\n' ' ')"
+grep -q "credential files are removed from the $(jq -r .load_vm "$config") VM" "$tmp/out" ||
+  fail "down does not say that it removed the run's credential files: $(cat "$tmp/out")"
+while IFS=$'\t' read -r name value; do
+  ! grep -rqF -- "$value" "$remote/work" ||
+    fail "down left the deployment's $name on the load machine: $(grep -rlF -- "$value" "$remote/work" | head -n1)"
+done < <(credentials)
+pass "down removes the run's credential files from the load machine, leaving none of its credentials there, and says it did"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'

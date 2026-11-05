@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -325,7 +326,7 @@ func TestRunStubEmbedRefusesWhatItCannotServe(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{}, "-key is required"},
+		{[]string{}, "-key or -key-file is required"},
 		{[]string{"-key", "k", "-listen", ""}, "-listen is required"},
 		{[]string{"-key", "k", "-throttle-every", "-1"}, "-throttle-every must be 0 or more"},
 		{[]string{"-key", "k", "extra"}, `unexpected argument "extra"`},
@@ -333,6 +334,41 @@ func TestRunStubEmbedRefusesWhatItCannotServe(t *testing.T) {
 		err := runStubEmbed(c.args)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("loadgen stub-embed %q: error %v, want %q", c.args, err, c.want)
+		}
+	}
+}
+
+// TestStubEmbedReadsItsKeyFromAFile: the embedder's api-key has a file form, because a key given
+// as -key is in this process's argv, and in the argv of the ssh that started it, for the whole
+// life of the deployment (dispatch://INFRA-988). The file's content with its trailing white
+// space trimmed is the key, and the four refusals are the ones every credential of this package
+// is read with (readCredentials).
+func TestStubEmbedReadsItsKeyFromAFile(t *testing.T) {
+	const key = "stub-embed-api-key"
+	// The file ends in white space, as one written with printf does (vm/vm.sh writes it on the
+	// load machine).
+	path := credentialFileAt(t, "embed-key", key+" \t\n")
+	opts, err := stubEmbedArgs([]string{"-key-file", path})
+	if err != nil {
+		t.Fatalf("-key-file was refused: %v", err)
+	}
+	if opts.key != key {
+		t.Errorf("the key is %q, want the file's content with its trailing white space trimmed", opts.key)
+	}
+
+	_, err = stubEmbedArgs([]string{"-key", key, "-key-file", path})
+	var both *bothCredentialFormsError
+	if !errors.As(err, &both) || both.Flag != "-key" || both.FileFlag != "-key-file" {
+		t.Errorf("-key given with -key-file too: refusal %v, want one naming the two forms", err)
+	}
+
+	// A file that cannot be read, and one that holds no credential: each refused by the flag and
+	// the path, before the port is taken.
+	absent := filepath.Join(t.TempDir(), "absent-key")
+	for _, bad := range []string{absent, credentialFileAt(t, "empty-key", " \n")} {
+		if _, err := stubEmbedArgs([]string{"-key-file", bad}); err == nil ||
+			!strings.Contains(err.Error(), "-key-file") || !strings.Contains(err.Error(), bad) {
+			t.Errorf("-key-file %s: refusal %v, want one naming the flag and the path", bad, err)
 		}
 	}
 }

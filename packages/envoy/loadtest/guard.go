@@ -141,27 +141,31 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.allowForeign, "allow-foreign", false, "allow endpoint flags that differ from stack.json (another stack, such as a cluster copy)")
 }
 
-// readCredentialFiles replaces each credential flag's value with its file's content, trailing
-// white space trimmed, so that a file written with a final newline holds what the credential is.
-// The three credential flags are the ones that carry a secret: the Dispatch agent token, the
-// listener token and the Postgres URL with its password. Every argument of every process is
-// readable by anything that can list processes (`ps -eo args`), here and on any machine an ssh
-// carries the command to, so a caller that can write a file of its own gives the file form:
-// vm/vm.sh writes one of mode 600 on the machine the load runs from, as it writes every
-// container's settings.
+// credentialFile is one credential a command takes either as a value, under flag, or as the path
+// of a file holding it, under fileFlag; value is the flag's own variable, where the credential
+// lands whichever form gave it.
+type credentialFile struct {
+	flag, fileFlag, path string
+	value                *string
+}
+
+// readCredentials replaces each credential's value with its file's content, trailing white space
+// trimmed, so that a file written with a final newline holds what the credential is. A credential
+// is a value that carries a secret: a Dispatch agent token, the listener token, a Postgres URL
+// with its password, the stub embedder's api-key. Every argument of every process is readable by
+// anything that can list processes (`ps -eo args`), here and on any machine an ssh carries the
+// command to, so a caller that can write a file of its own gives the file form: vm/vm.sh writes
+// one of mode 600 on the machine the command runs on, as it writes every container's settings.
 //
 // A credential given in both forms is refused: which was meant cannot be known, and the two may
 // name different things. A file that cannot be read, or that holds nothing, is refused by its
 // flag and its path, before the first connection, as every other input of this package is.
-func (f *endpointFlags) readCredentialFiles() error {
-	for _, c := range []struct {
-		flag, fileFlag, path string
-		value                *string
-	}{
-		{"-token", "-token-file", f.tokenFile, &f.token},
-		{"-listener-token", "-listener-token-file", f.listenerTokenFile, &f.listenerToken},
-		{"-pg", "-pg-file", f.pgFile, &f.pg},
-	} {
+//
+// Every command of this package that takes a credential reads it here, and no second reader of a
+// credential file exists: the four refusals are one behaviour, and a command that spelled them
+// again would drift from it (stubembed.go, loopseed_check.go, loopseed_export.go, seedfinish.go).
+func readCredentials(creds ...credentialFile) error {
+	for _, c := range creds {
 		if c.path == "" {
 			continue
 		}
@@ -180,6 +184,16 @@ func (f *endpointFlags) readCredentialFiles() error {
 		*c.value = v
 	}
 	return nil
+}
+
+// readCredentialFiles reads the file form of the three endpoint flags that carry a secret: the
+// Dispatch agent token, the listener token and the Postgres URL with its password.
+func (f *endpointFlags) readCredentialFiles() error {
+	return readCredentials(
+		credentialFile{"-token", "-token-file", f.tokenFile, &f.token},
+		credentialFile{"-listener-token", "-listener-token-file", f.listenerTokenFile, &f.listenerToken},
+		credentialFile{"-pg", "-pg-file", f.pgFile, &f.pg},
+	)
 }
 
 // bothCredentialFormsError refuses a credential given as a value and as a file at once.

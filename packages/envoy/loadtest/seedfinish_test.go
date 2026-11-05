@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -478,5 +480,90 @@ func TestDispatchCoverageReadsTheReportAndReportsWhatItCannotRead(t *testing.T) 
 	status, body = http.StatusOK, "<html>a proxy's page</html>"
 	if _, err := reader.readCoverage(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid character") {
 		t.Errorf("error %v, want the body that does not decode named", err)
+	}
+}
+
+// seedFinishResolve parses args as `loadgen seed-finish` parses them and resolves the flags, so
+// a test reads what a command line resolves to without a database to connect to.
+func seedFinishResolve(t *testing.T, args ...string) (seedFinishFlags, error) {
+	t.Helper()
+	fs := flag.NewFlagSet("seed-finish", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var f seedFinishFlags
+	f.register(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("seed-finish %q: %v", args, err)
+	}
+	return f, f.resolve()
+}
+
+// TestSeedFinishReadsItsCredentialsFromFiles: seed-finish runs on the pod that drives the
+// deployment, so its two credentials -- the Postgres URL with its password and the Dispatch
+// agent bearer -- would be arguments anything that can list processes there reads for the whole
+// embedding gate, which waits hours (dispatch://INFRA-988). Each file's content with its
+// trailing white space trimmed is the value, and the four refusals are the ones every credential
+// of this package is read with (readCredentials).
+func TestSeedFinishReadsItsCredentialsFromFiles(t *testing.T) {
+	const (
+		pg          = "postgres://dispatch:pg-secret@10.139.0.3:5432/dispatch?sslmode=require"
+		token       = "dispatch-agent-token"
+		dispatchURL = "http://10.138.0.21:8766"
+	)
+	// Each file ends in white space, as one written with printf does (vm/vm.sh writes these
+	// under the run's own directory).
+	pgFile := credentialFileAt(t, "pg-url", pg+"\n")
+	tokenFile := credentialFileAt(t, "dispatch-token", token+" \t\n")
+	// bothFiles is a command line that gives each credential as a file alone; given replaces one
+	// of those files with another path.
+	bothFiles := func() []string {
+		return []string{"-pg-file", pgFile, "-url", dispatchURL, "-token-file", tokenFile}
+	}
+	given := func(replace, with string) []string {
+		args := bothFiles()
+		for i, a := range args {
+			if a == replace {
+				args[i] = with
+			}
+		}
+		return args
+	}
+
+	f, err := seedFinishResolve(t, bothFiles()...)
+	if err != nil {
+		t.Fatalf("seed-finish given both its credentials as files was refused: %v", err)
+	}
+	if f.pg != pg || f.token != token {
+		t.Errorf("-pg is %q and -token %q, want each its file's content with the trailing white space trimmed",
+			redactPG(f.pg), f.token)
+	}
+
+	for _, c := range []struct{ flag, fileFlag, value, file string }{
+		{"-pg", "-pg-file", pg, pgFile},
+		{"-token", "-token-file", token, tokenFile},
+	} {
+		_, err := seedFinishResolve(t, append(bothFiles(), c.flag, c.value)...)
+		var both *bothCredentialFormsError
+		if !errors.As(err, &both) || both.Flag != c.flag || both.FileFlag != c.fileFlag {
+			t.Errorf("%s given with %s too: refusal %v, want one naming the two forms", c.flag, c.fileFlag, err)
+		}
+		// A file that cannot be read, and one that holds no credential: each refused by the flag
+		// and the path, before the first connection.
+		absent := filepath.Join(t.TempDir(), "absent")
+		for _, bad := range []string{absent, credentialFileAt(t, "empty", "\n")} {
+			_, err := seedFinishResolve(t, given(c.file, bad)...)
+			if err == nil || !strings.Contains(err.Error(), c.fileFlag) || !strings.Contains(err.Error(), bad) {
+				t.Errorf("%s %s: refusal %v, want one naming the flag and the path", c.fileFlag, bad, err)
+			}
+		}
+	}
+
+	// Neither form of either credential: refused naming both forms, so a caller that gave none
+	// reads which flags it has.
+	if _, err := seedFinishResolve(t); err == nil || !strings.Contains(err.Error(), "-pg or -pg-file is required") {
+		t.Errorf("no -pg and no -pg-file: refusal %v, want one naming both forms", err)
+	}
+	_, err = seedFinishResolve(t, "-pg-file", pgFile, "-url", dispatchURL)
+	if err == nil || !strings.Contains(err.Error(), "-token or -token-file is required with -url") {
+		t.Errorf("-url with no bearer in either form: refusal %v, want one naming both forms", err)
 	}
 }

@@ -128,25 +128,29 @@ func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
 	}
 }
 
+// credentialFileAt is a credential file of mode 600 holding content, as vm/vm.sh writes one on
+// the machine the command that reads it runs on, and its path. Every command of this package
+// that takes a credential reads its file through readCredentials, so every test of one writes
+// the file here.
+func credentialFileAt(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // credentialFiles is every endpoint flag of a foreign run, with the three that carry a secret
 // given as files alone. Each file's content ends in white space, as a file written with printf
 // does (vm/vm.sh writes these on the machine the load runs from).
 func credentialFiles(t *testing.T) endpointFlags {
 	t.Helper()
-	dir := t.TempDir()
-	write := func(name, content string) string {
-		t.Helper()
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
 	f := foreignFlags()
 	f.token, f.listenerToken, f.pg = "", "", ""
-	f.tokenFile = write("token", "cluster-agent-token\n")
-	f.listenerTokenFile = write("listener-token", "cluster-listener-token \t\n")
-	f.pgFile = write("pg", "postgres://postgres:pw@db.example:5432/dispatch\n\n")
+	f.tokenFile = credentialFileAt(t, "token", "cluster-agent-token\n")
+	f.listenerTokenFile = credentialFileAt(t, "listener-token", "cluster-listener-token \t\n")
+	f.pgFile = credentialFileAt(t, "pg", "postgres://postgres:pw@db.example:5432/dispatch\n\n")
 	return f
 }
 

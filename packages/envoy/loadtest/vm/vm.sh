@@ -109,19 +109,22 @@
 # can list and no file the run collects. .vms.<name> therefore names an address and a Compute
 # instance alone: the user is OS Login's and no file names it.
 #
-# No credential of the deployment is an argument either, for the same reason: `ps -eo args` on
+# No credential of the deployment is an argument anywhere, for the same reason: `ps -eo args` on
 # this pod, and on any machine an ssh carries a command to, lists every argument of every
 # process. Every container's settings go in an environment file of mode 600 on its own machine
-# (container_write_env); loadgen's three that carry a secret -- the agent token, the listener
-# token and the Postgres URL with its password -- go in files of mode 600 under the run's own
-# directory on the load machine and are given as -token-file, -listener-token-file and -pg-file
-# (endpoints, remote_secret, guard.go); psql takes the instance's password in a passfile of its
-# own (psql_at). Each of those files is written over ssh's standard input (put_file).
+# (container_write_env); every credential loadgen takes goes in a file of mode 600 and is given
+# as the -…-file form of its flag (guard.go's readCredentials), and psql takes the instance's
+# password in a passfile of its own (psql_at). Each file is written over ssh's standard input
+# (put_file) where it belongs on another machine.
 #
-# Two credentials are arguments all the same, both for want of a file form of the command that
-# takes them: loadgen stub-embed takes the embedder's api-key as -key (stub_embed_start), and
-# the seed phases that run on this pod -- loop-seed-check, loop-seed-export and seed-finish --
-# take -pg, and seed-finish -token, which are flags of their own commands and not the guard's.
+# Which file is written where follows the machine the command runs on. The commands that run on
+# the load machine -- loop-seed-write, loadgen run and the stub embedder -- read theirs from the
+# run's own directory there (remote_secret, endpoints, stub_embed_start): the agent token, the
+# listener token, the Postgres URL with its password and the embedder's api-key. The seed phases
+# that run on this pod -- loop-seed-check, loop-seed-export and seed-finish -- read theirs from
+# the run's directory here (local_secret), and each is removed when the seed ends, as the
+# passfile is removed with the psql call that read it. `down` removes the load machine's, so a
+# deployment that is turned off leaves no token and no password on a disk that outlives it.
 #
 # Dispatch's identity is DISPATCH_IDENTITY=header:X-Dispatch-User with
 # DISPATCH_IDENTITY_HEADER_TRUSTED=1 and a shared agent token, as stack.sh's start_dispatch sets
@@ -497,7 +500,8 @@ remote_loadgen() { cfg_valid path .paths.remote_loadgen "$(remote_root)/loadgen"
 remote_work() { cfg_valid path .paths.remote_work "$(remote_root)/work"; }
 
 # pg_url DATABASE: the direct Postgres URL of one database on the instance, its password in it.
-# It is what loadgen reads out of its -pg-file, and it reaches no command line (endpoints).
+# It is what loadgen reads out of its -pg-file, and it reaches no command line (endpoints for
+# the load machine's commands, local_secret for the seed's own phases).
 pg_url() {
   printf 'postgres://%s:%s@%s\n' "$(cfg .cloudsql.user)" "$(cfg .cloudsql.password)" "$(pg_url_tail "$1")"
 }
@@ -911,10 +915,13 @@ container_stop() {
 # ---- the stub embedder --------------------------------------------------------------------------
 
 # stub_embed_start: loadgen stub-embed on the load machine, detached, with its certificate
-# written where Dispatch reads it as SSL_CERT_FILE on its own machine. The key is given on the
-# load machine's command line alone; Dispatch takes it from its environment file.
+# written where Dispatch reads it as SSL_CERT_FILE on its own machine. The key reaches it in a
+# file of mode 600 under the run's own directory there (remote_secret), as every other
+# credential of the load machine does: given as -key it would be an argument of the stub for the
+# whole life of the deployment, and of the ssh that started it. Dispatch takes the same key from
+# its environment file.
 stub_embed_start() {
-  local cert=$RUN_DIR/stub-embed.pem remote work
+  local cert=$RUN_DIR/stub-embed.pem remote work key_file
   work=$(remote_work)
   remote=$(remote_loadgen)
   on_vm "$LOAD_VM" mkdir -p -- "$work" || die "making $work on the $LOAD_VM VM failed"
@@ -923,9 +930,10 @@ stub_embed_start() {
   # here too: whatever the last start recorded is ended first, and the wait below then sees this
   # start's own certificate rather than the one before it.
   stub_embed_stop
+  key_file=$(remote_secret embed-key "$(cfg .secrets.embed_key)")
   # shellcheck disable=SC2016 # expanded by the load machine's sh
-  on_vm "$LOAD_VM" sh -c 'rm -f "$3"; nohup setsid "$1" stub-embed -key "$2" -listen "$4" -cert-out "$3" -host "$5" >"$6/stub-embed.log" 2>&1 </dev/null & echo "$!" >"$6/stub-embed.pid"' \
-    sh "$remote" "$(cfg .secrets.embed_key)" "$work/stub-embed.pem" "0.0.0.0:$(port_of stub_embed)" "$(vm_host "$LOAD_VM")" "$work" ||
+  on_vm "$LOAD_VM" sh -c 'rm -f "$3"; nohup setsid "$1" stub-embed -key-file "$2" -listen "$4" -cert-out "$3" -host "$5" >"$6/stub-embed.log" 2>&1 </dev/null & echo "$!" >"$6/stub-embed.pid"' \
+    sh "$remote" "$key_file" "$work/stub-embed.pem" "0.0.0.0:$(port_of stub_embed)" "$(vm_host "$LOAD_VM")" "$work" ||
     die "starting loadgen stub-embed on the $LOAD_VM VM failed"
   local waited=0
   # shellcheck disable=SC2016 # expanded by the load machine's sh
@@ -1104,6 +1112,39 @@ remote_secret() {
   put_file "$LOAD_VM" "$tmp" "$(remote_run)/$name"
   rm -f -- "$tmp"
   printf '%s\n' "$(remote_run)/$name"
+}
+
+# local_secret NAME VALUE: VALUE in a file named NAME under the run's own directory on this pod,
+# mode 600, its path printed. It is what remote_secret is for the load machine: the file form of
+# a credential for the commands that run here, which are the seed's own phases (cmd_seed). The
+# caller removes it when the command that reads it has ended, as psql_at removes its passfile,
+# so no credential is left in the run directory this pod keeps.
+local_secret() {
+  local name=$1 value=$2 path
+  path=$RUN_DIR/$name
+  rm -f -- "$path"
+  (
+    umask 077
+    printf '%s\n' "$value" >"$path"
+  ) || die "writing the credential file $path failed"
+  chmod 600 -- "$path" || die "making the credential file $path mode 600 failed"
+  printf '%s\n' "$path"
+}
+
+# remote_secrets_remove: the run's own directory on the load machine removed, with every
+# credential file this run wrote there (remote_secret). A deployment that is turned off should
+# leave no token, no api-key and no database password on a disk that outlives it. The removal is
+# read back rather than assumed, because a credential nobody knows is still there is the thing
+# this guards against.
+remote_secrets_remove() {
+  local dir
+  dir=$(remote_run)
+  on_vm "$LOAD_VM" rm -rf -- "$dir" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2016 # expanded by the load machine's sh
+  if on_vm "$LOAD_VM" sh -c 'test -e "$1"' sh "$dir" 2>/dev/null; then
+    die "down: the run's credential files at $dir on the $LOAD_VM VM could not be removed; they are still there"
+  fi
+  note "down: the run's credential files are removed from the $LOAD_VM VM ($dir)"
 }
 
 # ---- the remote root programs are executed from ---------------------------------------------------
@@ -1351,6 +1392,14 @@ seed_phase() {
   note "seed: $name done in $(elapsed_since "$t0") s"
 }
 
+# seed_cleanup: the credential files the phases that run on this pod were given, removed. It
+# runs on the way out whatever ends the seed, as step_cleanup does for a step, so a phase that
+# fails leaves no credential in the run directory this pod keeps.
+seed_cleanup() {
+  ((${#SEED_SECRETS[@]} == 0)) || rm -f -- "${SEED_SECRETS[@]}"
+  SEED_SECRETS=()
+}
+
 cmd_seed() {
   parse "config run loadgen embed-timeout workers" "" "$@"
   positional 0 "no positional arguments"
@@ -1368,25 +1417,37 @@ cmd_seed() {
   ! db_exists "$template" || die "seed: the instance already holds the template database $template"
   : >"$RUN_DIR/seed.phases.jsonl"
   endpoints
+  # The three phases below run here and not on the load machine, so they take their credentials
+  # in files of this pod's own (local_secret) rather than the load machine's: a value would be
+  # an argument of loadgen here for the length of a phase, and the embedding gate's phase waits
+  # hours. Both files go when the seed ends, whatever ends it (seed_cleanup).
+  local pg_file token_file
+  SEED_SECRETS=()
+  trap seed_cleanup EXIT
+  pg_file=$(local_secret .seed-pg-url "$(pg_url "$(cfg .cloudsql.database dispatch)")")
+  token_file=$(local_secret .seed-dispatch-token "$(cfg .secrets.dispatch_token)")
+  SEED_SECRETS=("$pg_file" "$token_file")
 
   seed_phase plan loadgen_local loop-seed-plan -out "$plan"
   seed_phase push-plan put_file "$LOAD_VM" "$plan" "$work/loopseed.plan.json"
   seed_phase write on_vm_for 86400 "$LOAD_VM" "$remote" loop-seed-write \
     -plan "$work/loopseed.plan.json" -out "$work/loopseed.meta.json" -workers "$workers" "${ENDPOINTS[@]}"
   seed_phase pull-meta get_file "$LOAD_VM" "$work/loopseed.meta.json" "$RUN_DIR/loopseed.meta.json"
-  seed_phase check loadgen_local loop-seed-check -plan "$plan" -pg "$(pg_url "$(cfg .cloudsql.database dispatch)")"
-  seed_phase export loadgen_local loop-seed-export -plan "$plan" -pg "$(pg_url "$(cfg .cloudsql.database dispatch)")" -out "$seed"
+  seed_phase check loadgen_local loop-seed-check -plan "$plan" -pg-file "$pg_file"
+  seed_phase export loadgen_local loop-seed-export -plan "$plan" -pg-file "$pg_file" -out "$seed"
   seed_phase push-seed put_file "$LOAD_VM" "$seed" "$work/loopseed.seed.json"
   # The embedding gate: seed-finish with -url also waits for meaning search to embed the seed,
   # and -embed-progress records the coverage's progress while it waits (R4's "the seed is
   # complete, its embeddings included").
   seed_phase finish loadgen_local seed-finish \
-    -pg "$(pg_url "$(cfg .cloudsql.database dispatch)")" \
-    -url "$(dispatch_url)" -token "$(cfg .secrets.dispatch_token)" \
+    -pg-file "$pg_file" \
+    -url "$(dispatch_url)" -token-file "$token_file" \
     -embed-timeout "$embed_timeout" -embed-progress "$RUN_DIR/seedfinish.embed.json"
   # The template the reset copies from: Dispatch and the listeners hold connections to the
   # database, so they stop before the rename, as cluster.sh's seed_run does.
   seed_phase template seed_template "$template"
+  seed_cleanup
+  trap - EXIT
 
   jq -n --arg at "$(utc_now)" --argjson seconds "$(elapsed_since "$t0")" --arg template "$template" \
     --argjson phases "$(jq -s . "$RUN_DIR/seed.phases.jsonl")" \
@@ -1923,7 +1984,11 @@ cmd_down() {
     role=${CONTAINERS[i]%% *}
     container_stop "$role"
   done
-  note "down done: every container of run $RUN is stopped. The machines and the Cloud SQL instance are left as they are: dispatch://INFRA-1051's merge removes them."
+  # Nothing of the deployment reads them again, and they outlive it otherwise: the run's
+  # directory on the load machine holds the agent token, the listener token, the Postgres URL
+  # with its password and the embedder's key, each mode 600 but on a disk that stays.
+  remote_secrets_remove
+  note "down done: every container of run $RUN is stopped and the run's credential files are gone from the $LOAD_VM VM. The machines and the Cloud SQL instance are left as they are: dispatch://INFRA-1051's merge removes them."
 }
 
 main() {

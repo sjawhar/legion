@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -380,5 +383,62 @@ func TestLoopSeedCheckNamesARehearsal(t *testing.T) {
 	printLoopCheck(&whole, lines, 0)
 	if strings.Contains(whole.String(), "rehearsal") {
 		t.Errorf("a whole plan's verdict names a rehearsal:\n%s", whole.String())
+	}
+}
+
+// loopSeedCheckResolve parses args as `loadgen loop-seed-check` parses them and resolves the
+// flags, so a test reads what a command line resolves to without a database to connect to.
+func loopSeedCheckResolve(t *testing.T, args ...string) (loopSeedCheckFlags, error) {
+	t.Helper()
+	fs := flag.NewFlagSet("loop-seed-check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var f loopSeedCheckFlags
+	f.register(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("loop-seed-check %q: %v", args, err)
+	}
+	return f, f.resolve()
+}
+
+// TestLoopSeedCheckReadsItsPostgresURLFromAFile: this phase runs on the pod that drives the
+// deployment, so a -pg value is an argument anything that can list processes there reads for as
+// long as the check runs (dispatch://INFRA-988). The file's content with its trailing white
+// space trimmed is the URL, and the four refusals are the ones every credential of this package
+// is read with (readCredentials).
+func TestLoopSeedCheckReadsItsPostgresURLFromAFile(t *testing.T) {
+	isolatePG(t)
+	const pg = "postgres://dispatch:pg-secret@10.139.0.3:5432/dispatch?sslmode=require"
+	// The file ends in white space, as one written with printf does (vm/vm.sh writes it under
+	// the run's own directory).
+	path := credentialFileAt(t, "pg-url", pg+"\n")
+	f, err := loopSeedCheckResolve(t, "-plan", "loopseed.plan.json", "-pg-file", path)
+	if err != nil {
+		t.Fatalf("-pg-file was refused: %v", err)
+	}
+	if f.pg != pg {
+		t.Errorf("-pg is %q, want the file's content with its trailing white space trimmed", redactPG(f.pg))
+	}
+
+	_, err = loopSeedCheckResolve(t, "-plan", "loopseed.plan.json", "-pg", pg, "-pg-file", path)
+	var both *bothCredentialFormsError
+	if !errors.As(err, &both) || both.Flag != "-pg" || both.FileFlag != "-pg-file" {
+		t.Errorf("-pg given with -pg-file too: refusal %v, want one naming the two forms", err)
+	}
+
+	// A file that cannot be read, and one that holds no credential: each refused by the flag and
+	// the path, before the first connection.
+	absent := filepath.Join(t.TempDir(), "absent-pg")
+	for _, bad := range []string{absent, credentialFileAt(t, "empty-pg", "\n")} {
+		_, err := loopSeedCheckResolve(t, "-plan", "loopseed.plan.json", "-pg-file", bad)
+		if err == nil || !strings.Contains(err.Error(), "-pg-file") || !strings.Contains(err.Error(), bad) {
+			t.Errorf("-pg-file %s: refusal %v, want one naming the flag and the path", bad, err)
+		}
+	}
+
+	// Neither form: refused naming both, so a caller that gave no credential reads which flags
+	// it has.
+	if _, err := loopSeedCheckResolve(t, "-plan", "loopseed.plan.json"); err == nil ||
+		!strings.Contains(err.Error(), "-pg (or -pg-file)") {
+		t.Errorf("no -pg and no -pg-file: refusal %v, want one naming both forms", err)
 	}
 }

@@ -514,40 +514,67 @@ func (ls *loopSeed) statusTerm(r *rand.Rand) string {
 
 // --- the subcommand --------------------------------------------------------------------------
 
+// loopSeedExportFlags are loop-seed-export's own flags. The Postgres URL carries the database's
+// password, so it has the file form every credential of this package has (readCredentials):
+// vm/vm.sh runs this phase on the pod that drives the deployment, where a value would be an
+// argument anything that can list processes reads.
+type loopSeedExportFlags struct {
+	plan, pg, pgFile, out string
+	threads               int
+}
+
+func (f *loopSeedExportFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&f.plan, "plan", "", "the plan the seed was written from (loopseed.plan.json)")
+	fs.StringVar(&f.pg, "pg", "", "direct Postgres URL of the database loadtest.loop_ids was written to")
+	fs.StringVar(&f.pgFile, "pg-file", "", "file holding the -pg value, so no password reaches the command line")
+	fs.StringVar(&f.out, "out", "", "the loop seed's path (default $LOADTEST_ROOT/"+loopSeedFileName+")")
+	fs.IntVar(&f.threads, "threads-per-proposal", loopThreadSample, "open and resolved thread ids recorded per proposal")
+}
+
+// resolve reads the credential file, judges every value and fills -out's default, before the
+// first connection.
+func (f *loopSeedExportFlags) resolve() error {
+	if err := readCredentials(credentialFile{"-pg", "-pg-file", f.pgFile, &f.pg}); err != nil {
+		return err
+	}
+	if f.plan == "" || f.pg == "" {
+		return fmt.Errorf("-plan and -pg (or -pg-file) are required")
+	}
+	if _, ok := parsePG(f.pg); !ok {
+		return fmt.Errorf("-pg %s is not a Postgres URL", redactPG(f.pg))
+	}
+	if f.threads < 1 {
+		return fmt.Errorf("-threads-per-proposal must be at least 1")
+	}
+	if f.out == "" {
+		f.out = filepath.Join(loadtestRoot(), loopSeedFileName)
+	}
+	return nil
+}
+
 // runLoopSeedExport writes what a run needs to drive a written loop seed: the id map joined to the
 // plan it was written from.
 func runLoopSeedExport(args []string) error {
 	fs := flag.NewFlagSet("loop-seed-export", flag.ExitOnError)
-	plan := fs.String("plan", "", "the plan the seed was written from (loopseed.plan.json)")
-	pg := fs.String("pg", "", "direct Postgres URL of the database loadtest.loop_ids was written to")
-	out := fs.String("out", "", "the loop seed's path (default $LOADTEST_ROOT/"+loopSeedFileName+")")
-	threads := fs.Int("threads-per-proposal", loopThreadSample, "open and resolved thread ids recorded per proposal")
+	var f loopSeedExportFlags
+	f.register(fs)
 	_ = fs.Parse(args)
 
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if *plan == "" || *pg == "" {
-		return fmt.Errorf("-plan and -pg are required")
+	if err := f.resolve(); err != nil {
+		return err
 	}
-	if _, ok := parsePG(*pg); !ok {
-		return fmt.Errorf("-pg %s is not a Postgres URL", redactPG(*pg))
-	}
-	if *threads < 1 {
-		return fmt.Errorf("-threads-per-proposal must be at least 1")
-	}
-	if *out == "" {
-		*out = filepath.Join(loadtestRoot(), loopSeedFileName)
-	}
-	p, err := readLoopPlan(*plan)
+	p, err := readLoopPlan(f.plan)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(f.out), 0o755); err != nil {
 		return err
 	}
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, *pg)
+	conn, err := pgx.Connect(ctx, f.pg)
 	if err != nil {
 		return err
 	}
@@ -556,14 +583,14 @@ func runLoopSeedExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	ls, err := buildLoopSeed(*plan, p, ids, *threads)
+	ls, err := buildLoopSeed(f.plan, p, ids, f.threads)
 	if err != nil {
 		return err
 	}
 	lg := log.New(os.Stderr, "loadgen loop-seed-export: ", 0)
-	writeJSONFile(*out, ls, 0o644, lg)
+	writeJSONFile(f.out, ls, 0o644, lg)
 	lg.Printf("%d proposals of project %s, %d id-map rows, missing %s: %s",
-		len(ls.Proposals), ls.Project, len(ids), ls.Missing.summary(), *out)
+		len(ls.Proposals), ls.Project, len(ids), ls.Missing.summary(), f.out)
 	return nil
 }
 

@@ -584,9 +584,10 @@ the last two read Postgres directly.
 packages/envoy/loadtest/stack.sh loadgen loop-seed-plan -out $LOADTEST_ROOT/loopseed.plan.json [-seed 1] [-rehearsal <n>]
 packages/envoy/loadtest/stack.sh loadgen loop-seed-write -plan $LOADTEST_ROOT/loopseed.plan.json \
   -out $LOADTEST_ROOT/loopseed.meta.json [-project LOOP] [-workers 8]
-packages/envoy/loadtest/stack.sh loadgen loop-seed-check -plan $LOADTEST_ROOT/loopseed.plan.json -pg <postgres url>
-packages/envoy/loadtest/stack.sh loadgen loop-seed-export -plan $LOADTEST_ROOT/loopseed.plan.json -pg <postgres url> \
-  -out $LOADTEST_ROOT/loopseed.seed.json
+packages/envoy/loadtest/stack.sh loadgen loop-seed-check -plan $LOADTEST_ROOT/loopseed.plan.json \
+  (-pg <postgres url> | -pg-file <path>)
+packages/envoy/loadtest/stack.sh loadgen loop-seed-export -plan $LOADTEST_ROOT/loopseed.plan.json \
+  (-pg <postgres url> | -pg-file <path>) -out $LOADTEST_ROOT/loopseed.seed.json
 ```
 
 1. **`loop-seed-plan`** turns the source file into the plan of the records a deployment must hold
@@ -669,8 +670,8 @@ A step that starts the moment the seed ends would measure a deployment still emb
 fixture, and a meaning search over it would rank a fraction of the seed. So `seed-finish` waits:
 
 ```bash
-packages/envoy/loadtest/stack.sh loadgen seed-finish -pg <postgres url> \
-  -url <dispatch url> -token <bearer> [-embed-timeout 8h] [-embed-progress <path>]
+packages/envoy/loadtest/stack.sh loadgen seed-finish (-pg <postgres url> | -pg-file <path>) \
+  -url <dispatch url> (-token <bearer> | -token-file <path>) [-embed-timeout 8h] [-embed-progress <path>]
 ```
 
 Without `-url`, `seed-finish` does what it always did (The seed, above) and says that it is not
@@ -694,8 +695,8 @@ It refuses rather than waits wherever waiting cannot help:
 resource:
 
 ```bash
-packages/envoy/loadtest/stack.sh loadgen stub-embed -key <api-key> [-listen 127.0.0.1:8443] \
-  [-cert-out $LOADTEST_ROOT/stub-embed.pem] [-host <name or address>] [-throttle-every 0]
+packages/envoy/loadtest/stack.sh loadgen stub-embed (-key <api-key> | -key-file <path>) \
+  [-listen 127.0.0.1:8443] [-cert-out $LOADTEST_ROOT/stub-embed.pem] [-host <name or address>] [-throttle-every 0]
 ```
 
 Dispatch's own client is the contract (`internal/dispatch/embed/azure.go`): the stub serves the
@@ -1939,16 +1940,19 @@ is given. The guard stops a mistaken target before the first write:
    as pgx checks it) or that pgx's own parser (`pgconn.ParseConfig`) refuses. Each is refused by
    its name and the reason alone, never the value or pgx's error, since an error that printed the
    value would print its credentials.
-2. The three flags that carry a secret have a file form: `-token-file`, `-listener-token-file`
-   and `-pg-file`. The file's content, with its trailing white space trimmed, is the value, so a
-   file written with a final newline carries the credential itself. Either form satisfies
-   `-allow-foreign`. A credential given in both forms is refused, naming the two flags; a file
-   that cannot be read, or that holds nothing, is refused by the flag and the path, before any
-   connection. Give the file form wherever the caller can write a file of mode 600: every
-   argument of every process is readable by anything that can list processes (`ps -eo args`),
-   here and on any machine an `ssh` carries the command to. `vm.sh` gives all three
-   (Running on the deployment, below); the local stack and `cluster.sh` give the values, which
-   never leave the pod.
+2. Every flag that carries a secret has a file form, here and in the four commands that take a
+   credential of their own: the guard's `-token-file`, `-listener-token-file` and `-pg-file`,
+   `loop-seed-check`'s and `loop-seed-export`'s `-pg-file`, `seed-finish`'s `-pg-file` and
+   `-token-file`, and `stub-embed`'s `-key-file`. One reader serves them all
+   (`readCredentials`), so each reads the same way: the file's content, with its trailing white
+   space trimmed, is the value, so a file written with a final newline carries the credential
+   itself. Either form satisfies `-allow-foreign`. A credential given in both forms is refused,
+   naming the two flags; a file that cannot be read, or that holds nothing, is refused by the
+   flag and the path, before any connection. Give the file form wherever the caller can write a
+   file of mode 600: every argument of every process is readable by anything that can list
+   processes (`ps -eo args`), here and on any machine an `ssh` carries the command to. `vm.sh`
+   gives every one of them (Running on the deployment, below); the local stack and `cluster.sh`
+   give the values, which never leave the pod.
 3. Before its first write, `loadgen` checks:
    - NATS `/varz` `server_name` is the stack name.
    - Dispatch answers `GET /api/v1/projects` with the stack's random agent token.
@@ -2776,7 +2780,7 @@ directory is `${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>`, on th
 | `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), `loadgen run` at FACTOR, the profiles fetched from the machine Dispatch runs on, then `cgroup-merge`, `cloudsql-cpu` and `tables`. |
 | `series --config FILE [--run ID] [--duration 10m] [--long 60m] [--long-warmup 5m]` | The baseline, 1x and 2x at `--long` after a `--long-warmup` warm-up, then the grid 3, 4, 6, 8, 12, 16 and 20 at `--duration`, stopping at the first failing step, then the refinement `loadgen curves` asks for until `refine.txt` is empty. |
 | `collect --config FILE [--run ID]` | `loadgen curves -series loop` over the run's steps, in the order they ran, into `<run>/curves`. |
-| `down --config FILE [--run ID]` | Stops every container and the stub embedder. The machines and the instance are left alone. |
+| `down --config FILE [--run ID]` | Stops every container and the stub embedder, and removes the run's credential files from the load machine. The machines and the instance are left alone. |
 
 ```bash
 packages/envoy/loadtest/vm/vm.sh up --config <deployment file>
@@ -2862,24 +2866,25 @@ of every process, so a credential of the deployment is not one:
   written over `ssh`'s standard input and given to `docker run` as `--env-file`, so Dispatch's
   `DATABASE_URL`, its agent token, the listener token and the embedder's key are no arguments of
   `docker`.
-- **`loadgen`'s three credentials** — the Dispatch agent token, the listener token and the
-  Postgres URL with its password — go in three files of mode 600 under the run's own directory on
-  the load machine, `<paths.remote_work>/runs/<run id>`, written the same way; `loop-seed-write`
-  and `loadgen run` are given `-token-file`, `-listener-token-file` and `-pg-file` (The guard,
-  above). The endpoint flags that are addresses alone stay on the command line.
+- **The credentials of the commands that run on the load machine** — the Dispatch agent token,
+  the listener token, the Postgres URL with its password and the embedder's api-key — go in
+  files of mode 600 under the run's own directory there, `<paths.remote_work>/runs/<run id>`,
+  written the same way; `loop-seed-write` and `loadgen run` are given `-token-file`,
+  `-listener-token-file` and `-pg-file`, and the stub embedder `-key-file` (The guard, above).
+  The endpoint flags that are addresses alone stay on the command line.
+- **The credentials of the seed's phases that run on this pod** — `loop-seed-check`,
+  `loop-seed-export` and `seed-finish` — go in files of mode 600 under the run's directory
+  here, given as `-pg-file` and, for the embedding gate, `-token-file`. Each is removed when the
+  seed ends, whatever ends it, so the run directory this pod keeps holds no credential.
 - **`psql`** is given the instance's URL without its password and reads the password from a
   passfile of mode 600, written under the run directory for that one call and removed with it.
 - **The minted OS Login token** reaches `curl` on its standard input (above).
 
-Two credentials are arguments all the same, and both want a file form of a `loadgen` command this
-issue did not give one:
-
-- `loadgen stub-embed` takes the embedder's api-key as `-key`, so that key is an argument of the
-  stub embedder on the load machine and of the `ssh` that starts it;
-- the seed's phases that run on this pod — `loop-seed-check`, `loop-seed-export` and
-  `seed-finish` — take `-pg`, and `seed-finish` `-token`, each a flag of its own command rather
-  than the guard's, so for the length of a phase the Postgres URL is an argument on this pod. The
-  phase that runs on the load machine, `loop-seed-write`, is the guard's and takes the files.
+No credential of the deployment is an argument anywhere, on either machine. `down` removes the
+run's own directory from the load machine with every credential file in it, and says so: a
+deployment that is turned off should leave no token, no api-key and no database password on a
+disk that outlives it. The containers' environment files are their machines' own and stay with
+them, as the machines and the instance do (`dispatch://INFRA-1051`'s merge removes those).
 
 ### The deployment file
 

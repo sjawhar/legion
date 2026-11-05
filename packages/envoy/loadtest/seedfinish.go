@@ -116,59 +116,93 @@ type seedFinisher struct {
 	lg                      *log.Logger
 }
 
+// seedFinishFlags are seed-finish's own flags. Two of them carry a secret -- the Postgres URL
+// with its password and the Dispatch agent bearer -- so each has the file form every credential
+// of this package has (readCredentials): vm/vm.sh runs this phase on the pod that drives the
+// deployment, where a value would be an argument anything that can list processes reads.
+type seedFinishFlags struct {
+	pg, pgFile            string
+	url, token, tokenFile string
+	timeout, embedTimeout time.Duration
+	embedProgress         string
+}
+
+func (f *seedFinishFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&f.pg, "pg", "", "direct Postgres URL of the seeded dispatch database (required, or -pg-file)")
+	fs.StringVar(&f.pgFile, "pg-file", "", "file holding the -pg value, so no password reaches the command line")
+	fs.DurationVar(&f.timeout, "timeout", 15*time.Minute, "how long each wait on a Postgres count may take before it fails")
+	fs.StringVar(&f.url, "url", "", "Dispatch base URL; with it, seed-finish also waits for meaning search to embed the seed")
+	fs.StringVar(&f.token, "token", "", "Dispatch agent bearer, required with -url (or -token-file)")
+	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the -token value, so no token reaches the command line")
+	fs.DurationVar(&f.embedTimeout, "embed-timeout", seedEmbedTimeout, "how long the wait for meaning search may take before it fails")
+	fs.StringVar(&f.embedProgress, "embed-progress", "", "where that wait's poll record is written (default $LOADTEST_ROOT/seedfinish.embed.json)")
+}
+
+// resolve reads the credential files, judges every value and fills -embed-progress's default,
+// before the first connection.
+func (f *seedFinishFlags) resolve() error {
+	if err := readCredentials(
+		credentialFile{"-pg", "-pg-file", f.pgFile, &f.pg},
+		credentialFile{"-token", "-token-file", f.tokenFile, &f.token},
+	); err != nil {
+		return err
+	}
+	switch {
+	case f.pg == "":
+		return fmt.Errorf("-pg or -pg-file is required")
+	case f.timeout <= 0:
+		return fmt.Errorf("-timeout must be more than 0, not %s", f.timeout)
+	case f.embedTimeout <= 0:
+		return fmt.Errorf("-embed-timeout must be more than 0, not %s", f.embedTimeout)
+	case f.url == "" && f.token != "":
+		return fmt.Errorf("-token names no deployment to read: it needs -url")
+	case f.url != "" && f.token == "":
+		return fmt.Errorf("-token or -token-file is required with -url: the coverage report takes the deployment's agent bearer")
+	}
+	if f.url != "" {
+		u, err := url.Parse(f.url)
+		if err != nil || !u.IsAbs() || u.Host == "" {
+			return fmt.Errorf("-url %q is not an absolute URL with a host", f.url)
+		}
+	}
+	if f.embedProgress == "" {
+		f.embedProgress = filepath.Join(loadtestRoot(), "seedfinish.embed.json")
+	}
+	return nil
+}
+
 func runSeedFinish(args []string) error {
 	fs := flag.NewFlagSet("seed-finish", flag.ExitOnError)
-	pg := fs.String("pg", "", "direct Postgres URL of the seeded dispatch database (required)")
-	timeout := fs.Duration("timeout", 15*time.Minute, "how long each wait on a Postgres count may take before it fails")
-	dispatchURL := fs.String("url", "", "Dispatch base URL; with it, seed-finish also waits for meaning search to embed the seed")
-	token := fs.String("token", "", "Dispatch agent bearer, required with -url")
-	embedTimeout := fs.Duration("embed-timeout", seedEmbedTimeout, "how long the wait for meaning search may take before it fails")
-	embedProgress := fs.String("embed-progress", "", "where that wait's poll record is written (default $LOADTEST_ROOT/seedfinish.embed.json)")
+	var f seedFinishFlags
+	f.register(fs)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: loadgen seed-finish -pg <postgres url> [-timeout 15m] [-url <dispatch url> -token <bearer> [-embed-timeout 8h] [-embed-progress <path>]]")
+		fmt.Fprintln(fs.Output(), "usage: loadgen seed-finish (-pg <postgres url> | -pg-file <path>) [-timeout 15m] [-url <dispatch url> (-token <bearer> | -token-file <path>) [-embed-timeout 8h] [-embed-progress <path>]]")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
-	switch {
-	case fs.NArg() > 0:
+	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
-	case *pg == "":
-		return fmt.Errorf("-pg is required")
-	case *timeout <= 0:
-		return fmt.Errorf("-timeout must be more than 0, not %s", *timeout)
-	case *embedTimeout <= 0:
-		return fmt.Errorf("-embed-timeout must be more than 0, not %s", *embedTimeout)
-	case *dispatchURL == "" && *token != "":
-		return fmt.Errorf("-token names no deployment to read: it needs -url")
-	case *dispatchURL != "" && *token == "":
-		return fmt.Errorf("-token is required with -url: the coverage report takes the deployment's agent bearer")
 	}
-	if *dispatchURL != "" {
-		u, err := url.Parse(*dispatchURL)
-		if err != nil || !u.IsAbs() || u.Host == "" {
-			return fmt.Errorf("-url %q is not an absolute URL with a host", *dispatchURL)
-		}
-	}
-	if *embedProgress == "" {
-		*embedProgress = filepath.Join(loadtestRoot(), "seedfinish.embed.json")
+	if err := f.resolve(); err != nil {
+		return err
 	}
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, *pg)
+	conn, err := pgx.Connect(ctx, f.pg)
 	if err != nil {
 		return fmt.Errorf("connect to -pg: %w", err)
 	}
 	defer conn.Close(context.Background())
-	f := seedFinisher{
-		timeout: *timeout, poll: seedFinishPoll,
-		embedTimeout: *embedTimeout, embedPoll: seedEmbedPoll, embedProgress: *embedProgress,
+	fin := seedFinisher{
+		timeout: f.timeout, poll: seedFinishPoll,
+		embedTimeout: f.embedTimeout, embedPoll: seedEmbedPoll, embedProgress: f.embedProgress,
 		now:   time.Now,
 		sleep: func(ctx context.Context, d time.Duration) bool { return sleepUntil(ctx, time.Now().Add(d)) },
 		lg:    log.New(os.Stderr, "loadgen seed-finish: ", 0),
 	}
-	if *dispatchURL != "" {
-		f.coverage = dispatchCoverage{a: newAPI(*dispatchURL, *token, 2)}
+	if f.url != "" {
+		fin.coverage = dispatchCoverage{a: newAPI(f.url, f.token, 2)}
 	}
-	return f.finish(ctx, conn)
+	return fin.finish(ctx, conn)
 }
 
 // finish waits until the outbox has published every seed event, then, when the build has the
