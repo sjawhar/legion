@@ -17,9 +17,9 @@ import (
 // the read answers the same document either way.
 //
 // ygo makes that a no-op. A struct whose end is at or below the clock the document already holds
-// for its client is skipped rather than integrated again (sjawhar/ygo v1.55.1-sami.1,
+// for its client is skipped rather than integrated again (sjawhar/ygo v1.55.1-sami.2,
 // crdt/update.go:914-924, integrateGroup), and an item the document has already deleted is passed
-// over by the delete cascade (crdt/item.go:500-505, Item.delete). The test guards the first skip
+// over by the delete cascade (crdt/item.go:505-510, Item.delete). The test guards the first skip
 // alone: with update.go's skip defeated the second apply fails during integration, while with
 // item.go's skip defeated it still passes, so it does not show that the delete-side skip is needed.
 //

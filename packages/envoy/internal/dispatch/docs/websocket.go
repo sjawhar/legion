@@ -95,13 +95,13 @@ type servicePersistenceAdapter struct {
 // from being born behind the head.
 //
 // Nothing of ygo's own runs between this read and the hook it calls next: there is no decode of
-// what this returns (sjawhar/ygo v1.55.1-sami.1, provider/websocket/server.go:2006-2011), and the
+// what this returns (sjawhar/ygo v1.55.1-sami.2, provider/websocket/server.go:2013-2018), and the
 // only way a load fails with nothing of this service still to run on its goroutine is a panic out
 // of this read. Every way the read ends short is therefore failed here, on the load's own
 // goroutine and before ygo closes the room's barrier: the store's refusal, a stored history whose
 // header declares more items than one update may hold (loadableHistory), and a panic out of any
 // of it, recovered here as the hook recovers its own (bootstrapLoadedState, foldDocument). ygo
-// recovers such a panic too and hands every waiter the load's error (server.go:1997-2016), but it
+// recovers such a panic too and hands every waiter the load's error (server.go:2004-2023), but it
 // does so with the record this load began still standing under the room's name and the room
 // healthy, which left the failure to whichever caller's Apply met it - a caller that cannot tell
 // the load it waited on from the load that began after it, since ygo removes the room before any
@@ -634,8 +634,8 @@ func (s *Service) refuseIfRebuilding(room string) error {
 // allowInject decides whether ygo may apply an injection to a room. Its issue read goes
 // through the shared pool for a caller that need hold no connection of its own (the
 // settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
-// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.55.1-sami.1,
-// provider/websocket/inject.go:324-333): an injection refused here has published no room
+// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.55.1-sami.2,
+// provider/websocket/inject.go:319-328): an injection refused here has published no room
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
@@ -683,7 +683,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// the load's own failure, and it fails the room so the next access reloads rather than meeting
 	// a half-loaded document. ygo loads one room at a time under a name - the goroutine that
 	// created the placeholder owns the load and every other caller for that name waits on its
-	// ready barrier (sjawhar/ygo v1.55.1-sami.1, provider/websocket/server.go:1744-1764) - and
+	// ready barrier (sjawhar/ygo v1.55.1-sami.2, provider/websocket/server.go:1744-1764) - and
 	// this runs on that load's own goroutine, so the record read here is this load's own
 	// (sjawhar/legion#2519).
 	load, held := s.roomLoads.Load(room)
@@ -695,8 +695,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The state is taken off the load's record first, so a load refused below leaves none held.
 	stored := s.takeLoadedState(room)
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
-	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.55.1-sami.1,
-	// provider/websocket/inject.go:568-576) and closes the channel awaitRoomRecovery waits on
+	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.55.1-sami.2,
+	// provider/websocket/inject.go:587-599) and closes the channel awaitRoomRecovery waits on
 	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
 	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
 	// both loaders that reach this one carry context.Background(), the settlement warm-up
@@ -745,7 +745,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
-	// returns (sjawhar/ygo v1.55.1-sami.1, provider/websocket/server.go:1896-1987: loadRoom closes
+	// returns (sjawhar/ygo v1.55.1-sami.2, provider/websocket/server.go:1903-1994: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it. Its
 	// rendering, with the layout recorded with it, goes to the room's replica (keepReplica, below),
 	// whose first run takes it as its base's: nothing from here to OpenUpdateLog hands the document

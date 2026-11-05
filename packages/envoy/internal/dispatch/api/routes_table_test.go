@@ -109,7 +109,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 159
+	const registeredRoutes = 162
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -350,6 +350,12 @@ func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
 		"POST /api/v1/credential-grants/{id}/revoke",
 		"GET /api/v1/machine-logins",
 		"POST /api/v1/machine-logins/{id}/revoke",
+		// The sign-in rows and the capabilities read are this change's own, and are the
+		// browser's alone for the reason the credential rows above them are: each names the
+		// calling person, whom Dispatch takes from the credential and never from the request.
+		"GET /api/v1/signins",
+		"POST /api/v1/signins/{id}/revoke",
+		"GET /api/v1/credentials/capabilities",
 		"POST /api/v1/agents/{session_id}/stream/_test/publish",
 		// The scope edit is the one route that was no row at all before INFRA-1017: it is the
 		// person's own, as the mint and the revoke beside it are.

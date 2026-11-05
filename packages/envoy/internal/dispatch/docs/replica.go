@@ -15,7 +15,7 @@ import (
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.55.1-sami.1, crdt/doc.go, transactInternal), and a walk of the live tree
+// lock (sjawhar/ygo v1.55.1-sami.2, crdt/doc.go, transactInternal), and a walk of the live tree
 // takes no lock (crdt/yxml.go), so a render or read of the live tree can walk it while another
 // transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
 // false WARN and counts the update as a content change. Only a holder of mu writes or walks the
@@ -476,7 +476,7 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 //
 //   - base is the room's whole state as of just before the first transaction to run on it after
 //     its log opened: ygo encodes it under the document's lock before that transaction's fn runs,
-//     for each open log still waiting for one (sjawhar/ygo v1.55.1-sami.1, crdt/update_log.go,
+//     for each open log still waiting for one (sjawhar/ygo v1.55.1-sami.2, crdt/update_log.go,
 //     OpenUpdateLog and recordUpdateLogBases; crdt/doc.go, transactInternal), and only a
 //     transaction changes the state, so base is the state the log opened on;
 //   - the load renders the room's tree before it opens the log (onLoadDocument), and nothing

@@ -28,7 +28,7 @@ import (
 //
 // ygo closes no room a caller is inside - a Server.Apply, a relay Inject, or a browser's join
 // before its peer registers - and answers websocket.ErrRoomInUse instead (sjawhar/ygo
-// v1.55.1-sami.1, reearth/ygo#342). So a close from outside the room waits for those callers to
+// v1.55.1-sami.2, reearth/ygo#342). So a close from outside the room waits for those callers to
 // leave (closeWhenFree), and the one close the service makes from inside its own Apply on the
 // room (closeInstance) is ygo's CloseRoomWithin.
 type roomServer struct {

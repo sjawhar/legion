@@ -17,6 +17,7 @@ import {
 } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
+import { bearerCredential } from "../bearer";
 import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
@@ -78,7 +79,12 @@ function repoExec(repo: string): ExecFn {
   };
 }
 
-const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+const config = {
+  enabled: true,
+  url: "http://dispatch.test",
+  credential: bearerCredential("secret"),
+  error: null,
+};
 const releaseQuestion = "The release is ready. How should we proceed?";
 const changedReleaseQuestion =
   "The change is ready but needs a release decision. How should we proceed?";
@@ -4215,6 +4221,36 @@ describe("executeDispatchTool", () => {
     expect(result.text).not.toContain("which is not this host session");
   });
 
+  // A token that names a service and no person is refused every Dispatch write with
+  // SIGN_IN_REQUIRED, whose message names `agent-secrets login`. whoami is where a person asks
+  // what their credential may do, so its sentence for that caller must not describe the issue
+  // creation the server refuses, and must name the command that gets them a write.
+  test("dispatch_whoami tells a service-only caller its writes need a sign-in", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: null,
+        service: "example-fleet",
+        session: "session-1",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.text).toContain("runs as service example-fleet");
+    expect(result.text).not.toMatch(/issues? you create/);
+    expect(result.text).toContain("agent-secrets login");
+  });
+
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const existingLink = { url: "https://ci.example/run/1", kind: "url" };
@@ -8037,6 +8073,66 @@ describe("executeDispatchTool", () => {
       expect(await moved.outcome).toStartWith("Applied 1 ops (version 5)");
       expect(moved.reads).toEqual([]);
     });
+  });
+
+  test("doc-read names the version bytes and the approval's pin and provenance", async () => {
+    const hash = "ab".repeat(32);
+    for (const state of ["approved", "stale", "changes_requested"] as const) {
+      for (const source of ["insert", "backfill", undefined] as const) {
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          if (target.pathname === "/api/v1/issues/DSP-42") {
+            return response({
+              key: "DSP-42",
+              primary_artifact_id: "artifact-42",
+              open_asks: [],
+              artifacts: [
+                {
+                  id: "artifact-42",
+                  slug: "spec",
+                  name: "spec.md",
+                  primary: true,
+                  approval: {
+                    state,
+                    latest_version: 4,
+                    version: 3,
+                    by: { kind: "user", id: "alice" },
+                    ...(source === undefined
+                      ? {}
+                      : { content_sha256: hash, content_sha256_source: source }),
+                  },
+                },
+              ],
+            });
+          }
+          if (target.pathname === "/api/v1/artifacts/artifact-42/versions/3") {
+            return response({ markdown: "# Spec", number: 3, sha256: hash });
+          }
+          if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = await executeDispatchTool({
+          tool: "dispatch_doc_read",
+          args: { issue: "DSP-42", version: 3 },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+        expect(result.text).toContain(`Content: sha256:${hash}\nApproval:`);
+        const line = result.text.split("\n").find((row) => row.startsWith("Approval:"));
+        if (source === undefined) {
+          expect(line).not.toContain("content sha256:");
+          if (state === "approved") expect(line).toBe("Approval: approved v3 by alice");
+        } else {
+          expect(line).toEndWith(
+            `, content sha256:${hash}${source === "backfill" ? " (hashed after approval)" : ""}`
+          );
+        }
+      }
+    }
   });
 
   test("dispatch_doc_read tells the agent when the document's approval went stale", async () => {
@@ -13057,7 +13153,11 @@ test("an issue document reference resolves to the document's id as the Dispatch 
       ],
     });
   };
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  const client = new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
   for (const [reference, id] of [
     ["spec", "artifact-42"],
     ["spec-md", "artifact-42"],
@@ -13096,7 +13196,11 @@ test("a reference that is one document's slug and another's filename is the slug
         },
       ],
     });
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  const client = new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
   for (const [reference, id] of [
     ["spec-v2", "artifact-v2"],
     ["spec v2", "artifact-v2"],
