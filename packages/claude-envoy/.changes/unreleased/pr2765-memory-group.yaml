@@ -1,4 +1,0 @@
-kind: Changed
-body: |-
-  The worker's MCP server declares daemon API contract 49, which adds each issue's tree memory
-  draw to the state.

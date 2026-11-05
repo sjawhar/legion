@@ -1,5 +1,17 @@
 # Changelog
 
+## [main@f06073fb9ef4] - 2026-11-05
+
+### Added
+
+- Each issue of the Legion state carries its tree's memory draw: `memoryGroup`, `memoryDrawMode`
+  and `memoryDrawnAt`, all optional. A tree no draw has reached carries none of the three, and a
+  daemon before contract 49 sends none.
+
+### Fixed
+
+- The schemas that read the Legion daemon's answers now ignore a key they do not name, at every depth, so a plugin one contract behind its daemon reads the state instead of refusing the whole body for one field the daemon added. They still refuse a body that lacks a field they require or carries one of a type they do not describe, a refusal still arrives with its stable code, and every body the plugin sends is still refused for a key its schema does not name. The gate that holds the reader to the daemon's Go wire shape is now an equality between each golden's parse and the file, which names the path of the first key the parse dropped.
+
 ## [main@804d3695e12e] - 2026-11-05
 
 ### Added
