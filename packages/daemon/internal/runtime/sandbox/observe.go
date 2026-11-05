@@ -147,7 +147,8 @@ func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error
 
 // observation is one verdict of the mapping: the runtime.Observation the caller receives, beside
 // the one classification only this package acts on. No runtime consumer reads it — the supervisor
-// reads Kind and Displaced alone — so it stays here rather than on the cross-runtime contract.
+// reads Kind, Displaced and OutOfMemory alone — so it stays here rather than on the cross-runtime
+// contract.
 type observation struct {
 	runtime.Observation
 	// initFailed is a Gone whose process never started because an init container of its pod ended

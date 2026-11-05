@@ -254,9 +254,10 @@ start() {
 	# Without it a suite that drops its own throwaway database that way fails in the pod alone,
 	# with `permission denied to terminate process` (SQLSTATE 42501), and passes in CI, whose
 	# login is a superuser. It signals a backend and nothing else: it cannot read a file, run a
-	# command or reach a database the role is not already in. The grant runs on every start, so a
-	# cluster an earlier version of this script made gets it at the next one, and repeating it
-	# changes nothing.
+	# command or reach a database the role is not already in. The grant runs on every start and
+	# repeating it changes nothing; a server already serving is never started again (ensure), so
+	# it keeps what it has, and a pod's own cluster takes the grant because its disk, made with the
+	# pod, starts empty.
 	super -d postgres -c "grant pg_signal_backend to $user" >> "$log" 2>&1 ||
 		die "grant pg_signal_backend to $user failed; $log holds its output"
 	if [ "$database" != postgres ]; then

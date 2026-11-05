@@ -639,17 +639,20 @@ something to count.
 
   Both or neither: one set without the other fails the test rather than falling back. The
   monitor port is read, not decoration — the per-test reset waits there for every client
-  connection to end. Pick ports no sibling role holds, and keep the store directory off your
-  home. Measured here: `go run …@v2.15.1 --version` prints `nats-server: v2.15.1`, and with the
-  two variables set `go test -count=1 -timeout 40m ./internal/workflow/` runs whole in the pod,
-  with no docker panic.
-- **The rest, by package**, for a named run the pod does make. The pod's Postgres has only the
-  `C`, `C.utf8` and `POSIX` locales, so its default collation is byte order, and
-  `internal/dispatch/api`'s
+  connection to end. One server serves one test binary at a time, so name one package a
+  command (or pass `-p 1`): two packages' binaries on one server delete each other's streams.
+  Pick ports no sibling role holds, and keep the store directory off your home. In your own
+  work, run the NATS-backed tests your change touches by name (`go test -run`), as the first
+  section says. Measured here, as proof of the route and not as a run to repeat:
+  `go run …@v2.15.1 --version` prints `nats-server: v2.15.1`, and with the two variables set
+  `go test -count=1 -timeout 40m ./internal/workflow/` runs whole in the pod, with no docker
+  panic.
+- **The rest, by package**, for a named run the pod does make. A Postgres unpacked from Debian
+  packages (the harness under **The worked case**) has only the `C`, `C.utf8` and `POSIX`
+  locales, so its default collation is byte order, and `internal/dispatch/api`'s
   `TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves` refuses such a database
-  by its own message; it runs in CI's `envoy-go` job, whose Postgres has `en_US.utf8`. Ten
-  minutes, `go test`'s per-package default, is short for `internal/dispatch/api` and
-  `internal/dispatch/docs` here, so give a run of either a `-timeout` of your own.
+  by its own message. The pod's own `legion-testpg` server is made with ICU `en-US`, so that
+  test runs there, as it does in CI's `envoy-go` job, whose Postgres has `en_US.utf8`.
   `internal/dispatch/pmdoc`'s browser-parity tests need `bun install` to have run for
   `@legion/proof-editor`. In the daemon's module, never export `GOWORK=off` inside
   `$LEGION_WORKSPACE`: `packages/daemon/go.mod` replaces `github.com/sjawhar/envoy => ../envoy`,
