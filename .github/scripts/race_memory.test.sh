@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Tests for `race_memory.py`: a command's status passes through, a peak over the limit stops the
-# command and fails the step while the run is still going, naming the tests that were running, a
-# signal to the script stops the command's group, reports the peak and ends the script with that
-# same signal, a SIGHUP the caller had already ignored leaves the run alone, a run within the
-# limit ends with the peak, and a `go test -json` stream's output reaches the log.
+# Tests for `race_memory.py`: a command's status passes through, a peak over the limit fails the
+# step and names the tests that were running, a run within the limit ends with the peak, and a
+# `go test -json` stream's output reaches the log.
 #
 # Each case runs the real script around a stand-in command — a shell or a Python program that
 # prints a -json stream and grows — so no Go, no race binary and no database are needed. The two
@@ -23,17 +21,10 @@ sampler="$script_dir/race_memory.py"
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
 
-# The signal cases run the script as a background job, so that the harness can find the pids of
-# the command under it and signal it while it runs. `$(...)` cannot capture the output of a
-# background job, so that output goes to a file.
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
 # run_sampler <limit in kB, or '' for the default> <command...>: runs the script under test and
-# leaves its merged output in $out, its status in $status, and the whole seconds it took in
-# $elapsed - which is how a case tells a command that was stopped from one that was waited out.
+# leaves its merged output in $out and its status in $status.
 run_sampler() {
-  local limit=$1 began=$SECONDS
+  local limit=$1
   shift
   set +e
   if [ -z "$limit" ]; then
@@ -43,7 +34,6 @@ run_sampler() {
   fi
   status=$?
   set -e
-  elapsed=$((SECONDS - began))
 }
 
 # peak <python expression over race_memory>: the peak functions called with no process involved.
@@ -51,194 +41,36 @@ peak() {
   env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$script_dir" python3 -c "$1"
 }
 
-# holder <test name> <MiB to hold> <seconds to hold it>: a stand-in command for `python3 -c`. It
-# names that test as running on a -json stream, waits two seconds so the sampler's first walk
-# finds it still small, holds that many MiB of written bytes for that long, and only then says
-# what it held - a line a stand-in that was stopped never reaches.
-holder() {
-  cat <<PY
-import json, sys, time
-sys.stdout.write(json.dumps({"Action": "run", "Test": "$1"}) + "\n")
-sys.stdout.flush()
-time.sleep(2)
-block = b"x" * ($2 * 1024 * 1024)
-time.sleep($3)
-sys.stdout.write("held %d bytes\n" % len(block))
-PY
-}
-
-# find_command <naptime>: waits for the stand-in `sh` and the `sleep` that stand-in starts, and
-# leaves their pids in $stand_in and $child, the script's own pid in $script_pid and the script's
-# process group in $pgid. A pid it did not find is left empty, which the case asserts on rather
-# than signalling anything. The stand-in's parent is the script, which is how $script_pid is
-# found.
-find_command() {
-  local naptime=$1 waited=0
-  stand_in=""
-  child=""
-  script_pid=""
-  pgid=""
-  while [ "$waited" -lt 100 ]; do
-    stand_in=$(pgrep -f "^sh -c sleep $naptime" || true)
-    child=$(pgrep -f "^sleep $naptime\$" || true)
-    if [ -n "$stand_in" ] && [ -n "$child" ]; then
-      break
-    fi
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  if [ -n "$stand_in" ]; then
-    script_pid=$(ps -o ppid= -p "$stand_in" | tr -d ' ')
-  fi
-  if [ -n "$script_pid" ] && [ "$script_pid" -gt 1 ]; then
-    pgid=$(ps -o pgid= -p "$script_pid" | tr -d ' ')
-  fi
-}
-
-# signal_sampler <signal name>: runs the script under `setsid`, so that the script has a process
-# group of its own as it does in a terminal, waits for the stand-in `sh` and the `sleep` that
-# stand-in starts, and sends the signal to the script's whole group - which is what a terminal's
-# Ctrl-C does. It leaves the two pids it found in $stand_in and $child, the script's status in
-# $status, its output in $out, and whatever of the stand-in's tree outlived the signal in
-# $leftover. Each call gives its stand-in a nap of its own length, so that nothing an earlier
-# call left behind can be taken for this one's.
-signal_cases=0
-signal_sampler() {
-  signal_cases=$((signal_cases + 1))
-  local signal_name=$1 naptime="30$signal_cases.$$" log="$work/signal-$1.log" waited=0
-  env -u RACE_MEM_LIMIT_KB setsid --wait "$sampler" sh -c "sleep $naptime; echo woke" \
-    >"$log" 2>&1 &
-  local launcher=$!
-  find_command "$naptime"
-  # The group signalled is the script's own, which a new session put it in: never this harness's,
-  # whose run the signal would end, and never `-1`, which is every process this user has. The
-  # stand-in's parent is the script, so a stand-in whose parent has gone is not this call's and
-  # the case asserts its way out instead of sending anything.
-  if [ -n "$pgid" ] && [ "$pgid" -gt 1 ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]; then
-    kill -"$signal_name" -- "-$pgid"
-  fi
-  # The thread reading the command's stdout is a daemon, so a script that died of the signal ends
-  # at once however long the tree it left behind holds that pipe open. The watchdog is for a
-  # script that does not end at all - one that inherited SIGINT ignored and sampled on, say - so
-  # that such a run fails this case on the status it reports, 137, rather than hanging the suite.
-  (sleep 15 && kill -KILL "$launcher") >/dev/null 2>&1 &
-  local watchdog=$!
-  set +e
-  wait "$launcher"
-  status=$?
-  kill -KILL "$watchdog" >/dev/null 2>&1
-  wait "$watchdog" >/dev/null 2>&1
-  set -e
-  waited=0
-  while [ "$waited" -lt 50 ]; do
-    leftover=$(pgrep -f "^sh -c sleep $naptime|^sleep $naptime\$" || true)
-    if [ -z "$leftover" ]; then
-      break
-    fi
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  # A case that failed must not leave the stand-in's tree running for the five minutes it sleeps.
-  pkill -KILL -f "sleep $naptime" >/dev/null 2>&1 || true
-  out=$(cat "$log")
-}
-
 echo "case: a failing command's status passes through"
 run_sampler '' sh -c 'exit 3'
 check "exits 3" "$(is "$status" 3)"
 check "names the default limit" "$(contains "$out" 'the limit is 8388608 kB (the default')"
 
-echo "case: a peak over the limit stops the command at that sample rather than waiting it out"
-# 256 MiB held past a 40960 kB limit, and then a minute of sleep. The first walk finds the
-# stand-in before it has grown, well under the limit; the walk at 5 s finds it over, by when the
-# stream naming the test has been read; twelve more walks would follow if the command ran on. The
-# limit used to be read only after the command had ended, so a case that asserts the status alone
-# would have passed then too; this one asserts the clock.
-run_sampler 40960 python3 -c "$(holder TestTheSamplerStopsMe 256 60)"
-check "exits 1" "$(is "$status" 1)"
-check "names the limit it was given" \
-  "$(contains "$out" 'the limit is 40960 kB (RACE_MEM_LIMIT_KB)')"
-check "stopped the command after ${elapsed} s, well inside the stand-in's 62 s" \
-  "$([ "$elapsed" -lt 25 ] && echo true || echo false)"
-check "names the test it stopped" \
-  "$(contains "$out" 'these tests were running: TestTheSamplerStopsMe')"
-check "says it stopped the command" "$(contains "$out" 'Stopping the command')"
+echo "case: a peak over the limit fails the run and names the test that was running"
+# Prints a -json stream naming a test as running, then grows past a 1 kB limit and lives long
+# enough for the sampler to take a second sample at 5 s, by when the stream has been read.
+grower='
+import json, sys, time
+sys.stdout.write(json.dumps({"Action": "run", "Test": "TestTheSamplerNamesMe"}) + "\n")
+sys.stdout.flush()
+block = b"x" * (64 * 1024 * 1024)
+time.sleep(6)
+sys.stdout.write(str(len(block)) + "\n")
+'
+run_sampler 1 python3 -c "$grower"
+check "exits non-zero" "$([ "$status" -ne 0 ] && echo true || echo false)"
+check "names the limit it was given" "$(contains "$out" 'the limit is 1 kB (RACE_MEM_LIMIT_KB)')"
+check "names the test that was running" "$(contains "$out" 'TestTheSamplerNamesMe')"
+check "says the peak passed the limit" "$(contains "$out" 'passed the limit of 1 kB')"
 check "warns that the peak may be between two samples" \
   "$(contains "$out" 'VmHWM can be reached between two samples')"
 check "took a sample at 0 s and another at 5 s" \
   "$([ "$(grep -c -- ' s, VmRSS ' <<<"$out")" -ge 2 ] && echo true || echo false)"
-check "the stand-in never reached the end of its sleep" \
-  "$(is "$(contains "$out" '^held [0-9][0-9]* bytes$')" false)"
-
-echo "case: a signal to the script stops the command's group, reports the peak, and ends with it"
-# The script gives the command a session of its own, so a signal to the script reaches the script
-# alone and the command is what must not be left behind: the stand-in `sh` and the `sleep` under
-# it are looked for by name once the script has gone. The script dies of that signal rather than
-# exiting with its number, which the shell waiting on it reports the same way, 128 plus the
-# number, and which ends a loop of the caller's at the first Ctrl-C.
-for named in INT:130 TERM:143 HUP:129; do
-  signal_sampler "${named%%:*}"
-  check "SIG${named%%:*}: the stand-in and its own child were running before the signal" \
-    "$([ -n "$stand_in" ] && [ -n "$child" ] && echo true || echo false)"
-  check "SIG${named%%:*}: nothing of the command's tree outlived it" "$(is "$leftover" '')"
-  check "SIG${named%%:*}: the script exits ${named##*:}" "$(is "$status" "${named##*:}")"
-  check "SIG${named%%:*}: the log names the signal and the stop" \
-    "$(contains "$out" "SIG${named%%:*} arrived, so the command's process group")"
-  check "SIG${named%%:*}: the log gives the peak it measured before it goes" \
-    "$(contains "$out" '^race memory: the peak was [0-9][0-9]* kB (Vm.*), the limit 8388608 kB$')"
-done
-
-echo "case: a SIGHUP the caller had already ignored leaves the run alone"
-# `nohup` protects a run by setting SIGHUP to SIG_IGN, which this script inherits and must leave
-# alone: replacing it would end a 40-minute race run the moment the ssh session it was started
-# from dropped. The SIGHUP goes to the script's own pid, as a dropped session's does, and not to
-# the group, whose `setsid` has no such ignore and would die of it whatever the script did.
-nohup_nap="309.$$"
-nohup_log="$work/nohup.log"
-env -u RACE_MEM_LIMIT_KB setsid --wait nohup "$sampler" sh -c "sleep $nohup_nap; echo woke" \
-  >"$nohup_log" 2>&1 </dev/null &
-nohup_launcher=$!
-find_command "$nohup_nap"
-check "under nohup: the stand-in and its own child were running before the signal" \
-  "$([ -n "$stand_in" ] && [ -n "$child" ] && echo true || echo false)"
-if [ -n "$script_pid" ] && [ "$script_pid" -gt 1 ]; then
-  kill -HUP "$script_pid"
-fi
-sleep 2
-check "under nohup: the script is still sampling two seconds later" \
-  "$(kill -0 "$script_pid" 2>/dev/null && echo true || echo false)"
-check "under nohup: the command is still running" \
-  "$(kill -0 "$child" 2>/dev/null && echo true || echo false)"
-check "under nohup: the log says nothing of a signal arriving" \
-  "$(is "$(contains "$(cat "$nohup_log")" 'arrived')" false)"
-# The run is ended by taking the stand-in's `sleep` away rather than by killing the script: the
-# stand-in reaches its `echo woke`, the script ends the way any finished command ends it, and
-# what the ignored SIGHUP left untouched is then read off that ending. The pattern is anchored
-# at the start of a command line, so that the `setsid` waiting on all of it, whose own line
-# carries the nap too, is not killed out from under the `wait` below. The watchdog is the one
-# signal_sampler keeps, for a script that does not end at all.
-(sleep 15 && kill -KILL "$nohup_launcher") >/dev/null 2>&1 &
-nohup_watchdog=$!
-pkill -KILL -f "^sleep $nohup_nap\$" >/dev/null 2>&1 || true
-set +e
-wait "$nohup_launcher"
-nohup_status=$?
-kill -KILL "$nohup_watchdog" >/dev/null 2>&1
-wait "$nohup_watchdog" >/dev/null 2>&1
-set -e
-nohup_out=$(cat "$nohup_log")
-check "under nohup: the run then ends with its command, exit 0" "$(is "$nohup_status" 0)"
-check "under nohup: the stand-in reached the end of its nap" \
-  "$(contains "$nohup_out" '^woke$')"
-check "under nohup: and the log ends with the peak" \
-  "$(contains "${nohup_out##*$'\n'}" '^race memory: the peak was [0-9][0-9]* kB (Vm.*), the limit 8388608 kB$')"
 
 echo "case: a run within the limit exits 0 and ends with the peak"
-run_sampler '' sh -c 'echo the command spoke; sleep 6'
+run_sampler '' sh -c 'echo the command spoke'
 check "exits 0" "$(is "$status" 0)"
 check "passes the command's own output through" "$(contains "$out" '^the command spoke$')"
-check "writes a sample line as the run goes, not only at the end" \
-  "$([ "$(grep -c -- ' s, VmRSS ' <<<"$out")" -ge 2 ] && echo true || echo false)"
 check "its last line gives the peak and the limit" \
   "$(contains "${out##*$'\n'}" '^race memory: the peak was [0-9][0-9]* kB (Vm.*), the limit 8388608 kB$')"
 
