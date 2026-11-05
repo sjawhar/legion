@@ -271,8 +271,8 @@ type dismissedScaleHeld struct {
 // dismissed thread, which is what a14 asks of it, and no read linear in a count that grows 167x
 // is within 2x of itself. Measured at 1.96x, 2.10x, 2.10x and 2.57x over four runs. What holds it
 // instead is a p95 of 50 ms: a read that grows with the pile fails that long before it reaches
-// the 250 ms every other read carries, and the shape this change replaced - which asked each
-// dismissed thread its own question - was already at 69 ms with a tenth of this pile.
+// the 250 ms every other read carries, since the shape this change replaced - which asked each
+// dismissed thread its own question - measured 681 ms here (verification.md v17).
 func dismissedScaleBounds() []dismissedScaleHeld {
 	return []dismissedScaleHeld{
 		{"state=inbox", dismissedScaleTimeBound, "state=inbox", "no dismissed", dismissedScaleRatioBound},
