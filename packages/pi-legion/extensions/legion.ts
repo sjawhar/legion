@@ -3,14 +3,18 @@ import path from "node:path";
 import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import {
-  sessionDirectory as dispatchSessionDirectory,
-  writeSessionTitle,
-} from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
-import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionEnvoySettings,
+} from "@legion/envoy-client/session-settings";
+import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
-import { findHandoffCommit } from "@legion/pi-shared/handoff-commit";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
+import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -18,8 +22,25 @@ import {
   LEGION_PLUGIN_LOADED_KEY,
   readEnvoyPluginInterface,
 } from "@legion/pi-shared/interface";
+import { createPhaseReminder, type EnvoyPublish } from "@legion/pi-shared/phase-reminder";
+import {
+  assistantRanTool,
+  assistantText,
+  inboundKind,
+  PHASE_STALL_ENTRY,
+  restorePhaseStallEntry,
+} from "@legion/pi-shared/phase-stall";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
+import {
+  asyncJobKinds,
+  type SessionActivityReport,
+  sameSessionActivity,
+  sessionActivity,
+  sessionActivityRequest,
+} from "@legion/pi-shared/session-activity";
+import { stallLimits } from "@legion/pi-shared/stall-limits";
+import { clearStartupTurn } from "@legion/pi-shared/startup-turn";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -30,15 +51,6 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
-import {
-  assistantText,
-  inboundKind,
-  PHASE_STALL_ENTRY,
-  type PhaseStall,
-  type PhaseStallInput,
-  restorePhaseStall,
-  stepPhaseStall,
-} from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
@@ -129,23 +141,116 @@ export default function legionExtension(pi: PiApi): void {
   // answer is kept, so it runs once per session.
   const checkSubagentSession = subagentSessionCheck();
 
-  // The phase-stall check (src/phase-stall.ts). It runs only in a session holding a
-  // claim for its own id with a phase role, so never in an architect (a root or a sub-architect),
-  // the controller (whose claim lives in controllerSession), a session with no Legion environment,
-  // or a `task` subagent (whose instance returns at checkSubagentSession before any capability
-  // exists). Restored from the transcript at session_start and appended to it on every change.
-  let phaseStall: PhaseStall = "closed";
+  // The endless phase reminder (src/phase-stall.ts, src/phase-reminder.ts). It runs only in a
+  // session holding a claim for its own id with a phase role, so never in an architect (a root or
+  // a sub-architect), the controller (whose claim lives in controllerSession), a session with no
+  // Legion environment, or a `task` subagent (whose instance returns at checkSubagentSession
+  // before any capability exists). Restored from the transcript at session_start and appended to
+  // it on every change.
+  //
+  // The runner's timers and its record check run outside every hook, so the pane's own session
+  // context is kept here (`paneContext`, set at session_start and after every session change):
+  // one Oh My Pi process holds one claim for its whole life, and this is the session that claim
+  // is on.
+  let paneContext: SessionContext | undefined;
   const phaseWorkerSession = (context: SessionContext): boolean => {
     const role = claimSession.capability(context.sessionManager.getSessionId())?.role;
     return role !== undefined && role !== "architect";
   };
-  const advancePhaseStall = (input: PhaseStallInput): string | undefined => {
-    const step = stepPhaseStall(phaseStall, input);
-    if (step.state !== phaseStall) {
-      phaseStall = step.state;
-      pi.appendEntry(PHASE_STALL_ENTRY, { state: phaseStall });
+  // The Envoy listener the architect notice goes to, built once and only when a notice is due:
+  // this entry reaches no listener of its own otherwise. Envoy off for the session leaves it
+  // undefined, and the reminder keeps coming without a notice.
+  let architectPublisher: { readonly publish: EnvoyPublish | undefined } | undefined;
+  const phaseReminder = createPhaseReminder({
+    sendReminder: (reminder) =>
+      pi.sendMessage(
+        { customType: "legion-phase-reminder", content: reminder, display: true },
+        { deliverAs: "steer", triggerTurn: true }
+      ),
+    armTimer: (callback, delayMs) => paneContext?.setTimeout(callback, delayMs),
+    saveEntry: (entry) => pi.appendEntry(PHASE_STALL_ENTRY, entry),
+    claim: () =>
+      paneContext === undefined
+        ? undefined
+        : claimSession.capability(paneContext.sessionManager.getSessionId()),
+    readState: (signal) => roleDaemon().state({ signal }),
+    publisher: () => {
+      if (architectPublisher === undefined) {
+        const envoy = sessionEnvoySettings(sessionConfigFile("omp", process.env), process.env, {
+          cwd: process.cwd(),
+          nats: false,
+          session: currentSessionID,
+        });
+        architectPublisher = {
+          publish: envoy.enabled
+            ? createEnvoyClient({
+                baseUrl: envoy.url,
+                credential: envoy.credential,
+                fetch,
+              }).publish
+            : undefined,
+        };
+      }
+      return architectPublisher.publish;
+    },
+    project: process.env.LEGION_PROJECT,
+    limits: stallLimits(process.env, logger),
+    log: logger,
+  });
+
+  /**
+   * INFRA-945: what this pane is doing, which the daemon reads to decide whether its issue pod
+   * may be released. A report is sent at every settle, change or no change — the daemon releases
+   * no claim whose last report predates its last turn, so a quiet turn that sent nothing would
+   * hold the pod for ever — and between turns only when the report's content changes.
+   *
+   * Oh My Pi fires no event for background work, so what it is running is read rather than
+   * waited for: `SESSION_ACTIVITY_PERIOD_MS` apart, the host's own managed interval reads
+   * `ctx.getAsyncJobSnapshot()`, which is an in-memory look at this session's own job manager,
+   * and compares the report it builds with the last one sent. Nothing leaves the pane unless
+   * that content changed, so the cost between turns is one object comparison, and five seconds
+   * bounds how stale the daemon's view of a job that just started can be against a release rule
+   * measured in minutes.
+   */
+  const SESSION_ACTIVITY_PERIOD_MS = 5_000;
+  let lastActivity: SessionActivityReport | undefined;
+  const reportActivity = async (
+    context: SessionContext,
+    options: { readonly onlyWhenChanged: boolean }
+  ): Promise<void> => {
+    const claim = claimSession.capability(context.sessionManager.getSessionId());
+    if (claim === undefined) return;
+    // An architect arms no phase reminder, so it waits on no reminder of its own; what it
+    // reports is its background work.
+    const report = sessionActivity(
+      asyncJobKinds(context.getAsyncJobSnapshot?.() ?? null),
+      phaseWorkerSession(context) ? phaseReminder.phaseWake() : { nextReminderAt: null }
+    );
+    if (
+      options.onlyWhenChanged &&
+      lastActivity !== undefined &&
+      sameSessionActivity(lastActivity, report)
+    ) {
+      return;
     }
-    return step.followUp;
+    const request = sessionActivityRequest({
+      project: process.env.LEGION_PROJECT,
+      claim,
+      report,
+    });
+    if (request === undefined) return;
+    lastActivity = report;
+    try {
+      await roleDaemon().activity(request);
+    } catch (error) {
+      // The daemon did not take it, so it is not what the daemon holds: the next reading sends
+      // again whether or not its content moved.
+      lastActivity = undefined;
+      logger.warn("legion: this session's activity report did not reach the daemon", {
+        issue: claim.issue,
+        error: messageFor(error),
+      });
+    }
   };
 
   let daemonClient: LegionDaemonClient | undefined;
@@ -211,9 +316,13 @@ export default function legionExtension(pi: PiApi): void {
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
     await titleSession(context);
+    // The session this pane's claim is on, for the reminder's timers and its record check, which
+    // run outside every hook.
+    paneContext = context;
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
-    // an Envoy notice rather than a new assignment, and must find the phase still open.
-    phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
+    // an Envoy notice rather than a new assignment, and must find the phase still open. The
+    // transcript is this host's store for that record; the runner is handed the record alone.
+    phaseReminder.restore(restorePhaseStallEntry(context.sessionManager.getBranch?.() ?? []));
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
@@ -247,6 +356,20 @@ export default function legionExtension(pi: PiApi): void {
         });
       }
       await claimSession.bootstrap(context);
+      // The claim is registered. A phase worker relaunched into an open phase gets its reminder
+      // from a timer, since nothing else would wake it. The guard drops that timer when any turn
+      // started meanwhile, which is exactly the case to drop — the daemon re-sending an
+      // interrupted task arrives as a prompt.
+      if (phaseWorkerSession(context)) phaseReminder.armResumeReminder();
+      // Between turns, the host's own managed interval is the only sight of this session's
+      // background work; it sends nothing unless what it reads has changed. Every claimed
+      // session reports, an architect's as much as a phase worker's: the daemon releases a pod
+      // only when each of its live roles has said it runs nothing.
+      context.setInterval(() => {
+        if (paneContext !== undefined) {
+          void reportActivity(paneContext, { onlyWhenChanged: true });
+        }
+      }, SESSION_ACTIVITY_PERIOD_MS);
     }
     registerLegionTool();
     await activateLegionTool();
@@ -268,8 +391,14 @@ export default function legionExtension(pi: PiApi): void {
     resentNoticeId = recreatedNotice.id;
     return { message: workspaceRecreatedMessage(recreatedNotice) };
   });
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, context) => {
     recreatedNotice = undefined;
+    clearStartupTurn(context.sessionManager.getSessionId());
+    // The operator moved on: a session change's re-claim outcome left in its widget comes down.
+    controllerSession.handleAgentStart(context);
+  });
+  pi.on("session_shutdown", async (_event, context) => {
+    clearStartupTurn(context.sessionManager.getSessionId());
   });
   // The recovery kept the saved copy in the process's live context, so once it is sent again
   // every later request of this process would carry it twice: the first copy, where the history
@@ -287,6 +416,10 @@ export default function legionExtension(pi: PiApi): void {
   // instance does neither, and the subagent check is asked once for both.
   const afterSessionChange = async (context: SessionContext): Promise<void> => {
     if (await checkSubagentSession(context)) return;
+    // Whatever session the pane is left on, every reminder timer armed on the old one is stale,
+    // and the new one is where the next is armed.
+    paneContext = context;
+    phaseReminder.sessionChanged();
     if (classifySession(process.env).kind === "controller") await titleSession(context);
     await controllerSession.reclaimAfterSessionChange(context);
   };
@@ -295,36 +428,62 @@ export default function legionExtension(pi: PiApi): void {
   pi.on("session_tree", (_event, context) => afterSessionChange(context));
 
   // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
-  // that already had its follow-up or a WAITING reply. A person's direct message that envoy.ts
-  // sent in as the user's own turn is a user message too (a `skill-prompt` custom message for a
-  // `/skill:`), but it is an inbound event, as its Envoy card was: the record envoy.ts keeps of the
-  // turns it sent in says which message that is, whichever of the two extensions asks first. A turn
-  // that record misses falls through to `inboundKind` and counts as an assignment; the phase-stall
-  // section of `packages/pi-legion/AGENTS.md` says which turns it misses. The `legion` tool's
-  // successful `handoff_complete` closes the phase (`onPhaseCompleted`, below).
+  // whose reminders went unanswered or that a WAITING reply quieted. A person's direct message
+  // that envoy.ts sent in as the user's own turn is a user message too (a `skill-prompt` custom
+  // message for a `/skill:`), but it is an inbound event, as its Envoy card was: the record
+  // envoy.ts keeps of the turns it sent in says which message that is, whichever of the two
+  // extensions asks first. A turn that record misses falls through to `inboundKind` and counts as
+  // an assignment; the phase-stall section of `packages/pi-legion/AGENTS.md` says which turns it
+  // misses. The `legion` tool's successful `handoff_complete`, and a successful backward move,
+  // close the phase (`onPhaseCompleted`, below). Every message, classified or not, says a turn is
+  // running and leaves every armed reminder timer stale.
   pi.on("message_start", async (event, context) => {
     if (!phaseWorkerSession(context)) return;
+    phaseReminder.turnStarted();
     const injected =
       matchInjectedUserTurn(context.sessionManager.getSessionId(), event.message) !== undefined;
     const kind = injected ? "inbound-event" : inboundKind(event.message);
-    if (kind !== undefined) advancePhaseStall({ kind });
+    if (kind !== undefined) phaseReminder.apply({ kind });
+  });
+
+  // An assistant message that settled having run at least one real tool call: the worker is
+  // working, so nothing it has been reminded of is unanswered. Read from `message_end` rather
+  // than a `tool_call` hook, which this entry registers none of, so nothing it does can block or
+  // shape a call the worker makes.
+  pi.on("message_end", async (event, context) => {
+    if (!phaseWorkerSession(context)) return;
+    if (assistantRanTool(event.message)) phaseReminder.apply({ kind: "tool-call" });
   });
 
   // The run is about to settle with nothing left for the host to continue: a phase still open
-  // gets its follow-up, one a stall, or two when the follow-up to a tool call written as text is
-  // answered with another (src/phase-stall.ts), which the host sends as the next turn of this same
-  // session.
+  // earns a reminder (src/phase-stall.ts). The first of a run comes back as the host's own
+  // continuation, one more turn of this same session; every one after it is a timer, so the run
+  // settles and the daemon sees the turn end (src/phase-reminder.ts).
   pi.on("session_stop", async (event, context) => {
-    if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
-    const followUp = advancePhaseStall({
-      kind: "settle",
-      lastAssistantText: assistantText(event.last_assistant_message),
-    });
-    return followUp === undefined ? undefined : { continue: true, additionalContext: followUp };
+    if (event.signal.aborted) return undefined;
+    if (!phaseWorkerSession(context)) {
+      // An architect has no phase of its own to settle, and its pod is released on the same rule
+      // as a worker's, so its turn ends with a report of its own.
+      await reportActivity(context, { onlyWhenChanged: false });
+      return undefined;
+    }
+    const reminder = await phaseReminder.settle(assistantText(event.last_assistant_message));
+    // After the settle, so the report carries the wake that settle armed: the daemon releases no
+    // claim whose last report is older than its last turn, so this one goes whatever it says.
+    await reportActivity(context, { onlyWhenChanged: false });
+    return reminder === undefined ? undefined : { continue: true, additionalContext: reminder };
   });
 
   const onPhaseCompleted = (context: SessionContext): void => {
-    if (phaseWorkerSession(context)) advancePhaseStall({ kind: "handoff-complete" });
+    if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "phase-closed" });
+  };
+
+  // A successful `ready_for_update`: the worker has pushed what it wants kept and waits for the
+  // process its claim runs in to be replaced. Its phase stays open, and the reminder must not
+  // continue the turn it answered in — the work that continuation did would go with the pod, and
+  // the daemon would see no turn end.
+  const onUpdateAnswered = (context: SessionContext): void => {
+    if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "update-answered" });
   };
 
   const activateLegionTool = async (): Promise<void> => {
@@ -357,14 +516,24 @@ export default function legionExtension(pi: PiApi): void {
         },
         controllerGrant: (sessionId) => controllerSession.mintGrant(sessionId),
         onPhaseCompleted,
-        // The pane's own environment: its workspace and issue, and the identity the daemon put
-        // on it; PATH's jj, the one its shell runs.
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+        onUpdateAnswered,
+        // The pane's own environment: its workspace and issue; PATH's jj, the one its shell runs;
+        // and the Dispatch pi-envoy's session reads (Oh My Pi's rule, in the same process), which
+        // the pane's `dispatch handoff-write` wrote the record to.
+        handoffReport: (phase, role) =>
+          paneHandoffReport(
+            sessionConfigFile("omp", process.env),
+            process.env,
+            process.cwd(),
+            currentSessionID()
+          )(phase, role),
+        branchHead: () => findPushedBranchHead({ env: process.env }),
         resolveDocument: async (issue, reference) => {
           // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
           const config = activeDispatchSettings(
             sessionDispatchSettings(sessionConfigFile("omp", process.env), process.env, {
               cwd: process.cwd(),
+              session: currentSessionID,
             }).dispatch
           );
           if (config === null) {
@@ -374,7 +543,7 @@ export default function legionExtension(pi: PiApi): void {
           }
           try {
             return await resolveIssueDocumentId(
-              new DispatchClient(config.url, config.token, fetch),
+              new DispatchClient(config.url, config.credential, fetch),
               issue,
               reference
             );
@@ -402,6 +571,15 @@ export default function legionExtension(pi: PiApi): void {
       await controllerSession.claim(context);
       registerLegionTool();
       await activateLegionTool();
+    },
+  });
+
+  pi.registerCommand("legion-controller-start", {
+    description:
+      "Claim the Legion controller and send its start message as the session's first turn; `legion controller start` passes this command on Oh My Pi's command line",
+    // Why a command and not a claim from session_start: `controllerSession.startCommand`.
+    handler: async (_args, context) => {
+      await controllerSession.startCommand(context);
     },
   });
 }

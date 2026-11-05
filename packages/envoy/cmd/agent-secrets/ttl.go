@@ -12,7 +12,7 @@ import (
 )
 
 // ttlFlag is --ttl's usage line, the request form's and the exec form's alike.
-const ttlFlag = "how long the grant lasts, a whole number of seconds such as 2m or 90s; unset, it lasts until this session ends"
+const ttlFlag = "how long the grant lasts, a whole number of seconds such as 2m or 90s; unset, it lasts 12 hours, or until this session ends when every secret is tagged default-grant=session"
 
 // ttlSeconds is --ttl's value as the whole seconds a request object signs: nil when flags never
 // set it, and an error for a value that is not a positive whole number of seconds or is past the

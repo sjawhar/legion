@@ -9,15 +9,19 @@ you act, because a wake can be stale.
 
 ## `triage on <KEY>` (`{kind: "triage"}`)
 
-An unrecorded root in `triage` that carries the `legion` label. The daemon sends it when the issue
-is created with the label, and on each later change while it stays in `triage`, the change that
-adds the label included: the dashboard creates an issue without labels, so a person adds it from
-the issue header. Triage it as `skill://legion-controller/references/triage.md` says.
+An unrecorded root in `triage` that carries the `legion` label, when no person set that label (a
+session's label, yours included). The daemon sends it when a session creates the issue with the
+label, and on each later change while it stays in `triage`, the change that adds the label
+included. Triage the root as `skill://legion-controller/references/triage.md` says. A person's
+label on a `triage` root wakes nobody: the root is queued by the daemon (its own `todo` write). A
+person's approval of a parked (`backlog` or `icebox`) labelled root's spec is queued by the daemon
+the same way and wakes nobody.
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
-The daemon released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting
-root took it. Name the free slots; take nothing.
+The daemon released `<KEY>`'s slot and no waiting root took it: its tree finished or left the
+workflow, or the root returned the slot to wait on a person (`awaiting_person`, which also sends
+its own `awaiting-person` wake). Name the free slots; take nothing.
 
 ## `todo on <KEY>` (`{kind: "todo"}`)
 
@@ -29,7 +33,7 @@ Legion's.
 
 The daemon's periodic wake, a minute after it starts and then every
 `controller_wake_interval_seconds` (an hour by default), whatever the slots. Run the skill's every-turn
-steps.
+steps, then the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`).
 
 `openCapabilities`, when present, names the open capability rows; `read_state`'s `capabilities`
 gives each one's `detail`. A deployment row (the secrets broker, model fallback, a role's CPU and
@@ -50,12 +54,32 @@ take nothing for them.
 
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
 
-A root that waited for a slot was moved from `todo` to the status `reason` names, by a person or by
-another session, so the daemon took it out of the workflow (`phase: done`) and starts nothing for
-it. Re-admit nothing, because the move was someone else's; `dispatch read` shows who claims it now.
-Tell the person in your summary: "<KEY> left Legion's waiting line: it was set to <status> while it
-waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again". Other
-admission states: `skill://legion-controller/references/admission.md`.
+Either a root that waited for a slot was moved from `todo` to the status `reason` names, by a
+person or by another session, or a root waiting on a person (`awaiting_person`) could not be
+resumed — its `legion` label is gone, or a person or a session outside its tree took its Dispatch
+claim. Either way the daemon took it out of the workflow (`phase: done`) and starts nothing for it;
+`reason` says which. Re-admit nothing, because the move was someone else's; `dispatch read` shows
+who claims it now. Tell the person in your summary: "<KEY> left Legion's workflow: <reason as the
+wake gives it>; `todo` with the `legion` label queues it again". Other admission states:
+`skill://legion-controller/references/admission.md`.
+
+## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)
+
+A root whose architect asked a person a question, or handed its spec to a person for approval, and
+now waits only on them: the daemon returned its slot while the architect stays live to read the
+person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
+take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
+slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
+`admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+Dispatch claim sends the separate `unslotted` wake.
+
+## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)
+
+A person's spec decision, or answer, resolution or reply on an ask, on a tree Legion is not
+running, which nobody inside the tree heard. The payload names the decision, the tree's `root`,
+the decision's Dispatch `ref`, the person (`actor`), and a spec decision's `version` and a changes
+request's `reason`. Decide it as `skill://legion-controller/references/parked-decisions.md#deciding`
+says.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 
@@ -66,10 +90,15 @@ handle it as an escalation (`skill://legion-controller/references/escalation.md`
 with no `holdReason` while its tree lingers (the time after its root closes when a reopen resumes
 it) or is closed waits for the tree's re-admission and needs nothing from you.
 
-When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`. Set
-the root back to `todo` only when you checked that the hold's cause is gone, or a person asks,
-because `todo` re-admits it as a new generation: a new run of the tree that starts again from its
-architect.
+When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`,
+then, in the same turn, post one comment on the root (`dispatch comment --issue <root>
+--body-file -`) whose first line is `Parked by Legion while it waits on: <the hold's cause>`, the
+cause being what you found the held phase waits on (the payload's `phase` and `role`, and the held
+issue's `dispatch read`). That mark is what makes the park Legion's own hold
+(`skill://legion-controller/references/parked-decisions.md#deciding`, step 2). Set the root back to
+`todo` only when you checked that the hold's cause is gone, a person asks, or a person's decision
+after the park gives its work a next step (that reference's step 4), because `todo` re-admits it
+as a new generation: a new run of the tree that starts again from its architect.
 
 ## `worker-died on <KEY>` (`role: "architect"`)
 
@@ -82,6 +111,12 @@ architect's last message on the root issue. When you find none, or it is gone, r
 (`set_status` the root to `backlog`, then to `todo`: a new generation whose architect starts with
 fresh budgets). When it stays, park the tree (`set_status` the root to `backlog`) and say why on
 the issue, because a relaunch would fail the same way.
+
+## `update-stalled on <KEY>` (`{kind: "update-stalled", reason, update}`)
+
+An update round over the issue's pod, or over one claim's own process, is not finishing. Handle
+it as `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled`
+says.
 
 ## GitHub mentions
 

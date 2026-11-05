@@ -8,9 +8,11 @@ import (
 )
 
 // DiscoveryTimeout bounds an issuer's discovery read at boot. Discovery is a
-// network read taken before either binary binds its port, so an issuer that
-// accepts the connection and never answers has to refuse the boot rather than
-// hang it: a hung boot serves no health endpoint and reports nothing.
+// network read taken before the listener or the broker binds its port, so an
+// issuer that accepts the connection and never answers has to refuse the boot
+// rather than hang it: a hung boot serves no health endpoint and reports
+// nothing. Dispatch discovers in the background instead (LazyVerifier,
+// discovery.go).
 const DiscoveryTimeout = 30 * time.Second
 
 // ConfigFromEnv reads the both-or-neither issuer/audience pair named by

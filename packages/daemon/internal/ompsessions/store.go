@@ -59,8 +59,12 @@ func ValidInstance(name string) bool {
 }
 
 // InDatabase is whether a session is a row rather than a file, which both database kinds are: then
-// nothing a volume holds says anything about a session.
-func (s Store) InDatabase() bool { return s.Kind == StorePostgres || s.Kind == StoreCloudSQLIAM }
+// nothing a volume holds says anything about a session. It is the kind's own answer, so a reader
+// that holds the kind alone — the store a kept pod was built under, which is all of a store its
+// start command names (sandbox.keptPod) — asks the question the settled store asks.
+func (k StoreKind) InDatabase() bool { return k == StorePostgres || k == StoreCloudSQLIAM }
+
+func (s Store) InDatabase() bool { return s.Kind.InDatabase() }
 
 // DSNSecretKey is the providers Secret's key that holds the session database's URL, "" unless the
 // store is the postgres one: under cloudsql-iam no pod mounts a session key, since each pod signs

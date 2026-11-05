@@ -1,0 +1,32 @@
+# changie v1.26.0's configuration for this package's changelog fragments. `changie new`, run
+# from this directory, writes a fragment under .changes/unreleased; a pull request adds its entry
+# that way, or writes the same YAML by hand. `changie init`, `changie batch` here and `changie
+# merge` must never be run on this package: they rewrite CHANGELOG.md (init overwrites it, merge
+# rebuilds it from changie's own files and drops every existing line).
+# .github/workflows/changelog-fold.yaml folds the fragments into CHANGELOG.md on main, writing
+# each release's heading itself, which is why versionFormat is empty.
+changesDir: .changes
+unreleasedDir: unreleased
+changelogPath: CHANGELOG.md
+versionExt: md
+versionFormat: ''
+kindFormat: '### {{.Kind}}'
+# changie strips a body's YAML indentation, so this puts two spaces before each body line after
+# the first that is not empty: the lines stay under the bullet. A blank line stays empty, so a
+# second paragraph stays in the bullet too.
+changeFormat: '- {{ regexReplaceAll "\n(.)" .Body "\n  ${1}" }}'
+# A blank line before and after each kind's heading, none between bullets: the layout of
+# CHANGELOG.md's existing sections.
+newlines:
+  beforeKind: 1
+  afterKind: 1
+kinds:
+  - label: Added
+  - label: Changed
+  - label: Removed
+  - label: Fixed
+custom:
+  - key: Issue
+    type: string
+    minLength: 1
+fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'

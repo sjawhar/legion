@@ -23,6 +23,9 @@ const realGit = "/usr/bin/git"
 func git(t *testing.T, clone string, args ...string) string {
 	t.Helper()
 	command := exec.Command(realGit, append([]string{"--git-dir=" + filepath.Join(clone, ".git")}, args...)...)
+	// --git-dir is not a working directory: the helper runs in the clone it reads, never in the
+	// directory the test process happens to have.
+	command.Dir = clone
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Run(); err != nil {
@@ -48,8 +51,14 @@ func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 	// host's own config can carry the very helper asserted here (`gh auth setup-git` writes the
 	// github.com one to ~/.gitconfig). Neither the global nor the system file may reach the test:
 	// its own git, its `git init`, and the fix-up's runner all inherit this process's environment.
+	// Nor may the environment's own scope, the GIT_CONFIG_COUNT block: a Legion issue pod sets it
+	// to credential.https://github.com.helper twice, the empty reset and `legion git-credential`,
+	// so a test that shuts out only the files reads four values of that key where the clone's file
+	// holds two. GIT_CONFIG_COUNT=0 has git read none of the pairs, in this process and in every
+	// child of it.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_COUNT", "0")
 	cfg := config.Config{Project: "WIDGETS", StateDir: t.TempDir(), Runtime: config.Runtime{Name: "tmux"}}
 	tools := map[string]string{"git": realGit}
 	var logs bytes.Buffer
@@ -72,7 +81,11 @@ func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 		if err := os.MkdirAll(located.Clone, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if out, err := exec.Command(realGit, "init", "-q", located.Clone).CombinedOutput(); err != nil {
+		initialise := exec.Command(realGit, "init", "-q", located.Clone)
+		// The clone's directory is made just above, so the init runs inside it rather than in
+		// whatever directory the test process has.
+		initialise.Dir = located.Clone
+		if out, err := initialise.CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
 		old := "!gh auth git-credential"

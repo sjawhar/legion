@@ -42,14 +42,25 @@ const reconcileOverlap = time.Hour
 // broker the issue.deployed events go through (RecordDeployedEvents). A nil GitHub client (no App
 // credentials) leaves it idle, exactly like architecture.Importer and Intake.
 type Reconcile struct {
-	pool   *store.Pool
-	github *githubapp.Client
-	events *events.Broker
+	pool    *store.Pool
+	github  *githubapp.Client
+	events  *events.Broker
+	atStart bool
 }
 
 // NewReconcile builds a Reconcile.
 func NewReconcile(pool *store.Pool, github *githubapp.Client, broker *events.Broker) *Reconcile {
 	return &Reconcile{pool: pool, github: github, events: broker}
+}
+
+// FirstPassAtStart makes Run run one pass as it starts, before its jittered ticks, for an
+// end-to-end test that must see a pass inside its window (DISPATCH_TEST_RECONCILE_AT_START, under
+// the test hooks). The pass takes the lease for the current ReconcileInterval as any tick's does,
+// so a jittered tick inside that interval finds it served. A deployment never sets it: the
+// jitter is what keeps a restart from stampeding GitHub.
+func (r *Reconcile) FirstPassAtStart() *Reconcile {
+	r.atStart = true
+	return r
 }
 
 // HasApp reports whether the GitHub App credentials needed to do any work are configured.
@@ -73,19 +84,22 @@ const deliveryReconcileLease = "delivery-reconcile"
 // because it is the boot's error-returning constructor, Run has no error to return, so it takes
 // the pool cmd/dispatch has already opened (and exits at boot without).
 func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
+	if r.atStart && r.HasApp() {
+		r.leasedPass(ctx, leases, time.Now())
+	}
 	duty.RunJittered(ctx, ReconcileInterval, func() bool {
 		if r.HasApp() {
 			return false
 		}
 		slog.Info("dispatch delivery: no GitHub App key — the reconcile is idle")
 		return true
-	}, func(ctx context.Context) { r.leasedPass(ctx, leases) })
+	}, func(ctx context.Context, due time.Time) { r.leasedPass(ctx, leases, due) })
 }
 
 // leasedPass runs one reconcile pass under the lease, for the ReconcileInterval this loop ticks
-// on.
-func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, deliveryReconcileLease, ReconcileInterval, r.runOnce)
+// on and the tick due at due.
+func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time.Time) {
+	duty.Exclusive(ctx, leases, deliveryReconcileLease, due, ReconcileInterval, r.runOnce)
 }
 
 // runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests
@@ -142,6 +156,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
+	record("reconcile pull request heads", r.reconcilePullRequestHeads(ctx, now))
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, production, now))
@@ -166,7 +181,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	// Last, over everything this pass stored and what intake stored since the previous one: the
 	// issue.deployed of every pull request whose shipping run is now known. Its failure is the
 	// pass's, so last_error names it, and the rows it did not reach wait for the next pass.
-	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events, now); err != nil {
+	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events); err != nil {
 		record("record issue.deployed events", err)
 	} else if written > 0 {
 		slog.Info("dispatch delivery: recorded issue.deployed", "events", written, "by", "reconcile")
@@ -181,7 +196,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	}
 	// The change log keeps a day (ChangeRetention): a page away longer reads its window once. A
 	// failed prune leaves the rows for the next pass and fails nothing else.
-	if _, err := PruneChanges(ctx, r.pool, time.Now()); err != nil {
+	if _, err := PruneChanges(ctx, r.pool); err != nil {
 		slog.Error("dispatch: delivery prune changes failed", "error", err)
 	}
 }
@@ -440,6 +455,40 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	return nil
 }
 
+// reconcilePullRequestHeads re-reads the pull request heads ListStalePullRequestHeads hands it,
+// at most PullRequestHeadBatch of them a pass, the longest unread first: the open rows Dispatch
+// last checked over PullRequestHeadStaleAfter ago, and the merged rows no read of GitHub has
+// ever reached that are attributed to nobody, each of those taken once. GitHub's `pull_request`
+// events carry every head move, so this is the backstop for an event that never arrived — a
+// delivery Dispatch was down for, a repository whose webhook was installed late — and the one
+// way a merge that happened while Dispatch was not listening reaches the head row at all. The
+// merged arm is the backstop for an envelope that arrived but said too little: one naming no
+// head repository attributes nobody, and only GitHub's own answer, which always names
+// `head.repo`, can attribute that row before a result at the merged head reads `older` for
+// good. A rate limit stops the batch and fails the pass, as every other GitHub step's does; any
+// other per-row failure is logged and leaves the row for the next pass.
+func (r *Reconcile) reconcilePullRequestHeads(ctx context.Context, now time.Time) error {
+	stale, err := ListStalePullRequestHeads(ctx, r.pool, PullRequestHeadBatch, now)
+	if err != nil {
+		return err
+	}
+	refresh := func(ctx context.Context, head PullRequestHead) error {
+		err := RefreshPullRequestHead(ctx, r.pool, r.github, head.Repo, head.Number, now)
+		if err == nil {
+			return nil
+		}
+		if limited, ok := githubapp.AsRateLimit(err); ok {
+			return limited
+		}
+		slog.Warn("dispatch delivery: re-read a pull request head", "repo", head.Repo, "number", head.Number, "error", err)
+		return nil
+	}
+	if err := boundedFanOut(ctx, reconcilePartialConcurrency, stale, refresh); err != nil {
+		return fmt.Errorf("rate-limited re-reading pull request heads: %w", err)
+	}
+	return nil
+}
+
 // attributionBackfillCalls bounds the GitHub calls reconcileAttributionInputs makes in one pass. A
 // row costs one call for the pull request and one per page of 100 commits
 // (fetchAttributionFacts): two for a pull request under 100 commits, at most maxAttributionCalls.
@@ -611,7 +660,7 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 	if fetched.MergedAt == nil {
 		return nil
 	}
-	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched); err != nil {
+	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched, nil); err != nil {
 		if limited, ok := githubapp.AsRateLimit(err); ok {
 			slog.Warn("dispatch delivery: stopped completing partial pull requests: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited

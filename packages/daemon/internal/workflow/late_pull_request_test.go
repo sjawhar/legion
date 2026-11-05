@@ -96,7 +96,7 @@ func lateClosed(head string, at time.Time) intake.Fact {
 // request's updated_at, so one older than the newest applied is a late redelivery and changes
 // nothing: it neither moves the head back nor reopens or closes the pull request against a newer
 // close or reopen. The decision belongs to the reviewer round, rather than the pull request,
-// because the reviewer's handoff push itself moves the head; lifecycle observations leave it until
+// because a push after the review moves the head; lifecycle observations leave it until
 // the round ends. An event at the same clock applies (GitHub's clock is to the second, so two real
 // events can share one), and so does one that carries no clock.
 func TestALatePullRequestEventChangesNothing(t *testing.T) {
@@ -117,6 +117,10 @@ func TestALatePullRequestEventChangesNothing(t *testing.T) {
 		{"an opened newer than the head", record.PullRequestOpen, lateOpened("head-a", later), kept},
 		{"a close older than the reopen", record.PullRequestOpen, lateClosed("head-c", earlier), kept},
 		{"a reopen older than the close", record.PullRequestClosed, lateReopened("head-c", earlier), closed},
+		// A reopen of the pull request the record holds open, at its clock, is the reopen that
+		// opened it delivered again: the CI settlement is kept.
+		{"a reopen at the same clock as the open pull request", record.PullRequestOpen, lateReopened("head-c", lateApplied), kept},
+		{"a reopen older than the open pull request", record.PullRequestOpen, lateReopened("head-c", earlier), kept},
 
 		{"a newer synchronize", record.PullRequestOpen, lateSync("head-d", later), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},
 		{"a synchronize at the same clock", record.PullRequestOpen, lateSync("head-d", lateApplied), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},

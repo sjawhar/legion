@@ -48,24 +48,44 @@ if [[ -z "$binary" ]]; then
   binary="${workdir}/envoy-dispatch"
   (cd "$(dirname "$0")/.." && go build -o "$binary" ./cmd/dispatch)
 fi
-port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-readonly base="http://127.0.0.1:${port}"
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
+readonly root
+# shellcheck source-path=SCRIPTDIR source=../../../scripts/e2e/lib/port-file.sh
+. "${root}/scripts/e2e/lib/port-file.sh"
 
+# held-port.py opens 127.0.0.1:0 and hands the socket to the server, so the port the kernel chose
+# stays held until the server serves on it; it then runs as the server, so $! is the server's PID.
 mkdir "${workdir}/home"
-env HOME="${workdir}/home" \
+HOME="${workdir}/home" \
   DATABASE_URL="$DATABASE_URL" \
   DISPATCH_AGENT_TOKEN=search-smoke-not-a-credential \
   DISPATCH_IDENTITY=header:X-Dispatch-User \
   DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
   DISPATCH_NATS_DISABLED=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
-  DISPATCH_PORT="$port" \
-  DISPATCH_SERVER_URL="$base" \
-  "$binary" >"${workdir}/server.log" 2>&1 &
+  python3 "${root}/scripts/e2e/lib/held-port.py" exec --port-file "${workdir}/port" \
+    --fd-env DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' \
+    -- "$binary" >"${workdir}/server.log" 2>&1 &
 server_pid=$!
 
+port=""
+waited=0
+read_port_file "${workdir}/port" "$server_pid" port || waited=$?
+case $waited in
+  0) ;;
+  1)
+    printf 'the server exited before its port was held; its log:\n' >&2
+    cat "${workdir}/server.log" >&2
+    exit 1
+    ;;
+  *) printf 'no port was held for the server within %d seconds\n' "$port_file_seconds" >&2; exit 1 ;;
+esac
+readonly base="http://127.0.0.1:${port}"
+
+# The held socket queues a request until the server serves it, so each poll is bounded.
 for _ in $(seq 1 300); do
-  if curl -fsS "${base}/healthz" >/dev/null 2>&1; then
+  if curl -fsS --max-time 2 "${base}/healthz" >/dev/null 2>&1; then
     break
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then

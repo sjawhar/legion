@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
-	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -215,72 +215,42 @@ func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []m
 	return authors
 }
 
-// A repairing settlement's version can hold a browser's edit whose own update the room stores
-// only after the settlement commits, since the settlement holds the document's lock until then.
-// When that append fails, the room fails and reloads from the store without the edit's text, which
-// the version already holds; the settlement's own stored update carries the document's delete set,
-// the edit's deletions included. The browser resends what the room lacks when it reconnects, and
-// the document's next settlement finds the document matching that version and writes no other
+// A repairing settlement's version holds a browser's edit the room took during the settlement's
+// database work, and the settlement stores that edit's update itself, in the room's commit order:
+// before the repair the room committed after it (storeRepair), and before the version
+// (Ledger.flushThrough). The edit's own append waits on the document's lock the settlement holds,
+// so the update is unstored when the repair is appended. The version never stands ahead of the
+// store - the stored updates through its doc_update_version fold to its text, whatever becomes of
+// the edit's own append - and the edit's own settlement finds the document already versioned
 // (LEGION-479).
-func TestSettlementVersionAheadOfAFailedAppendIsMetByTheBrowsersResend(t *testing.T) {
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "# First")
-	store := &failingBrowserAppendStore{
-		VersionedStore: NewPgVersioned(database),
-		entered:        make(chan struct{}),
-		release:        make(chan struct{}),
-	}
-	service := New(Deps{Store: database, Persistence: store, Events: events.NewBroker(), Settle: time.Hour})
-	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+func TestSettlementStoresAnEditItsRepairedVersionHoldsBeforeTheRepair(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
 	service.settleRoom(artifactID, 0)
 	answer := answerBlockAsk(t, service, artifactID)
 
-	var browser *crdt.Doc
+	var edited atomic.Bool
 	service.afterSettleReconcile = func(room string) {
-		if room == artifactID && browser == nil {
-			store.failing.Store(true)
-			browser = editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+		if room == artifactID && edited.CompareAndSwap(false, true) {
+			editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
 		}
 	}
 	settleCurrentGeneration(t, service, artifactID)
-	if browser == nil {
+	service.afterSettleReconcile = nil
+	if !edited.Load() {
 		t.Fatal("settlement never reached the window between its read and its repair")
 	}
 	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
 		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\nContext after.\n"
 	requireLatestVersionMarkdown(t, service, artifactID, want)
 	versioned := latestVersionNumber(t, service, artifactID)
+	assertStoredOrder(t, service, artifactID)
 
-	// The edit's append fails, which fails the room; it reloads without the edit's text.
-	<-store.entered
-	close(store.release)
-	waitForRoomFailure(t, service, artifactID)
-	ctx := context.Background()
-	if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
-		t.Fatalf("wait for the room to recover: %v", err)
-	}
-	store.failing.Store(false)
-	service.afterSettleReconcile = nil
-	if reloaded, err := service.Text(ctx, artifactID); err != nil || strings.Contains(reloaded, "Context after.") {
-		t.Fatalf("reloaded document = %q (%v), want it without the edit whose append failed", reloaded, err)
-	}
-
-	// The browser reconnects and sends what the room lacks, as its sync does.
-	var resendErr error
-	if err := service.srv.Apply(ctx, artifactID, func(room *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		resendErr = crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(browser, room.StateVector()), "peer")
-	}); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
-		t.Fatalf("load the room for the browser's resend: %v", err)
-	}
-	if resendErr != nil {
-		t.Fatalf("resend the browser's edit: %v", resendErr)
-	}
 	settleCurrentGeneration(t, service, artifactID)
-	waitForDocumentText(t, service, artifactID, want)
 	waitForPersistedProofText(t, service.store, artifactID, want)
 	if latest := latestVersionNumber(t, service, artifactID); latest != versioned {
-		t.Fatalf("latest version = %d, want %d, which already held the resent edit", latest, versioned)
+		t.Fatalf("latest version = %d, want %d, which already held the edit", latest, versioned)
 	}
 }
 
@@ -473,14 +443,16 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 
 // A room that fails while a settlement's repair commits into it - an append of the room fails, or
 // another write gives up - recovers, and its readers' wait for that recovery ends: the failed
-// room's eviction, which compacts under the document's advisory lock the settlement holds, waits
-// for the repair's commit to reach the room's persistence rather than retiring the room's worker
-// under it (roomServer, LEGION-498).
+// room's eviction, which compacts the document's old rows under the document's advisory lock the
+// settlement holds, waits for the repair's commit to reach the room's persistence rather than
+// retiring the room's worker under it (roomServer, LEGION-498).
 func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	pause := pauseRepairCommits(service)
 	generation := owedStamp(t, service, artifactID)
+	// Old rows give the eviction's compaction a fold to write, which waits for the lock.
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 
 	settled := settleUnderPause(t, service, pause, artifactID, generation)
 	service.failRoom(artifactID, errors.New("injected room failure"))
@@ -555,7 +527,7 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 				defer close(closed)
 				closeErr = closer.close(service, artifactID)
 			}()
-			waitFor(t, 10*time.Second, "the room's close to wait for the repair's commit", closeWaitsForRepair)
+			awaitCloseWaitingForRepair(t, service, closed)
 
 			_, update := peerEdit(t, held, replaceRun("before", "before, edited"))
 			var writeErr error
@@ -669,12 +641,71 @@ func endRoomLockHolders(t *testing.T, service *Service) {
 // closeWaitsForRepair reports whether a close the service makes of a room is waiting for a repair
 // to finish committing into that room: the repair holds the room's close gate while it commits
 // (roomServer.holdOpen), and a close waits for that gate. Every gated close of the service is named
-// here, since any can be the one waiting: CloseRoom; closeInstance, which the close of a room
-// behind the head takes; and closeOwned, which a failed room's eviction takes.
+// here, since any can be the one waiting: closeWhenFree, which every close from outside the room
+// takes (CloseRoom, closeRoom and closeOwned, a failed room's eviction's); and closeInstance, which
+// the close of a room behind the head takes.
 func closeWaitsForRepair() bool {
-	return goroutinesIn("(*roomServer).CloseRoom", "sync.(*RWMutex).Lock")+
-		goroutinesIn("(*roomServer).closeInstance", "sync.(*RWMutex).Lock")+
-		goroutinesIn("(*roomServer).closeOwned", "sync.(*RWMutex).Lock") > 0
+	return goroutinesIn("(*roomServer).closeWhenFree", "sync.(*RWMutex).Lock")+
+		goroutinesIn("(*roomServer).closeInstance", "sync.(*RWMutex).Lock") > 0
+}
+
+// awaitCloseWaitingForRepair blocks until a close the service makes of the room waits for the
+// paused repair's commit (closeWaitsForRepair), failing at once if the close returns first, and
+// otherwise only after a ceiling no ordering of the close's own waits reaches - Shutdown's close
+// comes after its own settlement of the room has waited, up to its drain budget, for the document
+// lock the paused repair holds. On the ceiling it reports where the service's goroutines stand and
+// what the database's sessions wait on, so a close held up elsewhere names what held it.
+func awaitCloseWaitingForRepair(t *testing.T, service *Service, closed <-chan struct{}) {
+	t.Helper()
+	ceiling := time.After(ShutdownDrainBudget + 2*time.Minute)
+	for !closeWaitsForRepair() {
+		select {
+		case <-closed:
+			t.Fatal("the room's close returned without waiting for the repair's commit")
+		case <-ceiling:
+			describeCloseWait(t, service)
+			t.Fatal("the room's close never waited for the repair's commit")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// describeCloseWait logs the stack of every goroutine standing in the service's close, shutdown
+// and settlement paths, and every session of the test's database with what it waits on and the
+// advisory locks it holds.
+func describeCloseWait(t *testing.T, service *Service) {
+	t.Helper()
+	buffer := make([]byte, 1<<24)
+	for _, stack := range strings.Split(string(buffer[:runtime.Stack(buffer, true)]), "\n\n") {
+		for _, frame := range []string{"(*Service).Shutdown", "(*roomServer).close", "(*Service).settleRoom", "(*Service).waitForDurableAppends", "settlementPending", "(*PgVersioned)"} {
+			if strings.Contains(stack, frame) {
+				t.Logf("goroutine in %s:\n%s", frame, stack)
+				break
+			}
+		}
+	}
+	rows, err := service.store.Pool.Query(context.Background(), `
+		select a.pid, a.state, coalesce(a.wait_event_type, ''), coalesce(a.wait_event, ''),
+		       left(a.query, 160), coalesce(string_agg(l.objid::text, ',') filter (where l.granted), '')
+		from pg_stat_activity a
+		left join pg_locks l on l.pid = a.pid and l.locktype = 'advisory'
+		where a.datname = current_database() and a.pid <> pg_backend_pid()
+		group by a.pid, a.state, a.wait_event_type, a.wait_event, a.query
+	`)
+	if err != nil {
+		t.Logf("read the database's sessions: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid int
+		var state, waitType, waitEvent, query, held string
+		if err := rows.Scan(&pid, &state, &waitType, &waitEvent, &query, &held); err != nil {
+			t.Logf("scan a database session: %v", err)
+			return
+		}
+		t.Logf("session %d %s wait=%s/%s advisory_held=[%s] query=%q", pid, state, waitType, waitEvent, held, query)
+	}
 }
 
 // repairCommitPause holds a room's next repair commit in the room's update observers once armed,

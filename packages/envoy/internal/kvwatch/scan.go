@@ -30,29 +30,50 @@ func (s *KeyScan) count(entry nats.KeyValueEntry) bool {
 }
 
 // ScanExistingKeys hands visitLive each live key one watch of keys over kv's existing keys
-// delivers, and returns what the watch delivered. keys is the watch's filter (nats.AllKeys, or a
-// prefix and its wildcard) and opts its watch options, to which ctx is added. A MetaOnly watch of
-// every key is the watch nats.go's kv.Keys() runs, which discards each entry's revision; this keeps
-// it, so a caller reads a revision without a round trip per key. A watch that names no key reaches
-// a key this build cannot read (bus.ErrRefused: too long, or outside nats.go's key alphabet) like
-// any other. Without nats.IgnoreDeletes the delete markers are on the wire either way and are
-// counted, since their count is what a restart's log needs; visitLive never sees one. An error
-// visitLive returns ends the scan and fails it.
-//
-// A snapshot short of the filter's keys is not a reading of them, so a scan that did not reach the
-// end fails the caller instead of handing it what happened to arrive. nats.go ends a scan three ways
-// (kv.go in nats.go v1.50.0): it sends a nil entry once it has delivered every existing key
-// (:1096-1099, :1140-1142); its idle timer sends the same nil after putting ErrKeyWatcherTimeout on
-// Error() (idleTimeout); and it closes the updates channel with no nil at all when the subscription
-// ends first (:1170, which closes Error() at :1171 too), an ordered consumer it could not recreate
-// or a closed connection. Only the first is a complete scan; ctx ending first fails it too. what
-// names the caller in every error the scan produces, and log takes the one line a failed stop of the
-// watch writes.
+// delivers, and returns what the watch delivered (DrainExistingKeys, which is what a caller with a
+// watch of its own calls instead). keys is the watch's filter (nats.AllKeys, or a prefix and its
+// wildcard) and opts its watch options, to which ctx is added. A MetaOnly watch of every key is the
+// watch nats.go's kv.Keys() runs, which discards each entry's revision; this keeps it, so a caller
+// reads a revision without a round trip per key. A watch that names no key reaches a key this build
+// cannot read (bus.ErrRefused: too long, or outside nats.go's key alphabet) like any other. Without
+// nats.IgnoreDeletes the delete markers are on the wire either way and are counted, since their
+// count is what a restart's log needs; visitLive never sees one. A scan that did not reach the end
+// of the filter's keys fails the caller, and so do ctx ending first and an error visitLive returns
+// (drain).
 func ScanExistingKeys(ctx context.Context, kv bus.KeyValue, keys, what string, log *slog.Logger, visitLive func(nats.KeyValueEntry) error, opts ...nats.WatchOpt) (KeyScan, error) {
 	watcher, err := kv.Watch(keys, append(opts, nats.Context(ctx))...)
 	if err != nil {
 		return KeyScan{}, fmt.Errorf("%s: watch the bucket: %w", what, err)
 	}
+	return drain(ctx, watcher, what, log, visitLive)
+}
+
+// DrainExistingKeys hands visitLive each live key watcher delivers of the keys that existed when it
+// was created, stops the watcher, and returns what it delivered. The markers are kept rather than
+// dropped by nats.go's IgnoreDeletes, because they are on the wire either way and their count is
+// what a restart's log needs; visitLive never sees one, and a watcher created with IgnoreDeletes
+// delivers none to count. A scan that did not reach the end fails the caller (drain); a caller that
+// wants the watch made for it, and the scan ended by a context too, calls ScanExistingKeys.
+func DrainExistingKeys(watcher nats.KeyWatcher, what string, log *slog.Logger, visitLive func(nats.KeyValueEntry)) (KeyScan, error) {
+	return drain(context.Background(), watcher, what, log, func(entry nats.KeyValueEntry) error {
+		visitLive(entry)
+		return nil
+	})
+}
+
+// drain is the one reading of the existing keys a watcher delivers, which both scans above share,
+// and it stops the watcher when it returns.
+//
+// A snapshot short of what the watcher names is not a reading of it, so a scan that did not reach
+// the end fails the caller instead of handing it what happened to arrive. nats.go ends a scan three
+// ways (kv.go in nats.go v1.50.0): it sends a nil entry once it has delivered every existing key
+// (:1096-1099, :1140-1142); its idle timer sends the same nil after putting ErrKeyWatcherTimeout on
+// Error() (idleTimeout); and it closes the updates channel with no nil at all when the subscription
+// ends first (:1170, which closes Error() at :1171 too), an ordered consumer it could not recreate
+// or a closed connection. Only the first is a complete scan; ctx ending first fails it too, and so
+// does an error visitLive returns. what names the caller in every error the scan produces, and log
+// takes the one line a failed stop of the watch writes.
+func drain(ctx context.Context, watcher nats.KeyWatcher, what string, log *slog.Logger, visitLive func(nats.KeyValueEntry) error) (KeyScan, error) {
 	defer func() {
 		if err := watcher.Stop(); err != nil {
 			log.Warn("could not stop the "+what+" watch of the bucket", slog.String("error", err.Error()))

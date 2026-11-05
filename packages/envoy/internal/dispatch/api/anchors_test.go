@@ -729,6 +729,40 @@ func TestAnchorQuoteNotFoundIs404(t *testing.T) {
 	}
 }
 
+// An upload whose markdown moves an open ask's quote into a code block, where an ask mark is not
+// allowed, is the caller's markdown to fix: 400 INVALID_MARKDOWN naming the ask and its quote, not
+// a 500 that blames the server, and the document keeps its text.
+func TestAnUploadMovingAnOpenAsksQuoteIntoACodeBlockIs400(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask into code", "Intro.\n\nrun the tests\n")
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which tests?",
+		"anchor":   map[string]any{"artifact": "spec", "quote": "run the tests"},
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the anchored ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	artifact := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice")
+	if artifact.Code != http.StatusOK {
+		t.Fatalf("read the spec: status=%d body=%s", artifact.Code, artifact.Body.String())
+	}
+	name := decodeBody[struct {
+		Name string `json:"name"`
+	}](t, artifact).Name
+	before := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice").Body.String()
+
+	upload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": name, "content": "Intro.\n\n```\nrun the tests\n```\n", "summary": "Fence the command",
+	}, "alice")
+	if upload.Code != http.StatusBadRequest || !strings.Contains(upload.Body.String(), `"code":"INVALID_MARKDOWN"`) ||
+		!strings.Contains(upload.Body.String(), `the open ask anchored on \"run the tests\"`) {
+		t.Fatalf("upload moving the ask's quote into a code block: status=%d body=%s, want 400 INVALID_MARKDOWN naming the ask", upload.Code, upload.Body.String())
+	}
+	if after := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice").Body.String(); after != before {
+		t.Fatalf("the spec after the refused upload = %s, want %s", after, before)
+	}
+}
+
 func TestReplyMayNotCarryAnAnchor(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored reply", "The quick brown fox")

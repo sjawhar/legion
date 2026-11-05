@@ -22,7 +22,7 @@ type userIssueState struct {
 }
 
 func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -59,22 +59,26 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Pinned      *bool        `json:"pinned"`
-		LastReadSeq *int         `json:"last_read_seq"`
-		Dismissed   *[]string    `json:"dismissed"`
-		Seq         *int64       `json:"seq"`
-		Actor       *model.Actor `json:"actor"`
+		Pinned      *bool     `json:"pinned"`
+		LastReadSeq *int      `json:"last_read_seq"`
+		Dismissed   *[]string `json:"dismissed"`
+		Seq         *int64    `json:"seq"`
+		// Actor names no writer of this row: the state is the calling person's, keyed on the
+		// login actingPerson resolves, and the row has no column for a session. The session it
+		// names is the acting agent's, which goes on the act of the event this write appends
+		// (actSessionFromBody); a client that has always sent one is not refused for an unknown
+		// key either (decodeJSON).
+		Actor *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	actor, ok := s.requireActor(w, r, input.Actor)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
-	if actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "user state is only available to users")
+	if actor, ok = actSessionFromBody(w, actor, input.Actor); !ok {
 		return
 	}
 	if input.LastReadSeq != nil && *input.LastReadSeq < 0 {
@@ -116,6 +120,7 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	previous := value
 	if input.Pinned != nil {
 		value.Pinned = *input.Pinned
 	}
@@ -146,8 +151,21 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// changed names which of pinned, last_read_seq and dismissed this write moved from the row it
+	// read (seq, the write's own precondition, is not one), so another tab refreshes its pinned
+	// list for a pin and not for a read mark. Nothing it moved leaves it [].
+	changed := []string{}
+	if previous.Pinned != value.Pinned {
+		changed = append(changed, "pinned")
+	}
+	if previous.LastReadSeq != value.LastReadSeq {
+		changed = append(changed, "last_read_seq")
+	}
+	if !slices.Equal(previous.Dismissed, value.Dismissed) {
+		changed = append(changed, "dismissed")
+	}
 	event, err := s.appendEvent(r.Context(), tx, projectOwner(project).event(
-		"user_state.updated", actor, map[string]any{"login": actor.ID, "state": value},
+		"user_state.updated", actor, map[string]any{"login": actor.ID, "state": value, "changed": changed},
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -219,7 +237,7 @@ func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionI
 }
 
 func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -255,7 +273,7 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 // replies already read by id or passed by the read mark (one the Clear hides is neither), and
 // answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

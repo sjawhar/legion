@@ -31,6 +31,24 @@ type askThread struct {
 	Edits     []model.AskEdit     `json:"edits"`
 	Answers   []model.AskAnswer   `json:"answers"`
 	Followers []model.AskFollower `json:"followers"`
+	askReach
+}
+
+// askReach is who besides the followers a person's answer and replies on an ask reach: the
+// session holding the claim on the ask's issue (the outbox's claimant route) and the issue's
+// route, a session or a role holder. The embedded model.IssueRouteReach is that route's reach
+// right now (routeRoster.reach, the same the issue reads carry): RouteStatus says whether the
+// route reaches anyone (live, no_holder, or unknown when the listener did not answer), and
+// RouteHolder is the session it reaches while live, so a reader can count a session that is both
+// claimant and route holder once and tell an unreachable route from one it cannot see.
+// Claimant is null while nobody or a person holds the claim; Route, RouteStatus and RouteHolder
+// while the issue has no route; RouteHolder whenever RouteStatus is not live; and all four on a
+// project document's ask, which has no issue. The single-ask read and every askThread carry it
+// at the same keys.
+type askReach struct {
+	Claimant *string `json:"claimant"`
+	Route    *string `json:"route"`
+	model.IssueRouteReach
 }
 
 type inboxAsk struct {
@@ -68,7 +86,7 @@ func (s *server) inboxAssigneeFilter(ctx context.Context, raw string, caller mod
 }
 
 func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -137,15 +155,11 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		askPointers[index] = &asks[index].Ask
 		askIDs[index] = asks[index].ID
 	}
-	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
+	if err := loadAskDetails(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	threads, err := s.loadAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(r.Context(), askIDs)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

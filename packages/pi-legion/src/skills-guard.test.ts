@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   brokenRelativeLinks,
@@ -13,6 +14,15 @@ import {
   stageSkills,
 } from "@legion/pi-shared/test/skills-guard";
 
+// The Claude Code plugin is generated from this repository's skills/ and this package's agents/,
+// and only main's Rebuild Claude Envoy plugin workflow commits packages/claude-envoy/legion/, so
+// a check of what a Claude Code role loads builds a fresh one, as
+// packages/claude-envoy/tests/legion-plugin-fresh.test.ts does. The build runs as its own command,
+// the way stageSkills runs the prepack script: imported, that package's sources would be
+// typechecked under this package's `tsc`, whose `lib` is older than the one they are written
+// against.
+const PLUGIN_BUILDER = path.join(REPO_ROOT, "packages/claude-envoy/scripts/build.ts");
+
 // The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
 // dist/skills: the partition scripts/pi-plugin-prepack.sh gives @sjawhar/pi-legion, staged here as
 // its prepack stages it. Everything a Legion agent reads that can link into a skill is a linking
@@ -22,6 +32,7 @@ import {
 // partition is valid because the Envoy plugin, installed beside this one, ships it.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
 const promptsRoot = path.join(REPO_ROOT, "packages/daemon/internal/prompts");
+const agentsRoot = path.join(REPO_ROOT, "packages/pi-legion/agents");
 let staged: string;
 
 beforeAll(() => {
@@ -163,28 +174,6 @@ test("the controller skill reads pull requests as the review App, and nothing sa
   expect(offending).toEqual([]);
 });
 
-// GitHub honours the `skip-checks: true` trailer only as the last line after two empty lines; the
-// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker
-// skill's trailer reference and the daemon's worker part carry the recipe with two, and no skill
-// or prompt carries one with fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends
-// with exactly three `\n`.
-test("the skip-checks recipe writes two empty lines before the trailer, everywhere it is written", () => {
-  const recipe = "$'\\n\\n\\nskip-checks: true'";
-  expect(
-    readFileSync(path.join(staged, "legion-worker/references/skip-checks-trailer.md"), "utf8")
-  ).toContain(recipe);
-  expect(readFileSync(path.join(promptsRoot, "go/worker-common.md"), "utf8")).toContain(recipe);
-  const short = [staged, promptsRoot]
-    .flatMap(files)
-    .filter((file) => {
-      if (!file.endsWith(".md")) return false;
-      const forms = readFileSync(file, "utf8").match(/\$'(\\n)*skip-checks: true'/g) ?? [];
-      return forms.some((form) => form !== recipe);
-    })
-    .map((file) => path.relative(REPO_ROOT, file));
-  expect(short).toEqual([]);
-});
-
 // INFRA-83 took the `CI:` line out of the pull request body, and the forward merge of main put the
 // paragraph that defined it back into skills/legion-worker/references/pr-body.md with no conflict
 // for anyone to read: a merge keeps both sides by design, so a deletion is undone in silence. The
@@ -249,37 +238,249 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
   expect(instructing).toEqual([]);
 });
 
-// Whether retro's push carries that trailer was once stated three ways that disagreed: a rule keyed
-// to the paths a push touched, an exception list that named retro's removal commit, and a reason
-// that held only while retro also wrote a learning (INFRA-149). A retro with nothing to write took
-// the path rule, so the commit that merges arrived with no check runs, which a base branch that
-// requires a check blocks while Legion carries the earlier code head's verdict and reads the head as
-// green. One sentence now replaces all three, and an edit that un-states it in any of the five texts
-// must fail a lane here rather than pass with every required check green. Counted per file and never
-// against a composed prompt: the composed implementer prompt carries the sentence twice, from
-// `roles/implementer.md` and from `go/worker-common.md`. The whole sentence is counted literally, so
-// a reworded half cannot satisfy it. The `packages/claude-envoy/legion/` mirror needs no pin of its
-// own; `packages/claude-envoy/tests/legion-plugin-fresh.test.ts` fails when it drifts from these.
+// Background work is on for every role: Legion writes no Oh My Pi settings
+// overlay, so a long bash call becomes a background job and a `task` subagent runs as one, and a
+// role reads a result with the `wait` tool, which a message to its session also returns from. No
+// task agent declares `blocking`, and nothing interrupts a turn: a CI red that ends a
+// phase starts the implementer at once and tells the role whose phase ended by one message, which
+// stops nothing of its. So no skill, no shipped agent and no file of the plugin a Claude Code role
+// loads may say that a takeover cancels a turn or tell a role to keep its work in
+// the foreground, and each that dispatches a task subagent names the tool that reads its result.
 //
-// INFRA-83 adds the fifth text. It moved the trailer's contract out of `legion-worker/SKILL.md`
-// into `legion-worker/references/skip-checks-trailer.md`, which is now the file a worker reads
-// before it writes the line, so a copy of the sentence that lived there unpinned would be the
-// drift this test exists to stop. The four INFRA-149 pinned are pinned unchanged.
-test("one sentence states that retro's push never carries the trailer, in each text that states it", () => {
-  const rule =
-    "Retro's push never carries the line, whatever paths it touches, because it is the last " +
-    "push before the merge and a base that requires a check will not merge a head whose checks " +
-    "never ran.";
-  const texts = [
-    path.join(staged, "legion-worker/SKILL.md"),
-    path.join(staged, "legion-worker/references/skip-checks-trailer.md"),
-    path.join(staged, "legion-retro/SKILL.md"),
-    path.join(promptsRoot, "go/worker-common.md"),
-    path.join(promptsRoot, "roles/implementer.md"),
+// Three of the four trees that carry this text are read here — the repository's skills/, the
+// plugin's agents/, and a
+// fresh `buildLegionPlugin` output, which is generated from those two and so is the only copy of
+// `packages/claude-envoy/legion/` a pull request can check (that tree is committed by main's
+// Rebuild Claude Envoy plugin workflow alone). The daemon's prompts are the fourth, read by
+// packages/daemon/internal/prompts/roles_test.go, which walks both of its embed trees and so
+// reaches go/claude-mechanics.md, a part `Compose` never joins.
+//
+// Both halves are exact: the retired sentences as literals, and the dispatch as the boot gate's
+// own `task(agent="` against `` `wait` `` as a backticked token, since the English word "wait" is
+// in many of these files and one of them forbids waiting (packages/daemon/internal/prompts/go/
+// implementer.md, "never wait for CI"). The files that dispatch are listed rather than counted, so
+// one that stopped dispatching fails as loudly as one that started, and a reader that found
+// nothing cannot pass while checking nothing.
+test("no skill, agent or plugin file keeps work in the foreground, and each that dispatches a task names `wait`", () => {
+  const retired = [
+    "interrupts your turn",
+    "tool calls are cancelled",
+    "interrupted its turn",
+    "run none in the background",
+    "one foreground command",
+    "blocking: true",
   ];
-  const counts = texts.map((file) => ({
-    file: path.relative(REPO_ROOT, file),
-    found: readFileSync(file, "utf8").split(rule).length - 1,
+  const out = path.join(mkdtempSync(path.join(os.tmpdir(), "legion-plugin-")), "build");
+  try {
+    const built = Bun.spawnSync([process.execPath, PLUGIN_BUILDER, "--out", out]);
+    if (built.exitCode !== 0) {
+      throw new Error(
+        `${PLUGIN_BUILDER} --out ${out} exited ${built.exitCode}:\n${built.stderr.toString()}`
+      );
+    }
+    const plugin = path.join(out, "legion");
+    const saidAnyway: string[] = [];
+    const dispatching: string[] = [];
+    const silent: string[] = [];
+    for (const file of [repoSkillsRoot, agentsRoot, plugin].flatMap(files)) {
+      const name = file.startsWith(plugin)
+        ? `the fresh Claude plugin's ${path.relative(plugin, file)}`
+        : path.relative(REPO_ROOT, file);
+      const text = readFileSync(file, "utf8");
+      for (const phrase of retired) {
+        if (text.includes(phrase)) saidAnyway.push(`${name}: ${phrase}`);
+      }
+      if (text.includes('task(agent="')) {
+        dispatching.push(name);
+        if (!text.includes("`wait`")) silent.push(name);
+      }
+    }
+    expect(saidAnyway).toEqual([]);
+    expect(silent).toEqual([]);
+    expect(dispatching.sort()).toEqual([
+      "skills/AGENTS.md",
+      "skills/ce-simplify-code/SKILL.md",
+      "skills/dispatch-writing-specs/SKILL.md",
+      "skills/legion-architect/references/decomposition.md",
+      "skills/legion-architect/references/design-gate.md",
+      "skills/legion-oracle/SKILL.md",
+      "skills/legion-retro/SKILL.md",
+      "skills/legion-worker/references/merge-gate.md",
+      "the fresh Claude plugin's skills/ce-simplify-code/SKILL.md",
+      "the fresh Claude plugin's skills/legion-architect/references/decomposition.md",
+      "the fresh Claude plugin's skills/legion-architect/references/design-gate.md",
+      "the fresh Claude plugin's skills/legion-oracle/SKILL.md",
+      "the fresh Claude plugin's skills/legion-retro/SKILL.md",
+      "the fresh Claude plugin's skills/legion-worker/references/merge-gate.md",
+    ]);
+  } finally {
+    rmSync(path.dirname(out), { recursive: true, force: true });
+  }
+}, 60_000);
+
+// dispatch://INFRA-332's eight guidance rules, each pinned where it was written. A pin fails when
+// a later edit deletes the rule's key sentence; it does not show that an agent follows the rule,
+// which the issue's session runs measure. Whitespace is collapsed before the match, as
+// shipped-agents.test.ts collapses it, so a pin survives a rewrap of the file it reads.
+const collapsed = (file: string) => readFileSync(file, "utf8").replace(/\s+/g, " ");
+
+// A sentence copied into several files is counted once per file, never over a composed prompt,
+// where a sentence in both roles/<role>.md and go/worker-common.md would appear twice. A file
+// that lost the sentence and a file that gained a second copy both fail, and the files are listed
+// rather than counted, so one that stopped carrying it fails as loudly as one that started.
+// A `skills/…` path is read from the staged partition, as every other skill pin here is, so what
+// is counted is the copy the plugin ships.
+function countedOncePerFile(rule: string, relativePaths: string[]) {
+  const counts = relativePaths.map((relative) => ({
+    file: relative,
+    found:
+      collapsed(
+        relative.startsWith("skills/")
+          ? path.join(staged, relative.slice("skills/".length))
+          : path.join(REPO_ROOT, relative)
+      ).split(rule).length - 1,
   }));
-  expect(counts).toEqual(texts.map((file) => ({ file: path.relative(REPO_ROOT, file), found: 1 })));
+  expect(counts).toEqual(relativePaths.map((file) => ({ file, found: 1 })));
+}
+
+// R1: the simplify pass covers every file of the diff, docs-only diffs included, and a defect it
+// sees is reported rather than dropped as out of scope (dispatch://INFRA-198).
+test("the simplify pass reads every file of its scope and reports the defects it sees", () => {
+  const simplify = collapsed(path.join(staged, "ce-simplify-code", "SKILL.md"));
+  expect(simplify).toContain(
+    "Every file of the scope is in the pass: documentation, workflow and configuration files as much as code, and a scope that holds no code at all still runs."
+  );
+  expect(simplify).toContain("A defect you see is reported, never dropped.");
+  expect(simplify).not.toContain("For mixed scopes, retain only the code.");
+  const prBody = collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"));
+  expect(prBody).toContain("whatever the diff touches, a docs-only diff included.");
+  expect(prBody).toContain(
+    "The pass covers every file of the diff, workflow YAML and documentation with the code, and a defect it reports is fixed outside the pass with the results recorded again, never dropped as out of scope; the `Thermo` line's `defects reported` half names how many and the commit that fixed them"
+  );
+  // The Thermo line is written on every diff now, and carries what the pass reported; only its
+  // pair half is omitted on a docs-only one, which leaves the reviewer's pair where it was.
+  expect(prBody).toContain("defects reported: <none | <n>, fixed in <sha>>");
+  expect(prBody).toContain(
+    "(on a docs-only PR the simplify half and the defects are recorded as on any other diff, and the pair half reads `thermonuclear pair: not run (docs-only)`)"
+  );
+  expect(prBody).not.toContain("a docs-only diff gets none");
+  const mergeGate = collapsed(path.join(staged, "legion-worker", "references", "merge-gate.md"));
+  expect(mergeGate).toContain(
+    "On a docs-only PR the `Thermo` line still records the simplify pass and the defects it reported, and its pair half reads `thermonuclear pair: not run (docs-only)`."
+  );
+  expect(mergeGate).not.toContain("Skip the `Thermo` line entirely on a docs-only PR.");
+});
+
+// R2: a check that cannot fail is not a result, and a documented procedure counts only when it
+// ran (dispatch://INFRA-142, dispatch://INFRA-198).
+test("a check that cannot fail is not a result, and a documented procedure counts only when it ran", () => {
+  const prBody = collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"));
+  expect(prBody).toContain("**A check that cannot fail is not a result.**");
+  expect(prBody).toContain(
+    "A documented procedure counts only when it ran: reading it, or reading the document that describes it, is not a run"
+  );
+});
+
+// R3: the unchanged-diff fingerprint covers the branch's own diff alone, so a forward merge can
+// bring a new instance of a class the branch already answered (dispatch://INFRA-83). The `E2E`
+// re-check wording carries the class search in both files that hold it.
+test("the forward-merge re-check searches the new head for each earlier finding's class", () => {
+  expect(
+    collapsed(path.join(staged, "legion-worker", "references", "conflicts-and-rewrites.md"))
+  ).toContain(
+    "The fingerprint answers one question only: whether the branch's own diff changed. It cannot show an instance the merge brought in from the base"
+  );
+  expect(collapsed(path.join(staged, "legion-architect", "references", "acceptance.md"))).toContain(
+    "the tester re-runs the bare gates only and the class search of every earlier round's findings at the new head;"
+  );
+  countedOncePerFile(
+    "forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings clean",
+    [
+      "skills/legion-worker/references/pr-body.md",
+      "packages/daemon/internal/prompts/roles/tester.md",
+    ]
+  );
+});
+
+// R4: a planner waits on a decision its plan needs rather than completing around it
+// (dispatch://INFRA-206). The role prompts carry the rest of R4; roles_test.go pins those.
+test("a planner waits on an open decision instead of completing around it", () => {
+  expect(collapsed(path.join(staged, "legion-worker", "SKILL.md"))).toContain(
+    "a planner on a decision the plan itself needs, because a plan completed around an open decision carries that gap into every later phase"
+  );
+});
+
+// R5: a review agent returns its whole report, and the reviewer refuses a result without one
+// (dispatch://INFRA-331). shipped-agents.test.ts pins the two agent definitions.
+test("the reviewer treats a result with no report as a failed run, not a verdict", () => {
+  const mergeGate = collapsed(path.join(staged, "legion-worker", "references", "merge-gate.md"));
+  expect(mergeGate).toContain(
+    "A result that carries no report, or that names another place for it, is a failed run, not a verdict"
+  );
+  expect(mergeGate).toContain(
+    "Reading the agent's diff yourself and recording that in its place is the same as answering the rubric from a bare verdict"
+  );
+  expect(mergeGate).toContain(
+    "that half of the round has no review: tell the architect, do not approve, and wait with a `WAITING` line naming what you wait on until it answers"
+  );
+});
+
+// R6: a pipe's status is the last command's, so `$?` after `cmd | tail` reads the pager's
+// (dispatch://INFRA-334). The sentence goes in the always-loaded prompts and agent definitions,
+// because skills/legion-worker/references/tools.md loads only on a tool or test question.
+test("every shipped prompt and bash-running agent says how to read a piped command's status", () => {
+  countedOncePerFile(
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: `${PIPESTATUS[0]}` is the shell expansion the rule teaches, quoted verbatim.
+    "Read a piped command's status with `${PIPESTATUS[0]}`, or with `set -o pipefail` inside a subshell of that one line; never set `pipefail` at the top level of your shell, where a later `cmd | head` exits 141 and reads as a failure although it did its job. Never pipe a write — a `dispatch` command that records something, or any command whose own output tells you what it did — into `head`, `tail` or `grep`: the status you read would be the pager's, and the line that says what happened is the line you cut.",
+    [
+      "packages/daemon/internal/prompts/go/worker-common.md",
+      "packages/daemon/internal/prompts/go/architect-common.md",
+      "packages/daemon/internal/prompts/go/controller-headless.md",
+      "packages/daemon/internal/prompts/go/controller-interactive.md",
+      "packages/pi-legion/agents/deep-worker.md",
+      "packages/pi-legion/agents/plan-gap-analyst.md",
+      "packages/pi-legion/agents/plan-reviewer.md",
+      "packages/pi-legion/agents/thermonuclear-deep-review.md",
+      "packages/pi-legion/agents/thermonuclear-code-quality.md",
+    ]
+  );
+});
+
+// R7: `READY_UNREVIEWED_CHANGE` has more causes than retro's own paths, and the merger's own
+// prompt part is the one complete list, so neither file gets a second copy of it
+// (dispatch://INFRA-427, and the spec's decision "A pointer, not a second list"). The pin counts
+// the pointer and refuses the list: a second copy would have to be kept equal to `ready.go`.
+test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CHANGE's causes", () => {
+  const files = ["skills/legion-worker/references/merge-gate.md", "skills/legion-retro/SKILL.md"];
+  countedOncePerFile(
+    "`READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own",
+    files
+  );
+  countedOncePerFile(
+    "the complete list, with each remedy, is the merger's own role prompt part",
+    files
+  );
+  for (const file of files) {
+    const text = collapsed(path.join(staged, file.slice("skills/".length)));
+    expect(text, `${file} lists the causes instead of pointing at them`).not.toContain(
+      "300-file limit"
+    );
+  }
+});
+
+// R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes
+// another role's open directory (dispatch://INFRA-654).
+test("every prompt and agent that may write says to make its own scratch and delete only what it made", () => {
+  countedOncePerFile(
+    'Make your own scratch with `mktemp -d` and delete only the paths you made, each by its exact path. Never delete by a glob in a shared directory: every role of this issue writes into the same `$TMPDIR` on the issue\'s volume, so a sweep like `rm -rf "$TMPDIR"/tmp.*` deletes directories another role has open.',
+    [
+      "packages/pi-legion/agents/deep-worker.md",
+      "packages/pi-legion/agents/thermonuclear-deep-review.md",
+      "packages/pi-legion/agents/thermonuclear-code-quality.md",
+      "skills/thermonuclear-deep-review/SKILL.md",
+      "skills/thermonuclear-code-quality/SKILL.md",
+      "packages/daemon/internal/prompts/go/worker-common.md",
+      "packages/daemon/internal/prompts/go/architect-common.md",
+    ]
+  );
 });

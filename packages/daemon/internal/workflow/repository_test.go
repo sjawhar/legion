@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -134,6 +135,55 @@ func TestARecordedIssueKeepsItsRepositoryAndSaysAnEditIsNotApplied(t *testing.T)
 	}
 	if len(kept) != 1 || kept[0].issue != "LEGION-209" || kept[0].payload["body"] != want {
 		t.Fatalf("repository notes = %#v, want one saying %q", kept, want)
+	}
+}
+
+// A recorded issue whose Dispatch resolution is now its repository's rename partner is told
+// nothing: the record keeps sjawhar/legion, Dispatch resolves the issue to cybermonklabs/legion,
+// and a configured rename makes the two one repository, so re-pointing every open issue at the
+// repository a transfer moved to — the step the transfer takes in Dispatch — posts no note on any
+// of them. With no pair configured the same resolution is a repository change like any other, and
+// says so on the issue once.
+func TestARecordedIssueSaysNothingWhenItsResolutionIsItsRenamePartner(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		renames ghrepo.Renames
+		want    string
+	}{
+		{name: "the pair configured", renames: renamedLegion},
+		{name: "no pair configured", renames: ghrepo.Renames{},
+			want: "Legion keeps sjawhar/legion as this issue's repository; the change to cybermonklabs/legion in Dispatch is not applied — an issue's repository is fixed when Legion records it. Work on cybermonklabs/legion needs an issue of its own, which a person decides on."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			openTree(t, pool)
+			parent := "LEGION-208"
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", Rank: "V", LastDispatchSeq: 2})
+			apply := applyFacts(t, pool, renamedEngine(tc.renames))
+			repointed := childTodo(3, "cybermonklabs/legion")
+			repointed.Status, repointed.Title = "in_progress", "child"
+			apply("re-pointed", repointed)
+			apply("re-pointed-again", childTodo(4, "cybermonklabs/legion"))
+			if child := issueRecord(t, pool, "LEGION-209"); child == nil || child.Repo != "sjawhar/legion" || child.GitHubRepo != "sjawhar/legion" {
+				t.Fatalf("child = %#v, want it still recorded on sjawhar/legion: a rename rewrites no record", child)
+			}
+			var kept []outboxEntry
+			for _, message := range outboxOf(t, pool, "dispatch_message") {
+				if strings.HasPrefix(message.payload["body"].(string), "Legion keeps") {
+					kept = append(kept, message)
+				}
+			}
+			if tc.want == "" {
+				if len(kept) != 0 {
+					t.Fatalf("repository notes = %#v, want none: the resolution is the issue's repository under the configured pair", kept)
+				}
+				return
+			}
+			if len(kept) != 1 || kept[0].issue != "LEGION-209" || kept[0].payload["body"] != tc.want {
+				t.Fatalf("repository notes = %#v, want one saying %q", kept, tc.want)
+			}
+		})
 	}
 }
 

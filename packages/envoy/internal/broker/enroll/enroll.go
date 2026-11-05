@@ -15,13 +15,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -44,10 +45,15 @@ var (
 	ErrInvalidSlot     = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
 	ErrNoCredential    = errors.New("no such machine login")
 	ErrNotApprover     = errors.New("only the person who approved a person's machine login may revoke it")
-	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
-	// the one that enrolled it (Revoke).
-	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
+	// ErrNotEnrollingCredential refuses a revoke of an enrollment that carries no operator — a
+	// pod's, or a machine's own session — by any launcher credential but the one that enrolled
+	// it (Revoke).
+	ErrNotEnrollingCredential = errors.New("only the machine login that made an enrollment carrying no operator may end it")
 	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrMachineLoginEnded refuses a machine's own session a renewal because the launcher
+	// credential its exchange minted is no longer live: revoked, past the expiry its Google
+	// identity token gave it, or its account no longer listed for its service (Renew).
+	ErrMachineLoginEnded = errors.New("the machine login that enrolled this session has ended")
 )
 
 type Credential struct {
@@ -55,6 +61,10 @@ type Credential struct {
 	Operator *string
 	Service  *string
 	Host     string
+	// Subject is the identity a token login proved (TokenLogin.Subject): a Kubernetes
+	// ServiceAccount, or a machine as the token exchange names it (exchange.MachineSubject); nil
+	// for every login a person approved.
+	Subject *string
 }
 
 // LiveCredential is one of the machine logins a person may revoke, as their machine-login page
@@ -67,17 +77,19 @@ type LiveCredential struct {
 	// Service names the service a service's login is for (legion-daemon); nil for a person's own
 	// machine.
 	Service *string
-	// Subject is the ServiceAccount a service's token login proved
-	// (system:serviceaccount:<namespace>:<name>); nil for every login a person approved.
+	// Subject is what a token login proved: its ServiceAccount
+	// (system:serviceaccount:<namespace>:<name>), or a machine as the token exchange names it
+	// (exchange.MachineSubject); nil for every login a person approved.
 	Subject *string
 	// ApprovedBy is the login of the person who approved it, "" for a service's token login, which
 	// no person approves.
 	ApprovedBy string
 	IssuedAt   time.Time
 	ExpiresAt  time.Time
-	// Expired is true once ExpiresAt has passed: the login enrolls no more sessions, but the ones
-	// it enrolled renew with their own keys and still run, so it stays listed until they end or
-	// lapse, or it is revoked.
+	// Expired is true once ExpiresAt has passed: the login enrols no more sessions, and the ones
+	// it enrolled renew with their own keys and still run — every one but a machine's own
+	// session, whose renewal is held to its login being live (Renew) — so it stays listed until
+	// they end or lapse, or it is revoked.
 	Expired bool
 }
 
@@ -94,7 +106,7 @@ type Enrollment struct {
 	// identity of every session and single-identity pod enrollment.
 	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
-	// projected token itself and never from the caller; nil for a session.
+	// token itself and never from the caller; nil for a session.
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
@@ -118,7 +130,7 @@ type Service struct {
 	Lease time.Duration
 	// Pod verifies the cluster's projected ServiceAccount tokens against BROKER_K8S_OIDC_ISSUER and
 	// BROKER_K8S_OIDC_AUDIENCE; nil on a broker that trusts no Kubernetes token issuer, which enrolls
-	// no pod and serves no token login.
+	// no pod and serves no Kubernetes token login.
 	Pod PodVerifier
 
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
@@ -129,8 +141,13 @@ type Service struct {
 
 	// ServiceLogins is BROKER_SERVICE_LOGINS: each ServiceAccount subject that logs in as a service
 	// with its token, answering that service. AuthenticateLauncher reads it for every credential a
-	// token login issued.
+	// Kubernetes token login issued.
 	ServiceLogins map[string]string
+	// VMServicesByAccount is BROKER_VM_SERVICES, keyed by a Google service account's email: the
+	// service the machines of that account are listed as. AuthenticateLauncher reads it for
+	// every credential the token exchange minted for a machine, which keeps that credential
+	// authenticating only while its account is still listed.
+	VMServicesByAccount map[string]string
 
 	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
 	// before the recovery lookup. It exists only so a test can deterministically reproduce the
@@ -173,58 +190,82 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 	return s.mintLauncherCredential(ctx, tx, &operator, nil, host, thumbprint, jwk, recordID, expires)
 }
 
-// TokenLogin is one verified token login, as IssueTokenLogin records it: the ServiceAccount
-// subject and the service BROKER_SERVICE_LOGINS maps it to, the pod its token is bound to ("" for
-// none) and when the token expires, the key the request object proved (its thumbprint and public
-// JWK), and when the credential expires.
+// TokenLogin is one verified token login, as IssueTokenLogin records it: the identity the token
+// proved (a ServiceAccount subject, a machine as the token exchange names it,
+// exchange.MachineSubject, or a person's sign-in on a machine, exchange.PersonSubject), the
+// service BROKER_SERVICE_LOGINS or BROKER_VM_SERVICES maps it to,
+// the person its sessions act for (a sign-in's, "" for a machine's and for a Kubernetes
+// service's, which act as nobody), the host the credential names (a ServiceAccount's
+// <namespace>/<name>, a machine's <project>/<zone>/<instance name>), the pod its token is bound
+// to ("" for none) and when the token expires, the key the request object or the DPoP proof
+// proved (its thumbprint and public JWK), and when the credential expires.
 type TokenLogin struct {
-	Subject, Service, PodUID string
-	TokenExpires             time.Time
-	Thumbprint               string
-	JWK                      json.RawMessage
-	Expires                  time.Time
+	Subject, Service, Host, PodUID string
+	// Operator is the person the credential's enrollments run for, which makes them that
+	// person's sessions exactly as a dev box's machine login does (authorized). A person's
+	// sign-in on a machine sets it and nothing else does: a machine's own credential and a
+	// Kubernetes service's act for no person, and their sessions reach their service's secrets
+	// alone.
+	Operator     string
+	TokenExpires time.Time
+	Thumbprint   string
+	JWK          json.RawMessage
+	Expires      time.Time
 }
 
-// IssueTokenLogin issues or moves the launcher credential of a service's token login, which no
-// person approves (machine.Service.TokenLogin verified everything in login). The subject holds one
-// live credential, created at its first login: each login moves it to login's key and expiry under
-// the same id, so a login proving the key the credential already holds changes only its expiry and
-// every pod the account enrolled stays under it. Its host is the account's <namespace>/<name>.
-// Each login writes a launcher_credential.token_login audit row naming the subject, the pod the
-// token is bound to, the key, and both expiries. A key another live credential holds is a unique
-// violation (store.IsUniqueViolation), and nothing is written.
+// IssueTokenLogin issues or moves the launcher credential of a token login, which no person
+// approves, in a transaction of its own: machine.Service.TokenLogin verified everything in
+// login and has none to join.
 func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.UUID, error) {
-	namespace, name := accountName(login.Subject)
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
-	var id uuid.UUID
-	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
-		values ($1, null, $2, $3, $4, $5, null, $6, $7)
-		on conflict (subject) where subject is not null and revoked_at is null
-		do update set service=excluded.service, host=excluded.host, key_thumbprint=excluded.key_thumbprint,
-			public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
-		returning id`,
-		uuid.New(), login.Service, namespace+"/"+name, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
-		return uuid.Nil, err
-	}
-	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
-		jsonb_strip_nulls(jsonb_build_object('credential_id',$2::text,'service',$3::text,'subject',$4::text,'pod_uid',nullif($5::text,''),
-			'key_thumbprint',$6::text,'expires_at',$7::timestamptz,'token_expires_at',$8::timestamptz)))`,
-		record.LauncherActor(id.String()), id.String(), login.Service, login.Subject, login.PodUID, login.Thumbprint, login.Expires, login.TokenExpires); err != nil {
+	id, err := s.IssueTokenLoginTx(ctx, tx, login)
+	if err != nil {
 		return uuid.Nil, err
 	}
 	return id, tx.Commit(ctx)
 }
 
-// accountName splits a ServiceAccount subject, system:serviceaccount:<namespace>:<name>, which
-// BROKER_SERVICE_LOGINS already holds to that form.
-func accountName(subject string) (namespace, name string) {
-	rest := strings.TrimPrefix(subject, "system:serviceaccount:")
-	namespace, name, _ = strings.Cut(rest, ":")
-	return namespace, name
+// IssueTokenLoginTx issues or moves the launcher credential of a token login inside tx, joined
+// to the caller's own transaction — the RFC 8693 exchange's, which must write the credential
+// and the access token that names it together or not at all
+// (oauth.ExchangeConfig.MachineCredentials).
+//
+// The subject holds one live credential, created at its first login: each login moves it to
+// login's key, person and expiry under the same id, so a login proving the key the credential
+// already holds changes only its expiry and every session enrolled under it stays there. A
+// machine's subject names that one machine (exchange.MachineSubject) and a sign-in's names one
+// person on one box (exchange.PersonSubject), so each machine of a fleet, and each person
+// signed in on each of its boxes, holds a credential of its own and no login moves another's.
+// Its host is login's. Each login writes a launcher_credential.token_login audit row naming the
+// subject, the pod the token is bound to, the key, and both expiries. A key another live
+// credential holds is a unique violation (store.IsUniqueViolation), and nothing is written.
+func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenLogin) (uuid.UUID, error) {
+	var operator *string
+	if login.Operator != "" {
+		operator = new(record.CanonicalLogin(login.Operator))
+	}
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
+		values ($1, $2, $3, $4, $5, $6, null, $7, $8)
+		on conflict (subject) where subject is not null and revoked_at is null
+		do update set operator=excluded.operator, service=excluded.service, host=excluded.host,
+			key_thumbprint=excluded.key_thumbprint, public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
+		returning id`,
+		uuid.New(), operator, login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
+		return uuid.Nil, err
+	}
+	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
+		jsonb_strip_nulls(jsonb_build_object('credential_id',$2::text,'service',$3::text,'subject',$4::text,'pod_uid',nullif($5::text,''),
+			'operator',nullif($6::text,''),'key_thumbprint',$7::text,'expires_at',$8::timestamptz,'token_expires_at',$9::timestamptz)))`,
+		record.LauncherActor(id.String()), id.String(), login.Service, login.Subject, login.PodUID, login.Operator,
+		login.Thumbprint, login.Expires, login.TokenExpires); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
@@ -238,12 +279,12 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 // unexpired credential row and checks what vouches for it. A credential a person approved has its
 // entire issuance chain re-verified through s.Chain — a launcher_credentials row is never trusted
 // on its own, so a row inserted without a genuine approved credential-request record behind it
-// never authenticates. A credential a service's token login issued (IssueTokenLogin, its subject
-// set, and so its service, as the table's check constraint holds) authenticates while
-// ServiceLogins still names its subject for its service, so removing an account from
-// BROKER_SERVICE_LOGINS ends its credential at its next call. A missing, expired, revoked,
-// chain-broken or no-longer-listed credential all answer ("", false, nil); only a genuine
-// dependency failure is a non-nil error, matching Lookup's own contract.
+// never authenticates. A credential a token login issued (IssueTokenLoginTx, its subject set,
+// and so its service, as the table's check constraint holds) authenticates while its subject is
+// still listed for its service (tokenLoginListed), so removing an account from
+// BROKER_SERVICE_LOGINS or BROKER_VM_SERVICES ends its credential at its next call. A missing,
+// expired, revoked, chain-broken or no-longer-listed credential all answer ("", false, nil); only a
+// genuine dependency failure is a non-nil error, matching Lookup's own contract.
 func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string, bool, error) {
 	if _, err := uuid.Parse(lid); err != nil {
 		return "", false, nil
@@ -263,7 +304,7 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 		return "", false, nil
 	}
 	if subject != nil {
-		if listed, ok := s.ServiceLogins[*subject]; !ok || listed != *service {
+		if !s.tokenLoginListed(*subject, *service) {
 			return "", false, nil
 		}
 		return thumbprint, true, nil
@@ -280,16 +321,44 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 	return thumbprint, true, nil
 }
 
-// Credential loads a launcher credential's own identity (operator, service, host) by its id, for
-// a handler that has already authenticated the caller via a launcher proof (proof.Subject's
-// LauncherID, verified live by AuthenticateLauncher through proof.Verifier.LookupLauncher) and
-// needs that identity to pass to Create or Revoke. err is a genuine dependency failure; a launcher
-// id a live proof just verified vanishing before this read is treated the same way (never
-// silently swallowed into an empty Credential).
+// tokenLoginListed reports whether a token login's subject still logs in as service: a machine
+// and a person's sign-in on one while BROKER_VM_SERVICES still lists that box's Google account
+// for that service, and a Kubernetes ServiceAccount while BROKER_SERVICE_LOGINS names it.
+// Which of the three a subject is, and the account a machine's and a sign-in's carry, are one
+// reading (exchange.ReadSubject).
+//
+// A machine's own test is the account alone, because the account is what a listed identity is:
+// where the machine runs, and which of two machines of one account this is, were decided by the
+// entry when the exchange minted the credential (exchange.Set.Google), and the subject keeps
+// only enough to tell the machines apart (exchange.MachineSubject). So dropping an account from
+// BROKER_VM_SERVICES ends every one of its machines' credentials at their next call, and
+// narrowing an entry's pins takes effect at the next exchange, where the pins are read.
+//
+// A sign-in's subject carries the same account (exchange.PersonSubject), so the same test holds
+// it to the same listed fleet: a person signs in from a box the deployment lists, and dropping
+// the account ends their sign-in's credential with the box's own. What ends a sign-in the
+// person has revoked is not this but the revoke itself, which ends that credential in the
+// transaction it revokes the sign-in in (RevokePersonSignIn): "listed" is a question about the
+// configuration, and a revoke is a fact about the row.
+func (s *Service) tokenLoginListed(subject, service string) bool {
+	if read := exchange.ReadSubject(subject); read.Kind != exchange.SubjectOther {
+		listed, isListed := s.VMServicesByAccount[read.Account]
+		return isListed && listed == service
+	}
+	listed, found := s.ServiceLogins[subject]
+	return found && listed == service
+}
+
+// Credential loads a launcher credential's own identity (operator, service, host, and a token
+// login's subject) by its id, for a handler that has already authenticated the caller via a
+// launcher proof (proof.Subject's LauncherID, verified live by AuthenticateLauncher through
+// proof.Verifier.LookupLauncher) and needs that identity to pass to Create or Revoke. err is a
+// genuine dependency failure; a launcher id a live proof just verified vanishing before this read is
+// treated the same way (never silently swallowed into an empty Credential).
 func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
 	var cred Credential
-	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host from launcher_credentials where id=$1`, id).
-		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject); err != nil {
 		return Credential{}, err
 	}
 	return cred, nil
@@ -304,7 +373,12 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 // A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
-// not prove this pod is ErrPodIdentity.
+// not prove this pod is ErrPodIdentity. A machine whose Google identity token the exchange
+// accepted enrolls a session under the credential that exchange minted it, which is why it
+// needs no kind and no token of its own here: the credential is the proof. Such a session
+// records that credential's subject, which is what makes it its fleet's service's and no
+// person's (requests.Machine.requester), as a pod's recorded service account makes it its
+// service's.
 // A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
 // by anyone signed in for a service's), even after the caller's launcher proof was verified, is
 // ErrUnauthenticated.
@@ -320,6 +394,11 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		return Enrollment{}, ErrOperatorMismatch
 	}
 	in.Subject = nil
+	if in.Kind == "session" && machineCredential(cred) {
+		// A machine's session is its fleet's, and the credential's subject is what says which
+		// fleet: the enrollment records it as a pod's records the account its token proved.
+		in.Subject = cred.Subject
+	}
 	if in.Kind == "pod" {
 		claims, err := s.verifyPodToken(ctx, in.PodToken)
 		if err != nil {
@@ -409,7 +488,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 	defer tx.Rollback(ctx)
 	var existing Enrollment
 	var live bool
-	err = tx.QueryRow(ctx, `select id, thumbprint, lease_expires_at, lease_expires_at > now() from enrollments
+	err = tx.QueryRow(ctx, `select id, thumbprint, lease_expires_at, enrollment_lease_live(lease_expires_at) from enrollments
 		where launcher_credential_id=$1 and runtime_id=$2 and slot=$3 and revoked_at is null for update`, cred.ID, in.RuntimeID, in.Slot).
 		Scan(&existing.ID, &existing.Thumbprint, &existing.LeaseExpires, &live)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -484,13 +563,15 @@ const lapsedBatch = 100
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
 // rather than waiting there for their own expiry with an approval that could grant nothing.
 //
-// Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(). A
-// session that keeps renewing keeps its lease ahead of now() and is never selected, and Renew
-// refuses an enrollment once its lease has lapsed, so ending one takes nothing a session could
-// still use. Rows a concurrent Renew or Revoke has locked are skipped (the next sweep sees them
-// as they are then), and an ended row has revoked_at set and is never selected again, so a sweep
-// that finds nothing changes nothing. It works in batches of lapsedBatch, each one transaction,
-// and returns what it ended.
+// Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(), and
+// not a lease that ran out while no broker was serving (enrollment_lease_live, migration 0019),
+// which is never ended for that: the next ServingClock beat gives it the time back. A session that
+// keeps renewing keeps its lease ahead of now() and is never selected, and Renew refuses an
+// enrollment once its lease has lapsed, so ending one takes nothing a session could still use. Rows
+// a concurrent Renew or Revoke has locked are skipped (the next sweep sees them as they are then),
+// and an ended row has revoked_at set and is never selected again, so a sweep that finds nothing
+// changes nothing. It works in batches of lapsedBatch, each one transaction, and returns what it
+// ended.
 func (s *Service) EndLapsed(ctx context.Context) ([]LapsedEnrollment, error) {
 	var ended []LapsedEnrollment
 	for {
@@ -509,7 +590,7 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 	}
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `select id, kind, runtime_id, slot, lease_expires_at from enrollments
-		where revoked_at is null and lease_expires_at <= now()
+		where revoked_at is null and lease_expires_at <= now() and not enrollment_lease_live(lease_expires_at)
 		order by lease_expires_at limit $1 for update skip locked`, lapsedBatch)
 	if err != nil {
 		return nil, err
@@ -571,6 +652,23 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // another pod or account never renews this one. A machine session renews on its proof alone; a
 // token on its renewal is ErrPodIdentity.
 //
+// A machine's own session renews only while the launcher credential that enrolled it is still
+// live — ErrMachineLoginEnded otherwise — which is the one thing a session proof cannot say:
+// the key and the enrollment id a machine's helper holds are files on its disk, and a copy of
+// the pair taken off the box would otherwise renew for ever, long after the box was deleted or
+// its fleet dropped from BROKER_VM_SERVICES. "Live" is what AuthenticateLauncher means by it,
+// read in this transaction: not revoked, not past its expiry — which is the machine's Google
+// identity token's, so a machine that stops being able to prove its identity
+// stops renewing within the hour, as requiring a fresh identity token on every renewal once
+// did — and its account still listed for its service. A revoke ends such a session outright
+// (RevokeCredential), so what this adds is the two endings a revoke is not: the expiry, and the
+// delisting. The session ends one lease later at most, swept as any lapsed one is (EndLapsed).
+//
+// A person's session and a pod's are deliberately not held this way. A pod's renewal already
+// proves the pod's own projected token, and a person's sessions must outlive the hour their
+// box's credential lives: a person signs in once per box and their sessions are theirs until
+// they revoke the sign-in, which ends them at once (RevokePersonSignIn).
+//
 // The ratchet is keyed on the pod UID. Every pod enrollment starts with pod_token_renewed_at null,
 // whether migration 0014 found it or Create made it, and the first renewal carrying an accepted
 // token sets that row's column, the record that the pod's renewer sends its token. A renewal
@@ -616,15 +714,26 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 
 	var kind string
 	var subject *string
+	var cred Credential
+	var credLive bool
 	renewal := Renewal{}
-	err = tx.QueryRow(ctx, `select kind, runtime_id, slot, subject from enrollments
-		where id=$1 and revoked_at is null and lease_expires_at > now() for update`, id).
-		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject)
+	err = tx.QueryRow(ctx, `select e.kind, e.runtime_id, e.slot, e.subject,
+			c.operator, c.service, c.subject, c.revoked_at is null and c.expires_at > now()
+		from enrollments e join launcher_credentials c on c.id = e.launcher_credential_id
+		where e.id=$1 and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at) for update of e`, id).
+		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject, &cred.Operator, &cred.Service, &cred.Subject, &credLive)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Renewal{}, ErrNotLive
 	}
 	if err != nil {
 		return Renewal{}, err
+	}
+	// The row's own half of "live" is credLive, read above; what is left is the configuration's
+	// half, the account still listed for the credential's service, which no column holds. cred
+	// is one machineCredential has answered for, so its subject and its service are both set.
+	if kind == "session" && machineCredential(cred) &&
+		!(credLive && s.tokenLoginListed(*cred.Subject, *cred.Service)) {
+		return Renewal{}, ErrMachineLoginEnded
 	}
 	switch {
 	case kind != "pod" && withToken:
@@ -675,18 +784,39 @@ func podTokenRatcheted(ctx context.Context, tx pgx.Tx, podUID string) (bool, err
 
 // authorized reports whether cred may act on an enrollment of the given kind and operator — the
 // trust boundary both Create (when creating one) and Revoke (when ending one) enforce: an
-// operator credential may only act on that same operator's own non-pod enrollments; a service
-// credential (no operator) may only act on pod enrollments, which never carry an operator.
+// operator credential may only act on that same operator's own sessions; a service credential
+// (no operator) may only act on an enrollment that carries no operator either, a pod's or a
+// machine's own session.
+//
+// A machine's credential, which the token exchange mints, names its fleet's service and never a
+// person, whatever that fleet's entry says: secret authority follows the access token, so the
+// machine's sessions reach its service's secrets and no person's, and a person reaches theirs on
+// that machine only through their own sign-in. Its session is the one kind a service credential
+// may enrol beside a pod, and only a machine's credential may: a Kubernetes service's login
+// enrols the pods its tokens prove and nothing else.
 func authorized(cred Credential, kind string, operator *string) bool {
+	serviceKind := kind == "pod" || (kind == "session" && machineCredential(cred))
 	switch {
 	case cred.Operator != nil && (operator == nil || *operator != *cred.Operator):
 		return false
-	case cred.Operator != nil && kind == "pod":
+	case cred.Operator != nil && serviceKind:
 		return false
-	case cred.Operator == nil && (kind != "pod" || operator != nil):
+	case cred.Operator == nil && (!serviceKind || operator != nil):
 		return false
 	}
 	return true
+}
+
+// machineCredential reports whether cred is one the token exchange minted for a machine: a
+// credential with a service, no person and a subject that reads as a machine's
+// (exchange.SubjectMachine). A Kubernetes service's token login holds a subject of its own
+// shape, a person's sign-in on a machine a subject of its own kind, and a person's machine
+// login holds an operator.
+func machineCredential(cred Credential) bool {
+	if cred.Operator != nil || cred.Service == nil || cred.Subject == nil {
+		return false
+	}
+	return exchange.ReadSubject(*cred.Subject).Kind == exchange.SubjectMachine
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request
@@ -697,10 +827,11 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // plausible-looking. A row that does not exist at all has no operator/kind to check ownership
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
 //
-// A pod enrollment carries no operator, so the operator cannot tell one service's pods from
-// another's: a pod enrollment is ended only by the launcher credential that created it
-// (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
-// credential of the same service. A Legion daemon's token login keeps its account's one credential
+// A pod enrollment and a machine's own session carry no operator, so the operator cannot tell
+// one service's sessions from another's: each is ended only by the launcher credential that
+// created it (ErrNotEnrollingCredential for any other), never by another service's credential,
+// nor a second credential of the same service, nor another machine of the same fleet. A
+// Legion daemon's token login keeps its account's one credential
 // across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
 // enrollment another credential made — a service login a person approved before token logins, or
 // the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
@@ -733,7 +864,7 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
 	}
-	if kind == "pod" && enrolledBy != cred.ID {
+	if cred.Operator == nil && enrolledBy != cred.ID {
 		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {
@@ -750,14 +881,22 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 // record, a service's whoever approved it, a person's own machine's only when it is the person
 // whose record names them, and every service's token login (machine.Service.TokenLogin), while it
 // is unexpired or a session it enrolled is live as Lookup means it: not revoked, its lease not
-// lapsed. A login's sessions outlive its expiry, since each renews with its own key (Renew never
-// reads the credential), so an expired login stays listed, Expired set, until its last session ends
-// or lapses (a lapsed session renews no more, swept or not): revoking every listed login ends every
-// session the person's machines started. A service's login, such as the Legion daemon's, has no
+// lapsed. A login's sessions outlive its expiry, since each renews with its own key and Renew
+// reads the credential only for a machine's own session, so an expired login stays listed,
+// Expired set, until its last session ends or lapses (a lapsed session renews no more, swept or
+// not): revoking every listed login ends every session the person's machines started. A
+// machine's own login is the exception its sessions make: they stop renewing at its expiry and
+// lapse within one lease. A service's login, such as the Legion daemon's, has no
 // operator and acts as no person, so anyone signed in to Dispatch lists it and revokes it, its
 // Service set. Each login names who approved it, the login its approved event records, or "" for a
 // token login, which no person approved. The sentinel record.AnyoneApprover and an empty login list
 // nothing. OwnLiveCredentials lists the person's own machines' alone.
+//
+// A person's sign-in on a machine holds a launcher credential too, and that one is never listed
+// here: it is one person's, it is already listed as that person's sign-in
+// (store.Store.PersonSignIns), and ending it alone would end nothing, since the sign-in row
+// behind it mints it again at the box's next trade. Its subject says so
+// (exchange.PersonSubject), which is what signInCredential reads.
 func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
 	return s.liveCredentials(ctx, person, true)
 }
@@ -767,6 +906,18 @@ func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCre
 // person's own machine lists them (GET /v1/operator/machines).
 func (s *Service) OwnLiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
 	return s.liveCredentials(ctx, person, false)
+}
+
+// signInCredential reports whether a launcher credential's subject is a person's sign-in on a
+// machine rather than a machine's own identity or a Kubernetes account: the one fact that tells
+// the sign-ins list's credentials from the machine-logins list's, written by
+// exchange.PersonSubject and read back by exchange.ReadSubject. nil is a credential a person
+// approved, which has no subject at all.
+func signInCredential(subject *string) bool {
+	if subject == nil {
+		return false
+	}
+	return exchange.ReadSubject(*subject).Kind == exchange.SubjectSignIn
 }
 
 // liveCredentials is LiveCredentials, every service's login among them only when services is set.
@@ -781,12 +932,20 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
 		where ((c.service is null and r.approver = $1) or ($2 and c.service is not null and (r.id is not null or c.subject is not null)))
 			and c.revoked_at is null
-			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and e.lease_expires_at > now()))
+			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)))
 		order by c.created_at desc, c.id`, person, services)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[LiveCredential])
+	live, err := pgx.CollectRows(rows, pgx.RowToStructByPos[LiveCredential])
+	if err != nil {
+		return nil, err
+	}
+	// A sign-in's credential names its fleet's service, so the query above would take it for a
+	// service's login. Which list a credential belongs on is its subject's to say, and the
+	// subject is read here rather than matched in SQL so that exchange.PersonSubject's shape is
+	// written down once.
+	return slices.DeleteFunc(live, func(c LiveCredential) bool { return signInCredential(c.Subject) }), nil
 }
 
 // RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
@@ -800,7 +959,10 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 // longer names its account), and a person's own machine's only as the approver of the
 // launcher_credential record it was minted from (ErrNotApprover); the sentinel
 // record.AnyoneApprover and an empty login revoke nothing. An unknown id, like a credential with
-// neither a record nor a token login's subject, is ErrNoCredential. actor
+// neither a record nor a token login's subject, is ErrNoCredential, and so is a person's
+// sign-in's credential, which is no machine login: it is ended whole, with the sign-in row that
+// mints it, by RevokePersonSignIn, and ending it here would leave that row to mint it again at
+// the box's next trade. actor
 // is what every row it writes records as having done it, which the caller proved:
 // "human:<person>" for a revoke Dispatch relays from its signed-in person,
 // "launcher:<credential id>" for one the person's own machine login makes. Revoking a credential
@@ -827,19 +989,27 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 	}
 	defer tx.Rollback(ctx)
 	var approver, host string
-	var service *string
+	var service, subject *string
 	var revokedAt *time.Time
 	// A token login's credential has no record, so no approver: as every service's login, anyone
 	// signed in may revoke it (record.MayDecide), and its service logs in again with its token at
 	// its next call, under a new credential, unless BROKER_SERVICE_LOGINS no longer names its account.
-	err = tx.QueryRow(ctx, `select coalesce(r.approver, ''), c.service, c.host, c.revoked_at from launcher_credentials c
+	err = tx.QueryRow(ctx, `select coalesce(r.approver, ''), c.service, c.subject, c.host, c.revoked_at from launcher_credentials c
 		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where c.id = $1 and (r.id is not null or c.subject is not null) for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
+		where c.id = $1 and (r.id is not null or c.subject is not null) for no key update of c`, id).Scan(&approver, &service, &subject, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoCredential
 	}
 	if err != nil {
 		return err
+	}
+	// A sign-in's credential names its fleet's service and no record, so the rule below would
+	// read it as a service's login and let anyone signed in end it. It is one person's, it is
+	// listed as that person's sign-in and not here (liveCredentials), and the revoke that means
+	// anything is RevokePersonSignIn's, which ends the sign-in row with it; so this route does
+	// not find it, exactly as it does not find a login of another kind than it lists.
+	if signInCredential(subject) {
+		return ErrNoCredential
 	}
 	var svc string
 	if service != nil {
@@ -866,7 +1036,11 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 // presented later (an old copy of the machine file, a late answer to an abandoned refresh) is a
 // plain invalid_grant rather than a reuse that would revoke the credential. Unlike a revoke it
 // leaves every enrollment it made running: a session renews with its own proof, which an expired
-// credential's sessions already do. It writes one launcher_credential.retired audit row as actor.
+// credential's sessions already do. The one exception is a machine's own session, whose renewal
+// is held to a live login (Renew) and which therefore lapses within one lease of a retire; no
+// machine's credential is ever retired, since a retire follows a device-grant machine login that
+// a machine proving its own identity never makes.
+// It writes one launcher_credential.retired audit row as actor.
 // A credential already revoked or past its expiry changes nothing; an unknown id is
 // ErrNoCredential. It takes the credential's row as a revoke does, so an enrollment Create holding
 // it for share commits first.
@@ -927,6 +1101,52 @@ func RevokeReusedCredential(ctx context.Context, tx pgx.Tx, id string) error {
 	return endCredential(ctx, tx, id, host, service, ReuseActor, "its machine login's refresh token was reused")
 }
 
+// RevokePersonSignIn ends the sign-in id of person — the sign-in `agent-secrets login` made on
+// one box — and everything that sign-in still holds, in one transaction, and answers how many
+// of that person's live access tokens it ended. An id no sign-in of that person has is
+// store.ErrNoSignIn; a sign-in already revoked changes nothing and answers no error, as
+// revoking a machine login twice does.
+//
+// Three things end together, because a person revoking a sign-in means all three and would be
+// surprised by any one of them outliving the others: the row, so no later trade of that box key
+// is answered (store.RevokePersonSignInTx, which refuses it by name); the access tokens already
+// minted under it, so none goes on writing Dispatch for the rest of its life; and the launcher
+// credential that sign-in's trades minted, so no launcher proof signed with the box key
+// authenticates again (AuthenticateLauncher) and every session it enrolled ends with its grants
+// and pending requests, exactly as revoking a machine login ends them (endCredential).
+//
+// The credential is found by the box key's thumbprint, which names it exactly: a live
+// credential holds one key (launcher_credentials_live_key), and that key is the one
+// `agent-secrets login` made for this sign-in and no other. A sign-in whose box has not traded
+// since it was recorded holds no credential yet, and nothing is ended but the row.
+func (s *Service) RevokePersonSignIn(ctx context.Context, id, person, actor string) (int, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	thumbprint, ended, err := store.RevokePersonSignInTx(ctx, tx, id, person)
+	if err != nil {
+		return 0, err
+	}
+	if thumbprint != "" {
+		var credential, host string
+		var service *string
+		err := tx.QueryRow(ctx, `select id, host, service from launcher_credentials
+			where key_thumbprint = $1 and revoked_at is null for no key update`, thumbprint).Scan(&credential, &host, &service)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+		case err != nil:
+			return 0, err
+		default:
+			if err := endCredential(ctx, tx, credential, host, service, actor, "the person revoked this machine's sign-in"); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return ended, tx.Commit(ctx)
+}
+
 // endCredential revokes launcher credential id in tx, whose row the caller holds: it sets
 // revoked_at, ends its OAuth tokens, ends every enrollment it made that has not ended
 // (endEnrollment, reason), and writes one launcher_credential.revoked audit row, each as actor.
@@ -968,11 +1188,15 @@ func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	}
 	var thumbprint string
 	var live bool
-	err := s.Store.Pool.QueryRow(ctx, `select thumbprint, revoked_at is null and lease_expires_at > now() from enrollments where id=$1`, id).Scan(&thumbprint, &live)
+	err := s.Store.Pool.QueryRow(ctx, `select thumbprint, revoked_at is null and enrollment_lease_live(lease_expires_at)
+		from enrollments where id=$1`, id).Scan(&thumbprint, &live)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
-	return thumbprint, live, err
+	if err != nil {
+		return "", false, err
+	}
+	return thumbprint, live, nil
 }
 
 // Get answers this enrollment's own metadata (kind, operator, slot, lease expiry) for

@@ -2,7 +2,8 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { Issue, IssueDetails, IssueSummary, RepoProject } from "../../api/types";
 import { RepoControl } from "./RepoControl";
@@ -151,7 +152,7 @@ function select(): HTMLSelectElement {
 const badge = 'span[aria-hidden="true"]';
 
 test("RepoControl lists the project's mapped repositories, shows the resolved one, and patches repo", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     repo: "acme/gadgets",
     resolved_repo: "acme/gadgets",
@@ -179,7 +180,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
     expect(select().value).toBe("");
     fireEvent.change(select(), { target: { value: "acme/gadgets" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: "acme/gadgets" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: "acme/gadgets" }, keyedAttempt)
     );
     await waitFor(() =>
       expect(queryClient.getQueryData<IssueDetails>(detailKey)?.last_seq).toBe(2)
@@ -194,7 +195,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
 });
 
 test("RepoControl sends null for Inherit", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     repo: null,
     resolved_repo: "acme/widgets",
@@ -204,7 +205,9 @@ test("RepoControl sends null for Inherit", async () => {
     // The issue's own repository is selectable before the mapping list has loaded.
     expect(select().value).toBe("acme/gadgets");
     fireEvent.change(select(), { target: { value: "" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: null }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: null }, keyedAttempt)
+    );
     await waitFor(() => expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy());
   } finally {
     unmount();
@@ -305,7 +308,7 @@ test("RepoControl shows a failed mappings read beside a resolved repository", as
 });
 
 test("RepoControl rolls back and shows the server's refusal", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(400, {
       code: "REPO_NOT_MAPPED",
       error: "acme/gadgets is not mapped to project CORE (Settings → Repositories → Projects)",

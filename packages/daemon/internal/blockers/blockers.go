@@ -5,7 +5,7 @@
 // phase, inside a transaction that performs no I/O: neither can ask Dispatch what an issue is
 // blocked by at the moment it decides. So the daemon keeps its own table of Dispatch's answer
 // (record.DispatchIssueRow), written by Mirror as each issue event arrives and by Reconcile from
-// the boot listing, and read back whole, one project at a time, by whoever judges.
+// the boot listing, and read back for the issues a judgement names, with what they wait on.
 package blockers
 
 import (
@@ -32,8 +32,8 @@ type Row struct {
 	Blockers []string
 }
 
-// Rows indexes a project's mirror by issue key, as Unfinished takes it: every caller reads the
-// whole project in one query (Load) and then judges in memory.
+// Rows indexes mirrored rows by issue key, as Unfinished takes them: every caller reads the rows
+// of the issues it judges in one query (Load) and then judges in memory.
 func Rows(mirrored []record.DispatchIssueRow) map[string]Row {
 	rows := make(map[string]Row, len(mirrored))
 	for _, row := range mirrored {
@@ -42,20 +42,45 @@ func Rows(mirrored []record.DispatchIssueRow) map[string]Row {
 	return rows
 }
 
-// Load is one project's whole mirror, read in one query (record.Store.DispatchIssues) and
-// indexed as every judgement here takes it.
+// Load is the mirror of keys, the issues a judgement reads, and of every issue their rows wait
+// on, read in one query (record.Store.DispatchIssuesOf) and indexed as every judgement here takes
+// it. No keys read nothing.
 //
 // Admission decides whether to admit a root, and the workflow whether to start a child's first
 // phase, inside a transaction that performs no I/O: neither can ask Dispatch what an issue is
 // blocked by at the moment it decides. Both read the rows Mirror wrote instead — the deciding
 // fact's own row included, written ahead of them in the same transaction — and judge them in
-// memory. Each call that judges loads the project once, whatever the number of issues it judges.
-func Load(ctx context.Context, tx pgx.Tx, store record.Store, project string) (map[string]Row, error) {
-	mirrored, err := store.DispatchIssues(ctx, tx, project)
+// memory. Each call that judges loads once, whatever the number of issues it judges, and reads the
+// rows of those issues alone, never the project's whole mirror, which keeps a row of every issue
+// the project ever had.
+func Load(ctx context.Context, tx pgx.Tx, store record.Store, project string, keys []string) (map[string]Row, error) {
+	if len(keys) == 0 {
+		return map[string]Row{}, nil
+	}
+	mirrored, err := store.DispatchIssuesOf(ctx, tx, project, keys)
 	if err != nil {
-		return nil, fmt.Errorf("list what the issues of %s wait on: %w", project, err)
+		return nil, fmt.Errorf("read what the issues of %s wait on: %w", project, err)
 	}
 	return Rows(mirrored), nil
+}
+
+// Judged is the keys whose rows a judgement of issues and waiting reads (Blocked, and the
+// deciders it stands for): each root of waiting the rule does not exempt (WaitsOn), and each issue
+// a blocker can hold where it stands (Holdable: Holds, and StartUnblockedChildren's converse).
+// Load reads these and what they wait on.
+func Judged(issues, waiting []record.Issue) []string {
+	keys := make([]string, 0, len(waiting))
+	for _, issue := range waiting {
+		if !Exempt(issue) {
+			keys = append(keys, issue.Key)
+		}
+	}
+	for _, issue := range issues {
+		if Holdable(issue) {
+			keys = append(keys, issue.Key)
+		}
+	}
+	return keys
 }
 
 // Unfinished is the keys key waits on that are not done, in the order its row lists them, and is
@@ -124,12 +149,14 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 // as a phase of that run begins, re-admission keeps it when the root's own tree comes back, and
 // every other path that opens a run starts it clean — a child's re-entry into its tree, and a
 // child's hand-over to a root of its own without its run. So no issue is exempt unless the run it
-// is exempt for is the run it arrived with. Everything else is checked like any other issue: a
-// child that has been released but never started, a waiting root that only left the line and came
-// back, and a child handed over from a finished tree as a root of its own without its run, whether
-// or not it ran there, a done child a person labels as an orphan root among them. A child held at
-// phase.Admitted in its own tree is no candidate here at all: the workflow holds it, and Blocked
-// reports it, by Holds, whatever its mark — and a re-entered child carries none.
+// is exempt for is the run it arrived with. A root waiting on a person (awaiting_person, answered or
+// not) carries its run (record.Issue.CarriesRun): its links were read when it was first admitted,
+// and its resume takes the next free slot whatever they say now. Everything else is checked like
+// any other issue: a child that has been released but never started, a waiting root that only left
+// the line and came back, and a child handed over from a finished tree as a root of its own without
+// its run, whether or not it ran there, a done child a person labels as an orphan root among them. A
+// child held at phase.Admitted in its own tree is no candidate here at all: the workflow holds it,
+// and Blocked reports it, by Holds, whatever its mark — and a re-entered child carries none.
 func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }
 
 // WaitsOn is what issue still waits on, from rows: the issues Dispatch says it is blocked by

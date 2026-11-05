@@ -20,9 +20,9 @@ var lostEditAgent = model.Actor{Kind: "session", ID: "agent"}
 
 // editInFlight is one agent edit held open between the operations and the version render, the
 // window a browser's concurrent change merges into (LEGION-269's first window). The browser write
-// is driven explicitly rather than raced: the transaction's fork is only brought up to date with
-// the room when the version is captured, so a write made at any point before that lands in the
-// same merge.
+// is driven explicitly rather than raced: the version's capture checks the transaction's fork
+// against everything the room committed since the fork's read, so a write made at any point before
+// that lands in the same check.
 type editInFlight struct {
 	service    *Service
 	artifactID string
@@ -418,6 +418,49 @@ func TestABatchNamesOnlyTheOperationsWhoseTextWentMissing(t *testing.T) {
 	}
 	if want := []int{1}; !reflect.DeepEqual(lost.Ops, want) {
 		t.Fatalf("lost operations = %v, want %v: only the second operation's paragraph went", lost.Ops, want)
+	}
+}
+
+// A transaction's fork is built again after one of its operations abandons it (rebuildFork), and
+// the transaction's own earlier writes are applied to the rebuilt fork. That apply is not local and
+// advances the fork's own client clock, and ygo then gives the document a new client ID at commit,
+// as Yjs's cleanupTransactions does. The lost-write check finds what a batch inserted by the
+// write's client ID (recordInsertedText), so an edit made after the rebuild must still be found
+// under the ID its fork now has: a browser that removes that edit's text before the version is
+// rendered has the edit refused, not reported applied.
+func TestAnEditAfterItsForkIsRebuiltIsRefusedWhenItsTextIsLost(t *testing.T) {
+	service, artifactID := lostEditService(t)
+	browser := model.Actor{Kind: "user", ID: "alice"}
+	service.addConnection(artifactID, service.nextConnection.Add(1), browser)
+	edit := startEditInFlight(t, service, artifactID, model.EditOp{
+		Op: "replace", Find: "Alpha paragraph.", With: "Alpha paragraph edited.",
+	})
+	// A mark whose author carries more text than a document's anchor marks may hold: the growth
+	// weigh refuses it once it has moved the fork, so the operation abandons the fork and leaves
+	// the transaction the update its first edit appended.
+	heavy := model.Actor{Kind: "session", ID: "s" + strings.Repeat("a", maxAnchorBytes)}
+	if _, err := service.MarkQuote(edit.ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c-heavy", By: heavy}, "Bravo", nil); !errors.Is(err, ErrDocumentTooLarge) {
+		t.Fatalf("the heavy mark answered %v, want the growth refusal that abandons the fork", err)
+	}
+	write := joinedLiveWrite(edit.ctx, artifactID)
+	if write == nil || write.fork != nil || len(write.updates) == 0 {
+		t.Fatal("the refused mark left the transaction a fork, or no update of its own, so nothing here is rebuilt")
+	}
+	if _, err := service.ApplyOps(edit.ctx, artifactID, []model.EditOp{{
+		Op: "replace", Find: "Bravo paragraph.", With: "Bravo paragraph edited.",
+	}}, lostEditAgent, nil); err != nil {
+		t.Fatalf("the edit after the rebuild: %v", err)
+	}
+	if write.fork == nil || write.fork.ClientID() != write.clientID {
+		t.Fatal("the write does not name the client ID its rebuilt fork authors items under")
+	}
+	// The browser removes, in the room, the paragraph the edit after the rebuild rewrote.
+	edit.browserWrites(t, withoutTopLevelBlock("Bravo paragraph."))
+
+	_, err := service.SnapshotVersion(edit.ctx, artifactID, lostEditAgent)
+	var lost *ErrEditLost
+	if !errors.As(err, &lost) {
+		t.Fatalf("snapshot = %v, want the edit made after the rebuild refused as lost", err)
 	}
 }
 

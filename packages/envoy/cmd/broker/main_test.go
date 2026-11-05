@@ -15,11 +15,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -38,12 +40,42 @@ const (
 	testSecretsKMSKeyARN = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 )
 
+// testSignInIssuer is the provider every broker these tests start signs people in at. Nothing
+// dials it: the approval page reads a provider's discovery document at a person's first sign-in,
+// so a broker nobody signs in to never reaches for it. approval_page_test.go's fixture overrides
+// these settings with a local issuer that answers.
+const testSignInIssuer = "https://signin.example"
+
+// signInClientSecretFile writes the sign-in client's secret into a file of t's own and answers
+// its path, the file BROKER_SIGNIN_CLIENT_SECRET_FILE names.
+func signInClientSecretFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "signin-client-secret")
+	if err := os.WriteFile(path, []byte(brokertest.SignInClientSecret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// testMachineLoginURL is the page a person types a machine login's code into, as every broker
+// these tests start that serves the device grant names it (BROKER_MACHINE_LOGIN_URL). It is not
+// in productionEnv: the setting is optional, and the rows that need the device grant ask for it
+// by name, so the broker every other row starts is the one that serves none.
+const testMachineLoginURL = "https://dispatch.example/credentials/machine"
+
 // productionEnv is the configuration every broker needs besides its addresses and database: the
-// namespace it serves and the key every secret there is on.
-var productionEnv = []string{
-	"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
-	"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
-	"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
+// namespace it serves, the key every secret there is on, and the four settings a person signs
+// in to its approval page with, which it refuses to start without.
+func productionEnv(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
+		"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
+		"BROKER_SIGNIN_ISSUER=" + testSignInIssuer,
+		"BROKER_SIGNIN_CLIENT_ID=" + brokertest.SignInClientID,
+		"BROKER_SIGNIN_CLIENT_SECRET_FILE=" + signInClientSecretFile(t),
+		"BROKER_SIGNIN_DOMAIN=" + brokertest.SignInDomain,
+	}
 }
 
 func TestPortZeroPublicURLRefusedInProduction(t *testing.T) {
@@ -74,14 +106,19 @@ func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 // config holds the config's ServicesByAccount, keyed by account so one service may have several,
 // without which no pod is ever a service's.
 func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
+	secretFile := signInClientSecretFile(t)
 	cfg, err := config.Load(func(name string) string {
 		return map[string]string{
-			"BROKER_DATABASE_URL":        "postgres://unused",
-			"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
-			"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.example/credentials/machine",
-			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
-			"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
-			"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+			"BROKER_DATABASE_URL":              "postgres://unused",
+			"BROKER_PUBLIC_URL":                "https://secrets.internal.example",
+			"BROKER_MACHINE_LOGIN_URL":         "https://dispatch.example/credentials/machine",
+			"BROKER_SERVICES":                  "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
+			"BROKER_SECRETS_PREFIX":            "example/agent-secrets/",
+			"BROKER_SECRETS_KMS_KEY_ARN":       "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+			"BROKER_SIGNIN_ISSUER":             testSignInIssuer,
+			"BROKER_SIGNIN_CLIENT_ID":          brokertest.SignInClientID,
+			"BROKER_SIGNIN_CLIENT_SECRET_FILE": secretFile,
+			"BROKER_SIGNIN_DOMAIN":             brokertest.SignInDomain,
 		}[name]
 	})
 	if err != nil {
@@ -119,7 +156,7 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 // real socket.
 func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
 	cmd := exec.Command(buildBroker(t))
-	cmd.Env = append(append(os.Environ(), productionEnv...),
+	cmd.Env = append(append(os.Environ(), productionEnv(t)...),
 		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
 	)
@@ -176,7 +213,7 @@ func buildBroker(t *testing.T) string {
 func runRefusedBroker(t *testing.T, binPath string, env ...string) string {
 	t.Helper()
 	cmd := exec.Command(binPath)
-	cmd.Env = append(append(append(os.Environ(), productionEnv...), noAWSEnv(t)...), env...)
+	cmd.Env = append(append(append(os.Environ(), productionEnv(t)...), noAWSEnv(t)...), env...)
 	out, err := cmd.CombinedOutput()
 	exitErr, isExit := err.(*exec.ExitError)
 	if err == nil || !isExit || exitErr.ExitCode() == 0 {
@@ -312,7 +349,7 @@ func startBroker(t *testing.T, options brokerOptions) *brokerProcess {
 		binary = buildBroker(t)
 	}
 	cmd := exec.Command(binary)
-	cmd.Env = append(append(os.Environ(), productionEnv...), options.Env...)
+	cmd.Env = append(append(os.Environ(), productionEnv(t)...), options.Env...)
 	p := &brokerProcess{Process: cmdtest.Start(t, "broker", cmd)}
 	// Cleanups run last-registered-first, so this one — registered after cmdtest.Start's own —
 	// asks the broker to stop and waits its whole stop budget out before cmdtest's cleanup kills
@@ -414,6 +451,55 @@ func listeningIn(log string) (addr, boot string, ok bool) {
 		offset = end
 	}
 	return "", "", false
+}
+
+// rereadRateLine is what one of a broker's "broker reread rate" lines says: the replica count
+// the process counted at a beat of its serving clock, and the shared reread bucket it derived
+// from that count (api.RereadRate.SetReplicas). A process logs one at its first beat and again
+// whenever the count it sees changes, so the LAST such line is the sizing it serves at now.
+type rereadRateLine struct {
+	Replicas int
+	Every    time.Duration
+	Burst    int
+}
+
+// rereadRatePattern reads a whole "broker reread rate" line: the message and the three values
+// that follow it, in the order api.RereadRate logs them.
+//
+// It matches the message and the first key together because the warning a count above
+// api.MaxSupportedReplicas logs opens with the same words and carries replicas too, and what
+// tells the two apart is that the warning's message goes on ("above the replica count this
+// sizing supports") where this one ends. The optional quote covers both handlers a broker can
+// be started with: cmd/broker logs through slog's default handler, which writes the message
+// bare, and a TextHandler writes it as msg="broker reread rate".
+//
+// every is whatever the handler wrote a time.Duration as (2.25s), which time.ParseDuration
+// reads back.
+var rereadRatePattern = regexp.MustCompile(`broker reread rate"? replicas=(\d+) every=(\S+) burst=(\d+)`)
+
+// rereadRateIn finds the last complete "broker reread rate" line in log and answers what it
+// says. Only a line a newline closes counts, for listeningIn's own reason: this reads a buffer
+// the child's output is still being copied into, and half a line would hand back half a
+// duration — 2.2s for a broker sized at 2.25s — as the rate it derived.
+func rereadRateIn(log string) (rate rereadRateLine, ok bool) {
+	complete := strings.LastIndexByte(log, '\n') + 1
+	for offset := 0; offset < complete; {
+		end := offset + strings.IndexByte(log[offset:], '\n') + 1
+		line := log[offset:end]
+		offset = end
+		m := rereadRatePattern.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		replicas, replicasErr := strconv.Atoi(m[1])
+		every, everyErr := time.ParseDuration(m[2])
+		burst, burstErr := strconv.Atoi(m[3])
+		if replicasErr != nil || everyErr != nil || burstErr != nil {
+			continue
+		}
+		rate, ok = rereadRateLine{Replicas: replicas, Every: every, Burst: burst}, true
+	}
+	return rate, ok
 }
 
 // AwaitExit waits up to within for the broker to exit and answers what its exit was: nil for a

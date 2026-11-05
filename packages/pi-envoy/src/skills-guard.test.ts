@@ -63,11 +63,9 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   const file = dispatchFirstSkillFile(staged);
   const skill = readFileSync(file, "utf8");
   expect(skill.split("\n").length).toBeLessThan(60);
-  // Oh My Pi and Claude Code inject the marker-wrapped body; OpenCode adds the whole file under an
-  // `Instructions from: <path>` line. Claude Code keeps a hook's context whole up to 10,000
-  // characters; 6,000 leaves room for a longer install path and a later edit.
+  // Oh My Pi and Claude Code inject the marker-wrapped body. Claude Code keeps a hook's context
+  // whole up to 10,000 characters; 6,000 leaves room for a later edit.
   expect(readDispatchFirstContext(file).length).toBeLessThan(6_000);
-  expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
 });
 
 // dispatch-first is the one Dispatch skill every session holds without loading it, so the two
@@ -87,6 +85,10 @@ test("the injected dispatch-first context holds the blocker and accepted-request
 // The three Dispatch skills are read by every session with Dispatch, so their length is a cost on
 // each one. Every file of the three staged skills counts, frontmatter included, as `wc -w` counts:
 // whitespace-separated tokens.
+//
+// The budget does not move: a rule that must go in is paid for by cutting the lines that duplicate
+// another skill or say what the new rule says (2026-11-03, "The conversation", which the three
+// skills made room for at 1,998 words).
 test("the three Dispatch skills total fewer than 2,000 words", () => {
   const words = ["dispatch", "dispatch-first", "dispatch-writing-specs"]
     .flatMap((skill) => files(path.join(staged, skill)))
@@ -98,6 +100,13 @@ test("the three Dispatch skills total fewer than 2,000 words", () => {
     )
     .reduce((total, count) => total + count, 0);
   expect(words).toBeLessThan(2_000);
+});
+
+test("the staged decisions rule separates material choices from spec details", () => {
+  const skill = readFileSync(path.join(staged, "dispatch-writing-specs/SKILL.md"), "utf8");
+  expect(skill).toContain("only if a disagreeing reader would act differently");
+  expect(skill).toContain("keep others to one spec line each");
+  expect(skill).not.toContain("Each choice you made alone, and each a person made");
 });
 
 // Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
@@ -134,7 +143,7 @@ test("every relative link resolves to a file inside the staged partition", () =>
 // (what `omp agents unpack` writes, read off the pinned binary rather than listed here). A
 // `skill://legion-*` mention in these skills is held to no such partition, on purpose: each is a
 // sentence conditioned on a Legion role (skills/dispatch/SKILL.md:29,
-// skills/dispatch-writing-specs/SKILL.md:3, :10 and :72, skills/dispatch-first/SKILL.md:31 and :44), inert
+// skills/dispatch-writing-specs/SKILL.md:10, skills/dispatch-first/SKILL.md:30 and :47), inert
 // for a person and right for a pane with both plugins, and `brokenSkillLinks` above resolves a
 // `skill://<name>/<path>` link against the repository's skills/ for the same reason.
 test.skipIf(omp === undefined && !onActions)(

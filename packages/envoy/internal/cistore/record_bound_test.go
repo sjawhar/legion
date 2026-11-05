@@ -98,34 +98,36 @@ func TestACommitRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
 	}
 }
 
-// refusingPub refuses every settlement as NATS refuses one it cannot take whole, and counts them.
-type refusingPub struct {
+// failingPub fails every publication with err and counts them.
+type failingPub struct {
+	err      error
 	mu       sync.Mutex
 	attempts int
 }
 
-func (p *refusingPub) Publish(contracts.Envelope) error {
+func (p *failingPub) Publish(contracts.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.attempts++
-	return fmt.Errorf("publish: %w", bus.ErrTooLarge)
+	return p.err
 }
 
-func (p *refusingPub) count() int {
+func (p *failingPub) count() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.attempts
 }
 
-// NATS refuses a settlement the same way on every tick, so a refused one is terminal: the record is
-// marked overflowed and the commit is not published again, where a publish that merely failed is
-// retried on the next tick. A server whose max payload is set below the store's bound refuses one
-// the store accepted.
+// NATS refuses a settlement the same way at every attempt, so a refused one is terminal: the record
+// is marked overflowed and the commit is not published again, where a publish that merely failed is
+// retried at the next pass, on the next tick of the loop's grid. A server whose max payload is set
+// below the store's bound refuses one the store accepted.
 func TestASettlementNATSRefusesIsNotPublishedAgain(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
-	pub := &refusingPub{}
+	// NATS refuses a settlement it cannot take whole.
+	pub := &failingPub{err: fmt.Errorf("publish: %w", bus.ErrTooLarge)}
 	const (
 		owner  = "example-org"
 		repo   = "example-repo"

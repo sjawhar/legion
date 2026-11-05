@@ -1,4 +1,10 @@
-import { actorAttribution, actorName, sessionLabel, shortSessionId } from "@legion/contracts";
+import {
+  actorActText,
+  actorAttribution,
+  actorName,
+  sessionLabel,
+  shortSessionId,
+} from "@legion/contracts";
 import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
 
@@ -11,6 +17,7 @@ import {
   offlineDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
+import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
 import { relativeTimeLabel } from "./Timestamp";
@@ -128,9 +135,9 @@ function AgentStateMark({
 
 /**
  * An agent, as every place in the app shows one. A `user` or `system` actor is its id as plain
- * text (inside the host's control, for `kind="control"`) and reads no registry. A session
- * renders in one `<span data-agent-name data-agent-state>`: its state mark, its name, and its
- * attribution.
+ * text (inside the host's control, for `kind="control"`) and reads no registry; a person an
+ * agent acted for also carries that agent (`actorActText`). A session renders in one
+ * `<span data-agent-name data-agent-state>`: its state mark, its name, and its attribution.
  */
 export function AgentName(props: AgentNameProps): ReactNode {
   if (props.sessionId !== undefined) {
@@ -145,7 +152,10 @@ export function AgentName(props: AgentNameProps): ReactNode {
   }
   const { actor } = props;
   if (actor.kind !== "session") {
-    const named = props.kind === "control" ? props.control(actor.id) : actor.id;
+    // An act an agent made for its person is recorded as the person's, so the person's name
+    // carries the agent beside it, by the one rule every reader of an act follows.
+    const text = actor.kind === "user" ? actorActText(actor.id, actor.act) : actor.id;
+    const named = props.kind === "control" ? props.control(text) : text;
     return props.className === undefined ? named : <span className={props.className}>{named}</span>;
   }
   return (
@@ -250,7 +260,11 @@ export function useAgentText(): AgentText {
   return useMemo(() => {
     const label = (ref: AgentRef) => {
       const { attribution, name } = resolveAgent(ref, registry);
-      return `${name}${attribution}`;
+      // The same name `AgentName` draws, the agent an act was made through included, so a title
+      // or an aria-label never says a person wrote what their agent wrote for them.
+      const acted =
+        "actor" in ref && ref.actor.kind === "user" ? actorActText(name, ref.actor.act) : name;
+      return `${acted}${attribution}`;
     };
     return {
       initials: (actor: Actor) => agentInitials(resolveAgent({ actor }, registry).name),
@@ -262,18 +276,31 @@ export function useAgentText(): AgentText {
   }, [registry]);
 }
 
-const RESOLUTION_VERB: Record<AskResolution["kind"], string> = {
-  resolved: "Resolved",
-  retracted: "Retracted",
-};
+/** The text before and after a resolution's actor. A withdrawal is the close of the ask's issue,
+ *  so it names the closer: `Withdrawn when <agent> closed the issue`; else `<Verb> by <agent>`. */
+function resolutionFrame(resolution: AskResolution): readonly [before: string, after: string] {
+  return resolution.kind === "withdrawn"
+    ? ["Withdrawn when ", " closed the issue"]
+    : [`${askResolutionBadge(resolution)} by `, ""];
+}
 
-/** `Resolved by <agent>` / `Retracted by <agent>`: the verb-and-actor prefix of a resolution,
- *  for callers that render its reason with their own markup. */
-export function AskResolutionLine({ resolution }: { resolution: AskResolution }): ReactNode {
+/** `Resolved by <agent>` / `Retracted by <agent>` / `Withdrawn when <agent> closed the issue`:
+ *  the actor sentence of a resolution, for callers that render its reason (`askResolutionReason`)
+ *  with their own markup. `agent="static"` names the agent without its link, for a host that is
+ *  itself one control (a listbox option). */
+export function AskResolutionLine({
+  agent,
+  resolution,
+}: {
+  agent?: "link" | "static";
+  resolution: AskResolution;
+}): ReactNode {
+  const [before, after] = resolutionFrame(resolution);
   return (
     <>
-      {`${RESOLUTION_VERB[resolution.kind]} by `}
-      <AgentName actor={resolution.actor} inline />
+      {before}
+      <AgentName actor={resolution.actor} inline kind={agent} />
+      {after}
     </>
   );
 }
@@ -311,12 +338,15 @@ export function AgentParts({
   ));
 }
 
-/** `Resolved by <agent> - <reason>` / `Retracted by <agent> - <reason>` as `AgentPart`s, for
- *  the description builders (the activity and event descriptions). */
+/** `Resolved by <agent> - <reason>` / `Retracted by <agent> - <reason>` / `Withdrawn when <agent>
+ *  closed the issue` (a withdrawal's reason only repeats it) as `AgentPart`s, for the description
+ *  builders (the activity and event descriptions). */
 export function askResolutionParts(resolution: AskResolution): AgentPart[] {
+  const [before, after] = resolutionFrame(resolution);
+  const reason = askResolutionReason(resolution);
   return [
-    `${RESOLUTION_VERB[resolution.kind]} by `,
+    before,
     { actor: resolution.actor },
-    ` - ${resolution.reason}`,
+    reason === undefined ? after : `${after} - ${reason}`,
   ];
 }

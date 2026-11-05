@@ -134,16 +134,18 @@ func TestCloudConfigOpensTheHostFirewallToTheHealthChecksAndTheTailnet(t *testin
 }
 
 // The configuration file is core's rendering of the users: each is a keyed user with a seed. A
-// machine id gives the host's permission set, a Dispatch machine id gives its set, and explicit
-// permissions are taken as they are. The listener's user follows them, named after the hub, with
-// the listener's set and a seed; then the session user, with the session's set and no seed, which
-// a client presenting no credential becomes.
+// machine id gives the host's permission set, a listener machine id gives the listener-host set, a
+// Dispatch machine id gives its set, and explicit permissions are taken as they are. The
+// listener's user follows them, named after the hub, with the listener's set and a seed; then the
+// session user, with the session's set and no seed, which a client presenting no credential
+// becomes.
 func TestCloudConfigNatsConfigurationIsCoresRenderingOfTheUsers(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
 	host := core.HostPermissions("example-host-a")
 	dispatch := core.DispatchPermissions("example-dispatch")
+	listenerHost := core.ListenerHostPermissions("example-listener-a")
 	listener := core.ListenerPermissions("example-hub")
 	session := core.SessionPermissions()
 	want, err := core.Authorization{Users: []core.User{
@@ -154,6 +156,7 @@ func TestCloudConfigNatsConfigurationIsCoresRenderingOfTheUsers(t *testing.T) {
 			Subscribe: &core.Rules{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 		},
 		{Name: "example-dispatch", NKey: keyC, Publish: &dispatch.Publish, Subscribe: &dispatch.Subscribe, HasSeed: true},
+		{Name: "example-listener-a", NKey: keyD, Publish: &listenerHost.Publish, Subscribe: &listenerHost.Subscribe, HasSeed: true},
 		{Name: "example-hub", NKey: keyListener, Publish: &listener.Publish, Subscribe: &listener.Subscribe, HasSeed: true},
 		{Name: "example-sessions", NKey: keySessions, Publish: &session.Publish, Subscribe: &session.Subscribe},
 	}, NoAuthUser: "example-sessions"}.Render([]string{"Rendered by envoy-infra. Public keys only."})

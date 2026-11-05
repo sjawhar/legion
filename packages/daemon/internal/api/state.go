@@ -3,8 +3,9 @@
 // The shape here is designed from the LEGION-208 spec's Issue record, not ported from the
 // TypeScript daemon's `packages/contracts/src/legion-daemon-api.ts` (which still carries the
 // tossed worker queue and the Dispatch/GitHub mirror). Go is the source of truth for the wire:
-// `packages/contracts/src/legion-api.ts` mirrors these types as strict zod objects and is
-// held to them by the golden fixture in `packages/contracts/fixtures/daemon-api/`.
+// `packages/contracts/src/legion-api.ts` mirrors these types as zod objects, which strip a key
+// they do not name on the answer side, and is held to them by the golden fixture in
+// `packages/contracts/fixtures/daemon-api/`.
 package api
 
 import (
@@ -17,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -67,16 +69,58 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
+	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
+	// NATS at the request after the state's transaction commits, so no NATS read holds the
+	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
+	Consumers []ConsumerLagView `json:"consumers"`
+}
+
+// ConsumerLagView is one durable consumer's lag as the state shows it (intake.ConsumerLag): its
+// name; how many messages wait for it (Waiting); the stream time of the oldest and its age in whole
+// seconds at the read, both null when nothing waits or when that message could not be read; when
+// the daemon last handled one of its messages, null before the first; whether it is stalled,
+// messages waiting and none handled for 60 seconds; and Unavailable, what NATS did not answer or
+// refused, absent when every read answered.
+type ConsumerLagView struct {
+	Name             string     `json:"name"`
+	Waiting          uint64     `json:"waiting"`
+	OldestAt         *time.Time `json:"oldestAt"`
+	OldestAgeSeconds *int64     `json:"oldestAgeSeconds"`
+	LastHandledAt    *time.Time `json:"lastHandledAt"`
+	Stalled          bool       `json:"stalled"`
+	Unavailable      string     `json:"unavailable,omitempty"`
+}
+
+// ConsumerLagViewsOf is lags as the state shows them, consumer for consumer; no lags is an empty
+// list.
+func ConsumerLagViewsOf(lags []intake.ConsumerLag) []ConsumerLagView {
+	views := make([]ConsumerLagView, len(lags))
+	for i, lag := range lags {
+		view := ConsumerLagView{Name: lag.Name, Waiting: lag.Waiting, Stalled: lag.Stalled, Unavailable: lag.Unavailable}
+		if !lag.OldestAt.IsZero() {
+			oldestAt, age := lag.OldestAt, int64(lag.OldestAge/time.Second)
+			view.OldestAt, view.OldestAgeSeconds = &oldestAt, &age
+		}
+		if !lag.LastHandledAt.IsZero() {
+			handledAt := lag.LastHandledAt
+			view.LastHandledAt = &handledAt
+		}
+		views[i] = view
+	}
+	return views
 }
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
-// Refused and Caches are sorted, and never null. Caches are the repository caches of repositories
-// the mapping no longer names, each kept until its RetainedUntil (contract 32).
+// Refused, WithoutWebhookApp and Caches are sorted, and never null. Caches are the repository
+// caches of repositories the mapping no longer names, each kept until its RetainedUntil (contract
+// 32). WithoutWebhookApp is each served repository Dispatch's GitHub App is not known to be
+// installed on, with why (contract 43).
 type RepositoriesView struct {
-	Owners  []string                `json:"owners"`
-	Mapped  []MappedRepositoryView  `json:"mapped"`
-	Refused []RefusedRepositoryView `json:"refused"`
-	Caches  []CacheView             `json:"caches"`
+	Owners            []string                `json:"owners"`
+	Mapped            []MappedRepositoryView  `json:"mapped"`
+	Refused           []RefusedRepositoryView `json:"refused"`
+	WithoutWebhookApp []WebhookAppGapView     `json:"withoutWebhookApp"`
+	Caches            []CacheView             `json:"caches"`
 }
 
 // MappedRepositoryView is a repository the daemon serves, as GitHub names it, whether it is the
@@ -114,7 +158,14 @@ type RefusedRepositoryView struct {
 	Reason string `json:"reason"`
 }
 
-// MarshalJSON keeps the four lists arrays on the wire.
+// WebhookAppGapView is a served repository, as Dispatch maps it, that Dispatch's GitHub App is not
+// installed on, or whose check failed, and why. The daemon serves it all the same.
+type WebhookAppGapView struct {
+	Repo   string `json:"repo"`
+	Reason string `json:"reason"`
+}
+
+// MarshalJSON keeps the five lists arrays on the wire.
 func (r RepositoriesView) MarshalJSON() ([]byte, error) {
 	type wire RepositoriesView
 	out := wire(r)
@@ -126,6 +177,9 @@ func (r RepositoriesView) MarshalJSON() ([]byte, error) {
 	}
 	if out.Refused == nil {
 		out.Refused = []RefusedRepositoryView{}
+	}
+	if out.WithoutWebhookApp == nil {
+		out.WithoutWebhookApp = []WebhookAppGapView{}
 	}
 	if out.Caches == nil {
 		out.Caches = []CacheView{}
@@ -193,8 +247,8 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims` and `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the
-// plugin's strict reader refuses.
+// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
+// `null`, which the plugin's reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -212,6 +266,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
+	}
+	if out.Consumers == nil {
+		out.Consumers = []ConsumerLagView{}
 	}
 	return json.Marshal(out)
 }
@@ -266,7 +323,11 @@ type Issue struct {
 	Key        string      `json:"key"`
 	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
-	// Status is the last Dispatch status the daemon observed for the issue.
+	// Status is the status the daemon means the issue to have and writes to Dispatch
+	// (record.Issue.Status). It is not the status Dispatch shows: that is
+	// record.Issue.DispatchStatus, which this state does not carry. The two differ while a status
+	// write is queued, and go on differing where one was lost until the status repair puts it
+	// back, so a reader who wants the status Dispatch shows must read Dispatch.
 	Status string `json:"status"`
 	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
 	// default branch, both taken when the daemon first recorded the issue and never changed after.
@@ -285,9 +346,39 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	Slot        *SlotView                `json:"slot,omitempty"`
+	// WaitingOn is present only while the root is in awaiting_person: what it waits on from a
+	// person, when the wait began and, once a person answered, when and by what act.
+	WaitingOn *WaitingOnView `json:"waitingOn,omitempty"`
 	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
 	// present only while the check is open, and absent once it closed or while none was opened.
 	Check *CheckView `json:"check,omitempty"`
+	// MemoryGroup is the memory group of the issue's tree (memorygroup.Group): `memory` for a
+	// tree whose roles run with the project's memory overlays and instructions, `none` for one
+	// that runs without them, and absent while nothing has drawn for the tree — a tree first
+	// opened before the setting existed, or one the draw never reached. MemoryDrawMode is the
+	// project's memory mode in force when that group was drawn (config.MemoryMode's words) and
+	// MemoryDrawnAt when it was drawn, both absent with the group. The draw is made once, on the
+	// tree's root record, when the tree's lifecycle row is first created, and every issue of the
+	// tree shows its root's: an issue's memory group is its tree's (contract 49).
+	MemoryGroup    string     `json:"memoryGroup,omitempty"`
+	MemoryDrawMode string     `json:"memoryDrawMode,omitempty"`
+	MemoryDrawnAt  *time.Time `json:"memoryDrawnAt,omitempty"`
+}
+
+// WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind
+// is `ask` with Ask, the id of the oldest question of its tree still with the person, or `gate`
+// with GateVersion and ArtifactID, the spec version of its registered document a person has not
+// reviewed. Since is Dispatch's time of the hand-back the wait began at,
+// absent when unknown. AnsweredAt and AnsweredBy are absent until a person's act answers the wait;
+// the root then waits at the front of admission's waiting line for its slot.
+type WaitingOnView struct {
+	Kind        string        `json:"kind"`
+	Ask         string        `json:"ask,omitempty"`
+	GateVersion int           `json:"gateVersion,omitempty"`
+	ArtifactID  string        `json:"artifactId,omitempty"`
+	Since       *time.Time    `json:"since,omitempty"`
+	AnsweredAt  *time.Time    `json:"answeredAt,omitempty"`
+	AnsweredBy  record.Answer `json:"answeredBy,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.
@@ -318,6 +409,15 @@ type ClaimView struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// UpdateRound is the update round the claim is in, and absent when none is open: the pod's
+	// drift round (`pod:<pod uid>`), which every claim of that pod shares, or the claim's own
+	// plugin round (`plugin:<daemon contract>`). Once its worker has answered, the process holding
+	// this claim is waiting to be replaced and the daemon holds the claim's next task. UpdateHead
+	// is the commit the worker reported as the head of its issue branch at origin when it answered
+	// the round, and is absent until it answers and for a worker that reported none (a planner
+	// before its first push). It is the worker's word, which nothing verifies.
+	UpdateRound string `json:"updateRound,omitempty"`
+	UpdateHead  string `json:"updateHead,omitempty"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session
@@ -355,11 +455,21 @@ func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
 	return view
 }
 
-// PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
+// PhaseView is one phase worker's claim, the handoff of its current phase — the commit its
+// completion reported, the Dispatch handoff record it named — and the rounds the phase has run.
 type PhaseView struct {
-	Claim         ClaimView `json:"claim"`
-	HandoffCommit string    `json:"handoffCommit,omitempty"`
-	Rounds        int       `json:"rounds"`
+	Claim         ClaimView          `json:"claim"`
+	HandoffCommit string             `json:"handoffCommit,omitempty"`
+	HandoffRecord *HandoffRecordView `json:"handoffRecord,omitempty"`
+	Rounds        int                `json:"rounds"`
+}
+
+// HandoffRecordView is the Dispatch handoff record a worker's completion of its current
+// file-backed phase named: the record's id, and its version among its phase's records, which
+// `dispatch handoff-read --issue <KEY> --phase <word> --version <n>` reads.
+type HandoffRecordView struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 // PullRequestView is the issue's pull request as the daemon observes it from GitHub.
@@ -457,12 +567,57 @@ type HeldOutboxRow struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. Its state and role say the move that brings it back
-// (Move).
+// entry under `issues` carries the rest. Its state, its role and who suspended it say the move
+// that brings it back (Move), and that suspender is no field of it: every plugin parses this
+// body with the schema of the contract it was built at, and a session whose plugin predates
+// INFRA-1048 refuses the whole state over a key it does not know — a daemon that relaunches no
+// stale session (spec R10) would break every such pod the moment a claim is stranded. A plugin
+// built after it strips the key instead, which loses the field rather than the state, and the
+// drift gate in packages/contracts names it at the next golden write. It is served on the
+// operator claim routes, which no plugin calls (OperatorClaim.SuspendedBy), so a reader hands
+// Move the suspender it holds: the daemon's own boot the claim's (SuspendersOf), `legion state`
+// the operator claim list's.
 type StrandedClaim struct {
 	Issue string     `json:"issue"`
 	Role  claim.Role `json:"role"`
 	State string     `json:"state"`
+}
+
+// Suspenders is who suspended each claim, by the key its issue and role make: the fact a
+// stranded claim's move turns on, which the state body does not carry.
+type Suspenders map[string]string
+
+// SuspendersOf is who suspended each suspended claim of stranded, as the daemon's own boot reads
+// it from the claims themselves. A failed claim carries no suspension.
+func SuspendersOf(stranded []supervise.Claim) Suspenders {
+	by := make(Suspenders, len(stranded))
+	for _, c := range stranded {
+		if c.State == supervise.StateSuspended {
+			by[strandedKey(c.Issue, c.Role)] = string(c.SuspendedBy)
+		}
+	}
+	return by
+}
+
+// SuspendersOfOperatorClaims is who suspended each claim of the operator claim list, the one
+// surface that serves it (OperatorClaim.SuspendedBy): how a reader off the daemon, `legion
+// state`, names the move of a stranded claim.
+func SuspendersOfOperatorClaims(claims []OperatorClaim) Suspenders {
+	by := make(Suspenders, len(claims))
+	for _, c := range claims {
+		by[strandedKey(c.Issue, c.Role)] = c.SuspendedBy
+	}
+	return by
+}
+
+// Of is who suspended c, "" when nobody did or when this lookup does not name it.
+func (s Suspenders) Of(c StrandedClaim) string {
+	return s[strandedKey(c.Issue, c.Role)]
+}
+
+// strandedKey names one claim of a tree in both lookups: an issue runs one claim of a role.
+func strandedKey(issue string, role claim.Role) string {
+	return issue + " " + string(role)
 }
 
 // StrandedMove is the move that brings a stranded claim back (StrandedClaim.Move). Its value is the
@@ -472,18 +627,25 @@ type StrandedMove string
 const (
 	StrandedResume           StrandedMove = "resume"
 	StrandedSuspendedWorkers StrandedMove = "suspendedWorkers"
+	StrandedReleasedNoResume StrandedMove = "releasedNoResume"
 	StrandedRetry            StrandedMove = "retry"
 	StrandedWorkflowStart    StrandedMove = "needsWorkflowStart"
 )
 
 // StrandedMoves is every move, in the order the boot's log line and `legion state` list them.
 func StrandedMoves() []StrandedMove {
-	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedRetry, StrandedWorkflowStart}
+	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedReleasedNoResume, StrandedRetry, StrandedWorkflowStart}
 }
 
-// Move is the move that brings c back, the one statement of it that the boot's log line and
-// `legion state` both group by:
+// Move is the move that brings c back, given who suspended it (Suspenders.Of, "" for a claim
+// nobody suspended or whose suspender the caller cannot read): the one statement of it that the
+// boot's log line and `legion state` both group by:
 //
+//   - StrandedReleasedNoResume, a claim whose idle pod the daemon released and whose wake never
+//     brought it back (workflow.Stranded's ten-minute rule): the pod and its disk are gone, so
+//     the move is the operator's reading of why the replacement pod never took a turn, not a
+//     resume of the claim — a released claim resumes on its next delivery, and the wake that
+//     should have resumed it has already been taken.
 //   - StrandedResume, a suspended architect: the operator's resume (`legion claims resume`), which
 //     a catch-up follows.
 //   - StrandedSuspendedWorkers, a suspended phase worker: the move its claim's suspendedBy calls
@@ -492,12 +654,14 @@ func StrandedMoves() []StrandedMove {
 //     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
 //   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
 //     relaunches its session with fresh budgets, and a catch-up follows.
-//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
-//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
-//     architect.
-func (c StrandedClaim) Move() StrandedMove {
+//   - StrandedWorkflowStart, a failed phase worker: the retry of its held phase — its architect's
+//     retry_or_escalate, or the operator's retry (`legion claims retry`, which applies the same
+//     retry) — since a failed claim ignores resume and deliver.
+func (c StrandedClaim) Move(suspendedBy string) StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {
+	case !failed && suspendedBy == string(supervise.SuspendedByReleased):
+		return StrandedReleasedNoResume
 	case failed && c.Role == claim.RoleArchitect:
 		return StrandedRetry
 	case failed:
@@ -518,15 +682,17 @@ func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
 	return claims
 }
 
-// StrandedByMove is each stranded claim named `<issue> <role>`, grouped by its Move, each group in
-// stranded's order; every move has a group, empty when no claim takes it.
-func StrandedByMove(stranded []StrandedClaim) map[StrandedMove][]string {
+// StrandedByMove is each stranded claim named `<issue> <role>`, grouped by its Move under
+// suspended, each group in stranded's order; every move has a group, empty when no claim takes
+// it.
+func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[StrandedMove][]string {
 	grouped := make(map[StrandedMove][]string, len(StrandedMoves()))
 	for _, move := range StrandedMoves() {
 		grouped[move] = []string{}
 	}
 	for _, c := range stranded {
-		grouped[c.Move()] = append(grouped[c.Move()], c.Issue+" "+string(c.Role))
+		move := c.Move(suspended.Of(c))
+		grouped[move] = append(grouped[move], strandedKey(c.Issue, c.Role))
 	}
 	return grouped
 }

@@ -22,7 +22,9 @@ import { Inbox } from "./Inbox";
  * exist exactly so a peek embedded on, say, the Agents page does not navigate it to `/` the
  * moment someone picks a person. `keymapScope={DIALOG_SCOPE}` puts its j/k/Enter/Escape
  * bindings on the scope a dialog anywhere on the stack exclusively consults, instead of the
- * standalone page's `inbox` scope, which a dialog's keydown handling never reaches.
+ * standalone page's `inbox` scope, which a dialog's keydown handling never reaches. `pane={false}`
+ * is the third: a peek is a strip beside the page it covers, not a two-column reader, so it keeps
+ * the card in the row at every width - the Inbox the page itself shows below 1280 px.
  */
 export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -60,7 +62,12 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
             Close
           </button>
         </div>
-        <Inbox filter={filter} keymapScope={DIALOG_SCOPE} onAssigneesChange={setAssignees} />
+        <Inbox
+          filter={filter}
+          keymapScope={DIALOG_SCOPE}
+          onAssigneesChange={setAssignees}
+          pane={false}
+        />
       </aside>
     </>
   );

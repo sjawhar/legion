@@ -17,8 +17,9 @@ import (
 // enrollment, and a slot names one of several independent enrollments of the same pod
 // (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
 type createEnrollmentBody struct {
-	// What the session is: "session" (an agent session on a machine its person logged in) or
-	// "pod".
+	// What the session is: "session" (an agent session on a machine its person logged in, or a
+	// machine enrolling under the launcher credential its token exchange minted, which acts for
+	// that machine's fleet rather than for a person) or "pod".
 	Kind string `json:"kind"`
 	// The session's runtime: a pod's UID, or whatever names the session on its machine (the
 	// helper's host:pid:start time, a container's id). A launcher enrolls one live session per
@@ -82,7 +83,9 @@ type selfResponse struct {
 
 // createEnrollment authenticates by launcher proof now (payload carries "lid"), never a bearer
 // token; cred is the launcher credential's own identity, read by server.authenticate from the
-// verified proof's launcher id.
+// verified proof's launcher id. A machine's own credential enrols a session that carries no
+// operator and acts for its fleet's service, as a pod's enrolment does for the service its
+// token proves.
 func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	var body createEnrollmentBody
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
@@ -174,6 +177,17 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // and service account the enrollment was made for; a pod enrollment that has never renewed with
 // one still renews with no body, logged here, naming the enrollment, until the token-less path is
 // removed (Renew says when).
+//
+// A machine's own session whose launcher credential has ended (enroll.ErrMachineLoginEnded: the
+// machine login was revoked, lapsed, or its account was dropped from BROKER_VM_SERVICES) is
+// answered ENROLLMENT_NOT_LIVE, which is what the enrollment now is, rather than a code of its
+// own, which would read as a retryable failure to a renewer that has not heard of it. Every
+// renewer treats it as terminal, and what each does then is its own: a session the helper holds
+// is enrolled again by the helper's own loop, under whatever credential it holds then
+// (helper.Server.enrollLoop); `agent-secrets renew` stops, exit 76 naming the enrollment, and
+// leaves the enrolling again to whatever enrolled the box or pod in the first place, which for
+// a box enrolled through `enroll-session-key` is a person running that command again. The WARN
+// beside it is the only record naming which of the two refusals an operator is looking at.
 func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
 	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -191,6 +205,10 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	switch {
 	case errors.Is(err, enroll.ErrNotLive):
 		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
+		return
+	case errors.Is(err, enroll.ErrMachineLoginEnded):
+		slog.Warn("broker: machine session renewal refused: its machine login has ended", "enrollment", id)
+		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", err.Error())
 		return
 	case errors.Is(err, enroll.ErrPodTokenExpired):
 		writeError(w, http.StatusForbidden, "POD_TOKEN_EXPIRED", err.Error())

@@ -84,7 +84,8 @@ Operationally, after an architect re-claims its role by hand:
    names the worker.
 2. `envoy_send(session_id=<that worker>, message="architect role re-held; call the legion tool's handoff_complete again")`.
    Direct session delivery does not depend on any role claim. The worker makes that one tool call, nothing
-   else — no second handoff file, no new commit (its handoff is already committed).
+   else — no second handoff record (`dispatch handoff-write` has already written this phase's), and no new
+   commit.
 3. Alternatively the worker sends the summary straight to the architect's session (what LEGION-13's workers
    did; gotchas § 7) — that informs the architect but leaves `phases[<KEY>].completed` parked until the
    next assignment or `/process/ready` overwrites it. Prefer the repeat: it clears the daemon's record too.

@@ -296,15 +296,14 @@ esac
 }
 
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
-// the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, ahead of the operator's, the two session-placing variables where the pod
+// the pod's baseline: PI_CONFIG_FILES as the pod carries it, the operator's overlays and the
+// role's own and no overlay of Legion's, the two session-placing variables where the pod
 // leaves them unset, Oh My Pi's profile directory made under the role's XDG_STATE_HOME, and every
 // directory the role is told to scratch in (podsafety.ScratchVariables) made on the role's own
 // scratch — its TMPDIR above all, which no tool makes for itself and whose absence fails a role's
 // first mktemp. Without it the agent starts on the environment it always had, and nothing is made:
-// not under its state home, not on its scratch. With --pod-safety and no state directory, or a
-// state home whose profile directory cannot be made, the shim refuses naming it, before anything
-// is dialled or spawned.
+// not under its state home, not on its scratch. With --pod-safety and a state home whose profile
+// directory cannot be made, the shim refuses naming it, before anything is dialled or spawned.
 func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
 	socket := filepath.Join(socketDir(t), "s")
@@ -317,13 +316,11 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := t.TempDir()
 	t.Setenv("PI_CONFIG_FILES", "/etc/operator.yml")
 	// Restored by t.Setenv's cleanup; unset so the pod row proves the baseline fills it and the
 	// pane row that nothing does.
 	t.Setenv("OMP_SESSION_STORAGE", "")
 	os.Unsetenv("OMP_SESSION_STORAGE")
-	t.Setenv("LEGION_STATE_DIR", "")
 	t.Setenv("OMP_PROFILE", "legion")
 	marker := filepath.Join(dir, "spawned")
 	// told is every scratch directory the role was told of, as the child reads it: the shim's own
@@ -366,10 +363,6 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		_ = ln.(*net.UnixListener).SetDeadline(time.Time{})
 	}
 
-	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state", "tester"))
-	refuses(shim(true, "", "", "", ""), "LEGION_STATE_DIR")
-
-	t.Setenv("LEGION_STATE_DIR", state)
 	blocked := filepath.Join(dir, "blocked")
 	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -386,7 +379,7 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		makes     string
 		scratches bool
 	}{
-		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file", "omp/profiles/legion", true},
+		"a pod":  {true, "/etc/operator.yml", "file", "omp/profiles/legion", true},
 		"a pane": {false, "/etc/operator.yml", "unset", "", false},
 	} {
 		// Under dir rather than t.TempDir: this row points TMPDIR at a directory nothing has made,

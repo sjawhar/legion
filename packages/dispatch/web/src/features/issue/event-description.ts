@@ -41,6 +41,8 @@ function describe(event: Event): string | AgentPart[] {
       return "Agent conversation state updated";
     case "user_thread_state.updated":
       return "Thread read";
+    case "decision.kept":
+      return "Kept a decision";
     case "ask.resolved":
       return askResolutionParts(event.payload.resolution);
     case "ask.answered":
@@ -100,6 +102,8 @@ function describe(event: Event): string | AgentPart[] {
       return event.payload.reason === "closed" ? "Claim released on close" : "Claim released";
     case "issue.deployed":
       return `Deployed by run ${event.payload.run_id}`;
+    case "handoff.recorded":
+      return `Recorded the ${event.payload.phase} handoff, version ${event.payload.version}`;
     case "artifact.created":
       return `Added ${event.payload.artifact.name}`;
     case "artifact.approved":
@@ -108,6 +112,8 @@ function describe(event: Event): string | AgentPart[] {
       return `Changes requested on v${event.payload.version}`;
     case "artifact.version":
       return `Saved ${event.payload.name} v${event.payload.version.number}`;
+    case "artifact.human_edited":
+      return `Edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
     case "suggestion.accepted":
       return "Suggestion accepted";
     case "suggestion.rejected":
@@ -136,6 +142,8 @@ function describe(event: Event): string | AgentPart[] {
       return `Repaired block ${event.payload.block_id}`;
     case "block.invalid":
       return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
+    case "result.recorded":
+      return `Check ${event.payload.check_block_id} ${event.payload.verdict === "pass" ? "passed" : "failed"} at ${event.payload.commit_sha.slice(0, 12)}, recorded by ${event.payload.role}${event.payload.issue === event.payload.check_issue ? "" : ` on ${event.payload.issue}`}`;
   }
   return event satisfies never;
 }

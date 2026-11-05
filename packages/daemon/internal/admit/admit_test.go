@@ -693,7 +693,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "acme/widgets", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", CheckedHead: "merged", Failing: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
-		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
+		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", HandoffRecord: "gen1-implement", HandoffVersion: 3, LastHandoff: "gen1-implement", Rounds: 2}); err != nil {
 			t.Fatalf("seed implementer: %v", err)
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger", Summary: "READY #85 at gen1 (approved at gen1) for " + child}); err != nil {
@@ -722,8 +722,11 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 			t.Fatalf("read phases: %v", err)
 		}
 		for _, row := range rows {
-			if row.HandoffCommit != "" || row.Rounds != 0 || row.Verdict != "" {
-				t.Fatalf("generation 2 %s row = %#v, want no handoff, rounds, or verdict", row.Role, row)
+			if row.Completed() || row.HandoffVersion != 0 || row.Rounds != 0 || row.Verdict != "" {
+				t.Fatalf("generation 2 %s row = %#v, want no handoff commit or record, rounds, or verdict", row.Role, row)
+			}
+			if row.Role == claim.RoleImplementer && row.LastHandoff != "gen1-implement" {
+				t.Fatalf("generation 2 implementer row = %#v, want the record it last named kept", row)
 			}
 		}
 	})
@@ -734,8 +737,8 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	}{
 		{id: "gen2-register", fact: intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 1}},
 		{id: "gen2-approved", fact: intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 1}},
-		{id: "gen2-plan", fact: intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Claim: "planner", Summary: "planned", Commit: "gen2-plan"}},
-		{id: "gen2-implement", fact: intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RoleImplementer, Claim: "implementer", Summary: "implemented", Commit: "gen2-handoff"}},
+		{id: "gen2-plan", fact: intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Claim: "planner", Summary: "planned", HandoffRecord: "gen2-plan", HandoffVersion: 1}},
+		{id: "gen2-implement", fact: intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RoleImplementer, Claim: "implementer", Summary: "implemented", Commit: "gen2-handoff", HandoffRecord: "gen2-implement", HandoffVersion: 4}},
 	} {
 		if result, err := intake.ApplyFact(context.Background(), pool, "api", step.id, step.fact, engine, admission); err != nil || result.Refusal != nil || result.Duplicate {
 			t.Fatalf("%s = %#v, %v", step.id, result, err)
@@ -824,6 +827,54 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 				t.Fatalf("reopened orphan = %#v with %d architect starts, want its own admitted root with its architect started", reopened, architectStarts)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
+		})
+	}
+}
+
+// Re-entering a child creates a new generation, so a completion or production-check report from
+// the generation it left cannot apply to the new run. Its live claims stay live: re-entry queues
+// no suspension for the interrupted phase worker or for an open production-check look.
+func TestReenteringAnOpenChildDoesNotSuspendItsLiveClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase phase.Phase
+		check *record.ProductionCheck
+	}{
+		{name: "an interrupted phase worker", phase: phase.Testing},
+		{name: "an implementer in an open production-check look", phase: phase.Done,
+			check: &record.ProductionCheck{Project: testProject, Tree: "LEGION-1", Repo: "acme/widgets", Number: 1,
+				MergeSHA: "merged", OpenedAt: fixedNow, BoundAt: fixedNow.Add(time.Hour), Looks: 1, LookOpen: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, nil)
+			const root, child = "LEGION-1", "LEGION-2"
+			seedSlotted(t, pool, root, "A")
+			liveRoot := issue(t, pool, root)
+			liveRoot.Phase = phase.Implementing
+			putIssue(t, pool, liveRoot)
+			parent := root
+			putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+				Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: tc.phase, Generation: 1, Status: "in_progress", Rank: "B"})
+			if tc.check != nil {
+				check := *tc.check
+				check.Issue = child
+				inTx(t, pool, func(tx pgx.Tx) {
+					if err := record.NewStore().PutProductionCheck(context.Background(), tx, check); err != nil {
+						t.Fatalf("seed production check: %v", err)
+					}
+				})
+			}
+
+			apply(t, pool, admission, "child-reentered", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2,
+				Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B"}, engine)
+
+			for _, effect := range effects(t, pool) {
+				if request, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == child && request.Op == "suspend" {
+					t.Fatalf("outbox effect = %#v, want no suspension when the child remains in the workflow", request)
+				}
+			}
 		})
 	}
 }
@@ -976,13 +1027,13 @@ func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	js := testJetStream(t)
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, engineStub{}, admission) }()
+	go func() { done <- consumers.Run(ctx, engineStub{}, admission) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {

@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,6 +160,87 @@ func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
 	}
 }
 
+// A snooze moves only its writer's Inbox, so only that person's other tabs and devices hear of
+// it: each snooze and un-snooze of an issue's or a project document's ask appends a
+// user_state.updated that carries exactly the writer's login and `changed: ["snoozed"]`. Every
+// signed-in feed replays it, so it names neither the ask nor the writer's issue state, nor
+// anyone else - not even another person holding a snooze on the same row. A write that moves
+// nothing announces nothing.
+func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	issueAsk := createSnoozeAsk(t, handler, "/api/v1/issues/"+issue.Key+"/asks", "Issue question")
+	document := createProjectDocument(t, handler, "CORE", "Runbook", "# Runbook\n")
+	documentAsk := createSnoozeAsk(t, handler, "/api/v1/artifacts/"+document.ID+"/asks", "Document question")
+	until := time.Now().UTC().Add(3 * time.Hour).Truncate(time.Millisecond)
+	snooze := func(askID, login string, at time.Time) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/asks/"+askID+"/snooze", map[string]any{
+			"snoozed_until": at.Format(time.RFC3339Nano),
+		}, login); response.Code != http.StatusOK {
+			t.Fatalf("%s snoozes %s: status=%d body=%s", login, askID, response.Code, response.Body.String())
+		}
+	}
+	unsnooze := func(askID string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/me/asks/"+askID+"/snooze", nil, "alice"); response.Code != http.StatusNoContent {
+			t.Fatalf("alice un-snoozes %s: status=%d body=%s", askID, response.Code, response.Body.String())
+		}
+	}
+	// Bob holds his own snooze on both rows and his own pin on the issue, so a payload that
+	// carried anyone else's state would name him.
+	snooze(issueAsk, "bob", until.Add(time.Hour))
+	snooze(documentAsk, "bob", until.Add(time.Hour))
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{"pinned": true}, "bob"); response.Code != http.StatusOK {
+		t.Fatalf("bob pins the issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	requireAnnounced := func(write, askID string) {
+		t.Helper()
+		var project string
+		var issueKey *string
+		var payload []byte
+		if err := database.Pool.QueryRow(context.Background(), `
+			select project_key, issue_key, payload from events where type = 'user_state.updated' order by id desc limit 1
+		`).Scan(&project, &issueKey, &payload); err != nil {
+			t.Fatalf("read the %s event: %v", write, err)
+		}
+		var event map[string]any
+		if err := json.Unmarshal(payload, &event); err != nil {
+			t.Fatalf("decode the %s event %s: %v", write, payload, err)
+		}
+		changed, _ := event["changed"].([]any)
+		if len(event) != 2 || event["login"] != "alice" || len(changed) != 1 || changed[0] != "snoozed" {
+			t.Fatalf("%s of %s announced %s, want exactly alice's login and changed [snoozed]", write, askID, payload)
+		}
+		if strings.Contains(string(payload), askID) {
+			t.Fatalf("%s of %s names the ask: %s", write, askID, payload)
+		}
+		if project != "CORE" || issueKey != nil {
+			t.Fatalf("%s of %s is owned by project %q issue %v, want project CORE as every user_state.updated", write, askID, project, issueKey)
+		}
+		if strings.Contains(string(payload), "bob") {
+			t.Fatalf("%s of %s names another person: %s", write, askID, payload)
+		}
+	}
+	for _, askID := range []string{issueAsk, documentAsk} {
+		before := countEvents(t, database, "user_state.updated")
+		snooze(askID, "alice", until)
+		requireAnnounced("a snooze", askID)
+		snooze(askID, "alice", until)
+		if got := countEvents(t, database, "user_state.updated"); got != before+1 {
+			t.Fatalf("a snooze to the moment %s already holds appended an event: %d events, want %d", askID, got, before+1)
+		}
+		unsnooze(askID)
+		requireAnnounced("an un-snooze", askID)
+		unsnooze(askID)
+		if got := countEvents(t, database, "user_state.updated"); got != before+2 {
+			t.Fatalf("an un-snooze of %s nobody holds appended an event: %d events, want %d", askID, got, before+2)
+		}
+	}
+}
+
 // The snooze window is absolute: an agent replying to a snoozed ask hands the turn back to
 // the human, and the row must still carry its unchanged snooze so the Inbox keeps it folded
 // away. Only the moment passing or an explicit un-snooze brings it back.
@@ -241,7 +324,7 @@ func TestInboxSurfacesASnoozeWhoseMomentHasPassed(t *testing.T) {
 	}
 }
 
-func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
+func TestAskSnoozeRefusesBadInputAndACredentialWithoutThePersonScope(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -285,7 +368,8 @@ func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
 		}
 	}
 
-	// The inbox is human-only, so the snooze that folds one of its rows away is too.
+	// The inbox needs the person scope, so the snooze that folds one of its rows away needs it
+	// too, and the deployment's shared token holds none.
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		response := sessionRequest(t, handler, method, "/api/v1/me/asks/"+askID+"/snooze", map[string]any{
 			"snoozed_until": future,

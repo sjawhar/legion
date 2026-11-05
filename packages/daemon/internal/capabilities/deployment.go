@@ -57,7 +57,8 @@ type Deployment struct {
 }
 
 // The statuses a State carries: an image row is present or missing, a live or a deployment row
-// present, reported, decided or open, a withheld row withheld, and an unmeasured row unchecked.
+// present, reported, decided or open, a withheld row withheld, and an unmeasured row unchecked
+// (in the probe table, the browser row under `probe-image --skip-browser`).
 // StatusMissing and StatusReported are the probe table's alone (CheckImage): a deployment row
 // `legion state` carries (api.CapabilityState) is never missing or reported, since the daemon
 // either measures it or has nothing yet to measure it with.

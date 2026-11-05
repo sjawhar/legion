@@ -34,7 +34,7 @@ teardown_sequence() {
     if teardown; then teardown_done=1; else rc=1; fi
   fi
   if [ -z "$session_db_torn_down" ]; then
-    [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
+    [ -z "$session_db_started" ] || docker rm -f -v "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
     session_db_torn_down=1
   fi
   if [ -z "$reminter_torn_down" ]; then

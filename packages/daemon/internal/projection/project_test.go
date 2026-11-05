@@ -25,7 +25,8 @@ type projectionStore struct {
 	checks       []record.ProductionCheck
 	held         []record.HeldRow
 	// mirror is what Dispatch says each issue of the project waits on, as the store lists it: by
-	// key, which is the order the state's `blocked` is judged from.
+	// key, which is the order the state's `blocked` is judged from. DispatchIssuesOf serves the rows
+	// of the keys asked for and of what they wait on, as the real store does.
 	mirror []record.DispatchIssueRow
 }
 
@@ -51,8 +52,25 @@ func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
 	return s.checks, nil
 }
-func (s projectionStore) DispatchIssues(context.Context, pgx.Tx, string) ([]record.DispatchIssueRow, error) {
-	return s.mirror, nil
+func (s projectionStore) DispatchIssuesOf(_ context.Context, _ pgx.Tx, _ string, keys []string) ([]record.DispatchIssueRow, error) {
+	wanted := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			for _, blocker := range row.Blockers {
+				wanted[blocker] = true
+			}
+		}
+	}
+	var rows []record.DispatchIssueRow
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
 }
 
 // projectedAt is the fixed instant every test here projects at.
@@ -86,6 +104,52 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	var _ api.State = got
 }
 
+// A root in awaiting_person shows what it waits on: the question, or the spec version of the gate
+// shape, when the wait began, and the answer only once a person gave one. A root in any other
+// phase shows no wait, even with a stale Awaiting on its record.
+func TestProjectShowsWhatAnAwaitingRootWaitsOn(t *testing.T) {
+	since := projectedAt.Add(-time.Hour)
+	answeredAt := projectedAt.Add(-time.Minute)
+	store := projectionStore{issues: []record.Issue{
+		{
+			Key: "LEGION-ASK", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-ASK",
+			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "A", HandedOver: true,
+			Awaiting: &record.Awaiting{
+				Ask: "ask-1", Since: record.EventMark{Seq: 9, At: since},
+				AnsweredAt: &answeredAt, AnsweredBy: record.AnsweredByReply,
+			},
+		},
+		{
+			Key: "LEGION-GATE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-GATE",
+			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "B", HandedOver: true,
+			Awaiting: &record.Awaiting{GateVersion: 4, Artifact: "artifact-gate"},
+		},
+		{
+			Key: "LEGION-RUN", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-RUN",
+			Phase: phase.Admitted, Status: "in_progress", Rank: "C", HandedOver: true,
+			Awaiting: &record.Awaiting{Ask: "ask-2"},
+		},
+	}}
+
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	ask := got.Issues["LEGION-ASK"].WaitingOn
+	if ask == nil || ask.Kind != "ask" || ask.Ask != "ask-1" || ask.Since == nil || !ask.Since.Equal(since) ||
+		ask.AnsweredAt == nil || !ask.AnsweredAt.Equal(answeredAt) || ask.AnsweredBy != record.AnsweredByReply {
+		t.Fatalf("ask waitingOn = %#v, want ask-1 since %s answered by reply at %s", ask, since, answeredAt)
+	}
+	gate := got.Issues["LEGION-GATE"].WaitingOn
+	if gate == nil || gate.Kind != "gate" || gate.GateVersion != 4 || gate.ArtifactID != "artifact-gate" ||
+		gate.Since != nil || gate.AnsweredAt != nil || gate.AnsweredBy != "" {
+		t.Fatalf("gate waitingOn = %#v, want unanswered gate version 4 of artifact-gate with no start time", gate)
+	}
+	if run := got.Issues["LEGION-RUN"].WaitingOn; run != nil {
+		t.Fatalf("admitted root waitingOn = %#v, want none", run)
+	}
+}
+
 func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	const issue = "S2-1"
 	architect := claim.Token("legion-s2-1-architect")
@@ -113,8 +177,9 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 		t.Fatalf("operator-spawned implementer = %#v, want %#v", got, want)
 	}
 	// The row is listed for the claim's sake and says the workflow does not record its issue.
-	// Empty strings here refused the whole state document at every strict client — the contract's
-	// own parse of that document is packages/contracts' state-operator-claim fixture.
+	// Empty strings here refuse the whole state document at every client — no phase enum value is
+	// empty — and the contract's own parse of that document is packages/contracts'
+	// state-operator-claim fixture.
 	if view.Phase != api.Unrecorded || view.Status != string(api.Unrecorded) {
 		t.Fatalf("operator-spawned issue = phase %q status %q, want both %q", view.Phase, view.Status, api.Unrecorded)
 	}
@@ -161,6 +226,40 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	}
 	if view.State != string(supervise.StateLaunchUncertain) || view.Locator != nil {
 		t.Fatalf("launch_uncertain architect = %#v, want its state with no locator", view)
+	}
+}
+
+// A worker's view shows the handoff of its current phase as its completion left it: the Dispatch
+// handoff record a file-backed phase's completion named, with its version, and the commit a
+// completion reported; a worker whose phase has not completed shows neither.
+func TestProjectShowsTheHandoffRecordAWorkerNamed(t *testing.T) {
+	const record1 = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
+	tester, implementer, reviewer := claim.Token("legion-208-tester"), claim.Token("legion-208-implementer"), claim.Token("legion-208-reviewer")
+	store := projectionStore{
+		issues: []record.Issue{{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing}},
+		phases: map[string][]record.PhaseRow{"LEGION-208": {
+			{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: implementer, HandoffCommit: "head", HandoffRecord: "implement-record", HandoffVersion: 2, Rounds: 1},
+			{Issue: "LEGION-208", Role: claim.RoleTester, Claim: tester, HandoffRecord: record1, HandoffVersion: 3},
+			{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: reviewer, LastHandoff: "review-record"},
+		}},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{
+		{Token: implementer, Issue: "LEGION-208", Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "ses_implementer"},
+		{Token: tester, Issue: "LEGION-208", Role: claim.RoleTester, State: supervise.StateIdle, Session: "ses_tester"},
+		{Token: reviewer, Issue: "LEGION-208", Role: claim.RoleReviewer, State: supervise.StateIdle, Session: "ses_reviewer"},
+	}, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	workers := got.Issues["LEGION-208"].Workers
+	if got, want := workers[claim.RoleTester].HandoffRecord, (&api.HandoffRecordView{ID: record1, Version: 3}); !reflect.DeepEqual(got, want) || workers[claim.RoleTester].HandoffCommit != "" {
+		t.Fatalf("the tester's handoff = record %+v, commit %q; want %+v and no commit", got, workers[claim.RoleTester].HandoffCommit, want)
+	}
+	if got, want := workers[claim.RoleImplementer].HandoffRecord, (&api.HandoffRecordView{ID: "implement-record", Version: 2}); !reflect.DeepEqual(got, want) || workers[claim.RoleImplementer].HandoffCommit != "head" {
+		t.Fatalf("the implementer's handoff = record %+v, commit %q; want %+v at head", got, workers[claim.RoleImplementer].HandoffCommit, want)
+	}
+	if got := workers[claim.RoleReviewer]; got.HandoffRecord != nil || got.HandoffCommit != "" {
+		t.Fatalf("the reviewer mid-round shows handoff %+v, commit %q; want none: the record it named last round is not this round's", got.HandoffRecord, got.HandoffCommit)
 	}
 }
 
@@ -350,5 +449,52 @@ func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 	}
 	if none.Admission.Blocked == nil || len(none.Admission.Blocked) != 0 {
 		t.Fatalf("blocked with nothing waiting on a link = %#v, want an empty list", none.Admission.Blocked)
+	}
+}
+
+// An issue's memory group is its tree root's, which is the one record the draw is written on: the
+// root and every issue of its tree are shown the group, the mode it was drawn under and the
+// instant of the draw, a done issue included, and an issue of a tree no draw has reached is shown
+// none of the three. There is no ancestor walk: a record's Tree is its root's key.
+func TestProjectShowsEveryIssueItsTreeRootsMemoryDraw(t *testing.T) {
+	drawnAt := projectedAt.Add(-48 * time.Hour)
+	store := projectionStore{issues: []record.Issue{
+		{
+			Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+			Phase: phase.Implementing, Status: "in_progress", Rank: "A", HandedOver: true,
+			MemoryGroup: "memory", MemoryDrawMode: "random", MemoryDrawnAt: &drawnAt,
+		},
+		// A child of that tree, which the draw never wrote to, and a done child of it: both run
+		// with what their root was drawn into.
+		{
+			Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+			Phase: phase.Admitted, Status: "in_progress", Rank: "B", HandedOver: true,
+		},
+		{
+			Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+			Phase: phase.Done, Status: "done", Rank: "C", HandedOver: true,
+		},
+		// A tree first opened before the setting existed: no draw, so no group.
+		{
+			Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211",
+			Phase: phase.Implementing, Status: "in_progress", Rank: "D", HandedOver: true,
+		},
+	}}
+
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	for _, key := range []string{"LEGION-208", "LEGION-209", "LEGION-210"} {
+		view := got.Issues[key]
+		if view.MemoryGroup != "memory" || view.MemoryDrawMode != "random" ||
+			view.MemoryDrawnAt == nil || !view.MemoryDrawnAt.Equal(drawnAt) {
+			t.Errorf("%s = group %q drawn as %q at %v, want its root's memory, random, %s",
+				key, view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt, drawnAt)
+		}
+	}
+	if view := got.Issues["LEGION-211"]; view.MemoryGroup != "" || view.MemoryDrawMode != "" || view.MemoryDrawnAt != nil {
+		t.Errorf("the undrawn tree's root = group %q drawn as %q at %v, want none of the three",
+			view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt)
 	}
 }

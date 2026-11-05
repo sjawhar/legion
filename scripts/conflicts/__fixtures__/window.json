@@ -1,0 +1,219 @@
+{
+  "since": "2026-10-20",
+  "until": "2026-10-26",
+  "origin_main": "0000000000000000000000000000000000000001",
+  "prs": [
+    {
+      "number": 10,
+      "title": "Merged, carries m1 with #11",
+      "state": "MERGED",
+      "baseRefName": "main",
+      "headRefName": "legion/A-1",
+      "headRefOid": "a100",
+      "mergedAt": "2026-10-24T00:00:00Z",
+      "createdAt": "2026-10-19T00:00:00Z",
+      "commit_count": 6,
+      "merges": [
+        {
+          "oid": "m1",
+          "date": "2026-10-21T10:00:00Z",
+          "headline": "merge main",
+          "parents": ["a1", "u1"],
+          "branch_parent": "a1",
+          "upstream_parent": "u1",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/x/CHANGELOG.md"]
+        },
+        {
+          "oid": "m2",
+          "date": "2026-10-20T00:00:00Z",
+          "headline": "merge main at the since bound",
+          "parents": ["a2", "u2"],
+          "branch_parent": "a2",
+          "upstream_parent": "u2",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["AGENTS.md", "packages/x/CHANGELOG.md"]
+        },
+        {
+          "oid": "m3",
+          "date": "2026-10-19T23:59:59Z",
+          "headline": "merge main one second before the window",
+          "parents": ["a3", "u3"],
+          "branch_parent": "a3",
+          "upstream_parent": "u3",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["src/a.ts"]
+        },
+        {
+          "oid": "m4",
+          "date": "2026-10-22T00:00:00Z",
+          "headline": "clean merge of main",
+          "parents": ["a4", "u4"],
+          "branch_parent": "a4",
+          "upstream_parent": "u4",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": []
+        }
+      ],
+      "force_pushes": [
+        {
+          "date": "2026-10-23T00:00:00Z",
+          "before": "p1",
+          "after": "p2",
+          "main_at_push": "u4",
+          "already_contains_main": false,
+          "conflicts": ["packages/x/CHANGELOG.md"]
+        },
+        {
+          "date": "2026-10-27T00:00:00Z",
+          "before": "p2",
+          "after": "p3",
+          "main_at_push": "u4",
+          "already_contains_main": false,
+          "conflicts": ["src/a.ts"]
+        }
+      ]
+    },
+    {
+      "number": 11,
+      "title": "Merged, carries m1 with #10 and m5 with #12",
+      "state": "MERGED",
+      "baseRefName": "main",
+      "headRefName": "legion/A-2",
+      "headRefOid": "b100",
+      "mergedAt": "2026-10-25T00:00:00Z",
+      "createdAt": "2026-10-19T00:00:00Z",
+      "commit_count": 5,
+      "merges": [
+        {
+          "oid": "m1",
+          "date": "2026-10-21T10:00:00Z",
+          "headline": "merge main",
+          "parents": ["a1", "u1"],
+          "branch_parent": "a1",
+          "upstream_parent": "u1",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/x/CHANGELOG.md"]
+        },
+        {
+          "oid": "m5",
+          "date": "2026-10-26T23:59:59Z",
+          "headline": "merge main at the until bound",
+          "parents": ["b5", "u5"],
+          "branch_parent": "b5",
+          "upstream_parent": "u5",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/x/CHANGELOG.md", "src/a.ts"]
+        },
+        {
+          "oid": "m6",
+          "date": "2026-10-27T00:00:00Z",
+          "headline": "merge main one second after the window",
+          "parents": ["b6", "u6"],
+          "branch_parent": "b6",
+          "upstream_parent": "u6",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["docs/guide.md"]
+        }
+      ],
+      "force_pushes": []
+    },
+    {
+      "number": 12,
+      "title": "Open, carries m5 with merged #11",
+      "state": "OPEN",
+      "baseRefName": "legion/A-2",
+      "headRefName": "legion/A-3",
+      "headRefOid": "c100",
+      "mergedAt": null,
+      "createdAt": "2026-10-21T00:00:00Z",
+      "commit_count": 4,
+      "merges": [
+        {
+          "oid": "m5",
+          "date": "2026-10-26T23:59:59Z",
+          "headline": "merge main at the until bound",
+          "parents": ["b5", "u5"],
+          "branch_parent": "b5",
+          "upstream_parent": "u5",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/x/CHANGELOG.md", "src/a.ts"]
+        },
+        {
+          "oid": "m7",
+          "date": "2026-10-23T00:00:00Z",
+          "headline": "merge main",
+          "parents": ["c7", "u7"],
+          "branch_parent": "c7",
+          "upstream_parent": "u7",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/y/CHANGELOG.md"]
+        },
+        {
+          "oid": "m8",
+          "date": "2026-10-23T00:00:00Z",
+          "headline": "merge two commits of the PR",
+          "parents": ["c7", "c8"],
+          "kind": "internal"
+        }
+      ],
+      "force_pushes": [
+        {
+          "date": "2026-10-24T00:00:00Z",
+          "before": "q1",
+          "after": "q2",
+          "conflicts": null,
+          "error": "base is not main"
+        }
+      ],
+      "open_conflicts_now": ["packages/y/CHANGELOG.md"],
+      "open_behind_base": true
+    },
+    {
+      "number": 13,
+      "title": "Open, not on a legion/ branch",
+      "state": "OPEN",
+      "baseRefName": "main",
+      "headRefName": "feature/other",
+      "headRefOid": "d100",
+      "mergedAt": null,
+      "createdAt": "2026-10-21T00:00:00Z",
+      "commit_count": 2,
+      "merges": [
+        {
+          "oid": "m9",
+          "date": "2026-10-23T00:00:00Z",
+          "headline": "merge main",
+          "parents": ["d9", "u9"],
+          "branch_parent": "d9",
+          "upstream_parent": "u9",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["src/b.ts"]
+        }
+      ],
+      "force_pushes": [],
+      "open_conflicts_now": [],
+      "open_behind_base": false
+    }
+  ]
+}

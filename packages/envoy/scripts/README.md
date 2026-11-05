@@ -1,72 +1,5 @@
 # Envoy diagnostic scripts
 
-## probe-webhook-e2e.sh
-
-On-demand end-to-end probe for the GitHub webhook → Envoy session delivery
-path. Run it any time you suspect webhooks aren't reaching subscribed
-sessions (e.g., agents subscribed to `notifications.github.<owner>.<repo>.pr.<n>.checks`
-not seeing settled CI events).
-
-### Usage
-
-```bash
-WEBHOOK_URL=https://your-ingress.example.com/webhook/github \
-  packages/envoy/scripts/probe-webhook-e2e.sh
-```
-
-Required env:
-
-- `WEBHOOK_URL` — the public ingress that fronts the webhook receiver Envoy
-  publishes from. **No default** — supply your deployment's URL.
-
-Run from a host with:
-
-- A local Envoy listener reachable at `http://127.0.0.1:9020` (override with
-  `LISTENER_URL=...`).
-- SOPS-decryptable access to `ENVOY_GITHUB_WEBHOOK_SECRET` (the same secret
-  the receiver verifies against). The probe reads it via
-  `packages/envoy/deploy/scripts/read-secret.sh`.
-
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | The synthetic webhook was delivered to a live session via the full pipeline. |
-| 1 | Webhook ingress accepted the payload but the on-prem listener never delivered it (the bridge is broken). |
-| 2 | Webhook ingress rejected the request (signature mismatch, malformed, or 5xx). |
-| 3 | Local listener unreachable or subscribe call failed at startup. (Cleanup unsubscribe failures are tolerated by the cleanup trap and do not flip the exit code.) |
-| 4 | Required tool missing on the host (`curl`, `openssl`, `python3`, `jq`, or `read-secret.sh`). |
-
-### Diagnosing failures
-
-- **Exit 1 (most common):** the receiver published to its NATS but the
-  on-prem listener never saw it. Check `docker logs envoy-listener --since 1m`
-  on the on-prem host for any `received` line containing the probe's trigger
-  string. If absent, the event never made it from receiver-side NATS to the
-  listener — the bridge between them is broken.
-- **Exit 2:** the receiver itself rejects the request. Verify
-  `ENVOY_GITHUB_WEBHOOK_SECRET` matches what the receiver has in its secret
-  store. Confirm the URL with `curl -i $WEBHOOK_URL/../healthz` if there's a
-  health endpoint.
-- **Exit 3:** the local listener is down or on a different port. Check
-  `curl http://127.0.0.1:9020/healthz` and the running container
-  (`docker ps | grep envoy-listener`).
-- **Exit 4:** install the missing tool.
-
-### Why the topic is `notifications.github.legion-probe.canary.issue.1.comment`
-
-The `legion-probe/canary` repo does not exist on GitHub — that's intentional.
-The probe sends a fake `issue_comment` event with that owner/repo, the
-receiver normalizes the envelope topic from the payload (it does not call
-the GitHub API to validate the resource), and the topic flows through
-exactly the same code path real events do. Using a synthetic owner/repo
-guarantees no real subscriber will ever match the probe traffic.
-
-### Tuning
-
-- `TIMEOUT_SECONDS=60 ...` — wait longer (default 30s).
-- `LISTENER_URL=http://other-host:9020 ...` — point at a different on-prem listener.
-
 ## e2e-local.sh
 
 Runs the local listener against a throwaway NATS server it builds and runs
@@ -75,10 +8,23 @@ posts signed public GitHub fixtures and a three-paragraph direct message,
 checks the one-warning response for a never-seen GitHub repository, reads the
 registered session back by id from `/v1/registry/<session_id>` and an id that
 never registered as `404 {"error":"no live session <id>"}`, rejects an unheld
-role publish before claiming it for the fake session, captures the raw
-notification envelopes, and proves both the Go prompt text and the shared
-TypeScript renderer print the full direct message once, with no separate
-summary line repeating its first line.
+role publish before claiming it for a stand-in session that takes every
+delivery from its own NATS consumer, refuses a registration naming a port,
+captures the raw notification envelopes, and proves that the shared TypeScript
+renderer prints the full direct message once, with no separate summary line
+repeating its first line.
+
+It also proves the three answers a sender gets when a send cannot be delivered:
+a send to a session the store does not hold is refused `404 {"error":"no live
+session <id>"}`; each send leaves exactly one `listener send` record in
+`listener.log`, INFO when accepted and WARN when refused, carrying
+`target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
+`outcome` and `status`; and a send whose bus is gone is refused `503` with
+`{"error":"envoy: the message bus did not answer: …"}` and `Retry-After: 1`
+inside the sending client's five-second deadline, both over curl and through
+`createEnvoyClient`, which raises an `EnvoySendUnconfirmedError` naming its resend key, with
+the listener's 503 `EnvoyApiError` as its last answer, rather than timing out. The
+bus-down step runs last, because it ends the run's NATS.
 
 ```bash
 packages/envoy/scripts/e2e-local.sh
@@ -87,17 +33,23 @@ packages/envoy/scripts/e2e-local.sh
 The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 
 - `envelopes.jsonl` — raw NATS envelope frames
-- `session-prompts.jsonl` — raw fake-session `prompt_async` requests
+- `session-frames.jsonl` — the envelopes the session took from its own consumer
 - `rendered-ts.txt` — `renderInbound` output for every envelope
-- `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
+- `listener.log` — the listener's own log, including one record per send and publish
+- `absent-session-response.json` — the 404 body naming the session nothing registered
+- `bus-down-send-response.json`, `bus-down-send-headers.txt`,
+  `bus-down-send-result.txt` — the bus-down 503 body, its headers, and its
+  status and `time_total`
+- `bus-down-client-error.json` — the `EnvoySendUnconfirmedError` the real client raised for it
 
-Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
-collisions. The NATS server is a process of this checkout's own build, stopped
-on exit with the listener and the two fake clients. Unlike
-`probe-webhook-e2e.sh`, it has no deployment URL or secret prerequisite: it
-validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
-`.github/workflows/envoy-and-contracts.yaml` on every change to
-`packages/envoy`, `packages/envoy-client` or `packages/contracts`.
+The OS chooses the NATS and listener ports, and each URL is built from the port
+its own process reports. `E2E_NATS_PORT` or `E2E_PORT` sets a port explicitly:
+it is used as given, and one already in use fails the run with `address already
+in use`. The session opens no port: it registers with none, which a listener
+now refuses above 0, and takes its messages from its own NATS consumer. The
+NATS server is a process of this checkout's own build, stopped on exit with the
+listener and the two fake clients. CI runs it as the `envoy-e2e-local` job of
+`.github/workflows/ci.yaml` on every change its `envoy_e2e_local` filter matches.
 
 ## listener-deploy-probe.sh
 
@@ -175,9 +127,10 @@ so during a rolling deploy the replacement answers `/healthz` 200 `starting`
 and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
 listener that opens `/v1` once its caches are warm passes.
 
-`listener-deploy-probe.test.sh` proves the verdict over two fake tasks, Python
-`http.server`s on `127.0.0.1` and `127.0.0.2` behind a fake `getent`; CI runs it
-in the `envoy-go` job of `.github/workflows/envoy-and-contracts.yaml`.
+`listener-deploy-probe.test.sh` proves the verdict over two fake tasks, one
+Python process per case serving `127.0.0.1` and `127.0.0.2` on one port the
+kernel chose, behind a fake `getent`; CI runs it in the `envoy-go` job of
+`.github/workflows/ci.yaml`.
 
 ## Measuring search on a copy of the corpus
 
@@ -195,8 +148,8 @@ It downloads the dump under `DISPATCH_CORPUS_DIR` (default `$TMPDIR` or `/tmp`) 
 it is restored, whether or not the restore succeeded. `DISPATCH_CORPUS_CONTAINER` (default
 `dispatch-corpus-pg`), `DISPATCH_CORPUS_PORT` (default `55433`, on `127.0.0.1`) and
 `DISPATCH_CORPUS_DATABASE` (default `dispatch_corpus`) name the copy. Run again while the container
-holds the database, it prints the URL and restores nothing; `docker rm -f <container>` deletes the
-copy.
+holds the database, it prints the URL and restores nothing; `docker rm -f -v <container>` deletes the
+copy and its data volume.
 
 `search-smoke.sh` prints what a searcher sees for each query in a file
 (`search-smoke-queries.txt` is one): it starts `envoy-dispatch` against the copy, built from this
@@ -220,3 +173,115 @@ never a fixed number of milliseconds.
 ```bash
 DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare.sh <base-checkout> [rounds]
 ```
+
+## Measuring the related-item check on a project's duplicates
+
+`related-recall.sh` copies one project's pairs of issues closed one into the other, and every other
+issue of the project they compete with, from a Dispatch server into a JSONL file, for
+`TestRelatedRecallOnDuplicates` (`internal/dispatch/api`). A pair is a done issue whose close
+reason names one other issue that covers it: `Duplicate of`, `Duplicate:`, `Folded into`,
+`Covered by` or `Superseded by`, in any case, followed by a Dispatch issue reference
+(a Dispatch link to `<KEY>`, a bare `<KEY>` of one of the server's projects, or an `/issues/<KEY>` link).
+The close reason is the issue's last top-level message posted at or before its close, the message
+`dispatch issue-update --status done --reason` posts just before the close; the `issue.closed`
+event carries no reason. A reason naming only a pull request, several issues or the issue itself
+is not a pair. Two closes naming the same two issues make one pair, by the first close.
+
+Each pair's query is its later-filed issue as filed: its first title and first spec version. That
+is the closed issue when the issue its reason names came first (forward), and the named issue
+when that came later (reversed). The target, the issue the check should list, is the earlier one,
+its title and spec as of the query's filing. Pairs naming another project's issue, or one that
+does not exist, are counted and left out. It reads with the caller's own token, sends only
+`GET`s, one at a time, and prints counts only: done issues read, close reasons with a wording,
+those that are not a pair by what they name (`no_reference` is a wording followed by no issue or
+pull request), pairs found and kept per wording with forward and reversed, pairs left out by
+reason, chains (a pair's named issue itself closed into another), and issues copied.
+
+```bash
+DISPATCH_URL=<server> DISPATCH_TOKEN_FILE=<token file> \
+  packages/envoy/scripts/related-recall.sh <project> "$TMPDIR/recall.jsonl"
+```
+
+The file is production data: it is written with mode 600 and never committed. The test loads it
+into a fresh test database, every issue open, under its own key, with its latest title and spec.
+For each pair it sets the target's title and spec to their text at the query's filing, takes the
+query out of the search, refreshes the term statistics, runs the check's old 40-word OR query and
+its keyword search over the query's text, then puts both issues back. It prints each pair's
+wording, direction, the target's rank in each search and whether each lists it among its three
+related items, then the counts per wording and over every pair. An idf-weighted coordination rank
+of the same terms is printed beside them as an experiment. `DISPATCH_RECALL_REQUIRE_NO_LOSS=1`
+fails it if the keyword search lists fewer targets than the old query.
+`TestRelatedCheckLatencyOnRecallCorpus` loads the same corpus and prints the keyword search's p50,
+p95 and max over 20 runs for the text of the issue `DISPATCH_RECALL_LATENCY_ISSUE` names and for a
+10,000-word spec, and the refresh's duration.
+
+```bash
+cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<test database> DISPATCH_RECALL_CORPUS="$TMPDIR/recall.jsonl" \
+  go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' -v -count=1 -timeout 60m
+```
+
+## Measuring Dispatch's statements and its write routes on the seeded database
+
+These are INFRA-325's own measurements: every changed statement's plan and time (A8), and the
+median wall time of the six write routes the new triggers slow (A9). Both run against the seeded
+measurement database `cmd/dispatch-seed` fills, never against a test database and never against
+production. `DISPATCH_BENCH_DATABASE_URL` is the one gate: CI leaves it unset, so CI runs no
+measurement.
+
+### The statement timings
+
+`internal/dispatch/benchtime` is the runner, and each package that owns statement texts carries
+its own `statement_timing_test.go`, all named `TestStatementTimings`: `internal/dispatch/api`,
+`internal/dispatch/refs` and `internal/dispatch/docs`.
+`Pair` takes a named pair of statement texts with their arguments, runs `EXPLAIN (ANALYZE, BUFFERS)` of each alternately on one connection, reports planning plus execution as the median of runs 2 to 12, prints both plans and fails when the after text's median is not below the before text's.
+`Report` is that same two-sided reading with no bound, for a statement whose gain is real but smaller than the run-to-run spread of the parts it shares a statement with: the gate then sits on the piece whose text differs, as a pair of its own.
+The runner records the server settings it found and the subjects it bound (the largest project, its most heavily linked issue, the most anchored document, five sessions, an embedding and three words), each read from the database at run time, so a re-seed moves them with it.
+
+```bash
+cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
+  go test -run TestStatementTimings -v -count=1 -timeout 90m \
+  ./internal/dispatch/api ./internal/dispatch/refs ./internal/dispatch/docs
+```
+
+A statement whose gain needs an index or a table a migration of this release adds has no such pair, because one schema cannot hold both sides of it.
+`Before` and `After` measure one side of such a statement alone, with its plan and no bound, each line naming the side it read: the after side on a database at this release's schema, the before side on one migrated from the release before it.
+Running this same test against each of the two databases is what puts the two sides together.
+Each test file says which statement is under which protocol and why.
+
+`TestRelatedTermsRefreshTiming`, in `internal/dispatch/api`, measures the related-terms refresh,
+which has no statement pair: it times one whole pass of the release before this one, one whole
+pass of this build with no change, and eleven rounds each preceded by a hundred item writes
+outside the timed part, and reports the median of the eleven. It writes 1,100 items to the
+database it measures and leaves them there, so run it after the statement timings.
+
+```bash
+cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
+  go test -run TestRelatedTermsRefreshTiming -v -count=1 -timeout 90m ./internal/dispatch/api
+```
+
+### The write routes
+
+`route-timings.sh` times the six write routes against one running server: the median wall time of
+50 requests to each of `POST /api/v1/issues/{key}/comments`, `.../asks`, `.../messages`,
+`.../artifacts` under a name that already exists, that same upload over a 100-660 KB document,
+and `PATCH /api/v1/issues/{key}` with a title alone. It prints one tab-separated line per route -
+the label, the route, the median in milliseconds and every reading - so a reader sees the spread.
+
+The caller gives it the base URL and the issue key, so one command measures the base server and
+the head server, and the plan's three base-and-head pairs are a loop:
+
+```bash
+for round in 1 2 3; do
+  packages/envoy/scripts/route-timings.sh --url "$BASE_URL" --issue SEED1-1 --label "base-$round" >>runs.tsv
+  packages/envoy/scripts/route-timings.sh --url "$HEAD_URL" --issue SEED1-1 --label "head-$round" >>runs.tsv
+done
+packages/envoy/scripts/route-timings.sh --summarise runs.tsv
+```
+
+`--summarise` prints each route's runs, the highest base run - what a rise is judged against,
+since a rise inside the spread of the base runs is no rise - and each head run against it.
+`DISPATCH_USER` names the caller (default `bench`), and the server must take it as a human
+identity. The script writes 50 comments, 50 asks, 50 messages, 100 document versions and 50 title
+edits for every run, which is what A9 measures: run it after the statement timings, and re-seed
+before anything reads a row count again. `--requests`, `--body-bytes`, `--artifact` and
+`--large-artifact` are the knobs; `--help` lists them.

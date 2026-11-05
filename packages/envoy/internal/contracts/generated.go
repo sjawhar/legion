@@ -1,10 +1,13 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Envelope struct {
@@ -16,6 +19,7 @@ type Envelope struct {
 	DedupeKey      string          `json:"dedupe_key"`
 	IssuedAt       int64           `json:"issued_at"`
 	ExpiresAt      *int64          `json:"expires_at,omitempty"`
+	KeptAt         *int64          `json:"kept_at,omitempty"`
 	PayloadSummary string          `json:"payload_summary"`
 	PayloadRef     string          `json:"payload_ref,omitempty"`
 	Payload        string          `json:"payload,omitempty"`
@@ -132,6 +136,9 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
 
+// GithubTopicPrefix begins every GitHub subject, before the repository's owner and name.
+const GithubTopicPrefix = "notifications.github."
+
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
 // notification stream and by every host that subscribes over core NATS. Generated from
 // DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, whose doc comment states the retry promise
@@ -206,6 +213,29 @@ const IssueTitleMax = 1000
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = 32000
 
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = 2000
+
+// DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
+// POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
+// packages/contracts so the server's 413 and the `dispatch handoff-write` command's pre-send
+// refusal cannot drift apart.
+const DispatchHandoffBodyMax = 262144
+
+// HandoffPhaseRule says the handoff-phase pattern's rule in words; every refusal of a phase that is
+// not a handoff phase gives it. Generated from HANDOFF_PHASE_RULE_WORDS in packages/contracts so
+// the server and the tool word it once.
+const HandoffPhaseRule = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement"
+
+// HandoffPhasePattern is a handoff's phase, the {phase} segment of the handoff routes, which the
+// handoffs.phase check constraint holds too. Generated from HANDOFF_PHASE_PATTERN in
+// packages/contracts, which the dispatch command checks a phase against, so the two accept the
+// same phases.
+const HandoffPhasePattern = "^[a-z][a-z0-9-]{0,31}$"
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.
@@ -218,6 +248,63 @@ const ProjectNameMax = 80
 const DocumentSchemaCloseCode = 4409
 const DocumentSchemaCloseReason = "DOC_SCHEMA"
 
+// LiveSocketMaxAgeClose is the close code Dispatch ends a live socket with once the socket reaches
+// its age, a random point in [LiveSocketMinAge, LiveSocketMaxAge), and LiveSocketMaxSubscriptions
+// the most subscriptions one live socket holds. Generated from LIVE_SOCKET_MAX_AGE_CLOSE,
+// LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS and LIVE_SOCKET_MAX_SUBSCRIPTIONS in
+// packages/contracts so the server's close and limit and the dashboard's reading of them cannot
+// drift apart.
+const LiveSocketMaxAgeClose = 4001
+const LiveSocketMinAge = 1800000 * time.Millisecond
+const LiveSocketMaxAge = 3600000 * time.Millisecond
+const LiveSocketMaxSubscriptions = 64
+
+// IdempotencyKeyHeader is the request header a write names its intent with, the same on every
+// retry of that intent, and IdempotencyReplayedHeader the response header (?1) on an answer
+// replayed from the first request under the key rather than run again. Generated from
+// IDEMPOTENCY_KEY_HEADER and IDEMPOTENCY_REPLAYED_HEADER in packages/contracts so the server, the
+// dashboard and the agents' client name them once.
+const IdempotencyKeyHeader = "Idempotency-Key"
+const IdempotencyReplayedHeader = "Idempotency-Replayed"
+
+// IdempotencyKeyMax is the longest key and IdempotencyKeyPattern a whole one. Generated from
+// IDEMPOTENCY_KEY_MAX and IDEMPOTENCY_KEY_PATTERN in packages/contracts so the server's refusal and
+// the keys every client mints cannot drift apart.
+const IdempotencyKeyMax = 128
+const IdempotencyKeyPattern = "^[A-Za-z0-9._:-]{1,128}$"
+
+// The codes of a keyed write's refusals and of a replay whose first answer was not kept: a key
+// used for another request (422), a key whose first request still runs (409), a key whose write
+// landed and whose answer was lost (409), a header that is not a key (400), and a first answer too
+// large to keep. Generated from IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_IN_FLIGHT,
+// IDEMPOTENCY_KEY_COMMITTED, IDEMPOTENCY_KEY_INVALID and IDEMPOTENCY_ANSWER_NOT_KEPT in
+// packages/contracts so the server's codes and the clients' reading of them cannot drift apart.
+const IdempotencyKeyReused = "KEY_REUSED"
+const IdempotencyKeyInFlight = "KEY_IN_FLIGHT"
+const IdempotencyKeyCommitted = "KEY_COMMITTED"
+const IdempotencyKeyInvalid = "KEY_INVALID"
+const IdempotencyAnswerNotKept = "ANSWER_NOT_KEPT"
+
+// IdempotencyKeyTTL is how long Dispatch keeps a key's answer, and IdempotencyLease how long a
+// key's first request holds it before a repeat may run it again. Generated from
+// IDEMPOTENCY_KEY_TTL_MS and IDEMPOTENCY_LEASE_MS in packages/contracts so the server's windows and
+// the clients' account of them cannot drift apart.
+const IdempotencyKeyTTL = 86400000 * time.Millisecond
+const IdempotencyLease = 60000 * time.Millisecond
+
+// DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
+// of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
+// is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
+// packages/contracts so the server's check and the page's header cannot drift apart.
+const DispatchLoginHeader = "Dispatch-Login"
+const DispatchLoginChanged = "LOGIN_CHANGED"
+
+// DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
+// names a session and a service but no person: the machine holding it has signed nobody in.
+// Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
+// every client's reading of it cannot drift apart.
+const DispatchSignInRequired = "SIGN_IN_REQUIRED"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }
@@ -226,15 +313,15 @@ func AgentSubject(session string) string {
 	return AgentTopicPrefix + session
 }
 
-// githubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
+// GithubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
 // segment: a name may hold a dot, which a NATS subject splits on. Mirrored on the TS side as
 // `githubRepositoryPrefix`.
-func githubRepositoryPrefix(owner, repo string) string {
-	return "notifications.github." + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
+func GithubRepositoryPrefix(owner, repo string) string {
+	return GithubTopicPrefix + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
 }
 
 func GithubSubject(owner string, repo string, kind string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + kind
+	return GithubRepositoryPrefix(owner, repo) + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
@@ -256,22 +343,46 @@ func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind
 }
 
+// SubjectMaxBytes is the longest subject the bus publishes on, in bytes: bus's maxSubjectBytes, the
+// NATS server's 4 KiB max control line less the rest of the longest protocol line nats.go sends.
+// The bus refuses a longer subject before sending it, since the server would close the connection
+// over it. Generated from SUBJECT_MAX_BYTES in packages/contracts.
+const SubjectMaxBytes = 4032
+
+// GithubPushSubject names a push by its ref name, one segment, sanitized. The ref is the one part of
+// a GitHub subject that GitHub bounds only as git does, which is not at all, so a subject past
+// SubjectMaxBytes keeps of the segment what fits, cut between runes, followed by ~ and the first 16
+// hex digits of the SHA-256 of the whole ref name, and is then at most SubjectMaxBytes: the bus
+// publishes it, and two refs that share the kept text still have two subjects. Git refuses ~ in a
+// ref, so a cut segment is never another ref's whole one. A consumer that needs the exact ref reads
+// the payload's ref. Mirrored on the TS side as `githubPushSubject`.
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	return githubRepositoryPrefix(owner, repo) + ".push." + refType + "." + SanitizeSubjectSegment(refName)
+	prefix := GithubRepositoryPrefix(owner, repo) + ".push." + refType + "."
+	segment := SanitizeSubjectSegment(refName)
+	if len(prefix)+len(segment) <= SubjectMaxBytes {
+		return prefix + segment
+	}
+	digest := sha256.Sum256([]byte(refName))
+	suffix := "~" + hex.EncodeToString(digest[:8])
+	keep := max(SubjectMaxBytes-len(prefix)-len(suffix), 0)
+	for keep > 0 && !utf8.RuneStart(segment[keep]) {
+		keep--
+	}
+	return prefix + segment[:keep] + suffix
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 // GithubJobSubject names a finished GitHub Actions job on the default branch, of a run with no pull
 // request, by its run. Mirrored on the TS side as `githubJobSubject`.
 func GithubJobSubject(owner, repo, runID, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
+	return GithubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."

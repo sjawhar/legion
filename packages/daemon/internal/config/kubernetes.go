@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"gopkg.in/yaml.v3"
@@ -93,6 +94,17 @@ type Kubernetes struct {
 	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
 	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
 	RepositoryCache RepositoryCacheConfig
+	// TestPostgres is `runtime.kubernetes.test_postgres`: every issue pod serves its own
+	// PostgreSQL for tests, started by the roles container's launcher and named to every role of
+	// the pod as LEGION_TEST_PG_DSN, so no agent points a test at the deployment's own databases.
+	// False when the file sets none. It needs an image carrying /usr/local/bin/legion-testpg.
+	TestPostgres bool
+	// IdleRelease is `runtime.kubernetes.idle_release`, settled: how long an issue pod with no
+	// turn in progress and no turn due is kept before the daemon releases it, and how long after
+	// a release the backstop wakes each phase worker of the pod whose phase is open. Both
+	// defaults apply when the file sets no block, so release is on for every Kubernetes
+	// deployment; `idle_minutes: 0` turns it off.
+	IdleRelease IdleReleaseConfig
 }
 
 // RepositoryCacheConfig is `runtime.kubernetes.repository_cache`: the volume each repository's
@@ -121,6 +133,38 @@ var defaultRepositoryCache = RepositoryCacheConfig{
 
 // DefaultRepositoryCache is the repository cache's settled configuration when the file sets none.
 func DefaultRepositoryCache() RepositoryCacheConfig { return defaultRepositoryCache }
+
+// IdleReleaseConfig is `runtime.kubernetes.idle_release`: the idle period an issue pod must pass
+// with no turn in progress and no turn due before the daemon saves its workspace's unpushed work,
+// suspends each live claim with the source `released` and deletes the pod, its disk and its
+// Sandbox (IdleMinutes), and how long after that release the backstop wakes each phase worker of
+// the pod whose phase is open (BackstopMinutes), standing in for a wait that raises no event of
+// its own. IdleMinutes zero turns release off, and the deployment's pods then live from an
+// issue's first role start to its close.
+type IdleReleaseConfig struct {
+	IdleMinutes     int
+	BackstopMinutes int
+}
+
+// Releases is whether the deployment releases idle pods at all: false while idle_minutes is 0.
+func (c IdleReleaseConfig) Releases() bool { return c.IdleMinutes > 0 }
+
+// Idle is the idle period as a duration, zero while release is off.
+func (c IdleReleaseConfig) Idle() time.Duration { return time.Duration(c.IdleMinutes) * time.Minute }
+
+// Backstop is the wait between a release and the backstop wake of a phase worker whose phase is
+// open.
+func (c IdleReleaseConfig) Backstop() time.Duration {
+	return time.Duration(c.BackstopMinutes) * time.Minute
+}
+
+// defaultIdleRelease is the release when the file sets none of it: a pod quiet for ten minutes is
+// released, and the backstop wakes an open phase's worker an hour after that. Every deployment on
+// a cluster that charges for a pod's requests pays for an idle pod, so the defaults are on.
+var defaultIdleRelease = IdleReleaseConfig{IdleMinutes: 10, BackstopMinutes: 60}
+
+// DefaultIdleRelease is the idle release's settled configuration when the file sets none.
+func DefaultIdleRelease() IdleReleaseConfig { return defaultIdleRelease }
 
 // PluginsConfig is `runtime.kubernetes.plugins`: the pi-legion and pi-envoy sources a
 // stale-plugin relaunch installs, each an exact semver version, an absolute tarball path, or an
@@ -277,7 +321,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	}
 	u, err := url.Parse(block.URL)
 	if err != nil || !u.IsAbs() || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user; got %q", agentSecretsKey, block.URL)
+		// Not echoed: the refused parts (a user, a password, a query, a fragment, or a value
+		// that does not parse) are where a credential would be.
+		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user (not echoed)", agentSecretsKey)
 	}
 	if err := refuseNonASCIIHost(agentSecretsKey+".url host", u.Hostname()); err != nil {
 		return nil, err
@@ -444,7 +490,8 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup")
+		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup", "test_postgres",
+		"idle_release")
 	if err != nil {
 		return nil, err
 	}
@@ -508,10 +555,31 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Setup, err = readSetup(fields["setup"]); err != nil {
 		return nil, err
 	}
+	if block.TestPostgres, err = readTestPostgres(fields["test_postgres"]); err != nil {
+		return nil, err
+	}
 	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
 		return nil, err
 	}
+	if block.IdleRelease, err = readIdleRelease(fields["idle_release"]); err != nil {
+		return nil, err
+	}
 	return block, nil
+}
+
+// readTestPostgres reads `runtime.kubernetes.test_postgres`, false when absent: whether every
+// issue pod serves its own PostgreSQL for tests. Only true or false, since the key turns one
+// thing on, and `false` reads as the default so an operator can write the key out.
+func readTestPostgres(value *yaml.Node) (bool, error) {
+	const key = kubernetesKey + ".test_postgres"
+	if value == nil {
+		return false, nil
+	}
+	var on bool
+	if value.Tag != "!!bool" || value.Decode(&on) != nil {
+		return false, fmt.Errorf("%s must be true or false", key)
+	}
+	return on, nil
 }
 
 // readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when
@@ -588,6 +656,50 @@ func readRepositoryCache(value *yaml.Node) (RepositoryCacheConfig, error) {
 	return settled, nil
 }
 
+// readIdleRelease reads `runtime.kubernetes.idle_release`, settled: each member the file sets and
+// the default (DefaultIdleRelease) for each it leaves out, so release is on wherever the file
+// says nothing. `idle_minutes: 0` is the one zero the block accepts — it turns release off, and
+// the deployment's pods then live from an issue's first role start to its close — while a
+// negative minute count, a zero backstop and a backstop below the idle period are refused naming
+// the key: a backstop shorter than the idle period would wake a pod the daemon has only just
+// released.
+func readIdleRelease(value *yaml.Node) (IdleReleaseConfig, error) {
+	const key = kubernetesKey + ".idle_release"
+	settled := defaultIdleRelease
+	if value == nil || value.Tag == "!!null" {
+		return settled, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return IdleReleaseConfig{}, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "idle_minutes", "backstop_minutes")
+	if err != nil {
+		return IdleReleaseConfig{}, err
+	}
+	idle, err := readInt(fields["idle_minutes"], key+".idle_minutes")
+	if err != nil {
+		return IdleReleaseConfig{}, err
+	}
+	if idle != nil {
+		if *idle < 0 {
+			return IdleReleaseConfig{}, fmt.Errorf("%s.idle_minutes must be a positive number of minutes, or 0 to release no pod", key)
+		}
+		settled.IdleMinutes = *idle
+	}
+	backstop, err := readPositiveInteger(fields["backstop_minutes"], key+".backstop_minutes", 0)
+	if err != nil {
+		return IdleReleaseConfig{}, err
+	}
+	if backstop != nil {
+		settled.BackstopMinutes = *backstop
+	}
+	if settled.BackstopMinutes < settled.IdleMinutes {
+		return IdleReleaseConfig{}, fmt.Errorf("%s.backstop_minutes (%d) is below %s.idle_minutes (%d): a backstop that short would wake a pod the daemon has only just released",
+			key, settled.BackstopMinutes, key, settled.IdleMinutes)
+	}
+	return settled, nil
+}
+
 // ReadPodFile reads a `runtime.kubernetes.pod` block kept in a file of its own, such as an
 // operator's own route (deploy/kubernetes/operator-route/pod.yml), with every check the
 // loader makes of the block inside a legion.yaml.
@@ -610,7 +722,9 @@ func ReadPodFile(path string) (PodConfig, error) {
 	return pod, nil
 }
 
-// readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry.
+// readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry, and a
+// ServiceAccount still holding a ${…} placeholder: nothing in Legion expands one, as the token
+// projection says, so the API server would refuse every pod for an account that does not exist.
 func readPod(value *yaml.Node) (PodConfig, error) {
 	if value == nil {
 		return PodConfig{}, nil
@@ -636,7 +750,23 @@ func readPod(value *yaml.Node) (PodConfig, error) {
 	if pod.ServiceAccount, err = optionalString(fields["service_account"], podKey+".service_account"); err != nil {
 		return PodConfig{}, err
 	}
+	if err := unfilledPlaceholder(podKey+".service_account", pod.ServiceAccount, "the ServiceAccount the pods run as"); err != nil {
+		return PodConfig{}, err
+	}
 	return pod, nil
+}
+
+// unfilledPlaceholder refuses a value still holding a `${…}` placeholder: nothing in Legion expands
+// one, so the value would be read as the placeholder's own text — a ServiceAccount no namespace
+// has, an audience no service issues a token for — and whatever uses it would refuse it far from
+// the configuration that wrote it, in a message naming neither. key is the key as the operator
+// wrote it and put what belongs in its place, so the one refusal still reads as the key's own
+// sentence. A value holding no placeholder, an unset key's "" included, is no error.
+func unfilledPlaceholder(key, value, put string) error {
+	if !strings.Contains(value, "${") {
+		return nil
+	}
+	return fmt.Errorf("%s %q is an unfilled placeholder: put %s in its place", key, value, put)
 }
 
 // readPodEnv is `pod.env`: a mapping of variable to value, refusing a variable shaped like a
@@ -726,16 +856,17 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 			return nil, fmt.Errorf("%s must set exactly one of %s", field, strings.Join(volumeSources, ", "))
 		}
 		named[volume.Name] = true
-		var name string
-		var items []corev1.KeyToPath
+		var source objectSource
 		switch {
 		case fields["secret"] != nil:
-			if name, items, err = readObjectSource(fields["secret"], field+".secret"); err == nil {
-				volume.Secret = &corev1.SecretVolumeSource{SecretName: name, Items: items}
+			if source, err = readObjectSource(fields["secret"], field+".secret", true); err == nil {
+				volume.Secret = &corev1.SecretVolumeSource{SecretName: source.name, Items: source.items, DefaultMode: source.mode}
 			}
 		case fields["config_map"] != nil:
-			if name, items, err = readObjectSource(fields["config_map"], field+".config_map"); err == nil {
-				volume.ConfigMap = &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			if source, err = readObjectSource(fields["config_map"], field+".config_map", true); err == nil {
+				volume.ConfigMap = &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: source.name}, Items: source.items, DefaultMode: source.mode,
+				}
 			}
 		case fields["projected"] != nil:
 			volume.Projected, err = readProjected(fields["projected"], field+".projected")
@@ -851,47 +982,92 @@ func setCount(fields map[string]*yaml.Node, names ...string) int {
 	return count
 }
 
-// readObjectSource is a Secret or ConfigMap source: its name, and the keys it projects, each with
-// the file it becomes; every key, each a file of its own name, when it lists none.
-func readObjectSource(value *yaml.Node, key string) (string, []corev1.KeyToPath, error) {
+// objectSource is a Secret or ConfigMap source as `pod.volumes` names it: the object, the keys it
+// projects, each with the file it becomes (every key, each a file of its own name, when it lists
+// none), and the mode of every file, nil for the API server's default (0644).
+type objectSource struct {
+	name  string
+	items []corev1.KeyToPath
+	mode  *int32
+}
+
+// readObjectSource is a Secret or ConfigMap source. A volume's own source (withMode) also takes
+// default_mode; a projected volume's source does not, since Kubernetes sets the mode of a projected
+// volume's files for the whole volume, never per source.
+func readObjectSource(value *yaml.Node, key string, withMode bool) (objectSource, error) {
 	if value.Kind != yaml.MappingNode {
-		return "", nil, fmt.Errorf("%s must be a mapping", key)
+		return objectSource{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "name", "items")
-	if err != nil {
-		return "", nil, err
+	known := []string{"name", "items"}
+	if withMode {
+		known = append(known, "default_mode")
 	}
-	name, err := requiredString(fields["name"], key+".name", "")
+	fields, err := members(value, key, known...)
 	if err != nil {
-		return "", nil, err
+		return objectSource{}, err
+	}
+	var source objectSource
+	if source.name, err = requiredString(fields["name"], key+".name", ""); err != nil {
+		return objectSource{}, err
+	}
+	if mode := fields["default_mode"]; mode != nil {
+		if source.mode, err = readFileMode(mode, key+".default_mode"); err != nil {
+			return objectSource{}, err
+		}
 	}
 	items := fields["items"]
 	if items == nil {
-		return name, nil, nil
+		return source, nil
 	}
 	if items.Kind != yaml.SequenceNode {
-		return "", nil, fmt.Errorf("%s.items must be an array", key)
+		return objectSource{}, fmt.Errorf("%s.items must be an array", key)
 	}
-	var projected []corev1.KeyToPath
 	for index, entry := range items.Content {
 		field := fmt.Sprintf("%s.items[%d]", key, index)
 		if entry.Kind != yaml.MappingNode {
-			return "", nil, fmt.Errorf("%s must be a mapping", field)
+			return objectSource{}, fmt.Errorf("%s must be a mapping", field)
 		}
 		item, err := members(entry, field, "key", "path")
 		if err != nil {
-			return "", nil, err
+			return objectSource{}, err
 		}
 		var one corev1.KeyToPath
 		if one.Key, err = requiredString(item["key"], field+".key", ""); err != nil {
-			return "", nil, err
+			return objectSource{}, err
 		}
 		if one.Path, err = requiredString(item["path"], field+".path", ""); err != nil {
-			return "", nil, err
+			return objectSource{}, err
 		}
-		projected = append(projected, one)
+		source.items = append(source.items, one)
 	}
-	return name, projected, nil
+	return source, nil
+}
+
+// readFileMode is a volume's default_mode: octal digits after YAML 1.1's leading 0 (kubectl's
+// spelling) or YAML 1.2's 0o, from 0 to 0777, the bits the API server admits, written as a YAML
+// integer or as a string ("0440", the one octal spelling a block written as JSON can carry). A
+// mode written in decimal is refused rather than read, quoted or not: `440` is 0670, which would
+// let the file's group write it.
+func readFileMode(value *yaml.Node, key string) (*int32, error) {
+	digits, octal := strings.CutPrefix(value.Value, "0o")
+	if !octal {
+		if digits, octal = strings.CutPrefix(value.Value, "0"); octal && digits == "" {
+			digits = "0"
+		}
+	}
+	mode, err := strconv.ParseUint(digits, 8, 32)
+	if value.Kind != yaml.ScalarNode || (value.Tag != "!!int" && value.Tag != "!!str") || !octal || err != nil || mode > 0o777 {
+		got := strconv.Quote(value.Value)
+		switch value.Kind {
+		case yaml.MappingNode:
+			got = "a mapping"
+		case yaml.SequenceNode:
+			got = "a sequence"
+		}
+		return nil, fmt.Errorf(`%s must be a file mode in octal digits with a leading 0 or 0o, from 0 to 0777, such as 0440 or "0440"; got %s`, key, got)
+	}
+	bits := int32(mode)
+	return &bits, nil
 }
 
 // readProjected is a projected volume: one or more sources, each exactly one of a ServiceAccount
@@ -925,18 +1101,17 @@ func readProjected(value *yaml.Node, key string) (*corev1.ProjectedVolumeSource,
 			return nil, fmt.Errorf("%s must set exactly one of service_account_token, secret, config_map", field)
 		}
 		var source corev1.VolumeProjection
-		var name string
-		var items []corev1.KeyToPath
+		var object objectSource
 		switch {
 		case kinds["service_account_token"] != nil:
 			source.ServiceAccountToken, err = readTokenProjection(kinds["service_account_token"], field+".service_account_token")
 		case kinds["secret"] != nil:
-			if name, items, err = readObjectSource(kinds["secret"], field+".secret"); err == nil {
-				source.Secret = &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			if object, err = readObjectSource(kinds["secret"], field+".secret", false); err == nil {
+				source.Secret = &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: object.name}, Items: object.items}
 			}
 		default:
-			if name, items, err = readObjectSource(kinds["config_map"], field+".config_map"); err == nil {
-				source.ConfigMap = &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			if object, err = readObjectSource(kinds["config_map"], field+".config_map", false); err == nil {
+				source.ConfigMap = &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: object.name}, Items: object.items}
 			}
 		}
 		if err != nil {
@@ -971,8 +1146,8 @@ func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTo
 	if token.Audience, err = optionalString(fields["audience"], key+".audience"); err != nil {
 		return nil, err
 	}
-	if strings.Contains(token.Audience, "${") {
-		return nil, fmt.Errorf("%s.audience %q is an unfilled placeholder: put the audience the token is for in its place", key, token.Audience)
+	if err := unfilledPlaceholder(key+".audience", token.Audience, "the audience the token is for"); err != nil {
+		return nil, err
 	}
 	expiry, err := readInt(fields["expiration_seconds"], key+".expiration_seconds")
 	switch {

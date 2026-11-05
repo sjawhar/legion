@@ -11,6 +11,7 @@ import {
   successQuoteAccentBorder,
   textPrimaryOnSuccessCallout,
 } from "../../theme/classes";
+import { blockFragment } from "../refs/block-reference";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 
 /** The document named by an ask's quote anchor, including its stable block fragment when known. */
@@ -20,9 +21,7 @@ export function AskAnchorLink({ ask }: { ask: Ask }): ReactNode {
     return null;
   }
   const fragment =
-    anchor.block_id === undefined || anchor.block_id === null
-      ? ""
-      : `#b-${encodeURIComponent(anchor.block_id)}`;
+    anchor.block_id === undefined || anchor.block_id === null ? "" : blockFragment(anchor.block_id);
   if (ask.issue_key !== null) {
     const route = artifact.primary
       ? buildIssuePath({ key: ask.issue_key, kind: "spec" })

@@ -1,5 +1,5 @@
 ---
-title: "A port held in an issue pod is a sibling role's harness: move your run with the five port variables and your own database, and never stop the holder"
+title: "A port held in an issue pod is a sibling role's harness: move your run with every harness port variable and your own database, and never stop the holder"
 category: legion
 tags:
   - legion-worker
@@ -16,7 +16,16 @@ related_issues:
   - "sjawhar/legion#1928"
 ---
 
-# A port held in an issue pod is a sibling role's harness: move your run with the five port variables and your own database, and never stop the holder
+# A port held in an issue pod is a sibling role's harness: move your run with every harness port variable and your own database, and never stop the holder
+
+**Update (2026-10-26, INFRA-253): the harness has no fixed ports any more.** `bun run e2e`, CI's
+browser step, `bun run dispatch:local` and the docs media harness start every harness server
+through `packages/dispatch/e2e/harness-start.ts` on a port the OS chooses and holds until the
+server serves, and Playwright runs through `e2e/run.ts`, which exports those ports; the config's
+port probe and the defaults 8777 and 9021-9024 are gone. Two roles' harnesses in one pod no
+longer meet on a port, so the port moves below are unneeded. A port variable set by hand is
+still used as given and fails with `address already in use` when taken; the rule never to stop or
+reuse a sibling's server stands. What follows is the record as it was written.
 
 Extends `packages/dispatch/AGENTS.md` ("`e2e/harness-ports.ts` resolves …", the port-probe
 paragraphs), whose remedy for a taken harness port is "stop whatever listens there, or move a
@@ -25,12 +34,13 @@ applies:
 
 - Every role of an issue (planner, implementer, tester, reviewer, merger, architect) runs in its
   own container of one pod, and the containers share one network namespace. A `bun run
-  dispatch:local` or a Playwright run the tester left listening on `8777` and `9021-9024` is
+  dispatch:local` or a Playwright run the tester left listening on `8777` and `9021-9026` is
   invisible to your `ps` and is not yours to stop: it is that role's proof surface, possibly
   mid-run.
 - Read the Playwright config's port refusal, or `local-instance.ts`'s `already in use`, as that
   sibling, and run yours with `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
-  `PLAIN_HTTP_PORT` and `FAKE_BROKER_PORT` on free ports **and** a `DATABASE_URL` of your own
+  `PLAIN_HTTP_PORT`, `FAKE_BROKER_PORT`, `DEV_OIDC_ISSUER_PORT` and `REAL_BROKER_PORT` (the last
+  two since INFRA-314) on free ports **and** a `DATABASE_URL` of your own
   (`DISPATCH_E2E_REUSE_SERVERS=1` against the sibling's server truncates your database under a
   server that holds another and fails every row with `409 PROJECT_EXISTS`). Name the ports and
   the database in your proof so the next role can tell the two instances apart.

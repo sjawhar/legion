@@ -87,6 +87,16 @@ class FakeDispatch {
   messages: { message: Record<string, unknown>; replies: Record<string, unknown>[] }[] = [];
   comments: Record<string, unknown>[] = [];
   artifacts: FakeArtifact[] = [];
+  handoffs: {
+    id: string;
+    issue_key: string;
+    phase: string;
+    version: number;
+    author: Actor;
+    created_at: string;
+    body: string;
+  }[] = [];
+  results: Record<string, unknown>[] = [];
   /** A seeded spec's ask blocks no settlement has indexed yet, by issue. Dispatch settles a
    * seeded document a moment after the issue is created; here the issue's second read of its asks
    * is the first to find them. */
@@ -278,6 +288,79 @@ class FakeDispatch {
         (id) => {
           const artifact = this.artifacts.find((a) => a.id === id);
           return json({ ...artifact, versions: artifact?.versions.map(strip) });
+        },
+      ],
+      [
+        /^POST \/api\/v1\/issues\/([^/]+)\/handoffs\/([^/]+)$/,
+        (issue, phase) => {
+          const record = {
+            id: this.id("handoff"),
+            issue_key: issue,
+            phase,
+            version:
+              this.handoffs.filter((h) => h.issue_key === issue && h.phase === phase).length + 1,
+            author: actor(),
+            created_at: new Date().toISOString(),
+            body: body?.body,
+          };
+          this.handoffs.push(record);
+          const { body: _body, ...summary } = record;
+          return json(summary, 201);
+        },
+      ],
+      [
+        /^GET \/api\/v1\/issues\/([^/]+)\/handoffs$/,
+        (issue) =>
+          json(
+            this.handoffs
+              .filter((h) => h.issue_key === issue)
+              .reverse()
+              .map(({ body: _body, ...summary }) => summary)
+          ),
+      ],
+      [
+        /^GET \/api\/v1\/handoffs\/([^/]+)$/,
+        (id) => {
+          const record = this.handoffs.find((h) => h.id === id);
+          return record === undefined ? json({ code: "HANDOFF_NOT_FOUND" }, 404) : json(record);
+        },
+      ],
+      [
+        /^POST \/api\/v1\/issues\/([^/]+)\/artifacts$/,
+        (issue) => {
+          const name = String(body?.name ?? "");
+          const artifact: FakeArtifact = {
+            id: this.id("art"),
+            issue_key: issue,
+            name,
+            slug: name.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-"),
+            kind: "doc",
+            primary: false,
+            markdown: String(body?.content ?? ""),
+            versions: [],
+          };
+          this.artifacts.push(artifact);
+          return json(strip(artifact), 201);
+        },
+      ],
+      [
+        /^POST \/api\/v1\/issues\/([^/]+)\/results$/,
+        (issue) => {
+          const result = {
+            id: this.id("result"),
+            issue_key: issue,
+            check: body?.check,
+            role: body?.role,
+            verdict: body?.verdict,
+            commit_sha: body?.commit,
+            actor: actor(),
+            created_at: new Date().toISOString(),
+          };
+          this.results.push(result);
+          return json(
+            { result, line: `- Check ${body?.check} (before_merge): ${body?.verdict}` },
+            201
+          );
         },
       ],
     ];
@@ -480,7 +563,7 @@ describe("spec-writing", () => {
   test("cuts a source question over Dispatch's ask cap at a word, and posts the rest unchanged", async () => {
     const src = source();
     const asks = JSON.parse(readFileSync(path.join(src, "asks.json"), "utf8"));
-    const long = `${"Which way? ".repeat(70)}Recommendation: the second way, since it costs less.`;
+    const long = `${"Which way? ".repeat(Math.ceil(ASK_QUESTION_MAX / 11))}Recommendation: the second way, since it costs less.`;
     expect(long.length).toBeGreaterThan(ASK_QUESTION_MAX);
     asks[0].question = long;
     writeFileSync(path.join(src, "asks.json"), JSON.stringify(asks));
@@ -944,5 +1027,99 @@ describe("capture-spec", () => {
     await seed.captureSpec(fixture(dir, spec), dir);
     expect(existsSync(path.join(dir, "plan.md"))).toBe(false);
     expect(JSON.parse(readFileSync(path.join(dir, "agent-texts.json"), "utf8"))).toEqual([]);
+  });
+});
+
+describe("tester-proof", () => {
+  // Catches: a seeding that shares one issue between a batch's runs, or that the duplicate check
+  // refuses on the second run.
+  test("files the run's own greet() issue, forced past the duplicate check", async () => {
+    const file = path.join(freshDir("seed"), "fixture.json");
+    await seed.testerProofIssue(file);
+    const posts = dispatch.calls.filter((call) => call.method === "POST");
+    expect(`${posts[0]?.who} ${posts[0]?.path}`).toBe("agent /api/v1/issues");
+    expect(posts[0]?.body).toMatchObject({ project: "LWEVAL", force: true });
+    expect(String(posts[0]?.body?.spec)).toContain(":::requirement{#r1}");
+    expect(String(posts[0]?.body?.spec)).not.toContain("## Acceptance");
+    expect(`${posts[1]?.who} ${posts[1]?.path}`).toBe("agent /api/v1/issues/LWEVAL-2/artifacts");
+    expect(String(posts[1]?.body?.content)).toContain(':::check{#k1 surface="cli"');
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ issue: "LWEVAL-2" });
+  });
+
+  // Catches: an implement record under the run's session (which the daemon would take as the
+  // tester's own), a body re-encoded on the way, a fixture that forgets the record's version, or a
+  // seed that leaves the tester no implementer result to judge.
+  test("records the implement handoff and the implementer's result, under its own session", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    const body = { schemaVersion: 1, phase: "implement", issue: "LWEVAL-2" };
+    writeFileSync(path.join(dir, "implement.json"), JSON.stringify(body));
+    const commit = "1111111111111111111111111111111111111111";
+    await seed.implementHandoff(file, path.join(dir, "implement.json"), commit);
+    expect(dispatch.handoffs).toEqual([
+      expect.objectContaining({
+        issue_key: "LWEVAL-2",
+        phase: "implement",
+        version: 1,
+        author: seed.IMPLEMENTER,
+        body: JSON.stringify(body),
+      }),
+    ]);
+    expect(dispatch.results).toEqual([
+      expect.objectContaining({
+        issue_key: "LWEVAL-2",
+        check: "k1",
+        role: "implementer",
+        verdict: "pass",
+        commit_sha: commit,
+        actor: seed.IMPLEMENTER,
+      }),
+    ]);
+    expect(seed.IMPLEMENTER.id).not.toBe(runSession.id);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      issue: "LWEVAL-2",
+      implement: { id: dispatch.handoffs[0]?.id, version: 1 },
+    });
+  });
+
+  // Catches: a fixture whose body is no JSON object reaching Dispatch.
+  test("refuses a body that is no JSON object, and writes nothing", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    writeFileSync(path.join(dir, "implement.json"), "[1]");
+    await expect(
+      seed.implementHandoff(file, path.join(dir, "implement.json"), "1".repeat(40))
+    ).rejects.toThrow("holds no JSON object");
+    expect(dispatch.handoffs).toEqual([]);
+    expect(dispatch.results).toEqual([]);
+  });
+
+  // Catches: a capture that keeps only the metadata Dispatch lists, or loses the newest-first order
+  // the score reads the run's own newest test record by.
+  test("captures every record of the issue, newest first, each with its body", async () => {
+    const dir = runDir();
+    const file = path.join(dir, "fixture.json");
+    await seed.testerProofIssue(file);
+    writeFileSync(path.join(dir, "implement.json"), JSON.stringify({ phase: "implement" }));
+    await seed.implementHandoff(file, path.join(dir, "implement.json"), "2".repeat(40));
+    dispatch.handoffs.push({
+      id: "h-test",
+      issue_key: "LWEVAL-2",
+      phase: "test",
+      version: 1,
+      author: runSession,
+      created_at: "2026-10-24T10:50:00.000001Z",
+      body: '{"phase":"test"}',
+    });
+    await seed.captureHandoffs(file, dir);
+    const captured = JSON.parse(readFileSync(path.join(dir, "handoffs.json"), "utf8"));
+    expect(
+      captured.map((record: { id: string; body: string }) => [record.id, record.body])
+    ).toEqual([
+      ["h-test", '{"phase":"test"}'],
+      [dispatch.handoffs[0]?.id, '{"phase":"implement"}'],
+    ]);
   });
 });

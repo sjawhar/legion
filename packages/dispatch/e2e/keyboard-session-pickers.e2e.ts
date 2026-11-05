@@ -88,6 +88,10 @@ function freshReplay(sessionID: string): object {
   };
 }
 
+/** Every fact this file polls for lands in milliseconds: Playwright's default 100/250/500/1000
+ *  ladder would first see it a quarter-second late. */
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
+
 /** A browser context signed in as `login`, and a page at the row's width: a 390 px phone, or a
  *  1280 × 800 desktop. */
 async function viewer(
@@ -132,7 +136,9 @@ async function expectPicked(page: Page, model: string, level: string): Promise<v
   await expect(shownThinking).toHaveText(level);
 }
 
-/** The stored id of the switch whose body is `body`, once Dispatch has stored it, with its author. */
+/** The stored id of the switch whose body is `body`, once Dispatch has stored it and opened its
+ *  first delivery, with its author. A session only ever answers a delivery it received, and
+ *  Dispatch opens the delivery after the message commits, so a listed message can have none yet. */
 async function storedSwitch(
   sessionID: string,
   body: string
@@ -141,9 +147,9 @@ async function storedSwitch(
   await expect
     .poll(async () => {
       const read = (await listAgentMessages(sessionID)).find((row) => row.message.body === body);
-      found = read === undefined ? undefined : read.message;
+      found = read === undefined || read.message.deliveries.length === 0 ? undefined : read.message;
       return found !== undefined;
-    })
+    }, PROBE)
     .toBe(true);
   if (found === undefined) throw new Error(`no stored ${body}`);
   return { author: found.author, id: found.id };
@@ -190,7 +196,9 @@ test.beforeEach(async () => {
 // choose and Enter commits, so a keyboard reader can pass the next model to reach the one after
 // it. An engine that commits a closed select's arrow step would switch the session to every model
 // it passes on the way.
-test("the arrows move a header picker's choice without switching the session, and Enter switches it once", async ({
+// SLOW(>=2s): two switches through the fake Envoy and back, each read from the server, in every
+// engine the rule has to hold in.
+test("the arrows move a header picker's choice without switching the session, and Enter switches it once @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(11);
@@ -213,8 +221,9 @@ test("the arrows move a header picker's choice without switching the session, an
     expect(await sentSwitches()).toEqual([]);
     await page.keyboard.press("Enter");
     await expect(status).toHaveText("Switching model to openai/model-c…");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(1);
-    expect((await sentSwitches()).map((sent) => sent.message)).toEqual(["/model openai/model-c"]);
+    await expect
+      .poll(async () => (await sentSwitches()).map((sent) => sent.message), PROBE)
+      .toEqual(["/model openai/model-c"]);
 
     const stored = await storedSwitch(id, "/model openai/model-c");
     await answer(id, stored.id, "Model set to openai/model-c.");
@@ -228,11 +237,9 @@ test("the arrows move a header picker's choice without switching the session, an
     expect((await sentSwitches()).map((sent) => sent.message)).toEqual(["/model openai/model-c"]);
     await page.keyboard.press("Enter");
     await expect(status).toHaveText("Switching thinking level to medium…");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(2);
-    expect((await sentSwitches()).map((sent) => sent.message)).toEqual([
-      "/model openai/model-c",
-      "/effort medium",
-    ]);
+    await expect
+      .poll(async () => (await sentSwitches()).map((sent) => sent.message), PROBE)
+      .toEqual(["/model openai/model-c", "/effort medium"]);
   } finally {
     await context.close();
   }
@@ -249,7 +256,7 @@ for (const [row, way, leave] of [
     (page: Page) => page.getByTestId("agent-thread-empty").click(),
   ],
 ] as const) {
-  test(`a header picker's step left by ${way} sends nothing and puts the picker back on the reported model`, async ({
+  test(`a header picker's step left by ${way} sends nothing and puts the picker back on the reported model @phone`, async ({
     browser,
   }, testInfo) => {
     const session = liveSession(row);
@@ -278,8 +285,7 @@ for (const [row, way, leave] of [
       await page.keyboard.press("ArrowDown");
       await page.keyboard.press("Enter");
       await expect(status).toHaveText("Switching model to openai/model-c…");
-      await expect.poll(async () => (await sentSwitches()).length).toBe(1);
-      expect(await sentSwitches()).toEqual([
+      await expect.poll(sentSwitches, PROBE).toEqual([
         {
           actor: { id: "alice", kind: "user" },
           message: "/model openai/model-c",
@@ -296,7 +302,7 @@ for (const [row, way, leave] of [
 // Decision 6a: type-ahead is a step as the arrows are. A letter moves the choice to the next
 // option it starts, here `o` to openai/model-c past both anthropic models, and sends nothing;
 // Enter switches to it.
-test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once", async ({
+test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(14);
@@ -318,8 +324,7 @@ test("type-ahead on a header picker moves its choice without switching the sessi
 
     await page.keyboard.press("Enter");
     await expect(status).toHaveText("Switching model to openai/model-c…");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(1);
-    expect(await sentSwitches()).toEqual([
+    await expect.poll(sentSwitches, PROBE).toEqual([
       {
         actor: { id: "alice", kind: "user" },
         message: "/model openai/model-c",
@@ -336,7 +341,9 @@ test("type-ahead on a header picker moves its choice without switching the sessi
 // so a held picker keeps focus and its keys still step its choice, but Enter sends nothing. The
 // step survives the switch's end, since the session reported no new thinking level meanwhile, so
 // Enter afterwards switches to it.
-test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step", async ({
+// SLOW(>=2s): a replay seed and two switch round trips through the fake listener, in Firefox and
+// WebKit, each of which lays out the live view's header afresh.
+test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(15);
@@ -351,7 +358,7 @@ test("a held header picker keeps focus and steps its choice but Enter sends noth
 
     await model.selectOption("anthropic/model-b");
     await expect(status).toHaveText("Switching model to anthropic/model-b…");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(1);
+    await expect.poll(async () => (await sentSwitches()).length, PROBE).toBe(1);
     const stored = await storedSwitch(id, "/model anthropic/model-b");
 
     await thinking.focus();
@@ -378,8 +385,7 @@ test("a held header picker keeps focus and steps its choice but Enter sends noth
 
     await page.keyboard.press("Enter");
     await expect(status).toHaveText("Switching thinking level to low…");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(2);
-    expect(await sentSwitches()).toEqual([
+    await expect.poll(sentSwitches, PROBE).toEqual([
       {
         actor: { id: "alice", kind: "user" },
         message: "/model anthropic/model-b",

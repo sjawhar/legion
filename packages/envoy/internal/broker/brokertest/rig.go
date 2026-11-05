@@ -59,6 +59,15 @@ const APIAccount = "system:serviceaccount:example-ns:example-dispatch"
 // APICaller is the name that account calls as, the one the broker logs when it acts.
 const APICaller = "dispatch"
 
+// ListenerAccount is the second ServiceAccount every Rig's BROKER_API_ACCOUNTS names, as the
+// caller "listener": the Envoy listener, which reads one of the broker's access tokens back
+// through introspection and relays no person's decision. A Rig lists it so a test can drive a
+// listed caller reaching past its own routes, which is 403 ACCOUNT_LACKS_POWER.
+const ListenerAccount = "system:serviceaccount:example-ns:example-listener"
+
+// ListenerCaller is the name that second account calls as.
+const ListenerCaller = "listener"
+
 // The one account every Rig's BROKER_EXCHANGE_ACCOUNTS lists and what a pod running as it may
 // write: ExchangeSession is the session name the entry fixes, so a token minted for that pod
 // carries it and a request naming any other is refused.
@@ -80,9 +89,10 @@ const (
 // Rig is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to its
 // store — enough to drive a machine login, a session enrollment, and an agent-secret request
 // end to end over genuine HTTP, and to reach into the store directly for what the API itself has
-// no route to do (e.g. forcing a launcher credential's expiry). A human decision is a call to one
+// no route to do (e.g. forcing a launcher credential's expiry). A machine login is decided on one
 // of the routes Dispatch's server calls, with UIToken as the caller's credential and Operator
-// named in the body as the approver.
+// named in the body as the approver; a secret request on the broker's own approval page, by
+// Operator signed in at the Rig's provider (Decide).
 type Rig struct {
 	// URL is the broker's own httptest.Server base URL: every proof's htu and every request
 	// object's aud must check against this one value.
@@ -97,7 +107,10 @@ type Rig struct {
 	// server calls (UI). It is minted once, for an hour, so a test may send it from a goroutine
 	// of its own where failing t is not allowed.
 	UIToken string
-	Store   *store.Store
+	// ListenerToken is ListenerAccount's own token, minted the same way: a listed caller that may
+	// introspect and nothing else, for a test driving what a caller's powers refuse.
+	ListenerToken string
+	Store         *store.Store
 	// Secrets is the secrets.Local standing in for Secrets Manager, which a test writes to as a
 	// person would, before asking the broker to reread a secret.
 	Secrets *secrets.Local
@@ -158,10 +171,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 	st := storetest.Open(t, params...)
 	operator := "ada@example.com"
-	local := secrets.NewLocal(
+	fixtures := []secrets.LocalSecret{
 		policytest.Secret("TEST_SECRET", operator, policy.TierHuman, "test-secret-v1"),
 		policytest.Secret("TEST_AUTO_SECRET", operator, policy.TierAgent, "test-auto-secret-v1"),
-	)
+	}
+	local := secrets.NewLocal(fixtures...)
 	cur := policytest.Current(t, local)
 
 	mux := http.NewServeMux()
@@ -192,8 +206,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	api.Register(mux, api.Deps{
-		PublicURL:   srv.URL,
-		APIAccounts: map[string]string{APIAccount: APICaller},
+		PublicURL: srv.URL,
+		APIAccounts: map[string]api.Account{
+			APIAccount:      Caller(t, APICaller),
+			ListenerAccount: Caller(t, ListenerCaller),
+		},
 		// The one verifier serves both, as the broker's own wiring does: a pod enrolling and a
 		// listed caller present tokens of the same issuer for the same audience.
 		AccountTokens: enroll.K8sPodVerifier{Verifier: podVerifier},
@@ -201,6 +218,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		Approval: NewApprovalPage(t, SignIn(issuer, podKey), srv.URL, st, reqMachine),
 	})
 
 	operatorFile := filepath.Join(t.TempDir(), "operator")
@@ -216,7 +234,20 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		serviceLogins: serviceLogins,
 	}
 	rig.UIToken = rig.MintAccountToken(t, APIAccount, time.Hour)
+	rig.ListenerToken = rig.MintAccountToken(t, ListenerAccount, time.Hour)
 	return rig
+}
+
+// Caller is the account a caller name carries, for an api.Deps a test wires itself as well as for
+// the Rig's own: the broker's boot reads BROKER_API_ACCOUNTS this way, and a name its table does
+// not know fails t here exactly as it would refuse that boot.
+func Caller(t *testing.T, name string) api.Account {
+	t.Helper()
+	account, known := api.AccountFor(name)
+	if !known {
+		t.Fatalf("api.AccountFor(%q): the broker knows no caller of that name", name)
+	}
+	return account
 }
 
 // MachineLoginURL is the rig broker's machine-login page, the device grant's verification_uri.
@@ -240,6 +271,10 @@ func NewOAuthProvider(t *testing.T, st *store.Store, issuer *oidctest.Issuer) *o
 	policy, err := exchange.NewSet(
 		[]exchange.AccountEntry{{Account: ExchangeAccount, Project: ExchangeProject, Person: ExchangePerson, Session: ExchangeSession}},
 		[]exchange.WorkflowEntry{{Repository: ExchangeRepository, Workflow: ExchangeWorkflow, Ref: ExchangeRef, Project: ExchangeProject, Person: ExchangePerson}},
+		nil,
+		// The rig lists no machine, so there is no box a person could have signed in on and no
+		// domain to hold one to.
+		"",
 	)
 	if err != nil {
 		t.Fatalf("exchange.NewSet: %v", err)
@@ -370,6 +405,14 @@ func decideMachineLogin(t *testing.T, ui uiCall, approver, code string, approve 
 		return ""
 	}
 	return *decided.CredentialID
+}
+
+// Decide decides the pending secret request recordID as Operator on the broker's own approval
+// page, as the operator does: signed in at the Rig's provider, from the record's page
+// (brokertest.Decide).
+func (r *Rig) Decide(t *testing.T, recordID string, approve bool) {
+	t.Helper()
+	Decide(t, r.URL, r.podIssuer, r.Operator, recordID, approve)
 }
 
 // DecideMachineLogin decides the pending machine login whose confirmation code is code, naming

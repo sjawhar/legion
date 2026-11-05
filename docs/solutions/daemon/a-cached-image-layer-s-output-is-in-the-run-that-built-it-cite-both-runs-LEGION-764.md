@@ -17,10 +17,21 @@ related_issues:
 
 # A cached image layer's output is in the run that built it: cite both runs
 
-Extends docs/solutions/daemon/omp-pin-bump-behavioral-proof.md (3c: a handoff-only commit re-runs the
-`Worker Image` workflow fully `CACHED`, so the first run is the evidence). The cache is per layer, not per run:
+Extends docs/solutions/daemon/omp-pin-bump-behavioral-proof.md (3c: a commit that touches nothing the image needs
+re-runs the `Worker Image` workflow fully `CACHED`, so the first run is the evidence; the handoff-only commit it
+was written about went with the handoff commit in sjawhar/legion#2354). The cache is per layer, not per run:
 a second code push that changes a later layer rebuilds from that layer down and prints `#<n> CACHED` for every
 step above it, so the proof of one step and the proof of another can live in two runs at two heads.
+
+**Changed 2026-10-27 (INFRA-520, the CI router):** a pull request's image build no longer writes
+the layer cache. Only builds on main write it, in the GitHub Actions cache under the scope
+`worker-image` (`worker-image.yaml`, `cache-to` only on `refs/heads/main`), because a newer head can
+now cancel a pull request's build in the middle of an export. A `CACHED` step in a pull request's
+run comes from a layer main's
+builds cached, never from an earlier head of the same pull request. So a later head rebuilds the
+earlier head's layers and prints their output again, and the reuse in the evidence below, where a
+second head reused the first head's layer, no longer happens inside one pull request. The rest of
+this note, how to find a step's output when it is `CACHED`, still holds.
 
 - Before quoting a `RUN` step's output from a `Worker Image` log, find its step line (`#<n> [stage-5 2/22] RUN
   apt-get …`) and check whether the next line is `#<n> CACHED`. If it is, the output is in the newest run where

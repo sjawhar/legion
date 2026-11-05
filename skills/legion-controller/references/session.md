@@ -83,8 +83,8 @@ environment, then run:
 It checks `LEGION_PROJECT` against the daemon, registers the session, claims the Envoy role, and
 moves the daemon's recorded controller session id to this session; the `legion` tool's controller
 operations then work there. Never pass the secret as a command argument or copy it into a
-transcript, because others read transcripts. Do not set `LEGION_CONTROLLER=1`, because a session
-carrying that marker claims at startup as the launched controller. Run `/legion-claim-controller`
+transcript, because others read transcripts. Do not set `LEGION_CONTROLLER=1`: that marker makes
+the session the launched controller, which needs a start message. Run `/legion-claim-controller`
 once per session; do not run it again after an Envoy listener restart, because the heartbeat
 re-claims the role.
 

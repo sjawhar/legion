@@ -1,0 +1,170 @@
+# dispatch.yaml: the copy's Dispatch, production's pod
+# (packages/envoy/infra/gcp/dispatch_kube.go) at production's size, with an environment written
+# from scratch: no production credential, address or setting. cluster.sh fills every
+# placeholder from validated values.
+#
+# The Deployment starts at 0 replicas: cluster.sh scales the listener up first and Dispatch after
+# it, so the listener creates ENVOY_NOTIFICATIONS with ENVOY_NATS_REPLICAS=3.
+#
+# No cloud-sql-proxy sidecar (Postgres is a pod of the copy), no tailnet front door and no NATS
+# nkey or SOCKS5 proxy (NATS is the copy's own, without auth), header identity instead of cookies,
+# and no GitHub App, secrets broker or embedder. No GOMAXPROCS, GOGC or GOMEMLIMIT, as in
+# production. DISPATCH_SIGNING_KEY comes from the run's Secret, as production's comes from its
+# own: the key is the same in every pod of the run, so HOME keeps nothing a pod recreated between
+# steps needs, and HOME is an emptyDir. The profiler binds 127.0.0.1:6060 inside the pod; the
+# pprof sidecar forwards :6061 to it for loadgen's -pprof.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dispatch
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+spec:
+  type: ClusterIP
+  selector:
+    dispatch-loadtest/run: __RUN_ID__
+    dispatch-loadtest/role: dispatch
+  ports:
+    - name: http
+      port: 8766
+      targetPort: 8766
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dispatch-pprof
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+spec:
+  type: ClusterIP
+  selector:
+    dispatch-loadtest/run: __RUN_ID__
+    dispatch-loadtest/role: dispatch
+  ports:
+    - name: pprof
+      port: 6061
+      targetPort: 6061
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatch
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      dispatch-loadtest/run: __RUN_ID__
+      dispatch-loadtest/role: dispatch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: dispatch-loadtest
+        dispatch-loadtest/run: __RUN_ID__
+        dispatch-loadtest/role: dispatch
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # Production's: the 5 s preStop wait plus the 30 s Dispatch builds its shutdown for.
+      terminationGracePeriodSeconds: 35
+      containers:
+        - name: envoy-dispatch
+          image: __ENVOY_IMAGE__
+          command: [/usr/local/bin/envoy-dispatch]
+          env:
+            - name: HOME
+              value: /home/envoy
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dispatch-credentials
+                  key: DATABASE_URL
+            - name: DISPATCH_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dispatch-credentials
+                  key: DISPATCH_AGENT_TOKEN
+            - name: DISPATCH_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dispatch-credentials
+                  key: DISPATCH_SIGNING_KEY
+            - name: DISPATCH_IDENTITY
+              value: header:X-Dispatch-User
+            - name: DISPATCH_IDENTITY_HEADER_TRUSTED
+              value: "1"
+            - name: DISPATCH_LISTEN_HOST
+              value: 0.0.0.0
+            - name: DISPATCH_SERVER_URL
+              value: http://dispatch.__NAMESPACE__.svc:8766
+            - name: DISPATCH_PPROF_PORT
+              value: "6060"
+            - name: NATS_URLS
+              value: nats://nats.__NAMESPACE__.svc:4222
+            - name: ENVOY_ALLOW_REMOTE_NATS
+              value: "1"
+            - name: ENVOY_NATS_REPLICAS
+              value: "3"
+            - name: ENVOY_URL
+              value: http://listener.__NAMESPACE__.svc:9020
+            - name: ENVOY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: listener-credentials
+                  key: ENVOY_API_TOKEN
+          ports:
+            - name: http
+              containerPort: 8766
+          readinessProbe:
+            exec:
+              command: [curl, -fsS, http://127.0.0.1:8766/healthz]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: [sleep, "5"]
+          resources:
+            requests:
+              cpu: "16"
+              memory: 32Gi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: "16"
+              memory: 32Gi
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: home
+              mountPath: /home/envoy
+        - name: pprof
+          image: __SOCAT_IMAGE__
+          args: ["TCP-LISTEN:6061,fork,reuseaddr", "TCP:127.0.0.1:6060"]
+          ports:
+            - name: pprof
+              containerPort: 6061
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 256Mi
+      volumes:
+        - name: home
+          emptyDir:
+            sizeLimit: 1Gi

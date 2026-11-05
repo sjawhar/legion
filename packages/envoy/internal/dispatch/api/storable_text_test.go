@@ -4,23 +4,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	gws "github.com/gorilla/websocket"
-
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // nulText is caller text with U+0000 as its second character, which PostgreSQL's text and jsonb
@@ -143,8 +136,9 @@ func nulListener(t *testing.T) *httptest.Server {
 // member name, a multipart upload's every field and its markdown file, and every path and query
 // parameter, so each row below is a route and one of its text fields.
 func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: nulListener(t).URL, settle: time.Hour})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: nulListener(t).URL, settle: time.Hour})
 	f := newNulFixture(t, handler)
+	awaitBackgroundWrites(t, served)
 	session := func(id string) map[string]any { return map[string]any{"kind": "session", "id": id} }
 	issue := "/api/v1/issues/" + f.issue
 	spec := "/api/v1/artifacts/" + f.spec
@@ -185,7 +179,7 @@ func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 		{"reply to message: error", nulRequest{method: http.MethodPost, target: "/api/v1/messages/" + f.direct + "/reply", bearer: true, body: map[string]any{"actor": session("s1"), "attempt": 1, "error": nulText}}, "error"},
 		{"message a session: body", nulRequest{method: http.MethodPost, target: "/api/v1/agents/s1/messages", body: map[string]any{"body": nulText, "delivery": "btw"}}, "body"},
 		{"message a session: session id", nulRequest{method: http.MethodPost, target: "/api/v1/agents/" + nulPath + "/messages", body: map[string]any{"body": "hi", "delivery": "btw"}}, "path parameter session_id"},
-		{"broadcast: body", nulRequest{method: http.MethodPost, target: "/api/v1/broadcasts", body: map[string]any{"body": nulText, "delivery": "btw", "session_ids": []string{"s1"}, "idempotency_key": uuid.NewString()}}, "body"},
+		{"broadcast: body", nulRequest{method: http.MethodPost, target: "/api/v1/broadcasts", body: map[string]any{"body": nulText, "delivery": "btw", "session_ids": []string{"s1"}}}, "body"},
 		{"agent state: session id", nulRequest{method: http.MethodPut, target: "/api/v1/me/agents/" + nulPath + "/state", body: map[string]any{"cleared_before": cutoff}}, "path parameter session_id"},
 
 		{"open ask: question", nulRequest{method: http.MethodPost, target: issue + "/asks", body: map[string]any{"question": nulText}}, "question"},
@@ -271,8 +265,9 @@ func TestAReadRefusesANulInItsParameters(t *testing.T) {
 // type. Each failed with a 500 or, for the markdown file, panicked the document writer and dropped
 // the connection. A markdown file stores no part header, so its Content-Type is not checked.
 func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Not UTF-8", "before\n")
+	awaitBackgroundWrites(t, served)
 	artifacts := "/api/v1/issues/" + issue.Key + "/artifacts"
 	for _, row := range []struct {
 		name    string
@@ -687,44 +682,4 @@ func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
 			t.Errorf("%s at %v: status=%d body=%s", op["op"], op, edit.Code, edit.Body.String())
 		}
 	}
-}
-
-// A document websocket's bearer names its session in the X-Dispatch-Actor header, JSON whose
-// escapes can spell U+0000, which the author a version records cannot store. The connection is
-// refused before it is upgraded, naming where the character stands, as a body holding one is; the
-// same session without it connects.
-func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, AgentTokens: sharedAgentTokens(t, "agent-token")})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Websocket actor", "before\n")
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	room := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	dial := func(actor string) (*gws.Conn, *http.Response, error) {
-		return gws.DefaultDialer.Dial(room, http.Header{"Authorization": {"Bearer agent-token"}, "X-Dispatch-Actor": {actor}})
-	}
-	for _, row := range []struct{ actor, field string }{
-		{`{"kind":"session","id":"a\u0000b"}`, "X-Dispatch-Actor.id"},
-		{`{"kind":"session","id":"s1","origin":{"cwd":"a\u0000b"}}`, "X-Dispatch-Actor.origin.cwd"},
-	} {
-		connection, response, err := dial(row.actor)
-		if err == nil {
-			_ = connection.Close()
-			t.Fatalf("a bearer whose actor holds a NUL at %s connected to the document", row.field)
-		}
-		if response == nil {
-			t.Fatalf("dial with a NUL at %s: %v, want a refused handshake", row.field, err)
-		}
-		refused, _ := io.ReadAll(response.Body)
-		assertRefusal(t, "dial with a NUL at "+row.field, response.StatusCode, refused, "NUL_CHARACTER", row.field)
-	}
-	connection, response, err := dial(`{"kind":"session","id":"s1"}`)
-	if err != nil {
-		t.Fatalf("dial with a clean actor: response=%v err=%v", response, err)
-	}
-	_ = connection.Close()
 }

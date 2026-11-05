@@ -22,25 +22,40 @@ import (
 // own text. Without the bound, thirty-two 900 KB inserts of prose grew one document to 29.5 MB, and
 // four to six `)_` inserts or eighteen of headings left one the server could no longer load: the
 // next insert answered 500, and its reads 503.
+//
+// Each document is created holding all but the last two of the inserts that reach the bound, so the
+// test makes only the two that show writes adding up: the first still fits beside the text before
+// it, and the second, no bigger, passes the bound only with the first. Each insert costs time in the
+// size of the whole document, and making the earlier ones one at a time took most of a minute.
 func TestRepeatedInsertsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	tableSpec := "| a | b |\n| - | - |\n| A10 | b |\n"
+	// before is the spec "Before.\n" followed by inserts copies of chunk, each its own block as an
+	// insert after the end writes it.
+	before := func(chunk string, inserts int) string {
+		return "Before.\n" + strings.Repeat("\n"+chunk, inserts)
+	}
 	for _, test := range []struct {
 		name, spec, after, chunk string
-		inserts                  int
 	}{
-		{"900 KB of prose", "Before.\n", "end", strings.Repeat("word ", 180_000), 3},
-		{"900 KB of a code block's text", "Before.\n", "end", "```\n" + strings.Repeat("a line of code, forty bytes long; more\n", 22_500) + "```\n", 3},
-		{"42 KB of )_", "Before.\n", "end", strings.Repeat(")_", 21_000), 6},
-		{"a thousand headings", "Before.\n", "end", strings.Repeat("# a\n", 1_000), 20},
-		{"two thousand hard breaks", "Before.\n", "end", strings.Repeat("a  \n", 2_000) + "a\n", 12},
-		{"three thousand list items", "Before.\n", "end", strings.Repeat("- a\n", 3_000), 8},
-		{"a thousand table rows", tableSpec, "A10", strings.Repeat("| x | y |\n", 1_000), 10},
+		{"900 KB of prose", before("", 0), "end", strings.Repeat("word ", 180_000)},
+		{"900 KB of a code block's text", before("", 0), "end", "```\n" + strings.Repeat("a line of code, forty bytes long; more\n", 22_500) + "```\n"},
+		// 31,505 elements an insert: the third passes 65,536.
+		{"42 KB of )_", before(strings.Repeat(")_", 21_000), 1), "end", strings.Repeat(")_", 21_000)},
+		// 4,000 elements an insert: the seventeenth passes 65,536.
+		{"a thousand headings", before(strings.Repeat("# a\n", 1_000), 15), "end", strings.Repeat("# a\n", 1_000)},
+		// 8,004 elements an insert: the ninth passes 65,536.
+		{"two thousand hard breaks", before(strings.Repeat("a  \n", 2_000)+"a\n", 7), "end", strings.Repeat("a  \n", 2_000) + "a\n"},
+		// 21,003 elements an insert: the fourth passes 65,536.
+		{"three thousand list items", before(strings.Repeat("- a\n", 3_000), 2), "end", strings.Repeat("- a\n", 3_000)},
+		// 13,000 elements an insert, written as rows after A10's: the sixth passes 65,536.
+		{"a thousand table rows", tableSpec + strings.Repeat("| x | y |\n", 4_000), "A10", strings.Repeat("| x | y |\n", 1_000)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler := newTestHandler(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Repeated growth", test.spec)
+			const inserts = 2
 			refused := 0
-			for index := range test.inserts {
+			for index := range inserts {
 				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 					"ops": []map[string]string{{"op": "insert", "after": test.after, "markdown": test.chunk}},
 				}, "alice")
@@ -56,7 +71,10 @@ func TestRepeatedInsertsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T
 				break
 			}
 			if refused == 0 {
-				t.Fatalf("all %d inserts were taken, want the document's growth refused", test.inserts)
+				t.Fatalf("all %d inserts were taken, want the document's growth refused", inserts)
+			}
+			if refused == 1 {
+				t.Fatalf("the first insert was refused, want it taken: the document was made to have room for one more insert, so the second shows writes adding up")
 			}
 			for _, read := range []string{"/text", "/blocks"} {
 				if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+read, nil, "alice"); response.Code != http.StatusOK {

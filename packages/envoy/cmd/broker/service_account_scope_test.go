@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -57,25 +58,25 @@ func TestAnAccountProvesOnlyTheServiceItIsListedFor(t *testing.T) {
 	}})
 	addr := process.Addr
 	requireHealthy(t, addr)
-	broker := podBroker{t: t, base: "http://" + addr, issuer: issuer, key: podKey, audience: podAudience}
+	broker := brokertest.Pods{T: t, Base: "http://" + addr, Token: brokertest.IssuerTokens(t, issuer, podKey, podAudience)}
 
-	exampleLauncher := broker.logIn(service, loginAccount)
-	otherLauncher := broker.logIn(otherService, otherLogin)
+	exampleLauncher := broker.LogIn(service, loginAccount)
+	otherLauncher := broker.LogIn(otherService, otherLogin)
 
 	t.Log("--- other-service's own pod, under its credential, is granted its secret")
-	own := broker.ask(broker.enroll(otherLauncher, "pod-other-own", accountD), otherSecret)
+	own := broker.Ask(broker.Enroll(otherLauncher, "pod-other-own", accountD), otherSecret)
 	if own.State != "granted" || own.GrantID == nil || own.RecordID != nil || string(own.Approver) != "null" {
 		t.Fatalf("other-service's own pod's request = %+v (approver %s), want granted with no record and approver null", own, own.Approver)
 	}
 
-	for who, p := range map[string]pod{
-		"a pod under other-service's credential running as example-service's account A": broker.enroll(otherLauncher, "pod-other-as-a", accountA),
-		"a pod under other-service's credential running as example-service's account B": broker.enroll(otherLauncher, "pod-other-as-b", accountB),
-		"a pod under example-service's credential running as other-service's account":   broker.enroll(exampleLauncher, "pod-example-as-d", accountD),
+	for who, p := range map[string]brokertest.Pod{
+		"a pod under other-service's credential running as example-service's account A": broker.Enroll(otherLauncher, "pod-other-as-a", accountA),
+		"a pod under other-service's credential running as example-service's account B": broker.Enroll(otherLauncher, "pod-other-as-b", accountB),
+		"a pod under example-service's credential running as other-service's account":   broker.Enroll(exampleLauncher, "pod-example-as-d", accountD),
 	} {
 		for _, name := range []string{secretName, otherSecret} {
 			t.Logf("--- %s asks for %s", who, name)
-			reply := broker.ask(p, name)
+			reply := broker.Ask(p, name)
 			if reply.State != "denied" || reply.GrantID != nil || reply.RecordID != nil || string(reply.Approver) != "null" {
 				t.Errorf("%s asking for %s = %+v (approver %s), want denied with no grant, no record and approver null", who, name, reply, reply.Approver)
 			}

@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -58,22 +57,19 @@ func TestPprofInvalidPortRefusesStartup(t *testing.T) {
 }
 
 // The listener serves the pprof index on 127.0.0.1 alone, from its own mux, and stops when the
-// process's shutdown context ends.
+// process's shutdown context ends. It binds port 0, so the kernel chooses a port no other program
+// holds, and the address startPprof reports is the one it bound; the address DISPATCH_PPROF_PORT
+// builds is TestPprofAddressIsLoopbackOnly's.
 func TestPprofServesTheIndexOnLoopbackAndStopsWithTheContext(t *testing.T) {
-	port := freeLoopbackPort(t)
-	addr, err := pprofAddress(envGetter(map[string]string{"DISPATCH_PPROF_PORT": strconv.Itoa(port)}))
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	bound, err := startPprof(ctx, addr)
+	bound, err := startPprof(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tcp, ok := bound.(*net.TCPAddr)
-	if !ok || !tcp.IP.Equal(net.IPv4(127, 0, 0, 1)) || tcp.Port != port {
-		t.Fatalf("bound address = %v; want 127.0.0.1:%d", bound, port)
+	if !ok || !tcp.IP.Equal(net.IPv4(127, 0, 0, 1)) || tcp.Port == 0 {
+		t.Fatalf("bound address = %v; want 127.0.0.1 on the port the kernel chose", bound)
 	}
 	response, err := http.Get("http://" + bound.String() + "/debug/pprof/")
 	if err != nil {
@@ -120,15 +116,4 @@ func TestPprofPortInUseIsAnError(t *testing.T) {
 	if _, err := startPprof(context.Background(), held.Addr().String()); err == nil || !strings.Contains(err.Error(), "DISPATCH_PPROF_PORT") {
 		t.Fatalf("startPprof on a held port: err = %v; want an error naming DISPATCH_PPROF_PORT", err)
 	}
-}
-
-func freeLoopbackPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	return port
 }

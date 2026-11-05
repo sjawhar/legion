@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -24,14 +23,17 @@ type Repositories interface {
 
 // Resolution is the repository an issue is recorded on: Repo and DefaultBranch when Legion serves
 // it, with GitHubRepo, GitHub's spelling of Repo that Envoy's event subjects carry, or Refusal, why
-// it does not. LeftOut is a mapped repository Legion leaves out for a GitHub App not installed on
-// it, which Refusal names.
+// it does not. LeftOut is a mapped repository Legion leaves out, for a GitHub App not installed on
+// it or, with Unread, for now, because GitHub did not answer its installation read; Refusal names
+// which. An Unread issue is not refused but left: RefuseRecording says nothing on it, and the
+// daemon takes it from Dispatch's listing once GitHub answers for the repository (its recovery).
 type Resolution struct {
 	Repo          string
 	DefaultBranch string
 	GitHubRepo    string
 	Refusal       string
 	LeftOut       bool
+	Unread        bool
 }
 
 // resolvesToNone is the refusal of an issue whose repository Dispatch resolves to none: neither it
@@ -73,8 +75,19 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // RefuseRecording says on the Dispatch issue key why Legion did not record it: its repository,
 // resolved, resolves to none or to one Legion does not serve (refused). It says it once per
 // resolution (record.RepoNote), so a repeated event of the issue says nothing again, and reports
-// whether it said it now. A child's refusal is also told to its tree's architect (refuseChild).
+// whether it said it now. A child's refusal is also told to its tree's architect (refuseChild). An
+// Unread resolution says nothing, to the issue or to an architect: the daemon recovers the issue
+// from Dispatch's listing once GitHub answers for its repository, with nothing for anyone to move,
+// and it is noted for that recovery (Config.NoteUnread), so an issue whose resolution moves off
+// the repository meanwhile (its parent's repository, or the project's default, changed) is still
+// recovered.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
+	if refused.Unread {
+		if note := e.cfg.NoteUnread; note != nil {
+			note(key, resolved)
+		}
+		return false, nil
+	}
 	note := "Legion did not admit this issue: " + refused.Refusal + ". Set its repository (" + setRepositoryHint + ") and move it to todo again."
 	if refused.LeftOut {
 		note = "Legion did not admit this issue: " + refused.Refusal + ". Install it on " + resolved + ", or set another repository (" + setRepositoryHint + "), and move the issue to todo again."
@@ -84,9 +97,11 @@ func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved s
 
 // NoteRepositoryKept says on a recorded issue that the repository Dispatch now resolves it to,
 // resolved, is not applied: the record keeps the one it was recorded with. It says it once per
-// resolution, and nothing when resolved is the recorded repository.
+// resolution, and nothing when resolved is the recorded repository — the same name, or the other
+// name of a configured rename (sameRepository), so re-pointing every open issue at the repository
+// a transfer moved to says nothing on any of them.
 func (e *Engine) NoteRepositoryKept(ctx context.Context, tx pgx.Tx, issue record.Issue, resolved string) error {
-	if strings.EqualFold(resolved, issue.Repo) {
+	if e.sameRepository(resolved, issue.Repo) {
 		return nil
 	}
 	changed := resolved

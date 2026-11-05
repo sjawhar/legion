@@ -1,8 +1,11 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 
-import { api } from "../../api/client";
+import { api, askSnoozeRequest } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
 import type { InboxRow } from "../../api/types";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { plainWrite, useWrites } from "../writes/write-store";
 
 export interface AskSnoozeWrite {
   /** The server's reason after a refused save, until the next attempt. */
@@ -30,9 +33,14 @@ export interface AskSnoozeWrite {
 export function useAskSnooze(askId: string): AskSnoozeWrite {
   const queryClient = useQueryClient();
   const inboxKey = inboxQuery().queryKey;
-  const mutation = useMutation({
-    mutationFn: (until: string | null) =>
-      until === null ? api.unsnoozeAsk(askId) : api.snoozeAsk(askId, until).then(() => undefined),
+  // The row says why its snooze was refused, where the reader pressed it.
+  const mutation = useKeyedWrite({
+    write: (until: string | null, bounds) =>
+      until === null
+        ? api.unsnoozeAsk(askId, bounds)
+        : api.snoozeAsk(askId, until, bounds).then(() => undefined),
+    inline: true,
+    label: (until) => (until === null ? "Ask brought back now" : "Ask snoozed"),
     onMutate: async (until) => {
       await queryClient.cancelQueries({ queryKey: inboxKey });
       const previous = queryClient.getQueriesData<InboxRow[]>({ queryKey: inboxKey });
@@ -82,36 +90,48 @@ export interface AskSnoozeManyWrite {
 /**
  * The bulk form of `useAskSnooze`, over the same route once per ask: the marked rows drop into
  * `Later` on the pick through the same optimistic write on every inbox cache, and the list
- * refetches once the whole set has settled. Each ask settles on its own, so a refusal rolls back
- * that row alone - to the moment it had before, not to null, which would un-snooze a row that
- * was already deferred - and the ones the server took stay where they landed.
+ * refetches once the whole set has settled. Each ask is a write of its own, under a key of its own
+ * and tried until Dispatch decides it, so a transport failure is tried again rather than counted a
+ * refusal, and each settles on its own: a refusal rolls back that row alone - to the moment it had
+ * before, not to null, which would un-snooze a row that was already deferred - and the ones the
+ * server took stay where they landed.
  */
 export function useAskSnoozeMany(): AskSnoozeManyWrite {
   const queryClient = useQueryClient();
+  const writes = useWrites();
   const inboxKey = inboxQuery().queryKey;
-  const mutation = useMutation({
-    mutationFn: async ({ ids, until }: { ids: readonly string[]; until: string }) => {
-      const results = await Promise.allSettled(ids.map((id) => api.snoozeAsk(id, until)));
-      return ids.flatMap((askId, index) => {
-        const result = results[index];
-        if (result === undefined || result.status !== "rejected") return [];
-        const reason: unknown = result.reason;
-        return [{ askId, reason: reason instanceof Error ? reason.message : String(reason) }];
-      });
-    },
-    onMutate: async ({ ids, until }) => {
+  const [pending, setPending] = useState(0);
+  return {
+    pending: pending > 0,
+    submit: async (ids, until) => {
+      setPending((count) => count + 1);
       await queryClient.cancelQueries({ queryKey: inboxKey });
       const previous = queryClient.getQueriesData<InboxRow[]>({ queryKey: inboxKey });
       const marked = new Set(ids);
       queryClient.setQueriesData<InboxRow[]>({ queryKey: inboxKey }, (current) =>
         current?.map((row) => (marked.has(row.id) ? { ...row, snoozed_until: until } : row))
       );
-      return previous;
-    },
-    onSuccess: (failed, _variables, previous) => {
-      if (failed.length === 0) return;
+      const results = await Promise.allSettled(
+        ids.map((id) =>
+          writes.run({
+            detail: null,
+            inline: true,
+            kind: plainWrite,
+            label: "Ask snoozed",
+            presentation: "indicator",
+            request: askSnoozeRequest(id, until),
+            target: `ask-snooze:${id}`,
+          })
+        )
+      );
+      const failed = ids.flatMap((askId, index) => {
+        const result = results[index];
+        if (result === undefined || result.status !== "rejected") return [];
+        const reason: unknown = result.reason;
+        return [{ askId, reason: reason instanceof Error ? reason.message : String(reason) }];
+      });
       const refused = new Set(failed.map(({ askId }) => askId));
-      for (const [key, data] of previous ?? []) {
+      for (const [key, data] of refused.size === 0 ? [] : previous) {
         const before = new Map((data ?? []).map((row) => [row.id, row.snoozed_until]));
         queryClient.setQueryData<InboxRow[]>(key, (current) =>
           current?.map((row) =>
@@ -119,13 +139,9 @@ export function useAskSnoozeMany(): AskSnoozeManyWrite {
           )
         );
       }
-    },
-    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: inboxKey });
+      setPending((count) => count - 1);
+      return { failed };
     },
-  });
-  return {
-    pending: mutation.isPending,
-    submit: async (ids, until) => ({ failed: await mutation.mutateAsync({ ids, until }) }),
   };
 }

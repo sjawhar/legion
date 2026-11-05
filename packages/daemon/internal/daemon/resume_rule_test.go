@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -148,9 +150,7 @@ func TestTheLingersSuspensionWaitsForTheArchitectsTurnToEnd(t *testing.T) {
 		t.Fatalf("three stop timeouts into the turn the architect is %s after %d suspensions, want its turn still running",
 			got, len(rt.CallsOf("Suspend")))
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: architect}); err != nil {
-		t.Fatalf("the turn's end: %v", err)
-	}
+	endTurn(ctx, t, machine, architect)
 	if got := machine.Claim().State; got != supervise.StateSuspended || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after its turn the architect is %s after %d suspensions, want suspended once", got, len(rt.CallsOf("Suspend")))
 	}
@@ -316,7 +316,7 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 	suspend(sup, architect)
 	suspend(sup, implementer)
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
-	admission := admit.New(records, engine, 2, "legion", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	var clock time.Time
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -327,7 +327,7 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tick = func(by time.Duration) {
 		t.Helper()
@@ -372,6 +372,55 @@ func TestReadmissionResumesTheClaimsTheTreesCloseSuspended(t *testing.T) {
 	}
 }
 
+// A root parked after its architect exhausted the launch budget keeps that failed claim and its
+// session into re-admission. Forgetting that stopped claim's session before the root is admitted
+// again makes the workflow start a fresh architect rather than repeat the failed resume.
+func TestReadmissionSpawnsAFreshArchitectAfterForgettingItsSession(t *testing.T) {
+	rootArchitect := mustClaimToken(t, "LEGION-208", claim.RoleArchitect)
+	var rt *fake.Runtime
+	var sup *supervisor
+	var architect claim.Token
+	var readmit func()
+	rt, sup, architect, _, readmit, _ = readmissionRig(t, func(sup *supervisor, token claim.Token) {
+		machine, _ := sup.Machine(token)
+		if token == rootArchitect {
+			refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+			sup.deps.Runtime.(*fake.Runtime).ScriptResume(refused, refused, refused)
+			if err := machine.Handle(context.Background(), supervise.RuntimeObservation{Observation: runtime.Observation{
+				Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+			}}); err == nil {
+				t.Fatal("the missing-session relaunches answered no error")
+			}
+			return
+		}
+		if err := machine.Handle(context.Background(), supervise.RequestSuspend{
+			Claim: token, Reason: "the tree of LEGION-208 is parked", By: supervise.SuspendedByDaemon,
+		}); err != nil {
+			t.Fatalf("park %s: %v", token, err)
+		}
+	})
+	architectMachine, _ := sup.Machine(architect)
+	if failed := architectMachine.Claim(); failed.State != supervise.StateFailed || failed.SessionFile == "" {
+		t.Fatalf("parked architect = %+v, want failed with its session still recorded", failed)
+	}
+	if err := architectMachine.Handle(context.Background(), supervise.RequestForgetSession{
+		Claim: architect, Session: architectMachine.Claim().Session,
+	}); err != nil {
+		t.Fatalf("forget the architect session: %v", err)
+	}
+	if cleared := architectMachine.Claim(); cleared.Session != "" || cleared.SessionFile != "" {
+		t.Fatalf("architect after forget = %+v, want no recorded session", cleared)
+	}
+	before := len(rt.CallsOf("Spawn"))
+
+	readmit()
+
+	spawns := rt.CallsOf("Spawn")
+	if len(spawns) != before+1 || spawns[len(spawns)-1].Spec.Claim != architect || spawns[len(spawns)-1].Spec.ResumeSessionFile != "" {
+		t.Fatalf("re-admission spawns = %+v, want one fresh architect spawn", spawns)
+	}
+}
+
 // Re-admission does not override an operator's suspend: the starts it queues wait until the
 // operator resumes each claim, and then go on, the child's worker given the task to carry its
 // phase on.
@@ -400,7 +449,8 @@ func TestReadmissionWaitsForTheOperatorToResumeTheClaimsItSuspended(t *testing.T
 // seedWorkflowTree records root as an admitted tree of project in the store at dsn — the issue, its
 // admission slot and its tree's lifecycle, as admission leaves a root it promoted — and each of
 // claims, bound to that lifecycle as the daemon binds a claim it admits, its pending delivery
-// written too when it carries one (AdmitClaim alone writes only the claim row).
+// written too when it carries one (AdmitClaim alone writes only the claim row). Each tree takes
+// the next free slot, so a test may seed more than one running tree.
 func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, claims ...supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -414,7 +464,19 @@ func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, clai
 		if err := records.PutIssue(ctx, tx, root); err != nil {
 			return err
 		}
-		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()})
+		taken, err := records.Slots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		// Above every slot the store holds, so a second tree seeded here takes a free one whatever
+		// the first left.
+		index := 0
+		for _, slot := range taken {
+			if slot.Index >= index {
+				index = slot.Index + 1
+			}
+		}
+		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: index, AdmittedAt: time.Now()})
 	}); err != nil {
 		t.Fatalf("record the tree of %s: %v", root.Key, err)
 	}
@@ -454,6 +516,7 @@ func TestABootResumesASuspendedClaimThatOwnsItsIssuesPhase(t *testing.T) {
 		supervise.Claim{Token: implementer, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer, Generation: 1,
 			State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByDaemon, Session: "ses_implementer", SessionFile: filepath.Join(cfg.StateDir, "implementer.jsonl")})
 	writePrompt(t, cfg, implementer)
+	hostWorkspace(t, cfg.StateDir, "acme/widgets", root)
 	rt := fake.NewRuntime()
 	o := fakeRuntime(rt, &built{})
 	o.workflowTokens = &workflowTokenRecorder{}

@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,34 +12,73 @@ import (
 )
 
 // ErrPublishDenied is returned, wrapping nats.ErrPermissionViolation and the server's own text,
-// for a core publish the server refused under its connection's publish permissions.
+// for a publish the server refused under its connection's publish permissions: a core publish
+// confirmPublished names, and a publish whose subject's violation the connection recorded
+// (deniedPublish), which a JetStream publish and a window's Request both read.
 var ErrPublishDenied = errors.New("NATS denied the publish")
 
-// errPublishUnconfirmed is wrapped, with the reason, by a core publish confirmPublished cannot
-// confirm: not known to be denied, and not known to be accepted either.
-var errPublishUnconfirmed = errors.New("publish not known to have been accepted")
+// ErrPublishUnconfirmed is wrapped, with the reason, by a publish that is not known to have been
+// accepted: a core publish confirmPublished cannot confirm - not known to be denied, and not known
+// to be accepted either - and the timeout of a window's Request whose flush failed or could not
+// confirm the publish (window.request). That second case is what it is exported for: a caller that
+// counts a request which ran out of time reads it to tell a forward NATS took, whose holder sent
+// no receipt, from one that is not known to have reached the server at all.
+var ErrPublishUnconfirmed = errors.New("publish not known to have been accepted")
 
-// publishConfirmed publishes msg on conn with publish, flushes within deadline, and confirms the
-// server accepted it (confirmPublished). A nil error means the server accepted the publish;
-// otherwise the error is nats.go's refusal before sending (refused), a flush that failed or ran out
-// of the window, ErrPublishDenied, or one wrapping errPublishUnconfirmed. publish is conn.PublishMsg,
-// bound to the same conn: both callers read their connection once and pass it and its PublishMsg, so
-// publish publishes on the connection observe and confirmPublished judge. It is a parameter so a
-// test can make the server's answer arrive before publish returns, which is the case the state read
-// before it exists for.
-func (c *Client) publishConfirmed(conn *nats.Conn, msg *nats.Msg, deadline time.Time, publish func(*nats.Msg) error) error {
+// publishConfirmed publishes msg on conn with publish, flushes within ctx's deadline, and confirms
+// the server accepted it (confirmPublished). A nil error means the server accepted the publish;
+// otherwise the error is a window already spent (errWindowElapsed), nats.go's refusal before
+// sending (refused), a flush that failed or ran out of the window, ErrPublishDenied, or one
+// wrapping ErrPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: every caller
+// reads its connection once and passes it and its PublishMsg, so publish publishes on the
+// connection observe and confirmPublished judge. It is a parameter so a test can make the server's
+// answer arrive before publish returns, which is the case the state read before it exists for.
+//
+// A ctx that has ended - cancelled, or its deadline spent - is refused before publish is called,
+// never after: a core publish is on its way to the subject the moment publish returns, so
+// answering failure behind it tells the caller a message failed that its subscribers receive - and
+// a core subject has no duplicate window, so the caller's retry delivers it twice. The deadline is
+// also read off the clock, since it can pass before ctx's timer marks ctx done; a ctx with no
+// deadline has the zero one, already spent, though every caller bounds its own. The check after
+// publish stays for a window that runs out during publish itself; that publish is not known to
+// have left this process, the same ambiguity a flush that runs out of the window has, and is
+// answered the same way. A cancel that lands after the check goes unseen: the publish is made.
+func (c *Client) publishConfirmed(ctx context.Context, conn *nats.Conn, msg *nats.Msg, publish func(*nats.Msg) error) error {
+	deadline, _ := ctx.Deadline()
+	err := ctx.Err()
+	if err == nil && !time.Now().Before(deadline) {
+		err = context.DeadlineExceeded
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", errWindowElapsed(msg.Subject), err)
+	}
 	before := observe(conn)
 	if err := publish(msg); err != nil {
 		return c.refused(err, len(msg.Data))
 	}
+	return confirmFlushed(conn, msg.Subject, before, deadline)
+}
+
+// confirmFlushed flushes conn within deadline and confirms that the server accepted the core
+// publish to subject made on it after before was observed (confirmPublished).
+func confirmFlushed(conn *nats.Conn, subject string, before connState, deadline time.Time) error {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return fmt.Errorf("bus: window elapsed before the publish to %q was flushed", msg.Subject)
+		return errWindowElapsed(subject)
 	}
 	if err := conn.FlushTimeout(remaining); err != nil {
-		return fmt.Errorf("bus: flush publish to %q: %w", msg.Subject, err)
+		return fmt.Errorf("bus: flush publish to %q: %w", subject, err)
 	}
-	return confirmPublished(conn, msg.Subject, before)
+	return confirmPublished(conn, subject, before)
+}
+
+// errWindowElapsed is the error of a core publish to subject whose window ran out before it could
+// be flushed. Its text is the one this error had before the spent-window check moved ahead of the
+// publish, so anything that matches it - a deployed log filter, an operator's search - still does,
+// and every site that reports a spent window returns it: publishConfirmed before the publish, and
+// confirmFlushed after it.
+func errWindowElapsed(subject string) error {
+	return fmt.Errorf("bus: window elapsed before the publish to %q was flushed", subject)
 }
 
 // connState is what confirmPublished compares across a core publish and its flush.
@@ -89,24 +129,42 @@ func observe(conn *nats.Conn) connState {
 // between the two observations. nats.go exposes no error counter to tell that from no change. Both
 // connections that publish on core subjects carry subscriptions: Dispatch's carries its JetStream
 // reply inboxes and the webhook sweeper's KV watch, and the listener's carries its notification
-// stream consumer and the role-lane subscription whose handler forwards. But Envoy sets no pending
-// limits, and at nats.go's defaults (500,000 messages, 64 MiB per subscription) a subscription that
-// falls far enough behind to report a slow consumer, twice around one publish, is rare. So it is
-// accepted.
+// stream consumer and the receipt inboxes of its role forwards. The role-lane subscription whose
+// handler forwards runs on a connection of its own under limits far above any backlog its handler
+// can build (ConnectRoleLane), so it reports a slow consumer only under a flood no measured load
+// comes near; every other subscription keeps nats.go's defaults (500,000 messages, 64 MiB per
+// subscription), at which one that falls far enough behind to report a slow consumer, twice around
+// one publish, is rare. So it is accepted.
 func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	after := observe(conn)
 	if !after.connected || after.reconnects != before.reconnects {
-		return fmt.Errorf("bus: %w: NATS disconnected during the publish to %q", errPublishUnconfirmed, subject)
+		return fmt.Errorf("bus: %w: NATS disconnected during the publish to %q", ErrPublishUnconfirmed, subject)
 	}
 	if sameError(after.lastError, before.lastError) {
 		return nil
 	}
-	if errors.Is(after.lastError, nats.ErrPermissionViolation) &&
-		strings.Contains(after.lastError.Error(), fmt.Sprintf("Publish to %q", subject)) {
-		return fmt.Errorf("bus: %w to %q: %w", ErrPublishDenied, subject, after.lastError)
+	if denied := publishDenial(after.lastError, subject); denied != nil {
+		return denied
 	}
 	return fmt.Errorf("bus: %w: NATS reported an error during the publish to %q: %w",
-		errPublishUnconfirmed, subject, after.lastError)
+		ErrPublishUnconfirmed, subject, after.lastError)
+}
+
+// publishDenial names err as ErrPublishDenied when it is the server's refusal of a publish to
+// subject under the connection's own publish permissions, and nil when it is anything else. A core
+// publish reads it off the last error the connection recorded across the publish and its flush
+// (confirmPublished), which is where the core path's ambiguity lives: nats.go keeps one last error
+// per connection, so a violation of another subject recorded in between leaves this publish
+// unconfirmed rather than denied, and its caller publishes it again. A JetStream publish, which
+// the stream acknowledges with nothing when the server refuses it, and a window's Request, whose
+// flush meets that same ambiguity, read the violation recorded under their own subject instead
+// (deniedPublish), so a window whose sends were denied several subjects at once names each of them.
+func publishDenial(err error, subject string) error {
+	if errors.Is(err, nats.ErrPermissionViolation) &&
+		strings.Contains(err.Error(), fmt.Sprintf("Publish to %q", subject)) {
+		return deniedPublishError(subject, err)
+	}
+	return nil
 }
 
 // sameError reports whether a and b are the same error value. nats.go records each permissions

@@ -3,9 +3,11 @@ package api
 import (
 	"maps"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
@@ -66,8 +68,15 @@ type Settings struct {
 	GitHubApps *GitHubAppsSettings `json:"github_apps,omitempty"`
 	// LingerHours and ProductionCheckHours are `linger_hours` and `production_check_hours` as the
 	// file takes them, decimal numbers of hours.
-	LingerHours          float64                 `json:"linger_hours"`
-	ProductionCheckHours float64                 `json:"production_check_hours"`
+	LingerHours          float64 `json:"linger_hours"`
+	ProductionCheckHours float64 `json:"production_check_hours"`
+	// PodUpdateRetaskHours and PodUpdateNoticeHours are `pod_update_retask_hours` and
+	// `pod_update_notice_hours`, decimal numbers of hours as the two above are: how long an open
+	// update round waits before it asks a worker again, and how long after the round opened the
+	// controller is told it is stalled. They are decimals so a live proof and the production
+	// check can drive each bound inside one run.
+	PodUpdateRetaskHours float64                 `json:"pod_update_retask_hours"`
+	PodUpdateNoticeHours float64                 `json:"pod_update_notice_hours"`
 	ReviewRoundCap       int                     `json:"review_round_cap"`
 	MaxFixAttempts       int                     `json:"max_fix_attempts"`
 	Controller           config.ControllerLaunch `json:"controller"`
@@ -75,12 +84,30 @@ type Settings struct {
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
+	// RoleConfigFiles is `role_config_files`, the Oh My Pi overlays one role names and no other
+	// does, by role, `{}` while the file names none.
+	RoleConfigFiles map[string][]string `json:"role_config_files"`
+	// RepositoryRenames is `repository_renames`, the pairs this deployment treats as one
+	// repository wherever a name is compared, in configured order, `[]` while the file
+	// configures none.
+	RepositoryRenames []RepositoryRenameSettings `json:"repository_renames"`
 }
 
-// RuntimeSettings is `runtime`: its name, and the kubernetes block under that runtime alone.
+// RuntimeSettings is `runtime`: its name, the kubernetes block under that runtime alone, and the
+// tmux block when the file names one.
 type RuntimeSettings struct {
 	Name       string              `json:"name"`
 	Kubernetes *KubernetesSettings `json:"kubernetes,omitempty"`
+	Tmux       *TmuxSettings       `json:"tmux,omitempty"`
+}
+
+// TmuxSettings is the settled `runtime.tmux` block: its Oh My Pi overlays as resolved, the names
+// alone of its pane variables, whose values are the operator's free text, delivered to every pane,
+// and the runtime whose claims the daemon takes over (`take_over`), empty for none.
+type TmuxSettings struct {
+	PaneEnv       []string `json:"pane_env"`
+	PiConfigFiles []string `json:"pi_config_files"`
+	TakeOver      string   `json:"take_over,omitempty"`
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
@@ -103,8 +130,24 @@ type KubernetesSettings struct {
 	Plugins *PluginsSettings `json:"plugins,omitempty"`
 	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
-	Setup           []string                `json:"setup"`
+	Setup []string `json:"setup"`
+	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
+	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
+	TestPostgres    bool                    `json:"test_postgres"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
+	// IdleRelease is the settled `runtime.kubernetes.idle_release`: how long an issue pod must
+	// have had no turn in progress and no turn due before the daemon releases it, and how long
+	// after a release the backstop wakes a phase worker whose phase is still open. Neither is a
+	// credential, and a role reads both to know whether its own pod may go away under it, so
+	// every pod may read them.
+	IdleRelease IdleReleaseSettings `json:"idle_release"`
+}
+
+// IdleReleaseSettings is the settled `runtime.kubernetes.idle_release`. Zero `idle_minutes` is
+// release switched off.
+type IdleReleaseSettings struct {
+	IdleMinutes     int `json:"idle_minutes"`
+	BackstopMinutes int `json:"backstop_minutes"`
 }
 
 // SchedulingSettings is `runtime.kubernetes.scheduling`; the selector and the tolerations are `{}`
@@ -171,6 +214,19 @@ type ProjectSettings struct {
 	Merge          MergeSettings    `json:"merge"`
 	SlackChannels  []string         `json:"slack_channels"`
 	Deploys        []DeploySettings `json:"deploys"`
+	Memory         MemorySettings   `json:"memory"`
+}
+
+// MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
+// drawn under, absent for a project that names no block, which is off (config.Memory.Word); the
+// Oh My Pi overlays every role of a memory-group tree names after the operator's and its own, `[]`
+// for a project that names none; and the one instructions file the daemon appends to such a role's
+// system prompt, absent when the block names none. The paths are the operator's own file names,
+// which no credential rides in.
+type MemorySettings struct {
+	Mode         config.MemoryMode `json:"mode,omitempty"`
+	ConfigFiles  []string          `json:"config_files"`
+	Instructions string            `json:"instructions,omitempty"`
 }
 
 // DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
@@ -179,6 +235,13 @@ type DeploySettings struct {
 	Repo     string `json:"repo"`
 	Workflow string `json:"workflow"`
 	Step     string `json:"step"`
+}
+
+// RepositoryRenameSettings is one `repository_renames` entry as the file writes it: the
+// repository as it was and the one it moved to, each `<owner>/<name>`.
+type RepositoryRenameSettings struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
@@ -224,7 +287,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Bind:                                    cfg.Bind,
 		AdvertiseHost:                           cfg.AdvertiseHost,
 		StateDir:                                cfg.StateDir,
-		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes)},
+		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes), Tmux: tmuxSettingsOf(cfg.Runtime.Tmux)},
 		AdmissionCap:                            cfg.AdmissionCap,
 		DaemonURL:                               endpointOf(cfg.DaemonURL),
 		WorkerStreamPort:                        cfg.WorkerStreamPort,
@@ -250,11 +313,15 @@ func SettingsOf(cfg config.Config) Settings {
 		Gates:                                   GatesSettings{Design: cfg.Gates.Design},
 		LingerHours:                             cfg.Linger.Hours(),
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
+		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),
+		PodUpdateNoticeHours:                    cfg.PodUpdateNotice.Hours(),
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
 		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,
 		Capabilities:                            CapabilitiesSettings{Decided: make(map[string]string, len(cfg.Capabilities.Decided))},
 		WorkerBackends:                          make(map[string]string, len(cfg.WorkerBackends)),
+		RoleConfigFiles:                         make(map[string][]string, len(cfg.RoleConfigFiles)),
+		RepositoryRenames:                       repositoryRenamesOf(cfg.RepositoryRenames),
 	}
 	for i, key := range cfg.ProviderKeys {
 		settings.ProviderKeys[i] = key.Env
@@ -268,6 +335,11 @@ func SettingsOf(cfg config.Config) Settings {
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
 			Deploys:        make([]DeploySettings, len(project.Deploys)),
+			Memory: MemorySettings{
+				Mode:         project.Memory.Mode,
+				ConfigFiles:  stringsOf(project.Memory.ConfigFiles),
+				Instructions: project.Memory.InstructionsPath,
+			},
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
@@ -286,7 +358,30 @@ func SettingsOf(cfg config.Config) Settings {
 	for role, backend := range cfg.WorkerBackends {
 		settings.WorkerBackends[string(role)] = string(backend)
 	}
+	for role, files := range cfg.RoleConfigFiles {
+		settings.RoleConfigFiles[string(role)] = stringsOf(files)
+	}
 	return settings
+}
+
+// repositoryRenamesOf is the configured equivalence as the state shows it: one `{from, to}` per
+// pair, in configured order, and `[]` for a deployment that configures none.
+func repositoryRenamesOf(renames ghrepo.Renames) []RepositoryRenameSettings {
+	pairs := renames.Pairs()
+	settings := make([]RepositoryRenameSettings, len(pairs))
+	for i, pair := range pairs {
+		settings[i] = RepositoryRenameSettings{From: pair.From.String(), To: pair.To.String()}
+	}
+	return settings
+}
+
+// tmuxSettingsOf is block as the state shows it, nil when the file names none: the pane
+// variables' names in name order, never their values.
+func tmuxSettingsOf(block *config.Tmux) *TmuxSettings {
+	if block == nil {
+		return nil
+	}
+	return &TmuxSettings{PaneEnv: stringsOf(slices.Sorted(maps.Keys(block.PaneEnv))), PiConfigFiles: stringsOf(block.PiConfigFiles), TakeOver: block.TakeOver}
 }
 
 // kubernetesSettingsOf is block as the state shows it, nil under another runtime.
@@ -310,11 +405,16 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 		},
 		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
+		TestPostgres: block.TestPostgres,
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
 			RetainHours:    block.RepositoryCache.RetainHours,
 			Resources:      reservationSettingsOf(block.RepositoryCache.Resources),
+		},
+		IdleRelease: IdleReleaseSettings{
+			IdleMinutes:     block.IdleRelease.IdleMinutes,
+			BackstopMinutes: block.IdleRelease.BackstopMinutes,
 		},
 	}
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)

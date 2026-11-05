@@ -1,8 +1,10 @@
 //go:build e2e
 
-// The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go and
-// no_required_checks_live_test.go, whose scripts (scripts/e2e/merged-root-waits.sh and
-// scripts/e2e/no-required-checks.sh) make the same run around them through
+// The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go,
+// no_required_checks_live_test.go, child_adoption_live_test.go, ci_red_no_takeover_live_test.go and
+// handoff_records_live_test.go, whose scripts (scripts/e2e/merged-root-waits.sh,
+// scripts/e2e/no-required-checks.sh, scripts/e2e/child-adoption.sh, scripts/e2e/ci-red-no-takeover.sh
+// and scripts/e2e/handoff-records.sh) make the same run around them through
 // scripts/e2e/lib/live-daemon-proof.sh. A driver embeds liveProof, which holds what every such
 // proof needs before and around the daemon it boots: the configuration it boots with (newLiveProof
 // reads the broker LEGION_E2E_NATS_URL names, skips when it names none, and builds workflowConfig
@@ -17,13 +19,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -49,10 +48,6 @@ const liveNATSURLEnv = "LEGION_E2E_NATS_URL"
 // run's evidence. Unset, the daemon's log is dropped, as every other test in this package drops
 // it.
 const liveDaemonLogEnv = "LEGION_E2E_DAEMON_LOG"
-
-// liveRepo is the repository the project's Dispatch mapping serves (workflowConfig's
-// servedMapping), which every issue a live proof seeds is on.
-const liveRepo = "acme/widgets"
 
 // liveSettle is how long a step that must see nothing happen watches for it: what it must not see
 // — the boot's sweep of merged pull requests, which runs behind the API, or a notice the outbox
@@ -90,9 +85,7 @@ func newLiveProof(t *testing.T, script string) liveProof {
 	}
 	cfg := workflowConfig(t, natsURL)
 	p := liveProof{t: t, cfg: cfg, board: newLiveDispatch(t, cfg.Project), notices: newNoticeListener(), records: record.NewStore()}
-	dispatchServer := httptest.NewServer(p.board)
-	t.Cleanup(dispatchServer.Close)
-	p.cfg.DispatchURL = dispatchServer.URL
+	p.cfg.DispatchURL = p.board.url
 	envoyServer := httptest.NewServer(p.notices)
 	t.Cleanup(envoyServer.Close)
 	p.cfg.EnvoyURL = envoyServer.URL
@@ -255,132 +248,4 @@ func (p *liveProof) waitArchitectNotices(key, kind string, count int) []listener
 		return len(got) == count
 	})
 	return got
-}
-
-// liveDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an empty issue
-// list — grown into the board the daemon writes to: it holds each issue's status, as Dispatch's own
-// board does, answers the issue read the outbox makes before a status write, and records every
-// status and message the daemon posted, so a step can read back what the daemon told Dispatch and
-// tell a write that never came from one it cannot see. Anything else is a call a live proof does
-// not expect, and fails the test as workflowConfig's stand-in does.
-type liveDispatch struct {
-	t       *testing.T
-	project string
-	mu      sync.Mutex
-	// status is each issue's status as this board holds it, the daemon's writes applied.
-	status map[string]string
-	posted []liveDispatchWrite
-}
-
-// liveDispatchWrite is one write the daemon made to Dispatch: a status it set on an issue, or a
-// message it posted on one.
-type liveDispatchWrite struct {
-	Issue  string
-	Status string
-	Body   string
-}
-
-func newLiveDispatch(t *testing.T, project string) *liveDispatch {
-	return &liveDispatch{t: t, project: project, status: map[string]string{}}
-}
-
-// show puts key on the board at status, as the seeded fixture stands on Dispatch before the daemon
-// writes anything.
-func (b *liveDispatch) show(key, status string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.status[key] = status
-}
-
-func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if servedMapping(b.t, w, req, b.project) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	path := req.URL.Path
-	key := issueOfDispatchPath(path)
-	switch {
-	case req.Method == http.MethodGet && path == "/api/v1/issues":
-		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && path == "/healthz":
-		_, _ = io.WriteString(w, `{"status":"ok","commit":null}`)
-	case req.Method == http.MethodGet && strings.HasSuffix(path, "/events"):
-		// The outbox reads an issue's events to see whether its message is already posted; this
-		// board keeps none, so every message the daemon decides to post is posted.
-		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/issues/") && key != "":
-		b.showIssue(key, w)
-	case req.Method == http.MethodPost && strings.HasSuffix(path, "/messages"):
-		b.record(liveDispatchWrite{Issue: key, Body: b.decode(req, w)}, w)
-	case req.Method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/issues/"):
-		write := liveDispatchWrite{Issue: key, Status: b.decode(req, w)}
-		b.show(key, write.Status)
-		b.record(write, w)
-	default:
-		b.t.Errorf("Dispatch request = %s %s", req.Method, path)
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	}
-}
-
-// showIssue answers the issue read the outbox makes before a status write: the board's own status
-// for it, with the Legion label the tree runs under.
-func (b *liveDispatch) showIssue(key string, w http.ResponseWriter) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"key": key, "project": b.project, "title": key, "status": b.status[key], "rank": "U",
-		"labels": []string{"legion"}, "last_seq": 1, "resolved_repo": liveRepo,
-	}); err != nil {
-		b.t.Errorf("write the Dispatch issue %s: %v", key, err)
-	}
-}
-
-// decode is the write's status or body, whichever the daemon sent.
-func (b *liveDispatch) decode(req *http.Request, w http.ResponseWriter) string {
-	var write struct {
-		Status string `json:"status"`
-		Body   string `json:"body"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&write); err != nil {
-		b.t.Errorf("decode the Dispatch write to %s: %v", req.URL.Path, err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return ""
-	}
-	if write.Status != "" {
-		return write.Status
-	}
-	return write.Body
-}
-
-func (b *liveDispatch) record(write liveDispatchWrite, w http.ResponseWriter) {
-	b.mu.Lock()
-	b.posted = append(b.posted, write)
-	b.mu.Unlock()
-	_, _ = io.WriteString(w, `{}`)
-}
-
-// writes is every status the daemon has set and every message it has posted, oldest first.
-func (b *liveDispatch) writes() []liveDispatchWrite {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]liveDispatchWrite(nil), b.posted...)
-}
-
-// wrote says whether the daemon set issue to status.
-func (b *liveDispatch) wrote(issue, status string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, write := range b.posted {
-		if write.Issue == issue && write.Status == status {
-			return true
-		}
-	}
-	return false
-}
-
-// issueOfDispatchPath is the issue key in /api/v1/issues/<key>[/...].
-func issueOfDispatchPath(path string) string {
-	rest := strings.TrimPrefix(path, "/api/v1/issues/")
-	key, _, _ := strings.Cut(rest, "/")
-	return key
 }

@@ -20,7 +20,10 @@ import (
 // matching topic is broader than this owner (e.g. "notifications.dispatch.>"):
 // removing that topic would silently unsubscribe the session from every
 // other issue and document too, so Unsubscribe refuses it; Via then names
-// one such topic for the header to explain why.
+// one such topic for the header to explain why. LastSeen is the session's
+// last heartbeat: the live session's own, else the one the listener still
+// knows for the interest row, else the row's updated_at, which can lag that
+// heartbeat by up to the listener's interest refresh age.
 type subscriber struct {
 	SessionID string   `json:"session_id"`
 	Title     string   `json:"title"`
@@ -76,14 +79,14 @@ func exactTopics(topics []string, base string) []string {
 }
 
 func (s *server) listIssueSubscribers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	s.writeSubscribers(w, r, issueSubscriberBase(r.PathValue("key")))
 }
 
 func (s *server) listArtifactSubscribers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	artifact, _, err := s.documentOwnerFromRequest(r.Context(), s.deps.Store.Pool, r)
@@ -121,6 +124,11 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 			continue
 		}
 		entry := subscriber{SessionID: interest.SessionID, Topics: matched, LastSeen: interest.UpdatedAt}
+		// A listener that restarted since the session died, or one that predates the field,
+		// sends no last_seen; the row's own updated_at is then the closest it has.
+		if interest.LastSeen > 0 {
+			entry.LastSeen = interest.LastSeen
+		}
 		if exact := exactTopics(matched, base); len(exact) > 0 {
 			entry.Removable = true
 		} else {
@@ -143,7 +151,7 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 }
 
 func (s *server) unsubscribeIssueSession(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -152,7 +160,7 @@ func (s *server) unsubscribeIssueSession(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *server) unsubscribeArtifactSession(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

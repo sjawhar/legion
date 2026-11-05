@@ -19,7 +19,7 @@ related_issues:
 # Hot-Reload Daemon — Registry Coordination and Mock-Masked Integration Bugs
 
 **Issue:** sjawhar-legion-598
-**PR:** https://github.com/sjawhar/legion/pull/600
+**PR:** https://github.com/cybermonklabs/legion/pull/600
 
 ## Context
 

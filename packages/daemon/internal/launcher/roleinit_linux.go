@@ -649,6 +649,18 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 		case stat.Mode&unix.S_IFMT != unix.S_IFDIR:
 			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes", path)
 		}
+		// O_PATH is load-bearing in these flags. Measured 2026-11-01 against 4.19.0-gvisor
+		// and Linux 7.0, on a container filesystem and on a mounted volume alike: an openat
+		// of a symlink to a directory with O_PATH|O_DIRECTORY|O_NOFOLLOW refuses ENOTDIR on
+		// both, while the same open as O_RDONLY|O_DIRECTORY|O_NOFOLLOW refuses ENOTDIR on
+		// the ordinary kernel and opens what the link names under the gVisor an issue pod
+		// runs on. So an edit that dropped O_PATH here — to read the directory, say — would
+		// still be refused wherever this is tested and would follow the link in a pod. The
+		// Fstatat above is the component's other check, and it is honoured on both kernels
+		// (its AT_SYMLINK_NOFOLLOW reports the link, where fstatat without that flag and
+		// os.Stat report the directory); this open is what is left for a component the
+		// Mkdirat above made, or one that changed after that Fstatat read it. A final
+		// component that is a file never reaches this open: it returns above.
 		next, err := unix.Openat(parent, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return fmt.Errorf("open %s: %w", path, err)

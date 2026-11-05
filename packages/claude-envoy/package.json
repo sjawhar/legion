@@ -18,18 +18,19 @@
     "AGENTS.md"
   ],
   "legion": {
-    "daemonApiVersion": 39
+    "daemonApiVersion": 49
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sjawhar/legion"
+    "url": "https://github.com/cybermonklabs/legion"
   },
   "scripts": {
     "channel": "bun bin/envoy-channel.ts",
     "build": "bun scripts/build.ts",
     "check-dist": "bun scripts/build.ts --check",
+    "verify-build": "bash scripts/verify-build.sh",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --timeout=60000",
     "lint": "bunx biome check src/ hooks/ scripts/"
   },
   "dependencies": {

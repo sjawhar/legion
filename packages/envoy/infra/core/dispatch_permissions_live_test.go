@@ -3,9 +3,9 @@
 package core_test
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 
@@ -60,6 +61,7 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireConsumerPushBound(t, live.js, bus.DispatchJobDurable)
 				requireDurablesAcknowledge(t, live.js)
 				requireIssueEventPublished(t, live.process, live.conn, live.port)
+				requireCommentQuietPublished(t, live.process, live.conn, live.port)
 				requireAgentStreamRelayed(t, live.conn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
@@ -174,8 +176,8 @@ func startDispatchServer(t *testing.T, image string, grant core.Permissions) (st
 // lets it play a session (publish its frames, subscribe notifications and its control subject),
 // plus the exact calls its checks make, so it leans on nothing of Dispatch's grant: reply inboxes
 // for its JetStream requests, each Dispatch durable's consumer info, a JetStream publish into the
-// stream, and the redelivery bucket's reads, writes and watch — not the bucket's create, which is
-// Dispatch's to make.
+// stream, and the redelivery bucket's reads, writes and watch — not the bucket's create or the
+// update that raises its copies, which are Dispatch's to make.
 func testClientPermissions() core.Permissions {
 	session := core.SessionPermissions()
 	redelivery := "KV_" + bus.WebhookRedeliveryBucket
@@ -213,10 +215,14 @@ func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 }
 
+// startDispatch runs the Dispatch binary against databaseURL and natsURL on a held loopback port,
+// which it inherits as DISPATCH_LISTEN_FD, so no other program can take the port before it serves,
+// and returns it with its port. DISPATCH_PORT and DISPATCH_SERVER_URL name the same port, and
+// Dispatch checks DISPATCH_PORT and DISPATCH_LISTEN_HOST against the socket.
 func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL string) (*cmdtest.Process, int) {
 	t.Helper()
 	home := t.TempDir()
-	port := cmdtest.FreeTCPPort(t)
+	held := cmdtest.HoldPort(t)
 	_, pemText := githubapptest.Key(t)
 	cmd := exec.Command(binary)
 	cmd.Dir = home
@@ -226,8 +232,8 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 		"DISPATCH_DEV_SIGNIN=1",
 		"DISPATCH_INSECURE_COOKIE=1",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",
-		"DISPATCH_PORT=" + strconv.Itoa(port),
-		"DISPATCH_SERVER_URL=" + dispatchURL(port, ""),
+		"DISPATCH_PORT=" + strconv.Itoa(held.Port),
+		"DISPATCH_SERVER_URL=" + dispatchURL(held.Port, ""),
 		"NATS_URLS=" + natsURL,
 		core.EnvNATSSeed + "=" + seed,
 		"DISPATCH_APP_CLIENT_ID=Iv1.e2efake",
@@ -237,7 +243,8 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 		"HOME=" + home,
 		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"),
 	}
-	return cmdtest.Start(t, "Dispatch", cmd), port
+	held.Pass(cmd, "DISPATCH_LISTEN_FD")
+	return cmdtest.Start(t, "Dispatch", cmd), held.Port
 }
 
 // dispatchHealthy is the answer Dispatch's /healthz gives once its schema is migrated.
@@ -294,6 +301,54 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 	require.True(t, strings.HasSuffix(envelope.Topic, ".issue.created"), "event topic %q", envelope.Topic)
 }
 
+// requireCommentQuietPublished proves what a session subscribed to an issue is there for: a
+// comment an agent writes through Dispatch's HTTP API reaches a subscriber holding
+// SessionPermissions on that issue's own comment.created subject, and the frame says in a field
+// of its own, quiet, that it is not quiet. The actor is a session, not a person, which is the
+// case a reader judging the frame by notify drops: notify is false for every actor that is not a
+// person, so such a reader shows a session its peers' silence on the issue it watches. The
+// payload is read as raw JSON so a frame carrying no quiet at all fails here; decoded into a
+// bool, a missing field would read as false and the check would pass on the frames that keep the
+// stored 72 hours quiet. The create is forced because its title shares "example", the only word
+// of the title requireIssueEventPublished created, so the title-overlap check
+// (duplicateCandidates) would refuse it 409 POSSIBLE_DUPLICATE; what is under test here is the
+// published frame, not duplicate detection.
+func requireCommentQuietPublished(t *testing.T, process *cmdtest.Process, conn *natsgo.Conn, port int) {
+	t.Helper()
+	client := &http.Client{Timeout: 10 * time.Second}
+	actor := `"actor":{"kind":"session","id":"` + dispatchSessionID + `"}`
+	answer := postDispatchJSON(t, client, port, "/api/v1/issues", `{"project":"ACME","title":"quiet example","force":true,`+actor+`}`)
+	var created struct {
+		Key string `json:"key"`
+	}
+	require.NoError(t, json.Unmarshal(answer, &created))
+	require.NotEmpty(t, created.Key, "Dispatch named no issue key: %s", answer)
+
+	topic := "notifications.dispatch.issue." + created.Key + ".comment.created"
+	subscription, err := conn.SubscribeSync(topic)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	require.NoError(t, conn.Flush())
+	postDispatchJSON(t, client, port, "/api/v1/issues/"+created.Key+"/comments", `{"body":"example comment",`+actor+`}`)
+
+	envelope, _ := nextEnvelope(t, process, subscription)
+	require.Equal(t, topic, envelope.Topic)
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(envelope.Payload), &payload))
+	require.Contains(t, payload, "actor", "the comment frame names no actor: %s", envelope.Payload)
+	var wrote model.Actor
+	require.NoError(t, json.Unmarshal(payload["actor"], &wrote))
+	require.Equal(t, model.Actor{Kind: "session", ID: dispatchSessionID}, wrote)
+	require.Contains(t, payload, "quiet", "the comment frame carries no quiet field: %s", envelope.Payload)
+	var quiet bool
+	require.NoError(t, json.Unmarshal(payload["quiet"], &quiet))
+	require.False(t, quiet, "an agent's comment on an issue was published quiet: %s", envelope.Payload)
+}
+
+// requireAgentStreamRelayed signs a person in and watches the session's conversation through an
+// agent view on Dispatch's live socket: Dispatch tells the session a viewer is attached and asks
+// for its replay on the session's control subject, which its grant publishes, and relays the frame
+// the session publishes, which its grant subscribes.
 func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	t.Helper()
 	control, err := conn.SubscribeSync(contracts.AgentStreamControlSubject(dispatchSessionID))
@@ -318,14 +373,14 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	require.Equal(t, http.StatusFound, response.StatusCode)
 	_ = response.Body.Close()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, dispatchURL(port, "/api/v1/agents/"+dispatchSessionID+"/stream"), nil)
+	dialer := websocket.Dialer{Jar: jar, HandshakeTimeout: 10 * time.Second}
+	socket, _, err := dialer.DialContext(t.Context(), "ws://127.0.0.1:"+strconv.Itoa(port)+"/ws/live", nil)
 	require.NoError(t, err)
-	stream, err := human.Do(request)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = stream.Body.Close() })
-	require.Equal(t, http.StatusOK, stream.StatusCode)
+	t.Cleanup(func() { _ = socket.Close() })
+	require.NoError(t, socket.SetReadDeadline(time.Now().Add(10*time.Second)))
+	require.NoError(t, socket.WriteJSON(map[string]any{
+		"type": "subscribe", "sub": "agent", "view": map[string]string{"kind": "agent", "session_id": dispatchSessionID},
+	}))
 
 	watch, err := control.NextMsg(10 * time.Second)
 	require.NoError(t, err, "Dispatch sent no agent stream control message within 10s")
@@ -334,27 +389,33 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	require.NoError(t, err, "Dispatch sent no agent stream control message within 10s")
 	require.Equal(t, `{"v":1,"type":"replay"}`, string(replay.Data))
 	require.NoError(t, replay.Respond(nil))
+	requireAgentFrame(t, socket, "responder", `{"v":1,"responding":true}`)
 
 	frame := `{"v":1,"kind":"message","seq":1}`
 	require.NoError(t, conn.Publish(contracts.AgentStreamFramesSubject(dispatchSessionID), []byte(frame)))
 	require.NoError(t, conn.Flush())
-	requireSSEFrame(t, bufio.NewReader(stream.Body), frame)
+	requireAgentFrame(t, socket, "frame", frame)
 }
 
-func requireSSEFrame(t *testing.T, reader *bufio.Reader, want string) {
+// requireAgentFrame reads the live socket past its heartbeats to the agent view's next frame, which
+// must be named event and carry data.
+func requireAgentFrame(t *testing.T, socket *websocket.Conn, event, data string) {
 	t.Helper()
 	for {
-		line, err := reader.ReadString('\n')
-		require.NoError(t, err)
-		if line != "event: frame\n" {
+		var frame struct {
+			Type  string          `json:"type"`
+			Sub   string          `json:"sub"`
+			Event string          `json:"event"`
+			Data  json.RawMessage `json:"data"`
+		}
+		require.NoError(t, socket.ReadJSON(&frame))
+		if frame.Type == "heartbeat" {
 			continue
 		}
-		data, err := reader.ReadString('\n')
-		require.NoError(t, err)
-		require.Equal(t, "data: "+want+"\n", data)
-		separator, err := reader.ReadString('\n')
-		require.NoError(t, err)
-		require.Equal(t, "\n", separator)
+		require.Equal(t, "agent", frame.Type, "the live socket sent a %s frame, want the agent view's %s", frame.Type, event)
+		require.Equal(t, "agent", frame.Sub)
+		require.Equal(t, event, frame.Event)
+		require.Equal(t, data, string(frame.Data))
 		return
 	}
 }
@@ -382,7 +443,10 @@ func requireWebhookRedeliveryBucket(t *testing.T, js natsgo.JetStreamContext, pr
 	}
 }
 
-func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body string) {
+// postDispatchJSON posts body to one of Dispatch's write routes as the session bearer and returns
+// what it answered. Every route it is used for creates something, so an answer that is not 201
+// fails the call with the body Dispatch gave.
+func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body string) []byte {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPost, dispatchURL(port, path), strings.NewReader(body))
 	require.NoError(t, err)
@@ -394,6 +458,7 @@ func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body st
 	answer, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, response.StatusCode, "POST %s: %s", path, answer)
+	return answer
 }
 
 func dispatchURL(port int, path string) string {

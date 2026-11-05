@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,6 +25,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -113,16 +113,13 @@ type memoryServer struct {
 	idle    int64
 }
 
+// start starts a Dispatch server on a loopback port the kernel chose and the test holds from that
+// moment, which the server inherits as DISPATCH_LISTEN_FD and serves on, so no other program can
+// take the port before it serves.
 func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("free the port: %v", err)
-	}
+	held := cmdtest.HoldPort(t)
+	port := strconv.Itoa(held.Port)
 	command := exec.Command(os.Args[0])
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -130,6 +127,7 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		memoryTestServeEnv + "=1",
 		"DATABASE_URL=" + h.database.Pool.Config().ConnString(),
 		"DISPATCH_AGENT_TOKEN=" + memoryTestToken,
+		"DISPATCH_SIGNING_KEY=memory-test-signing-key",
 		"DISPATCH_IDENTITY=header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
 		"DISPATCH_NATS_DISABLED=1",
@@ -139,9 +137,14 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
 	}
 	command.Env = append(command.Env, h.env...)
+	held.Pass(command, "DISPATCH_LISTEN_FD")
 	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
 	command.Stdout, command.Stderr = server.output, server.output
-	if err := command.Start(); err != nil {
+	err := command.Start()
+	// The server holds its own copy of the socket from here on, so it releases the port when it
+	// exits.
+	cmdtest.CloseExtraFiles(command)
+	if err != nil {
 		t.Fatalf("start a Dispatch server: %v", err)
 	}
 	go func() {
@@ -150,8 +153,16 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	}()
 	t.Cleanup(func() { server.stop(t) })
 	deadline := time.Now().Add(time.Minute)
+	// The kernel queues a request on the held socket until the server serves it, so each one is
+	// bounded by the start's own deadline.
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 	for {
-		if response, err := http.Get(server.base + "/healthz"); err == nil {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.base+"/healthz", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := http.DefaultClient.Do(request); err == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				break
@@ -217,6 +228,30 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	}
 	during()
 	return p.resident(t, "VmHWM") - p.idle
+}
+
+// peakRuns is how many fresh servers peaksAboveIdle measures a request on.
+const peakRuns = 3
+
+// peaksAboveIdle runs during on runs fresh servers, each started for it and stopped after, and
+// returns each server's peak above idle. One run's peak is the memory the request holds plus the
+// garbage the collector had not yet reclaimed when the peak came, and how much garbage that is
+// depends on when the collector ran: one cold edit and settlement of the heaviest two-column table
+// peaked from 190 to 263 MiB above idle over five runs on one machine, while in two runs traced
+// with GODEBUG=gctrace=1 the heap it held live after each collection never passed about 130 MiB.
+// That garbage only adds to a peak, so the least of several runs is the nearest to what the
+// request holds, though it still carries some garbage and the runtime's own memory beside the live
+// heap. A change that makes the request hold more raises every run, and fails a test that holds
+// the least run to a bound once it lifts that run past the bound.
+func (h *memoryHarness) peaksAboveIdle(t *testing.T, runs int, during func(server *memoryServer)) []int64 {
+	t.Helper()
+	peaks := make([]int64, runs)
+	for index := range peaks {
+		server := h.start(t)
+		peaks[index] = server.peakAboveIdle(t, func() { during(server) })
+		server.stop(t)
+	}
+	return peaks
 }
 
 type response struct {

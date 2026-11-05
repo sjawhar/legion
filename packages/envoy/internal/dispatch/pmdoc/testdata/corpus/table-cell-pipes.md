@@ -8,3 +8,4 @@
 | escaped code | `one\\\|two` |
 | escaped link | [one\\\|two](https://example.test/one\\\|two "one\\\|two") |
 | escaped image | ![one\\\|two](https://example.test/one\\\|two.png "one\\\|two") |
+| even run \\| ends the cell |

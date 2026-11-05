@@ -42,18 +42,23 @@ type createRequestResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
-	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
-	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. While
-	// it is pending it waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null
-	// when the policy decided it at once, so no record names one.
+	// Who decides it, as its record names them: a person's login (their lowercase email), or
+	// "anyone" for a shared secret, which anyone signed in to the broker's approval page may
+	// decide. While it is pending it is listed in that person's Dispatch Inbox, or in everyone's
+	// for "anyone", linking approve_url. Null when the policy decided it at once, so no record
+	// names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
-	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// How many seconds its grant lasts, as the signed request asked; or, when it asked for none, 12
+	// hours; null when every name is tagged default-grant=session and the grant lasts until the
+	// session ends. A reused or coalesced request answers
 	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
 	// or no such field from a broker before it, was not given that lifetime.
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
+	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
+	// where a person signed in to the broker decides it; absent when the policy decided it at once.
+	ApproveURL string `json:"approve_url,omitempty"`
 }
 
 // createRequest requests secrets for the proof-verified caller, never for an enrollment named in
@@ -104,6 +109,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		Approver:        req.Approver,
 		LifetimeSeconds: req.LifetimeSeconds,
 		Coalesced:       req.Coalesced,
+		ApproveURL:      s.pendingApproveURL(req.State, req.RecordID),
 	})
 }
 
@@ -126,20 +132,24 @@ type requestStatusResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
-	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
-	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. The
-	// record fixes it when the request is made, so a later change to the secret's owner does not
-	// move it, and it stays once the request is decided. Null when the policy decided it at once,
-	// so no record names one.
+	// Who decides it, as its record names them: a person's login (their lowercase email), or
+	// "anyone" for a shared secret, which anyone signed in to the broker's approval page may
+	// decide. The record fixes it when the request is made, so a later change to the secret's
+	// owner does not move it, and it stays once the request is decided. Null when the policy
+	// decided it at once, so no record names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
-	// until the session ends.
+	// How many seconds its grant lasts: as the signed request asked, else 12 hours; null for a
+	// grant that lasts until the session ends (every name tagged default-grant=session).
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
 	// Who decided it and when; null while pending, when the policy decided it at once, and when it
 	// expired.
 	Decision *requestDecision `json:"decision"`
+	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
+	// where a person signed in to the broker decides it; absent once it is no longer pending, and
+	// when the policy decided it at once.
+	ApproveURL string `json:"approve_url,omitempty"`
 }
 
 // grantValuesBody is POST /v1/grants/{id}/values's optional body: no body at all, or one with no
@@ -164,7 +174,8 @@ type githubNarrowing struct {
 	// organization permissions among them, unless read_only is set too. The answer names them
 	// sorted, each once.
 	Repositories []string `json:"repositories,omitempty"`
-	// Optional: true limits the token to contents: read and metadata: read. A machine that must
+	// Optional: true limits the token to contents: read, metadata: read, pull_requests: read and
+	// actions: read, less the Actions grant the installation does not hold. A machine that must
 	// only read needs it, with or without repositories.
 	ReadOnly bool `json:"read_only,omitempty"`
 }
@@ -207,7 +218,10 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "read request", err)
 		return
 	}
-	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds, DecidedAt: req.DecidedAt}
+	resp := requestStatusResponse{
+		State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds,
+		DecidedAt: req.DecidedAt, ApproveURL: s.pendingApproveURL(req.State, req.RecordID),
+	}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
 	}

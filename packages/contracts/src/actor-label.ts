@@ -1,4 +1,4 @@
-import { type Actor, serviceSubjectLabel } from "./dispatch-api";
+import { type Actor, type ActorAct, serviceSubjectLabel } from "./dispatch-api";
 
 /**
  * The one way an actor is named, shared by every surface that names one: the Dashboard's
@@ -11,9 +11,32 @@ import { type Actor, serviceSubjectLabel } from "./dispatch-api";
  * when the registry is unavailable.
  */
 
-/** `session:01234567…` — how an untitled session reads everywhere. */
+/** The person an act is recorded as, with the agent that made it for them beside it:
+ *  `<person>, acting through session <id>` when the act names the session a broker-issued token
+ *  proved, `<person>, acting through token <name>` when it names only the personal token, and
+ *  `person` alone when there is no act, which is every act a person made at a browser.
+ *
+ *  Every surface that shows who acted or who answered renders it through here, the dashboard's
+ *  and the agent tools' alike, so no reader takes an agent's act for the person's own words. An
+ *  act that names neither a session nor a token names no agent to show, so it reads as the
+ *  person alone. */
+export function actorActText(person: string, act: ActorAct | undefined): string {
+  if (act === undefined) {
+    return person;
+  }
+  if (act.session !== undefined && act.session !== "") {
+    return `${person}, acting through session ${act.session}`;
+  }
+  if (act.token_name !== undefined && act.token_name !== "") {
+    return `${person}, acting through token ${act.token_name}`;
+  }
+  return person;
+}
+
+/** `session:01234567…` — how an untitled session reads everywhere. The Legion daemon's write
+ *  identity, `legion-daemon:<PROJECT>`, reads whole: its first 8 characters name nobody. */
 export function shortSessionId(id: string): string {
-  return `session:${id.slice(0, 8)}…`;
+  return id.startsWith("legion-daemon:") ? id : `session:${id.slice(0, 8)}…`;
 }
 
 /** The one session label: the live registry title, else the title stamped on the write, else

@@ -16,6 +16,10 @@ export const PHONE_VIEWPORT_QUERY = "(max-width: 767px)";
  *  default; at a 20 px one the `md:` classes switch at 960 px while a pixel query still would at
  *  768. */
 export const MD_VIEWPORT_QUERY = "(min-width: 48rem)";
+/** Tailwind's `xl`: from 1280 px the Inbox shows its reading pane beside the list. In `rem`, and
+ *  for `MD_VIEWPORT_QUERY`'s reason: it is paired with `xl:` classes, which Tailwind declares at
+ *  `80rem`, so only a `rem` query switches with them at any default font size. */
+export const READING_PANE_QUERY = "(min-width: 80rem)";
 
 const focusableSelector = [
   "a[href]",

@@ -60,11 +60,11 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	var lifetime *int
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service
+	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at),
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service, c.host
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrGrantNotLive
 	}
@@ -84,11 +84,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	if err != nil {
 		return nil, nil, err
 	}
-	// One snapshot of the policy serves both the re-check and the minters' inputs, so a release
-	// mints for the github-owners the grant was just checked against, never a later read's.
+	// One policy snapshot serves both the grant re-check and the minters' name, tier and owners.
 	set := m.Policy.Get()
 	if policyVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -121,7 +120,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.release(ctx, g, secrets.MintRequest{GitHubOwners: set.Secrets[g.name].GitHubOwnerLogins(), GitHubNarrowing: narrowing})
+		value, err := m.release(ctx, g, set.Secrets[g.name], narrowing)
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
@@ -241,23 +240,25 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 	return reason
 }
 
-// release is one granted name's value. A stored secret reads its frozen source and ignores req. A
-// kind source reads its frozen store source the same way, through the store's own Read (on Secret
-// Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value in
-// req to the kind's minter and returns only what the minter makes. req.GitHubOwners is the name's
-// github-owners in the policy snapshot Values checked the grant against, so a list narrowed after
-// a grant holds at the grant's next release, and a name that snapshot does not serve gets none,
-// which the github-app minter refuses. Only the github-app minter reads req.GitHubNarrowing. A
-// minter's refusal of the narrowing itself (secrets.ErrMintNarrowingRefused) is returned as it is,
+// release is one granted name's value. A stored secret reads its frozen source and ignores the
+// policy metadata and narrowing. A kind source reads its frozen store source (on Secret
+// Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value
+// and the name, tier and GitHub owners from the policy snapshot Values checked to the minter.
+// An Azure login also requires this name's grant decision to be approval, never automatic.
+// Only the github-app minter reads narrowing. A minter's refusal of the narrowing itself
+// (secrets.ErrMintNarrowingRefused) is returned as it is,
 // for Values to log as a refused narrowing, and is no mint failure. A deleted secret stops
 // releasing once the policy drops it: `agent-secrets secret delete` rereads the name at once.
-func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.MintRequest) (string, error) {
+func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (string, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
 		return "", fmt.Errorf("secret %s: %w", g.name, err)
 	}
 	if !minted {
 		return m.Secrets.Read(ctx, source)
+	}
+	if kind == policy.KindAzureLogin && g.decision != policy.Approval {
+		return "", fmt.Errorf("%w: %w: Azure login requires a person's approval", ErrMintFailed, secrets.ErrMintRefused)
 	}
 	mint := m.Minters[kind]
 	if mint == nil {
@@ -267,8 +268,10 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.Mi
 	if err != nil {
 		return "", err
 	}
-	req.Value = value
-	token, err := mint(ctx, req)
+	token, err := mint(ctx, secrets.MintRequest{
+		Name: g.name, HumanTier: served.Tier == policy.TierHuman, Value: value,
+		GitHubOwners: served.GitHubOwnerLogins(), GitHubNarrowing: narrowing,
+	})
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
 		return "", err
 	}
@@ -578,7 +581,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
 			return Request{}, false, err
 		}
@@ -606,8 +609,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 
 // RecordKind reads a credential-request record's own kind ("agent_secret" or
 // "launcher_credential") — the one column api.decideRecord needs before it knows which service's
-// ApplyDecision a record id belongs to, and api.readRecord needs to decide what an already-read
-// detail means. pgx.ErrNoRows means no such record.
+// ApplyDecision a record id belongs to. pgx.ErrNoRows means no such record.
 func (m *Machine) RecordKind(ctx context.Context, recordID string) (string, error) {
 	var kind string
 	err := m.Store.Pool.QueryRow(ctx, `select kind from credential_requests where id=$1`, recordID).Scan(&kind)
@@ -723,15 +725,22 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 	return out, rows.Err()
 }
 
-// RecordDecision is a decided credential-request record's own terminal event, for
-// GET /v1/credential-requests/{id}'s "decided" field.
+// RecordDecision is a decided credential-request record's own terminal event, for the broker's
+// approval page and POST /v1/machine-logins/lookup's "decided" field.
 type RecordDecision struct {
 	Event        string
 	At           time.Time
 	CredentialID string
+	// Login is the person who decided the record, empty for an event no person made (expired,
+	// cancelled).
+	Login string
+	// Detail is what the decision records beside its event, empty when it records nothing. An
+	// agent_secret approval carries one exactly when ApplyDecision recorded the request denied
+	// rather than granted, because its requesting enrollment was no longer live.
+	Detail string
 }
 
-// RecordDetail is a full credential-request record for GET /v1/credential-requests/{id}: its
+// RecordDetail is a full credential-request record for the broker's approval page: its
 // decoded request object plus its current state, folding in a later grant revocation the record's
 // own decision events never overwrite (State becomes "revoked" while Decided keeps the original
 // approval). Enrollment is nil for a machine login (Kind == "launcher_credential"), which carries
@@ -753,8 +762,8 @@ type RecordDetail struct {
 	Session         Session
 }
 
-// ReadRecord reads a credential-request record's full detail by id, for GET
-// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
+// ReadRecord reads a credential-request record's full detail by id, for the broker's approval page
+// and, reused verbatim, POST /v1/machine-logins/lookup.
 // pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
 	var canonical, approver, kind, requestSession, enrollmentSession string
@@ -800,15 +809,16 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	// by its request's state, a machine login by its terminal event. A decided record's terminal
 	// event names the decision; a request an ended enrollment cancelled before endEnrollment wrote
 	// that event has none, and its request row stands in for it.
-	var event, credID string
+	var event, credID, login, eventDetail string
 	var decidedAt time.Time
 	if agentSecret {
-		err = m.Store.Pool.QueryRow(ctx, `select coalesce(ev.event, r.state), coalesce(ev.at, r.decided_at), coalesce(ev.credential_id, '')
+		err = m.Store.Pool.QueryRow(ctx, `select coalesce(ev.event, r.state), coalesce(ev.at, r.decided_at), coalesce(ev.credential_id, ''),
+				coalesce(ev.login, ''), coalesce(ev.detail, r.decision_detail, '')
 			from requests r left join credential_request_events ev on ev.record_id=r.record_id and ev.event = any($2)
-			where r.record_id=$1 and r.state <> 'pending'`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+			where r.record_id=$1 and r.state <> 'pending'`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID, &login, &eventDetail)
 	} else {
-		err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
-			where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+		err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,''), coalesce(login, ''), coalesce(detail, '') from credential_request_events
+			where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID, &login, &eventDetail)
 	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -817,7 +827,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		return RecordDetail{}, err
 	}
 	detail.State = event
-	detail.Decided = &RecordDecision{Event: event, At: decidedAt, CredentialID: credID}
+	detail.Decided = &RecordDecision{Event: event, At: decidedAt, CredentialID: credID, Login: login, Detail: eventDetail}
 	var revoked int
 	err = m.Store.Pool.QueryRow(ctx, `select 1 from credential_request_events where record_id=$1 and event='revoked' limit 1`, recordID).Scan(&revoked)
 	switch {

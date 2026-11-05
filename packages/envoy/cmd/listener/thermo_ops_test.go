@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/config"
+	"github.com/sjawhar/envoy/internal/logging"
 )
 
 func TestThermoOpsListenerConfigDefaultsToLoopback(t *testing.T) {
@@ -64,7 +66,7 @@ func TestThermoOpsRoleSetRejectsUnregisteredSession(t *testing.T) {
 		"/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_unregistered","role":"legion-controller"}`),
 	)
-	roleSetHandler(state, "test-machine").ServeHTTP(recorder, request)
+	roleSetHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("unregistered role claimant status = %d, want 404: %s", recorder.Code, recorder.Body.String())
@@ -72,7 +74,7 @@ func TestThermoOpsRoleSetRejectsUnregisteredSession(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "registered") {
 		t.Fatalf("unregistered role claimant response = %q, want registration error", recorder.Body.String())
 	}
-	if _, err := registry.Get("ses_unregistered"); !errors.Is(err, nats.ErrKeyNotFound) {
+	if _, err := registry.Get(context.Background(), "ses_unregistered"); !errors.Is(err, nats.ErrKeyNotFound) {
 		t.Fatalf("unregistered role claimant created an interest: %v", err)
 	}
 }

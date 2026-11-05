@@ -14,11 +14,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // refusingPublisher refuses one topic as NATS refuses an envelope it cannot take, and publishes
 // the rest, counting every attempt by topic.
 type refusingPublisher struct {
+	publishOnly
 	mu       sync.Mutex
 	refuse   string
 	attempts map[string]int
@@ -34,6 +36,19 @@ func (p *refusingPublisher) Publish(item contracts.Envelope) error {
 	}
 	p.items = append(p.items, item)
 	return nil
+}
+
+func (p *refusingPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
+
+func (p *refusingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
+// Request takes a role forward by its envelope's topic, the role's, as Publish takes a publish.
+func (p *refusingPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return answered(p.Publish(item))
 }
 
 func (p *refusingPublisher) snapshot() (map[string]int, []string) {
@@ -68,9 +83,7 @@ func (b *lockedBuffer) String() string {
 // published, and the event is marked published instead of backing off forever.
 func TestRunTreatsADestinationNATSRefusesAsDone(t *testing.T) {
 	var logged lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
 
 	database := storetest.Open(t)
 	broker := events.NewBroker()

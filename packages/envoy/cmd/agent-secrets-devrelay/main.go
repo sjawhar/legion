@@ -1,13 +1,15 @@
-// Command agent-secrets-devrelay is the local dev stack's stand-in for Dispatch's
-// credential-request relay, so the credential-request broker
-// (packages/envoy/cmd/broker) can be decided by hand without a Dispatch deployment: it calls the
-// broker's approval routes with a listed caller's own ServiceAccount token and the approving
-// human's login, the same request Dispatch's server sends when a signed-in human clicks Approve
-// or Deny.
+// Command agent-secrets-devrelay is the local dev stack's stand-in for Dispatch's machine-login
+// relay, so a machine login to the credential-request broker (packages/envoy/cmd/broker) can be
+// decided by hand without a Dispatch deployment: it calls the broker's approval routes with a
+// listed caller's own ServiceAccount token, the approving human's login and the login's typed
+// code, the same requests Dispatch's server sends when a signed-in human types the code on its
+// machine-login page and clicks Approve or Deny.
 //
-//	agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --account-token-file <file>
-//	agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --account-token-file <file>
 //	agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --account-token-file <file> [--deny]
+//
+// A secret request has no subcommand here: the broker refuses every route a service calls to
+// decide one (403 DECIDE_ON_BROKER_PAGE), and its approver decides it signed in to the broker on
+// the broker's own page, <broker>/approve/<record>.
 //
 // Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_ACCOUNT_TOKEN_FILE,
 // AGENT_SECRETS_APPROVER. The file holds the token of a ServiceAccount the broker lists in
@@ -30,6 +32,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 const exitUsageError = 2
@@ -47,10 +51,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage())
 		return 0
-	case "approve":
-		return cmdDecide(true, args[1:], stdout, stderr)
-	case "deny":
-		return cmdDecide(false, args[1:], stdout, stderr)
 	case "machine-approve":
 		return cmdMachineApprove(args[1:], stdout, stderr)
 	default:
@@ -62,9 +62,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func usage() string {
 	return `usage:
-  agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --account-token-file <file>
-  agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --account-token-file <file>
   agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --account-token-file <file> [--deny]
+
+A secret request is not decided here: its approver signs in to the broker and decides it on the
+broker's own page, <broker>/approve/<record>, the approve_url agent-secrets prints.
 
 Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_ACCOUNT_TOKEN_FILE, AGENT_SECRETS_APPROVER.
 `
@@ -86,7 +87,7 @@ type commonFlags struct {
 
 func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 	c := &commonFlags{}
-	fs.StringVar(&c.broker, "broker", os.Getenv("AGENT_SECRETS_URL"), "broker base URL (default $AGENT_SECRETS_URL)")
+	fs.StringVar(&c.broker, "broker", "", "broker base URL (default $AGENT_SECRETS_URL)")
 	fs.StringVar(&c.tokenFile, "account-token-file", os.Getenv("AGENT_SECRETS_ACCOUNT_TOKEN_FILE"),
 		"file holding the token of a ServiceAccount the broker lists in BROKER_API_ACCOUNTS (default $AGENT_SECRETS_ACCOUNT_TOKEN_FILE)")
 	fs.StringVar(&c.login, "login", os.Getenv("AGENT_SECRETS_APPROVER"), "the deciding human's login (default $AGENT_SECRETS_APPROVER)")
@@ -94,6 +95,11 @@ func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 }
 
 func (c *commonFlags) validate() error {
+	if c.broker == "" {
+		// Read here, not as the flag's default: flag's usage text prints a non-empty default
+		// whole, credential included.
+		c.broker = os.Getenv("AGENT_SECRETS_URL")
+	}
 	if c.broker == "" {
 		return errors.New("--broker (or AGENT_SECRETS_URL) is required")
 	}
@@ -154,9 +160,11 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 		}
 		reader = bytes.NewReader(b)
 	}
+	// Each error naming the URL names it through redact.Error, so no credential the broker's URL
+	// carries prints.
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err, c.base)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -164,7 +172,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err, c.base)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
@@ -187,45 +195,6 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 func writeVerbatim(w io.Writer, raw []byte) {
 	w.Write(raw)
 	fmt.Fprintln(w)
-}
-
-// ---------------------------------------------------------------------------
-// approve / deny
-// ---------------------------------------------------------------------------
-
-func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
-	name := "deny"
-	if approve {
-		name = "approve"
-	}
-	fs := flag.NewFlagSet("agent-secrets-devrelay "+name, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	recordID := fs.String("record", "", "credential-request record id (required)")
-	c := registerCommonFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitUsage(err)
-	}
-	if *recordID == "" {
-		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: --record is required\n", name)
-		return 1
-	}
-	if err := c.validate(); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
-		return 1
-	}
-	client, err := c.client()
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
-		return 1
-	}
-	decideRaw, err := client.do(context.Background(), http.MethodPost,
-		"/v1/credential-requests/"+url.PathEscape(*recordID)+"/"+name, map[string]any{"approver": c.login})
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
-		return 1
-	}
-	writeVerbatim(stdout, decideRaw)
-	return 0
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
-// Applies a live delta (`GET /ws/delivery`'s `delta` frame, LEGION-690) to the body the page holds,
-// and its revision changes to the revisions the page holds. Pure: no React, no cache. Dispatch
-// sends only what moved, so every field, list item, map entry and count the delta does not name
-// stays the very object it was, and a delta that names nothing returns the body itself, which
-// re-renders nothing.
+// Applies a delivery view's `delta` frame from GET /ws/live (LEGION-690) to the body the page
+// holds, and its revision changes to the revisions the page holds. Pure: no React, no cache.
+// Dispatch sends only what moved, so every field, list item, map entry and count the delta does
+// not name stays the very object it was, and a delta that names nothing returns the body itself,
+// which re-renders nothing.
 import type {
   DeliveryLiveBody,
   DeliveryLiveDelta,

@@ -1,0 +1,25 @@
+name: Install the pinned Claude Code
+description: >-
+  Installs the @anthropic-ai/claude-code release .claude-code-pin pins (the repository's one copy
+  of the pin, an npm version on one line) with Bun into the runner's temporary directory, and
+  exports its path as LEGION_TEST_CLAUDE for the tests that run it; they refuse on GitHub Actions
+  without one. `bun add` rather than `bunx`, so the binary has a path the job names: bunx keeps its
+  install under a cache directory of its own layout. Needs the repository checked out and Bun on
+  PATH (.github/actions/setup-bun).
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Claude Code
+      shell: bash
+      run: |
+        set -euo pipefail
+        pin=$(<.claude-code-pin)
+        test -n "$pin"
+        started=$(date +%s)
+        directory="$RUNNER_TEMP/claude-code-$pin"
+        mkdir -p "$directory"
+        bun add --cwd "$directory" --exact --no-save "@anthropic-ai/claude-code@$pin"
+        claude="$directory/node_modules/.bin/claude"
+        "$claude" --version
+        echo "installed @anthropic-ai/claude-code@$pin in $(( $(date +%s) - started ))s"
+        echo "LEGION_TEST_CLAUDE=$claude" >> "$GITHUB_ENV"

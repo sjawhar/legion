@@ -227,9 +227,7 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 			t.Fatalf("fired %d stop timeouts after the operator's suspend, want the held suspension's one", fired)
 		}
 	default:
-		if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-			t.Fatalf("end the implementer's turn: %v", err)
-		}
+		endTurn(ctx, t, machine, implementer)
 	}
 	if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != wantBy ||
 		got.Session != "ses-implementer" || got.SessionFile != "/tmp/implementer.jsonl" {

@@ -48,7 +48,6 @@ test("the label cloud reads the project's loaded issue list instead of fetching 
         labels={["bug"]}
         onSave={() => Promise.resolve()}
         project="CORE"
-        saveError={false}
         saving={false}
       />
     </QueryClientProvider>
@@ -77,7 +76,6 @@ test("a rejected create shows its error until the next keystroke clears it", asy
         labels={[]}
         onSave={() => Promise.resolve()}
         project="CORE"
-        saveError={false}
         saving={false}
       />
     </QueryClientProvider>

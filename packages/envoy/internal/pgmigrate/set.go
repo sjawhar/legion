@@ -11,17 +11,17 @@
 package pgmigrate
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
-	"math"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
 )
 
-// Migration is one numbered forward migration.
+// Migration is one forward migration, identified by the version its file name carries.
 type Migration struct {
 	Version int
 	Name    string
@@ -40,8 +40,10 @@ type Migration struct {
 // An entry is <version>_<name>.up.sql, a forward migration, <version>_<name>.down.sql, a
 // rollback script an operator runs by hand and no runner applies, or <version>_<name>.census.sql,
 // the migration's census (Migration.Census), which a deployment reads with Census and no runner
-// runs. <version> is decimal digits naming a number from 1 to the largest the runners' integer
-// version column holds. Load refuses the whole set, naming the files, when:
+// runs. <version> is decimal digits naming a positive number the runners' bigint version column
+// holds: either one of the numbers the sets grew up with, or, for every migration added since,
+// the UTC moment its author created it, 14 digits YYYYMMDDHHMMSS. Load refuses the whole set,
+// naming the files, when:
 //
 //   - two forward migrations share a version: a runner records a migration by its version, so it
 //     would apply the first, pass over the rest as already applied, and report success;
@@ -55,9 +57,12 @@ type Migration struct {
 //
 // It reports every problem it finds and returns no migration when it finds one, so a runner that
 // calls it before opening a transaction applies nothing from a set it refuses. The order is the
-// versions', never the file names': 9_a.up.sql runs before 0010_b.up.sql. Versions need not be
-// contiguous for a runner to apply them; that a set skips no number is the repository's rule
-// about handing numbers out, which pgmigratetest.CheckNumberedOneToN holds both stores' sets to.
+// versions', never the file names': 9_a.up.sql runs before 0010_b.up.sql, and every timestamp
+// after every number. Load judges no version past its digits; that a set's numbered versions run
+// 1 to the file its series closed at (recorded once in migrationid), each taken once,
+// and that every version above them is a real UTC instant is the repository's rule about handing
+// identifiers out, which migrationid.Check holds Dispatch's set to and
+// pgmigratetest.CheckNumberedOneToN the broker's, which is numbered throughout.
 func Load(fsys fs.FS, dir string) ([]Migration, error) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
@@ -127,7 +132,7 @@ func Load(fsys fs.FS, dir string) ([]Migration, error) {
 		}
 	}
 	// Stable, so files that share a version stay in name order for the refusal that names them.
-	slices.SortStableFunc(migrations, func(a, b Migration) int { return a.Version - b.Version })
+	slices.SortStableFunc(migrations, func(a, b Migration) int { return cmp.Compare(a.Version, b.Version) })
 	for start := 0; start < len(migrations); {
 		end := start + 1
 		for end < len(migrations) && migrations[end].Version == migrations[start].Version {
@@ -135,7 +140,7 @@ func Load(fsys fs.FS, dir string) ([]Migration, error) {
 		}
 		if end-start > 1 {
 			problems = append(problems, fmt.Errorf(
-				"migrations %s share version %d: a runner records a migration by its version, so it would apply the first and skip the rest as already applied; keep the number on the file that merged to main first, since a database may already have applied it, and renumber the rest to the next free numbers on main",
+				"migrations %s share version %d: a runner records a migration by its version, so it would apply the first and skip the rest as already applied; keep the version on the file that merged to main first, since a database may already have applied it, and give each of the rest the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%%Y%%m%%d%%H%%M%%S)",
 				joinNames(migrations[start:end]), migrations[start].Version))
 		}
 		start = end
@@ -146,15 +151,17 @@ func Load(fsys fs.FS, dir string) ([]Migration, error) {
 	return migrations, nil
 }
 
-// parseVersion reads the version a forward migration's stem begins with.
+// parseVersion reads the version a forward migration's stem begins with: a number for the
+// migrations the sets grew up with, a 14-digit UTC timestamp for every one added since, which is
+// why it reads 64 bits and the version columns are bigint.
 func parseVersion(stem string) (int, error) {
 	digits, _, ok := strings.Cut(stem, "_")
 	if !ok || digits == "" || strings.Trim(digits, "0123456789") != "" {
 		return 0, errors.New("its name does not begin with a version: <version>_<name>.up.sql, <version> decimal digits")
 	}
-	version, err := strconv.ParseInt(digits, 10, 32)
+	version, err := strconv.ParseInt(digits, 10, 64)
 	if err != nil || version < 1 {
-		return 0, fmt.Errorf("version %s is not a number from 1 to %d", digits, math.MaxInt32)
+		return 0, fmt.Errorf("version %s is not a number from 1 that the runners' bigint version column holds", digits)
 	}
 	return int(version), nil
 }

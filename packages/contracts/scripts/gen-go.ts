@@ -5,9 +5,27 @@ import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DISPATCH_LOGIN_CHANGED,
+  DISPATCH_LOGIN_HEADER,
+  DISPATCH_SIGN_IN_REQUIRED,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
+  IDEMPOTENCY_KEY_INVALID,
+  IDEMPOTENCY_KEY_MAX,
+  IDEMPOTENCY_KEY_PATTERN,
+  IDEMPOTENCY_KEY_REUSED,
+  IDEMPOTENCY_KEY_TTL_MS,
+  IDEMPOTENCY_LEASE_MS,
+  IDEMPOTENCY_REPLAYED_HEADER,
   ISSUE_TITLE_MAX,
+  LIVE_SOCKET_MAX_AGE_CLOSE,
+  LIVE_SOCKET_MAX_AGE_MS,
+  LIVE_SOCKET_MAX_SUBSCRIPTIONS,
+  LIVE_SOCKET_MIN_AGE_MS,
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -16,7 +34,11 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
+  ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
+  DISPATCH_HANDOFF_BODY_MAX,
+  HANDOFF_PHASE_PATTERN,
+  HANDOFF_PHASE_RULE_WORDS,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   SEARCH_KIND_DEPTH,
@@ -24,7 +46,7 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
-import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
+import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
 
@@ -45,6 +67,7 @@ type Schema = {
 };
 
 const envelopeFile = resolve(import.meta.dir, "../schemas/envelope.schema.json");
+const blockSchemaFile = resolve(import.meta.dir, "../schemas/block-schema.schema.json");
 
 const map = {
   string: "string",
@@ -90,6 +113,9 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
+
+// GithubTopicPrefix begins every GitHub subject, before the repository's owner and name.
+const GithubTopicPrefix = "notifications.github."
 
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
 // notification stream and by every host that subscribes over core NATS. Generated from
@@ -165,6 +191,29 @@ const IssueTitleMax = ${ISSUE_TITLE_MAX}
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = ${DISPATCH_BODY_MAX}
 
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = ${ASK_QUESTION_MAX}
+
+// DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
+// POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
+// packages/contracts so the server's 413 and the \`dispatch handoff-write\` command's pre-send
+// refusal cannot drift apart.
+const DispatchHandoffBodyMax = ${DISPATCH_HANDOFF_BODY_MAX}
+
+// HandoffPhaseRule says the handoff-phase pattern's rule in words; every refusal of a phase that is
+// not a handoff phase gives it. Generated from HANDOFF_PHASE_RULE_WORDS in packages/contracts so
+// the server and the tool word it once.
+const HandoffPhaseRule = ${JSON.stringify(HANDOFF_PHASE_RULE_WORDS)}
+
+// HandoffPhasePattern is a handoff's phase, the {phase} segment of the handoff routes, which the
+// handoffs.phase check constraint holds too. Generated from HANDOFF_PHASE_PATTERN in
+// packages/contracts, which the dispatch command checks a phase against, so the two accept the
+// same phases.
+const HandoffPhasePattern = ${JSON.stringify(HANDOFF_PHASE_PATTERN.source)}
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.
@@ -177,6 +226,63 @@ const ProjectNameMax = ${PROJECT_NAME_MAX}
 const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
 const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
 
+// LiveSocketMaxAgeClose is the close code Dispatch ends a live socket with once the socket reaches
+// its age, a random point in [LiveSocketMinAge, LiveSocketMaxAge), and LiveSocketMaxSubscriptions
+// the most subscriptions one live socket holds. Generated from LIVE_SOCKET_MAX_AGE_CLOSE,
+// LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS and LIVE_SOCKET_MAX_SUBSCRIPTIONS in
+// packages/contracts so the server's close and limit and the dashboard's reading of them cannot
+// drift apart.
+const LiveSocketMaxAgeClose = ${LIVE_SOCKET_MAX_AGE_CLOSE}
+const LiveSocketMinAge = ${LIVE_SOCKET_MIN_AGE_MS} * time.Millisecond
+const LiveSocketMaxAge = ${LIVE_SOCKET_MAX_AGE_MS} * time.Millisecond
+const LiveSocketMaxSubscriptions = ${LIVE_SOCKET_MAX_SUBSCRIPTIONS}
+
+// IdempotencyKeyHeader is the request header a write names its intent with, the same on every
+// retry of that intent, and IdempotencyReplayedHeader the response header (?1) on an answer
+// replayed from the first request under the key rather than run again. Generated from
+// IDEMPOTENCY_KEY_HEADER and IDEMPOTENCY_REPLAYED_HEADER in packages/contracts so the server, the
+// dashboard and the agents' client name them once.
+const IdempotencyKeyHeader = ${JSON.stringify(IDEMPOTENCY_KEY_HEADER)}
+const IdempotencyReplayedHeader = ${JSON.stringify(IDEMPOTENCY_REPLAYED_HEADER)}
+
+// IdempotencyKeyMax is the longest key and IdempotencyKeyPattern a whole one. Generated from
+// IDEMPOTENCY_KEY_MAX and IDEMPOTENCY_KEY_PATTERN in packages/contracts so the server's refusal and
+// the keys every client mints cannot drift apart.
+const IdempotencyKeyMax = ${IDEMPOTENCY_KEY_MAX}
+const IdempotencyKeyPattern = ${JSON.stringify(IDEMPOTENCY_KEY_PATTERN.source)}
+
+// The codes of a keyed write's refusals and of a replay whose first answer was not kept: a key
+// used for another request (422), a key whose first request still runs (409), a key whose write
+// landed and whose answer was lost (409), a header that is not a key (400), and a first answer too
+// large to keep. Generated from IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_IN_FLIGHT,
+// IDEMPOTENCY_KEY_COMMITTED, IDEMPOTENCY_KEY_INVALID and IDEMPOTENCY_ANSWER_NOT_KEPT in
+// packages/contracts so the server's codes and the clients' reading of them cannot drift apart.
+const IdempotencyKeyReused = ${JSON.stringify(IDEMPOTENCY_KEY_REUSED)}
+const IdempotencyKeyInFlight = ${JSON.stringify(IDEMPOTENCY_KEY_IN_FLIGHT)}
+const IdempotencyKeyCommitted = ${JSON.stringify(IDEMPOTENCY_KEY_COMMITTED)}
+const IdempotencyKeyInvalid = ${JSON.stringify(IDEMPOTENCY_KEY_INVALID)}
+const IdempotencyAnswerNotKept = ${JSON.stringify(IDEMPOTENCY_ANSWER_NOT_KEPT)}
+
+// IdempotencyKeyTTL is how long Dispatch keeps a key's answer, and IdempotencyLease how long a
+// key's first request holds it before a repeat may run it again. Generated from
+// IDEMPOTENCY_KEY_TTL_MS and IDEMPOTENCY_LEASE_MS in packages/contracts so the server's windows and
+// the clients' account of them cannot drift apart.
+const IdempotencyKeyTTL = ${IDEMPOTENCY_KEY_TTL_MS} * time.Millisecond
+const IdempotencyLease = ${IDEMPOTENCY_LEASE_MS} * time.Millisecond
+
+// DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
+// of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
+// is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
+// packages/contracts so the server's check and the page's header cannot drift apart.
+const DispatchLoginHeader = ${JSON.stringify(DISPATCH_LOGIN_HEADER)}
+const DispatchLoginChanged = ${JSON.stringify(DISPATCH_LOGIN_CHANGED)}
+
+// DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
+// names a session and a service but no person: the machine holding it has signed nobody in.
+// Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
+// every client's reading of it cannot drift apart.
+const DispatchSignInRequired = ${JSON.stringify(DISPATCH_SIGN_IN_REQUIRED)}
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }
@@ -185,15 +291,15 @@ func AgentSubject(session string) string {
 	return AgentTopicPrefix + session
 }
 
-// githubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
+// GithubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
 // segment: a name may hold a dot, which a NATS subject splits on. Mirrored on the TS side as
 // \`githubRepositoryPrefix\`.
-func githubRepositoryPrefix(owner, repo string) string {
-	return "notifications.github." + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
+func GithubRepositoryPrefix(owner, repo string) string {
+	return GithubTopicPrefix + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
 }
 
 func GithubSubject(owner string, repo string, kind string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + kind
+	return GithubRepositoryPrefix(owner, repo) + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
@@ -215,22 +321,46 @@ func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind
 }
 
+// SubjectMaxBytes is the longest subject the bus publishes on, in bytes: bus's maxSubjectBytes, the
+// NATS server's 4 KiB max control line less the rest of the longest protocol line nats.go sends.
+// The bus refuses a longer subject before sending it, since the server would close the connection
+// over it. Generated from SUBJECT_MAX_BYTES in packages/contracts.
+const SubjectMaxBytes = ${SUBJECT_MAX_BYTES}
+
+// GithubPushSubject names a push by its ref name, one segment, sanitized. The ref is the one part of
+// a GitHub subject that GitHub bounds only as git does, which is not at all, so a subject past
+// SubjectMaxBytes keeps of the segment what fits, cut between runes, followed by ~ and the first 16
+// hex digits of the SHA-256 of the whole ref name, and is then at most SubjectMaxBytes: the bus
+// publishes it, and two refs that share the kept text still have two subjects. Git refuses ~ in a
+// ref, so a cut segment is never another ref's whole one. A consumer that needs the exact ref reads
+// the payload's ref. Mirrored on the TS side as \`githubPushSubject\`.
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	return githubRepositoryPrefix(owner, repo) + ".push." + refType + "." + SanitizeSubjectSegment(refName)
+	prefix := GithubRepositoryPrefix(owner, repo) + ".push." + refType + "."
+	segment := SanitizeSubjectSegment(refName)
+	if len(prefix)+len(segment) <= SubjectMaxBytes {
+		return prefix + segment
+	}
+	digest := sha256.Sum256([]byte(refName))
+	suffix := "~" + hex.EncodeToString(digest[:8])
+	keep := max(SubjectMaxBytes-len(prefix)-len(suffix), 0)
+	for keep > 0 && !utf8.RuneStart(segment[keep]) {
+		keep--
+	}
+	return prefix + segment[:keep] + suffix
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 // GithubJobSubject names a finished GitHub Actions job on the default branch, of a run with no pull
 // request, by its run. Mirrored on the TS side as \`githubJobSubject\`.
 func GithubJobSubject(owner, repo, runID, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
+	return GithubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."
@@ -409,10 +539,13 @@ function renderContracts(envelope: Schema) {
   return `package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 ${renderEnvelope(envelope)}
@@ -431,48 +564,284 @@ const MessageBodyLimit = ${DISPATCH_BODY_MAX}
 `;
 }
 
-const envelope = (await Bun.file(envelopeFile).json()) as Schema;
+// The slice of JSON Schema that schemas/block-schema.schema.json uses, which the block schema
+// renderers below read. `x-ordered` marks an object whose keys carry their declaration order,
+// `x-go-type` names the Go type holding such an object, and `x-go-constants` names the Go
+// constant of each value of a string enum.
+type BlockProp = {
+  description?: string;
+  type?: "object" | "array" | "string" | "integer" | "boolean";
+  $ref?: string;
+  const?: string;
+  enum?: string[];
+  items?: BlockProp;
+  anyOf?: BlockProp[];
+  properties?: Record<string, BlockProp>;
+  required?: string[];
+  additionalProperties?: BlockProp;
+  "x-ordered"?: boolean;
+  "x-go-type"?: string;
+  "x-go-constants"?: Record<string, string>;
+};
 
-// Every generated Go file this script owns. The daemon carries its own copy of the body cap
-// rather than importing the envoy package: its production build imports nothing from
-// github.com/sjawhar/envoy.
+type BlockSchemaDocument = BlockProp & { title: string; $defs: Record<string, BlockProp> };
+
+function blockRefName(ref: string) {
+  const referenced = ref.split("/").pop();
+  if (!referenced) throw new Error(`unsupported block schema $ref ${ref}`);
+  return referenced;
+}
+
+function blockDescription(prop: BlockProp, what: string) {
+  if (!prop.description) throw new Error(`block schema ${what} has no description`);
+  return prop.description;
+}
+
+// A description as comment lines of at most 100 columns, each behind prefix.
+function blockComment(text: string, prefix: string) {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/)) {
+    const candidate = line === "" ? word : `${line} ${word}`;
+    if (line !== "" && prefix.length + candidate.length > 100) {
+      lines.push(prefix + line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line !== "") lines.push(prefix + line);
+  return lines;
+}
+
+function blockDoc(text: string) {
+  return ["/**", ...blockComment(text, " * "), " */"];
+}
+
+function blockGoType(prop: BlockProp): string {
+  if (prop.$ref) return blockRefName(prop.$ref);
+  // A value of several scalar shapes (an attribute's default) is held as it comes off the wire.
+  if (prop.anyOf) return "any";
+  switch (prop.type) {
+    case "string":
+      return "string";
+    case "integer":
+      return "int";
+    case "boolean":
+      return "bool";
+    case "array":
+      if (!prop.items) throw new Error("a block schema array has no items");
+      return `[]${blockGoType(prop.items)}`;
+    case "object": {
+      const goType = prop["x-go-type"];
+      if (!prop["x-ordered"] || !goType) {
+        throw new Error("a block schema object property needs x-ordered and x-go-type");
+      }
+      return goType;
+    }
+    default:
+      throw new Error(`unsupported block schema type ${prop.type}`);
+  }
+}
+
+function blockTypeScriptType(prop: BlockProp): string {
+  if (prop.$ref) return blockRefName(prop.$ref);
+  if (prop.anyOf) return prop.anyOf.map(blockTypeScriptType).join(" | ");
+  switch (prop.type) {
+    case "string":
+      return prop.const === undefined ? "string" : JSON.stringify(prop.const);
+    case "integer":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "array":
+      if (!prop.items) throw new Error("a block schema array has no items");
+      return `readonly ${blockTypeScriptType(prop.items)}[]`;
+    case "object": {
+      const values = prop.additionalProperties;
+      if (!prop["x-ordered"] || !values) {
+        throw new Error("a block schema object property needs x-ordered and additionalProperties");
+      }
+      // A JavaScript object keeps the insertion order of its string keys, so the object the
+      // server sends carries the declaration order the Go decoder keeps.
+      return `Readonly<Record<string, ${blockTypeScriptType(values)}>>`;
+    }
+    default:
+      throw new Error(`unsupported block schema type ${prop.type}`);
+  }
+}
+
+function blockFields(typeName: string, prop: BlockProp) {
+  if (!prop.properties) throw new Error(`block schema object ${typeName} has no properties`);
+  const req = new Set(prop.required ?? []);
+  return Object.entries(prop.properties).map(([key, field]) => ({
+    key,
+    field,
+    required: req.has(key),
+  }));
+}
+
+function renderBlockGoStruct(typeName: string, prop: BlockProp) {
+  const fields = blockFields(typeName, prop).map(({ key, field, required }) => {
+    const tag = required ? key : `${key},omitempty`;
+    // A $ref carries its description on the definition it names, which is rendered there.
+    const doc = field.$ref
+      ? []
+      : blockComment(blockDescription(field, `${typeName}.${key}`), "\t// ");
+    return [...doc, `\t${name(key)} ${blockGoType(field)} \`json:"${tag}"\``].join("\n");
+  });
+  return [
+    ...blockComment(blockDescription(prop, typeName), "// "),
+    `type ${typeName} struct {`,
+    ...fields,
+    "}",
+  ].join("\n");
+}
+
+function renderBlockGoEnum(typeName: string, prop: BlockProp) {
+  const constants = prop["x-go-constants"];
+  if (!prop.enum?.length || !constants) {
+    throw new Error(`block schema enum ${typeName} needs enum values and x-go-constants`);
+  }
+  const values = prop.enum.map((value) => {
+    const constant = constants[value];
+    if (!constant) throw new Error(`block schema enum ${typeName} value ${value} has no constant`);
+    return `\t${constant} ${typeName} = ${JSON.stringify(value)}`;
+  });
+  return [
+    ...blockComment(blockDescription(prop, typeName), "// "),
+    `type ${typeName} string`,
+    "",
+    "const (",
+    ...values,
+    ")",
+  ].join("\n");
+}
+
+function renderBlockInterface(typeName: string, prop: BlockProp) {
+  const fields = blockFields(typeName, prop).map(({ key, field, required }) => {
+    const doc = field.$ref
+      ? []
+      : blockDoc(blockDescription(field, `${typeName}.${key}`)).map((line) => `  ${line}`);
+    const optional = required ? "" : "?";
+    return [...doc, `  readonly ${key}${optional}: ${blockTypeScriptType(field)};`].join("\n");
+  });
+  return [
+    ...blockDoc(blockDescription(prop, typeName)),
+    `export interface ${typeName} {`,
+    ...fields,
+    "}",
+  ].join("\n");
+}
+
+function renderBlockUnion(typeName: string, prop: BlockProp) {
+  if (!prop.enum?.length) throw new Error(`block schema enum ${typeName} has no values`);
+  const values = prop.enum.map((value) => JSON.stringify(value));
+  const line = `export type ${typeName} = ${values.join(" | ")};`;
+  const body =
+    line.length <= 100
+      ? line
+      : `export type ${typeName} =\n${values.map((value) => `  | ${value}`).join("\n")};`;
+  return [...blockDoc(blockDescription(prop, typeName)), body].join("\n");
+}
+
+// The Go the server reads its own block schema with: the types blocks.json is decoded into, and
+// the attribute order every renderer of a typed block follows. The BlockAttributes type that
+// `x-go-type` names is hand-written beside the generated file, in pmdoc/block_attributes.go: the
+// schema shapes the field, not the ordered decoding behind it.
+function renderBlockSchemaGo(document: BlockSchemaDocument) {
+  const definitions = Object.entries(document.$defs).map(([typeName, definition]) =>
+    definition.enum
+      ? renderBlockGoEnum(typeName, definition)
+      : renderBlockGoStruct(typeName, definition)
+  );
+  return `// Code generated by packages/contracts/scripts/gen-go.ts from
+// packages/contracts/schemas/block-schema.schema.json. DO NOT EDIT.
+
+package pmdoc
+
+${renderBlockGoStruct(document.title, document)}
+
+${definitions.join("\n\n")}
+`;
+}
+
+// The same shape for every TypeScript client: the browser editor, the SPA and the tools.
+function renderBlockSchemaTypes(document: BlockSchemaDocument) {
+  const definitions = Object.entries(document.$defs).map(([typeName, definition]) =>
+    definition.enum
+      ? renderBlockUnion(typeName, definition)
+      : renderBlockInterface(typeName, definition)
+  );
+  return `// Code generated by scripts/gen-go.ts from schemas/block-schema.schema.json. DO NOT EDIT.
+
+${renderBlockInterface(document.title, document)}
+
+${definitions.join("\n\n")}
+`;
+}
+
+const envelope = (await Bun.file(envelopeFile).json()) as Schema;
+const blockSchema = (await Bun.file(blockSchemaFile).json()) as BlockSchemaDocument;
+
+// Every generated file this script owns, each marked with the language it is written in: a Go
+// file is gofmt-formatted before it is written and before it is compared. The daemon carries its
+// own copy of the body cap rather than importing the envoy package: its production build imports
+// nothing from github.com/sjawhar/envoy.
 const outputs = [
   {
     path: resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go"),
     rendered: renderContracts(envelope),
+    language: "go",
   },
   {
     path: resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go"),
     rendered: renderDaemonDispatch(),
+    language: "go",
   },
-];
+  {
+    path: resolve(import.meta.dir, "../../envoy/internal/dispatch/pmdoc/schema_generated.go"),
+    rendered: renderBlockSchemaGo(blockSchema),
+    language: "go",
+  },
+  {
+    path: resolve(import.meta.dir, "../src/block-schema.generated.ts"),
+    rendered: renderBlockSchemaTypes(blockSchema),
+    language: "ts",
+  },
+] satisfies { path: string; rendered: string; language: "go" | "ts" }[];
 const fmt = Bun.which("gofmt");
 
-// `--check` pipes each render through gofmt and compares it with the committed file, writing
-// nothing, so CI fails on a generated.go that no longer matches the TypeScript it comes from.
+// `--check` pipes each Go render through gofmt and compares every render with the committed
+// file, writing nothing, so CI fails on a generated file that no longer matches the TypeScript or
+// the schema it comes from.
 if (process.argv.includes("--check")) {
   if (fmt === null) {
-    throw new Error("gen-go --check needs gofmt: the committed files are gofmt-formatted");
+    throw new Error("gen-go --check needs gofmt: the committed Go files are gofmt-formatted");
   }
   // GEN_GO_CHECK_ROOT points the comparison at copies of the outputs under another root, laid out
   // by their repository-relative paths, so a test can check a copy instead of a tracked file.
   // Unset, `--check` compares the committed files.
   const checkRoot = process.env.GEN_GO_CHECK_ROOT;
   const repoRoot = resolve(import.meta.dir, "../../..");
-  for (const { path: output, rendered } of outputs) {
+  for (const { path: output, rendered, language } of outputs) {
     const path = checkRoot ? resolve(checkRoot, relative(repoRoot, output)) : output;
-    const gofmt = Bun.spawnSync({
-      cmd: [fmt],
-      stdin: new TextEncoder().encode(rendered),
-      stderr: "inherit",
-    });
-    if (gofmt.exitCode !== 0) {
-      throw new Error("gofmt failed");
+    let expected = rendered;
+    if (language === "go") {
+      const gofmt = Bun.spawnSync({
+        cmd: [fmt],
+        stdin: new TextEncoder().encode(rendered),
+        stderr: "inherit",
+      });
+      if (gofmt.exitCode !== 0) {
+        throw new Error("gofmt failed");
+      }
+      expected = gofmt.stdout.toString();
     }
-    if (gofmt.stdout.toString() !== (await Bun.file(path).text())) {
+    if (expected !== (await Bun.file(path).text())) {
       Bun.spawnSync({
         cmd: ["diff", "-u", path, "-"],
-        stdin: gofmt.stdout,
+        stdin: new TextEncoder().encode(expected),
         stderr: "inherit",
         stdout: "inherit",
       });
@@ -490,10 +859,14 @@ for (const { path, rendered } of outputs) {
   await Bun.write(path, rendered);
 }
 
-// One gofmt for every file written, rather than one spawn per output.
+// One gofmt for every Go file written, rather than one spawn per output.
 if (fmt) {
   const gofmt = Bun.spawnSync({
-    cmd: [fmt, "-w", ...outputs.map(({ path }) => path)],
+    cmd: [
+      fmt,
+      "-w",
+      ...outputs.filter(({ language }) => language === "go").map(({ path }) => path),
+    ],
     stderr: "inherit",
     stdout: "inherit",
   });

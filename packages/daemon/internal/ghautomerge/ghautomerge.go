@@ -32,7 +32,7 @@ const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $numbe
   repository(owner: $owner, name: $name) {
     autoMergeAllowed
     pullRequest(number: $number) {
-      id state headRefOid mergeStateStatus updatedAt isMergeQueueEnabled
+      id state title headRefOid mergeStateStatus updatedAt isMergeQueueEnabled
       autoMergeRequest { enabledAt } mergeQueueEntry { enqueuedAt }
     }
   }
@@ -41,11 +41,21 @@ const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $numbe
 const (
 	disable = `mutation DisableAutoMerge($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }`
 	dequeue = `mutation DequeuePullRequest($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }`
-	enable  = `mutation EnableAutoMerge($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method}) { clientMutationId }
+	// The enable and the merge carry the squash commit's message themselves because GitHub's own
+	// default for it, COMMIT_MESSAGES, joins every commit message of the branch into the body: that is
+	// how a branch commit's Omp-Session: line, its skip-checks: true line and its Dispatch key reach
+	// the base branch's public history. GitHub reads the empty body as a value, not as an omission,
+	// and appends no second (#n) to a headline it was given.
+	//
+	// An arm stores the message when GitHub accepts it, so the merge GitHub makes later carries the
+	// title the pull request had when the daemon armed it, not a title edited since. On a merge-queue
+	// base GitHub ignores both inputs (EnablePullRequestAutoMergeInput says so) and keeps its default
+	// message, which only a repository setting can change.
+	enable = `mutation EnableAutoMerge($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!, $headline: String!, $body: String!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method, commitHeadline: $headline, commitBody: $body}) { clientMutationId }
 }`
-	merge = `mutation MergeREADYHead($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) {
-  mergePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method}) { clientMutationId }
+	merge = `mutation MergeREADYHead($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!, $headline: String!, $body: String!) {
+  mergePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method, commitHeadline: $headline, commitBody: $body}) { clientMutationId }
 }`
 )
 
@@ -194,7 +204,11 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	if !ok {
 		return "", &Unmergeable{Number: number, Repo: repo, Head: head, State: pull.MergeStateStatus, Queue: pull.IsMergeQueueEnabled}
 	}
-	sent := github.GraphQL(ctx, chosen.mutation, map[string]any{"id": pull.ID, "head": head, "method": "SQUASH"}, nil)
+	variables := map[string]any{
+		"id": pull.ID, "head": head, "method": "SQUASH",
+		"headline": fmt.Sprintf("%s (#%d)", pull.Title, number), "body": "",
+	}
+	sent := github.GraphQL(ctx, chosen.mutation, variables, nil)
 	switch {
 	case sent == nil && chosen.merges:
 		return Merged, nil
@@ -462,12 +476,14 @@ type repository struct {
 	PullRequest      *pullRequest `json:"pullRequest"`
 }
 
-// pullRequest is what Disarm and Submit read of a pull request: its node id, state, head, merge
-// state, GitHub's last change to it, whether its base requires a merge queue, and whether auto-merge
-// is enabled and it sits in a merge queue.
+// pullRequest is what Disarm and Submit read of a pull request: its node id, state, title, head,
+// merge state, GitHub's last change to it, whether its base requires a merge queue, and whether
+// auto-merge is enabled and it sits in a merge queue. The title is the headline of the squash
+// commit Submit asks for.
 type pullRequest struct {
 	ID                  string    `json:"id"`
 	State               string    `json:"state"`
+	Title               string    `json:"title"`
 	HeadRefOid          string    `json:"headRefOid"`
 	MergeStateStatus    string    `json:"mergeStateStatus"`
 	UpdatedAt           time.Time `json:"updatedAt"`

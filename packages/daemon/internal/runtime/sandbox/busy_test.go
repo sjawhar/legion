@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -156,17 +155,14 @@ func TestALaunchsRequestStopsWaitingAtItsDeadline(t *testing.T) {
 	}
 }
 
-// burstImage is an image the rig's runtime no longer launches, which a pod launched by an earlier
-// release of the daemon runs (imageDrift).
-const burstImage = "ghcr.io/sjawhar/legion-worker@sha256:0ld0000000000000000000000000000000000000000000000000000000000000"
-
 // A boot onto a new contract relaunches every live role at once (the daemon's stale-plugin pass,
 // which relaunches through the same launch a stale address does), and an API server under that load
 // answers a share of the launches' requests overloaded instead of acting on them: API Priority and
 // Fairness's 429 and the 500 etcd's throttle reaches a client as.
 // Here 24 roles of eight issue pods relaunch at once while every fifth request a launch sends is
-// answered so. Half the pods run an image the runtime no longer launches, so the first relaunch into
-// each replaces it and every kind of request a launch makes meets the throttle: the Sandbox's
+// answered so. Half the pods run the layout before one container, whose launchers this daemon
+// cannot ask to push first, so the first relaunch into each replaces it (movedLayout) and every
+// kind of request a launch makes meets the throttle: the Sandbox's
 // suspension and its Running patch, the wait for the old pod's end, the launcher Secrets' writes
 // and binding, their reads, and the address record. The informers meet it too: their watches end as
 // the burst begins, and the server refuses their next lists and watches for half a second, so every
@@ -206,14 +202,10 @@ func burstOfRelaunches(t *testing.T, feedRefusal error) {
 			name = SandboxName(token)
 		}
 		if i%2 == 0 {
-			g.update(g.pod(name), func(p *corev1.Pod) {
-				for c := range p.Spec.Containers {
-					p.Spec.Containers[c].Image = burstImage
-				}
-			})
-			g.eventually("the pod store to see "+name+"'s old image", func() bool {
-				_, drifted := imageDrift(g.r.storedPod(name), testImage)
-				return drifted
+			g.update(g.pod(name), toEarlierLayout)
+			g.eventually("the pod store to see "+name+"'s earlier layout", func() bool {
+				_, moved := movedLayout(g.r.storedPod(name))
+				return moved
 			})
 		}
 	}
@@ -275,8 +267,8 @@ func burstOfRelaunches(t *testing.T, feedRefusal error) {
 	}
 	for i := 0; i < issues; i += 2 {
 		name := SandboxName(all[i*len(roles)].spec.Claim)
-		if _, drifted := imageDrift(g.pod(name), testImage); drifted {
-			t.Errorf("%s still runs the old image after the burst, want its pod replaced", name)
+		if _, moved := movedLayout(g.pod(name)); moved {
+			t.Errorf("%s still runs the layout before one container after the burst, want its pod replaced", name)
 		}
 	}
 	if tooMany.Load() == 0 || serverError.Load() == 0 {

@@ -20,12 +20,14 @@ import (
 // not record looked up, which the workflow drops unread.
 //
 // The read goes through GitHub's REST review (`GET /pulls/{number}/reviews/{id}`), with the review
-// App's installation token (reviewAppClient, reused rather than duplicated): the same transient
-// mint failure and rate limit are returned as an intake.RetryLater, so intake waits GitHub out
-// before the delivery is tried again rather than applying a review whose footer it could not
-// restore. While GitHub's rate limit stands, the read is answered with the wait left and no call
-// is made, as reviewerCanWrite's permission read is; whichever of the mint or the read itself meets
-// the limit holds it (holdRateLimit). A review App with no installation on the repository's owner
+// App's installation token (reviewAppClient, reused rather than duplicated), which mints for and
+// addresses the repository GitHub holds the review's one under now and answers that repository,
+// so each log line and refusal after the mint names what was read: the same transient mint
+// failure and rate limit are returned as an intake.RetryLater, so intake waits GitHub out before
+// the delivery is tried again rather than applying a review whose footer it could not restore.
+// While GitHub's rate limit stands, the read is answered with the wait left and no call is made,
+// as reviewerCanWrite's permission read is; whichever of the mint or the read itself meets the
+// limit holds it (holdRateLimit). A review App with no installation on that owner
 // (appauth.ErrNotInstalled) cannot read it: the review is restored as it was delivered, logged,
 // since a retry would only mint again on every redelivery. A 401 for its token is retried
 // (tokenRefused), as the permission read's is.
@@ -43,9 +45,9 @@ func (w *workflowRuntime) reviewBody(ctx context.Context, review intake.PullRequ
 	if left := w.rateLimitLeft(); left > 0 {
 		return "", rateLimitRefusal(left, fmt.Sprintf("read review %d's body on %s#%d", review.ID, repository.String(), review.Number))
 	}
-	client, lease, err := w.reviewAppClient(ctx, repository)
+	client, lease, repository, err := w.reviewAppClient(ctx, repository)
 	if errors.Is(err, appauth.ErrNotInstalled) {
-		w.log.Error("workflow: the review App is not installed on the owner of its review's repository, so its review's body is read as delivered",
+		w.log.Error("workflow: the review App is not installed on the owner GitHub holds its review's repository under, so its review's body is read as delivered",
 			"app", appauth.Review, "installation_owner", repository.Owner(), "repo", repository.String(), "review", review.ID, "error", err)
 		return review.Body, nil
 	}

@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -182,7 +184,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners, cfg.RepositoryRenames)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -237,13 +239,14 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
 // one Oh My Pi at a time, each briefly (pi.agents, the plugin's load, the session-storage
-// setting), runs no lane and no browser (the browser check runs Chromium's --version), and exits,
-// so 250m and 1Gi hold it, over a 5Gi bound on the node's disk and a 1Gi disk request. It is no
-// pod's share on purpose: the probe runs at every boot, before anything is served, and a probe that
-// reserved a pod's share — the controller's 1 CPU and 4Gi, or an issue pod's 3 CPU and 19Gi —
-// could leave the daemon unable to boot on a pool full enough to place nothing that large, while a
-// 250m / 1Gi pod still fits (stage 4b's daemon-controller-liveness restart, whose controller
-// reservation no node can hold, met exactly that).
+// setting), runs no lane, navigates headless Chromium to the two compromised chains and its
+// control, and exits. Five fresh runs at 250m / 1Gi took 57.68–77.43 s, so those limits hold the
+// browser probe while the smaller reservation still fits a pool that cannot place a controller or
+// issue pod. It has a 5Gi bound on node disk and a 1Gi disk request. The probe runs at every boot,
+// before anything is served, and a probe that reserved a pod's share — the controller's 1 CPU and
+// 4Gi, or an issue pod's 3 CPU and 19Gi — could leave the daemon unable to boot on a pool full
+// enough to place nothing that large (stage 4b's daemon-controller-liveness restart, whose
+// controller reservation no node can hold, met exactly that).
 var probeReservation = config.Reservation{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
 
 // imageProbe is the probe of the daemon's worker image: this daemon's contract, the role prompts
@@ -298,6 +301,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 // stream's address, the connection directory and the token source, which boot hands the factory.
 // The issue pod's one container gets runtime.kubernetes.resources.issue as its requirements, and
 // the daemon-launched controller's container runtime.kubernetes.resources.controller (requirements).
+// The project's memory overlays (`memory.config_files`) reach the runtime whatever its mode is,
+// as they reach tmuxOptions: a tree already drawn into the memory group names them under any
+// mode, and a project with no block hands over none.
 // lookup is the daemon's environment, which can name the NATS nkey seed (launchSecrets).
 func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	issueVolume, err := resource.ParseQuantity(k.IssueVolume)
@@ -326,7 +332,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 	if err != nil {
 		return sandbox.Options{}, err
 	}
-	return sandbox.Options{
+	opts := sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, IssueVolume: issueVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
 		Resources:  sandbox.PodResources{Issue: issue, Controller: controller},
@@ -337,11 +343,13 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ControllerSlackChannels: cfg.Projects[cfg.Project].SlackChannels,
 		Tools:                   workerImageTools,
 		Pod:                     sandbox.Pod(k.Pod),
+		RoleConfigFiles:         cfg.RoleConfigFiles,
 		ProviderKeys:            providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:           launchSecretNames(cfg, lookup),
 		ProvidersSecrets:        providersSecrets(cfg, lookup),
 		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
+		TestPostgres:            k.TestPostgres,
 		BootTimeout:             cfg.WorkerBootTimeout,
 		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,
 		BusyBackoff:             busyBackoffFirst,
@@ -351,7 +359,9 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		AgentSecrets:            agentSecrets,
 		RepositoryCache:         cache,
 		Log:                     log,
-	}, nil
+	}
+	opts.MemoryConfigFiles = cfg.Projects[cfg.Project].Memory.ConfigFiles
+	return opts, nil
 }
 
 // repositoryCache is runtime.kubernetes.repository_cache as the runtime takes it: the volume as a
@@ -465,19 +475,32 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
-// bundle (gitHubCredential, a directory for each of owners), with the workflow's mapping as the
-// repositories its repository caches follow (mapped), and registers its launcher acceptor on the
-// stream listener. A daemon with no GitHub Apps hands it neither tokens nor a mapping, and
-// sandbox.New's own refusal names what is missing. Boot has already run the cluster check
-// (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
-// per-claim pods, or issue pods on one tree volume — remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
+// bundle (gitHubCredential, a directory for each of owners) and the owner set those directories
+// are built from (appauth.GitHubOwners), which the runtime reads a running pod's gh projection
+// against, with the workflow's mapping as the repositories its repository caches follow (mapped),
+// with the store's own workspace bundles as what a replacement pod's launcher is sent and what
+// its restore drops, and registers its launcher acceptor on the stream listener. A daemon with no
+// GitHub Apps hands it neither tokens nor a mapping, and sandbox.New's own refusal names what is
+// missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed
+// and no Sandbox of a layout before this one — per-claim pods, or issue pods on one tree volume —
+// remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
+		// The two halves of the release's saved work: an idle release puts the issue's unpushed
+		// work here (outbox's release), and the runtime hands it to the launcher of the pod that
+		// replaces the released one before any role of that pod starts. The confirmation deletes
+		// the bundle of the release the launcher's report names and no other, so a report that
+		// arrives late takes no newer release's work with it. The read is the bundle's one restore
+		// attempt: the first pod that is not the one the work came off takes it, whether the
+		// bundle is sent or that pod is refused as no newer than the save, and nothing is
+		// answered for that bundle again.
+		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = implementTokens{apps}
-			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)
+			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
+			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
+			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {
@@ -488,11 +511,46 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 	}
 }
 
+// servingOwner is the owner whose installation holds the repositories of owner now: the owner a
+// configured rename moved them to, where the project owns that one and not owner itself
+// (ghrepo.Renames.OwnerAliases, the daemon's one rule for it), and owner unchanged otherwise,
+// which is every owner of a deployment that configures no rename. The owners it reads are the
+// mapping's, which changes as Dispatch's mapping does, so it is read per mint rather than once.
+func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner string) string {
+	return func(owner string) string {
+		aliases, _ := renames.OwnerAliases(func(name string) bool {
+			return slices.ContainsFunc(owners(), func(o string) bool { return strings.EqualFold(o, name) })
+		})
+		if to, alias := aliases[strings.ToLower(owner)]; alias {
+			return to
+		}
+		return owner
+	}
+}
+
 // implementTokens is the workflow's implement App as a sandbox's provisioning token source: every
-// pod's workspace-fetch clones with an installation token minted for the repository's owner.
-type implementTokens struct{ apps appauth.Tokens }
+// pod's workspace-fetch clones with an installation token minted for the repository's owner. It
+// is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
+// provision, its gh credential refresh and its repository cache Secret), so the owner a
+// configured rename moved a repository away from is mapped here, once, to the owner whose
+// installation holds it now (serving): nothing under runtime/sandbox knows of a rename.
+//
+// Only the token follows the rename. Every address those three sites build — the pod's feed, its
+// clone, and the repository cache's volume and Service — stays the repository the record names,
+// which a transfer must not move: GitHub's own documentation of a transfer says "All links to the
+// previous repository location are automatically redirected to the new location. When you use
+// `git clone`, `git fetch`, or `git push` on a transferred repository, these commands will
+// redirect to the new repository location or URL", so a clone or a fetch addressed at the name
+// the record keeps reaches the repository GitHub holds today.
+type implementTokens struct {
+	apps    appauth.Tokens
+	serving func(owner string) string
+}
 
 func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+	if t.serving != nil {
+		owner = t.serving(owner)
+	}
 	lease, err := t.apps.Token(ctx, appauth.Implement, owner)
 	if err != nil {
 		return "", err

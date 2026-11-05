@@ -33,10 +33,17 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	// lingering is every tree whose root lingers, or closed after it lingered: only a root carries a
 	// linger deadline, and re-admission clears it.
 	lingering := make(map[string]bool)
+	// memoryByTree is every tree's memory draw, by the tree's key: only a root's record carries
+	// one, and a root's key is its own tree (record.Issue.MemoryGroup). Every issue of the tree is
+	// shown its root's, so an issue's view answers what its own roles run with.
+	memoryByTree := make(map[string]memoryDraw)
 	for _, issue := range issues {
 		knownIssues[issue.Key] = struct{}{}
 		if issue.Lingers() {
 			lingering[issue.Key] = true
+		}
+		if issue.MemoryGroup != "" {
+			memoryByTree[issue.Key] = memoryDraw{group: issue.MemoryGroup, mode: issue.MemoryDrawMode, at: issue.MemoryDrawnAt}
 		}
 	}
 	slots, err := s.Slots(ctx, tx)
@@ -74,6 +81,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			State:          string(current.State),
 			Locator:        current.Locator,
 			PluginContract: current.PluginContract,
+			UpdateRound:    current.UpdateRound,
+			UpdateHead:     current.UpdateHead,
 		}
 		if report, reported := reports[current.Token]; reported {
 			view.Capabilities = api.CapabilityReportViewOf(report)
@@ -102,6 +111,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			DefaultBranch: issue.DefaultBranch,
 			Workers:       map[claim.Role]api.PhaseView{},
 		}
+		// The tree's memory draw, which every issue of the tree is shown, a done one included: it
+		// is what the issue's roles ran with, and nothing redraws it.
+		if draw, drawn := memoryByTree[issue.Tree]; drawn {
+			view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt = draw.group, draw.mode, draw.at
+		}
 		// An escalation waits on the controller only while its tree runs. A held issue of a tree
 		// that lingers or closed keeps the reason on its record, and shows it again once the tree is
 		// re-admitted, which leaves the issue held.
@@ -110,6 +124,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		}
 		if slot, ok := slotViews[issue.Key]; ok {
 			view.Slot = &slot
+		}
+		if issue.AwaitingPerson() {
+			view.WaitingOn = waitingOn(*issue.Awaiting)
 		}
 
 		phases, err := s.Phases(ctx, tx, issue.Key)
@@ -129,11 +146,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				view.Architect = &claimView
 				continue
 			}
-			view.Workers[item.Role] = api.PhaseView{
+			worker := api.PhaseView{
 				Claim:         claimView,
 				HandoffCommit: item.HandoffCommit,
 				Rounds:        item.Rounds,
 			}
+			if item.HandoffRecord != "" {
+				worker.HandoffRecord = &api.HandoffRecordView{ID: item.HandoffRecord, Version: item.HandoffVersion}
+			}
+			view.Workers[item.Role] = worker
 		}
 
 		pr, err := s.PullRequest(ctx, tx, issue.Key)
@@ -172,7 +193,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	for _, current := range claims {
 		// The daemon's own controller (`controller: daemon`) holds a claim on no issue: the state
 		// shows it as the project's controller (controllerLocator), never as an issue's worker,
-		// since an issue keyed "" refuses the whole document at every strict client.
+		// since an issue keyed "" refuses the whole document at every client, which reads an
+		// issue's `key` as a non-empty string.
 		if claim.IsController(current.Role, current.Issue, current.Tree) {
 			continue
 		}
@@ -181,8 +203,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if !known {
 			// A claim on an issue the workflow does not record — an operator's spawn, which is
 			// what Stage 2 makes and what the merge-queue holder is — is listed for the claim's
-			// sake, and says so: an empty phase and status refused the whole document at every
-			// strict client, over a row that is a legitimate state.
+			// sake, and says so: an empty phase is no value of the phase enum and an empty status
+			// is refused too, so the whole document would be refused over a row that is a
+			// legitimate state.
 			view = api.Issue{
 				Key:     current.Issue,
 				Phase:   api.Unrecorded,
@@ -206,11 +229,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
-	// What Legion is waiting for, judged from the project's whole mirror of what Dispatch says
-	// each issue waits on, read in this transaction's snapshot like every other fact here: one
-	// query (blockers.Load), then the deciders' own judgement (blockers.Blocked), so the state
-	// names exactly the roots admission skips and the children the workflow holds.
-	rows, err := blockers.Load(ctx, tx, s, project)
+	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it judges
+	// wait on, read in this transaction's snapshot like every other fact here: one query
+	// (blockers.Load of blockers.Judged), then the deciders' own judgement (blockers.Blocked), so the
+	// state names exactly the roots admission skips and the children the workflow holds.
+	rows, err := blockers.Load(ctx, tx, s, project, blockers.Judged(issues, waiting))
 	if err != nil {
 		return api.State{}, err
 	}
@@ -241,6 +264,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	return projected, nil
 }
 
+// memoryDraw is one tree's memory draw as its root's record holds it (record.Issue.MemoryGroup,
+// MemoryDrawMode, MemoryDrawnAt): the group the draw gave the tree, the project's mode it was
+// drawn under, and when.
+type memoryDraw struct {
+	group string
+	mode  string
+	at    *time.Time
+}
+
 // checkView is an open production check as the state shows it (api.CheckView): the last wake is
 // shown once a look has woken, and the next wake is the check's bound, the moment its last look
 // starts.
@@ -251,6 +283,24 @@ func checkView(check record.ProductionCheck) *api.CheckView {
 	}
 	if check.LastWakeAt != nil {
 		view.LastWake = &api.CheckWakeView{Kind: check.LastWakeKind, Detail: check.LastWakeDetail, At: *check.LastWakeAt}
+	}
+	return view
+}
+
+// waitingOn is the view of what a root in awaiting_person waits on: the gate shape when the wait
+// names a spec version, otherwise the question; the answer only once a person gave one.
+func waitingOn(w record.Awaiting) *api.WaitingOnView {
+	view := &api.WaitingOnView{Kind: "ask", Ask: w.Ask}
+	if w.GateVersion != 0 {
+		view = &api.WaitingOnView{Kind: "gate", GateVersion: w.GateVersion, ArtifactID: w.Artifact}
+	}
+	if !w.Since.At.IsZero() {
+		since := w.Since.At
+		view.Since = &since
+	}
+	if w.AnsweredAt != nil {
+		answeredAt := *w.AnsweredAt
+		view.AnsweredAt, view.AnsweredBy = &answeredAt, w.AnsweredBy
 	}
 	return view
 }

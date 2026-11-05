@@ -85,7 +85,8 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 			_, uri := testnats.Start(t)
 			proxy := startRelayProxy(t, uri)
 			logs := captureBusLogs(t)
-			client, err := bus.ConnectOwningStream([]string{proxy.url()}, bus.WithReplicas(1))
+			name := t.Name()
+			client, err := bus.ConnectOwningStream([]string{proxy.url()}, bus.WithReplicas(1), bus.WithName(name))
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
@@ -99,7 +100,7 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 			watcher.Stop()
 			_ = client.Drain(3 * time.Second)
 			time.Sleep(200 * time.Millisecond)
-			records := warnOrErrorRecords(t, logs)
+			records := warnOrErrorRecords(t, logs, name)
 			for _, record := range records {
 				if strings.HasPrefix(record, "ERROR") {
 					t.Fatalf("a connection lost during the drain hooks logged %q", records)
@@ -211,7 +212,8 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	name := t.Name()
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(name))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -245,7 +247,7 @@ func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	if got := consumers(); len(got) != 0 {
 		t.Fatalf("consumers right after a drain a stuck delivery held = %v, want none", got)
 	}
-	if got := strings.Join(warnOrErrorRecords(t, logs), ", "); got != "" {
+	if got := strings.Join(warnOrErrorRecords(t, logs, name), ", "); got != "" {
 		t.Fatalf("the drain logged %q, want nothing", got)
 	}
 }

@@ -33,9 +33,10 @@ related_issues:
   every ten seconds until it reads `implementing` (about ninety seconds here, after the architect
   relayed the request to the tester). Fetch once more (`main` may have moved again), then
   `legion push`, the PR body, the handoff and `handoff_complete` as any round.
-- Prepare the round's handoff payload while you wait; it is the previous one plus this round's
-  commit, files, checks and proof entry, and `handoff_write` recreates `.legion/<KEY>/` after a
-  retro removed it.
+- Prepare the round's handoff body while you wait. It is the previous one plus this round's
+  commit, files, checks and proof entry. After the push, write it with `dispatch handoff-write
+  --issue <KEY> --phase <word> --body-file <file>`. Before sjawhar/legion#2354 the handoff was a
+  committed file, and `handoff_write` recreated `.legion/<KEY>/` after a retro removed it.
 
 ## Evidence
 

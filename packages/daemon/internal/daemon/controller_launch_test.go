@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,7 +109,7 @@ func TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage(t *testing.T) {
 	if locator := state.ControllerLocator; locator == nil || locator.SessionID != "ses_controller" {
 		t.Fatalf("controllerLocator = %+v, want the daemon's controller's session", locator)
 	}
-	// The controller is the project's, never an issue's worker; the strict client's own parse of
+	// The controller is the project's, never an issue's worker; the client's own parse of
 	// this shape is packages/contracts' state-controller-claim fixture.
 	if view, listed := state.Issues[""]; listed {
 		t.Fatalf("the state lists the controller's claim as an issue keyed \"\": %+v", view)
@@ -129,6 +131,9 @@ func TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage(t *testing.T) {
 	sh.send(shimwire.Response{ID: prompt.ID, Command: shimwire.TypePrompt, Success: true})
 	sh.send(shimwire.AgentStart{})
 	sh.send(shimwire.AgentEnd{})
+	// What Oh My Pi writes behind the agent_end of the turn its prompt ran, and the only frame
+	// that names that prompt: the delivery's life ends on it.
+	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 	testwait.Eventually(t, "the start turn to end", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateIdle) && c.Pending == nil
@@ -162,6 +167,97 @@ func controllerSpawns(rt *fake.Runtime, token claim.Token) int {
 	return spawns
 }
 
+// A daemon-launched controller can fail forever when its stored session is lost with a reaped
+// volume. An operator can clear that stopped claim's recorded session; the keeper's next retry then
+// starts a fresh controller instead of resuming the abandoned session.
+func TestForgetSessionLetsTheControllerKeeperSpawnFresh(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	var record built
+	o := fakeRuntime(rt, &record)
+	o.orphanSweep, o.controllerRetry = 2*time.Second, 100*time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	launch := controllerLaunched(t, rt, token)
+	registeredLaunch(t, d, &record, launch, "ses_controller")
+	refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+	rt.ScriptResume(refused, refused, refused)
+	rt.Emit(runtime.Observation{Locator: *d.claim(token).Locator, Kind: runtime.Gone})
+	testwait.Eventually(t, "the controller's missing-session launches to fail", func() bool {
+		return d.claim(token).State == string(supervise.StateFailed)
+	})
+
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/forget-session",
+		api.ForgetSessionRequest{Session: "ses_controller"}, true)
+	if status != http.StatusOK {
+		t.Fatalf("forget-session = %d %s, want 200", status, body)
+	}
+	var forgotten api.OperatorClaim
+	if err := json.Unmarshal(body, &forgotten); err != nil {
+		t.Fatalf("decode forget-session response %s: %v", body, err)
+	}
+	if forgotten.Session != "" || forgotten.SessionFile != "" || forgotten.State != string(supervise.StateFailed) {
+		t.Fatalf("forget-session answered %+v, want a failed controller with no session", forgotten)
+	}
+	testwait.Eventually(t, "the controller keeper to start a fresh controller", func() bool {
+		return controllerSpawns(rt, token) == 2 && d.claim(token).State == string(supervise.StateLaunching)
+	})
+	if spawn := lastLaunch(t, rt, token); spawn.ResumeSessionFile != "" {
+		t.Fatalf("the keeper's controller launch resumed %q, want a fresh spawn", spawn.ResumeSessionFile)
+	}
+}
+
+// keeperStoppedLine is what the controller keeper logs (controller.go, keep) the first time it
+// finds the controller's claim failed or retired, before it sends any retry.
+const keeperStoppedLine = "controller: the daemon's controller stopped; retrying it with fresh budgets"
+
+// keeperSawFailure is a log handler that records, once, how many times the runtime had spawned the
+// controller when the keeper logged its claim failed. The keeper logs that line on the sweep that
+// first finds the claim failed and sends its retry only on a later sweep, so the count is the one
+// the failure left, fixed for good however late the test reads it, where the claim's state and
+// the spawn count both move on at the retry.
+type keeperSawFailure struct {
+	slog.Handler
+	token  claim.Token
+	spawns func() int
+	// failedAt is that count, -1 until the line is logged.
+	failedAt *atomic.Int64
+}
+
+func (h keeperSawFailure) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == keeperStoppedLine {
+		var token, state string
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "claim":
+				token = a.Value.String()
+			case "state":
+				state = a.Value.String()
+			}
+			return true
+		})
+		if token == string(h.token) && state == string(supervise.StateFailed) {
+			h.failedAt.CompareAndSwap(-1, int64(h.spawns()))
+		}
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h keeperSawFailure) WithAttrs(attrs []slog.Attr) slog.Handler {
+	h.Handler = h.Handler.WithAttrs(attrs)
+	return h
+}
+
+func (h keeperSawFailure) WithGroup(name string) slog.Handler {
+	h.Handler = h.Handler.WithGroup(name)
+	return h
+}
+
 // A controller whose launches run out of their budget fails, as any claim does, and nothing in the
 // machine relaunches a failed claim. The keeper does: after its wait it retries the claim with fresh
 // budgets, so the project is never left without a controller for good.
@@ -173,15 +269,24 @@ func TestTheKeeperRetriesAControllerWhoseLaunchesRanOut(t *testing.T) {
 	rt.ScriptSpawn(fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused})
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep, o.controllerRetry = 50*time.Millisecond, 200*time.Millisecond
-	d := startDaemon(t, cfg, o)
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {
 		t.Fatal(err)
 	}
 	token := claim.ControllerToken(project)
+	// The claim is failed only from the third refusal until the keeper's retry a controllerRetry
+	// later, a window a loaded machine's polls can miss; the keeper's own line marks it for good.
+	failedAt := &atomic.Int64{}
+	failedAt.Store(-1)
+	log := slog.New(keeperSawFailure{Handler: quietLogger().Handler(), token: token,
+		spawns: func() int { return controllerSpawns(rt, token) }, failedAt: failedAt})
+	d := startDaemonLogging(t, cfg, o, log)
 	testwait.Eventually(t, "the controller's refused launches to fail its claim", func() bool {
-		return controllerSpawns(rt, token) == cfg.LaunchFailureLimit && d.claim(token).State == string(supervise.StateFailed)
+		return failedAt.Load() >= 0
 	})
+	if spawns := failedAt.Load(); spawns != int64(cfg.LaunchFailureLimit) {
+		t.Fatalf("the controller's claim failed after %d launches, want %d refused", spawns, cfg.LaunchFailureLimit)
+	}
 	testwait.Eventually(t, "the keeper to retry the failed controller on fresh budgets", func() bool {
 		c := d.claim(token)
 		return controllerSpawns(rt, token) == cfg.LaunchFailureLimit+1 && c.State == string(supervise.StateLaunching) &&
@@ -204,6 +309,11 @@ func TestARestartedDaemonReadoptsItsControllerAndLaunchesNoSecond(t *testing.T) 
 	}
 	token := claim.ControllerToken(project)
 	controllerLaunched(t, rt, token)
+	// Spawn returns before the machine saves the launched process: a stop in between leaves the
+	// claim stored with no locator, which the restart rightly relaunches.
+	testwait.Eventually(t, "the store to record the controller's launched process", func() bool {
+		return storedClaim(t, cfg, token).Locator != nil
+	})
 	d.stop()
 
 	rebindHeldPorts(t, &cfg)

@@ -1,4 +1,11 @@
-import { createDeliveryDedupe, DedupeIdentitySchema } from "@legion/envoy-client/delivery"
+import type { RelayHeaders } from "@legion/envoy-client/consumer-delivery"
+import {
+  createDeliveryDedupe,
+  type DedupeIdentity,
+  DedupeIdentitySchema,
+  type DeliveryDedupe,
+  readArrivals,
+} from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 import { z } from "zod"
@@ -8,13 +15,18 @@ export interface ChannelBrokerMessage {
   readonly subject: string
   readonly data: Uint8Array
   readonly reply?: string
+  /** The message's NATS headers; only a relay frame (consumer delivery) carries any read here. */
+  readonly headers?: RelayHeaders
 }
 
 /** A broker message as the forwarder delivers it: decoded once and classified. */
 export interface ChannelInboundMessage extends ChannelBrokerMessage {
   /** `data` decoded as UTF-8 once, at the broker boundary. */
   readonly raw: string
-  /** The event already reached the channel queue; direct request-reply still needs its receipt. */
+  /**
+   * The event already reached the channel queue, or its relayed copy is the one shown
+   * (`ChannelForwarderOptions.relayed`); direct request-reply still needs its receipt.
+   */
   readonly duplicate?: true
   /**
    * The topic the envelope itself names. It differs from `subject` when the listener forwarded
@@ -27,6 +39,11 @@ export interface ChannelTopicSubscription extends AsyncIterable<ChannelBrokerMes
   unsubscribe(): void
 }
 
+/** A nats.js connection status event; only its `type` is read. */
+export interface ChannelConnectionStatus {
+  readonly type: string
+}
+
 /** The NATS connection surface used by a channel session. */
 export interface ChannelForwarderConnection {
   subscribe(subject: string): ChannelTopicSubscription
@@ -35,6 +52,8 @@ export interface ChannelForwarderConnection {
   isClosed(): boolean
   drain(): Promise<void>
   close(): Promise<void>
+  /** The connection's status events (nats.js `status()`), which end when it closes. */
+  status(): AsyncIterable<ChannelConnectionStatus>
 }
 
 export interface ChannelForwarder {
@@ -50,6 +69,14 @@ export interface ChannelForwarder {
   close(): Promise<void>
 }
 
+/** The replay ledger as the live path sees it (`@legion/envoy-client/replay`). */
+export interface ChannelForwarderLedger {
+  /** Whether the session was shown the frame already, before this process started included. */
+  delivered(frame: DedupeIdentity): boolean
+  /** Records a frame Claude Code was handed, so no replay shows it again; never rejects. */
+  recordDelivered(frame: DedupeIdentity): Promise<void>
+}
+
 export interface ChannelForwarderOptions {
   /**
    * Hands one frame on and resolves whether Claude Code got it; `false`, or a rejection, releases
@@ -58,6 +85,28 @@ export interface ChannelForwarderOptions {
   readonly deliver: (message: ChannelInboundMessage) => Promise<boolean>
   /** How long close waits for a broker drain before closing outright. */
   readonly drainTimeoutMs?: number
+  /** The claims of the live path; a replay engine reads them to leave a frame in flight alone. */
+  readonly dedupe?: DeliveryDedupe
+  readonly ledger?: ChannelForwarderLedger
+  /**
+   * A frame whose delivery rejected, after its claim was released: `topic` is the subscription it
+   * came on, which says whether a replay will show it again, and `receivedAt` when the
+   * subscription yielded it (`Date.now`, `readArrivals`), however long the frames before it took
+   * to deliver, which says whether a replay cursor started past it.
+   */
+  readonly failed?: (
+    message: ChannelInboundMessage,
+    topic: string,
+    error: unknown,
+    receivedAt: number,
+  ) => void
+  /**
+   * Whether the listener relays the subscription `topic`'s subject from the session's consumer
+   * (consumer delivery), which shows its frames: a core frame on it claims nothing and goes on as
+   * a duplicate, only to answer a lane's receipt. Read before the claim, so the core copy never
+   * holds the claim its relayed copy needs.
+   */
+  readonly relayed?: (topic: string) => boolean
 }
 
 interface Following {
@@ -79,7 +128,8 @@ const DeliveryIdentity = DedupeIdentitySchema.extend({
 const decoder = new TextDecoder()
 const DEFAULT_DRAIN_TIMEOUT_MS = 1_000
 
-function deliveryIdentity(raw: string): z.infer<typeof DeliveryIdentity> | undefined {
+/** A frame's identity fields, each kept only when valid; undefined for a frame that is not JSON. */
+export function deliveryIdentity(raw: string): z.infer<typeof DeliveryIdentity> | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -98,40 +148,64 @@ function report(what: string, error: unknown): void {
  * One channel process receives both its direct Envoy route and every followed
  * topic. It deduplicates at the broker boundary, by event id and by dedupe key,
  * so an event covered by several patterns, and a re-send of one already
- * delivered, still becomes one Claude Code channel notification.
+ * delivered, still becomes one Claude Code channel notification. With a replay
+ * ledger, a frame the session was shown before this process started is dropped
+ * too, and each frame handed on is recorded there before its claim settles.
  */
 export function createChannelForwarder(
   connection: ChannelForwarderConnection,
   options: ChannelForwarderOptions,
 ): ChannelForwarder {
   const following = new Map<string, Following>()
-  const dedupe = createDeliveryDedupe()
+  const dedupe = options.dedupe ?? createDeliveryDedupe()
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
 
   const deliver = async (topic: string, subscription: ChannelTopicSubscription): Promise<void> => {
     try {
-      for await (const message of subscription) {
+      for await (const { message, receivedAt } of readArrivals(subscription)) {
         const raw = decoder.decode(message.data)
         const identity = deliveryIdentity(raw)
-        const claim = dedupe.claim(identity)
-        const duplicate = claim === undefined
+        // The relay shows this subject's frames: the core copy answers only a lane's receipt.
+        let claim = options.relayed?.(topic) === true ? undefined : dedupe.claim(identity)
+        // A repeat of a frame the session was shown before this process started, which only the
+        // replay ledger knows of: it goes on as a duplicate, which still answers a lane's receipt.
+        if (claim !== undefined && identity !== undefined && options.ledger?.delivered(identity)) {
+          claim.settle()
+          claim = undefined
+        }
+        // A nats.js Msg exposes subject/data/reply through prototype getters,
+        // which an object spread would silently drop; copy the fields by name.
+        const inbound: ChannelInboundMessage = {
+          subject: message.subject,
+          data: message.data,
+          raw,
+          // nats.js MsgImpl.reply is a getter returning "" when unset; absent means no reply address.
+          ...(message.reply ? { reply: message.reply } : {}),
+          ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
+          ...(claim === undefined ? { duplicate: true } : {}),
+        }
+        let handed: boolean
         try {
-          // A nats.js Msg exposes subject/data/reply through prototype getters,
-          // which an object spread would silently drop; copy the fields by name.
-          const handed = await options.deliver({
-            subject: message.subject,
-            data: message.data,
-            raw,
-            // nats.js MsgImpl.reply is a getter returning "" when unset; absent means no reply address.
-            ...(message.reply ? { reply: message.reply } : {}),
-            ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
-            ...(duplicate ? { duplicate: true } : {}),
-          })
-          if (!handed) claim?.release()
+          handed = await options.deliver(inbound)
         } catch (error) {
           claim?.release()
           report(`could not deliver a message on ${message.subject}`, error)
+          // A duplicate was never being shown; only its receipt can have failed.
+          if (claim !== undefined) options.failed?.(inbound, topic, error, receivedAt)
+          continue
         }
+        if (claim === undefined) continue
+        if (!handed) {
+          claim.release()
+          continue
+        }
+        // Recorded before the claim settles, so a replay never finds the frame neither pending
+        // nor in the ledger and shows it a second time. The next frame does not wait for the
+        // write: a repeat of this one meanwhile still finds its claim.
+        const taken = claim
+        const settle = () => taken.settle()
+        if (identity === undefined || options.ledger === undefined) settle()
+        else void options.ledger.recordDelivered(identity).then(settle, settle)
       }
     } catch (error) {
       report(`delivery from ${topic} stopped`, error)

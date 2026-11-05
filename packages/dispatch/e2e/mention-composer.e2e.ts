@@ -1,4 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import {
   type FakeSession,
   getSentMessages,
@@ -13,6 +16,7 @@ import {
   createMessage,
   createProject,
   createProjectDocument,
+  getIssueEvents,
   listComments,
   patchIssue,
   resolveComment,
@@ -20,7 +24,7 @@ import {
 } from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -92,7 +96,7 @@ async function sendBesideReply(page: Page, issueKey: string, parent: string): Pr
   await expect(field).toHaveValue("Status please");
   await expect(cancelReply).toHaveCount(0);
   refuse();
-  await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   await expect(field).toHaveValue("Status please");
   await expect(cancelReply).toHaveCount(0);
 }
@@ -245,8 +249,7 @@ test("a same-task Reply cannot send a conversation comment to an agent's message
 // while that reply is out - from Send's own task on - and its refusal and draft stay there.
 test("a conversation thread's own reply holds Collapse thread while it is out", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Held thread" });
   const earlier = await createComment(issue.key, { body: "Earlier comment" });
@@ -275,7 +278,7 @@ test("a conversation thread's own reply holds Collapse thread while it is out", 
     await expect(field).toBeDisabled();
     await expect(collapse).toBeDisabled();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Thread reply");
     await expect(collapse).toBeEnabled();
   } finally {
@@ -328,8 +331,9 @@ test("a docked send out when its issue closes posts", async ({ browser }) => {
 // The client's deadline lets go of the controls that would take the reader away from a send; it
 // is not a refusal. A comment that mentions agents can take the server longer than that, and it
 // is still one comment: the deadline offers no Retry, and the answer that follows lands as any
-// answer does.
-test("a docked send the server answers at 35 s posts once and shows once, with no Retry at the deadline", async ({
+// answer does. Each attempt is held to KEYED_SEND_ATTEMPT_MS (15 s), so a 35 s wait asks again,
+// under the same key: every POST carries that one key, and Dispatch makes the comment once.
+test("a docked send the server answers at 35 s is one keyed write and shows once, with no Retry at the deadline", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -359,7 +363,15 @@ test("a docked send the server answers at 35 s posts once and shows once, with n
     await expect(turns.getByText("Slow but sure", { exact: true })).toHaveCount(1);
     await expect(field).toHaveValue("");
     await expect(form.getByText(/^Still sending/)).toHaveCount(0);
-    expect(send.posts()).toBe(1);
+    const keys = send.keys();
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    // Every attempt that could reach Dispatch has, and Dispatch made the comment once.
+    await send.settled();
+    expect(
+      (await getIssueEvents(issue.key)).filter((event) => event.type === "comment.created")
+    ).toHaveLength(1);
   } finally {
     await alice.close();
   }
@@ -376,6 +388,10 @@ test("a docked send refused while its issue closes offers Retry, which posts on 
 
   try {
     const page = await alice.newPage();
+    // The status write below reaches the header over the event feed, whose refetch the page holds
+    // to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires, and 1 s is
+    // nowhere near the send's 30 s deadline, which stays out through the row.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" });
     const field = form.getByLabel("Comment");
@@ -386,12 +402,14 @@ test("a docked send refused while its issue closes offers Retry, which posts on 
     await expect(field).toBeDisabled();
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+
     await expect(field).toHaveValue("Through the close");
     await expect(field).toBeDisabled();
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await expect(form.getByRole("button", { name: "Discard draft" })).toHaveCount(0);
     await page.unroute(pattern);
@@ -415,8 +433,7 @@ test("a docked send refused while its issue closes offers Retry, which posts on 
 // thread's own reply - its draft, the send it has out and that send's refusal - stays with it.
 test("a thread resolved while its own reply is out stays open with the reply and its refusal", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Resolved under a reply" });
   const earlier = await createComment(issue.key, { body: "Earlier comment" });
@@ -439,7 +456,7 @@ test("a thread resolved while its own reply is out stays open with the reply and
     await expect(field).toHaveValue("Reply under a resolve");
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply under a resolve");
     await expect(field).toBeEnabled();
   } finally {
@@ -451,8 +468,7 @@ test("a thread resolved while its own reply is out stays open with the reply and
 // Conversation, and its reply's refusal shows there with the draft.
 test("a thread's own reply out when the viewport narrows to a phone keeps its draft and refusal", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the row starts on a wider screen");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Narrowed under a reply" });
   const earlier = await createComment(issue.key, { body: "Earlier comment" });
@@ -473,16 +489,20 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
     await page.setViewportSize({ height: 844, width: 390 });
     await expect(field).toHaveValue("Reply through a narrowing");
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply through a narrowing");
   } finally {
     await alice.close();
   }
 });
 
-test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
+test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target @phone", async ({
   browser,
 }) => {
+  // Two failed sends run end to end here, the seeded mention's and the Retry's, and each waits
+  // out the listener take-over window before it settles failed: half a second under the
+  // harness's DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW (e2e/run-server.sh), of the twelve seconds
+  // a deployment runs.
   await setLiveSessions([planner]);
   // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
   // retry of a delivery that landed is a repeat that is recognised and dropped, so the row no

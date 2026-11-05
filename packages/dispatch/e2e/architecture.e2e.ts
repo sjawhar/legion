@@ -82,7 +82,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker", async ({
+// SLOW(>=2s): one row for the whole Architecture page - the seeded model and its six issues, the
+// bars over them, a drill-down, a row's details, a status change that has to move a bar, and the
+// Unassigned picker. Each clause of the title is a press the row has to make.
+test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker @phone", async ({
   browser,
 }, testInfo) => {
   const issues = await seedArchitecture();
@@ -190,7 +193,8 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
       page.getByRole("list", { name: `Children of ${issues.login.key}` }).getByRole("listitem")
     ).toHaveText([/Login child/]);
 
-    // Item 11: closing an issue through the API moves the bar without a reload (SSE).
+    // Item 11: closing an issue through the API moves the bar without a reload (the live event
+    // feed).
     await patchIssue(issues.contract.key, { status: "done" });
     await expect(row(page, "API")).toContainText("1/1 issues done");
     await expect(scope).toContainText("2/6 issues done");

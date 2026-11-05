@@ -1,37 +1,47 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, AskRead } from "../../api/types";
+import type {
+  AskRead,
+  IssueReferenceSummary,
+  IssueReferenceSummaryDocument,
+} from "../../api/types";
+import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
+import { TextAskCard } from "./markdown-cards";
+import { setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
+import {
+  flushTasks,
+  type InstalledParseWorker,
+  installFakeParseWorker,
+  restoreParseWorker,
+} from "./parse-worker-fixture";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-/** An image artifact of CORE-1 with two versions, as the issue read lists it. */
-const picture: Artifact = {
-  created_at: "2026-10-04T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
+/** An image document of CORE-1 whose latest version is 2, as the issue summary lists it. */
+const picture: IssueReferenceSummaryDocument = {
   id: "artifact-shot",
-  issue_key: "CORE-1",
   kind: "image",
+  latest_version: 2,
   name: "shot.png",
   primary: false,
-  project: "CORE",
   slug: "shot-png",
-  versions: [1, 2].map((number) => ({
-    authors: [{ id: "alice", kind: "user" as const }],
-    created_at: "2026-10-04T00:00:00Z",
-    named: false,
-    number,
-    summary: null,
-  })),
 };
+
+/** CORE-1's summary read, the one read behind a reference to it or to its documents. */
+function issueSummary(documents: IssueReferenceSummaryDocument[]): IssueReferenceSummary {
+  return { documents, key: "CORE-1", project: "CORE", status: "in_progress", title: "Core one" };
+}
 
 // The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
 // happy-dom's page starts at `about:blank`, where no relative `src` resolves and every picture
@@ -41,12 +51,21 @@ const testWindow = window as unknown as HappyDOMWindow;
 let pageBefore = "about:blank";
 
 describe("Dispatch pictures", () => {
+  // Three of the rows below name a document whose slug is 2,683 characters, which puts their
+  // body past `markdownWorkerThreshold` and so in the parse worker's hands. The page's own
+  // `new Worker(…)` names a module this process cannot serve, so these rows drive the faked one
+  // (`parse-worker-fixture.ts`) and answer it: what they prove - a long name drawn and opened -
+  // is proved on the path the dashboard itself takes for a body that size.
+  let worker: InstalledParseWorker;
+
   beforeEach(() => {
+    worker = installFakeParseWorker();
     pageBefore = window.location.href;
     testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
   });
 
   afterEach(() => {
+    restoreParseWorker();
     testWindow.happyDOM.setURL(pageBefore);
   });
 
@@ -65,10 +84,12 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
       expect(shot.getAttribute("loading")).toBe("lazy");
-      // Scaled to the column, never taller than 24rem.
-      expect(shot.className.split(" ")).toEqual(
-        expect.arrayContaining(["max-h-96", "max-w-full", "w-auto", "object-contain"])
+      // At its own size scaled down to the column, with no cap on its height.
+      const classes = shot.className.split(" ");
+      expect(classes).toEqual(
+        expect.arrayContaining(["max-w-full", "w-auto", "h-auto", "object-contain"])
       );
+      expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
       // A picture with no caption is named by its slug.
       const plan = within(view.container).getByRole("img", { name: "plan-png" });
@@ -132,39 +153,116 @@ describe("Dispatch pictures", () => {
     }
   });
 
-  test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+  test("a Dispatch picture that pins no version shows its latest version inline", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
     );
 
     try {
-      const link = await within(view.container).findByRole("link", { name: "shot.png" });
-      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
-      expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/shot-png");
-      // The plain reference's thumbnail is the latest version, in the 40 px shape.
-      await waitFor(() =>
-        expect(link.querySelector("img")?.getAttribute("src")).toBe(
-          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
-        )
-      );
-      expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+      expect(shot.className.split(" ")).toContain("max-w-full");
+      expect(shot.className.split(" ")).not.toContain("h-10");
+      expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a version-less picture whose latest version fails to load draws the next version", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />
+      </QueryClientProvider>
+    );
+
+    try {
+      const v2 = await within(view.container).findByRole("img", { name: "shot.png" });
+      fireEvent.error(v2);
+      await waitFor(() =>
+        expect(within(view.container).queryByRole("img", { name: "shot.png" })).toBeNull()
+      );
+      // An upload of version 3 refreshes the summary, as its event does.
+      act(() => {
+        queryClient.setQueryData(
+          ["issue-summary", "CORE-1"],
+          issueSummary([{ ...picture, latest_version: 3 }])
+        );
+      });
+      const v3 = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(v3.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a picture line that pins no version and names a document reads as its reference", async () => {
+    const notes: IssueReferenceSummaryDocument = {
+      id: "artifact-notes",
+      kind: "doc",
+      latest_version: 4,
+      name: "notes.md",
+      primary: false,
+      slug: "notes-md",
+    };
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
+    const view = render(
+      withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-md)" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "notes.md" });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md");
+      expect(view.container.querySelector("img")).toBeNull();
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a plain click on a picture opens it at full size instead of following its link", async () => {
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png@v1)" />)
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+      shot.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      const lightbox = document.querySelector<HTMLDialogElement>(
+        '[data-testid="picture-lightbox"]'
+      );
+      expect(lightbox?.open).toBe(true);
+      expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+
+      // Opened again, the layer goes with the body that opened it.
+      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      view.unmount();
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+    } finally {
       view.unmount();
     }
   });
 
   test("a plain reference whose thumbnail cannot load drops it and keeps the title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     // A hand-written or stale reference can pin a version the server does not serve; the
     // thumbnail's load then fails, and the reference reads as its title with no broken glyph.
     const view = render(
@@ -185,17 +283,15 @@ describe("Dispatch pictures", () => {
       expect(link.textContent).toBe("shot.png");
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=99");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference to a non-image artifact shows no thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/notes-pdf" />)
     );
@@ -204,17 +300,15 @@ describe("Dispatch pictures", () => {
       const link = await within(view.container).findByRole("link", { name: "notes.pdf" });
       expect(link.querySelector("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a version that is no picture falls back to the reference's title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-pdf@v1)" />)
     );
@@ -226,7 +320,154 @@ describe("Dispatch pictures", () => {
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-pdf?v=1");
       expect(within(view.container).queryByRole("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // A picture's source and a link's target are nodes an author named explicitly, so a document
+  // whose name is past the bound text is held to (2683 characters, which a new upload's reference
+  // key still holds) is drawn from its version's bytes and opened by its page, not left a
+  // `dispatch://` source the browser cannot fetch or a dead link.
+  test("a long-named picture is drawn and an explicit link to a long-named document opens it", async () => {
+    const slug = "a".repeat(2683);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "doc", name: "design.md", slug }])
+    );
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`![shot](dispatch://CORE-1/artifact/${slug}@v1)\n\nSee [design](dispatch://CORE-1/artifact/${slug}).`}
+        />
+      )
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      const shot = await within(view.container).findByRole("img", { name: "shot" });
+      expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
+      expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
+      const link = await within(view.container).findByRole("link", { name: "design.md" });
+      expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+    } finally {
+      getArtifactText.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // A URL left as text is text to the server's `text.Extract`, which cites a dashboard page only
+  // within the bounds the graph keys: a document past them stays the URL it is, and a block past
+  // them (257 bytes) is its document. A link its author wrote names its target, so it opens the
+  // same long-named document.
+  test("a bare dashboard URL past the bounds stays a plain link; an author's link to it still opens the document", async () => {
+    const slug = "a".repeat(2683);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ])
+    );
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const page = `https://dispatch.test/issues/CORE-1/artifacts/${slug}`;
+    const plan = "https://dispatch.test/issues/CORE-1/artifacts/plan-md";
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Bare: ${page}\n\nSee [design](${page}) and [design](dispatch://CORE-1/artifact/${slug}).\n\nPlan: ${plan} and ${plan}#b-${"b".repeat(257)}`}
+        />
+      )
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(2);
+      for (const link of designs) {
+        expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+        expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+      }
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan-md");
+        expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/plan-md");
+      }
+      const bare = within(view.container).getByRole("link", { name: page });
+      expect(bare.getAttribute("href")).toBe(page);
+      expect(bare.getAttribute("data-dispatch-ref")).toBeNull();
+    } finally {
+      getArtifactText.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // The `dispatch://` forms of a URL left as text: an angle-bracket autolink, and a Markdown link
+  // whose words are its own target, the form a document stores one in. Proof's serializer moves
+  // their target into `data-dispatch-href`; they are text to the server all the same, so past the
+  // bounds they stay plain, and within them they are references. A `dispatch://` link its author
+  // gave words of its own still opens the long-named document.
+  test("a dispatch:// URL left as text past the bounds stays plain; an author's dispatch:// link with its own words still opens", async () => {
+    const slug = "a".repeat(2683);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ])
+    );
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const long = `dispatch://CORE-1/artifact/${slug}`;
+    const plan = "dispatch://CORE-1/artifact/plan-md";
+    const block = `${plan}#b-${"b".repeat(257)}`;
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Angle: <${long}>\n\nSelf: [${long}](${long})\n\nBlock: <${block}>\n\nSee [design](${long}).\n\nPlan: <${plan}> and [${plan}](${plan})`}
+        />
+      )
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(1);
+      expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(designs[0]?.getAttribute("data-dispatch-ref")).toBe(long);
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("data-dispatch-ref")).toBe(plan);
+      }
+      // Past the bounds each is its words as plain text: no link to click, and no
+      // `data-dispatch-href` for the hover card (`RefPreview`'s trigger) to find.
+      for (const [label, words] of [
+        ["Angle:", long],
+        ["Self:", long],
+        ["Block:", block],
+      ] as const) {
+        const paragraph = within(view.container).getByText(label, { exact: false });
+        expect(paragraph.textContent).toBe(`${label} ${words}`);
+        expect(paragraph.querySelector("a")).toBeNull();
+        expect(paragraph.querySelector("[data-dispatch-href],[data-dispatch-ref]")).toBeNull();
+      }
+    } finally {
+      getArtifactText.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -247,16 +488,268 @@ describe("Dispatch pictures", () => {
   });
 });
 
-test("renders a typed callout body through the server schema", async () => {
+test("a typed callout in a body draws its name, kind and title above its content, as a document does", async () => {
   const view = render(
-    <MarkdownBody
-      markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
-    />
+    <MarkdownBody markdown={':::callout{kind="warning" title="Read this"}\nBody text.\n:::\n'} />
   );
 
   try {
-    expect(await within(view.container).findByText("Body text.")).toBeDefined();
+    const content = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-proof-block-content]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(view.container.querySelector("[data-proof-block-name]")?.textContent).toBe("callout");
+    expect(view.container.querySelector("[data-proof-block-badge]")?.textContent).toBe("warning");
+    expect(view.container.querySelector("[data-proof-block-title]")?.textContent).toBe("Read this");
+    expect(within(content).getByText("Body text.")).toBeDefined();
+    const blockId = view.container
+      .querySelector('section[data-proof-block-type="callout"]')
+      ?.getAttribute("data-block-id");
+    expect(blockId).toBeTruthy();
+    expect(view.container.textContent).not.toContain("blockId");
+    expect(view.container.textContent).not.toContain(blockId as string);
     expect(view.container.textContent).not.toContain(":::callout");
+  } finally {
+    view.unmount();
+  }
+});
+
+/** A body as the app shell draws it: under a router, with the read-only decision card the app
+ *  provides for every `ask` block in a comment, ask or message body. */
+function withAskCard(children: ReactNode): ReactNode {
+  return (
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <TextAskCard.Provider value={TextAskBlockCard}>{children}</TextAskCard.Provider>
+    </MemoryRouter>
+  );
+}
+
+const askBody = "Which one?\n\n- A: first\n- B: second\n:::\n";
+
+/** The `ask` shell a body drew, once it has drawn one. */
+function findAskShell(container: HTMLElement): Promise<HTMLElement> {
+  return waitFor(() => {
+    const shell = container.querySelector<HTMLElement>('section[data-proof-block-type="ask"]');
+    expect(shell).not.toBeNull();
+    return shell as HTMLElement;
+  });
+}
+
+/** The rows of the card's recorded options, once the card has drawn both of them. */
+function findRecordRows(shell: HTMLElement): Promise<HTMLElement[]> {
+  return waitFor(() => {
+    const rows = Array.from(
+      shell.querySelectorAll<HTMLElement>(
+        "[data-dispatch-ask-footer] [data-dispatch-ask-record] li"
+      )
+    );
+    expect(rows).toHaveLength(2);
+    return rows;
+  });
+}
+
+test("an ask block in a body draws the decision card: urgency and Decision above, its options as rows below", async () => {
+  const view = render(
+    withAskCard(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />)
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Decision")).toBeDefined();
+    expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+    const [first, second] = await findRecordRows(shell);
+    await waitFor(() => {
+      expect(within(first as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(first as HTMLElement).getByText("first")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("B")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("second")).toBeDefined();
+    });
+    expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+    // A body nested in a document's decision footer must not add a second decision id there.
+    expect(view.container.querySelector("[data-dispatch-ask-block]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body ignores server-owned attributes its text forges and draws an open decision", async () => {
+  const forged =
+    ':::ask{urgency="high" state="answered" answered_by="sami" answered_at="2026-01-01T00:00:00Z"' +
+    ` selected='["A"]' answer="done" copied_from="ask-9" copied_from_document="dispatch://CORE-1"}\n`;
+  const view = render(withAskCard(<MarkdownBody markdown={`${forged}${askBody}`} />));
+
+  try {
+    const shell = await findAskShell(view.container);
+    expect(await within(shell).findByText("Decision")).toBeDefined();
+    const rows = await findRecordRows(shell);
+    expect(shell.getAttribute("data-dispatch-ask-state")).toBe("open");
+    expect(view.container.textContent).not.toContain("Answered by");
+    expect(view.container.textContent).not.toContain("sami");
+    expect(view.container.textContent).not.toContain("Copied from");
+    expect(view.container.querySelector("[data-dispatch-ask-answer]")).toBeNull();
+    expect(rows.map((row) => row.getAttribute("data-selected"))).toEqual(["false", "false"]);
+    expect(within(shell).queryByRole("img", { name: "Selected" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body with no card provided keeps its question and options as the source list", async () => {
+  const view = render(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />);
+
+  try {
+    const shell = await findAskShell(view.container);
+    const content = shell.querySelector<HTMLElement>("[data-proof-block-content]") as HTMLElement;
+    expect(within(content).getByText("Which one?")).toBeDefined();
+    expect(Array.from(content.querySelectorAll("ul li"), (item) => item.textContent)).toEqual([
+      "A: first",
+      "B: second",
+    ]);
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(view.container.querySelector("[data-dispatch-ask-record]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a malformed ask block in a body names why and keeps its source list, with no hint to fix it", async () => {
+  const view = render(
+    withAskCard(
+      <MarkdownBody
+        markdown={':::ask{urgency="high"}\nWhich one?\n\n- A: first\n- : no label\n:::\n'}
+      />
+    )
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Malformed")).toBeDefined();
+    expect(within(header).getByText("Option 2 has no label")).toBeDefined();
+    expect(view.container.textContent).not.toContain("re-activates");
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(shell.querySelectorAll("[data-proof-block-content] ul li")).toHaveLength(2);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision written inside another decision's option keeps each card in its own block", async () => {
+  // The outer fence is longer than the inner one, as a typed block holding another is written:
+  // the inner `:::` would close a three-colon outer block too.
+  const markdown =
+    '::::ask{urgency="high"}\nOuter?\n\n- A: first\n\n  :::ask\n  Inner?\n\n  - X: x\n  :::\n- B: second\n::::\n';
+  const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+  try {
+    const [outer, inner] = await waitFor(() => {
+      const shells = Array.from(
+        view.container.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]')
+      );
+      expect(shells).toHaveLength(2);
+      return shells as [HTMLElement, HTMLElement];
+    });
+    // The inner decision sits in the outer decision's first option.
+    const outerContent = outer.querySelector<HTMLElement>(
+      ":scope > [data-proof-block-content]"
+    ) as HTMLElement;
+    expect(outerContent.contains(inner)).toBe(true);
+    expect(inner.closest("li")?.textContent).toContain("A: first");
+
+    const outerFooter = outer.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    const innerFooter = inner.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    await waitFor(() => {
+      const outerRows = Array.from(
+        outerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(outerRows).toHaveLength(2);
+      expect(within(outerRows[0] as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(outerRows[1] as HTMLElement).getByText("B")).toBeDefined();
+      const innerRows = Array.from(
+        innerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(innerRows).toHaveLength(1);
+      expect(within(innerRows[0] as HTMLElement).getByText("X")).toBeDefined();
+    });
+    expect(within(innerFooter).queryByText("B")).toBeNull();
+    expect(within(innerFooter).queryByText("second")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a container directive the schema refuses shows its fence lines and the body still formats", async () => {
+  const view = render(
+    <MarkdownBody markdown={"Some **bold** text\n\n:::note\nA note line\n:::\n"} />
+  );
+
+  try {
+    expect(await within(view.container).findByText("bold", { selector: "strong" })).toBeDefined();
+    const paragraphs = Array.from(view.container.querySelectorAll("p"), (p) => p.textContent);
+    expect(paragraphs).toEqual(["Some bold text", ":::note", "A note line", ":::"]);
+    expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision the read-only parse refuses leaves the valid decision beside it its own card", async () => {
+  // A heading breaks an ask's content rule, so the read-only parse draws that block as its fence
+  // lines around its content and makes no `ask` node of it; the card must still find the valid
+  // decision's node, whichever side of the refused block it sits on.
+  const refused = ":::ask\n## Heading\n\nWhich?\n\n- X: x\n:::\n";
+  const valid = `:::ask{urgency="high"}\n${askBody}`;
+  for (const markdown of [`${refused}\n${valid}`, `${valid}\n${refused}`]) {
+    const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+    try {
+      const shell = await findAskShell(view.container);
+      const shells = view.container.querySelectorAll('section[data-proof-block-type="ask"]');
+      expect(shells).toHaveLength(1);
+      // The refused block reads as its source lines, outside the one shell.
+      const fence = within(view.container).getByText(":::ask", { selector: "p" });
+      expect(shell.contains(fence)).toBe(false);
+      const heading = within(view.container).getByText("Heading", { selector: "h2" });
+      expect(heading.closest("section")).toBeNull();
+
+      const header = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-header]"
+      ) as HTMLElement;
+      expect(await within(header).findByText("Decision")).toBeDefined();
+      expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+      const footer = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-footer]"
+      ) as HTMLElement;
+      await waitFor(() => {
+        const rows = Array.from(
+          footer.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+        );
+        expect(rows).toHaveLength(2);
+        expect(within(rows[0] as HTMLElement).getByText("A")).toBeDefined();
+        expect(within(rows[1] as HTMLElement).getByText("B")).toBeDefined();
+      });
+      expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+      expect(within(footer).queryByText("X")).toBeNull();
+      expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  }
+});
+
+test("a Pandoc fenced div reads as text and the body still formats", async () => {
+  const view = render(<MarkdownBody markdown={"Some **bold** text\n\n::: warning\nBody\n:::\n"} />);
+
+  try {
+    expect(await within(view.container).findByText("bold", { selector: "strong" })).toBeDefined();
+    expect(view.container.textContent).toContain("::: warning");
+    expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
   } finally {
     view.unmount();
   }
@@ -279,7 +772,9 @@ test("raw unsupported HTML renders as literal text with no element created", asy
   try {
     expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
     expect(view.container.querySelector("img")).toBeNull();
-    expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true");
+    await waitFor(() =>
+      expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true")
+    );
   } finally {
     view.unmount();
   }
@@ -323,7 +818,11 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -342,6 +841,62 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    view.unmount();
+  }
+});
+
+test("a block reference reads as the headline of its text: the pinned version's, opening that version, or the current one, opening the block", async () => {
+  // The pinned link's path names the spec's slug, which the issue's summary carries: no link to
+  // a block reads the full issue.
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+    issueSummary([
+      { ...picture, id: "spec", kind: "doc", name: "Design.md", primary: true, slug: "design-md" },
+    ])
+  );
+  const getIssue = spyOn(api, "getIssue");
+  const node = {
+    block_id: "p1",
+    changed_version: 3,
+    document: "dispatch://CORE-1/spec",
+    id: "CORE-1/spec#p1",
+    issue_key: "CORE-1",
+    kind: "block" as const,
+    project: "CORE",
+    ref: "dispatch://CORE-1/spec#b-p1",
+    text: "Ship it on **Monday**.",
+  };
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    Promise.resolve(
+      reference.endsWith("@v2")
+        ? {
+            edges: [],
+            node: {
+              ...node,
+              pin: { ref: reference, state: "changed", text: "Ship it on Friday.", version: 2 },
+            },
+          }
+        : { edges: [], node }
+    )
+  );
+  const view = render(
+    withQueries(
+      <MarkdownBody markdown="Now dispatch://CORE-1/spec#b-p1 and then dispatch://CORE-1/spec#b-p1@v2." />
+    )
+  );
+
+  try {
+    const current = await within(view.container).findByRole("link", { name: "Ship it on Monday." });
+    expect(current.getAttribute("href")).toBe("/issues/CORE-1/spec#b-p1");
+    const pinned = await within(view.container).findByRole("link", { name: "Ship it on Friday." });
+    await waitFor(() =>
+      expect(pinned.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-md?v=2")
+    );
+    expect(pinned.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/spec#b-p1@v2");
+    expect(getIssue).not.toHaveBeenCalled();
+  } finally {
+    getReferences.mockRestore();
+    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
     view.unmount();
   }
 });
@@ -374,7 +929,7 @@ test("an external URL unrelated to the app renders as an ordinary link", async (
   }
 });
 
-test("two references in one body each resolve their own inline link and title", async () => {
+test("two references in one body each resolve their own inline link and title, reading only what each shows", async () => {
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -394,24 +949,25 @@ test("two references in one body each resolve their own inline link and title", 
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
-  const projectArtifact: Artifact = {
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    id: "artifact-1",
-    issue_key: null,
-    kind: "doc",
-    name: "Runbook.md",
-    primary: false,
-    project: "CORE",
-    ref_key: "CORE/runbook-md",
-    slug: "runbook-md",
-    versions: [],
-  };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
-  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(projectArtifact);
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    id: "artifact-1",
+    kind: "doc",
+    latest_version: 4,
+    name: "Runbook.md",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
+  const getArtifactText = spyOn(api, "getArtifactText");
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -425,8 +981,16 @@ test("two references in one body each resolve their own inline link and title", 
     expect(askLink.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     expect(documentLink.getAttribute("href")).toBe("/projects/CORE/documents/runbook-md");
     expect(within(view.container).getAllByRole("link")).toHaveLength(2);
+    expect(getProjectDocumentSummary).toHaveBeenCalledWith("CORE", "runbook-md");
+    // An ask link reads its ask alone, and an inline document link shows no text, so reads none.
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
+    expect(getArtifactText).not.toHaveBeenCalled();
   } finally {
-    getProjectArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getIssueSummary.mockRestore();
+    getIssue.mockRestore();
+    getProjectDocumentSummary.mockRestore();
     getAsk.mockRestore();
     view.unmount();
   }
@@ -469,7 +1033,11 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -516,4 +1084,805 @@ test("a body re-renders when its text grows, formatting what has closed since", 
   } finally {
     view.unmount();
   }
+});
+
+// Each list is parted from the next by a plain paragraph, so each parses as its own list.
+test("a task item draws one disabled checkbox, ticked as its source is, in every list shape", async () => {
+  const view = render(
+    <MarkdownBody
+      markdown={[
+        "- [x] done\n- [ ] todo",
+        "Loose:",
+        "- [x] loose\n\n  second para",
+        "Ordered:",
+        "1. [x] one\n2. [ ] two",
+        "Nested:",
+        "- [x] parent\n  - [ ] child",
+        "Mixed:",
+        "- plain\n- [x] mixed",
+      ].join("\n\n")}
+    />
+  );
+
+  try {
+    const tasks = await waitFor(() => {
+      const found = Array.from(
+        view.container.querySelectorAll<HTMLLIElement>('li[data-item-type="task"]')
+      );
+      expect(found).toHaveLength(8);
+      return found;
+    });
+    const taskStartingWith = (text: string): HTMLLIElement => {
+      const item = tasks.find((task) => task.textContent?.startsWith(text));
+      if (item === undefined) {
+        throw new Error(`No task item starts with "${text}".`);
+      }
+      return item;
+    };
+    // A box belongs to the item it sits closest to, so a parent's count leaves out its child's.
+    const ownBoxes = (item: HTMLLIElement): HTMLInputElement[] =>
+      Array.from(item.querySelectorAll<HTMLInputElement>("input")).filter(
+        (box) => box.closest("li") === item
+      );
+
+    for (const item of tasks) {
+      const boxes = ownBoxes(item);
+      expect(boxes).toHaveLength(1);
+      const [box] = boxes;
+      expect(box?.type).toBe("checkbox");
+      expect(box?.disabled).toBe(true);
+      expect(box?.checked).toBe(item.getAttribute("data-checked") === "true");
+    }
+    expect(tasks.map((item) => ownBoxes(item)[0]?.checked)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+    ]);
+
+    const plain = Array.from(view.container.querySelectorAll("li")).find(
+      (item) => item.textContent === "plain"
+    );
+    expect(plain?.hasAttribute("data-item-type")).toBe(false);
+    expect(plain?.querySelector("input")).toBeNull();
+
+    // A tight item's paragraph is unwrapped with its box in it: box and words sit in the item.
+    for (const text of ["done", "todo", "one", "two", "child", "mixed"]) {
+      const item = taskStartingWith(text);
+      expect(item.querySelector("p")).toBeNull();
+      expect(Array.from(item.childNodes, (node) => node.nodeName)).toEqual(["INPUT", "#text"]);
+      expect(item.lastChild?.textContent).toBe(text);
+    }
+
+    // A loose or nested item keeps its paragraphs; the box leads the first one.
+    for (const text of ["loose", "parent"]) {
+      const item = taskStartingWith(text);
+      const paragraph = item.firstElementChild;
+      expect(paragraph?.tagName).toBe("P");
+      expect(paragraph?.firstChild).toBe(ownBoxes(item)[0] ?? null);
+      expect(paragraph?.textContent).toBe(text);
+    }
+  } finally {
+    view.unmount();
+  }
+});
+
+/** The element a body is painted into (`markdownClassName`), which carries `data-markdown-pending`
+ *  while the worker owes its formatting and `data-markdown-fallback` when the parser refused it. */
+function markdownElement(container: HTMLElement): HTMLElement {
+  return container.firstElementChild as HTMLElement;
+}
+
+/** Both marks are React state: the commit that clears `data-markdown-pending`, and the one that
+ *  sets `data-markdown-fallback`, are queued when the painter's last piece is in, after the
+ *  painter has written the body itself straight into the element. A row that waits on what the
+ *  painter wrote - its items, its paragraphs, its text - is therefore through that wait before
+ *  the commit lands, so a read of a mark the commit changes is waited for rather than read at
+ *  once (sjawhar/legion#2519). */
+function pendingMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-pending");
+}
+
+function fallbackMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-fallback");
+}
+
+/** The body's own list items, not an `ask` block's options, so a row counts what it wrote. */
+function topItems(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > ul > li"));
+}
+
+/** A list longer than the threshold, under a lead line that is the row's own, so no row reads
+ *  the answer the engine cached for another row's body. */
+const longItems = Math.ceil(markdownWorkerThreshold / "- x\n".length) + 200;
+
+function longBody(lead: string): string {
+  return `${lead}\n\n${"- x\n".repeat(longItems)}`;
+}
+
+/** A body past the threshold written as plain paragraphs, with no list in it, so the rows below
+ *  count what one task of a paint puts in without the body's finishing pass moving anything
+ *  after it. */
+const paragraphs = Math.ceil(markdownWorkerThreshold / "x\n\n".length) + 200;
+
+function paragraphBody(lead: string): string {
+  return `${lead}\n\n${"x\n\n".repeat(paragraphs)}`;
+}
+
+/** The body's own paragraphs, the lead one included. */
+function topParagraphs(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > p"));
+}
+
+/** The text standing in the element beside its blocks: a body's own literal text, which a paint
+ *  replaces rather than stands behind. */
+function looseText(container: HTMLElement): string {
+  return Array.from(markdownElement(container).childNodes)
+    .filter((node) => node.nodeName === "#text")
+    .map((node) => node.textContent ?? "")
+    .join("");
+}
+
+/** The next task, so a row reads what one slice of a paint left in the element: the task that
+ *  slice queued is ahead of this one, so exactly one of them has run when it resolves. */
+function nextTask(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 0);
+  return promise;
+}
+
+/** Every count of the body's own paragraphs the element passes through from the call on, in
+ *  order and from its own changes rather than from what a task happens to leave; the call it
+ *  answers with ends the watch and gives them. */
+function paragraphCounts(element: HTMLElement): () => number[] {
+  const counts: number[] = [];
+  let count = element.querySelectorAll(":scope > p").length;
+  const take = (records: MutationRecord[]): void => {
+    for (const record of records) {
+      for (const node of Array.from(record.removedNodes)) {
+        count -= node.nodeName === "P" ? 1 : 0;
+      }
+      for (const node of Array.from(record.addedNodes)) {
+        count += node.nodeName === "P" ? 1 : 0;
+      }
+      counts.push(count);
+    }
+  };
+  const watch = new MutationObserver(take);
+  watch.observe(element, { childList: true });
+  return () => {
+    take(watch.takeRecords());
+    watch.disconnect();
+    return counts;
+  };
+}
+
+/** What the element held when the paint that replaced a part-built one took it over. That paint
+ *  empties the element a node at a time before its first batch, so what it took is the top of
+ *  the run of counts falling to nothing (`MarkdownBody`'s `paintBlockInSlices`). */
+function heldWhenEmptied(counts: readonly number[]): number {
+  let at = counts.lastIndexOf(0);
+  while (at > 0 && counts[at - 1] === counts[at] + 1) {
+    at -= 1;
+  }
+  return counts[at];
+}
+
+/**
+ * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2519),
+ * so the reader's own thread is free while the heaviest body on the page parses. These rows are
+ * what a reader sees of that: the text at once, the formatting when the answer lands, their
+ * place in the body kept across it, and - whatever becomes of the worker - a formatted body in
+ * the end. `data-markdown-fallback` keeps its one meaning, a body the parser itself refused.
+ */
+describe("A long body parsed in the worker", () => {
+  beforeEach(async () => {
+    await warmMarkdownRenderer();
+  });
+
+  afterEach(restoreParseWorker);
+
+  test("paints its text at once, marked pending, then its formatted body", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A list the worker is parsing");
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      // The reader has the body's own text while the worker parses it: readable, selectable,
+      // and never the failure marker.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(view.container.textContent).toBe(markdown);
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(topItems(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(view.container.textContent).not.toContain("- x");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The worker answers with the document as plain JSON, and the page builds a document of its own
+  // schema from it. `Schema.nodeFromJSON` cannot: it checks each attribute against its type, and
+  // the Markdown parser writes `title: null` for a picture with no title where the schema's
+  // `image.title` is a string, so every body holding a picture would be refused. This row is what
+  // fails if the page reaches for `nodeFromJSON` again.
+  test("rebuilds a body holding a picture, which its own parser writes a null title for", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody(
+      "A picture over a list\n\n![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+    );
+    const view = render(withQueries(<MarkdownBody markdown={markdown} />));
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shot = view.container.querySelector("[data-dispatch-picture]");
+      expect(shot?.getAttribute("data-dispatch-picture")).toBe(
+        "dispatch://CORE-1/artifact/shot-png@v1"
+      );
+      expect(shot?.getAttribute("data-picture-caption")).toBe("shot.png");
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The live view hands each streamed delta to the same body as a longer `markdown`. Between the
+  // delta and the worker's answer the reader keeps the paint they were reading: a turn that
+  // flipped back to its source text on every delta would be unreadable while it streamed.
+  test("keeps the formatted body it painted when its text grows, until the new answer lands", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn still streaming");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+
+      view.rerender(<MarkdownBody markdown={grown} />);
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(topItems(view.container)).toHaveLength(longItems);
+      expect(view.container.textContent).not.toContain("- x");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("y");
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A turn streaming into the live view hands the same body a longer source every frame. The
+  // frame the worker has already started on cannot be taken back, so the page waits for that one
+  // answer and posts the frame the reader is waiting for in its place, rather than one message
+  // per frame: the worker is made to parse exactly one stale frame. That frame is the newest
+  // parse the reader can be given until the stream pauses, so it is painted when it lands, and
+  // the element stays marked pending because the frame they are on is still owed. A queue that
+  // posted each frame as it arrived would have the worker parse every one of them
+  // (sjawhar/legion#2519).
+  test("gives the worker one stale frame while a turn streams, and paints it while the newest is owed", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn streaming past the worker");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const grownAgain = `${grown}${"- z\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await worker.waitForRequests(1);
+      view.rerender(<MarkdownBody markdown={grown} />);
+      view.rerender(<MarkdownBody markdown={grownAgain} />);
+      await flushTasks();
+      // The worker holds the frame it started on and nothing else: neither frame written since
+      // was posted behind it.
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first]);
+
+      // The stale frame's answer lands. It is what the reader is shown, and the frame they are
+      // on takes its place in the worker.
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grownAgain]);
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 100));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("z");
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What a reader watching a long turn sees. The live view renders up to ten frames a second
+  // (`AgentThread.tsx`), and a parse of a long body takes longer than the gap between two of
+  // them, so every frame cancels the parse of the frame before it. An element that took only
+  // the answer to the frame it is on would be shown nothing for as long as the stream ran: each
+  // answer would land for a frame already replaced. The answer to a frame this element asked
+  // for is painted instead, however many frames have been written since, so the body grows one
+  // parse behind the stream (sjawhar/legion#2519).
+  test("grows through a stream whose frames outrun the worker, a parse behind it", async () => {
+    const worker = installFakeParseWorker();
+    const frames = [0, 1, 2, 3, 4].map(
+      (frame) => `${longBody("A turn the worker cannot keep up with")}${"- y\n".repeat(frame * 20)}`
+    );
+    const view = render(<MarkdownBody markdown={frames[0]} />);
+
+    try {
+      await worker.waitForRequests(1);
+      // Two more frames are written while the worker is still on the first: the reader is shown
+      // the frame it was holding, and the newest takes its place.
+      view.rerender(<MarkdownBody markdown={frames[1]} />);
+      view.rerender(<MarkdownBody markdown={frames[2]} />);
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream writes on while that frame is parsed, and the body grows again.
+      view.rerender(<MarkdownBody markdown={frames[3]} />);
+      view.rerender(<MarkdownBody markdown={frames[4]} />);
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 40));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream stops. The frame the reader is on is the one the worker is holding, and the
+      // body ends on it, marked neither pending nor as the fallback.
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 80));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Every edit of a long comment, and a streamed turn that crossed the threshold after a short
+  // paint, is a source the element does not hold - and 16,000 elements of it. Put in with one
+  // `replaceChildren` that is 918-971 ms of WebKit's thread (`MarkdownBody.tsx`, `ATTACH_BATCH`),
+  // so what decides is the source, not whether anything is painted here already
+  // (sjawhar/legion#2519).
+  test("slices the paint of a changed source into a body it already shows formatted", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment before its edit");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The task the answer lands in puts in one batch of the body and hands the thread back.
+      // A paint of the whole body in one task - what a repaint of the source already painted
+      // here gets - would have every paragraph of it in by now.
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 51);
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A sliced paint empties the element before its first batch and fills it 500 nodes a task, so
+  // between those tasks the element holds part of a body. A frame arriving in the middle of one
+  // must not stop it: the next render is pending and keeps whatever the element holds, so the
+  // reader would be left with a truncated prefix - 250 of 1,511 paragraphs in the deep review's
+  // reproduction - until that frame's own answer and its whole paint landed. The paint goes on
+  // to the end instead, which is the newest body the reader can be shown while the frame they
+  // are on is still owed (sjawhar/legion#2519).
+  test("goes on filling a body when the next frame arrives mid-paint, rather than leaving part of one", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment the reader is watching");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The paint of the edit has emptied the element and is filling it a batch at a task: what
+      // the element holds now is part of a body, fewer blocks than the paint before it left.
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // The next frame lands mid-paint. The body being painted still arrives whole, and the
+      // element stays marked pending, since that frame is owed.
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 101));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The same frame mid-paint, on an element that had nothing painted in it when the paint
+  // began: a reader opening the live session view while a long turn streams gets a pending
+  // first render and a frame every 100 ms, so the first frame lands while the first paint is
+  // still filling the element. A paint is stopped by nothing but the paint that replaces it, so
+  // the element must be left to it: the new frame's own text written here would stand in front
+  // of the batches still arriving behind it, and that is what the reader would read until that
+  // frame's answer and its whole paint landed (sjawhar/legion#2519).
+  test("writes no text beside a paint filling a freshly mounted element when a frame arrives", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A turn a reader opened while it streamed");
+    const grown = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      // Nothing is painted here and nothing is painting: the reader has the body's own text,
+      // which is what a first render owes them.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(looseText(view.container)).toBe(first);
+      expect(topParagraphs(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      // One task at a time up to the first batch, which is where the paint replaces that text.
+      for (let task = 0; task < 50 && topParagraphs(view.container).length === 0; task += 1) {
+        await act(nextTask);
+      }
+      const landed = topParagraphs(view.container).length;
+      expect(landed).toBeGreaterThan(0);
+      expect(landed).toBeLessThan(paragraphs + 1);
+
+      // The frame arrives in the middle of that paint.
+      view.rerender(<MarkdownBody markdown={grown} />);
+      // No text of that frame stands beside the blocks still arriving: about 2,800 characters
+      // of it would otherwise read in front of them, so the count is what this asserts.
+      expect(looseText(view.container).length).toBe(0);
+      expect(topParagraphs(view.container).length).toBeGreaterThanOrEqual(landed);
+
+      // The paint still puts its whole body in, with no text of the new frame beside it, and
+      // the element stays pending because that frame is owed.
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      expect(looseText(view.container).length).toBe(0);
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(looseText(view.container).length).toBe(0);
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What the paint that replaces a part-built one leaves on the way through. The answer to the
+  // frame after it is the one thing that stops a paint short, and the painter puts back what
+  // the element held before it started (`MarkdownBody`'s `paintBlockInSlices`), so what the
+  // replacing paint takes over is the whole body the reader was reading, never the few hundred
+  // paragraphs the stopped one had put in. Every task of this row leaves the element holding
+  // all of that body or a growing part of the new one (sjawhar/legion#2519).
+  test("holds none or all of the body it was reading while a part-built paint is replaced", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A body a reader is reading");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      // Frame N is painted part-way: the element holds some of it, fewer blocks than the body
+      // the reader was reading.
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // Frame N+1 answers mid-paint, which is what stops that paint. Its own paint empties the
+      // element before its first batch, and what it empties is what the stopped one left.
+      const changes = paragraphCounts(markdownElement(view.container));
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await act(() => worker.answer(2));
+
+      // Every task from there to the end of that paint: the whole body the reader had, or a
+      // part of the new one, which only grows.
+      const seen: number[] = [];
+      for (let task = 0; task < 200; task += 1) {
+        seen.push(topParagraphs(view.container).length);
+        if (seen.at(-1) === paragraphs + 101) {
+          break;
+        }
+        await act(nextTask);
+      }
+      expect(seen.at(-1)).toBe(paragraphs + 101);
+      const filling = seen.findIndex((count) => count !== paragraphs + 1);
+      expect(seen.slice(0, filling)).toEqual(seen.slice(0, filling).map(() => paragraphs + 1));
+      expect(seen.slice(filling)).toEqual([...seen.slice(filling)].sort((a, b) => a - b));
+      expect(new Set(seen.slice(filling)).size).toBe(seen.length - filling);
+      expect(heldWhenEmptied(changes())).toBe(paragraphs + 1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A body the engine already has the answer for is rendered in the commit that mounts it, never
+  // pending on the worker - and is still built across tasks, so between them the element holds
+  // part of a body. It carries the marker all the same, which is what a reader's surface, and
+  // every browser row that waits for a body to settle, reads to know the body is not all there.
+  test("marks a body painted in slices from the answer cache as pending until its last piece", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = paragraphBody("A body the engine has already parsed");
+    const first = render(<MarkdownBody markdown={markdown} />);
+    await act(() => worker.answer(0));
+    await waitFor(() => expect(topParagraphs(first.container)).toHaveLength(paragraphs + 1));
+    first.unmount();
+
+    const view = render(<MarkdownBody markdown={markdown} />);
+    try {
+      // The answer came from the cache: the worker was asked for this body once, on the mount
+      // before.
+      expect(worker.requests).toHaveLength(1);
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1);
+      expect(pendingMark(view.container)).toBe("true");
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The body's finishing pass (`finishBlock`) runs on the sliced path as it does on the
+  // whole-body one: a task item draws its checkbox, ticked as its source is, and a tight item's
+  // paragraph is unwrapped so the item reads as one line.
+  test("draws its task checkboxes and unwraps its tight items when it is painted in slices", async () => {
+    const worker = installFakeParseWorker();
+    const pairs = Math.ceil(markdownWorkerThreshold / "- [ ] todo\n- [x] done\n".length) + 50;
+    const markdown = `A long task list\n\n${"- [ ] todo\n- [x] done\n".repeat(pairs)}`;
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(pairs * 2));
+
+      const items = topItems(view.container);
+      const boxes = items.map((item) => item.querySelector<HTMLInputElement>("input"));
+      expect(boxes.every((box) => box?.type === "checkbox" && box.disabled)).toBe(true);
+      expect(boxes.map((box) => box?.checked)).toEqual(
+        Array.from({ length: pairs * 2 }, (_unused, at) => at % 2 === 1)
+      );
+      // Each item is tight, so none of them keeps a paragraph of its own.
+      expect(items.some((item) => item.querySelector("p") !== null)).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The parser refusing a body is the one final failure, and the only thing
+  // `data-markdown-fallback` says: pending before it was interim, never a failure.
+  test("ends as its literal text, marked as the fallback, where the parser refuses it", async () => {
+    const worker = installFakeParseWorker();
+    const refused =
+      'A body with <span data-dispatch="bogus">a span</span> this schema has no node for';
+    const markdown = longBody(refused);
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(fallbackMark(view.container)).toBe("true"));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(view.container.textContent).toBe(markdown);
+      expect(topItems(view.container)).toHaveLength(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when no worker can be created", async () => {
+    const worker = installFakeParseWorker({ refuseToCreate: true });
+    const view = render(<MarkdownBody markdown={longBody("A page that allows no worker")} />);
+
+    try {
+      // The page parses it itself: the reader waits, and then reads the body as a list. A
+      // worker that cannot be created is never the parser refusing the body.
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(worker.created).toBeGreaterThan(0);
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when the worker crashes", async () => {
+    const worker = installFakeParseWorker();
+    const view = render(<MarkdownBody markdown={longBody("A worker that crashes")} />);
+
+    try {
+      await act(() => worker.crash(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Nothing ever answers this body. The engine's deadline ends with the body parsed on the page;
+  // this row shortens it through `setParseDeadline`, the seam `resetMermaidDiagrams` is for the
+  // diagram renderer's own limit, so it proves what the deadline ends in without waiting out the
+  // page's own 10 s. The 25 s below is room for a loaded runner, not a second bound.
+  test("ends formatted on the page's own thread when the worker misses its deadline", async () => {
+    const worker = installFakeParseWorker();
+    setParseDeadline(50);
+    const view = render(<MarkdownBody markdown={longBody("A worker that never answers")} />);
+
+    try {
+      await worker.waitForRequests(1);
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems), {
+        interval: 250,
+        timeout: 25_000,
+      });
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      setParseDeadline();
+      view.unmount();
+    }
+  }, 40_000);
+
+  // The other end of the same deadline. An element keeps its place on the parse the worker is
+  // holding when it goes (`keepIfPosted`), which is how a streaming turn is shown the frame the
+  // worker was on; what that place must not buy is the body parsed on the reader's own thread
+  // once the deadline fires, since the element it was for has gone and `useRenderedMarkdown`
+  // throws such an answer away - the freeze a reader who navigated away would feel for a body
+  // nobody is looking at (sjawhar/legion#2519). A parse on the page would have cached its
+  // answer, so the mount below would need no worker at all; it asks for one, which is what says
+  // the page parsed nothing.
+  test("parses nothing on the page when the deadline passes for a body its reader left", async () => {
+    const worker = installFakeParseWorker();
+    setParseDeadline(50);
+    const markdown = longBody("A body left with the worker");
+    const left = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await worker.waitForRequests(1);
+    } finally {
+      left.unmount();
+    }
+    // Well past the deadline, which fires with the element gone and its place still on the job.
+    const pastTheDeadline = Promise.withResolvers<void>();
+    setTimeout(pastTheDeadline.resolve, 300);
+    await pastTheDeadline.promise;
+
+    const back = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await worker.waitForRequests(2);
+      expect(worker.requests[1]?.markdown).toBe(markdown);
+      expect(worker.workers).toHaveLength(2);
+      expect(pendingMark(back.container)).toBe("true");
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(back.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(back.container)).toBeNull());
+      expect(fallbackMark(back.container)).toBeNull();
+    } finally {
+      setParseDeadline();
+      back.unmount();
+    }
+  }, 20_000);
+
+  // Every paint recomputes the ask hosts, so a body whose decision card arrives late draws it
+  // from the answer it already has: the card is a dependency of the render, never a new parse.
+  test("repaints for a new decision card without sending the body a second time", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = `:::ask{urgency="high"}\n${askBody}\n${longBody("A decision above a list")}`;
+    const view = render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <TextAskCard.Provider value={undefined}>
+          <MarkdownBody markdown={markdown} />
+        </TextAskCard.Provider>
+      </MemoryRouter>
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shell = await findAskShell(view.container);
+      expect(within(shell).queryByText("Decision")).toBeNull();
+      expect(worker.requests).toHaveLength(1);
+
+      view.rerender(withAskCard(<MarkdownBody markdown={markdown} />));
+      const carded = await findAskShell(view.container);
+      expect(await within(carded).findByText("Decision")).toBeDefined();
+      await flushTasks();
+
+      expect(worker.requests).toHaveLength(1);
+      expect(topItems(view.container)).toHaveLength(longItems);
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // One body on two surfaces is one request with two waiters (the Conversation's card and the
+  // hover card of a reference to it both draw the same comment). A surface that goes away takes
+  // its own waiter and nothing else: the body stays with the worker, and the answer reaches the
+  // surface the reader is still looking at.
+  test("answers the surface still mounted when another drops the same body first", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body two surfaces draw");
+    const leaving = render(<MarkdownBody markdown={markdown} />);
+    const staying = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(staying.container)).toBe("true"));
+      await worker.waitForRequests(1);
+      expect(worker.requests).toHaveLength(1);
+
+      leaving.unmount();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(staying.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(staying.container)).toBeNull());
+      expect(fallbackMark(staying.container)).toBeNull();
+    } finally {
+      staying.unmount();
+    }
+  });
+
+  // A surface that starts drawing a body the worker has already answered - the hover card of a
+  // reference the reader points at after the card below it formatted - reads the answer the
+  // engine kept, so it is formatted from its first paint and the worker hears nothing.
+  test("paints a body whose answer already landed, without asking the worker again", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body answered before the second surface drew it");
+    const first = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(first.container)).toHaveLength(longItems));
+    } finally {
+      first.unmount();
+    }
+    await flushTasks();
+
+    const later = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await waitFor(() => expect(topItems(later.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(later.container)).toBeNull());
+      expect(fallbackMark(later.container)).toBeNull();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+    } finally {
+      later.unmount();
+    }
+  });
 });

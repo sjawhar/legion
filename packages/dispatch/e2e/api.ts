@@ -1,4 +1,9 @@
-import type { EditArtifactInput } from "@legion/contracts";
+import type {
+  CheckResultRecorded,
+  EditArtifactInput,
+  RecordCheckResultInput,
+} from "@legion/contracts";
+import type { Cookie } from "@playwright/test";
 import type {
   Actor,
   Agent,
@@ -6,6 +11,9 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
+  ArtifactBlock,
+  ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -27,10 +35,13 @@ import type {
   CreateProjectInput,
   EditAskInput,
   Event,
+  HandoffSummary,
   InboxRow,
   Issue,
+  IssueCoverage,
   IssueDetails,
   IssueSummary,
+  ItemBlocks,
   Message,
   MessageDelivery,
   MessageRead,
@@ -46,12 +57,21 @@ import type {
   UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
+  UserState,
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
+import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
-export const baseUrl =
-  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
+/** The Dispatch server a process of `env`'s lane addresses: the deployed server `env` names, else
+ *  the harness server of that lane, whose port e2e/run.ts exports from the server's report before
+ *  anything imports this module (e2e/harness-ports.ts). `e2e/preflight.ts` resolves another
+ *  lane's the same way this one resolves its own. */
+export function baseUrlOf(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts(env).dispatch.port}`;
+}
+
+export const baseUrl = baseUrlOf();
 /** The origin the server compares every cookie-authenticated write against (enforceCookieOrigin). */
 export const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
@@ -65,9 +85,18 @@ const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
+  /** The Dispatch server the call goes to; this module's `baseUrl`, the lane of the process that
+   *  imported it, when absent. Only e2e/preflight.ts names another: it checks every lane. */
+  baseUrl?: string;
+  /** The `Idempotency-Key` header the write carries, naming one intent: a repeat under it is
+   *  answered what the first was answered. None when absent, which Dispatch handles unkeyed. */
+  idempotencyKey?: string;
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+  /** In two-process mode, the process the round-robin proxy sends the call to; absent, whichever
+   *  takes its turn (e2e/round-robin-proxy.ts). */
+  process?: DispatchProcess;
 }
 
 /** The name of the session cookie the server issues at sign-in, dev or GitHub. */
@@ -79,53 +108,165 @@ export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
 }
 
+/** The whole `Set-Cookie` the server set the session cookie with, or undefined when it set
+ *  none. */
+function sessionSetCookie(response: Response): string | undefined {
+  return response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookieName}=`));
+}
+
+/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
+export function sessionCookieFrom(response: Response): string | undefined {
+  return sessionSetCookie(response)?.split(";")[0];
+}
+
+/** The SameSite values a `Set-Cookie` carries, by their lowercased spelling, as Playwright spells
+ *  them. */
+const sameSiteValues: Record<string, Cookie["sameSite"]> = {
+  lax: "Lax",
+  none: "None",
+  strict: "Strict",
+};
+
+/** The session cookie `response` sets, as `BrowserContext.addCookies` takes one, or undefined
+ *  when it sets none: the attributes the server itself set, never invented ones. The session
+ *  cookie is `HttpOnly`, `Path=/`, `SameSite=Strict`, `Max-Age=2592000`, and `Secure` only where
+ *  the server is not under DISPATCH_INSECURE_COOKIE (auth.IssueSessionCookie). It names no
+ *  `Domain`, which makes it host-only: the host of `from`, the URL that set it, is then its
+ *  domain. Playwright dates a cookie in whole seconds, and -1 is one that lasts the context's
+ *  life, which a header with no `Max-Age` gets. */
+function sessionCookieOf(response: Response, from: URL): Cookie | undefined {
+  const setCookie = sessionSetCookie(response);
+  if (setCookie === undefined) {
+    return undefined;
+  }
+  const [pair, ...attributes] = setCookie.split(";");
+  const assigned = pair.indexOf("=");
+  const cookie: Cookie = {
+    domain: from.hostname,
+    expires: -1,
+    httpOnly: false,
+    name: pair.slice(0, assigned),
+    path: "/",
+    sameSite: "Lax",
+    secure: false,
+    value: pair.slice(assigned + 1),
+  };
+  for (const attribute of attributes) {
+    const equals = attribute.indexOf("=");
+    const name = (equals === -1 ? attribute : attribute.slice(0, equals)).trim().toLowerCase();
+    const value = equals === -1 ? "" : attribute.slice(equals + 1).trim();
+    if (name === "domain") cookie.domain = value;
+    else if (name === "path") cookie.path = value;
+    else if (name === "max-age") cookie.expires = Math.floor(Date.now() / 1000) + Number(value);
+    else if (name === "httponly") cookie.httpOnly = true;
+    else if (name === "secure") cookie.secure = true;
+    else if (name === "samesite") cookie.sameSite = sameSiteValues[value.toLowerCase()] ?? "Lax";
+  }
+  return cookie;
+}
+
 export function devSignInError(login: string, status: number, responseText: string): Error {
   return new Error(`dev sign-in as ${login} failed: ${status} ${responseText}`);
 }
 
-const sessionCookies = new Map<string, Promise<string>>();
+/** The people the reset re-creates, each with a `user_sessions` row at generation 0
+ *  (`resetDatabaseOnce`, e2e/seed.ts): the only logins whose session cookie outlives a reset. */
+export const resetLogins: readonly string[] = ["alice", "bob"];
+
+/** One login's cached session cookie. */
+interface CachedSession {
+  cookie: Promise<Cookie>;
+  /** Whether the cookie names generation 0, which is where the reset puts `user_sessions` back
+   *  (e2e/seed.ts). A cookie minted after a sign-out names a later generation, and the server
+   *  admits only the login's current one (identity.CookieIdentity.Login), so the reset would
+   *  leave such a cookie refused rather than usable. */
+  atGenerationZero: boolean;
+}
+
+const sessionCookies = new Map<string, CachedSession>();
 
 /** The session cookie the server issues `login` at its dev sign-in route, minted once per
  *  spelling of a login and kept until something revokes it: the generation the cookie names lives
- *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
- *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
- *  the request itself, is not kept, so the next call asks again. */
-function sessionCookie(login: string): Promise<string> {
+ *  in `user_sessions`, which `resetDatabase` empties and refills for `resetLogins` alone (it
+ *  calls `forgetSessions`), and a browser context's Sign out as the same login advances it. A
+ *  sign-in that fails, by its answer or by the request itself, is not kept, so the next call asks
+ *  again. */
+export function sessionCookie(login: string): Promise<Cookie> {
   const cached = sessionCookies.get(login);
   if (cached !== undefined) {
-    return cached;
+    return cached.cookie;
   }
-  const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
-    async (response) => {
-      const value = response.headers
-        .getSetCookie()
-        .find((header) => header.startsWith(`${sessionCookieName}=`))
-        ?.split(";")[0];
-      if (response.status !== 302 || value === undefined) {
+  const mint = new URL(devSignInPath(login), baseUrl);
+  const session: CachedSession = {
+    atGenerationZero: false,
+    cookie: fetch(mint, { redirect: "manual" }).then(async (response) => {
+      const cookie = sessionCookieOf(response, mint);
+      if (response.status !== 302 || cookie === undefined) {
         throw devSignInError(login, response.status, await response.text());
       }
-      return value;
-    }
-  );
-  sessionCookies.set(login, cookie);
-  cookie.catch(() => {
-    if (sessionCookies.get(login) === cookie) {
+      // The cookie's value is `2.<base64url email>.<generation>.<expiry>.<mac>`
+      // (auth.sessionPayload), whose generation strconv.FormatInt writes, so "0" is the only
+      // spelling of the generation the reset puts back.
+      session.atGenerationZero = cookie.value.split(".")[2] === "0";
+      return cookie;
+    }),
+  };
+  sessionCookies.set(login, session);
+  session.cookie.catch(() => {
+    if (sessionCookies.get(login) === session) {
       sessionCookies.delete(login);
     }
   });
-  return cookie;
+  return session.cookie;
 }
 
-/** Forgets every cached session cookie; `resetDatabase` calls it after truncating `user_sessions`. */
+/** The logins a browser context has signed in as since the last reset by carrying the cached
+ *  cookie rather than minting one (`signIn`, e2e/users.ts). */
+const reusedSignIns = new Set<string>();
+
+/** The cookie a context signing in as `login` can carry instead of minting one, or undefined when
+ *  that sign-in must mint, which is the sign-in every row paid before this cache.
+ *
+ *  Only a `resetLogins` login reuses: the reset re-creates no other person, so no other login's
+ *  cookie outlives it. Only the first sign-in of that login since the reset reuses: a row that
+ *  signs the same login in twice has almost always signed it out in between, which advances the
+ *  login's generation, and the cached cookie, which names the generation before it, would then be
+ *  refused. */
+export function reusableSessionCookie(login: string): Promise<Cookie> | undefined {
+  if (!resetLogins.includes(login) || reusedSignIns.has(login)) {
+    return undefined;
+  }
+  reusedSignIns.add(login);
+  return sessionCookie(login);
+}
+
+/** Forgets the cached session cookies the reset leaves unusable, and the sign-ins it undoes;
+ *  `resetDatabase` calls it after emptying the tables.
+ *
+ *  The cookies of `resetLogins`, alice and bob, are kept: the reset re-inserts their people rows
+ *  and their `user_sessions` rows at generation 0 (e2e/seed.ts), the generation a cookie minted
+ *  after the previous reset names, so those two cookies authenticate again and the next row pays
+ *  no sign-in for them. Every other login's cookie is forgotten, since the reset re-creates no
+ *  other person, and so is a kept login's cookie minted at a later generation, which a sign-out
+ *  in the row just ended leaves behind. A kept cookie carries no state of its row into the next
+ *  one: it names a login and a generation, both of which the emptied database holds again. */
 export function forgetSessions(): void {
-  sessionCookies.clear();
+  for (const [login, session] of sessionCookies) {
+    if (!resetLogins.includes(login) || !session.atGenerationZero) {
+      sessionCookies.delete(login);
+    }
+  }
+  reusedSignIns.clear();
 }
 
 /** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
  *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
  *  whose `Origin` is the dashboard's). */
 export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
-  return { Cookie: await sessionCookie(login), Origin: dashboardOrigin };
+  const cookie = await sessionCookie(login);
+  return { Cookie: `${cookie.name}=${cookie.value}`, Origin: dashboardOrigin };
 }
 
 async function request<T>(
@@ -148,8 +289,12 @@ async function request<T>(
   } else {
     Object.assign(headers, await userHeaders(options.login));
   }
+  if (options.idempotencyKey !== undefined) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
+  }
+  if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
-  const response = await fetch(new URL(path, baseUrl), {
+  const response = await fetch(new URL(path, options.baseUrl ?? baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),
     headers,
     method,
@@ -228,6 +373,32 @@ export function patchIssue(
   options: ApiOptions = {}
 ): Promise<Issue> {
   return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
+}
+
+/** `POST /api/v1/issues/{key}/results`: one result of one check, recorded on `issue`, which
+ *  need not be the issue whose Verification document holds the check. The answer carries the
+ *  stored result and the pull-request body line it implies. */
+export function recordCheckResult(
+  issue: string,
+  input: RecordCheckResultInput,
+  options: ApiOptions = { as: "agent" }
+): Promise<CheckResultRecorded> {
+  return request<CheckResultRecorded>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/results`,
+    "POST",
+    input,
+    options
+  );
+}
+
+/** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. */
+export function getIssueCoverage(issue: string, options: ApiOptions = {}): Promise<IssueCoverage> {
+  return request<IssueCoverage>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/coverage`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 /** The project list in the server's order: lifecycle status, then rank. */
@@ -516,6 +687,29 @@ export function getComment(
   return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
 
+/** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks in body order, each with its
+ *  span in the stored body, its revision, and whether the blocks are indexed from that body. */
+export function getCommentBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/comments/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to comment `comment` of `issue` that answers its block `block` (`b2`): `reply_to`
+ *  with `reply_to_block`. */
+export function replyToCommentBlock(
+  issue: string,
+  comment: string,
+  block: string,
+  input: Omit<CreateCommentInput, "reply_to" | "reply_to_block">,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return createComment(issue, { ...input, reply_to: comment, reply_to_block: block }, options);
+}
+
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
   return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
@@ -541,6 +735,16 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
 export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
   return request<ArtifactText>(
     `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** The blocks of the document's current version, each with the span of markdown it covers. */
+export function getArtifactBlocks(id: string, options: ApiOptions = {}): Promise<ArtifactBlock[]> {
+  return request<ArtifactBlock[]>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/blocks`,
     "GET",
     undefined,
     options
@@ -577,6 +781,36 @@ export function requestApproval(
 ): Promise<{ ask: Ask; artifact_id: string; version: number }> {
   return request(
     `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
+    "POST",
+    input,
+    options
+  );
+}
+
+/** `POST /api/v1/artifacts/{id}/plan-reviews`: the plan review's approval of one plan version,
+ *  which is the only way a plan is approved. */
+export function createPlanReview(
+  id: string,
+  version: number,
+  options: ApiOptions = { as: "agent" }
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/plan-reviews`,
+    "POST",
+    { version },
+    options
+  );
+}
+
+/** Reviews the document's latest settled version as a person does from its header, with no
+ *  approval request needed: Approve, or Request changes with a reason. */
+export function reviewArtifact(
+  id: string,
+  input: { state: ArtifactReviewState; reason?: string },
+  options: ApiOptions = {}
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/reviews`,
     "POST",
     input,
     options
@@ -633,6 +867,12 @@ export function claimIssue(issue: string, options: ApiOptions = {}): Promise<Iss
   );
 }
 
+/** `DELETE /api/v1/issues/{key}/claim`: the holder, `options.actor` with the agent bearer, gives
+ *  the issue up. */
+export function releaseClaim(issue: string, options: ApiOptions = {}): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(issue)}/claim`, "DELETE", {}, options);
+}
+
 export function createMessage(
   issue: string,
   input: CreateMessageInput,
@@ -646,6 +886,7 @@ export function createMessage(
   );
 }
 
+/** Sends one message to a session as a human; `options.idempotencyKey` keys it. */
 export function createAgentMessage(
   sessionID: string,
   input: CreateAgentMessageInput,
@@ -659,18 +900,13 @@ export function createAgentMessage(
   );
 }
 
-/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
- *  the caller names its own, as a row that replays a request the page made does. */
+/** Sends one broadcast as a human; `options.idempotencyKey` keys it, as a row that repeats a
+ *  request the page made does. */
 export function createBroadcast(
-  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
+  input: CreateBroadcastInput,
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>(
-    "/api/v1/broadcasts",
-    "POST",
-    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
-    options
-  );
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
@@ -706,6 +942,33 @@ export function getMessage(
     `/api/v1/issues/${encodeURIComponent(issue)}/messages/${encodeURIComponent(messageID)}`,
     "GET",
     undefined,
+    options
+  );
+}
+
+/** `GET /api/v1/messages/{id}/blocks`: the message's blocks in body order, each with its span in
+ *  the stored body, and whether they are indexed from that body. */
+export function getMessageBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/messages/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to message `message` of `issue` that answers its block `block` (`b2`): `in_reply_to`
+ *  with `in_reply_to_block`. */
+export function replyToMessageBlock(
+  issue: string,
+  message: string,
+  block: string,
+  input: Omit<CreateMessageInput, "in_reply_to" | "in_reply_to_block">,
+  options: ApiOptions = {}
+): Promise<{ id: string }> {
+  return createMessage(
+    issue,
+    { ...input, in_reply_to: message, in_reply_to_block: block },
     options
   );
 }
@@ -747,6 +1010,23 @@ export function replyToCommentDelivery(
   );
 }
 
+/** A session records the next version of `phase`'s handoff on the issue, as `dispatch
+ *  handoff-write` does: under the agent bearer, naming itself in `actor`. `body` is sent as the
+ *  one JSON object's text the server stores verbatim. */
+export function createHandoff(
+  issue: string,
+  phase: string,
+  body: object,
+  actor: Actor = seedActor
+): Promise<HandoffSummary> {
+  return request<HandoffSummary>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/handoffs/${encodeURIComponent(phase)}`,
+    "POST",
+    { body: JSON.stringify(body) },
+    { actor, as: "agent" }
+  );
+}
+
 /** The signed-in human's own per-agent conversation state, as another of their devices sets it. */
 export function putAgentState(
   sessionID: string,
@@ -779,15 +1059,33 @@ export function putIssueState(
   );
 }
 
+/** `login`'s own state on every issue, `GET /api/v1/me/state`: each issue's pin and its pinned
+ *  items (`dismissed`), as the page reads them. */
+export function getMyState(login = "alice"): Promise<UserState> {
+  return request<UserState>("/api/v1/me/state", "GET", undefined, { login });
+}
+
 /**
- * Forces every open SSE connection on the server closed, as if it had restarted.
+ * Forces every open live socket on the server closed, as if it had restarted.
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
- * proves the client's reconnect-from-lastId path without seeding thousands of
- * events to trip the real replay cap.
+ * proves the page resumes every subscription after an unplanned gap.
  */
-export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+export function disconnectLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
-    "/api/v1/events/_test/disconnect",
+    "/api/v1/live/_test/disconnect",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}
+
+/** Forces every open live socket closed with 4001, as its bounded age does. */
+export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/live/_test/rotate",
     "POST",
     {},
     {
@@ -812,6 +1110,29 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
       as: "agent",
       ...options,
     }
+  );
+}
+
+/**
+ * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
+ * the server: once Dispatch has claimed its key, the run waits that long on the handler's own
+ * context before the handler runs, so a write Dispatch is slow to finish is slow server-side
+ * rather than held in the browser; a context that ends during the wait answers
+ * `503 SLOW_WRITE_CUT_OFF` and the handler never runs. Each call replaces the delay for that
+ * method and path, and `delayMs` 0 removes it. Test-only endpoint (mounted when
+ * DISPATCH_TEST_HOOKS=1, see run-server.sh), called as a person: its body takes no `actor`.
+ */
+export function slowWrites(
+  method: "PATCH" | "POST",
+  path: string,
+  delayMs: number,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/writes/_test/slow",
+    "POST",
+    { delay_ms: delayMs, method, path },
+    options
   );
 }
 
@@ -941,10 +1262,10 @@ export function publishAgentStreamFrame(
   );
 }
 
-/** Ends every open viewer stream for a session, as a connection lost on the way to the browser
- *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
- *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
- *  replay into a page that is already open, which a published frame alone cannot do. */
+/** Ends every open agent viewer for a session. The page resubscribes its dropped view on the live
+ * socket, which asks the session for its replay again and rebuilds the transcript: this is how a
+ * test gets a second replay into a page that is already open, which a published frame alone
+ * cannot do. */
 export function dropAgentStreamViewers(
   sessionID: string,
   options: ApiOptions = {}

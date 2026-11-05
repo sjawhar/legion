@@ -6,7 +6,7 @@
 // controller's daily report, which takes the project's next key.
 import type { Page } from "@playwright/test";
 
-import { expect } from "../harness";
+import { dispatchApi, expect } from "../harness";
 import type { ShotSet } from "../shot-runner";
 import {
   accept,
@@ -37,8 +37,57 @@ interface LegionJourney extends Tracked {
   report?: string;
 }
 
-/** Files both of the walkthrough's issues, so the daily report issue the controller creates takes
- *  a key no video shows, and hands the first one over. */
+/** The requirements each example issue's spec marks, in the words of its own subject. A spec
+ *  states them before its acceptance criteria, which check them. They are written here rather
+ *  than into `journey.ts`'s examples, which the committed walkthrough video was recorded from.
+ *  The Spec tab lists a spec's requirements under the document
+ *  (`web/src/features/issue/SpecRequirements.tsx`), so the shots of this issue's spec would
+ *  otherwise photograph an empty panel. Each requirement is flagged `has no check`: the example
+ *  issues carry no Verification document, and the issue page's documentation describes that
+ *  flag. */
+const SAVED_CART_REQUIREMENTS = `## Requirements
+
+:::requirement{#r1}
+A signed-in shopper saves the cart they are building, and the saved cart holds every line of it and its quantity.
+:::
+
+:::requirement{#r2}
+A saved cart belongs to the shopper's account rather than to the device that saved it, so any device they sign in on opens it.
+:::
+
+:::requirement{#r3}
+A saved cart nobody has touched for 30 days is removed, and the shopper is told a week before it goes.
+:::
+`;
+
+const DELIVERY_DATE_REQUIREMENTS = `## Requirements
+
+:::requirement{#r1}
+Checkout shows a delivery date beside every shipping option, before the shopper pays.
+:::
+
+:::requirement{#r2}
+Each date is the one that shipping option would deliver on, so a shopper who picks another option sees that option's date.
+:::
+`;
+
+/** The human who filed the issue states its requirements, above the acceptance criteria that
+ *  check them, and the seed waits for the Spec tab's list to hold them: it is read out of the
+ *  block index that the accepted write fills. */
+async function markRequirements(issue: Tracked, markdown: string, count: number): Promise<void> {
+  const api = await dispatchApi();
+  await api.editArtifact(issue.spec, {
+    ops: [{ before: "heading:Acceptance criteria", markdown, op: "insert" }],
+    summary: "Mark the requirements",
+  });
+  await expect
+    .poll(async () => (await api.getIssueCoverage(issue.key)).requirements.length)
+    .toBe(count);
+}
+
+/** Files both of the walkthrough's issues, with the requirements each one's spec marks, so the
+ *  daily report issue the controller creates takes a key no video shows, and hands the first one
+ *  over. */
 async function seed(): Promise<LegionJourney> {
   await seedProject(["SHOP-1"]);
   const issue = await file(SAVED_CART);
@@ -46,6 +95,8 @@ async function seed(): Promise<LegionJourney> {
   if (issue.key !== "SHOP-1" || next.key !== "SHOP-2") {
     throw new Error(`legion shots: the seed made ${issue.key} and ${next.key}`);
   }
+  await markRequirements(issue, SAVED_CART_REQUIREMENTS, 3);
+  await markRequirements(next, DELIVERY_DATE_REQUIREMENTS, 2);
   await handOver(issue);
   return { ...issue };
 }
@@ -54,6 +105,16 @@ const conversation = (journey: LegionJourney) => `/issues/${journey.key}/convers
 /** The issue's event history: what the Conversation leaves out now that it lists conversations. */
 const activity = (journey: LegionJourney) => `/issues/${journey.key}/activity`;
 const turns = (page: Page) => page.getByRole("list", { name: "Conversation turns" });
+/** Waits for the issue's own title in the header. An `h1` on an issue page is not the title alone:
+ *  the shell shows a loading skeleton `h1` before the issue arrives, and a rendered document whose
+ *  text opens on a top-level heading puts that heading on the page as a second one. Naming the
+ *  title and scoping to the header picks the heading the page is identified by, and waits for its
+ *  text rather than for whichever `h1` renders first. */
+async function titled(page: Page, title: string): Promise<void> {
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
+}
 /** The Conversation opens scrolled to what is new since the viewer's last read; this brings the
  *  issue's header, with its status, back to the top of the screen above the newest turns. */
 async function headerOnTop(page: Page): Promise<void> {
@@ -83,7 +144,7 @@ const legion: ShotSet<LegionJourney> = {
       viewport: "desktop",
       theme: "light",
       ready: async (page) => {
-        await expect(page.getByRole("heading", { level: 1 })).toContainText(SAVED_CART.title);
+        await titled(page, SAVED_CART.title);
       },
       steps: async (page) => {
         await page.getByRole("button", { name: "Edit labels" }).click();
@@ -127,8 +188,13 @@ const legion: ShotSet<LegionJourney> = {
     },
     {
       id: "spec-approval",
-      alt: "The architect's request to approve the spec in the Inbox, with its summary and the Approve and Request changes options.",
-      route: "/",
+      alt: "The architect's request to approve the spec, selected in the Inbox's reading column: Approve and Request changes at the head of the column, and the version it asks about below them.",
+      // The column shows the selected question, and an approval request has no card in the
+      // list: `?item=` selects its row (`buildInboxPath`), as a link to it would.
+      route: (journey) => {
+        if (journey.approval === undefined) throw new Error("the spec approval was not requested");
+        return `/?item=${journey.approval}`;
+      },
       viewport: "desktop",
       theme: "light",
       prepare: async (journey) => {
@@ -136,9 +202,17 @@ const legion: ShotSet<LegionJourney> = {
         journey.approval = await requestSpecApproval(journey, SAVED_CART);
       },
       ready: async (page, journey) => {
-        await expect(page.getByTestId(`ask-${journey.approval}`)).toContainText(
-          "Approval requested"
+        const pane = page.getByTestId("inbox-pane");
+        await expect(page.locator(`[data-inbox-row="${journey.approval}"]`)).toHaveAttribute(
+          "data-inbox-selected",
+          "true"
         );
+        const head = pane.locator("header").first();
+        await expect(head.getByRole("button", { exact: true, name: "Approve" })).toBeVisible();
+        await expect(
+          head.getByRole("button", { exact: true, name: "Request changes" })
+        ).toBeVisible();
+        await expect(pane.getByRole("region", { name: /^Document version / })).toBeVisible();
       },
     },
     {
@@ -211,7 +285,7 @@ const legion: ShotSet<LegionJourney> = {
         journey.report = (await postDailyReport([{ example: SAVED_CART, issue: journey }])).key;
       },
       ready: async (page) => {
-        await expect(page.getByRole("heading", { level: 1 })).toContainText("Legion daily report");
+        await titled(page, "Legion daily report");
         await expect(page.getByRole("combobox", { name: "Status" })).toHaveValue("icebox");
         await expect(turns(page)).toContainText("Finished:");
       },

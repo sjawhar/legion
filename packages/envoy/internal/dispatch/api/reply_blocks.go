@@ -1,0 +1,135 @@
+package api
+
+import (
+	"context"
+	"maps"
+	"net/http"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+)
+
+// replyBlockOwner is the kind of item the block a reply names belongs to, read from the node id
+// replies_to_block stores (refs.ParseItemBlockNode): `ask/<id>#<part>` is a part of an ask,
+// which a reply naming that ask names, and `comment/<id>#<block>` a block of the comment the
+// reply answers. A node id of no shape this build knows is read as a comment's, the kind every
+// reply written before ask parts named.
+func replyBlockOwner(nodeID string) refs.ItemKind {
+	if kind, _, _, ok := refs.ParseItemBlockNode(nodeID); ok {
+		return kind
+	}
+	return refs.ItemComment
+}
+
+// namedBlock is the block of its parent a reply names (reply_to_block, in_reply_to_block): the
+// node id replies_to_block stores, and the block's stored excerpt.
+type namedBlock struct {
+	node    string
+	excerpt string
+}
+
+// replyBlockOf checks that blockID is a current block of item itemID — the comment or the
+// message a reply answers, or the ask a reply names, whose blocks are the parts of its question,
+// its options and its answer — and returns it. The caller holds the item's owner row (when it
+// has one) and the item row; an item an older build wrote, or wrote after its last index, is
+// indexed first, in the caller's transaction (refs.IndexItemIfOwed), so the block named is one
+// of the item's current body. A block the item does not hold now answers 400 with code, naming
+// field and the block. The live write of this request is the reply, which its own route stamps;
+// the item indexed here is the parent, whose text an earlier write already carried an event for,
+// so a block mention this records takes the source_seq of the parent's own refs row for its
+// target at the item's first indexing and none after it (refs.indexItemBlocks), and either way it
+// is no new fact of this request.
+func (s *server) replyBlockOf(
+	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
+) (*namedBlock, error) {
+	if _, err := refs.IndexItemIfOwed(ctx, tx, kind, itemID, s.deps.ServerURL); err != nil {
+		return nil, err
+	}
+	node, excerpt, found, err := refs.CurrentItemBlock(ctx, tx, kind, itemID, blockID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errorf(http.StatusBadRequest, code, "%s %s is not a block of %s %s", field, blockID, kind, itemID)
+	}
+	return &namedBlock{node: node, excerpt: excerpt}, nil
+}
+
+// nodeID is the block's node id for replies_to_block, null for a reply naming no block.
+func (block *namedBlock) nodeID() *string {
+	if block == nil {
+		return nil
+	}
+	return &block.node
+}
+
+// lockReplyParentMessage takes message id, the parent a reply names a block of, `for no key update`
+// after its issue, the order the accept route takes it in, so replyBlockOf indexes it under the
+// lock and IndexItem takes its state row after it. It is not FOR UPDATE: the reply's insert then
+// takes the row FOR KEY SHARE through its foreign key, which this lock does not block.
+func lockReplyParentMessage(ctx context.Context, tx pgx.Tx, id string) error {
+	_, err := tx.Exec(ctx, `select 1 from messages where id = $1 for no key update`, id)
+	return err
+}
+
+// hydrateCommentReplyBlocks sets each comment's ReplyBlock, the block of its parent it answers
+// (null when it names none), in one query per kind of item the named blocks belong to: a reply
+// under an ask names a part of that ask, every other reply a block of the comment it answers
+// (replyBlockOwner), so a page of either costs one query and a page of both two.
+func hydrateCommentReplyBlocks(ctx context.Context, q queryer, comments ...*model.Comment) error {
+	ids := map[refs.ItemKind][]string{}
+	for _, comment := range comments {
+		if comment.RepliesToBlock != nil {
+			owner := replyBlockOwner(*comment.RepliesToBlock)
+			ids[owner] = append(ids[owner], comment.ID)
+		}
+	}
+	blocks := make(map[string]*model.ReplyBlock, len(ids))
+	for owner, owned := range ids {
+		found, err := refs.ReplyBlocks(ctx, q, owner, owned)
+		if err != nil {
+			return err
+		}
+		maps.Copy(blocks, found)
+	}
+	for _, comment := range comments {
+		comment.ReplyBlock = blocks[comment.ID]
+	}
+	return nil
+}
+
+// hydrateMessageReplyBlocks sets each message's ReplyBlock, the block of the message it answers
+// (null when it names none), in one query over every message that names one (RepliesToBlock),
+// however many there are, and none when no message does.
+func hydrateMessageReplyBlocks(ctx context.Context, q queryer, messages ...*model.Message) error {
+	ids := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if message.RepliesToBlock != nil {
+			ids = append(ids, message.ID)
+		}
+	}
+	blocks, err := refs.ReplyBlocks(ctx, q, refs.ItemMessage, ids)
+	if err != nil {
+		return err
+	}
+	for _, message := range messages {
+		message.ReplyBlock = blocks[message.ID]
+	}
+	return nil
+}
+
+// hydrateThreadReplyBlocks sets ReplyBlock on every message of the threads roots head: each root
+// (a message read by id may be a reply itself) and each reply chains holds under it, in one query.
+func hydrateThreadReplyBlocks(ctx context.Context, q queryer, roots []model.Message, chains map[string][]model.Message) error {
+	messages := make([]*model.Message, 0, len(roots))
+	for index := range roots {
+		messages = append(messages, &roots[index])
+		chain := chains[roots[index].ID]
+		for reply := range chain {
+			messages = append(messages, &chain[reply])
+		}
+	}
+	return hydrateMessageReplyBlocks(ctx, q, messages...)
+}

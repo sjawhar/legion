@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
@@ -27,7 +28,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project", async ({
+// SLOW(>=2s): one row for the whole project page - nine issues seeded across eight statuses,
+// the grouped board over them, eight filter presses, and the Documents tab down to a created
+// document with its editor. Each clause of the title is a press the row has to make.
+test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -56,10 +60,14 @@ test("project page groups issues by status in board order; filters narrow issues
   const bobs = await createIssue({ project: "CORE", title: "Bob's work" }, { login: "bob" });
   await patchIssue(bobs.key, { status: "in_progress" });
   await createAsk(bobs.key, { question: "Does Bob need to answer this?" }, session);
-  for (const issue of [triage, icebox, backlog, parent, needsYou, child, done]) {
-    const latest = await getIssue(issue.key);
-    await putIssueState(issue.key, { last_read_seq: latest.last_seq });
-  }
+  // Seven read marks, one round of round trips: the rows differ, the writes do not wait on
+  // each other.
+  await Promise.all(
+    [triage, icebox, backlog, parent, needsYou, child, done].map(async (issue) => {
+      const latest = await getIssue(issue.key);
+      await putIssueState(issue.key, { last_read_seq: latest.last_seq });
+    })
+  );
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -162,7 +170,7 @@ test("project page groups issues by status in board order; filters narrow issues
     await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
       "Design notes"
     );
-    await page.goto("/projects/CORE/documents");
+    await navigateInApp(page, "/projects/CORE/documents");
     await expect(page.getByRole("link", { name: "Design notes", exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("project-documents.png"), fullPage: true });
     await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);
@@ -190,7 +198,7 @@ test("project page groups issues by status in board order; filters narrow issues
 
 // The search filter holds up to 1,000 characters, and its chip stays inside its row: that text
 // on one line makes the page 7,535 px wide at 1280, and a phone zooms out until it is 1,560 px.
-test("a 1,000-character search filter's chip ends in an ellipsis inside its row", async ({
+test("a 1,000-character search filter's chip ends in an ellipsis inside its row @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -283,13 +291,16 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     await expect(references).toContainText("depth 1");
     await expect(references).toContainText("depth 2");
     const tabs = page.getByRole("main").getByRole("tab");
-    await expect(tabs).toHaveCount(5);
+    await expect(tabs).toHaveCount(8);
     for (const [index, name] of [
       "Spec",
+      "Verification",
+      "Plan",
       "Conversation",
       "Children",
       "Artifacts (2)",
       "Activity",
+      "Decisions",
     ].entries()) {
       await expect(tabs.nth(index)).toHaveAccessibleName(name);
     }
@@ -316,7 +327,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
 // The status bands are collapsible and the header is one strip. Both regressed once while this
 // surface was being polished: a `flex` summary loses the native disclosure marker, and a title
 // allowed to grow pushed the project key hundreds of pixels from a short name.
-test("status bands stay expandable and the project key sits beside its name", async ({
+test("status bands stay expandable and the project key sits beside its name @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -381,7 +392,7 @@ test("status bands stay expandable and the project key sits beside its name", as
 // would make the key and the title two flex columns: the key would break mid-key (`CORE-` over
 // `1`) and a long title would wrap in whatever the key and the timestamp left, about 130 px on a
 // phone.
-test("a list row keeps its key whole and gives the title the row's width", async ({
+test("a list row keeps its key whole and gives the title the row's width @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

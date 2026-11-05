@@ -12,9 +12,9 @@ import (
 // since a settlement can come before a required check is decided, so the head has no verdict until
 // a later settlement decides it; nothing decides while the required set is unread, and nothing
 // decides at a base that requires no check and no workflow, where nothing was judged to pass. A
-// settlement carried back across a .legion/-only push reads the same. A required workflow is judged
-// by its run as the daemon read it at the settlement's head: a cancelled run is red there, and
-// pending for a head a .legion/-only push made, whose own run superseded it.
+// settlement stands only for the head it names: a head pushed above it, its push known or not, has
+// no verdict until its own settlement comes. A required workflow is judged by its run as the daemon
+// read it at the head: a cancelled run is red there.
 func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 	// The live shape: the repository's one required gate passed, two workflow_dispatch lanes and an
 	// advisory review check failed beside it, and an image build was cancelled.
@@ -22,11 +22,6 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 		CheckRuns: []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "dev-apply / dev-chain-tripwire", ID: 2}, {Name: "review", ID: 3}, {Name: "build-image", ID: 4}},
 		Failing:   []string{"dev-apply / dev-chain-tripwire", "dev-apply / staging-e2e / staging-e2e", "review"},
 		Cancelled: []string{"build-image"}}
-	carried := func(pr record.PullRequest) record.PullRequest {
-		pr.HeadSHA = "handoff"
-		pr.Pushes = []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}
-		return pr
-	}
 	requiring := func(names ...string) func(record.PullRequest) record.PullRequest {
 		return func(pr record.PullRequest) record.PullRequest {
 			pr.Required = append([]string{}, names...)
@@ -69,19 +64,13 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 		{"a base branch that requires only a workflow whose run failed", requiringOnlyReview("failure"), "red", []Standing{{"review.yml", "failure"}}},
 		{"a base branch that requires only a workflow still running", requiringOnlyReview(Pending), "", []Standing{{"review.yml", Pending}}},
 		{"a required set never read", func(pr record.PullRequest) record.PullRequest { return pr }, "", nil},
-		{"the code head's settlement carried to the handoff head that replaced it", func(pr record.PullRequest) record.PullRequest {
-			return carried(requiring("pr-checks-result")(pr))
-		}, "green", []Standing{{"pr-checks-result", Success}}},
-		{"a failure carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
-			return carried(requiring("review")(pr))
-		}, "red", []Standing{{"review", Failed}}},
-		{"a cancellation carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
-			return carried(requiring("build-image", "pr-checks-result")(pr))
-		}, "", []Standing{{"build-image", Pending}, {"pr-checks-result", Success}}},
-		{"a gap carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
-			return carried(requiring("lint", "pr-checks-result")(pr))
-		}, "", []Standing{{"lint", Missing}, {"pr-checks-result", Success}}},
-		{"a head a push that may change code made, which no settlement stands for yet", func(pr record.PullRequest) record.PullRequest {
+		{"a head pushed above the settled one, whose push is known", func(pr record.PullRequest) record.PullRequest {
+			pr.Required = []string{"pr-checks-result"}
+			pr.HeadSHA = "next"
+			pr.Pushes = []record.ClassifiedPush{{SHA: "next", Before: "code"}}
+			return pr
+		}, "", nil},
+		{"a head a push made, which no settlement stands for yet", func(pr record.PullRequest) record.PullRequest {
 			pr.Required = []string{"pr-checks-result"}
 			pr.HeadSHA = "fix"
 			return pr
@@ -92,12 +81,6 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 		{"a required workflow still running", requiringReview(Pending, "code"), "", []Standing{{"pr-checks-result", Success}, {"review.yml", Pending}}},
 		{"a required workflow the head has no run of", requiringReview(Missing, "code"), "", []Standing{{"pr-checks-result", Success}, {"review.yml", Missing}}},
 		{"a required workflow's success read at an earlier head", requiringReview(Success, "earlier"), "", []Standing{{"pr-checks-result", Success}, {"review.yml", Pending}}},
-		{"a required workflow's failure read at the code head, carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
-			return carried(requiringReview("failure", "code")(pr))
-		}, "red", []Standing{{"pr-checks-result", Success}, {"review.yml", "failure"}}},
-		{"a required workflow's cancellation read at the code head, carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
-			return carried(requiringReview("cancelled", "code")(pr))
-		}, "", []Standing{{"pr-checks-result", Success}, {"review.yml", Pending}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := tc.pr(settled)

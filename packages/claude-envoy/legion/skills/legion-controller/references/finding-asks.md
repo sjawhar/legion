@@ -12,7 +12,11 @@ request: <request>`, because triage reads it to tell your filing from anyone els
 (`skill://legion-controller/references/triage.md`). The request, and the person it names, are:
 
 - an answer to an ask: `dispatch://<REPORT KEY>/ask/<id>`, for the person who answered it;
-- a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`;
+- a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`. When the
+  mention adopts an earlier message's request by asking for it
+  (`skill://legion-controller/references/slack-mentions.md`), the request reads
+  `Slack <channel_id> message <mention ts>, adopting message <earlier ts>`, and the person it names
+  is still the mention's `<@user_id>`;
 - a direct message: `direct message <id>`, with the id its frame's `reply_with` names after
   `--in-reply-to`, for the frame's `actor`. A message that arrives as your own user turn shows no
   id: write `direct message to session <your session id>`, for the person by the name they gave,
@@ -45,11 +49,12 @@ The work goes to whoever already owns that code. You file an issue only when nob
    `envoy_publish` the defect, its evidence reference and the fix to that tree's architect topic,
    `notifications.role.<issues.<KEY>.architect.locator.claim>`. The architect decides whether it
    is a child of the tree or part of an open issue's work. Reply `Handed dispatch://<that KEY>`
-   under the evidence only when the publish names a holder. When the root has no locator, or the
-   publish answers no holder, reply nothing: no architect reads a comment on its root, so the
-   evidence stays unhandled, and catch-up step 4 lists it again at your next start. Publish it
-   again at your next wake. Once the root leaves `admission.active`, no running tree owns the
-   code, and step 4 files it. File nothing while a tree owns it: a second issue splits the work.
+   under the evidence only when a live holder took the publish. When the root has no locator, or
+   the listener kept the publish for the role's next holder, reply nothing: no architect reads a
+   comment on its root, so the evidence stays unhandled, and catch-up step 4 lists it again at
+   your next start. Publish it again at your next wake. Once the root leaves `admission.active`,
+   no running tree owns the code, and step 4 files it. File nothing while a tree owns it: a
+   second issue splits the work.
 4. No running tree owns that code: file it on the repository where the fix belongs, in the
    project that repository maps to:
 

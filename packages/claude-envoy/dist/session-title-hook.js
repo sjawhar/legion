@@ -1,50 +1,4 @@
 // @bun
-var __create = Object.create;
-var __getProtoOf = Object.getPrototypeOf;
-var __defProp = Object.defineProperty;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-function __accessProp(key) {
-  return this[key];
-}
-var __toESMCache_node;
-var __toESMCache_esm;
-var __toESM = (mod, isNodeMode, target) => {
-  var canCache = mod != null && typeof mod === "object";
-  if (canCache) {
-    var cache = isNodeMode ? __toESMCache_node ??= new WeakMap : __toESMCache_esm ??= new WeakMap;
-    var cached = cache.get(mod);
-    if (cached)
-      return cached;
-  }
-  target = mod != null ? __create(__getProtoOf(mod)) : {};
-  const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
-  for (let key of __getOwnPropNames(mod))
-    if (!__hasOwnProp.call(to, key))
-      __defProp(to, key, {
-        get: __accessProp.bind(mod, key),
-        enumerable: true
-      });
-  if (canCache)
-    cache.set(mod, to);
-  return to;
-};
-var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
-var __returnValue = (v) => v;
-function __exportSetter(name, newValue) {
-  this[name] = __returnValue.bind(null, newValue);
-}
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, {
-      get: all[name],
-      enumerable: true,
-      configurable: true,
-      set: __exportSetter.bind(all, name)
-    });
-};
-var __require = import.meta.require;
-
 // ../envoy-client/src/errors.ts
 function messageFor(error) {
   return error instanceof Error ? error.message : String(error);
@@ -62,8 +16,11 @@ import { dirname, join } from "path";
 function configuredValue(value) {
   return value !== undefined && value.trim().length > 0 ? value : undefined;
 }
+function configuredSessionId(environment) {
+  return configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
+}
 function claudeSessionId(environment) {
-  const id = configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
+  const id = configuredSessionId(environment);
   if (id !== undefined)
     return id;
   throw new Error("Envoy channel requires ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID; Claude Code did not provide a session identity");

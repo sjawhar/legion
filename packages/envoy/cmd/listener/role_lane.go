@@ -1,0 +1,195 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
+)
+
+// roleForwardWaitLimit bounds the role forwards the role lane holds at once, queued behind their
+// holder's earlier forwards or waiting for their outcome. When it is reached the role lane's
+// handler waits for one to end, which only holds role messages in the lane's subscription, whose
+// pending limits are far above any backlog that wait can build (bus.ConnectRoleLane).
+const roleForwardWaitLimit = 4096
+
+// roleLaneSlowConsumerInterval is how often the role lane's slow-consumer count is read for a change
+// to log (watchRoleLaneSlowConsumers).
+const roleLaneSlowConsumerInterval = 5 * time.Second
+
+// roleForward is one role message the role lane resolved to its holder, every guard passed: item is
+// the message as it arrived and sessionID its holder.
+type roleForward struct {
+	item      contracts.Envelope
+	sessionID string
+}
+
+// roleForwarder runs the role lane's forwards off its NATS handler, so a holder slow to answer, or
+// one that never does, holds up no other role message. Forwards to one holder are published in the
+// order the handler handed them over, by a worker per holder with forwards queued; each forward's
+// wait for its outcome runs on a goroutine of its own, and the outcome becomes the forward's
+// delivery status and exception as it always has (finishRoleForward). Forwards queued and waiting
+// together are bounded by roleForwardWaitLimit.
+type roleForwarder struct {
+	// cfg is the delivery configuration the forwards are published (forwardRole) and reported
+	// through.
+	cfg   listenerDeliveryHandlerConfig
+	slots chan struct{}
+	// pending counts the forwards handed over and not yet reported, for wait.
+	pending sync.WaitGroup
+
+	mu sync.Mutex
+	// queues holds each holder's forwards not yet published, in arrival order. A holder has a key
+	// exactly while its worker runs.
+	queues map[string][]roleForward
+}
+
+func newRoleForwarder(cfg listenerDeliveryHandlerConfig) *roleForwarder {
+	return &roleForwarder{cfg: cfg, slots: make(chan struct{}, roleForwardWaitLimit), queues: map[string][]roleForward{}}
+}
+
+// forwarded is the envelope published on the holder's agent subject: the message under the
+// role-forward dedupe key, which the durable path recognises and acknowledges.
+func (f roleForward) forwarded() contracts.Envelope {
+	forwarded := f.item
+	forwarded.DedupeKey = roleForwardDedupePrefix + f.item.DedupeKey
+	return forwarded
+}
+
+// msgID is the forward's Nats-Msg-Id on subject: the name under which the stream keeps one copy
+// of this message for this holder, however often it is forwarded - by a retry, or by each
+// listener of the machine groups an older grant leaves the lane in, which all forward the same
+// message. A forward whose envelope's own key names its event
+// (contracts.DedupeKeyNamesTheUpstreamEvent, asked of the message as it arrived: the forward's
+// prefix hides a webhook key's shape) is named by the forward's dedupe key and the subject, as
+// the publish route's forwards are (bus.ForwardMsgID). Any other key is its sender's choice and
+// two distinct envelopes can share one, so such a forward is named by its event id and the
+// subject instead: a repeat of one message is still stored once, and two messages under one key
+// are two messages, which the stream stores both of.
+func (f roleForward) msgID(subject string) string {
+	if contracts.DedupeKeyNamesTheUpstreamEvent(f.item) {
+		return bus.ForwardMsgID(f.forwarded().DedupeKey, subject)
+	}
+	return bus.ForwardMsgID(f.item.EventID, subject)
+}
+
+// enqueue queues forward behind its holder's earlier forwards, starting the holder's worker when it
+// has none, once a slot is free.
+func (f *roleForwarder) enqueue(forward roleForward) {
+	f.slots <- struct{}{}
+	f.pending.Add(1)
+	f.mu.Lock()
+	queue, running := f.queues[forward.sessionID]
+	f.queues[forward.sessionID] = append(queue, forward)
+	f.mu.Unlock()
+	if !running {
+		go f.publish(forward.sessionID)
+	}
+}
+
+// publish is sessionID's worker: it publishes the holder's queued forwards in order, hands each
+// one's wait to a goroutine of its own, and ends once the queue is empty.
+func (f *roleForwarder) publish(sessionID string) {
+	subject := contracts.AgentSubject(sessionID)
+	for {
+		f.mu.Lock()
+		queue := f.queues[sessionID]
+		if len(queue) == 0 {
+			delete(f.queues, sessionID)
+			f.mu.Unlock()
+			return
+		}
+		forward := queue[0]
+		queue[0] = roleForward{}
+		f.queues[sessionID] = queue[1:]
+		f.mu.Unlock()
+
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout)
+		if err != nil {
+			f.finish(forward, err)
+			continue
+		}
+		go func() { f.finish(forward, wait()) }()
+	}
+}
+
+// finish reports forward's outcome and frees its slot.
+func (f *roleForwarder) finish(forward roleForward, err error) {
+	finishRoleForward(f.cfg, forward, err)
+	<-f.slots
+	f.pending.Done()
+}
+
+// outstanding is how many forwards are queued or waiting for their outcome.
+func (f *roleForwarder) outstanding() int {
+	return len(f.slots)
+}
+
+// wait waits, within ctx, for every forward handed over to be reported. The shutdown runs it once
+// the role lane has drained, so no forward is handed over meanwhile, and before the main client
+// drains, since the forwards and their exceptions are published through it. It reports whether all
+// were.
+func (f *roleForwarder) wait(ctx context.Context) bool {
+	return waitWithin(ctx, &f.pending)
+}
+
+// startRoleForward is forwardRole over client: a forward waits for the stream's acknowledgement
+// and the holder's receipt (bus.Client.StartRequestCoreTo).
+func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
+	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
+		forward, err := client.StartRequestCoreTo(subject, item, msgID, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return forward.Wait, nil
+	}
+}
+
+// roleLane is the listener's role lane at shutdown: its own client (bus.ConnectRoleLane), the
+// forwards its handler hands over, and stopWatch, which ends watchRoleLaneSlowConsumers.
+type roleLane struct {
+	client    *bus.Client
+	forwards  *roleForwarder
+	stopWatch func()
+}
+
+// drain ends the role lane at shutdown: it drains the lane's client within timeout, so the handler
+// takes every role message the server already delivered and no more, then waits for the forwards it
+// handed over, the receipt window after that at most, since a forward published by then has its
+// outcome within it. A forward still waiting then is logged and left to the main client's drain.
+func (l roleLane) drain(logger *logging.Logger, timeout time.Duration) {
+	l.stopWatch()
+	if err := l.client.Drain(timeout); err != nil {
+		logger.Warn("role lane drain error", slog.String("error", err.Error()))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), roleReceiptTimeout)
+	defer cancel()
+	if !l.forwards.wait(ctx) {
+		logger.Warn("role forwards still waiting at shutdown", slog.Int("outstanding", l.forwards.outstanding()))
+	}
+}
+
+// watchRoleLaneSlowConsumers logs each change of the role lane's slow-consumer count until ctx ends.
+// The lane's pending limits are far above any backlog its handler can build, so the count stays 0
+// unless nats.go reports a slow consumer anyway; the count is also the
+// envoy_role_lane_slow_consumers metric.
+func watchRoleLaneSlowConsumers(ctx context.Context, lane *bus.Client, logger *logging.Logger, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var seen uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if count := lane.SlowConsumers(); count != seen {
+			logger.Warn("role lane slow consumers", slog.Uint64("total", count), slog.Uint64("new", count-seen))
+			seen = count
+		}
+	}
+}

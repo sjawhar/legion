@@ -105,15 +105,16 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the stream's last message for %s is event %q, want the sent %q", target, stored.EventID, sent.EventID)
 	}
 
-	// The role lane is open too: a role message reaches its holder through this listener's queue
-	// subscription before the durable binds.
+	// The role lane is open too: a role message published straight onto it, as an operator's or an
+	// earlier listener's would be, reaches its holder through this listener's queue subscription
+	// before the durable binds.
 	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
 	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
-	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/publish",
-		`{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"role message while the durable is held","source_session":"ses_bind_window_sender"}`)
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages/publish to a role while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
+	onLane := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "publish.bind-window-role")
+	onLane.SourceSession = "ses_bind_window_sender"
+	if err := client.Publish(onLane); err != nil {
+		t.Fatalf("publish a role message onto the lane while another task holds the durable: %v", err)
 	}
 	select {
 	case forwarded := <-frames:
@@ -139,12 +140,13 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 }
 
 // Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
-// before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
-// queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
-// so a role message reaches its holder once whichever task takes it: no publish is forwarded by
-// both. A re-publish under the same dedupe key can land on the other task, whose dedupe cache has
-// not seen it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it
-// drops the copy each other machine's listener forwards today.
+// before its durable binds, so both subscribe notifications.role.> at once. They are members of one
+// core-NATS queue group (envoy-roles, which every listener shares), and NATS hands each message to
+// one member of a group, so a role message published on the lane reaches its holder once whichever
+// task takes it: no publish is forwarded by both. A re-publish under the same dedupe key can land
+// on the other task, whose dedupe cache has not seen it, and is forwarded again; the holder's pump
+// drops that copy by its dedupe key. The messages go straight onto the lane, as an operator's or
+// an earlier listener's do: the publish route forwards a role message itself.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"
@@ -174,26 +176,23 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	frames := receiveAsSession(t, client, holderID)
 	// The old task reads the claim from the role bucket and the holder from its session cache, which
 	// can trail the bucket and not yet hold the session the replacement just registered; it then reads
-	// the holder from the session bucket itself (roleHolderSession), so its first lookup answers the
+	// the holder from the session bucket itself (liveSessionEntry), so its first lookup answers the
 	// claim rather than releasing it as lapsed.
 	if status, answer := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, ""); status != http.StatusOK {
 		t.Fatalf("the old task's lookup of %s right after the replacement accepted %s's claim: status %d %s, want 200", role, holderID, status, answer)
 	}
 
-	publish := func(body string) contracts.Envelope {
+	publish := func(dedupeKey string) contracts.Envelope {
 		t.Helper()
-		status, answer := callListener(t, old.port, http.MethodPost, "/v1/messages/publish", body)
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/messages/publish %s: status %d %q", body, status, answer)
+		item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, dedupeKey)
+		item.SourceSession = "ses_two_tasks_sender"
+		if err := client.Publish(item); err != nil {
+			t.Fatalf("publish %s onto the role lane: %v", dedupeKey, err)
 		}
-		var published contracts.Envelope
-		if err := json.Unmarshal([]byte(answer), &published); err != nil {
-			t.Fatalf("decode the publish answer %q: %v", answer, err)
-		}
-		return published
+		return item
 	}
 	for index := range messages {
-		publish(`{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"two tasks message ` + strconv.Itoa(index) + `","source_session":"ses_two_tasks_sender"}`)
+		publish("publish.two-tasks-" + strconv.Itoa(index))
 	}
 	keys := map[string]int{}
 	for received := range messages {
@@ -234,7 +233,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	const repeatKey = "two-tasks-repeat"
 	events := map[string]bool{}
 	for range 2 {
-		published := publish(`{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"two tasks repeat","source_session":"ses_two_tasks_sender","dedupe_key":"` + repeatKey + `"}`)
+		published := publish(repeatKey)
 		events[published.EventID] = true
 	}
 	ofRepeat := func(record map[string]any) bool { return events[record["event_id"].(string)] }
@@ -357,6 +356,9 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 	sessions, records := bucket(bus.SessionBucket, 5*time.Minute), bucket(bus.CIStateBucket, 0)
 	put(roles, "reviewer", store.RoleClaim{HolderSessionID: "ses_live", ClaimedAt: now})
 	put(interests, "ses_live", store.Interest{SessionID: "ses_live", MachineID: "startup-legacy", Topics: []string{contracts.AgentSubject("ses_live")}, UpdatedAt: now})
+	// Written straight to the bucket as an earlier build's listener wrote it, serving port and
+	// all: no registration carries a port since dispatch://INFRA-889, and this test is about
+	// what a listener makes of the records it finds on its start.
 	put(sessions, "ses_live", session.SessionEntry{Port: 1, MachineID: "startup-legacy", UpdatedAt: now})
 	for _, kv := range []natsgo.KeyValue{roles, interests, sessions, records} {
 		readable, unreadable := testnats.LegacyKeys(kv.Bucket(), "k")
@@ -389,23 +391,23 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 // githubWebhookEnv mounts the listener's GitHub webhook route, the one route that uses the CI store.
 var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET=ci-route-secret", "ENVOY_REVIEWER_APP_ID=1"}
 
-// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit whose
-// checks finished a minute ago and have not settled, so any summary loop reading the bucket settles
-// it on its next tick. It returns the bucket and the record's key.
-func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
+// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit of
+// owner/repo#number at sha whose checks finished a minute ago and have not settled, so any
+// summary loop reading the bucket settles it at its first pass after the record reaches its
+// cache, on the next tick of the loop's grid. It returns the bucket and the record's key.
+func seedDueCIRecord(t *testing.T, client *bus.Client, owner, repo, number, sha string) (natsgo.KeyValue, string) {
 	t.Helper()
 	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("create the CI bucket: %v", err)
 	}
-	sha := strings.Repeat("d", 40)
-	key := cistore.Key("acme", "widgets", "7", sha)
-	record := `{"owner":"acme","repo":"widgets","number":"7","sha":"` + sha + `",` +
-		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/acme/widgets/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
+	key := cistore.Key(owner, repo, number, sha)
+	record := `{"owner":"` + owner + `","repo":"` + repo + `","number":"` + number + `","sha":"` + sha + `",` +
+		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/` + owner + `/` + repo + `/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
 		`"suites":{},"last_event_at":` + strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + `,` +
 		`"generation":1,"emitted_count":0,"settled_emitted":false,"schema":1}`
 	if _, err := kv.Put(key, []byte(record)); err != nil {
-		t.Fatalf("store the CI record: %v", err)
+		t.Fatalf("store the CI record of %s/%s#%s: %v", owner, repo, number, err)
 	}
 	return kv, key
 }
@@ -435,7 +437,7 @@ func ciSettled(t *testing.T, client *bus.Client) bool {
 func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	kv, key := seedDueCIRecord(t, client)
+	kv, key := seedDueCIRecord(t, client, "acme", "widgets", "7", strings.Repeat("d", 40))
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "no-github-route")
 	listener.waitHealthy(t)
@@ -476,7 +478,7 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 func TestAListenerWithAGitHubRouteSettlesTheCIBucket(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	kv, key := seedDueCIRecord(t, client)
+	kv, key := seedDueCIRecord(t, client, "acme", "widgets", "7", strings.Repeat("d", 40))
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "github-route", githubWebhookEnv...)
 	listener.waitHealthy(t)

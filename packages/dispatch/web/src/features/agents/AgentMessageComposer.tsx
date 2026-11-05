@@ -1,4 +1,4 @@
-import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
+import { hashKey, type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
@@ -19,6 +19,8 @@ import {
 import type { ReplyTarget } from "../conversation/composer-model";
 import { useHeldSends } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
+import { PendingSendTurn } from "../conversation/PendingSendTurn";
+import { useSessionSends } from "../conversation/useSessionSends";
 import { focusOnDocument } from "../shell/roving";
 import { AGENT_ROW_SELECTOR, ISSUE_PICKER_SELECTOR } from "./keyboard";
 
@@ -69,6 +71,12 @@ export function AgentMessageComposer({
   const queryClient = useQueryClient();
   const store = useHeldSends();
   const { sending, sendingNow } = hold;
+  // The session's other messages still on their way - its live view's - show here too, as their
+  // own turns, and Retry, Discard or Stop trying here acts on the same write there: the session is
+  // the write's target, not the surface that made it. This composer's own send shows in it.
+  const sends = useSessionSends(agent.session_id);
+  const ownName = hashKey(sendKey);
+  const others = sends.pending.filter((held) => hashKey(held.mutationKey) !== ownName);
   // The issue a held send went to - out, or refused - is the one the picker names when the row
   // mounts again, so what the toggle says and where Retry sends stay one issue.
   const [issueKey, setIssueKey] = useState(() => {
@@ -291,6 +299,9 @@ export function AgentMessageComposer({
           )}
         </div>
       ) : null}
+      {others.map((held) => (
+        <PendingSendTurn held={held} key={held.id} sends={sends} />
+      ))}
       <MentionComposer
         // The channel decides which mention the message needs - an issue comment reaches this
         // agent by mentioning it, a direct message does not. The composer takes a changed seed

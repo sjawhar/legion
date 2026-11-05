@@ -32,6 +32,23 @@ has one of two kinds:
 | `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
 
+A machine holding a Google identity token enrols a `session` too: it trades that token at the
+broker's token exchange, which answers a Dispatch access token and the machine login that trade
+minted, and the machine enrols with that login. That login names the machine's fleet and no
+person, so the session acts for the fleet's service: it reads the secrets that service owns and
+the shared agent-tier ones, and no person's. The person a fleet's
+`BROKER_VM_EXCHANGE_ACCOUNTS` entry names reaches the Dispatch token alone; that person reaches
+their own secrets on the machine only by signing in on it.
+
+A person signs in on a machine with `agent-secrets login`, which runs Google's device flow and then
+trades the person's own identity token at the exchange with the machine's as the actor token. That
+trade mints a machine login of its own, carrying the person rather than the fleet, so a session
+enrolled under it is that person's: it reads the secrets that person owns and the shared agent-tier
+ones, and no other person's and none of the fleet's. Each sign-in is bound to a box key the command
+makes there, so one person signed in on two machines holds a login on each, and two people signed
+in on one machine hold one each. Revoking a sign-in on Dispatch ends its machine login with it:
+every session it enrolled ends, and the box signs in again to work on.
+
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
 a pod. A pod's renewal carries the pod's current projected token, and the broker refuses it
@@ -49,8 +66,20 @@ current-image pod: a copied token used to renew before the pod's own first renew
 That is seconds while the Legion daemon holds an approved machine login, but after a daemon restart
 its pods enroll only once a person approves the daemon's new login, and a pod that ends before it
 enrolls never renews with its token, so its UID stays open as an old-image pod's does. A grant lasts
-until its session ends, so a copy that keeps renewing keeps the grant one approval gave it. An
-enrollment has **ended** once its launcher revokes it (the helper does
+until its session ends, so a copy that keeps renewing keeps the grant one approval gave it.
+
+A machine's own session is held to its machine login as well: the broker reads that login on every
+renewal, and refuses one whose login has ended — revoked, past the hour's expiry its Google
+identity token gave it, or its account no longer listed for its service in `BROKER_VM_SERVICES`.
+So a box dropped from its fleet's settings, and one that stops being able to prove its identity,
+lose their sessions within one `BROKER_LEASE_SECONDS`: the renewal is refused
+`ENROLLMENT_NOT_LIVE`, the broker logs `broker: machine session renewal refused: its machine login
+has ended`, and the sweep ends the enrollment at its lease. A copy of such a session's key and
+enrollment id taken off the box renews nothing once that box's login has ended. Only a machine's
+own session is held this way: a pod's renewal proves the pod's own projected token, and a person's
+session on such a box runs until they revoke the sign-in, which ends it at once.
+
+An enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that
 login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
@@ -72,6 +101,49 @@ chooses. A `pod` enrollment records none, since the Legion daemon logs in as a s
 Kubernetes token rather than as a person; it records the service account the pod's projected token
 proved instead.
 
+### When no broker is serving
+
+A lease that runs out while no broker is serving is not ended. A session renews through a
+broker, so while every broker process is down, or none can reach the database, no session can
+renew. Every serving broker records a beat every `BROKER_SWEEP_SECONDS`, and a gap of more than
+three sweeps between beats counts as time no broker was serving. A lease that was still running
+at the last beat stays live through that gap, so the sweep does not end it. The first beat after
+the gap gives the gap back to every such lease that was not revoked, at most
+`BROKER_LEASE_SECONDS` from then, and the broker logs
+`broker: gave back the time no broker was serving …`
+(`packages/envoy/internal/broker/enroll/serving.go`, `ServingClock`). The session's renewer then
+renews as before. A revoked enrollment stays ended, and so does one whose lease ran out while a
+broker was serving. A renewal with another pod's or service account's token is still refused
+`POD_IDENTITY_MISMATCH`. A gap of three sweeps is given back to nobody, so a lease has to
+outlive one and then the retries its renewer takes to renew once a broker serves again. The
+broker refuses to start on a `BROKER_LEASE_SECONDS` too short for its `BROKER_SWEEP_SECONDS`,
+and names the shortest lease that is long enough: 91 seconds at a sweep of 1 or 5 seconds, 105
+at a sweep of 10, 225 at 30 and 360 at 60.
+It walks both renewers' own retry schedules
+(`packages/envoy/internal/broker/leasetime`), counting each renewal the outage refuses as
+failing at whatever instant costs the renewer most: anywhere from at once, when the connection
+is refused, to the 30-second client timeout, when nothing behind a front door ever answers,
+with a proxy that gives up or a terminating pod that resets ending one between the two.
+Each renewer waits from the instant its failure comes back, so that instant is what decides
+where its next renewal falls.
+Which renewer sets the floor changes with the sweep: `agent-secrets renew`'s floor grows steadily
+with the sweep, while `agent-secrets-helper`, which waits at least 30 seconds after any failed
+renewal, stays at 91 seconds up to a 10-second sweep, where an outage can refuse only its first
+renewal, and rises faster after that. So `agent-secrets renew` is the stricter of the two only
+at sweeps of 7 to 10 seconds, and the helper at every other.
+The default lease
+of 900 seconds passes at every sweep the broker takes.
+A deployment whose `BROKER_LEASE_SECONDS` is below its sweep's floor has to raise it before it
+rolls a broker carrying this refusal, since each new pod exits at boot instead of serving.
+This covers only an outage of the broker
+itself:
+
+- A broker that runs but that sessions cannot reach (ingress, DNS, a NetworkPolicy, a stale
+  `AGENT_SECRETS_URL`) still counts as serving, so a lease that runs out then ends as before.
+- A grant's lifetime and a pending request's expiry still run on wall-clock time.
+- The first deploy of a broker with this behavior restores nothing that ran out before it.
+- A pod whose renewer already exited 76 has no renewer until the pod is relaunched.
+
 ## Machine login
 
 A launcher (a person's machine helper, or the Legion daemon) cannot enroll anything until the
@@ -91,6 +163,11 @@ broker's own endpoints:
    `NOT_APPROVER`, since the machine's sessions act as that person.
 4. On approval the broker mints the launcher credential bound to the machine's key, and the
    machine's next poll gets a refresh token for it, bound to the same key (DPoP, RFC 9449).
+
+The device grant is served only while the broker is given a page for a person to type the code
+into (`BROKER_MACHINE_LOGIN_URL`). A deployment whose machines hold a Google identity leaves that
+unset: nothing prints a code, Dispatch serves no page to type one into, and each machine gets its
+launcher credential from the trade above instead, with nobody to approve it.
 
 The helper keeps the login (its key, the credential's id and expiry, and the current refresh
 token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` by default),
@@ -121,13 +198,16 @@ revoked from Dispatch's machine-login page by the person who approved it and no 
 any of their machines under its machine login (`agent-secrets machine revoke`), before or after it
 expires, which also ends every session it enrolled and every refresh token it holds
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). Its
-sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
-credential, so a box keeps working after the machine's credential expires, and the page lists an
-expired login, marked as expired with sessions still running, until its last session ends. Whoever
+sessions outlive its expiry: a session renews its lease with its own key, and the broker reads no
+credential to renew one a person's machine login enrolled, so a box keeps working after the
+machine's credential expires, and the page lists an expired login, marked as expired with sessions
+still running, until its last session ends. (A machine's own session, enrolled under the login its
+Google identity traded for, is the one exception: it renews only while that login is live, as
+[Sessions and enrollment](#sessions-and-enrollment) says.) Whoever
 approved a person's machine login is its operator. A lapsed or revoked login means logging the
 machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
-a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A machine logs in
-through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
+a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A person's machine
+logs in through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
 `405 Method Not Allowed` and its poll `GET /v1/launcher-credentials/{pending}` `404`. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before
@@ -140,7 +220,8 @@ without secrets until it is replaced. To stop it logging in, remove its account 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
 source address and per named person, and how often anyone can try a token login: per source
-address before the token is verified, and per account once it is.
+address before the token is verified, and per account once it is. A token login the broker could
+not complete (a 5xx, such as while its database is away) spends neither.
 
 ## Owner and tier: who may have which secret
 
@@ -157,7 +238,7 @@ marked with tags or annotations:
   `projects/<number>/secrets/agent-secrets-deel-api-key`, is `DEEL_API_KEY`. It is lowercase
   letters, digits and single hyphens, starting with a letter.
 - **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
-  or a service the broker is configured with (`BROKER_SERVICES`).
+  or a service the broker is configured with (`BROKER_SERVICES` or `BROKER_VM_SERVICES`).
 - **`tier`** is `agent` or `human`.
 - **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key, or
   `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
@@ -171,7 +252,12 @@ marked with tags or annotations:
   name gets no token. A `github-app` secret without the tag, or with one that names no account, is
   refused `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
-  secret must use `--ttl` no longer than the tag.
+  secret must ask for a lifetime no longer than the tag; a request with no `--ttl` asks for the
+  12-hour default.
+- **`default-grant`** is optional. Its one value is `session`: a request with no `--ttl` whose
+  secrets all carry it gets a grant that lasts until its session ends instead of 12 hours. Any other
+  value is refused `default-grant-malformed`. Set it with `agent-secrets secret create|retag
+  --default-grant session`.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
   `kind-secret`, and this broker never reads it. It makes the brokers before kinds, from
   legion-envoy-v13.19.0 on, refuse a kind secret rather than serve its stored key.
@@ -191,7 +277,7 @@ Who gets a secret follows from those two tags alone:
 | A person's, `tier=agent` | Granted at once. | Sent to the owner for approval. |
 | A person's, `tier=human` | Sent to the owner for approval. | Sent to the owner for approval. |
 | `owner=shared`, `tier=agent` | Granted at once. | Granted at once. |
-| `owner=shared`, `tier=human` | Approved by anyone signed in to Dispatch. | Approved by anyone signed in to Dispatch. |
+| `owner=shared`, `tier=human` | Approved by anyone who signs in to the broker. | Approved by anyone who signs in to the broker. |
 | A service's, `tier=agent` | Granted at once. | Denied; no one can approve it. |
 
 A session is its owner's own when its operator is the owner: the owner approved the machine login
@@ -206,6 +292,13 @@ that service's accounts: the Legion daemon's worker pods, for `legion-daemon`. A
 as a service with its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token
 proving the pods' account is what makes a pod the service's.
 
+`BROKER_VM_SERVICES` binds a service to the Google service accounts its machines run as, one entry
+per account, each account bound to one service; for each account, `BROKER_VM_PROJECTS` and
+`BROKER_VM_INSTANCES` may pin the one Compute Engine project its machines run in and the glob
+their instance names match. Those entries are what the broker's token exchange decides a machine's
+Google identity token on, and a machine of a bound account is then that service's own session, so
+the service's secrets go to it at once.
+
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service
 enrolled it. A service's secret is agent tier, since no person approves it: the broker refuses one
@@ -217,7 +310,7 @@ session, even when the grant had already ended by then
 (`packages/envoy/internal/broker/requests/machine_state.go`, `RevokeByApprover`). Each
 withheld secret is human tier to that session for as long as the session lives: every other grant
 the session got it on without asking ends with the revoked one, and the session's requests for it
-are sent to the owner for approval, or to anyone signed in to Dispatch for a shared secret, so the
+are sent to the owner for approval, or to anyone who signs in to the broker for a shared secret, so the
 session asks before it gets the secret again. Only the session's own person withholds: anyone else
 who revokes one of its grants, the person who approved it, ends that grant alone. Other sessions,
 the person's own included, still get the secrets at once.
@@ -296,7 +389,8 @@ reason of at most 400 characters. The broker evaluates every name
   account its `github-owners` tag lists. A release can narrow that token, with the `github_app`
   body of `POST /v1/grants/{id}/values` or the exec form's `--github-owner`, `--github-repo` and
   `--github-read-only`: the token of one listed account alone, limited to named repositories of
-  that account, to `contents: read` and `metadata: read`, or to both. A token limited to
+  that account, to `contents: read`, `metadata: read`, `pull_requests: read` and `actions: read`,
+  or to both. An App whose installation has not been granted Actions gets the other three. A token limited to
   repositories alone keeps every permission the App holds, its organization permissions among
   them, so a token for a machine that must only read is limited to read access too. A narrowing
   to an account the tag does not list is refused `NARROWING_OWNER_NOT_LISTED`, and one GitHub
@@ -322,8 +416,8 @@ reason of at most 400 characters. The broker evaluates every name
   release mints a token of that same kind from that same frozen source, never the stored value. To
   end a grant, revoke it. A kind secret the broker stops serving, such as one whose
   `github-owners` is removed or malformed, stops releasing until the secret is served again.
-- A secret with `max-grant` needs `--ttl` no longer than that duration. A request with no `--ttl`,
-  or a longer one, is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
+- A secret with `max-grant` needs a lifetime no longer than that duration. A request whose `--ttl`
+  (or, with none, the 12-hour default, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a release that finds
   a live grant lasting longer ends it for good (`GRANT_NOT_LIVE`), and a pending request that asked
   for longer is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again
@@ -335,15 +429,19 @@ reason of at most 400 characters. The broker evaluates every name
   rather than asking twice, and any other request naming one of its secrets, with or without
   `--ttl`, is refused `REQUEST_PENDING`, naming the pending request. The session waits for that
   request to be decided, or cancels it (`agent-secrets cancel`) and asks again. The broker's answer
-  names the approver the record names, and `agent-secrets` prints it, so the agent can tell that
-  person. The record fixes its approver when the request is made, and the request stays in that
+  names the approver the record names and the request's page on the broker (`approve_url`), and
+  `agent-secrets` prints both, so the agent can tell that person where to approve it. The record
+  fixes its approver when the request is made, and the request stays in that
   person's Inbox after the secret's tags change, though they may then be unable to approve it
   ([what an owner change does](#approvals)).
 
 A granted request yields a **grant**: the session's right to read those values until the grant
-ends. A grant lasts until its session ends, unless the request asks for a shorter lifetime
-(`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), which it then
-lasts counted from the moment it is granted. A secret with `max-grant` requires that shorter
+ends. A grant lasts the lifetime its request asks for
+(`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), counted from
+the moment it is granted. A request that names no lifetime gets 12 hours, or, when every secret it
+names carries the tag `default-grant=session`, a grant that lasts until its session ends. A grant
+also always ends with its session. Any other value of `default-grant` is refused
+(`default-grant-malformed`). A secret with `max-grant` requires that shorter
 lifetime and bounds it. The approver sees the lifetime the request asked for before deciding it.
 While a grant lives, a new request from the same session for exactly the same names and the same
 lifetime gets the same grant back, without asking anyone again, as long as the current policy still
@@ -370,15 +468,28 @@ nothing. To end every session's automatic access to a secret, change its tags
 
 ## Approvals
 
-An approval happens in Dispatch, never in the broker. The broker holds no Dispatch credential and
-sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
-person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
-broker as its own Kubernetes ServiceAccount, which the broker lists as a caller
-(`BROKER_API_ACCOUNTS`), with that person's email, taken from their Dispatch session. No secret
-is shared between them. The broker then checks that email against the record's approver: anyone
-else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared
+A secret request is approved on the broker's own approval page, never in Dispatch. The broker holds
+no Dispatch credential and sends Dispatch nothing: Dispatch's server reads the broker's pending list
+for the person signed in, and its Inbox lists each secret request as a link to that request's page
+on the broker, `<broker>/approve/<record>`, which the broker's answers name as `approve_url`. The
+page signs the person in to the broker itself, with OpenID Connect and the broker's own client (the
+deployment's Google Workspace, `BROKER_SIGNIN_*` in
+[Operate](/legion/broker/operate/#approval-sign-in)), only when they hold no live sign-in there,
+and brings them back to the same request. It prints the request from the broker's own record: the
+secret names, the enrollment the broker verified asked (its kind, operator, runtime and worker
+slot), the session the request names when it differs, marked as the request's own claim, the
+reason, the lifetime, the times, the approver and the state; then every other request waiting on
+that person. Each request the person may decide has **Approve** and **Deny**, and one **Approve
+all N shown** decides every request printed. A decision is posted to the broker's own origin and
+is bound to that sign-in and to the requests the page printed, so a page on another origin,
+Dispatch's among them, cannot make one, and no route a service calls decides a secret request: the
+broker refuses it `DECIDE_ON_BROKER_PAGE`, naming the page.
+
+The broker checks the signed-in person against the record's approver: anyone else gets a page
+saying who may decide it, with a link to sign in as someone else, and no buttons. A request for a
+shared
 human-tier secret, or for a shared agent-tier secret its session's operator withheld from it,
-names the approver `anyone`: it waits in every person's Inbox, any person signed in to Dispatch may
+names the approver `anyone`: it waits in every person's Inbox, anyone who signs in to the broker may
 decide it, and the
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
@@ -413,11 +524,18 @@ approved before it wherever the new tags want the secret approved for that sessi
   signed-in person may deny it. Otherwise it expires, or its session cancels it
   (`agent-secrets cancel`) and asks again.
 
-A record is decided once. A second click, a concurrent one, or one after the record expired gets
-`RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
-a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the broker
-records whoever a listed caller says is approving, a listed account's token is an approval
-credential: list Dispatch's own account and nothing else.
+A record is decided once. A second click, a concurrent one, or one after the record expired changes
+nothing (`RECORD_TERMINAL`), and the page says what became of the record. A pending request nobody
+decides expires after 12 hours, a fixed time rather than
+a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`).
+
+A machine login is still decided in Dispatch, with its typed code
+([Machine login](#machine-login)), and a person's revoke of a grant or a machine login is still made
+through Dispatch: Dispatch's server calls the broker as its own Kubernetes ServiceAccount, which the
+broker lists as a caller (`BROKER_API_ACCOUNTS`), with that person's email from their Dispatch
+session, and the broker takes that name on Dispatch's word. A listed account's token can therefore
+approve a machine login and revoke in any person's name, though never approve a secret request:
+list Dispatch's own account and nothing else.
 
 ## The audit record
 
@@ -447,7 +565,8 @@ a grant already revoked, naming under `withheld` the secrets it withheld from th
 `launcher_credential.token_login` (a service's token login: the `credential_id`, its `service`, the
 token's `subject`, the `pod_uid` the token is bound to when it is, the login's `key_thumbprint`,
 the credential's `expires_at` and the token's own `token_expires_at`). Each row names its actor:
-`human:<email>` for a change Dispatch made for its signed-in person, `session:<enrollment id>` for
+`human:<email>` for a decision a person made on the broker's approval page or a change Dispatch
+made for its signed-in person, `session:<enrollment id>` for
 a session's own, `launcher:<credential id>` for one
 a machine login made under its own credential, a person's revoke from their machine and a
 service's token login included, or `broker`. No

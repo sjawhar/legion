@@ -8,10 +8,12 @@
     "dev": "vite --config web/vite.config.ts",
     "build:web": "vite build --config web/vite.config.ts",
     "check:classes": "bun web/src/theme/classes-in-build-css.ts",
+    "check:asset-sizes": "bun web/src/asset-sizes-in-build.ts",
     "test": "bun test --parallel web/src e2e/__tests__",
     "dispatch:local": "bun e2e/local-instance.ts",
-    "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",
-    "e2e:deployed": "playwright test --config e2e/playwright.config.ts",
+    "e2e": "bun run build:web && bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts",
+    "e2e:multiprocess": "bun run build:web && DISPATCH_BUILD=e2e-b vite build --config web/vite.config.ts --outDir dist-b && DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_WEB_DIST_B=../dispatch/web/dist-b bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts",
+    "e2e:deployed": "bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts",
     "e2e:install": "playwright install chromium webkit firefox",
     "typecheck": "bunx tsc --noEmit",
     "lint": "bunx biome check web/src e2e"
@@ -19,7 +21,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@happy-dom/global-registrator": "^20.14.0",
-    "@playwright/test": "^1.63.0",
+    "@playwright/test": "^1.64.1",
     "@testing-library/react": "^16.3.3",
     "@types/bun": "latest",
     "@types/react": "^19.2.18",

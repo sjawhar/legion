@@ -5,6 +5,14 @@ package pmdoc
 // each rendering back; the engine reads the same renderings; then the head judges the base against
 // itself. Both tests skip unless the driver sets their inputs. The driver copies this file into the
 // base revision, so it uses only what every revision since the write-path read-back check has.
+//
+// Among what TestDifferentialCompare counts: a document the head reads as the engine but its
+// writer refuses, because its rendering reads back otherwise, is reported ("refused by the
+// writer") and gates where the base stores it ("newly refused by the writer"); any other document
+// the base stores and the head does not is reported ("newly refused"). A document the engine
+// itself threw on is reported ("engine cannot read"), the throw being the engine's own; one whose
+// reading Go's schema refuses gates ("engine reading Go's schema refuses"), since no other gate
+// can judge a document Go cannot hold.
 
 import (
 	"bufio"
@@ -99,66 +107,30 @@ func diffStep(dump *diffDump, name string, step func() error) (err error) {
 	return step()
 }
 
-// diffTree decodes the engine's ProseMirror JSON as Go holds the document where the two differ only
-// in what the browser editor does not store: a mark on a hard break or an image, which the engine's
-// reader keeps and the editor's store (y-prosemirror) drops, as Go's schema does by holding marks on
-// text alone. An image's link is one such mark, which the editor shows until the document is
-// reloaded (LEGION-365); TestDifferentialCompare counts those documents apart. Each short table
-// body row is padded to its header's width as Parse pads it, the documented canonicalisation. No
-// revision is judged by these.
-func diffTree(reading *diffReading) *Node {
-	doc, _ := diffTreeLinkingImages(reading)
-	return doc
-}
-
-// diffTreeLinkingImages is diffTree, also reporting whether the engine's reading links an image.
-func diffTreeLinkingImages(reading *diffReading) (*Node, bool) {
+// diffRead decodes the engine's ProseMirror JSON as Go holds the document, and reports whether
+// Go's schema refused what the engine read, which is not the engine failing to read. The engine's
+// reading is compared as it stands: both readers hold a mark on text alone, never on an inline
+// leaf, as the browser editor's store (y-prosemirror) does, so FromJSON refuses a reading carrying
+// one on a leaf, and TestDifferentialCompare counts that document under `engine reading Go's
+// schema refuses`, which gates, rather than under `engine cannot read`, which counts an engine
+// throw and is reported alone. Each short table body row is padded to its header's width as Parse
+// pads it, the documented canonicalisation. No revision is judged by these.
+func diffRead(reading *diffReading) (*Node, bool) {
 	if reading == nil || reading.Err != "" || reading.PM == nil {
 		return nil, false
 	}
-	var generic any
-	if err := json.Unmarshal(reading.PM, &generic); err != nil {
-		return nil, false
-	}
-	linksImage := dropUnstoredMarks(generic)
-	raw, err := json.Marshal(generic)
+	doc, err := FromJSON(reading.PM)
 	if err != nil {
-		return nil, linksImage
-	}
-	doc, err := FromJSON(raw)
-	if err != nil {
-		return nil, linksImage
+		return nil, true
 	}
 	padShortRows(doc)
-	return doc, linksImage
+	return doc, false
 }
 
-// dropUnstoredMarks removes, in decoded ProseMirror JSON, every mark on a hard break or an image,
-// and reports whether one it removed was an image's link.
-func dropUnstoredMarks(value any) (linksImage bool) {
-	node, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	switch node["type"] {
-	case "hardbreak":
-		delete(node, "marks")
-	case "image":
-		marks, _ := node["marks"].([]any)
-		for _, mark := range marks {
-			if m, ok := mark.(map[string]any); ok && m["type"] == "link" {
-				linksImage = true
-			}
-		}
-		delete(node, "marks")
-	}
-	children, _ := node["content"].([]any)
-	for _, child := range children {
-		if dropUnstoredMarks(child) {
-			linksImage = true
-		}
-	}
-	return linksImage
+// diffTree is the tree diffRead reads, for a caller that treats either refusal the same way.
+func diffTree(reading *diffReading) *Node {
+	doc, _ := diffRead(reading)
+	return doc
 }
 
 // padShortRows gives every short body row of every table under node the cells Parse pads it with,
@@ -341,12 +313,14 @@ func TestDifferentialCompare(t *testing.T) {
 			break
 		}
 		documents++
-		source, linksImage := diffTreeLinkingImages(read.MD)
-		if source == nil {
+		// A reading the engine threw on is the engine's own refusal, and only reported; one Go's
+		// schema refuses leaves the document out of every gate below, so it gates itself.
+		source, refused := diffRead(read.MD)
+		switch {
+		case refused:
+			counts["engine reading Go's schema refuses"]++
+		case source == nil:
 			counts["engine cannot read"]++
-		}
-		if linksImage {
-			counts["engine links an image"]++
 		}
 		var sides [2]diffSide
 		for index := range sides {
@@ -358,14 +332,6 @@ func TestDifferentialCompare(t *testing.T) {
 			sides[index] = judge(dump, source, reading)
 		}
 		base, head := sides[0], sides[1]
-		// A linked image is stored without its link at both revisions, as the editor stores it
-		// (LEGION-365); these are the documents that loss reaches.
-		if linksImage && base.stores {
-			counts["base stores a linked image without its link (LEGION-365)"]++
-		}
-		if linksImage && head.stores {
-			flag("head stores a linked image without its link (LEGION-365)", sides)
-		}
 		for index, name := range []string{"base", "head"} {
 			side := sides[index]
 			if side.correct {
@@ -415,11 +381,24 @@ func TestDifferentialCompare(t *testing.T) {
 		if !base.engineOnly && head.engineOnly {
 			flag("new engine-only read-back", sides)
 		}
+		// The writer refuses a document the head reads as the engine because its rendering reads
+		// back otherwise; one the base stores is newly refused by the writer, and gates.
+		writerRefuses := head.dump.Parse == "" && strings.Contains(head.dump.Write, "reads back otherwise") && head.ReadsAsEngine
+		if writerRefuses {
+			flag("refused by the writer", sides)
+		}
+		switch {
+		case writerRefuses && base.stores:
+			flag("newly refused by the writer", sides)
+		case base.stores && !head.stores:
+			flag("newly refused", sides)
+		}
 	}
 
 	var summary strings.Builder
 	fmt.Fprintf(&summary, "documents: %d (the engine cannot read %d)\n", documents, counts["engine cannot read"])
-	for _, line := range []struct{ label, key string }{
+	// gates is each count that is summarized and that fails the test, in the order both read them.
+	gates := []struct{ label, key string }{
 		{"regressions (base stores correctly, head does not)", "regression"},
 		{"misreads (base refuses, head stores what reads back otherwise)", "misread"},
 		{"churn (base stores correctly, head's bytes differ)", "churn"},
@@ -427,8 +406,17 @@ func TestDifferentialCompare(t *testing.T) {
 		{"engine-tree churn (base renders the engine's tree correctly, head's bytes differ)", "engine-tree churn"},
 		{"head panics (recovered or not)", "head panic"},
 		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
-	} {
+		{"newly refused by the writer (base stores, head's rendering reads back otherwise)", "newly refused by the writer"},
+		{"engine readings Go's schema refuses (FromJSON cannot hold what the engine read)", "engine reading Go's schema refuses"},
+	}
+	for _, line := range gates {
 		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
+	}
+	for _, line := range []struct{ label, key string }{
+		{"refused by the writer (head reads it as the engine, its rendering reads back otherwise)", "refused by the writer"},
+		{"newly refused (base stores, head does not, other than newly refused by the writer)", "newly refused"},
+	} {
+		fmt.Fprintf(&summary, "REPORTED %-82s %d\n", line.label, counts[line.key])
 	}
 	keys := make([]string, 0, len(counts))
 	for key := range counts {
@@ -439,9 +427,9 @@ func TestDifferentialCompare(t *testing.T) {
 		fmt.Fprintf(&summary, "  %s: %d\n", key, counts[key])
 	}
 	fmt.Print(summary.String())
-	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point"} {
-		if counts[gate] > 0 {
-			t.Errorf("%d %s; see %s", counts[gate], gate, os.Getenv("PMDOC_DIFF_REPORT"))
+	for _, gate := range gates {
+		if counts[gate.key] > 0 {
+			t.Errorf("%d %s; see %s", counts[gate.key], gate.key, os.Getenv("PMDOC_DIFF_REPORT"))
 		}
 	}
 }

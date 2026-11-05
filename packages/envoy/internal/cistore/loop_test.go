@@ -783,10 +783,13 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 	}
 }
 
+// Two replicas, each with its own store on the same bucket, attempt one due record at once: the
+// second finds the first's durable claim and finishes without reaching publish.
 func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	store := openStore(t, conn)
+	replicaA := openStore(t, conn)
+	replicaB := openStore(t, conn)
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	pub := &recPub{
@@ -802,16 +805,17 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := recordCheck(store, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+	if err := recordCheck(replicaA, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
-	waitCacheChecks(t, store, owner, repo, number, sha, 1)
-	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	waitCacheChecks(t, replicaA, owner, repo, number, sha, 1)
+	setLastEventAt(t, replicaA, owner, repo, number, sha, 0)
+	waitCached(t, replicaB, Key(owner, repo, number, sha), func(st State) bool { return st.LastEventAt == 0 })
 
 	firstDone := make(chan struct{})
 	go func() {
 		defer close(firstDone)
-		runSummaryTick(store, pub, time.Second, logging.New("test"))
+		runSummaryTick(replicaA, pub, time.Second, logging.New("replica-a"))
 	}()
 	select {
 	case <-entered:
@@ -822,7 +826,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		runSummaryTick(store, pub, time.Second, logging.New("test"))
+		runSummaryTick(replicaB, pub, time.Second, logging.New("replica-b"))
 	}()
 	select {
 	case <-secondDone:

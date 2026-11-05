@@ -13,7 +13,7 @@ status: active
 module: packages/pi-legion
 applies_when:
   - Main is forward-merged into a branch that moved a component to another package
-  - Main's round added `[Unreleased]` changelog bullets, AGENTS.md rows or README lines about that component
+  - Main's round added changelog fragments (`packages/<pkg>/.changes/unreleased/*.yaml`), AGENTS.md rows or README lines about that component
   - A file the branch kept merges cleanly while the component it describes now lives elsewhere
 related_issues:
   - "LEGION-247"
@@ -24,17 +24,18 @@ related_issues:
 
 Extends docs/solutions/legion/a-forward-merge-into-a-branch-that-moved-files-ports-mains-edits-to-the-new-paths-LEGION-247.md.
 
-- After porting main's code edits to the new paths, read every hand-maintained text main appended
-  in the merged range — `[Unreleased]` changelog sections, AGENTS.md tables, README lists — for
-  entries that describe what you moved. They merge with no conflict marker because the file is
-  still where it was, so neither the conflict list nor the serials bullet flags them, and they are
-  now attached to the wrong package.
-- Move each such entry to the package that ships the component, in the merge commit, and delete
-  it from the old package's text; then read the old file's own statements against what remains,
-  since a changelog that keeps `legion.daemonApiVersion is 14` while its split entry says the
-  manifest has no `legion` key contradicts itself at the reader.
-- `jj diff --from <last base> --to main@origin --name-only` is the list to walk; a `CHANGELOG.md`
-  or `AGENTS.md` on it under a package you split from is a file to read, not a merge to trust.
+- After porting main's code edits to the new paths, read every hand-maintained text main added
+  in the merged range — changelog fragments (`packages/<pkg>/.changes/unreleased/*.yaml`),
+  AGENTS.md tables, README lists — for entries that describe what you moved. They merge with no
+  conflict marker because they stay in the old package, so neither the conflict list nor the
+  serials bullet flags them, and they are now attached to the wrong package.
+- Move each such entry to the package that ships the component, in the merge commit: a fragment
+  moves to that package's `.changes/unreleased/`, and a line leaves the old package's text. Then
+  read the old package's own statements against what remains, since a changelog that keeps
+  `legion.daemonApiVersion is 14` while its split entry says the manifest has no `legion` key
+  contradicts itself at the reader.
+- `jj diff --from <last base> --to main@origin --name-only` is the list to walk; a fragment or an
+  `AGENTS.md` on it under a package you split from is a file to read, not a merge to trust.
 
 ## Evidence
 

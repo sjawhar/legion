@@ -20,9 +20,10 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
 // go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
-// (podsafety.Apply: the turn-scoping overlay written to LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, under the operator's, and the two variables that place a pod's sessions where
-// the pod leaves them unset; nothing of a repository's settings held off), with the scratch
+// (podsafety.Apply: the two variables that place a pod's sessions, each set where the pod leaves
+// it unset, and nothing else — Legion writes no settings overlay of its own, so PI_CONFIG_FILES
+// rides through as the runtime composed it and nothing of a repository's settings is held off),
+// with the scratch
 // directories the runtime told this role to write under made (podsafety.EnsureScratch) and Oh My
 // Pi's profile directory made under the role's XDG_STATE_HOME (podsafety.EnsureStateHome). With
 // --warm-codegraph, which the Sandbox runtime passes for a role in an issue pod — never for a
@@ -47,7 +48,7 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	flags.StringVar(&given.connect, "connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
 	flags.StringVar(&given.bootTokenFile, "boot-token-file", "", "the file holding the pane's boot token")
 	flags.StringVar(&given.providerEnvDir, "provider-env-dir", "", "a directory whose files become NAME=contents in OMP's environment only")
-	podSafety := flags.Bool("pod-safety", false, "start OMP on a pod's baseline (internal/podsafety), writing its overlay to LEGION_STATE_DIR")
+	podSafety := flags.Bool("pod-safety", false, "start OMP on a pod's baseline (internal/podsafety)")
 	flags.DurationVar(&given.stopGrace, "stop-grace", 0, "how long the runtime gives this shim to exit after its stop signal before killing it (a pod's terminationGracePeriodSeconds, which the launcher passes); the wait for an in-flight CodeGraph warm-up stays inside it and is never under 3s, so the daemon refuses a worker_stop_timeout_seconds under 9 for pods; unset is the daemon's default worker_stop_timeout_seconds")
 	flags.BoolVar(&given.warmCodegraph, "warm-codegraph", false, "once Oh My Pi has started, build the CodeGraph index of the workspace LEGION_WORKSPACE names, in the background (a role's shim in an issue pod; never a tmux pane's or the controller's)")
 	flags.StringVar(&given.keyDir, "agent-secrets-key-dir", "", "the pod's tmpfs directory for its agent-secrets key and enrollment id")
@@ -76,9 +77,8 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	return code
 }
 
-// podSafeEnvironment is environ on the pod's baseline: the turn-scoping overlay written to the
-// pod's state directory, which the runtime names as LEGION_STATE_DIR, and named first in
-// PI_CONFIG_FILES, and PI_CONFIG_DIR and OMP_SESSION_STORAGE set where environ leaves them unset;
+// podSafeEnvironment is environ on the pod's baseline: PI_CONFIG_DIR and OMP_SESSION_STORAGE set
+// where environ leaves them unset, and no overlay of Legion's own, since it writes none;
 // then the directories environ's TMPDIR, cache and data homes and Go and bun caches name, which
 // are the issue's shared scratch and its shared Go caches, none of which anything else makes — a
 // role told a temporary directory nothing created cannot run — and Oh My Pi's profile directory
@@ -87,14 +87,7 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 // lock would be the name every role of the pod takes. A directory that cannot be made is a
 // refusal to start, naming it, as a providers key that cannot be read is.
 func podSafeEnvironment(environ []string) ([]string, error) {
-	state := os.Getenv("LEGION_STATE_DIR")
-	if state == "" {
-		return nil, errors.New("--pod-safety needs LEGION_STATE_DIR, the pod's state directory, to write the baseline overlay to")
-	}
-	environ, err := podsafety.Apply(environ, state)
-	if err != nil {
-		return nil, err
-	}
+	environ = podsafety.Apply(environ)
 	if err := podsafety.EnsureScratch(environ); err != nil {
 		return nil, err
 	}

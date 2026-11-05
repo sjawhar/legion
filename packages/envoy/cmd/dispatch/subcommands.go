@@ -46,6 +46,9 @@ var subcommands = []subcommand{
 	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
+	{"stored-order", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return storedOrder(ctx, args, env.get("DATABASE_URL"), stdout)
+	}},
 	{"settings", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
 		if err := writeSettings(stdout); err != nil {
 			fmt.Fprintf(stderr, "settings: %v\n", err)
@@ -151,7 +154,8 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 }
 
 // backfillFiles moves every uploaded file's bytes from Postgres into the bucket
-// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows); with --verify-only it reads back every
+// DISPATCH_FILE_STORE_BUCKET names, opened by files.Open as the server opens it, so the two never
+// read one value as two stores (files.BackfillRows); with --verify-only it reads back every
 // file already moved and checks it against its row's hash, moving nothing (files.VerifyRows); with
 // --restore, the rollback, it writes every moved file's bytes back into its row from the bucket
 // (files.RestoreRows). Each pass names the rows it could not do and goes on past them, exits 1
@@ -182,7 +186,7 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		return 1
 	}
 	defer database.Pool.Close()
-	fileStore, err := files.NewS3(ctx, bucket)
+	fileStore, err := files.Open(ctx, bucket)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: %v\n", err)
 		return 1
@@ -253,8 +257,8 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 }
 
 func writeRebuildRefsReport(out io.Writer, report refs.Rebuild) {
-	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d\n",
-		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges)
+	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d blocks_owed=%d items_owed=%d\n",
+		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges, report.BlocksOwed, report.ItemsOwed)
 }
 
 func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {

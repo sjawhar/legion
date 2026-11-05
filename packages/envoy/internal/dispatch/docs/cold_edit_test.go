@@ -60,8 +60,8 @@ func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
 			if err != nil {
 				t.Fatalf("apply the edit: %v", err)
 			}
-			if write.fork != nil || write.tree != nil || write.updates != nil {
-				t.Error("the committed write kept its fork, its rendering or its updates")
+			if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.forkMarkdown != nil {
+				t.Error("the committed write kept its fork, its rendering, its updates or the renderings beside them")
 			}
 			if service.srv.GetDoc(artifactID) == nil {
 				t.Fatal("the published write left no room holding it")
@@ -160,7 +160,7 @@ func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
 					return nil
 				}
 				write := joinedLiveWrite(ctx, artifactID)
-				if during && (write.cold || write.forkedFrom.Value() != room) {
+				if during && (write.cold || write.point.cursor != service.cursorOf(room)) {
 					t.Error("the write kept a copy of the document read from the store beside the browser's room")
 				}
 				return nil

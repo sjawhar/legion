@@ -127,9 +127,11 @@ return jsonResponse({ issues, titles, newIssues });
 
 `splice(0)` drains the array in one operation — no race between reading and clearing.
 
-## `.legion/` Rebase Conflicts
+## `.legion/` Rebase Conflicts, before sjawhar/legion#2354
 
-When rebasing a feature branch onto main, `.legion/` handoff files (review.json, implement.json, etc.) conflict because other issues' review/test commits land on main with their own `.legion/` files. Always resolve by keeping the branch version:
+Each phase once committed its handoff file under `.legion/`. When you rebased a feature branch
+onto main, those files conflicted, because other issues' review and test commits landed on main
+with their own `.legion/` files. The resolution kept the branch version:
 
 ```bash
 git checkout --theirs .legion/review.json
@@ -137,11 +139,15 @@ git add .legion/review.json
 git rebase --continue
 ```
 
-The branch's `.legion/` files are the correct per-issue handoff data. Main's versions belong to other issues.
+The branch's `.legion/` files were the correct per-issue handoff data. Main's versions belonged to
+other issues.
 
-**Superseded 2026-10-05 (dispatch://LEGION-565):** every tree now writes its handoffs under its
-own per-issue subdirectory, `.legion/<issue>/<phase>.json`, instead of the flat `.legion/<phase>.json`
-paths this section assumes, so the same-path conflict described below is structurally impossible
-for a tree's own handoffs going forward. The `git checkout --theirs` recipe no longer applies to
-fresh trees; main may still carry pre-existing flat-path residue from before this change.
+**Superseded 2026-10-05 (dispatch://LEGION-565):** from that date every tree wrote its handoffs
+under its own per-issue subdirectory, `.legion/<issue>/<phase>.json`, instead of the flat
+`.legion/<phase>.json` paths this section assumes, so the same-path conflict above became
+structurally impossible for a tree's own handoffs. The `git checkout --theirs` recipe stopped
+applying to fresh trees, and main could still carry flat-path residue from before that change.
+
+sjawhar/legion#2354 retired the section in full. A handoff is now a record on the Dispatch issue,
+and no phase commits a handoff file, so a rebase finds none to conflict.
 

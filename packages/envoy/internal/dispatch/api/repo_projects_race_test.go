@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -152,9 +153,32 @@ func TestRepoProjectOppositeMovesDoNotDeadlock(t *testing.T) {
 	createProjects(t, handler, "CORE", "OTHER")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/from-core", map[string]any{"project": "CORE"}, "alice")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/from-other", map[string]any{"project": "OTHER"}, "alice")
-	// The event log's commit-order lock (events.commitOrderAdvisoryLock): every append takes it
-	// after its owner's row, so holding it stops the first move at its first event.
-	release := holdLock(t, database, `select pg_advisory_xact_lock($1)`, int64(0x4449535041544348))
+	// Each move stops at its first event, holding the owner rows it has locked by then: a trigger
+	// has every event insert take a shared hold on a key the test holds. By then the first move has
+	// locked CORE and OTHER (LockOwners sorts them by key), so the second waits on CORE in its own
+	// LockOwners, and released, the two go one after the other. A move that locked each owner only
+	// as it appended would stop holding the project it leaves, CORE for the first and OTHER for the
+	// second; released together, each would wait on the other's, and Postgres would end one with
+	// 40P01. The hold is shared, so once released it orders nothing itself, as writes to different
+	// owners take no lock in common (events.Broker.Append). Holding a project row instead would
+	// leave both moves waiting on that row's holder, and which of them took the row first would be
+	// a race.
+	const holdEvents = int64(4815162345)
+	for _, statement := range []string{
+		`create function dispatch_test_hold_events() returns trigger language plpgsql as $$
+		begin
+			perform pg_advisory_xact_lock_shared(tg_argv[0]::bigint);
+			return new;
+		end;
+		$$`,
+		fmt.Sprintf(`create trigger dispatch_test_hold_events before insert on events for each row
+			execute function dispatch_test_hold_events('%d')`, holdEvents),
+	} {
+		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("hold every event insert: %v", err)
+		}
+	}
+	release := holdLock(t, database, `select pg_advisory_xact_lock($1)`, holdEvents)
 	first := putMappingAsync(t, handler, "acme/from-core", map[string]any{"project": "OTHER"})
 	awaitLockWaiters(t, database, 1)
 	second := putMappingAsync(t, handler, "acme/from-other", map[string]any{"project": "CORE"})

@@ -15,32 +15,55 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const testTimeout = 30 * time.Second
 
-// TestMain isolates every real jj invocation this package's tests make from the operator's own
-// jj configuration — in particular fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG
-// names a file that does not exist, so jj falls back to its built-in defaults instead of reading
-// ~/.jjconfig.toml, and no test-created repository ever registers a root with the operator's
-// long-running watchman. watchman drops a root once its directory is deleted, so without this,
-// the roots that pile up are the ones from a run this devbox's load killed before t.TempDir's
-// cleanup ran. A test that sets its own JJ_CONFIG afterward (newLocalRunner's isolated one)
-// still wins: os.Environ() is read fresh by every exec.Command.
+// TestMain takes out of the process every variable that could lead git or jj to a workspace,
+// remote or credential not the test's own (fixtureenv.Guard), and gives the process a home of the
+// package's own (fixtureenv.Home), so every real jj and
+// git these tests run — provisioning's, which reads the process's environment, and the fixtures',
+// which run under fixtureenv.Isolated of that same home (setupEnvironment) — reads none of the
+// operator's configuration: in particular fsmonitor.backend = "watchman" on this devbox, which
+// would have every test-created repository register a root with the operator's long-running
+// watchman. watchman drops a root once its directory is deleted, so without this, the roots that
+// pile up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
+// that sets a home of its own afterward (newLocalRunner's) still wins: os.Environ() is read fresh
+// by every exec.Command.
 func TestMain(m *testing.M) {
-	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
+	if err := fixtureenv.Guard(); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
+	home, err := os.MkdirTemp("", "legion-test-home")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
-	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+	for _, entry := range fixtureenv.Home(home) {
+		key, value, _ := strings.Cut(entry, "=")
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain:", err)
+			os.Exit(1)
+		}
 	}
 	code := m.Run()
-	os.RemoveAll(configDir)
+	os.RemoveAll(home)
 	os.Exit(code)
+}
+
+func TestTheTestProcessIsGuarded(t *testing.T) {
+	fixtureenv.RequireGuarded(t)
+}
+
+// setupEnvironment is the environment of a fixture command: fixtureenv.Isolated under the home
+// the test's provisioning reads too (TestMain's, or newLocalRunner's), so a fixture and a
+// provision read the same jj repository configuration, and no fixture reads the workspace,
+// configuration, provisioning token or credential of the process that runs the tests.
+func setupEnvironment() []string {
+	return fixtureenv.Isolated(os.Getenv("HOME"))
 }
 
 // recordingRunner runs every command through the production runner, NewRunner, with the real jj
@@ -165,8 +188,9 @@ func seedRemote(t *testing.T, root, defaultBranch string) string {
 	return remote
 }
 
-// runSetup runs a fixture command, never under a GIT_CONFIG_PARAMETERS a test planted for
-// provisioning's processes alone.
+// runSetup runs a fixture command under setupEnvironment, so it reads neither a
+// GIT_CONFIG_PARAMETERS a test planted for provisioning's processes alone nor the git
+// configuration of the process that runs the tests.
 func runSetup(t *testing.T, dir string, argv ...string) string {
 	t.Helper()
 	return runSetupWith(t, dir, nil, argv...)
@@ -177,12 +201,7 @@ func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string
 	t.Helper()
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Dir = dir
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_CONFIG_PARAMETERS=") {
-			command.Env = append(command.Env, entry)
-		}
-	}
-	command.Env = append(command.Env, "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = append(setupEnvironment(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
 	command.Env = append(command.Env, env...)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -199,9 +218,9 @@ func fromOrigin(t *testing.T, run *recordingRunner, dir string, argv ...string) 
 }
 
 // newLocalRunner is a runner against a fresh local bare remote whose default branch is main. jj
-// reads no configuration of the user's who runs the tests: its user configuration is empty and its
-// config home, where jj keeps a repository's configuration, is the test's own, as in a pod's init
-// container.
+// reads no configuration of the user's who runs the tests: its home (fixtureenv.Home), whose
+// config home is where jj keeps a repository's configuration, is the test's own, as in a pod's
+// init container, and its fixtures read the same one.
 func newLocalRunner(t *testing.T) *recordingRunner {
 	t.Helper()
 	return newLocalRunnerOnBranch(t, "main")
@@ -211,8 +230,10 @@ func newLocalRunner(t *testing.T) *recordingRunner {
 func newLocalRunnerOnBranch(t *testing.T, defaultBranch string) *recordingRunner {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
-	t.Setenv("JJ_CONFIG", filepath.Join(home, "no-user-config.toml"))
+	for _, entry := range fixtureenv.Home(home) {
+		key, value, _ := strings.Cut(entry, "=")
+		t.Setenv(key, value)
+	}
 	t.Setenv("JJ_USER", "Legion test")
 	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
 	return &recordingRunner{t: t, remote: seedRemote(t, t.TempDir(), defaultBranch), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
@@ -231,7 +252,7 @@ func provisionRequest(t *testing.T) Request {
 		Issue:            "WIDGETS-42",
 		DefaultBranch:    "main",
 		CredentialHelper: GitHubCredentialHelper,
-		Source:           FromGitHub("test-installation-token", state),
+		Source:           FromGitHub(staticToken("test-installation-token"), state),
 		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
 	}
 }
@@ -297,7 +318,7 @@ func TestProvisionStartsAtADefaultBranchWhoseNameJJWouldParse(t *testing.T) {
 					t.Helper()
 					req := provisionRequest(t)
 					req.StateDir = filepath.Join(filepath.Dir(run.remote), "legion state")
-					req.Source = FromGitHub("test-installation-token", req.StateDir)
+					req.Source = FromGitHub(staticToken("test-installation-token"), req.StateDir)
 					req.DefaultBranch = tc.branch
 					if source == "feed" {
 						req = feedRequest(t, run, req)
@@ -346,7 +367,8 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 		edit func(*Request)
 		want string
 	}{
-		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub("test-installation-token", "") }, "workspace credential directory is required"},
+		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub(staticToken("test-installation-token"), "") }, "workspace credential directory is required"},
+		{"no token", func(r *Request) { r.Source = FromGitHub(nil, r.StateDir) }, "workspace provisioning token is required"},
 		{"no way to the repository", func(r *Request) { r.Source = nil }, "workspace request names no way to the repository: FromFeed or FromGitHub"},
 		{"no log", func(r *Request) { r.Log = nil }, "workspace request names no log"},
 	} {
@@ -914,7 +936,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	}
 	push := exec.Command("jj", "git", "push", "--named", "legion/WIDGETS-99=@", "--allow-empty-description")
 	push.Dir = working.Dir
-	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
+	push.Env = append(setupEnvironment(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
 	if output, err := push.CombinedOutput(); err != nil {
 		t.Fatalf("a tree agent's push: %v\n%s", err, output)
 	}
@@ -1026,7 +1048,7 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, err := os.Stat(workspace.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -1079,7 +1101,7 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
 		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locked, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; registered {
@@ -1143,7 +1165,7 @@ func TestProvisionRecordsWhenItCreatedTheWorkspace(t *testing.T) {
 		t.Errorf("Created after provisioning the existing workspace = %v, %v; want %v unchanged", again, err, created)
 	}
 
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, ok, err := Created(workspace.Dir); ok || err != nil {
@@ -1290,7 +1312,7 @@ func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != physical {
 		t.Errorf("git in the re-added workspace answers %q, want %q", got, physical)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
@@ -1618,7 +1640,7 @@ func TestRemoveDeletesTheEntryACrashAfterTheForgetLeft(t *testing.T) {
 	if _, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; !registered {
 		t.Fatal("the forget already removed the git worktree entry; the crash shape is not reproduced")
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
@@ -1750,7 +1772,7 @@ func TestAnIssueWithADotSegmentIsRefused(t *testing.T) {
 		filepath.Join(state, "workspaces", "acme"),
 		filepath.Join(state, "workspaces", "acme", "other", "widgets-7"),
 	} {
-		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone})
+		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone}, nil)
 		if err == nil || !strings.Contains(err.Error(), "is not a workspace Location names") {
 			t.Errorf("Remove(%s) = %v, want it refused as no workspace Location names", dir, err)
 		}

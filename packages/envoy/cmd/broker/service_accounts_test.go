@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -58,31 +59,31 @@ func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 	if strings.Contains(boot, "agent secret policy refused") || strings.Contains(boot, policy.ReasonOwnerTagMalformed) {
 		t.Fatalf("boot log refuses the secret %s owns, which BROKER_SERVICES registers for two accounts:\n%s", service, boot)
 	}
-	broker := podBroker{t: t, base: "http://" + addr, issuer: issuer, key: podKey, audience: podAudience}
+	broker := brokertest.Pods{T: t, Base: "http://" + addr, Token: brokertest.IssuerTokens(t, issuer, podKey, podAudience)}
 
 	t.Log("--- the service logs in once with its own token")
-	launcher := broker.logIn(service, loginAccount)
+	launcher := broker.LogIn(service, loginAccount)
 
 	t.Log("--- the one credential enrolls a pod as each of accounts A, B and C")
 	granted := []struct {
 		name string
-		pod  pod
-	}{{"A", broker.enroll(launcher, "pod-a", accountA)}, {"B", broker.enroll(launcher, "pod-b", accountB)}}
-	podC := broker.enroll(launcher, "pod-c", accountC)
+		pod  brokertest.Pod
+	}{{"A", broker.Enroll(launcher, "pod-a", accountA)}, {"B", broker.Enroll(launcher, "pod-b", accountB)}}
+	podC := broker.Enroll(launcher, "pod-c", accountC)
 
 	for _, p := range granted {
 		t.Logf("--- pod %s, running as one of the service's accounts, is granted its secret at once", p.name)
-		reply := broker.ask(p.pod, secretName)
+		reply := broker.Ask(p.pod, secretName)
 		if reply.State != "granted" || reply.GrantID == nil || reply.RecordID != nil || string(reply.Approver) != "null" {
 			t.Fatalf("pod %s's request = %+v (approver %s), want granted with a grant, no record and approver null", p.name, reply, reply.Approver)
 		}
-		if values := broker.values(p.pod, *reply.GrantID); values[secretName] != secretValue {
+		if values := broker.Values(p.pod, *reply.GrantID); values[secretName] != secretValue {
 			t.Fatalf("pod %s's grant values = %v, want %s=%s", p.name, values, secretName, secretValue)
 		}
 	}
 
 	t.Log("--- pod C, running as an account no entry names, is denied it at once with no one to ask")
-	reply := broker.ask(podC, secretName)
+	reply := broker.Ask(podC, secretName)
 	if reply.State != "denied" || reply.GrantID != nil || reply.RecordID != nil || string(reply.Approver) != "null" {
 		t.Fatalf("pod C's request = %+v (approver %s), want denied with no grant, no record and approver null", reply, reply.Approver)
 	}

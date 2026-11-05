@@ -1,0 +1,29 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · secrets broker</title>
+<link rel="stylesheet" href="/approve/assets/approve.css">
+</head>
+<body>
+<header>
+<p class="brand">Secrets broker</p>
+{{- if .Login}}
+<div class="who">
+<p>Signed in as <strong>{{.Login}}</strong>.{{if .Record}} <a href="/approve/{{.Record}}?switch=1">Not you? Sign in as someone else</a>{{end}}</p>
+<form method="post" action="/signin/logout">
+{{- if .Record}}<input type="hidden" name="next" value="/approve/{{.Record}}">{{end}}
+<button type="submit" class="quiet">Sign out</button>
+</form>
+</div>
+{{- end}}
+</header>
+<main>
+<h1>{{.Title}}</h1>
+{{end}}
+
+{{define "foot"}}</main>
+</body>
+</html>
+{{end}}

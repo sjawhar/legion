@@ -9,11 +9,16 @@
 #   none   commits exist in the range but none bump the version
 #   empty  no commits touch the given paths in the range
 #
-# Both commit subjects and bodies are classified. Squash merges carry the
-# original commit subjects as "* type: summary" bullet lines in the squash
-# body, so a squash-merged PR with a non-conventional title still releases;
-# a "BREAKING CHANGE:" footer in a body bumps the major version, per the
-# conventional-commits spec.
+# Both commit subjects and bodies are classified, and a "BREAKING CHANGE:"
+# footer in a body bumps the major version, per the conventional-commits spec.
+# A merge a person makes by hand through GitHub's UI takes the repository's
+# COMMIT_MESSAGES default, so its squash body carries the branch's own commit
+# messages as "* type: summary" bullet lines and a squash-merged PR with a
+# non-conventional title still releases from them. A merge the Legion daemon
+# submits writes the squash message itself (packages/daemon/internal/ghautomerge),
+# the PR title and number as the subject and an empty body, so there the title
+# is the only thing classified: a "type!:" title still bumps the major version,
+# and a "BREAKING CHANGE:" footer written only in a branch commit body does not.
 #
 # --patch-path <path> (repeatable) names a path whose commits bump at least the
 # patch version whatever their type: a path the package ships as runtime rather

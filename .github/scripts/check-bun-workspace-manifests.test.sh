@@ -3,7 +3,7 @@
 # manifest in its own Docker stage, and the check must say what it inspected.
 #
 # Run from anywhere: .github/scripts/check-bun-workspace-manifests.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 

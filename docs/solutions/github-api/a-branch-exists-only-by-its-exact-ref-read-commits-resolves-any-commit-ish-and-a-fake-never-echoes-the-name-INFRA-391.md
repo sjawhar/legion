@@ -43,7 +43,7 @@ Extends docs/solutions/github-api/a-capped-github-read-asks-for-the-smallest-med
   real GitHub: every commit-ish answered 200 from `commits/…` and 404 from `git/ref/heads/…`.
   The fix is de00bf0aac. `TestArchitectureSourcePutRefusesACommitThatIsNoBranch` failed on the
   `Ref`-based handler.
-- Proof on real GitHub: https://github.com/sjawhar/legion/pull/2209#issuecomment-6406509456. At
+- Proof on real GitHub: https://github.com/cybermonklabs/legion/pull/2209#issuecomment-6406509456. At
   the head, the SHA, `~1`, `^`, `HEAD`, `refs/heads/…` and the prefix `infra-391` each got `409`
   with no row. The previous head stored the first five with `200`.
 - The first retro left two things in the code: `Ref`'s doc comment still said the call "also

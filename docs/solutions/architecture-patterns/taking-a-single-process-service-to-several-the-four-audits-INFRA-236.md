@@ -70,7 +70,8 @@ INFRA-236 made the Envoy secrets broker safe to run as more than one pod
 - The plan's sizing decision read "halve both buckets in both dimensions", the `N` model. The
   tester's first round measured the fleet at **7.64 store reads/s against a 3.82 budget** — the
   `N²` the plan had not written down. `internal/broker/api/limits.go` now carries the formula, and
-  `TestTwoBrokers` row 7 measures the fleet's real traffic against it.
+  `TestABrokerFleetDerivesItsRereadRate` measures the fleet's real traffic against it, at two,
+  three and four processes (it was `TestTwoBrokers` row 7 until INFRA-454 moved it).
 - Halving the shared bucket to a burst of two broke an end-to-end test that writes four secrets in
   sequence; the burst's floor is a human's write sequence, not a fraction of a quota. The burst is
   undivided at ten.

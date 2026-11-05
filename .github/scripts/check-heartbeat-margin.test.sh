@@ -16,7 +16,7 @@
 # this suite.
 #
 # Run from anywhere: .github/scripts/check-heartbeat-margin.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 

@@ -64,7 +64,7 @@ export function GrantsSection(): ReactNode {
         void queryClient.invalidateQueries({ queryKey: credentialGrantsQuery().queryKey })
       }
       query={grants}
-      revoke={(grant) => api.revokeCredentialGrant(grant.grant_id)}
+      revoke={(grant, bounds) => api.revokeCredentialGrant(grant.grant_id, bounds)}
       revokeError="Could not revoke this grant."
       rowKey={(grant) => grant.grant_id}
     />

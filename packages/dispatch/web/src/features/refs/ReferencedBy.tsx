@@ -1,8 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
 import type { GraphEdge } from "../../api/types";
 import {
   borderDefault,
@@ -11,14 +10,20 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { blockFragment, isBlockItemKind } from "./block-reference";
 import { referenceTriggerProps } from "./RefPreview";
+import { referencesQuery } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
-import { buildReferencePath, parseDispatchReference } from "./routes";
+import { buildReferencePath, parseNodeReference } from "./routes";
 import { Timestamp } from "./Timestamp";
 
 const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
   artifact: "Artifact",
   ask: "Ask",
+  // A block of a document that cites a node shows as the document holding it, linked to the
+  // block; a part of an ask, or a block of a comment or message, shows as its item
+  // (`blockItem`).
+  block: "Artifact",
   comment: "Comment",
   component: "Component",
   issue: "Issue",
@@ -32,8 +37,13 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
   blocked_by: "Blocked issue",
   child_of: "Child issue",
   followed_by: "Follower",
+  // The two kinds a typed block's `block[]` attributes make (`blocks.json`): a check or a plan
+  // task that names a requirement in `serves`, and a plan task that names another in `needs`.
+  // Read from the named block, the edge says what the citing block does for it.
+  needs: "needed by",
   owned_by: "Owned item",
   replies_to: "Reply",
+  serves: "served by",
 };
 
 /** Beyond this the row clamps the excerpt and offers to expand it. The real clamp is CSS, so
@@ -41,15 +51,18 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
 const CLAMP_LINES = 3;
 const CLAMP_CHARACTERS = 240;
 
-function referencedByQuery(reference: string) {
-  return {
-    queryKey: ["references", "to", reference] as const,
-    queryFn: () => api.getReferences(reference),
-  };
+/** The ask, comment or message a graph node is a block of: its parent, for a block node naming
+ *  no document (`ask/<uuid>#b2`, `comment/<uuid>#b2`, `message/<uuid>#b1`); undefined for any
+ *  other node. A part of an ask reads as its ask, as a block of a comment reads as its comment:
+ *  one set of item kinds says which (`isBlockItemKind`). */
+function blockItem(node: GraphEdge["node"]): GraphEdge["node"]["parent"] {
+  return node.kind === "block" && node.document === undefined && isBlockItemKind(node.parent?.kind)
+    ? node.parent
+    : undefined;
 }
 
 function edgeLabel(edge: GraphEdge): string {
-  return STRUCTURAL_LABELS[edge.kind] ?? NODE_LABELS[edge.node.kind];
+  return STRUCTURAL_LABELS[edge.kind] ?? NODE_LABELS[blockItem(edge.node)?.kind ?? edge.node.kind];
 }
 
 function sourceLabel(edge: GraphEdge): string {
@@ -62,17 +75,19 @@ interface SourcePath {
   readonly route: DispatchReferenceRoute;
 }
 
-function sourcePath(edge: GraphEdge): SourcePath | undefined {
-  if (edge.node.ref === undefined) {
-    return undefined;
-  }
-  const route = parseDispatchReference(edge.node.ref);
+/** Where `reference`, a node's own reference as the graph returned it, opens - whatever the length
+ *  of its name - with `block` (the block of a document that holds the mention) as its `#b-`
+ *  fragment when the reference names no block of its own. */
+function referencePath(reference: string | undefined, block?: string): SourcePath | undefined {
+  const route = reference === undefined ? undefined : parseNodeReference(reference);
   if (route === undefined) {
     return undefined;
   }
   return {
     href: `${buildReferencePath(route)}${
-      edge.excerpt?.block_id === undefined ? "" : `#b-${encodeURIComponent(edge.excerpt.block_id)}`
+      ("block" in route && route.block !== undefined) || block === undefined
+        ? ""
+        : blockFragment(block)
     }`,
     route,
   };
@@ -82,23 +97,44 @@ interface SourceGroup {
   readonly edges: GraphEdge[];
   readonly key: string;
   readonly label: string;
+  /** How many citing nodes the group holds: more than one only when blocks of one document, or of
+   *  one comment or message, cite the node, each then shown as a row linked to its own block. */
+  readonly nodes: number;
   readonly path: SourcePath | undefined;
 }
 
-/** One entry per citing node, in the server's newest-first order: a document that both holds an
- *  ask's anchor and mentions it is one source with two rows, not two cards. */
+/** One entry per citing source, in the server's newest-first order: a document that both holds
+ *  an ask's anchor and mentions it is one source with two rows, not two cards, and the blocks of
+ *  one document, or the parts or blocks of one ask, comment or message, that cite the node are
+ *  that document's or item's rows. A source of one node links to that node (a block at the
+ *  block); a document or item whose blocks are its rows links to itself, and each row to its own
+ *  block. */
 function groupBySource(edges: readonly GraphEdge[]): SourceGroup[] {
-  const groups = new Map<string, SourceGroup>();
+  const groups = new Map<string, { edges: GraphEdge[]; nodes: Set<string> }>();
   for (const edge of edges) {
-    const key = edge.node.ref ?? `${edge.node.kind}:${edge.node.id}`;
-    const group = groups.get(key);
-    if (group === undefined) {
-      groups.set(key, { edges: [edge], key, label: sourceLabel(edge), path: sourcePath(edge) });
-      continue;
-    }
+    const key =
+      edge.node.document ??
+      blockItem(edge.node)?.ref ??
+      edge.node.ref ??
+      `${edge.node.kind}:${edge.node.id}`;
+    const group = groups.get(key) ?? { edges: [], nodes: new Set<string>() };
     group.edges.push(edge);
+    group.nodes.add(`${edge.node.kind}:${edge.node.id}`);
+    groups.set(key, group);
   }
-  return [...groups.values()];
+  return [...groups].map(([key, { edges: grouped, nodes }]) => {
+    const [first] = grouped as [GraphEdge, ...GraphEdge[]];
+    return {
+      edges: grouped,
+      key,
+      label: sourceLabel(first),
+      nodes: nodes.size,
+      path:
+        nodes.size === 1
+          ? referencePath(first.node.ref, first.excerpt?.block_id)
+          : referencePath(key),
+    };
+  });
 }
 
 function Excerpt({ text }: { text: string }): ReactNode {
@@ -129,7 +165,11 @@ function Excerpt({ text }: { text: string }): ReactNode {
 /** The control every host uses: the count comes from the list response the page already read,
  *  so a card or a header costs no graph request until the reader opens its panel. A count of
  *  zero is a fact, not an affordance: it renders as plain text, since opening it would only say
- *  nothing references the node. `controls` names the panel the host renders when expanded. */
+ *  nothing references the node. `controls` names the panel the host renders when expanded.
+ *
+ *  A block of a document has no such count - no listing the tabs read carries one - so `count`
+ *  is left out there and the control offers itself without one, the panel's own read being the
+ *  first thing that knows. */
 export function ReferencedByToggle({
   controls,
   count,
@@ -137,7 +177,7 @@ export function ReferencedByToggle({
   onToggle,
 }: {
   controls: string;
-  count: number;
+  count?: number;
   expanded: boolean;
   onToggle: () => void;
 }): ReactNode {
@@ -159,7 +199,7 @@ export function ReferencedByToggle({
       onClick={onToggle}
       type="button"
     >
-      Referenced by ({count})
+      {count === undefined ? "Referenced by" : `Referenced by (${count})`}
     </button>
   );
 }
@@ -180,7 +220,7 @@ export function ReferencedBy({
    *  and then the panel is its own heading. */
   toggle?: { id: string };
 }): ReactNode {
-  const query = useQuery(referencedByQuery(reference));
+  const query = useQuery(referencesQuery(reference));
   const groups = groupBySource(query.data?.edges ?? []);
 
   return (
@@ -227,27 +267,80 @@ export function ReferencedBy({
                 )}
               </div>
               <ul className="space-y-2">
-                {group.edges.map((edge) => (
-                  <li key={`${edge.kind}:${edge.direction}:${edge.created_at}`}>
-                    <div
-                      className={`flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurface}`}
+                {group.edges.map((edge) => {
+                  const row =
+                    group.nodes === 1
+                      ? undefined
+                      : referencePath(edge.node.ref, edge.excerpt?.block_id);
+                  // On a document's read, the block of the document the edge meets: one source
+                  // citing two of its blocks is two rows, each naming and keyed by its block.
+                  const cited = referencePath(edge.block?.ref);
+                  return (
+                    <li
+                      key={`${edge.node.kind}:${edge.node.id}:${edge.kind}:${edge.direction}:${edge.block?.id ?? ""}`}
                     >
-                      {group.edges.length === 1 ? null : (
-                        <>
-                          <span>{edgeLabel(edge)}</span>
-                          <span aria-hidden="true">·</span>
-                        </>
-                      )}
-                      <Timestamp at={edge.created_at} />
-                    </div>
-                    {edge.excerpt === undefined ? null : <Excerpt text={edge.excerpt.text} />}
-                  </li>
-                ))}
+                      <div
+                        className={`flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurface}`}
+                      >
+                        {group.edges.length === 1 ? null : (
+                          <>
+                            <span>{edgeLabel(edge)}</span>
+                            <span aria-hidden="true">·</span>
+                          </>
+                        )}
+                        {row === undefined ? (
+                          <Timestamp at={edge.created_at} />
+                        ) : (
+                          <Link
+                            {...referenceTriggerProps(row.route)}
+                            className={`underline ${linkText} ${linkHoverText}`}
+                            to={row.href}
+                          >
+                            <Timestamp at={edge.created_at} />
+                          </Link>
+                        )}
+                        {cited === undefined ? null : (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <Link
+                              {...referenceTriggerProps(cited.route)}
+                              className={`underline ${linkText} ${linkHoverText}`}
+                              to={cited.href}
+                            >
+                              block {edge.block?.block_id}
+                            </Link>
+                          </>
+                        )}
+                      </div>
+                      {edge.excerpt === undefined ? null : <Excerpt text={edge.excerpt.text} />}
+                    </li>
+                  );
+                })}
               </ul>
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+/** The Referenced-by disclosure a typed block carries on the Spec, Verification and Plan tabs:
+ *  the control, and under it, once the reader opens it, the panel that reads what points at that
+ *  block. No listing those tabs read carries the block's reference count, so the control shows
+ *  none and nothing is read until it is opened. */
+export function BlockReferences({ reference }: { reference: string }): ReactNode {
+  const panelId = useId();
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="space-y-2">
+      <ReferencedByToggle
+        controls={panelId}
+        expanded={open}
+        onToggle={() => setOpen((shown) => !shown)}
+      />
+      {open ? <ReferencedBy reference={reference} toggle={{ id: panelId }} /> : null}
+    </div>
   );
 }

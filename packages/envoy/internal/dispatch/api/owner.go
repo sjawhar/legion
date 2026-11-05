@@ -138,14 +138,15 @@ func ownerStatus(ctx context.Context, q queryer, owner owner, lock string) (*str
 	return nil, true, nil
 }
 
-// refuseOwnerBeforeResolving answers, from the pool and locking nothing, the refusal the
-// comment's locked owner check will make (lockCommentOwner). A comment that mentions anyone
-// resolves every mention against the Envoy listener before its transaction opens, and an owner
-// that does not exist - or, for a suggestion, is already closed - refuses the comment whatever
-// the listener says, so a request that cannot be written costs no listener call at all. The
-// locked check still decides; this one only spares the calls, and takes no lock of its own so
-// a comment on a busy owner waits for that lock once rather than twice.
-func (s *server) refuseOwnerBeforeResolving(ctx context.Context, owner owner, suggestion bool) error {
+// refuseOwnerBeforeResolving answers, from the pool and locking nothing, the refusal the locked
+// owner check will make (lockCommentOwner, requireOpenOwnerStatus). A comment that mentions
+// anyone resolves every mention against the Envoy listener before its transaction opens, and an
+// owner that does not exist - or, when refuseClosed, is already closed - refuses the write
+// whatever the listener says, so a request that cannot be written costs no listener call at all;
+// an upload to an issue is refused so before its body is spooled (refuseUploadToAClosedIssue).
+// The locked check still decides; this one only spares the work, and takes no lock of its own so
+// a write on a busy owner waits for that lock once rather than twice.
+func (s *server) refuseOwnerBeforeResolving(ctx context.Context, owner owner, refuseClosed bool) error {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
@@ -153,7 +154,7 @@ func (s *server) refuseOwnerBeforeResolving(ctx context.Context, owner owner, su
 	if err != nil {
 		return err
 	}
-	if suggestion && !open {
+	if refuseClosed && !open {
 		return errIssueClosed
 	}
 	return nil

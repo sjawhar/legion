@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { isSessionId, pictureCaption, SESSION_ID_PATTERN } from "./dispatch-text-rules";
+import {
+  isSessionId,
+  MAX_REFERENCE_TARGET_BYTES,
+  pictureCaption,
+  referenceTargetFits,
+  SESSION_ID_PATTERN,
+  utf8Bytes,
+} from "./dispatch-text-rules";
 
 describe("isSessionId", () => {
   test("accepts what the server's text.IsSessionID accepts", () => {
@@ -46,6 +53,38 @@ describe("isSessionId", () => {
     expect(reference.exec("agent/01a1-abc/artifact/shot-png")?.[1]).toBe("01a1-abc");
     expect(reference.test("agent/01a1[abc]/artifact/shot-png")).toBe(false);
   });
+});
+
+// A string's UTF-8 bytes as Go's `len` counts them: a multi-byte character in its bytes wherever
+// it stands, a Latin-1 one ending a run past 1024 characters too (Bun 1.3's TextEncoder writes that
+// one as a single NUL byte), and a lone surrogate as the three of the U+FFFD encoding writes.
+test.each([
+  ["", 0],
+  ["ship-it", 7],
+  ["é", 2],
+  ["日", 3],
+  ["📊", 4],
+  [`${"a".repeat(2000)}é`, 2002],
+  ["é".repeat(1500), 3000],
+  [`${"a".repeat(1024)}é${"b".repeat(10)}`, 1036],
+  ["\ud800", 3],
+  ["x\udc00y", 5],
+] as const)("counts the UTF-8 bytes of %p", (value, bytes) => {
+  expect(utf8Bytes(value)).toBe(bytes);
+});
+
+// A target id fits at MAX_REFERENCE_TARGET_BYTES UTF-8 bytes and not one byte past, a multi-byte
+// character counted in its bytes whether it fills the target or ends a long ASCII run: `é` (two
+// bytes, one UTF-16 unit), `日` (three, one) or `📊` (four, two).
+test.each([
+  ["CORE-1/", (room: number) => "é".repeat(Math.floor(room / 2)) + "x".repeat(room % 2)],
+  ["CORE/", (room: number) => "日".repeat(Math.floor(room / 3)) + "x".repeat(room % 3)],
+  ["CORE-1/spec#", (room: number) => `${"x".repeat(room - 2)}é`],
+  ["CORE/handbook-md#", (room: number) => `${"x".repeat(room - 4)}📊`],
+] as const)("bounds a target id starting %s", (prefix, runOf) => {
+  const target = prefix + runOf(MAX_REFERENCE_TARGET_BYTES - prefix.length);
+  expect(referenceTargetFits(target)).toBe(true);
+  expect(referenceTargetFits(`${target}x`)).toBe(false);
 });
 
 describe("pictureCaption", () => {

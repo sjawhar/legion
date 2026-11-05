@@ -51,6 +51,42 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 	}
 }
 
+// Patch sends its body as JSON with PATCH, as GitHub's ref update takes it, and gives a refusal
+// back as an *Answer naming PATCH.
+func TestPatchSendsJSONWithPatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			SHA   string `json:"sha"`
+			Force bool   `json:"force"`
+		}
+		if r.Method != http.MethodPatch || r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&sent) != nil || sent.Force {
+			http.Error(w, `{"message":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		if sent.SHA == "behind" {
+			http.Error(w, `{"message":"Update is not a fast forward"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		w.Write([]byte(`{"object":{"sha":"` + sent.SHA + `"}}`))
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+
+	var moved struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := client.Patch(context.Background(), "/git/refs/heads/main", map[string]any{"sha": "ahead", "force": false}, &moved); err != nil || moved.Object.SHA != "ahead" {
+		t.Fatalf("Patch = %+v, %v; want the answer read", moved, err)
+	}
+	err := client.Patch(context.Background(), "/git/refs/heads/main", map[string]any{"sha": "behind", "force": false}, nil)
+	var answer *Answer
+	if !errors.As(err, &answer) || answer.Method != http.MethodPatch || answer.Path != "/git/refs/heads/main" || answer.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("Patch behind = %v, want an *Answer for PATCH /git/refs/heads/main with 422", err)
+	}
+}
+
 // GraphQL posts to the client's GraphQL route itself, so an answer other than 2xx names that route
 // rather than nothing: a failed disarm logs "POST /graphql with 502", not "POST  with 502". An
 // answer that carries errors with status 200 is a *GraphQLError, whose NOT_FOUND names its path.
@@ -298,5 +334,29 @@ func TestARateLimitsResetFarInTheFutureWaitsNoLongerThanAnHour(t *testing.T) {
 	}
 	if !answer.RateLimited || answer.RetryAfter != time.Hour {
 		t.Fatalf("a reset six hours out = rate limited %v, retry after %s; want true and an hour's cap", answer.RateLimited, answer.RetryAfter)
+	}
+}
+
+// NotFound reads GitHub's 404 out of an error, however deeply its caller wrapped the *Answer, and
+// is false for every other answer, for an error that carries none, and for no error at all, so a
+// caller reads only a ref, a file or a repository GitHub does not have as missing.
+func TestNotFoundReadsGitHubs404(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "no error", err: nil},
+		{name: "an error carrying no answer", err: errors.New("read refs/heads/main: dial tcp: connection refused")},
+		{name: "another answer", err: &Answer{Method: http.MethodGet, Path: "/git/ref/heads/main", Status: http.StatusForbidden}},
+		{name: "a 404", err: &Answer{Method: http.MethodGet, Path: "/git/ref/heads/main", Status: http.StatusNotFound}, want: true},
+		{name: "a wrapped 404", want: true, err: fmt.Errorf("read refs/heads/main of acme/widgets: %w",
+			fmt.Errorf("get: %w", &Answer{Method: http.MethodGet, Path: "/git/ref/heads/main", Status: http.StatusNotFound}))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NotFound(tc.err); got != tc.want {
+				t.Fatalf("NotFound(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

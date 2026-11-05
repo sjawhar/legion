@@ -13,6 +13,7 @@ import {
   replyToMessageDelivery,
 } from "./api";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 // A row names its replier through `AgentName`, by the rule every surface uses: the registry's
@@ -88,7 +89,9 @@ async function expectRepliesCount(page: Page, isPhone: boolean, count: number): 
 }
 
 for (const [kind, seed] of Object.entries(threadKinds)) {
-  test(`replies: ${kind} a session replied in is listed, clears once read, and returns on the next reply`, async ({
+  // SLOW(>=2s): the Replies load, the thread's own issue route, the read-state write and the
+  // live delivery of a second reply - once per thread kind.
+  test(`replies: ${kind} a session replied in is listed, clears once read, and returns on the next reply @phone`, async ({
     browser,
   }, testInfo) => {
     const isPhone = testInfo.project.name === "iphone";
@@ -108,11 +111,6 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
       await expect(row).toContainText("Done: the build is green.");
       await expect(row).toContainText("Release bot");
       await expectRepliesCount(page, isPhone, 1);
-      await page.screenshot({
-        fullPage: true,
-        path: testInfo.outputPath(`replies-row-${testInfo.project.name}.png`),
-      });
-
       // Opening the thread shows its reply, and reading it clears the row and the count.
       await row.getByRole("link", { name: "Open" }).click();
       await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/`));
@@ -121,12 +119,10 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
       ).toBeInViewport();
       await expectRepliesCount(page, isPhone, 0);
       await expect.poll(async () => (await listMyReplies()).total).toBe(0);
-      await page.screenshot({
-        fullPage: true,
-        path: testInfo.outputPath(`replies-read-${testInfo.project.name}.png`),
-      });
 
-      await page.goto("/replies");
+      // Back to the page, as its link does it: what the row proves is what the Replies page
+      // shows once the thread is read, not what a cold load answers.
+      await navigateInApp(page, "/replies");
       await expect(page.getByText("No new replies in threads you wrote in.")).toBeVisible();
 
       // A later reply brings the row and the count back, live.
@@ -149,7 +145,7 @@ const planner: FakeSession = {
 // A phone's compact header carries the title, every count that is up and Menu on one bar. With
 // all three counts up (an open ask, an agent's reply, a thread's reply), the title stays whole,
 // every badge reads on one line, Menu stays on screen, and the page never scrolls sideways.
-test("replies: the phone header keeps the title and every count whole when all three are up", async ({
+test("replies: the phone header keeps the title and every count whole when all three are up @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the compact header renders below 1280 px");

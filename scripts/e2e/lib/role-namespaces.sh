@@ -1,6 +1,6 @@
 # shellcheck shell=bash disable=SC2034  # the sourcing script uses these variables
 # The POSIX sh programs a live proof runs in an issue pod's `roles` container to reach one role.
-# Sourced by stage4b-sandbox-tree.sh and share-volumes-kind.sh.
+# Sourced by stage4b-sandbox-tree.sh, share-volumes-kind.sh and claude-backend-sandbox.sh.
 #
 # An issue pod has one container, `roles`, whose PID 1 is the launcher of every role; each role's
 # generation runs in Linux user, mount, PID and IPC namespaces of its own, whose init is that

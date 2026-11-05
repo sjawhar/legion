@@ -70,7 +70,9 @@
 # LEGION_E2E_PLATFORM (required, `gke-autopilot` or `eks`, above), LEGION_E2E_POD_REACHABILITY and
 # LEGION_E2E_MODEL_ROUTE (both required, above);
 # LEGION_E2E_STORAGE_CLASS (required) the issue volumes' StorageClass — AWS's gp2, GKE's
-# standard-rwo, or whatever else the cluster under test defaults to; LEGION_E2E_MODEL_GATEWAY_URL
+# standard-rwo, or whatever else the cluster under test defaults to; LEGION_E2E_POD_SERVICE_ACCOUNT
+# (required, both routes) the ServiceAccount the deployment's pods run as, substituted for the
+# operator route's ${POD_SERVICE_ACCOUNT} placeholder; LEGION_E2E_MODEL_GATEWAY_URL
 # and LEGION_E2E_MODEL_GATEWAY_AUDIENCE (both required under LEGION_E2E_MODEL_ROUTE=gateway, unused
 # under key-file) the gateway's Anthropic endpoint and the token audience it accepts, substituted
 # for the operator route's placeholders; LEGION_E2E_WORKER_STREAM_PORT (default 13373, the same
@@ -82,17 +84,23 @@
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
 # read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (this deployment's implement App by default) the App's numeric
-# id and the secret-store key the `secrets` CLI resolves to its private key (agent tier: no YubiKey
-# touch), which prerequisites proves is that id's App against GitHub's GET /app before the run
-# writes anything (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
+# LEGION_E2E_IMPLEMENT_APP_SECRET (this deployment's implement App by default) the App's numeric
+# id and the secrets broker github-app secret the `agent-secrets` client releases its installation
+# tokens from (agent tier: no person's grant), which prerequisites proves is that id's App from its
+# token against GitHub (GraphQL's viewer, then GET /apps/<slug>) before the run writes anything
+# (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
 # (required) a worker image by digest built from a commit of main at daemon API contract 37 or 38,
 # before one container (its issue pods run six role containers), which this checkout contains: previous-layout builds that commit's
 # own Stage 4a harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's
 # fixture and runs it on that image, to leave a pod of the previous layout running for this runtime
 # to take over; the script refuses an image whose revision main or this checkout does not contain,
 # one whose commit already runs one container, or one at a contract other than 37 or 38; STAGE4A_FROM a development entry point, which is
-# never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
+# never the proof, any checkpoint the harness runs but identity and stale-incarnation (pod-update
+# and pod-update-fleet among them: entered there, the two workers of each of that checkpoint's
+# issues — one issue for pod-update, two for pod-update-fleet — push their own issue's branch to
+# the run's repository from inside their pod and the run deletes each again, as cache-lost-volume's
+# is);
+# STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
@@ -121,7 +129,7 @@ repo=sjawhar/legion-smoke
 second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
 previous_image=${LEGION_E2E_PREVIOUS_IMAGE:-}
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
-session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_db_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 session_db_port=${LEGION_E2E_SESSION_DB_PORT:-}
 operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
@@ -193,7 +201,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl curl ss secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl curl ss agent-secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$runtime_identity_kind" in
@@ -209,6 +217,8 @@ gke-autopilot | eks) ;;
 esac
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 [ -n "$storage_class" ] || fail "LEGION_E2E_STORAGE_CLASS is unset: name the issue volumes' StorageClass (the cluster has no default to fall back on)"
+pod_service_account=$(bash "$root/scripts/e2e/lib/pod-service-account.sh") ||
+  fail "LEGION_E2E_POD_SERVICE_ACCOUNT is not a ServiceAccount name the operator route's pod.yml can carry (the reason is above)"
 case "$model_route" in
 gateway)
   gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
@@ -386,7 +396,8 @@ session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 )
 unset session_db_password
 session_db_started=1
-docker run -d --name "$session_db" --cpus 1 --env-file "$work/session-db.env" -p "$bind_host:$session_db_port:5432" "$session_db_image" >/dev/null ||
+docker run -d --name "$session_db" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql \
+  --env-file "$work/session-db.env" -p "$bind_host:$session_db_port:5432" "$session_db_image" >/dev/null ||
   fail "docker could not start the scratch session database $session_db on $bind_host:$session_db_port"
 ready=
 for _ in $(seq 60); do
@@ -430,6 +441,15 @@ key-file)
   note "operator pod: $work/pod.yml, the key-file fixture (no projected token: operator-token's projected-token assertion is skipped, the rest still run and pass)"
   ;;
 esac
+# The ServiceAccount is the operator's own whichever route the run takes, so it is filled once,
+# here, over whichever fixture the arm above wrote.
+# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+account_placeholder='${POD_SERVICE_ACCOUNT}'
+pod=$(<"$work/pod.yml")
+printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
+grep -qF "service_account: $pod_service_account" "$work/pod.yml" ||
+  fail "the $model_route route's operator pod fixture has no ServiceAccount $account_placeholder to fill with the run's"
+note "operator pod: $work/pod.yml, its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
@@ -451,19 +471,26 @@ go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./intern
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
 # previous-layout's fixture: the previous release's own Stage 4a harness (LEGION_E2E_PREVIOUS_IMAGE's revision), with testdata/previouslayout's
-# one test added, built from an archive of that commit so no worktree or branch is made.
+# one test added, built from an archive of that commit so no worktree or branch is made. That
+# harness read the implement App's key from a secret store; testdata/previouslayout's App overlay
+# replaces its live_app_test.go so it mints from the same token command this harness is handed
+# (LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND, which its environment carries on), and no key is read.
 mkdir "$work/previous"
 git -C "$root" archive "$previous_base" go.work go.work.sum packages/daemon packages/envoy | tar -x -C "$work/previous" ||
   fail "archiving $previous_base for the previous release's harness failed"
 cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/fixture_test.go.txt" \
   "$work/previous/packages/daemon/internal/runtime/sandbox/zz_previous_layout_fixture_test.go"
+cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/live_app_test.go.txt" \
+  "$work/previous/packages/daemon/internal/runtime/sandbox/live_app_test.go"
 go -C "$work/previous/packages/daemon" test -c -tags e2e -o "$work/previous.test" ./internal/runtime/sandbox ||
   fail "building the previous release's ($previous_base) harness with the previous-layout fixture failed"
-note "built the previous release's ($previous_base) harness with the previous-layout fixture; its image $previous_image"
+note "built the previous release's ($previous_base) harness with the previous-layout fixture and the token-command App overlay; its image $previous_image"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
-# cache-lost-volume deletes a cache-b branch older than that as a killed run's leftover.
+# cache-lost-volume deletes a branch of that shape older than that as a killed run's leftover —
+# cache-b's, pod-update's, and pod-update-fleet's two, which each issue's own workers push from
+# inside their pod.
 env \
   LEGION_E2E_RUNTIME_KUBECONFIG="$runtime_kubeconfig" \
   LEGION_E2E_RUNTIME_CONTEXT="$runtime_context" \
@@ -482,7 +509,8 @@ env \
   LEGION_E2E_PLATFORM="$platform" \
   LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
   LEGION_E2E_IMPLEMENT_APP_ID="$implement_app_id" \
-  LEGION_E2E_IMPLEMENT_APP_KEY_NAME="$implement_app_key_name" \
+  LEGION_E2E_IMPLEMENT_APP_SECRET="$implement_app_secret" \
+  LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND="$(app_token_command "$implement_app_secret")" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \

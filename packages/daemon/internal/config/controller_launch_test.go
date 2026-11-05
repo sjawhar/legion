@@ -17,25 +17,29 @@ func TestTheOperatorLaunchesTheControllerUnlessTheFileSaysTheDaemonDoes(t *testi
 		t.Fatalf("ControllerLaunch = %q with no controller key, want %q", cfg.ControllerLaunch, ControllerLaunchOperator)
 	}
 	for _, value := range []ControllerLaunch{ControllerLaunchOperator, ControllerLaunchDaemon} {
-		cfg, err := LoadForValidation(writeConfigFile(t, "controller: "+string(value)+"\n"+kubernetesFile), noEnv)
-		if err != nil {
-			t.Fatalf("LoadForValidation with controller: %s: %v", value, err)
-		}
-		if cfg.ControllerLaunch != value {
-			t.Errorf("ControllerLaunch = %q, want %q", cfg.ControllerLaunch, value)
+		for runtime, file := range map[string]string{"kubernetes": kubernetesFile, "tmux": minimalFile} {
+			cfg, err := LoadForValidation(writeConfigFile(t, "controller: "+string(value)+"\n"+file), noEnv)
+			if err != nil {
+				t.Fatalf("LoadForValidation with controller: %s under %s: %v", value, runtime, err)
+			}
+			if cfg.ControllerLaunch != value {
+				t.Errorf("ControllerLaunch under %s = %q, want %q", runtime, cfg.ControllerLaunch, value)
+			}
 		}
 	}
 }
 
-// The daemon launches its controller as an Agent Sandbox pod, so `controller: daemon` is refused
-// where there is no cluster, naming why, and so is a value that is neither launcher.
+// The controller works the project's Dispatch issues — an Agent Sandbox pod's under kubernetes, a
+// pane's under tmux — so `controller: daemon` is refused where the daemon has no Dispatch to hand
+// it, naming why, and so is a value that is neither launcher.
 func TestTheControllerKeyIsRefusedWhereTheDaemonCannotLaunchOne(t *testing.T) {
+	const noDispatch = "project: DEMO\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\n"
 	for _, tc := range []struct {
 		name, body, want string
 	}{
 		{"neither launcher", "controller: pod\n" + kubernetesFile, "controller must be 'operator' or 'daemon'"},
 		{"blank", "controller: \"\"\n" + kubernetesFile, "controller must be 'operator' or 'daemon'"},
-		{"under tmux", "controller: daemon\n" + minimalFile, "controller: daemon needs runtime: kubernetes"},
+		{"under tmux with no Dispatch", "controller: daemon\n" + noDispatch, "controller: daemon needs dispatch_url: the controller the daemon launches works the project's Dispatch issues"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
