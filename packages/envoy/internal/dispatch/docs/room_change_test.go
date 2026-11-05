@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -222,29 +223,31 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 	const rounds = 160
 	for round := range rounds {
 		marker := fmt.Sprintf("DOOMED-%d under the browser's cursor", round)
-		editLiveTree(t, service, artifactID, appendBlocks(t, marker))
-
-		// Precompute the tree the browser's delete will write, so that when it fires it does
-		// nothing but take the document's mutex and apply.
+		// One read of the room does both the browser's append and the precompute of the
+		// delete that undoes it: the tree the room holds before the marker is appended is
+		// exactly the tree that delete writes back. Reading the room a second time and
+		// rendering each of its 1,200 blocks on its own to find the marker cost this test
+		// 192,000 renders of a block (dispatch://INFRA-1075).
 		var want *pmdoc.Node
+		appendMarker := appendBlocks(t, marker)
 		if err := service.srv.Apply(context.Background(), artifactID,
-			func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-				tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
+			func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				fragment := doc.GetXmlFragment(fragmentName)
+				tree, err := pmdoc.Read(fragment)
 				if err != nil {
+					t.Errorf("round %d: read the live tree: %v", round, err)
 					return
 				}
-				kept := tree.Children[:0]
-				for _, child := range tree.Children {
-					rendered, renderErr := renderTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{child}})
-					if renderErr != nil || strings.Contains(rendered, marker) {
-						continue
+				before := *tree
+				before.Children = slices.Clone(tree.Children)
+				want = &before
+				transact(func(txn *crdt.Transaction) {
+					if err := pmdoc.Update(txn, fragment, appendMarker(tree)); err != nil {
+						t.Errorf("round %d: append the marker: %v", round, err)
 					}
-					kept = append(kept, child)
-				}
-				tree.Children = kept
-				want = tree
-			}); err != nil && !strings.Contains(err.Error(), "no changes") {
-			t.Fatalf("round %d: precompute the browser's delete: %v", round, err)
+				})
+			}); err != nil {
+			t.Fatalf("round %d: append the marker under the browser's cursor: %v", round, err)
 		}
 		if want == nil {
 			t.Fatalf("round %d: could not precompute the browser's delete", round)

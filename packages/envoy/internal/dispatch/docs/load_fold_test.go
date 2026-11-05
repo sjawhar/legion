@@ -37,6 +37,16 @@ func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) 
 		t.Fatalf("open the rooms pool: %v", err)
 	}
 	ctx := context.Background()
+	// The 143 fixtures' documents are stored once and read under both modes: which way a reader
+	// folds a log is the reader's, not the log's, and storing all of them again for the second
+	// mode cost the package a pass of 143 documents (dispatch://INFRA-1075). The appends run
+	// through a store of their own, so they are no part of what each mode's fold counter sees.
+	seeding := NewPgVersioned(database)
+	fixtureDocuments := make([]string, len(fixtures))
+	for index := range fixtures {
+		fixtureDocuments[index] = createDocument(t, database, "history")
+		appendUpdates(t, seeding, fixtureDocuments[index], fixtureHistoryAt(t, fixtures, index)...)
+	}
 	for _, mode := range []struct {
 		name  string
 		limit int64
@@ -92,9 +102,8 @@ func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) 
 			})
 			t.Run("many rows", func(t *testing.T) {
 				for index, fixture := range fixtures {
-					history := documentHistory(t, fixture.update, fixtures[(index+1)%len(fixtures)].update)
-					artifactID := stored(t, history)
-					want := readMerged(t, history)
+					artifactID := fixtureDocuments[index]
+					want := fixtureMergedAt(t, fixtures, index)
 					requireReadsAs(t, fixture.Name+": the load", load(t, artifactID), want)
 					requireReadsAs(t, fixture.Name+": the cold read", coldRead(t, artifactID), want)
 				}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -34,20 +35,28 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 	ctx := context.Background()
 	for index, fixture := range fixtures {
 		t.Run(fixture.Name, func(t *testing.T) {
-			history := documentHistory(t, fixture.update, fixtures[(index+1)%len(fixtures)].update)
+			history := fixtureHistoryAt(t, fixtures, index)
 			artifactID := createDocument(t, database, "history")
 			for _, update := range history {
 				if _, err := versioned.AppendUpdate(ctx, artifactID, update); err != nil {
 					t.Fatalf("append update: %v", err)
 				}
 			}
-			want := readMerged(t, history)
+			// Each prefix of the log is merged and read once, and the version loops below
+			// take their expected reading from here: the two the compaction loop repeats
+			// cost a merge and a render of the whole document apiece
+			// (dispatch://INFRA-1075).
+			prefixes := make([]documentReading, len(history)+1)
+			for prefix := 1; prefix <= len(history); prefix++ {
+				prefixes[prefix] = readMerged(t, history[:prefix])
+			}
+			want := prefixes[len(history)]
 			for version := 1; version <= len(history); version++ {
 				state, err := versioned.MaterializeAt(ctx, artifactID, persistence.Version(version))
 				if err != nil {
 					t.Fatalf("materialize version %d: %v", version, err)
 				}
-				requireReadsAs(t, fmt.Sprintf("version %d", version), state, readMerged(t, history[:version]))
+				requireReadsAs(t, fmt.Sprintf("version %d", version), state, prefixes[version])
 			}
 			requireLoadReadsAs(t, versioned, artifactID, "the head", want)
 
@@ -59,7 +68,7 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 				if err != nil {
 					t.Fatalf("materialize version %d after compaction: %v", version, err)
 				}
-				requireReadsAs(t, fmt.Sprintf("version %d after compaction to two", version), state, readMerged(t, history[:version]))
+				requireReadsAs(t, fmt.Sprintf("version %d after compaction to two", version), state, prefixes[version])
 			}
 			compactAged(t, versioned, database, artifactID)
 			if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
@@ -604,6 +613,50 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 		return pmdoc.Update(txn, fragment, initialTree)
 	})
 	return history
+}
+
+var (
+	fixtureHistoryMu    sync.Mutex
+	fixtureHistoryCache = map[int][][]byte{}
+)
+
+// fixtureHistoryAt is the stored log of fixture index rewritten into the next fixture and back
+// (documentHistory), built by the first test that asks for it and kept for every test after it.
+// Three tests walk all 143 fixtures and each of them builds the same bytes: building the logs
+// once rather than three times over saves the package about seven seconds
+// (dispatch://INFRA-1075). Nothing writes into what it returns.
+func fixtureHistoryAt(t *testing.T, fixtures []historyFixture, index int) [][]byte {
+	t.Helper()
+	fixtureHistoryMu.Lock()
+	defer fixtureHistoryMu.Unlock()
+	if history, built := fixtureHistoryCache[index]; built {
+		return history
+	}
+	history := documentHistory(t, fixtures[index].update, fixtures[(index+1)%len(fixtures)].update)
+	fixtureHistoryCache[index] = history
+	return history
+}
+
+var (
+	fixtureMergedMu    sync.Mutex
+	fixtureMergedCache = map[int]documentReading{}
+)
+
+// fixtureMergedAt is the reading the whole of fixture index's log merges to (readMerged), kept as
+// fixtureHistoryAt keeps the log: the fold-mode test reads it for all 143 fixtures once per mode,
+// and merging and rendering each of those documents again for the second mode cost the package
+// about three seconds (dispatch://INFRA-1075).
+func fixtureMergedAt(t *testing.T, fixtures []historyFixture, index int) documentReading {
+	t.Helper()
+	history := fixtureHistoryAt(t, fixtures, index)
+	fixtureMergedMu.Lock()
+	defer fixtureMergedMu.Unlock()
+	if reading, read := fixtureMergedCache[index]; read {
+		return reading
+	}
+	reading := readMerged(t, history)
+	fixtureMergedCache[index] = reading
+	return reading
 }
 
 // documentReading is everything a reader of a document state sees: its markdown (or why it has

@@ -215,7 +215,7 @@ func TestALoadedDocumentIsTheLoadedStateDecoded(t *testing.T) {
 	for index, fixture := range fixtures {
 		t.Run("many updates/"+fixture.Name, func(t *testing.T) {
 			artifactID := createDocument(t, database, "history")
-			appendUpdates(t, versioned, artifactID, documentHistory(t, fixture.update, fixtures[(index+1)%len(fixtures)].update)...)
+			appendUpdates(t, versioned, artifactID, fixtureHistoryAt(t, fixtures, index)...)
 			sameAsLoad(t, artifactID)
 		})
 	}

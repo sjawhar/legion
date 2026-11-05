@@ -77,8 +77,10 @@ const taskProgressBatch = 50
 
 // The boot retries: taskProgressBootRetries is how many more passes RunTaskProgressReconciliation
 // runs after the boot pass while drift it could not lock remains, the first
-// taskProgressBootRetryFirst after the boot pass, each later one waiting twice as long as the one
-// before, never more than taskProgressBootRetryCeiling.
+// Service.taskProgressBootRetryFirst after the boot pass, each later one waiting twice as long as
+// the one before, never more than taskProgressBootRetryCeiling. New sets that field to
+// taskProgressBootRetryFirst; the test of the retries sets a short one on its own service, so it
+// does not wait out a second between the boot pass and the retry that counts the row it held.
 const (
 	taskProgressBootRetries      = 6
 	taskProgressBootRetryFirst   = time.Second
@@ -100,7 +102,7 @@ const (
 // none, so one broken document does not hold the rest back. It returns once no drift is left, the
 // retries are spent, or ctx ends.
 func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
-	s.runTaskProgressReconciliation(ctx, taskProgressBootRetryFirst)
+	s.runTaskProgressReconciliation(ctx, s.taskProgressBootRetryFirst)
 }
 
 func (s *Service) runTaskProgressReconciliation(ctx context.Context, firstRetry time.Duration) {
@@ -123,8 +125,10 @@ func (s *Service) runTaskProgressReconciliation(ctx context.Context, firstRetry 
 }
 
 // taskProgressPassRetries is how many failed or short batches one reconciliation pass retries
-// before it gives up, and taskProgressRetryBackoffStep the wait before the first retry,
-// multiplied by the retry's number.
+// before it gives up, and taskProgressRetryBackoffStep the wait before the first retry, multiplied
+// by the retry's number. New sets Service.taskProgressRetryBackoff to that step; the test of a pass
+// that gives up sets a short one on its own service, so it does not wait out the three seconds the
+// five backoffs add up to.
 const (
 	taskProgressPassRetries      = 5
 	taskProgressRetryBackoffStep = 200 * time.Millisecond
@@ -163,7 +167,7 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (driftLeft bool) {
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(time.Duration(retries) * taskProgressRetryBackoffStep):
+		case <-time.After(time.Duration(retries) * s.taskProgressRetryBackoff):
 		}
 	}
 	if counted > 0 {
