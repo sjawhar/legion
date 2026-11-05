@@ -38,9 +38,9 @@ func reviewerAppID(env settingValues) (string, error) {
 
 // ciReconciler builds the CI reconcile pass for the App whose key Dispatch holds, writing through
 // the listener's own CI record bucket. It returns nil when the pass cannot run: no NATS to write
-// its records to, or no App private key to sign the reads with. The bucket is bound by the first
-// pass that finds the client connected, not here, exactly as the webhook redelivery sweep's state
-// is (webhookSweeper): the client connects in the background (serverBus), and a bus that is down
+// its records to, or no App private key to sign the reads with. The bucket is bound by each pass
+// that finds the client connected, not here, exactly as the webhook redelivery sweep's state is
+// (webhookSweeper): the client connects in the background (serverBus), and a bus that is down
 // at boot must not stop the boot; a pass before then reads GitHub nothing and says so. Its App
 // client obeys the GitHub rate limits every process shares, in the database's github_rate_limits,
 // since GitHub budgets the App rather than a process.
@@ -60,7 +60,12 @@ func ciReconciler(natsClient *bus.Client, database *store.Store, app *auth.AppCo
 		if !natsClient.Connected() {
 			return nil, errors.New("NATS is not connected, so the CI record writer cannot be bound yet")
 		}
-		writer, err := cistore.OpenWriter(natsClient.Conn, logger)
+		// The client's own JetStream context, read under its lock as redeliver.OpenState's caller
+		// reads it: the client replaces the connection and the context together when it reconnects
+		// a closed connection, which reading the field here would race. Every pass binds through
+		// this, so a pass after such a reconnect writes through the connection the client now
+		// holds.
+		writer, err := cistore.OpenWriter(natsClient.JS(), logger)
 		if err != nil {
 			return nil, err
 		}

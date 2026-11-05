@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
 // A head whose checks reached the listener through no webhook at all settles after one pass: the
@@ -276,10 +277,10 @@ func TestAPassOverRecordedChecksChangesNothing(t *testing.T) {
 	if after != before {
 		t.Fatalf("the record's revision moved from %d to %d; the pass rewrote what the webhooks recorded", before, after)
 	}
-	// The pass wrote both observations through to the store, as its line says; the store applied
-	// each as no change, which is what leaves the revision where it was.
-	if line := h.passLine(); number(t, line, "records") != 2 {
-		t.Fatalf("the pass line reports %d records, want the 2 observations it wrote: %v", number(t, line, "records"), line)
+	// The pass wrote both observations through to the store, which applied each as no change:
+	// records counts the records a pass changed, so a pass that mended nothing reports none.
+	if line := h.passLine(); number(t, line, "records") != 0 {
+		t.Fatalf("the pass line reports %d records, want 0: it changed no record: %v", number(t, line, "records"), line)
 	}
 }
 
@@ -447,6 +448,118 @@ func TestThePassLineCountsWhatThePassDid(t *testing.T) {
 	}
 }
 
+// The pass line tells its own counts apart, which only a pass whose numbers differ can show:
+// two pages of open pull requests, three heads, one of them answered 304 throughout, and one
+// record changed. It is the pass k12 describes.
+//
+// The two pages are two mapped repositories' listings, one page each, rather than one listing
+// of two pages: a pass counts every open pull request page it reads, whichever repository it
+// belongs to, and a listing spilling onto a second page is pinned by TestAListingIsReadPageByPage
+// already. Filling a first page here would take a hundred open pull requests, and each one with
+// a head of its own is a head the pass reads and counts, which is not the pass k12 names.
+//
+// Each of the three heads is there for one of the counts. Pull request 7's head was read in
+// full by the pass before this one and nothing at it has changed since, so both its listings
+// answer 304 and it is the one head GitHub had nothing new for. Pull request 9's check runs
+// have a newly queued run on them, so that listing is read in full again, and everything it
+// holds to record is in the record already, so it changes nothing. Pull request 8, of the other
+// repository, was opened since, and its completed run is the one record this pass changes.
+func TestThePassLineTellsItsPagesHeadsAndRecordsApart(t *testing.T) {
+	// The second mapped repository, and the two heads beside the harness's own: the one whose
+	// every observation the record holds already, and the one with a run to record.
+	const (
+		otherRow          = "acme/tools"
+		otherRepository   = "Acme/Tools"
+		otherRepositoryID = 777
+
+		unchangedHeadSHA = "c0ffee1234567890abcdef1234567890abcdef12"
+		changedHeadSHA   = "b1c0ffee1234567890abcdef1234567890abcdef"
+	)
+	h := newHarness(t, reviewerAppID)
+	h.mapRepository(rowRepository)
+	h.mapRepository(otherRow)
+	h.github.setRepository(rowRepository, gitHubRepository, repositoryID)
+	h.github.setRepository(otherRow, otherRepository, otherRepositoryID)
+	h.github.setPullRequests(gitHubRepository,
+		fakePull{number: 7, sha: headSHA},
+		fakePull{number: 9, sha: unchangedHeadSHA},
+	)
+	h.github.setCheckRuns(gitHubRepository, headSHA,
+		checkRun(1, "ci-ok", "completed", "success", otherApp, "2026-11-05T03:01:00Z"),
+	)
+	h.github.setCheckSuites(gitHubRepository, headSHA,
+		checkSuite(900, "completed", "success", otherApp, "2026-11-05T03:01:05Z"),
+	)
+	h.github.setCheckRuns(gitHubRepository, unchangedHeadSHA,
+		atHead(gitHubRepository, unchangedHeadSHA, checkRun(2, "build", "completed", "success", otherApp, "2026-11-05T03:01:10Z")),
+	)
+
+	// The pass before the one this test is about is what earns the 304s: it reads both heads of
+	// the first repository in full and records the three observations they hold, and the second
+	// repository has no open pull request yet.
+	h.pass()
+
+	if got := number(t, h.passLine(), "records"); got != 3 {
+		t.Fatalf("the pass before changed %d records, want the run and the suite of one head and the run of the other: %v",
+			got, h.passLine())
+	}
+
+	// Since that pass, a second job has been queued at pull request 9's head, which changes that
+	// listing without holding anything to record, and pull request 8 has been opened in the
+	// other repository, at a head carrying the one completed run this pass has to record.
+	h.github.setCheckRuns(gitHubRepository, unchangedHeadSHA,
+		atHead(gitHubRepository, unchangedHeadSHA, checkRun(2, "build", "completed", "success", otherApp, "2026-11-05T03:01:10Z")),
+		atHead(gitHubRepository, unchangedHeadSHA, checkRun(4, "deploy", "queued", "", otherApp, "")),
+	)
+	h.github.setPullRequests(otherRepository, fakePull{number: 8, sha: changedHeadSHA})
+	h.github.setCheckRuns(otherRepository, changedHeadSHA,
+		atHead(otherRepository, changedHeadSHA, checkRun(3, "ci-ok", "completed", "success", otherApp, "2026-11-05T03:06:00Z")),
+	)
+	sentBefore := h.github.count()
+
+	h.pass()
+
+	line := h.passLine()
+	for field, want := range map[string]int{
+		"list_pages":         2,
+		"heads":              3,
+		"heads_not_modified": 1,
+		"records":            1,
+		"mappings_skipped":   0,
+		"heads_too_large":    0,
+	} {
+		if got := number(t, line, field); got != want {
+			t.Errorf("the pass's %s = %d, want %d: %v", field, got, want, line)
+		}
+	}
+	// head_requests is the requests the three heads' two listings sent, which the stand-in's own
+	// log is the only honest count of.
+	sent := 0
+	for _, request := range h.github.received()[sentBefore:] {
+		if strings.Contains(request.url, "check-runs") || strings.Contains(request.url, "check-suites") {
+			sent++
+		}
+	}
+	if got := number(t, line, "head_requests"); got != sent {
+		t.Errorf("the pass reports %d head requests, want the %d the stand-in was sent: %v", got, sent, line)
+	}
+	if line["rate_limited"] != false {
+		t.Errorf("the pass reports rate_limited = %v, want false: no limit stopped it", line["rate_limited"])
+	}
+	if _, ok := line["duration"].(string); !ok {
+		t.Errorf("the pass line has no duration: %v", line)
+	}
+}
+
+// atHead is one check object of a head other than the harness's own: checkRun and checkSuite
+// answer for headSHA of gitHubRepository alone, and an observation is keyed by the head_sha its
+// object carries, so a run at another repository's head has to say where it ran itself.
+func atHead(repository, sha string, item object) object {
+	item["head_sha"] = sha
+	item["html_url"] = fmt.Sprintf("https://github.com/%s/runs/%v", repository, item["id"])
+	return item
+}
+
 // A limit already in force on the App ends a pass before it sends GitHub anything, and the pass
 // line names the scope and when the limit ends.
 func TestALimitInForceEndsThePassBeforeItReadsGitHub(t *testing.T) {
@@ -523,6 +636,33 @@ func TestARateLimitedAnswerStopsThePass(t *testing.T) {
 			t.Fatalf("the pass read %d heads under a rate limit: %v", got, line)
 		}
 	})
+}
+
+// The scope the pass line names is the one GitHub's answer was budgeted under. A repository's
+// own read is made with that repository's installation token, so a limit GitHub answers it with
+// is recorded in the shared ledger under that installation; a line naming the App instead would
+// send an alarm looking for a limit nobody recorded.
+func TestTheStopNamesTheScopeTheReadWasBudgetedUnder(t *testing.T) {
+	h := newHarness(t, reviewerAppID)
+	h.mapRepository(rowRepository)
+	h.listHead()
+	h.github.rateLimitNext("/repos/" + rowRepository)
+
+	h.pass()
+
+	line := h.passLine()
+	if line["rate_limited"] != true {
+		t.Fatalf("the pass line reports rate_limited = %v, want true: %v", line["rate_limited"], line)
+	}
+	want := githubapp.InstallationScope(h.github.installationID())
+	if line["rate_limit_scope"] != want {
+		t.Fatalf("the pass line names scope %v, want the installation the read was budgeted under, %s: %v",
+			line["rate_limit_scope"], want, line)
+	}
+	wait, _, err := h.reconciler.Limits.Wait(h.ctx, want)
+	if err != nil || wait <= 0 {
+		t.Fatalf("the shared limit on %s has %s left (%v), want GitHub's own wait recorded under the scope the line names", want, wait, err)
+	}
 }
 
 // webhookBody is one GitHub webhook body carrying payload as its event, with the repository and

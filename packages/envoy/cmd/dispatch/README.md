@@ -327,8 +327,9 @@ A webhook that reached no record leaves a head short of a check, and a head shor
 So every 5 minutes (`cireconcile.Interval`, Background loops, below) one Dispatch process reads each open pull request's head from GitHub and records every completed check run and completed check suite the listener's record of that head lacks.
 It runs under the lease `ci-reconcile` with that 5 minutes as its period, so one process serves each period however many run (Running more than one process, below), and its first pass is one interval after the start.
 
-- It is on when NATS is configured and the App's private key (`DISPATCH_APP_PEM_B64`) is present, and logs at start which it lacks when it is off.
-  It writes through the listener's own CI bucket, `envoy_ci_state`, which it binds on the first pass that finds NATS connected and never creates:
+- It is on when NATS is configured and the App's private key (`DISPATCH_APP_PEM_B64`) is present.
+  When it is off it logs one line at start, whichever of the two it lacks: `dispatch: CI reconcile off: it needs NATS and the GitHub App private key`.
+  It writes through the listener's own CI bucket, `envoy_ci_state`, which every pass binds afresh and none creates:
   the listener stays the one owner of that bucket's TTL and its copies, and a pass that finds no bucket says so and reads GitHub nothing.
 
 - A pass reads every row of `repo_projects`, resolves each against GitHub (`GET /repos/{owner}/{repo}`) for the name and id GitHub itself gives it, and deduplicates by that id, so a repository mapped under both an old and a new name is read once.
@@ -343,8 +344,9 @@ It runs under the lease `ci-reconcile` with that 5 minutes as its period, so one
   with that variable unset no verdict check is recorded, and the server says so once at start.
 
 - Every page is conditional on the `ETag` of its own last answer, so an unchanged page costs none of the rate limit, and requests go no more than two a second.
-  A head's ETags are kept only when every page answered and every observation the rules name was recorded, and are dropped when a page failed, when a write did not land, and when the record they stand for has gone (the bucket's seven-day TTL, or a delete), so nothing is hidden behind a `304`.
+  A head's ETags are kept only when every page answered and every observation the rules name was recorded, and are dropped when a page failed, when a write a later pass might land did not, and when the record they stand for has gone (the bucket's seven-day TTL, or a delete), so nothing is hidden behind a `304`.
   A head whose answer held nothing to record keeps its ETags: it has no record to lose, and dropping them would read it in full at every pass for ever.
+  A write the CI store refuses because the record would pass its bound keeps them too: the record is written marked overflowed and never settles on the checks it could not hold, exactly as the listener's own writes leave it, so every later pass would meet the same refusal.
 
 - The shared GitHub rate limits in `github_rate_limits` are read before the pass, before each repository and before each head, under the App's scope and the installation's, and the first limit — one this process read, or one GitHub answered with — ends the pass where it stands.
   The pass records no limit of its own: the App client records GitHub's own answer, as every process's App call does.

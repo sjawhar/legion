@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
@@ -182,8 +183,11 @@ func (r *Reconciler) headFailed(err error, head pullHead, c *counts) *stop {
 
 // record writes every observation the rules say to record from the pages GitHub answered 200
 // with, under the pull request's number and the owner and name GitHub itself gave. wanted counts
-// the observations those rules named, whether or not the record already held them; ok is false
-// when a write failed, which is what makes the pass drop this head's ETags.
+// the observations those rules named, whether or not the record already held them; the pass's own
+// records count takes only the writes that changed a record, so a pass over what the listener
+// already holds reports none. ok is false when a write failed and a later pass might make it
+// land, which is every failure but a refusal (refused); it is what makes the pass drop this
+// head's ETags.
 func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, runs, suites []pageOf[object], c *counts) (wanted int, ok bool) {
 	ok = true
 	repository := head.repository()
@@ -217,13 +221,18 @@ func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, r
 				continue
 			}
 			wanted++
-			if err := writer.Record(ctx, observation); err != nil {
-				ok = false
+			changed, err := writer.Record(ctx, observation)
+			if err != nil {
+				if !refused(err) {
+					ok = false
+				}
 				r.Logger.Warn("ci reconcile did not record a check run",
 					"check", observation.CheckName, "repository", repository, "pr", head.number, "sha", head.sha, "error", err)
 				continue
 			}
-			c.records++
+			if changed {
+				c.records++
+			}
 		}
 	}
 	for _, page := range suites {
@@ -242,16 +251,31 @@ func (r *Reconciler) record(ctx context.Context, writer Writer, head pullHead, r
 				continue
 			}
 			wanted++
-			if err := writer.RecordSuite(ctx, observation); err != nil {
-				ok = false
+			changed, err := writer.RecordSuite(ctx, observation)
+			if err != nil {
+				if !refused(err) {
+					ok = false
+				}
 				r.Logger.Warn("ci reconcile did not record a check suite",
 					"suite", observation.SuiteID, "repository", repository, "pr", head.number, "sha", head.sha, "error", err)
 				continue
 			}
-			c.records++
+			if changed {
+				c.records++
+			}
 		}
 	}
 	return wanted, ok
+}
+
+// refused reports whether a failed write is one every later pass would meet again: cistore
+// refuses a write that would take the record or its settlement past its bound with
+// bus.ErrTooLarge and writes the record marked Overflowed, so the head never settles on the
+// checks it could not hold and the listener's own writes leave it exactly there. Such a write
+// is named at WARN once, as any other failed write is, but it does not cost the head its
+// ETags: reading the head in full at every pass would buy nothing.
+func refused(err error) bool {
+	return errors.Is(err, bus.ErrTooLarge)
 }
 
 // objectPage is githubapp's answer as readPages takes it.

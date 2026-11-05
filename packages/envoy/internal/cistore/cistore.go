@@ -380,28 +380,34 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 	return s, nil
 }
 
+// Writer is the CI record bucket as a process that only writes it holds it: exactly Record,
+// RecordSuite and HasRecord, and no way to reach the store behind it. Everything else on Store
+// belongs to the listener's store and would panic here: the cache, the summary loop, Ping,
+// Rewatch, StopWatch, EndWatch, WaitForCacheReady and the settlement transitions all go through
+// the watcher a writer has not got, so the type a caller is given offers none of them rather than
+// a comment telling it which to leave alone.
+type Writer struct {
+	store *Store
+}
+
 // OpenWriter binds the existing CI state bucket for a process that writes records and reads none
 // of them into a cache: no watcher, no cache, no change feed and no summary loop, and it creates
 // nothing — the listener's Open stays the one owner of the bucket, its TTL and its copies. It
 // fails with what bus.OpenKeyValue gives when the bucket does not exist, so a caller binds it
 // again later rather than making one of its own.
 //
-// A writer supports Record, RecordSuite and HasRecord. Everything else on Store belongs to the
-// listener's store and must not be called on a writer: the cache, the summary loop, Ping,
-// Rewatch, StopWatch, EndWatch, WaitForCacheReady and the settlement transitions all go through
-// the watcher this one has not got. Its writes touch no cached state either (only applyWatched
-// and casState write the cache, and a writer calls neither), so a writer holds nothing per head
-// and grows with nothing.
+// It takes the JetStream context rather than the connection, as redeliver.OpenState does, so a
+// caller binding through a bus.Client passes natsClient.JS() and reads the connection under the
+// client's own lock: the client replaces both when it reconnects a closed connection, and reading
+// the field directly would race that replacement.
 //
-// A writer never calls Rewatch, so the channel nextRewatch hands its KV calls never closes and a
+// The store behind a writer touches no cached state (only applyWatched and casState write the
+// cache, and a writer calls neither), so a writer holds nothing per head and grows with nothing.
+// It never calls Rewatch either, so the channel nextRewatch hands its KV calls never closes and a
 // write of its own is never given up on for a rewatch (kvCall); it is given up on only when its
 // caller's context ends. The handle stays usable across a reconnect, since nats.go reconnects the
 // same *nats.Conn under it.
-func OpenWriter(nc *nats.Conn, logger *logging.Logger) (*Store, error) {
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
-		return nil, err
-	}
+func OpenWriter(js nats.JetStreamContext, logger *logging.Logger) (*Writer, error) {
 	kv, err := bus.OpenKeyValue(js, bus.CIStateBucket)
 	if err != nil {
 		return nil, err
@@ -414,7 +420,25 @@ func OpenWriter(nc *nats.Conn, logger *logging.Logger) (*Store, error) {
 	// One handle for the store's life: nothing moves it, since a writer has no watcher to
 	// rewatch. The cache maps stay nil, since nothing a writer calls reads or writes them.
 	s.kv = func() bus.KeyValue { return kv }
-	return s, nil
+	return &Writer{store: s}, nil
+}
+
+// Record folds one check observation into the head's record and reports whether that changed it:
+// an observation the record already holds, or one its own rules refuse as older, changes nothing
+// and is no news for a caller counting what a pass did.
+func (w *Writer) Record(ctx context.Context, observation contracts.CIObservation) (bool, error) {
+	return w.store.record(ctx, observation)
+}
+
+// RecordSuite folds one check_suite observation into the head's record and reports whether that
+// changed it, as Record does.
+func (w *Writer) RecordSuite(ctx context.Context, observation contracts.CIObservation) (bool, error) {
+	return w.store.recordSuite(ctx, observation)
+}
+
+// HasRecord answers whether the bucket holds the record of one head.
+func (w *Writer) HasRecord(owner, repo, number, sha string) (bool, error) {
+	return w.store.HasRecord(owner, repo, number, sha)
 }
 
 // HasRecord answers whether the bucket holds the record of one head, with one KV Get. A caller
@@ -627,12 +651,17 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 }
 
 // Record folds one check observation into the per-commit state via CAS, waiting for it no longer
-// than ctx allows (update).
+// than ctx allows (update). It answers the error alone, which is the shape webhook.CIRecorder
+// takes and all the webhook handler has a use for; a writer's Record also answers whether the
+// observation changed the record.
 func (s *Store) Record(ctx context.Context, observation contracts.CIObservation) error {
-	return s.record(ctx, observation)
+	_, err := s.record(ctx, observation)
+	return err
 }
 
-func (s *Store) record(ctx context.Context, observation contracts.CIObservation) error {
+// record is the one body both forms of Record share, and reports whether the observation changed
+// the head's record.
+func (s *Store) record(ctx context.Context, observation contracts.CIObservation) (bool, error) {
 	return s.update(ctx, observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
@@ -663,8 +692,15 @@ func (s *Store) record(ctx context.Context, observation contracts.CIObservation)
 }
 
 // RecordSuite folds a check_suite observation into the per-commit state, waiting for it no longer
-// than ctx allows (update).
+// than ctx allows (update). It answers the error alone, as Record does.
 func (s *Store) RecordSuite(ctx context.Context, observation contracts.CIObservation) error {
+	_, err := s.recordSuite(ctx, observation)
+	return err
+}
+
+// recordSuite is the one body both forms of RecordSuite share, and reports whether the
+// observation changed the head's record.
+func (s *Store) recordSuite(ctx context.Context, observation contracts.CIObservation) (bool, error) {
 	return s.update(ctx, observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Suites == nil {
 			st.Suites = map[string]Suite{}

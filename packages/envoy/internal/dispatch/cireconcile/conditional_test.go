@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
@@ -27,7 +28,7 @@ type failingWriter struct {
 	records int
 }
 
-func (w *failingWriter) Record(ctx context.Context, observation contracts.CIObservation) error {
+func (w *failingWriter) Record(ctx context.Context, observation contracts.CIObservation) (bool, error) {
 	w.mu.Lock()
 	failing := w.records > 0
 	if failing {
@@ -35,13 +36,13 @@ func (w *failingWriter) Record(ctx context.Context, observation contracts.CIObse
 	}
 	w.mu.Unlock()
 	if failing {
-		return errors.New("the CI record store refused the write")
+		return false, errors.New("the CI record store refused the write")
 	}
 	return w.Writer.Record(ctx, observation)
 }
 
-// failWrites makes the pass bind a writer whose first records writes of check runs fail. The
-// pass binds its writer itself, on the first pass that can, so the wrapping goes around Open.
+// failWrites makes the pass bind a writer whose first records writes of check runs fail. Every
+// pass binds its writer through Open, so the wrapping goes around Open.
 func (h *harness) failWrites(records int) *failingWriter {
 	h.t.Helper()
 	failing := &failingWriter{records: records}
@@ -55,6 +56,81 @@ func (h *harness) failWrites(records int) *failingWriter {
 		return failing, nil
 	}
 	return failing
+}
+
+// refusingWriter is a CI record writer that refuses the write of one named check exactly as
+// cistore refuses a record past its bound (bus.ErrTooLarge), and hands every other call to the
+// writer it wraps. cistore writes the record marked Overflowed under such a refusal, so the
+// head's record is there and holds the checks that fitted.
+type refusingWriter struct {
+	Writer
+
+	check string
+}
+
+func (w *refusingWriter) Record(ctx context.Context, observation contracts.CIObservation) (bool, error) {
+	if observation.CheckName == w.check {
+		return false, fmt.Errorf("record: %w", bus.ErrTooLarge)
+	}
+	return w.Writer.Record(ctx, observation)
+}
+
+// refuseWrites makes the pass bind a writer that refuses check's writes for the record's
+// bounds, as failWrites makes one whose writes fail.
+func (h *harness) refuseWrites(check string) {
+	h.t.Helper()
+	bind := h.reconciler.Open
+	h.reconciler.Open = func() (Writer, error) {
+		bound, err := bind()
+		if err != nil {
+			return nil, err
+		}
+		return &refusingWriter{Writer: bound, check: check}, nil
+	}
+}
+
+// A write refused for the record's bounds is final, so the head keeps its ETags: cistore writes
+// the record marked Overflowed and never settles it on the check it could not hold, and every
+// later pass would meet the same refusal, so reading the head in full at every pass would buy
+// nothing. The next pass reads it conditionally and GitHub answers 304.
+func TestARefusedWriteKeepsTheHeadsETags(t *testing.T) {
+	h := newHarness(t, reviewerAppID)
+	h.mapRepository(rowRepository)
+	h.listHead()
+	h.github.setCheckRuns(gitHubRepository, headSHA,
+		checkRun(1, "ci-ok", "completed", "success", otherApp, "2026-11-05T03:01:00Z"),
+		checkRun(2, "enormous", "completed", "success", otherApp, "2026-11-05T03:01:01Z"),
+	)
+	h.refuseWrites("enormous")
+
+	h.pass()
+
+	if !h.logged("ci reconcile did not record a check run") {
+		t.Fatalf("the refused write was not named at WARN:\n%s", h.logs.String())
+	}
+	state, _, ok := h.record()
+	if !ok {
+		t.Fatal("the head has no record after the pass whose other write landed")
+	}
+	if _, held := state.Checks["ci-ok"]; !held {
+		t.Fatalf("the record holds %+v, want the check that fitted", state.Checks)
+	}
+	sentBefore := h.github.count()
+
+	h.pass()
+
+	requests := h.github.sincePath(sentBefore, checkRunsPath)
+	if len(requests) != 1 {
+		t.Fatalf("the next pass read the head's check runs %d times, want once: %+v", len(requests), requests)
+	}
+	if want := h.github.etagOf(requests[0].url); requests[0].ifNoneMatch != want {
+		t.Fatalf("the next pass read the head's check runs with If-None-Match %q, want the ETag the refused pass was answered with, %q",
+			requests[0].ifNoneMatch, want)
+	}
+	line := h.passLine()
+	if got := number(t, line, "heads_not_modified"); got != 1 {
+		t.Errorf("the next pass's heads_not_modified = %d, want the head read conditionally and answered 304: %v", got, line)
+	}
 }
 
 // Nothing changed on GitHub between two passes, so the second reads nothing in full: every page

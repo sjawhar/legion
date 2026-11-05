@@ -45,6 +45,10 @@ func TestAMappingGitHubDoesNotAnswerIsSkipped(t *testing.T) {
 // No bucket yet, no pass: a pass that runs before the listener has made envoy_ci_state binds no
 // writer, says so and reads GitHub nothing -- there is nowhere to put what it would read -- and
 // the pass after the listener has made the bucket records the head and settles it.
+//
+// Each pass binds once and keeps nothing: the bus dials a replacement when nats.go gives up on
+// a connection, and a writer held from an earlier pass would write through the connection it
+// gave up on, so every later pass would read GitHub in full and record nothing until a restart.
 func TestNoBucketYetNoPass(t *testing.T) {
 	h := newHarnessBeforeTheListener(t, reviewerAppID)
 	h.mapRepository(rowRepository)
@@ -52,6 +56,13 @@ func TestNoBucketYetNoPass(t *testing.T) {
 	h.github.setCheckRuns(gitHubRepository, headSHA,
 		checkRun(1, "ci-ok", "completed", "success", otherApp, "2026-11-05T03:01:00Z"),
 	)
+	// A pass runs on the test's own goroutine, so a plain count is read and written by one.
+	binds := 0
+	bind := h.reconciler.Open
+	h.reconciler.Open = func() (Writer, error) {
+		binds++
+		return bind()
+	}
 
 	h.pass()
 
@@ -63,6 +74,9 @@ func TestNoBucketYetNoPass(t *testing.T) {
 	}
 	if sent := h.github.count(); sent != 0 {
 		t.Fatalf("a pass that bound no writer sent GitHub %d requests: %+v", sent, h.github.received())
+	}
+	if binds != 1 {
+		t.Fatalf("the pass called Open %d times, want once", binds)
 	}
 
 	// The listener boots and makes the bucket, as it does on its own clock.
@@ -81,5 +95,11 @@ func TestNoBucketYetNoPass(t *testing.T) {
 	}
 	if _, held := state.Checks["ci-ok"]; !held {
 		t.Fatalf("the record holds %+v, want ci-ok", state.Checks)
+	}
+
+	h.pass()
+
+	if binds != 3 {
+		t.Fatalf("Open was called %d times over three passes, want once a pass: a pass that kept the writer it bound would write through a connection the client may have replaced", binds)
 	}
 }

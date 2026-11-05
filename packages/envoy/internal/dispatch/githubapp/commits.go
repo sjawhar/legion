@@ -36,13 +36,15 @@ func (c *Client) readRepositoryJSON(ctx context.Context, token, path, repoFull s
 }
 
 // pollResponseLimit bounds the body of the conditional reads below, in place of the generic
-// responseLimit. A commit's check runs read with filter=all carries each run's output.text, which
-// GitHub caps at 65,535 characters: a hundred runs at that cap is about 6.4 MB, so responseLimit
-// (1 MiB) would fail such a head's read at every pass, for ever. Eight MiB is that bound with
-// room over it, derived from GitHub's own caps and a full page — not measured against any
-// repository. The other three reads are far smaller (a page of 100 pull requests is well under
-// it) and share it, since one bound is one thing to reason about.
-const pollResponseLimit = 8 << 20
+// responseLimit (1 MiB), which a head with many check runs would fail at every pass, for ever.
+// A page is 100 objects, and a check run carries both an output.summary and an output.text,
+// each of which GitHub caps at 65,535 characters: a full page at both caps is about 13 MB of
+// text before the JSON around it. Sixteen MiB is that bound with room over it, derived from
+// GitHub's own caps and a full page — not measured against any repository. A head whose answer
+// is past it is no failure of the pass that reads it: the pass skips that head, counts it and
+// logs it (cireconcile's headFailed). The other three reads are far smaller (a page of 100
+// pull requests is well under it) and share it, since one bound is one thing to reason about.
+const pollResponseLimit = 16 << 20
 
 // objectsPerPage is the page size the polled reads ask GitHub for, its own maximum: a head with
 // few checks is then one request, and a page holding exactly this many says another page may
@@ -175,9 +177,18 @@ func (c *Client) CommitCheckRuns(ctx context.Context, token, owner, repo, sha st
 	if c == nil {
 		return ObjectPage{}, ErrNoAppKey
 	}
+	repoFull := owner + "/" + repo
 	path := repoPath(owner, repo) + "/commits/" + url.PathEscape(sha) +
 		"/check-runs?filter=all&per_page=" + strconv.Itoa(objectsPerPage) + "&page=" + strconv.Itoa(pageNumber(page))
-	return c.readObjectPage(ctx, token, path, owner+"/"+repo, "check_runs", etag)
+	return c.readObjectPage(ctx, token, path, repoFull, etag, func(body []byte) ([]map[string]any, error) {
+		var answer struct {
+			CheckRuns []map[string]any `json:"check_runs"`
+		}
+		if err := json.Unmarshal(body, &answer); err != nil {
+			return nil, fmt.Errorf("decode the check_runs of %s: %w", repoFull, err)
+		}
+		return answer.CheckRuns, nil
+	})
 }
 
 // CommitCheckSuites reads page page (1-based) of GET
@@ -186,15 +197,29 @@ func (c *Client) CommitCheckSuites(ctx context.Context, token, owner, repo, sha 
 	if c == nil {
 		return ObjectPage{}, ErrNoAppKey
 	}
+	repoFull := owner + "/" + repo
 	path := repoPath(owner, repo) + "/commits/" + url.PathEscape(sha) +
 		"/check-suites?per_page=" + strconv.Itoa(objectsPerPage) + "&page=" + strconv.Itoa(pageNumber(page))
-	return c.readObjectPage(ctx, token, path, owner+"/"+repo, "check_suites", etag)
+	return c.readObjectPage(ctx, token, path, repoFull, etag, func(body []byte) ([]map[string]any, error) {
+		var answer struct {
+			CheckSuites []map[string]any `json:"check_suites"`
+		}
+		if err := json.Unmarshal(body, &answer); err != nil {
+			return nil, fmt.Errorf("decode the check_suites of %s: %w", repoFull, err)
+		}
+		return answer.CheckSuites, nil
+	})
 }
 
-// readObjectPage reads one page of a commit's check objects: path is the page's whole API path
-// and field the key GitHub's answer carries the objects under, both answers being
-// {"total_count":n,"<field>":[…]}.
-func (c *Client) readObjectPage(ctx context.Context, token, path, repoFull, field, etag string) (ObjectPage, error) {
+// readObjectPage reads one page of a commit's check objects: path is the page's whole API path,
+// and objects decodes the answer GitHub sends, {"total_count":n,"<key>":[…]}, into the objects
+// under the one key that listing carries. The caller passes that decode rather than the key's
+// name, so a listing nobody has written a decode for cannot be asked for at all, where a name
+// this function chose a field by could answer no objects and no error. Each decode takes the
+// objects alone into maps, as the webhook's own bodies reach contracts.GithubCIObservation:
+// total_count is GitHub's count of the whole list, which the page size and Full already say
+// what a caller needs of.
+func (c *Client) readObjectPage(ctx context.Context, token, path, repoFull, etag string, objects func([]byte) ([]map[string]any, error)) (ObjectPage, error) {
 	body, status, answerETag, err := c.readConditionalRepositoryJSON(ctx, token, path, repoFull, etag)
 	if err != nil {
 		return ObjectPage{}, err
@@ -202,25 +227,11 @@ func (c *Client) readObjectPage(ctx context.Context, token, path, repoFull, fiel
 	if status == http.StatusNotModified {
 		return ObjectPage{ETag: answerETag, NotModified: true}, nil
 	}
-	// The objects alone are decoded into maps, as the webhook's own bodies reach
-	// contracts.GithubCIObservation: total_count is GitHub's count of the whole list, which the
-	// page size and Full already say what a caller needs of. Both listings are decoded by one
-	// struct, the page the caller named picked out of it, so the objects are decoded once.
-	var answer struct {
-		CheckRuns   []map[string]any `json:"check_runs"`
-		CheckSuites []map[string]any `json:"check_suites"`
+	decoded, err := objects(body)
+	if err != nil {
+		return ObjectPage{}, err
 	}
-	if err := json.Unmarshal(body, &answer); err != nil {
-		return ObjectPage{}, fmt.Errorf("decode the %s of %s: %w", field, repoFull, err)
-	}
-	var objects []map[string]any
-	switch field {
-	case "check_runs":
-		objects = answer.CheckRuns
-	case "check_suites":
-		objects = answer.CheckSuites
-	}
-	return ObjectPage{Objects: objects, ETag: answerETag, Full: len(objects) == objectsPerPage}, nil
+	return ObjectPage{Objects: decoded, ETag: answerETag, Full: len(decoded) == objectsPerPage}, nil
 }
 
 // PullRequestHead is one open pull request of a repository: its number and its head commit.

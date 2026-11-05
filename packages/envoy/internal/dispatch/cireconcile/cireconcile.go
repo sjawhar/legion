@@ -66,12 +66,13 @@ const (
 )
 
 // Writer is the CI record store a pass writes through: the listener's bucket bound by
-// cistore.OpenWriter, which creates nothing. It is an interface rather than the store itself so
+// cistore.OpenWriter, which creates nothing. It is an interface rather than the writer itself so
 // that a caller may put its own writer in the pass's way, as every other collaborator of a
-// Reconciler is its caller's to choose; *cistore.Store satisfies it.
+// Reconciler is its caller's to choose; *cistore.Writer satisfies it. Its two record calls answer
+// whether the observation changed the head's record, which is what the pass counts.
 type Writer interface {
-	Record(context.Context, contracts.CIObservation) error
-	RecordSuite(context.Context, contracts.CIObservation) error
+	Record(context.Context, contracts.CIObservation) (bool, error)
+	RecordSuite(context.Context, contracts.CIObservation) (bool, error)
 	HasRecord(owner, repo, number, sha string) (bool, error)
 }
 
@@ -90,9 +91,10 @@ type Reconciler struct {
 	// not about limits wants.
 	Limits *ratelimit.Store
 	// Open binds the CI record writer (cistore.OpenWriter), as redeliver.Sweeper.Open binds its
-	// bucket: a pass calls it until it has once succeeded, and every later pass writes through
-	// that writer. It fails while NATS is not connected, and while the listener has not made the
-	// bucket; a pass it fails for reads GitHub nothing and leaves the binding to a later one.
+	// bucket. Every pass calls it and writes through the writer it answers with, binding afresh
+	// rather than keeping one. It fails while NATS is not connected, and while the listener has
+	// not made the bucket; a pass it fails for reads GitHub nothing and leaves the binding to a
+	// later one.
 	Open func() (Writer, error)
 	// ReviewerAppID is the review App's id, Dispatch's DISPATCH_REVIEWER_APP_ID. A verdict check
 	// (`tester`, `architect`) is recorded only when that App created it
@@ -104,15 +106,13 @@ type Reconciler struct {
 	// Pace is the pause left between requests to GitHub. Zero waits for nothing.
 	Pace time.Duration
 
-	// writer is what Open bound, nil until a pass has bound it.
-	writer Writer
 	// rows is what the last pass learned of each repo_projects row, keyed by the row's own text:
 	// the ETag of GitHub's answer about it, and the name and id that answer gave.
 	rows map[string]rowState
 	// pulls is each repository's open pull request pages as the last pass read them, keyed by the
 	// id GitHub gave the repository, so two rows naming one repository share one listing.
 	pulls map[int64][]pageOf[githubapp.PullRequestHead]
-	// heads is what the last pass kept of each head it read (headKey).
+	// heads is what the last pass kept of each head it read (pullHead.key).
 	heads map[string]headState
 }
 
@@ -161,8 +161,9 @@ type counts struct {
 	headRequests int
 	// notModified counts the heads every page of whose two listings answered 304.
 	notModified int
-	// records counts the observations written to the CI store. The store writes nothing for an
-	// observation its record already holds, which is what a pass over an unchanged head does.
+	// records counts the records the pass changed: an observation the store applied as no change,
+	// which is what every observation of a head the listener already recorded is, counts for
+	// nothing, so a pass that mended nothing reports none.
 	records int
 	// mappingsSkipped counts the repo_projects rows the pass skipped, and tooLarge the heads
 	// whose answer was past what githubapp reads.
@@ -183,7 +184,13 @@ func (r *Reconciler) Pass(ctx context.Context) {
 		r.report(&c, at, time.Since(started))
 		return
 	}
-	writer, err := r.bind()
+	// The writer is bound for this pass alone, never kept for the next: when nats.go gives up on
+	// a connection the bus dials a replacement and installs it under the client, and a writer
+	// held from before that would write through the connection nats.go gave up on, so every
+	// later pass would read GitHub in full and record nothing until a restart. One KV bind is
+	// one JetStream request every five minutes, which is nothing beside the GitHub reads the
+	// pass makes, and it leaves no handle to go stale.
+	writer, err := r.Open()
 	if err != nil {
 		// The listener makes the CI bucket and Dispatch's NATS connects in the background, so a
 		// pass before either is an ordinary moment of a boot, not a fault: it reads GitHub nothing
@@ -193,19 +200,6 @@ func (r *Reconciler) Pass(ctx context.Context) {
 	}
 	at := r.reconcile(ctx, writer, &c)
 	r.report(&c, at, time.Since(started))
-}
-
-// bind returns the CI record writer, binding it on the first pass that can.
-func (r *Reconciler) bind() (Writer, error) {
-	if r.writer != nil {
-		return r.writer, nil
-	}
-	writer, err := r.Open()
-	if err != nil {
-		return nil, err
-	}
-	r.writer = writer
-	return writer, nil
 }
 
 // reconcile is one pass over every mapped repository, and the stop that ended it early.
@@ -243,9 +237,10 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 			continue
 		}
 		// Every read made with this token is budgeted under its installation, so that scope is
-		// read beside the App's before each of the head reads below.
+		// read beside the App's before each of the head reads below, and is what a limit GitHub
+		// answers one of those reads with is named by.
 		scope := r.GitHub.TokenScope(token)
-		state, at, err := r.identify(ctx, row, owner, name, token, c)
+		state, at, err := r.identify(ctx, row, owner, name, token, scope, c)
 		if at != nil {
 			return at
 		}
@@ -272,7 +267,7 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 			r.Logger.Warn("ci reconcile skipped a repository GitHub named oddly", "repository", row, "full_name", state.fullName)
 			continue
 		}
-		pulls, at, err := r.openPullRequests(ctx, state.id, ownerOf, nameOf, token, c)
+		pulls, at, err := r.openPullRequests(ctx, state.id, ownerOf, nameOf, token, scope, c)
 		if at != nil {
 			return at
 		}
@@ -338,13 +333,15 @@ func (r *Reconciler) mapped(ctx context.Context) ([]string, error) {
 }
 
 // identify resolves one row against GitHub, conditionally: the name GitHub gives the repository
-// and its id. A 304 says the answer the last pass kept still stands.
-func (r *Reconciler) identify(ctx context.Context, row, owner, name, token string, c *counts) (rowState, *stop, error) {
+// and its id. A 304 says the answer the last pass kept still stands. scope is what this read is
+// budgeted under, which is the token's installation: GitHub records a limit it answers this
+// read with under that scope, so the pass names the same one.
+func (r *Reconciler) identify(ctx context.Context, row, owner, name, token, scope string, c *counts) (rowState, *stop, error) {
 	kept := r.rows[row]
 	r.pace(ctx, c)
 	c.requests++
 	answer, err := r.GitHub.RepositoryIdentity(ctx, token, owner, name, kept.etag)
-	if at := stopAt(err, githubapp.AppScope); at != nil {
+	if at := stopAt(err, scope); at != nil {
 		return rowState{}, at, nil
 	}
 	if err != nil {
@@ -366,13 +363,14 @@ func (r *Reconciler) identify(ctx context.Context, row, owner, name, token strin
 }
 
 // openPullRequests is every open pull request of one repository, read page by page and each page
-// conditional on the ETag the last pass kept for it.
-func (r *Reconciler) openPullRequests(ctx context.Context, id int64, owner, name, token string, c *counts) ([]githubapp.PullRequestHead, *stop, error) {
+// conditional on the ETag the last pass kept for it. scope is what these reads are budgeted
+// under, as identify's is.
+func (r *Reconciler) openPullRequests(ctx context.Context, id int64, owner, name, token, scope string, c *counts) ([]githubapp.PullRequestHead, *stop, error) {
 	pages, err := readPages(ctx, r, c, &c.listPages, r.pulls[id], func(ctx context.Context, page int, etag string) (conditionalPage[githubapp.PullRequestHead], error) {
 		answer, err := r.GitHub.OpenPullRequests(ctx, token, owner, name, page, etag)
 		return pullRequestPage(answer), err
 	})
-	if at := stopAt(err, githubapp.AppScope); at != nil {
+	if at := stopAt(err, scope); at != nil {
 		return nil, at, nil
 	}
 	if err != nil {

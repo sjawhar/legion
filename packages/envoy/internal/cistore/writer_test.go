@@ -47,7 +47,7 @@ func TestAWriterRecordSettlesThroughTheListenersSummaryLoop(t *testing.T) {
 	}
 	defer client.Close()
 	store := openListener(t, client.Conn)
-	writer, err := cistore.OpenWriter(client.Conn, logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
 	if err != nil {
 		t.Fatalf("open the writer: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestAWriterRecordSettlesThroughTheListenersSummaryLoop(t *testing.T) {
 	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond,
 		metrics.New().NewGauge("held", ""), logging.New("loop"))
 
-	if err := writer.Record(ctx, contracts.CIObservation{
+	if _, err := writer.Record(ctx, contracts.CIObservation{
 		Owner:      owner,
 		Repo:       repo,
 		Number:     number,
@@ -82,7 +82,7 @@ func TestAWriterRecordSettlesThroughTheListenersSummaryLoop(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("the writer's check run: %v", err)
 	}
-	if err := writer.RecordSuite(ctx, contracts.CIObservation{
+	if _, err := writer.RecordSuite(ctx, contracts.CIObservation{
 		Owner:      owner,
 		Repo:       repo,
 		Number:     number,
@@ -145,12 +145,12 @@ func TestOpenWriterFailsAndCreatesNothingWithoutTheBucket(t *testing.T) {
 	}
 	defer client.Close()
 
-	writer, err := cistore.OpenWriter(client.Conn, logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
 	if !errors.Is(err, natsgo.ErrBucketNotFound) {
 		t.Fatalf("OpenWriter without the bucket = %v, want %v", err, natsgo.ErrBucketNotFound)
 	}
 	if writer != nil {
-		t.Fatalf("OpenWriter returned a store for a bucket that is not there: %+v", writer)
+		t.Fatalf("OpenWriter returned a writer for a bucket that is not there: %+v", writer)
 	}
 	if _, err := client.JS().KeyValue(bus.CIStateBucket); !errors.Is(err, natsgo.ErrBucketNotFound) {
 		t.Fatalf("the CI bucket after the refused OpenWriter: %v, want %v", err, natsgo.ErrBucketNotFound)
@@ -169,7 +169,7 @@ func TestHasRecordReadsTheBucketRatherThanACache(t *testing.T) {
 	}
 	defer client.Close()
 	store := openListener(t, client.Conn)
-	writer, err := cistore.OpenWriter(client.Conn, logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
 	if err != nil {
 		t.Fatalf("open the writer: %v", err)
 	}
@@ -216,5 +216,66 @@ func TestHasRecordReadsTheBucketRatherThanACache(t *testing.T) {
 	}
 	if has {
 		t.Fatal("HasRecord is true for a head nothing wrote")
+	}
+}
+
+// A writer's Record says whether the observation changed the head's record, which is what a
+// caller counting what its pass mended reports: the first observation of a head with no record
+// changes it, the same observation again changes nothing, and an older observation of the same
+// check is refused by the record's own rules and changes nothing either.
+func TestAWriterReportsWhetherTheObservationChangedTheRecord(t *testing.T) {
+	ctx := context.Background()
+	_, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("bus connect: %v", err)
+	}
+	defer client.Close()
+	// The listener's store makes the bucket a writer only binds; no cache of this test's own is
+	// read, since the writer answers from what it wrote.
+	openListener(t, client.Conn)
+	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	if err != nil {
+		t.Fatalf("open the writer: %v", err)
+	}
+
+	observation := contracts.CIObservation{
+		Owner:      "example-org",
+		Repo:       "example-repo",
+		Number:     "42",
+		SHA:        "cccccccccccccccccccccccccccccccccccccccc",
+		CheckName:  "build",
+		CheckRunID: 7,
+		URL:        "https://github.com/example-org/example-repo/runs/7",
+		Status:     "completed",
+		Conclusion: "success",
+		ObservedAt: "2026-09-07T03:01:00Z",
+	}
+	changed, err := writer.Record(ctx, observation)
+	if err != nil {
+		t.Fatalf("the first record: %v", err)
+	}
+	if !changed {
+		t.Fatal("the first observation of a head with no record is reported as no change")
+	}
+
+	changed, err = writer.Record(ctx, observation)
+	if err != nil {
+		t.Fatalf("the same record again: %v", err)
+	}
+	if changed {
+		t.Fatal("an observation the record already holds is reported as a change")
+	}
+
+	older := observation
+	older.ObservedAt = "2026-09-07T02:59:00Z"
+	older.Status = "in_progress"
+	older.Conclusion = ""
+	changed, err = writer.Record(ctx, older)
+	if err != nil {
+		t.Fatalf("the older record: %v", err)
+	}
+	if changed {
+		t.Fatal("an older observation of the same check is reported as a change")
 	}
 }
