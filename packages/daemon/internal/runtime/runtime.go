@@ -205,6 +205,56 @@ type IssueSuspender interface {
 	SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error
 }
 
+// WorkspaceBundler asks one live role's process to bundle the unpushed work of the issue
+// workspace every role of the issue shares, so a release can keep it while the pod, its disk and
+// the workspace on it go. The role named must be one whose process runs: the shim builds the
+// bundle with the jj and git of the workspace it already works in. A runtime whose processes
+// share no workspace implements nothing here, and the release of such a pod saves nothing because
+// there is no such pod.
+type WorkspaceBundler interface {
+	BundleWorkspace(ctx context.Context, issue string, role claim.Role) (WorkspaceBundle, error)
+}
+
+// SavedWorkspaceBundle answers the bundle an issue's last release saved for the pod of podUID,
+// created at podCreated, to restore, and what that ask did to the bundle. It is the other half
+// of WorkspaceBundler: the save's own store (store.Store.TakeWorkspaceBundleForRestore), handed
+// to the runtime so that the runtime, which alone knows when a replacement pod's launcher is up,
+// can carry the saved work back into the new workspace before any role of that pod starts.
+//
+// WorkspaceBundleNone is nothing to send and nothing recorded: an issue never released, one
+// whose restore the launcher confirmed, one whose release a wake cancelled, one whose bundle has
+// had its one attempt already, and the pod the work was taken off asking for its own workspace's
+// work back. The runtime calls this at every start of every role, and a release stops the roles
+// of the pod it is releasing, so a role relaunched in that pod before the teardown deletes it is
+// one of those calls; the store knows that pod by the uid the save recorded
+// (WorkspaceBundle.PodUID) and leaves the row untouched for the pod that replaces it.
+//
+// WorkspaceBundleSend is the attempt, and the call is where it is spent: the store records
+// podUID against the bundle before answering the body, and answers no body for that bundle
+// again. A launcher holds its record of the restore it ran in memory, so a roles container that
+// restarts comes back to the pod's own disk with that record gone and the workspace hours of
+// work past the save; the daemon's record is what keeps the bundle from being applied over that
+// work.
+//
+// WorkspaceBundleRefusedOlder is that same one attempt, spent on a pod that was not created
+// after the save: nothing is sent, and no later pod is sent the bundle either. Such a pod is one
+// the release's teardown did not replace, or the replacement under a node clock running ahead of
+// the API server's; either way its roles go on working and pushing from the workspace its own
+// fetch provisioned, and a bundle the daemon kept open for the pod after it would be applied
+// over that work. The saved work stays in the database for a person to recover and holds the
+// issue's pod (workflow.IdleHoldBundleUnrestored).
+type SavedWorkspaceBundle func(ctx context.Context, issue, podUID string, podCreated time.Time) (WorkspaceBundle, WorkspaceBundleTake, error)
+
+// WorkspaceBundleRestored is the runtime's confirmation that the pod replacing the released one
+// has put the issue's saved work back: its launcher ran the restore and reported that it
+// succeeded, naming the release whose save it restored. It drops that release's saved copy and no
+// other (store.Store.DeleteRestoredWorkspaceBundle), so it is called only on that report, and a
+// report that arrives after a later release has saved again finds nothing of its own to delete —
+// a bundle no launcher has restored, because none took it, because the restore failed, or because
+// its confirmation named a release the store no longer holds, stays in the daemon's database for
+// the issue's next pod.
+type WorkspaceBundleRestored func(ctx context.Context, issue string, release int64) error
+
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
 // grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and
 // with zero after, so the one computation is the deadline's.

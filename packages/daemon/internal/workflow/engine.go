@@ -26,7 +26,15 @@ import (
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
 // outbox deadlines. Zero limits take their shipped defaults.
 type Config struct {
-	Project        string
+	// Project is the project key, which is what the record's own tables hold: an issue's
+	// `project`, a production check's, the Dispatch mirror's.
+	Project string
+	// Pods is the daemon's record of the project's released pods, which the wakes read and write
+	// (Pods, wake.go). It holds the project as the claim-keyed tables spell it, derived from
+	// Project once where it is built (store.Store.PodRecordsOf), so this configuration carries
+	// one spelling of the project and a wake can file no row under another. Nil, as in every
+	// engine built without the pod tables, wakes nothing and records no listener report.
+	Pods           Pods
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	Linger         time.Duration
@@ -164,6 +172,12 @@ func (e *Engine) apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 	case intake.BasePush:
 		return e.basePush(ctx, tx, fact)
 	case intake.PullRequestChecks:
+		// A settlement on the head of a released pod's pull request wakes that pod before the
+		// settlement is applied, so the woken role's task names the settlement this very
+		// transaction records (wakeOnSettlement).
+		if err := e.wakeOnSettlement(ctx, tx, fact); err != nil {
+			return intake.Result{}, err
+		}
 		return e.checks(ctx, tx, fact)
 	case intake.PullRequestMergeability:
 		return e.mergeability(ctx, tx, fact)
@@ -211,6 +225,10 @@ func (e *Engine) apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checkLookEnded(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
+	case intake.ListenerWake:
+		return e.listenerWake(ctx, tx, fact)
+	case intake.PodBackstopDue:
+		return e.podBackstopDue(ctx, tx, fact)
 	default:
 		return intake.Result{}, nil
 	}

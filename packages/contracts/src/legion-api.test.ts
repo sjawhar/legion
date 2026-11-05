@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import * as legionApi from "./legion-api";
 import {
   LEGION_PHASE_BACKWARD_TARGETS,
   LEGION_PHASES,
   LEGION_WORKFLOW_PHASES,
+  LegionActivityRequest,
   LegionChildRequest,
   LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
@@ -27,12 +29,15 @@ import {
   LegionReadyForUpdateRequest,
   LegionReadyRequest,
   LegionRegisterResponse,
+  LegionReleaseRecordsRequest,
+  LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
+import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
 
 const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
 
@@ -716,6 +721,243 @@ test("the ready golden carries the session's capability report", () => {
   expect(LegionReadyRequest.safeParse(withoutReport).success).toBeTrue();
 });
 
+// The idle rule reads these three values of a session and nothing else, so each is held here: the
+// moment of the reading, whether work of the session's own was running and what kinds, and the
+// armed wake, which is null when no reminder is armed.
+test("a session's activity report carries its reading, its work and its wake", () => {
+  const report = {
+    claimToken: "legion-legion-legion-208-implementer",
+    sessionId: "ses_implementer_208",
+    secret: "claim-secret",
+    activity: {
+      at: "2026-11-01T12:00:00.000Z",
+      backgroundWork: { running: true, kinds: ["async-job", "subagent"] },
+      phase: { nextReminderAt: "2026-11-01T12:05:00.000Z" },
+    },
+  };
+  expect(LegionActivityRequest.safeParse(report).success).toBeTrue();
+
+  const quiet = {
+    ...report,
+    activity: {
+      at: report.activity.at,
+      backgroundWork: { running: false, kinds: [] },
+      phase: { nextReminderAt: null },
+    },
+  };
+  expect(LegionActivityRequest.safeParse(quiet).success).toBeTrue();
+
+  // The wake may be absent only as null, never as a missing key or a bare date, and `at` is an
+  // instant: the daemon stores both as timestamps.
+  const noWakeKey = { ...quiet, activity: { ...quiet.activity, phase: {} } };
+  expect(LegionActivityRequest.safeParse(noWakeKey).success).toBeFalse();
+  const badWake = {
+    ...quiet,
+    activity: { ...quiet.activity, phase: { nextReminderAt: "2026-11-01" } },
+  };
+  expect(LegionActivityRequest.safeParse(badWake).success).toBeFalse();
+  const badAt = { ...quiet, activity: { ...quiet.activity, at: "now" } };
+  expect(LegionActivityRequest.safeParse(badAt).success).toBeFalse();
+  // No generation: the secret is the whole fence, and an added key is refused.
+  expect(LegionActivityRequest.safeParse({ ...report, generation: 3 }).success).toBeFalse();
+});
+
+// What a pod reads of its deployment's idle release: a release with the roles it suspended and
+// the bundle it saved, the wake that ended it with the stamps observed so far, and a pod the rule
+// kept with the reason it read. The three lists are always present, so a window with nothing in
+// it is readable without a missing-key check.
+test("the release records carry a release, a resume and a hold", () => {
+  const records = {
+    releases: [
+      {
+        id: 1,
+        issue: "LEGION-208",
+        generation: 3,
+        roles: ["implementer", "tester"],
+        at: "2026-11-01T12:00:00Z",
+        bundleBytes: 4096,
+      },
+    ],
+    resumes: [
+      {
+        id: 1,
+        release: 1,
+        issue: "LEGION-208",
+        role: "implementer",
+        kind: "delivery",
+        at: "2026-11-01T12:30:00Z",
+        podReadyAt: "2026-11-01T12:31:00Z",
+        stuck: false,
+      },
+    ],
+    holds: [
+      {
+        id: 1,
+        issue: "LEGION-209",
+        reason: "background_work",
+        detail: "subagent",
+        firstAt: "2026-11-01T12:50:00Z",
+        at: "2026-11-01T13:00:00Z",
+        passes: 11,
+      },
+    ],
+  };
+  expect(LegionReleaseRecordsResponse.safeParse(records).success).toBeTrue();
+
+  const empty = { releases: [], resumes: [], holds: [] };
+  expect(LegionReleaseRecordsResponse.safeParse(empty).success).toBeTrue();
+
+  // A release that saved nothing records a zero bundle, never a missing one, and a pod nothing
+  // has released yet carries no release row for its wake.
+  const nothingSaved = {
+    ...records,
+    releases: [{ ...records.releases[0], roles: [], bundleBytes: 0 }],
+    resumes: [{ ...records.resumes[0], release: 0 }],
+  };
+  expect(LegionReleaseRecordsResponse.safeParse(nothingSaved).success).toBeTrue();
+
+  // A list left out, a negative bundle, an unobserved stamp sent as null rather than left out,
+  // and an added key are each refused.
+  const noHolds = { releases: records.releases, resumes: records.resumes };
+  expect(LegionReleaseRecordsResponse.safeParse(noHolds).success).toBeFalse();
+  const negative = { ...records, releases: [{ ...records.releases[0], bundleBytes: -1 }] };
+  expect(LegionReleaseRecordsResponse.safeParse(negative).success).toBeFalse();
+  const nulled = { ...records, resumes: [{ ...records.resumes[0], firstTurnAt: null }] };
+  expect(LegionReleaseRecordsResponse.safeParse(nulled).success).toBeFalse();
+  const extra = { ...records, holds: [{ ...records.holds[0], issueKey: "LEGION-209" }] };
+  expect(LegionReleaseRecordsResponse.safeParse(extra).success).toBeFalse();
+});
+
+// The request a pod sends to read them: its claim, that claim's secret and the window's start,
+// in the body. The secret is a credential, so the route is a POST — a query string reaches every
+// proxy and access log between the pod and the daemon — and the window is required, since the
+// whole table is not an answer.
+test("the release records are read with the claim credential in the body", () => {
+  const request = {
+    claimToken: "legion-legion-legion-208-implementer",
+    secret: "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+    since: "2026-11-01T12:00:00Z",
+  };
+  expect(LegionReleaseRecordsRequest.safeParse(request).error?.issues ?? []).toEqual([]);
+
+  for (const missing of ["claimToken", "secret", "since"]) {
+    const without: Record<string, unknown> = { ...request };
+    delete without[missing];
+    expect(LegionReleaseRecordsRequest.safeParse(without).success, missing).toBeFalse();
+  }
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, since: "yesterday" }).success
+  ).toBeFalse();
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, sessionId: "ses" }).success
+  ).toBeFalse();
+});
+
+// `legionStrandedClaim` exactly as contract 45 holds it (`legion-v19.0.0`, this branch's base on
+// main): three keys, strict. Every plugin parses the state with the schema of the contract it
+// was built at, and a Kubernetes deployment relaunches no stale session (INFRA-945 spec R10),
+// so this reader is live in every pod still on the previous image.
+const strandedClaimAt45 = z.strictObject({
+  issue: z.string().regex(DISPATCH_KEY_PATTERN),
+  role: z.enum(LEGION_ROLES),
+  state: z.enum(["suspended", "failed"]),
+});
+
+test("a reader at the previous contract parses the state body this daemon serves", () => {
+  const state = fixture("state.json") as { strandedClaims: unknown[] };
+  // The golden carries both kinds: a failed claim and a released one whose wake never brought
+  // its pod back, which is the entry a `suspendedBy` would have ridden on.
+  expect(state.strandedClaims.length).toBeGreaterThan(1);
+  for (const stranded of state.strandedClaims) {
+    expect(strandedClaimAt45.safeParse(stranded).error?.issues ?? []).toEqual([]);
+  }
+
+  // What serving it would do, and why it is not served: the 45 reader does not know the key, and
+  // a strict object refuses the entry — and so the whole state body — over it.
+  const widened = strandedClaimAt45.safeParse({
+    issue: "LEGION-208",
+    role: "implementer",
+    state: "suspended",
+    suspendedBy: "released",
+  });
+  expect(widened.success).toBeFalse();
+  expect(widened.error?.issues[0]?.code).toBe("unrecognized_keys");
+
+  // This contract's own reader refuses it too, so neither end can start serving it quietly.
+  state.strandedClaims = [
+    { issue: "LEGION-208", role: "implementer", state: "suspended", suspendedBy: "released" },
+  ];
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+});
+
+/** The responses an operator's bearer opens, the only ones that may name a suspension. */
+const operatorSchemas: Record<string, true> = {
+  LegionOperatorClaimResponse: true,
+  LegionOperatorClaimsResponse: true,
+};
+
+/** Whether `value` is a zod schema this walk can read. */
+function isSchema(value: unknown): value is z.ZodType {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "def" in value &&
+    "safeParse" in value &&
+    typeof value.safeParse === "function"
+  );
+}
+
+/** Every key `schema` can carry, at any depth, through objects, arrays, unions, records, optional
+ * and nullable wrappers, pipes and lazy references. Zod holds each of those on its definition
+ * under a member of its own, so the walk reads the definition as the open record it is. */
+function schemaKeys(
+  schema: unknown,
+  found: Set<string> = new Set(),
+  seen: Set<unknown> = new Set()
+): Set<string> {
+  if (!isSchema(schema) || seen.has(schema)) return found;
+  seen.add(schema);
+  const def: Record<string, unknown> = { ...schema.def };
+  const shape = def.shape;
+  if (typeof shape === "object" && shape !== null) {
+    for (const [name, member] of Object.entries(shape)) {
+      found.add(name);
+      schemaKeys(member, found, seen);
+    }
+    return found;
+  }
+  for (const key of ["element", "innerType", "valueType", "keyType", "in", "out"]) {
+    schemaKeys(def[key], found, seen);
+  }
+  const getter = def.getter;
+  if (typeof getter === "function") schemaKeys(getter(), found, seen);
+  for (const option of Array.isArray(def.options) ? def.options : [])
+    schemaKeys(option, found, seen);
+  return found;
+}
+
+// The guard the INFRA-945 plan's departure 1 chose in place of serving two shapes of one body: a
+// session reads whatever this daemon serves with the schema of its own contract, so a key no
+// older contract knows refuses the whole body. `suspendedBy` is served to the operator's bearer
+// and nowhere else, and this holds that for every schema the module exports, present and future.
+test("no session-facing response carries suspendedBy", () => {
+  let walked = 0;
+  for (const [name, schema] of Object.entries(legionApi)) {
+    if (!isSchema(schema) || operatorSchemas[name] === true) continue;
+    walked += 1;
+    expect([...schemaKeys(schema)], `${name} carries suspendedBy`).not.toContain("suspendedBy");
+  }
+  expect(walked).toBeGreaterThan(20);
+  // The walk finds the key where it does live, so an empty walk cannot pass for a clean one.
+  expect([...schemaKeys(LegionOperatorClaimResponse)]).toContain("suspendedBy");
+
+  // And no body the daemon writes carries it outside the operator's own.
+  for (const name of readdirSync(fixtureDir).filter((entry) => entry.endsWith(".json"))) {
+    if (name.startsWith("operator-")) continue;
+    expect(readFileSync(path.join(fixtureDir, name), "utf8"), name).not.toContain("suspendedBy");
+  }
+});
+
 test("the state golden shows a claim's capability report beside its locator", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
   const implementer = state.issues["LEGION-208"]?.workers.implementer?.claim;
@@ -756,11 +998,14 @@ test("the state golden shows a claim's capability report beside its locator", ()
 });
 
 // The claims nothing will wake (contract 23): the golden names LEGION-210's failed implementer,
-// whose issue is held, and a state with none carries an empty list rather than none.
+// whose issue is held, and LEGION-211's released one, whose wake never brought its pod back —
+// three keys each, the released one no wider than the failed one — and a state with none carries
+// an empty list rather than none.
 test("the state golden names the claims nothing will wake, and the list cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
   expect(state.strandedClaims).toEqual([
     { issue: "LEGION-210", role: "implementer", state: "failed" },
+    { issue: "LEGION-211", role: "implementer", state: "suspended" },
   ]);
   expect(LegionStateResponse.parse(fixture("state-stage3.json")).strandedClaims).toEqual([]);
 

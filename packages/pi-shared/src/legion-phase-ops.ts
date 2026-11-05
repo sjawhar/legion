@@ -17,7 +17,8 @@ import type { HandoffReport } from "./handoff-record";
  * (`legion-claim-core`) records it: its own id, the daemon's answer for tree, issue and role, the
  * secret every grant is minted with, and the claim token and launch generation the routes that
  * name the claim itself rather than a grant — `claims/ready`, `claims/turn-outcome`,
- * `claims/ready-for-update` — carry. */
+ * `claims/ready-for-update` — carry. The token and the secret are the pair the claim routes
+ * authenticate a pod by, and they stay in this process: nothing writes either to disk. */
 export interface ClaimCapability {
   readonly sessionID: string;
   readonly tree: string;
@@ -35,6 +36,7 @@ export interface ClaimCapability {
  */
 export const PHASE_OPS = [
   "read_record",
+  "read_release_records",
   "handoff_complete",
   "request_backward_move",
   "ready_for_update",
@@ -50,6 +52,15 @@ const requiredString = (op: PhaseOp, field: string) => {
   const message = `${op} requires ${field}`;
   return z.string({ error: message }).refine((value) => value.trim() !== "", { error: message });
 };
+
+/** `read_release_records`' window: the instant it reads from, in the RFC 3339 form the route
+ * takes (`LegionReleaseRecordsRequest`'s `since`). A value the route could not read is refused
+ * here by the op's own name, rather than as the request schema's parse failure, and a blank one
+ * is refused as missing alone. */
+const windowStart = requiredString("read_release_records", "since").refine(
+  (value) => value.trim() === "" || z.iso.datetime({ offset: true }).safeParse(value).success,
+  { error: "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is" }
+);
 
 /** One operation's arguments: `op` and `shape`, and nothing else. */
 const operation = <Op extends PhaseOp, Shape extends z.ZodRawShape>(op: Op, shape: Shape) =>
@@ -74,6 +85,9 @@ export const PhaseOpArguments = z.discriminatedUnion(
     // reads the issue it works far more often than another, and its own key is one the daemon
     // already told it (its claim), so making it say that key again only refused first calls.
     operation("read_record", { issue: z.string().optional() }),
+    operation("read_release_records", {
+      since: windowStart,
+    }),
     operation("handoff_complete", {
       summary: requiredString("handoff_complete", "summary"),
       verdict: z
@@ -140,10 +154,16 @@ export function phaseOpParameters(zod: unknown): Record<PhaseOpField, z.ZodType>
   return byField;
 }
 
-/** The `legion` tool's sentences on `read_record` and `request_backward_move`, which a host whose
- * tool states them passes as `before` and `after` (`legionToolDescription`). */
+/** The `legion` tool's sentences on `read_record`, `read_release_records` and
+ * `request_backward_move`, which a host whose tool states them passes as `before` and `after`
+ * (`legionToolDescription`). */
 export const PHASE_OP_SENTENCES = {
   readRecord: "read_record returns the record of `issue` from the daemon's state. ",
+  readReleaseRecords:
+    "read_release_records returns this deployment's idle-release records from `since` (an RFC 3339 time) on, read with this session's own claim: " +
+    "every release, resume and hold the daemon recorded, and over them the counts of releases, of resumes by wake kind and of holds by reason, " +
+    "the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a " +
+    "wake to the woken role's first turn. ",
   requestBackwardMove:
     "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " +
     "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. ",
@@ -154,7 +174,8 @@ export const PHASE_OP_SENTENCES = {
  * then `handoff_complete`'s contract, then `after`, then where a question for another role goes,
  * `envoyPublish` being the host's name for Envoy's publish tool. `before` and `after` are whole
  * sentences, each ending in a space: the host's sentences on its other operations, and on
- * `read_record` and `request_backward_move` when it states them (`PHASE_OP_SENTENCES`).
+ * `read_record`, `read_release_records` and `request_backward_move` when it states them
+ * (`PHASE_OP_SENTENCES`).
  */
 export function legionToolDescription(host: {
   readonly envoyPublish: string;
@@ -208,6 +229,9 @@ export interface PhaseOpRuntime {
   /** How `handoff_complete` waits out a daemon restart (`retryWhileDaemonRestarts`): the host's
    * sentence to the agent, and a test's clock. */
   readonly restart?: DaemonRestartRetry;
+  /** The clock `read_release_records` measures a release the daemon has not resumed yet against,
+   * `Date` itself unless a test hands it another. */
+  readonly now?: () => Date;
 }
 
 /** A grant for one write of the claim's session, minted on `/grants`' session form with the
@@ -236,11 +260,12 @@ const ROOT_COMPLETION_REFUSAL =
 
 /**
  * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, of the issue it
- * names or of the claim's own when it names none, the daemon's answer for `handoff_complete`,
- * `{}` for `request_backward_move`, and `{}` for `ready_for_update`, or `{ note }` when its
- * branch-head lookup failed. A refusal throws before any write, minting nothing and posting
- * nothing: each problem `PhaseOpArguments` finds, joined by `; `, a field the operation does not
- * take named first, then a root architect's completion,
+ * names or of the claim's own when it names none, the window's records and their counts for
+ * `read_release_records`, the daemon's answer for `handoff_complete`, `{}` for
+ * `request_backward_move`, and `{}` for `ready_for_update`, or `{ note }` when its branch-head
+ * lookup failed. A refusal throws before any write, minting nothing and posting nothing: each
+ * problem `PhaseOpArguments` finds, joined by `; `, a field the operation does not take named
+ * first, then a root architect's completion,
  * then each problem with the operation's own fields in the order it takes them; then what the
  * record decides (a check report's verdict, `pending` on a phase completion, the issue a move
  * names), then a refused handoff report (`findHandoffReport`). A daemon refusal throws its code
@@ -283,6 +308,8 @@ export async function executePhaseOp(
       const issue = args.issue !== undefined && args.issue.trim() !== "" ? args.issue : claim.issue;
       return { record: recordFrom(await daemon.state(), issue) };
     }
+    case "read_release_records":
+      return releaseRecords(runtime, args.since);
     case "handoff_complete":
       // Retried whole while the daemon restarts: the record, the handoff report and a fresh grant
       // are read again on each attempt. A repeat never applies twice, but it cannot tell a landed
@@ -354,6 +381,105 @@ export async function executePhaseOp(
           };
     }
   }
+}
+
+/** A release woken again within this of its release is churn: the pod was given up and paid for
+ * again at once (`docs/kubernetes.md`, "Idle release"). */
+const WOKEN_SOON_MS = 10 * 60 * 1000;
+
+/** How many rows of each `key`, the key's own order kept. */
+const countedBy = <Row>(
+  rows: readonly Row[],
+  key: (row: Row) => string
+): Readonly<Record<string, number>> => {
+  const counts: Record<string, number> = {};
+  for (const row of rows) counts[key(row)] = (counts[key(row)] ?? 0) + 1;
+  return counts;
+};
+
+/** The nearest-rank percentile of `sorted`, ascending: the smallest value `share` of the rows
+ * are at or below. Null for no rows, which is a window nothing was measured in rather than a
+ * zero. */
+const percentile = (sorted: readonly number[], share: number): number | null =>
+  sorted.length === 0 ? null : (sorted[Math.max(Math.ceil(share * sorted.length), 1) - 1] ?? null);
+
+/**
+ * `read_release_records`: the window's records from the daemon, with the numbers a report of the
+ * deployment's idle release is written from, so an agent counts nothing itself. The claim's own
+ * token and secret authenticate the read, as every other claim route is authenticated, and they
+ * never leave this process.
+ *
+ * `podHoursReleased` is how long the released pods were gone: from each release to the first
+ * resume of it, and to `asOf` for a release the daemon has not resumed yet, since that pod is
+ * gone now. A pod's roles wake one resume each, so the first of them ends the release.
+ * `wokenWithinTenMinutes` counts the releases a wake followed that soon, the churn of releasing
+ * a pod that was wanted again at once. `wakeToFirstTurnSeconds` measures each resume the daemon
+ * has seen a first turn for, `withoutFirstTurn` counting the rest, and reports the nearest-rank
+ * median and 90th percentile and the maximum.
+ */
+async function releaseRecords(
+  runtime: PhaseOpRuntime,
+  since: string
+): Promise<Readonly<Record<string, unknown>>> {
+  const { claim } = runtime;
+  const records = await runtime.daemon.releaseRecords({
+    claimToken: claim.claimToken,
+    secret: claim.secret,
+    since,
+  });
+  const asOf = runtime.now?.() ?? new Date();
+  const wokenAt = new Map<number, number>();
+  for (const resume of records.resumes) {
+    if (resume.release === 0) continue;
+    const at = Date.parse(resume.at);
+    const first = wokenAt.get(resume.release);
+    if (first === undefined || at < first) wokenAt.set(resume.release, at);
+  }
+  let releasedMs = 0;
+  let wokenSoon = 0;
+  for (const release of records.releases) {
+    const from = Date.parse(release.at);
+    const woken = wokenAt.get(release.id);
+    releasedMs += Math.max((woken ?? asOf.getTime()) - from, 0);
+    if (woken !== undefined && woken - from <= WOKEN_SOON_MS) wokenSoon += 1;
+  }
+  const waits = records.resumes
+    .flatMap((resume) =>
+      resume.firstTurnAt === undefined
+        ? []
+        : [(Date.parse(resume.firstTurnAt) - Date.parse(resume.at)) / 1000]
+    )
+    .sort((one, other) => one - other);
+  const whole = (value: number | null) => (value === null ? null : Math.round(value));
+  return {
+    since,
+    asOf: asOf.toISOString(),
+    releases: records.releases,
+    resumes: records.resumes,
+    holds: records.holds,
+    counts: {
+      releases: records.releases.length,
+      resumes: records.resumes.length,
+      resumesByKind: countedBy(records.resumes, (resume) => resume.kind),
+      holds: records.holds.length,
+      holdsByReason: countedBy(records.holds, (hold) => hold.reason),
+    },
+    podHoursReleased: Math.round((releasedMs / 3_600_000) * 100) / 100,
+    wokenWithinTenMinutes: {
+      releases: wokenSoon,
+      share:
+        records.releases.length === 0
+          ? 0
+          : Math.round((wokenSoon / records.releases.length) * 1000) / 1000,
+    },
+    wakeToFirstTurnSeconds: {
+      measured: waits.length,
+      withoutFirstTurn: records.resumes.length - waits.length,
+      median: whole(percentile(waits, 0.5)),
+      p90: whole(percentile(waits, 0.9)),
+      max: whole(waits.at(-1) ?? null),
+    },
+  };
 }
 
 /** One attempt of `handoff_complete` (`executePhaseOp`'s doc comment). */

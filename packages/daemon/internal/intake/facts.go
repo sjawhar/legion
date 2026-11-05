@@ -1064,6 +1064,50 @@ type CheckBound struct {
 
 func (CheckBound) isFact() {}
 
+// ListenerWake is one report the Envoy listener publishes on notifications.legion.wake, the one
+// subject whose consumer every daemon runs: the listener alone sees a message published to a
+// role topic with no live holder and a message sent to the agent subject of a session that is
+// gone, and both must bring a released pod back. The listener does not know which daemon owns a
+// session and must not learn: it reports the role token or the session id it saw, every daemon
+// reads the report, and each acts only on a released claim of its own project.
+//
+// Kind is ListenerWakeRole, ListenerWakeAgent or ListenerWakeReady. Role is the claim token of
+// the role topic a message was published to, Session the session a message was sent to, and At
+// the listener's own clock at the report, because the stream's store time is the NATS server's.
+// A ListenerWakeReady report names neither a role nor a session: it is the positive liveness
+// signal R7's gate reads, published at the listener's start and every five minutes after it.
+type ListenerWake struct {
+	Kind    string
+	Role    string
+	Session string
+	At      time.Time
+	// Report is the listener's own id for this report, which makes a redelivered report the same
+	// wake rather than a second one.
+	Report string
+}
+
+func (ListenerWake) isFact() {}
+
+// The kinds a ListenerWake report carries, as the listener writes them on the wire.
+const (
+	ListenerWakeRole  = "role_message"
+	ListenerWakeAgent = "agent_message"
+	ListenerWakeReady = "listener_ready"
+)
+
+// PodBackstopDue is one armed backstop of a released pod coming due (the pod_wake_backstops row
+// at its due_at): the phase worker it names is woken whatever else did or did not happen since
+// the release. It is never decoded from an event — the daemon's own pass reads the due rows and
+// applies one fact per row, under the row's id, so a backstop that came due while the daemon was
+// down fires once after it starts.
+type PodBackstopDue struct {
+	ID    int64
+	Issue string
+	Role  claim.Role
+}
+
+func (PodBackstopDue) isFact() {}
+
 // Handler changes the workflow record inside the caller-owned transaction.
 type Handler interface {
 	Apply(context.Context, pgx.Tx, Fact) (Result, error)

@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import { setLiveSessions } from "./agents";
 import {
   claimIssue,
@@ -23,6 +25,9 @@ import { asUser } from "./users";
 const asker = { kind: "session" as const, id: "e2e-reach-asker" };
 const claimant = { kind: "session" as const, id: "e2e-reach-claimant" };
 const routed = "e2e-reach-routed";
+// A row that waits out the listener roster (routeRosterTTL, five seconds) sees the refreshed read
+// only on its next probe, and the default ladder probes once a second after the first second.
+const ROSTER = { intervals: [50, 50, 100, 200, 500], timeout: 15_000 };
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -127,13 +132,14 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     title: "A roster probe for the reviewer role",
   });
   await patchIssue(probe.key, { route: "role:reviewer" });
-  await expect
-    .poll(async () => (await getIssue(probe.key)).route_holder, { timeout: 15_000 })
-    .toBe(routed);
+  await expect.poll(async () => (await getIssue(probe.key)).route_holder, ROSTER).toBe(routed);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   try {
+    // The card's reads below arrive over the event feed, whose refetch the page holds to one per
+    // second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+    await page.clock.install();
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
@@ -158,6 +164,7 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
 
     // A role route set on the issue joins the card over the event feed, naming the role's holder.
     await patchIssue(issue.key, { route: "role:reviewer" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(recipients).toContainText("Reaches 2");
     const roleRow = viaIssue
       .getByRole("listitem")
@@ -189,13 +196,10 @@ test("a role route held by the claimant is counted once, under the claim that na
   // The server keeps one listener roster for up to five seconds (routeRosterTTL), so an earlier
   // read may still answer from the roster before these sessions went live.
   await expect
-    .poll(
-      async () => {
-        const read = await getAsk(ask.id);
-        return [read.claimant, read.route, read.route_holder];
-      },
-      { timeout: 15_000 }
-    )
+    .poll(async () => {
+      const read = await getAsk(ask.id);
+      return [read.claimant, read.route, read.route_holder];
+    }, ROSTER)
     .toEqual([claimant.id, "role:e2e-reach-implementer", claimant.id]);
 
   const alice = await asUser(browser, "alice");
@@ -237,13 +241,10 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   // The server keeps one listener roster for up to five seconds (routeRosterTTL), so an earlier
   // read may still answer from the roster before the asker went live.
   await expect
-    .poll(
-      async () => {
-        const read = await getAsk(ask.id);
-        return [read.route, read.route_status, read.route_holder];
-      },
-      { timeout: 15_000 }
-    )
+    .poll(async () => {
+      const read = await getAsk(ask.id);
+      return [read.route, read.route_status, read.route_holder];
+    }, ROSTER)
     .toEqual(["role:reviewer", "live", asker.id]);
 
   const alice = await asUser(browser, "alice");
@@ -333,6 +334,9 @@ test("a route change in a status write moves the open card's route row without a
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   try {
+    // Both PATCH writes below reach the card over the event feed, whose refetch the page holds to
+    // one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+    await page.clock.install();
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
@@ -349,6 +353,7 @@ test("a route change in a status write moves the open card's route row without a
     // One PATCH sets the new route and moves the status: one `issue.updated` names both, and the
     // card's own thread is what must move.
     await patchIssue(issue.key, { route: `session:${moved}`, status: "in_progress" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(routeRow(moved)).toContainText("Routed next (e2e)");
     await expect(routeRow(moved)).toContainText("via route");
     await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
@@ -366,6 +371,7 @@ test("a route change in a status write moves the open card's route row without a
     // withdrawn by the closer where it stands, listing no recipient at all - nobody can answer it
     // any more - with their unsent text kept under it to copy.
     await patchIssue(issue.key, { route: `session:${routed}`, status: "done" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(card).toContainText("Withdrawn when alice closed the issue");
     await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();

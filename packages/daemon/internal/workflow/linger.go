@@ -207,8 +207,12 @@ func awaitsMerge(issue record.Issue) bool {
 // reaches planning, and is running again from the reopen. It is the production check's "runs
 // again" predicate (check.go) and the outbox's (checkLookHolds): a look of an issue that runs
 // again would resume the implementer and relaunch its Sandbox under the run, so none starts.
+//
+// The rule itself is pods.Standing.InWorkflow, which the pod gate reads with the issue's linger
+// (pods.InWorkflowNotLingering) and this reads without it: one statement, so a terminal phase
+// added to it moves admission, the linger, the production check and the release gate together.
 func InWorkflow(issue record.Issue) bool {
-	return !record.OutOfWorkflow(issue.Status) && issue.Phase != phase.Done
+	return issue.Standing().InWorkflow(record.OutOfWorkflow)
 }
 
 // beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold

@@ -1910,7 +1910,7 @@ func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
 	runtime.ScriptResume(fake.SpawnResult{Err: errors.New("workspace-init could not fetch the clone")})
 	engine := workflow.New(records, workflow.Config{Project: root.Project, Repositories: testRepositories}, quietLogger())
 	active := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
-	sup.OnTerminal(active.terminal)
+	sup.OnDurableState(active.claimDurableState)
 	_, _ = suspendedImplementer(t, sup, root, supervise.SuspendedByDaemon)
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), log: quietLogger(), now: time.Now}
 

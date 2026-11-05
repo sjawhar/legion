@@ -229,6 +229,11 @@
       "issue": "LEGION-210",
       "role": "implementer",
       "state": "failed"
+    },
+    {
+      "issue": "LEGION-211",
+      "role": "implementer",
+      "state": "suspended"
     }
   ],
   "controllerLocator": {
@@ -486,6 +491,10 @@
             "ephemeral_storage": "2Gi",
             "ephemeral_storage_request": "1Gi"
           }
+        },
+        "idle_release": {
+          "idle_minutes": 10,
+          "backstop_minutes": 60
         }
       }
     },

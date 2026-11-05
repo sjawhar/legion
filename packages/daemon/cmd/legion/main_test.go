@@ -1582,11 +1582,27 @@ func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.
+//
+// The state body names no claim's suspender — every plugin parses it with the strict schema of
+// its own contract — so the command reads that from the operator claim list, with the bearer
+// --operator-token-file names (strandedSuspenders). Read without that flag, as a pane reads,
+// there is no bearer and a released claim reads as the suspended worker it is.
 func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
 		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	// The claims as the operator routes serve them, which is the one surface that names a
+	// suspender: the released implementer of LEGION-208 beside the tester an operator suspended.
+	operatorClaims := `{"claims":[` +
+		`{"token":"legion-legion-legion-208-implementer","issue":"LEGION-208","role":"implementer","state":"suspended","suspendedBy":"released","pluginContract":48},` +
+		`{"token":"legion-legion-legion-209-tester","issue":"LEGION-209","role":"tester","state":"suspended","suspendedBy":"operator","pluginContract":48}]}`
+	released := `[{"issue":"LEGION-208","role":"implementer","state":"suspended"},` +
+		`{"issue":"LEGION-209","role":"tester","state":"suspended"},` +
+		`{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`
 	for _, tc := range []struct {
 		name, stranded, want string
+		// bearer reads the daemon with --operator-token-file, as an operator does; otherwise the
+		// command reads it as a pane does, with no bearer to name a suspender with.
+		bearer bool
 	}{
 		{
 			name: "every move",
@@ -1599,21 +1615,48 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			stranded: `[{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`,
 			want:     "claims nothing will wake: 1 — failed, needs a workflow start LEGION-210 reviewer\n",
 		},
+		// INFRA-945 R6: a claim whose idle pod the daemon released and whose wake never brought
+		// the pod back reads as that, under a move of its own, never as a suspension to resume or
+		// a failure to retry.
+		{
+			name: "a released claim apart from a suspended and a failed one", bearer: true,
+			stranded: released,
+			want: "claims nothing will wake: 3 — suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-209 tester; " +
+				"released, woken over ten minutes ago and the pod never came back LEGION-208 implementer; failed, needs a workflow start LEGION-210 reviewer\n",
+		},
+		{
+			name: "no bearer to read the suspensions with", stranded: released,
+			want: "claims nothing will wake: 3 — suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-208 implementer, LEGION-209 tester; " +
+				"failed, needs a workflow start LEGION-210 reviewer\n",
+		},
 		{name: "none", stranded: `[]`, want: "claims nothing will wake: none\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := "{" + daemon + `,"strandedClaims":` + tc.stranded + "}"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == claimsRoute {
+					if r.Header.Get("Authorization") != "Bearer operator-token" {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					_, _ = w.Write([]byte(operatorClaims))
+					return
+				}
 				_, _ = w.Write([]byte(served))
 			}))
 			defer server.Close()
 			t.Chdir(t.TempDir())
-			t.Setenv("LEGION_DAEMON_URL", server.URL)
 			t.Setenv("LEGION_ISSUE", "")
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+
+			args := []string{"legion", "state"}
+			if tc.bearer {
+				args = append(args, "--operator-token-file", writeFile(t, "operator-token", "operator-token\n"))
+			}
 
 			var out, errb bytes.Buffer
-			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+			if code := run(context.Background(), args, &out, &errb); code != 0 {
 				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
 			}
 			if !strings.Contains(out.String(), tc.want) {

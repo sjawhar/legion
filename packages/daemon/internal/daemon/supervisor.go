@@ -39,7 +39,9 @@ type supervisor struct {
 	// waits for a worker to reach the daemon may run before it closes: the boot's relaunches run after
 	// it (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
 	restored chan struct{}
-	terminal func(supervise.Claim, supervise.ClaimState)
+	// durableState is the one callback every machine of this supervisor reports its durable
+	// transitions to (supervise.Machine.OnDurableState): ready, working and failed.
+	durableState func(supervise.Claim, supervise.ClaimState)
 
 	mu       sync.RWMutex
 	machines map[claim.Token]*member
@@ -89,7 +91,7 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 //
 // It reads each machine's published claim rather than any record of turns kept beside them, and
 // it iterates the lock-free snapshot of the machines (supervised) rather than taking s.mu:
-// publishing takes a machine's own lock, OnTerminal takes s.mu and then every machine's, and a
+// publishing takes a machine's own lock, OnDurableState takes s.mu and then every machine's, and a
 // reader here holding s.mu while a machine decides would be those two locks taken in both orders.
 // View never waits on the decision a machine is making either, so answering this can never be
 // held up by another claim's launch or stop.
@@ -131,13 +133,13 @@ func (s *supervisor) wakeIssue(token claim.Token) {
 	}
 }
 
-// OnTerminal applies one durable-state callback to every current and future machine.
-func (s *supervisor) OnTerminal(callback func(supervise.Claim, supervise.ClaimState)) {
+// OnDurableState applies one durable-state callback to every current and future machine.
+func (s *supervisor) OnDurableState(callback func(supervise.Claim, supervise.ClaimState)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.terminal = callback
+	s.durableState = callback
 	for _, member := range s.machines {
-		member.machine.OnTerminal(callback)
+		member.machine.OnDurableState(callback)
 	}
 }
 
@@ -234,7 +236,7 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 
 // add supervises m, starting the goroutine that feeds it. The caller holds mu.
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
-	m.OnTerminal(s.terminal)
+	m.OnDurableState(s.durableState)
 	queue := newInbox()
 	s.machines[token] = &member{machine: m, inbox: queue, issue: m.Claim().Issue}
 	all := append(slices.Clip(s.supervised()), m)

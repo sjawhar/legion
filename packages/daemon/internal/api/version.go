@@ -502,7 +502,30 @@ package api
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
 //
-// 47: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
+// 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// released claim is a new suspension source. Each session reports its activity to the daemon on
+// POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
+// runs background work and of which kinds, and when the phase reminder armed in it is due, if
+// one still is. The daemon releases an issue pod no claim of which has reported
+// background work and none of whose phase workers is due a reminder inside the idle period
+// (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
+// `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
+// which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
+// which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
+// knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
+// and the image that runs its roles together. A claim may read the deployment's release, resume
+// and hold records on POST /legion/v1/claims/release-records, which names its claim, that
+// claim's secret and the window's start in its body, as the other claim routes do: the secret is
+// a credential, and a query string reaches every proxy and access log between the pod and the
+// daemon. No session-facing body carries the new `suspendedBy` value: the state's
+// `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
+// claim apart from a suspended one on the operator claim routes, which no plugin calls. This
+// change adds ten store migrations. (This branch took 47 while main's #2538 was unmerged; main
+// then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
+// branch takes the number above them, as the collision note says.)
+//
+// 49: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
 // shapes change with it. The phase enum loses `awaiting_merge` (both places it is spelled: the
 // issue's phase and a backward move's target), since the merger merges in `merging` and the daemon
 // closes the issue when it reads that merge. `api.PullRequestView` loses `checksVerdict` and
@@ -521,11 +544,12 @@ package api
 // daemon's `checksVerdict` and `fixAttempts`; the boot gate and `legion probe-image` refuse the
 // mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
 // main landed the background-task contract at 44 and the Dispatch handoff records at 45, and
-// INFRA-484's sjawhar/legion#2538 takes 46, so this branch takes the number above both, as
+// INFRA-484's sjawhar/legion#2538 takes 46, this branch then took 47, and main's #2642 landed
+// the idle release at 48, so this branch takes the number above main's, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// Also at 47: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
+// Also at 49: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
 // that ended it, over `POST /legion/v1/claims/turn-outcome`: `{claimToken, sessionId, secret,
 // generation, sequence, outcome, message}`, authenticated by the registration's secret as the
 // ready and the exit are, answering `{refusedRun, failed}`. `sequence` is the producer's own count
@@ -534,7 +558,7 @@ package api
 // keyed by (generation, sequence), derives the trailing run of refused turns from them on every
 // report, and fails the claim once that run reaches `launch_failure_limit` — the fault that left an
 // implementer's every turn refused by its provider with its claim never failing. A plugin built
-// before 47 reports no turn, so its session's refusals are counted by nobody, and a plugin from
+// before 49 reports no turn, so its session's refusals are counted by nobody, and a plugin from
 // this contract posting to a daemon before 47 is answered "no route" for every turn it ends; the
 // boot gate and `legion probe-image` refuse the mixed pair. `legion claims retry` gains the
 // optional body `{freshSession}` (`--fresh-session`), which starts the claim in a new session
@@ -542,4 +566,4 @@ package api
 // whoever retries it. That retry also reaches a phase worker an operator stopped, which is
 // retired: the route starts the worker's phase again — restoring a held one, as the architect's
 // retry_or_escalate does — so the session it starts, new or kept, is given that phase's task.
-const DaemonAPIVersion = 47
+const DaemonAPIVersion = 49

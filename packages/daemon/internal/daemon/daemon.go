@@ -130,6 +130,10 @@ type overrides struct {
 	// controllerFirstWake is how soon after the workflow runtime starts it applies its first
 	// controller tick (workflowRuntime.controllerFirstWake); zero is firstControllerTick.
 	controllerFirstWake time.Duration
+	// idleTick is how often the daemon decides every pod of its project and fires the backstops
+	// that came due (workflowRuntime.idleTick, both ticks); zero is the production minute. A test
+	// of release and wake shortens it, so it waits out its own period rather than the daemon's.
+	idleTick time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -290,7 +294,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		var cancelAfterMint context.CancelFunc
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
-		workflow.controllerFirstWake = o.controllerFirstWake
+		workflow.controllerFirstWake, workflow.idleTick = o.controllerFirstWake, o.idleTick
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
 		plan.ensureWorkspace = workflow.ensureWorkspace
@@ -1617,6 +1621,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		HandoffCompleted:   handoffCompleted,
 		PromptAgents:       promptAgents(p.roleReferences),
 		CapabilityReported: s.capabilityReported,
+		ReleaseRecords:     st,
+		ClaimActivity:      st,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -1832,7 +1838,12 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	now := time.Now().UTC()
+	resumes, err := strandedReleaseWakes(ctx, s.store, s.projectToken, claims, now)
+	if err != nil {
+		return api.State{}, err
+	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims, resumes, now)
 	if err != nil {
 		return api.State{}, err
 	}

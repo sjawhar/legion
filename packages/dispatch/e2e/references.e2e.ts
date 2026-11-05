@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import {
   createAsk,
   createComment,
@@ -115,6 +117,9 @@ test("an open backlink panel follows a mention added, replied to, and removed", 
   const target = await createIssue({ project: "CORE", title: "Target issue" });
   const source = await createIssue({ project: "OPS", title: "Source issue" });
 
+  // Each citation reaches the open panel through the event feed, whose refetch the page holds to
+  // one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+  await page.clock.install();
   await page.goto(`/issues/${target.key}`);
   await page.getByRole("button", { name: /^Referenced by/ }).click();
   const references = page.getByTestId("issue-header").getByRole("region", {
@@ -126,14 +131,17 @@ test("an open backlink panel follows a mention added, replied to, and removed", 
   await expect(references).toContainText("Attached document", live);
 
   await createMessage(source.key, { body: `Blocked on dispatch://${target.key} today.` });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(references).toContainText("Blocked on dispatch://", live);
 
   const reply = await createComment(source.key, {
     body: `Still blocked on dispatch://${target.key} after the rollback.`,
   });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(references).toContainText("after the rollback", live);
 
   await editComment(reply.id, { body: "Unblocked; the dependency is gone." });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(references).not.toContainText("after the rollback", live);
 });
 
@@ -154,6 +162,9 @@ test("Inbox cards gain and move their backlink control as writes elsewhere cite 
     body: `Waiting on dispatch://${target.key}/ask/${cited.id}.`,
   });
 
+  // The Inbox count follows the event feed, whose refetch is held to one per second
+  // (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+  await page.clock.install();
   await page.goto("/");
   // The backlink control is the card's. From 1280 px the Inbox draws the card of the row the
   // reader has selected (INFRA-575), so each question is read on its own card, in turn.
@@ -176,6 +187,7 @@ test("Inbox cards gain and move their backlink control as writes elsewhere cite 
   await createMessage(source.key, {
     body: `Second cite of dispatch://${target.key}/ask/${cited.id}.`,
   });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(
     (await openCard(uncited.id)).getByRole("button", { name: /^Referenced by \(1\)$/ })
   ).toBeVisible(live);
@@ -187,11 +199,13 @@ test("Inbox cards gain and move their backlink control as writes elsewhere cite 
   const note = await createComment(source.key, {
     body: `Third citation of dispatch://${target.key}/ask/${cited.id}.`,
   });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(
     (await openCard(cited.id)).getByRole("button", { name: /^Referenced by \(3\)$/ })
   ).toBeVisible(live);
 
   await editComment(note.id, { body: "Withdrawn; nothing to wait on." });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(
     (await openCard(cited.id)).getByRole("button", { name: /^Referenced by \(2\)$/ })
   ).toBeVisible(live);
@@ -225,7 +239,10 @@ test("an answered decision keeps its backlink control and still moves with a lat
   );
   const live = { timeout: 30_000 };
   const decision = await expect
-    .poll(async () => (await getIssue(target.key)).open_asks.at(0)?.id, live)
+    .poll(async () => (await getIssue(target.key)).open_asks.at(0)?.id, {
+      ...live,
+      intervals: [50, 50, 100, 200, 500],
+    })
     .not.toBeUndefined()
     .then(async () => (await getIssue(target.key)).open_asks[0]);
 
@@ -235,6 +252,9 @@ test("an answered decision keeps its backlink control and still moves with a lat
   });
 
   await page.setViewportSize({ height: 900, width: 1440 });
+  // The later citation reaches the card over the event feed, whose refetch is held to one per
+  // second (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+  await page.clock.install();
   await page.goto(`/issues/${target.key}`);
   // The page hosts this ask twice — the decision block and the margin sheet; the block is the
   // one the reader answers in, and it keeps rendering the card once the ask is answered.
@@ -255,6 +275,7 @@ test("an answered decision keeps its backlink control and still moves with a lat
   await createMessage(source.key, {
     body: `Second citation of dispatch://${target.key}/ask/${decision.id}.`,
   });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(card.getByRole("button", { name: /^Referenced by \(2\)$/ })).toBeVisible(live);
 });
 
@@ -332,6 +353,9 @@ test("an issue header's count follows an ask whose question cites it", async ({ 
   const target = await createIssue({ project: "CORE", title: "Cited by a question" });
   const source = await createIssue({ project: "OPS", title: "Asking issue" });
 
+  // Both counts arrive over the event feed, whose refetch is held to one per second
+  // (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+  await page.clock.install();
   await page.goto(`/issues/${target.key}`);
   const header = page.getByTestId("issue-header");
   // The issue's own spec document is attached to it, so it starts at one.
@@ -340,11 +364,13 @@ test("an issue header's count follows an ask whose question cites it", async ({ 
   const decision = await createAsk(source.key, {
     question: `Does dispatch://${target.key} ship first?`,
   });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(header.getByRole("button", { name: /^Referenced by \(2\)$/ })).toBeVisible({
     timeout: 30_000,
   });
 
   await editAsk(decision.id, { question: "Does anything ship first?" });
+  await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(header.getByRole("button", { name: /^Referenced by \(1\)$/ })).toBeVisible({
     timeout: 30_000,
   });
@@ -380,10 +406,12 @@ test("an Inbox of twenty asks reads no backlinks until a card is opened", async 
   await createProject({ key: "OPS", name: "Operations" });
   const issue = await createIssue({ project: "CORE", title: "Twenty decisions" });
   const source = await createIssue({ project: "OPS", title: "Citing issue" });
-  const asks = [];
-  for (let index = 0; index < 20; index += 1) {
-    asks.push(await createAsk(issue.key, { question: `Decision ${index + 1}?` }));
-  }
+  // Twenty asks, not twenty round trips: the row needs the cards, never their creation order.
+  const asks = await Promise.all(
+    Array.from({ length: 20 }, (_, index) =>
+      createAsk(issue.key, { question: `Decision ${index + 1}?` })
+    )
+  );
   const cited = asks[0];
   if (cited === undefined) {
     throw new Error("seeded no asks");

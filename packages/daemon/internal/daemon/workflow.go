@@ -94,6 +94,16 @@ type workflowRuntime struct {
 	controllerWake time.Duration
 	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
 	controllerFirstWake time.Duration
+	// idlePeriod is how long an issue pod must have had no turn in progress and no turn due
+	// before the daemon releases it (runtime.kubernetes.idle_release.idle_minutes); zero turns
+	// release off, as `idle_minutes: 0` and every runtime but Kubernetes do. idleStore is the
+	// daemon's store, which holds the idle view and the release's mark, and idleImages the
+	// runtime's reading of an issue pod's image; both nil when release is off. idleTick is the
+	// tick's period, zero being idleTickInterval; a test shortens it.
+	idlePeriod time.Duration
+	idleStore  *store.Store
+	idleImages issuePodImages
+	idleTick   time.Duration
 	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
@@ -350,6 +360,12 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
+	// The engine reads and writes the pod tables of the idle release through the store's own
+	// view of this project (store.Store.PodRecordsOf), which derives the claim token's spelling
+	// of the project the tables are keyed by.
+	if engineCfg.Pods, err = st.PodRecordsOf(cfg.Project); err != nil {
+		return nil, err
+	}
 	engineCfg.Repositories, engineCfg.NoteUnread, engineCfg.ReadMergeState = w, w.noteUnread, w.queueMergeState
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
@@ -811,8 +827,26 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
-	supervision.supervisor.OnTerminal(w.terminal)
+	supervision.supervisor.OnDurableState(w.claimDurableState)
 	supervision.enqueue = w.enqueueOutbox
+	w.attachIdleRelease(supervision)
+}
+
+// attachIdleRelease wires the idle tick, and leaves it off unless the deployment releases pods:
+// `runtime: kubernetes` with a non-zero idle_minutes, over a runtime that can say whether an
+// issue's pod runs the image the configuration names.
+func (w *workflowRuntime) attachIdleRelease(supervision *supervision) {
+	k := supervision.cfg.Runtime.Kubernetes
+	if supervision.cfg.Runtime.Name != "kubernetes" || k == nil || !k.IdleRelease.Releases() {
+		return
+	}
+	images, ok := supervision.supervisor.deps.Runtime.(issuePodImages)
+	if !ok {
+		w.log.Warn("idle release: the runtime reads no pod image, so no pod is released")
+		return
+	}
+	w.idlePeriod, w.idleStore, w.idleImages = k.IdleRelease.Idle(), supervision.supervisor.store, images
+	w.outbox.backstop = k.IdleRelease.Backstop()
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
@@ -941,6 +975,17 @@ func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState
 	}
 }
 
+// claimDurableState is the daemon's one durable-state callback, because a supervisor keeps one
+// (supervisor.OnDurableState): a claim's ready and its failure are workflow facts (terminal), and
+// the same transitions measure a released pod's resume — its replacement pod is up at the first
+// ready, and the woken role took its work at the first turn (podResume).
+func (w *workflowRuntime) claimDurableState(c supervise.Claim, state supervise.ClaimState) {
+	w.podResume(c, state)
+	if state == supervise.StateReady || state == supervise.StateFailed {
+		w.terminal(c, state)
+	}
+}
+
 // applyTerminal applies a claim's ready or failure as a workflow fact. The daemon's own controller
 // (`controller: daemon`) holds a claim on no issue, so neither is a workflow fact for it: its
 // relaunch is the controller keeper's (controllerKeeper).
@@ -1017,6 +1062,14 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.readMergeStates(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickIdle(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickWakes(running)
 		return nil
 	})
 	group.Go(func() error {

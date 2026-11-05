@@ -73,8 +73,11 @@ type OperatorClaim struct {
 	UncertainStreak int              `json:"uncertainStreak"`
 	// Pending is the task the claim holds, until the turn it started ends.
 	Pending *DeliveryView `json:"pending,omitempty"`
-	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit, or
-	// unknown (a suspension recorded before migration 0038); absent otherwise.
+	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit,
+	// released (its idle pod was released), or unknown (a suspension recorded before migration
+	// 0038); absent otherwise. These routes are the one surface that serves it: a session parses
+	// every body it reads with the strict schema of its own contract, so a key an older contract
+	// does not know refuses the whole body (api.StrandedClaim).
 	SuspendedBy string `json:"suspendedBy,omitempty"`
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.

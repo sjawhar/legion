@@ -94,7 +94,10 @@ func decodeAnswer(answer []byte, into any) error {
 // printClaim is the one line a claim prints as: token, role, issue, state, generation, the plugin
 // contract its registration declared (0 when none is recorded), and the update round the claim is
 // in with the head its worker reported when it answered (`-` for a claim in no round, and `-` for
-// a head no worker has reported yet).
+// a head no worker has reported yet). A claim whose idle pod the daemon released prints
+// `suspended:released` for its state (claimStateWord): it is not a suspension anyone is waiting
+// to lift — its next delivery resumes it in a pod of its own — so an operator reading the list
+// must not read it as one.
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
@@ -116,8 +119,18 @@ func printClaims(w io.Writer, answer []byte) error {
 }
 
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
-	fmt.Fprintf(w, "%s %s %s %s %d %d %s %s\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract,
+	fmt.Fprintf(w, "%s %s %s %s %d %d %s %s\n", c.Token, c.Role, c.Issue, claimStateWord(c), c.Generation, c.PluginContract,
 		orNone(c.UpdateRound), quotedOrNone(c.UpdateHead))
+}
+
+// claimStateWord is the claim's state as the line prints it: `suspended:released` for a claim the
+// idle release suspended, and the state itself for every other claim, whose suspendedBy the
+// operator reads with --json.
+func claimStateWord(c api.OperatorClaim) string {
+	if c.State == string(supervise.StateSuspended) && c.SuspendedBy == string(supervise.SuspendedByReleased) {
+		return c.State + ":" + c.SuspendedBy
+	}
+	return c.State
 }
 
 // orNone is a field a claim need not have, as the line prints it.
