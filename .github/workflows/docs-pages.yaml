@@ -58,7 +58,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 65 patterns:
+      # ci.yaml's *legion_command, 72 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -121,7 +121,13 @@ on:
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/brokerclient/*'
+      - 'packages/envoy/dispatchbody/*'
       - 'packages/envoy/internal/brokerclient/*'
+      - 'packages/envoy/internal/contracts/*'
+      - 'packages/envoy/internal/dispatch/itemblocks/*'
+      - 'packages/envoy/internal/dispatch/model/*'
+      - 'packages/envoy/internal/dispatch/pmdoc/**'
+      - 'packages/envoy/internal/dispatch/text/*'
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
