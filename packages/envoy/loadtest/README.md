@@ -2535,7 +2535,7 @@ its cores and working set from `cgroup.json`. It also holds:
 
 ### An image for a commit
 
-`up` resolves `--dispatch-commit` to `ghcr.io/sjawhar/legion/envoy:<full sha>` by digest. A main
+`up` resolves `--dispatch-commit` to `ghcr.io/cybermonklabs/legion/envoy:<full sha>` by digest. A main
 commit that touches the image's inputs (`packages/envoy` among them) gets its image on push. A
 branch head gets one from:
 

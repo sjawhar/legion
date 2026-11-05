@@ -2345,16 +2345,87 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	return head
 }
 
-// openSyncedEditor checks that a tab's no-op sync leaves the durable head unchanged, so only
-// the subsequent write can leave its room behind the store.
+// Rendering is not an acknowledgement of a browser update's durable append.
+func TestSyncedEditorWaitsForItsOwnAppend(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SYNC")
+	pair.a.createProject(t, project, "Documents")
+	_, artifactID := pair.a.createIssueIn(t, project, "Held browser append", "before")
+	gate, err := pair.database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `lock table doc_updates in share mode`); err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan *docstest.Peer, 1)
+	go func() { opened <- openSyncedEditor(t, pair, artifactID, "before\n") }()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		select {
+		case <-opened:
+			t.Fatal("editor setup returned while its append was held")
+		default:
+		}
+		waiting, err := storetest.CountLockWaits(context.Background(), pair.database, "%insert into doc_updates%")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			select {
+			case <-opened:
+				t.Fatal("editor setup returned before its held append committed")
+			case <-time.After(100 * time.Millisecond):
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("editor setup never sent an append")
+		}
+	}
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case editor := <-opened:
+		if got := markdown(editor); got != "before\n" {
+			t.Fatalf("sync marker changed the document to %q", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("editor setup did not finish after its append was released")
+	}
+}
+
+// openSyncedEditor sends a metadata marker after the tab renders and returns only once that
+// specific update is stored. Sync frames ahead of it on the socket have then been processed too,
+// so only a subsequent write on B can leave A's room behind the durable head.
 func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
 	t.Helper()
-	before := storedHead(t, pair, artifactID)
 	editor := pair.a.openEditor(t, artifactID, want)
-	if head := storedHead(t, pair, artifactID); head != before {
-		t.Fatalf("the durable head moved from %d to %d during a tab's no-op sync", before, head)
+	markers := editor.Doc.GetMap("test-sync")
+	marker := strconv.FormatUint(uint64(editor.Doc.ClientID()), 10)
+	update, err := editor.Send(func(txn *crdt.Transaction) { markers.Set(txn, marker, true) })
+	if err != nil {
+		t.Fatalf("send the editor's sync marker: %v", err)
 	}
-	return editor
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var stored bool
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select exists(select 1 from doc_updates where artifact_id = $1 and update = $2)`, artifactID, update).Scan(&stored); err != nil {
+			t.Fatalf("read the editor's stored sync marker: %v", err)
+		}
+		if stored {
+			return editor
+		}
+		select {
+		case <-editor.Ended:
+			t.Fatalf("the editor closed before its sync marker was stored:\n%s", pair.a.Output.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the editor's sync marker was never stored:\n%s", pair.a.Output.String())
+		}
+	}
 }
 
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a

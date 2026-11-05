@@ -9,7 +9,7 @@ live in Dispatch. Legion is for people who want agents to work tracked issues en
 keep the decisions: what to build, whether the spec is right, the answers to the agents' questions,
 which credentials the agents may use, and the merge.
 
-Documentation: <https://sjawhar.github.io/legion/>
+Documentation: <https://cybermonklabs.github.io/legion/>
 
 ## The four parts
 
@@ -29,10 +29,10 @@ reviewed change, the merger posts `READY` on the issue and submits the merge, th
 merges under the repository's own rules and closes the issue, and the implementer then checks the
 change in production once it is deployed, recording that on the pull request.
 
-[Legion's documentation](https://sjawhar.github.io/legion/legion/) ·
-[a walkthrough video of one issue](https://sjawhar.github.io/legion/legion/walkthrough/)
+[Legion's documentation](https://cybermonklabs.github.io/legion/legion/) ·
+[a walkthrough video of one issue](https://cybermonklabs.github.io/legion/legion/walkthrough/)
 
-[![An issue Legion finished: Done at the merge, the spec approved at version 3, the architect's acceptance and the READY message](docs/site/public/media/videos/legion-issue-journey.jpg)](https://sjawhar.github.io/legion/legion/walkthrough/)
+[![An issue Legion finished: Done at the merge, the spec approved at version 3, the architect's acceptance and the READY message](docs/site/public/media/videos/legion-issue-journey.jpg)](https://cybermonklabs.github.io/legion/legion/walkthrough/)
 
 ### Dispatch
 
@@ -44,10 +44,10 @@ whose answer approves a document at one version or requests changes. Agents work
 `dispatch` command in their shell; people use the dashboard: the Inbox, each project's list and board, and the
 Agents page, where they can message the agents that are running.
 
-[Dispatch's documentation](https://sjawhar.github.io/legion/dispatch/) ·
-[a video of answering an ask](https://sjawhar.github.io/legion/dispatch/inbox-and-asks/)
+[Dispatch's documentation](https://cybermonklabs.github.io/legion/dispatch/) ·
+[a video of answering an ask](https://cybermonklabs.github.io/legion/dispatch/inbox-and-asks/)
 
-[![The Dispatch Inbox: a planner's question waiting on you, with its options, an answer box, and the Answer and Ask back buttons](docs/site/public/media/videos/answer-an-ask.jpg)](https://sjawhar.github.io/legion/dispatch/inbox-and-asks/)
+[![The Dispatch Inbox: a planner's question waiting on you, with its options, an answer box, and the Answer and Ask back buttons](docs/site/public/media/videos/answer-an-ask.jpg)](https://cybermonklabs.github.io/legion/dispatch/inbox-and-asks/)
 
 ### Envoy
 
@@ -60,7 +60,7 @@ is down is read when it comes back. Agent harnesses connect through the clients 
 `packages/pi-envoy` for Oh My Pi (with `packages/pi-legion`, the Legion plugin a Legion pane loads
 beside it) and `packages/claude-envoy` for Claude Code, both built on `packages/envoy-client`.
 
-[Envoy's documentation](https://sjawhar.github.io/legion/dispatch/envoy/)
+[Envoy's documentation](https://cybermonklabs.github.io/legion/dispatch/envoy/)
 
 ### Secrets Broker
 
@@ -73,31 +73,31 @@ never holds a long-lived key. Each session signs its requests with a key of its 
 request, decision and use is recorded. Legion enrolls every worker pod it starts on Kubernetes when
 its deployment names a broker.
 
-[The Secrets Broker's documentation](https://sjawhar.github.io/legion/broker/) ·
-[a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/) ·
+[The Secrets Broker's documentation](https://cybermonklabs.github.io/legion/broker/) ·
+[a walkthrough video of one request](https://cybermonklabs.github.io/legion/broker/walkthrough/) ·
 [install `agent-secrets` and give a machine access](packages/envoy/cmd/agent-secrets/README.md#install)
 
-[![The secrets broker's approval page for one secret request: the secret, the enrollment the broker verified asked, the reason, how long the grant lasts, the approver, and Approve and Deny buttons](docs/site/public/media/broker/credential-request.png)](https://sjawhar.github.io/legion/broker/walkthrough/)
+[![The secrets broker's approval page for one secret request: the secret, the enrollment the broker verified asked, the reason, how long the grant lasts, the approver, and Approve and Deny buttons](docs/site/public/media/broker/credential-request.png)](https://cybermonklabs.github.io/legion/broker/walkthrough/)
 
 ## Quick start
 
 The documentation's getting-started pages cover each part:
 
-- **Dispatch on your machine.** [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/#running-it-on-your-machine)
+- **Dispatch on your machine.** [Running Dispatch](https://cybermonklabs.github.io/legion/dispatch/running-dispatch/#running-it-on-your-machine)
   starts the server against a Postgres in Docker, with a sign-in that needs no GitHub App.
 - **The Secrets Broker on your machine.**
-  [Run the broker locally](https://sjawhar.github.io/legion/broker/guides/run-locally/): one script,
+  [Run the broker locally](https://cybermonklabs.github.io/legion/broker/guides/run-locally/): one script,
   `packages/envoy/scripts/dev-broker.sh`, starts a broker with example rules and fake secrets. The
-  [quickstart](https://sjawhar.github.io/legion/broker/quickstart/) then uses a secret from an agent
+  [quickstart](https://cybermonklabs.github.io/legion/broker/quickstart/) then uses a secret from an agent
   session.
-- **Envoy on your machine.** [Running Envoy on one machine](https://sjawhar.github.io/legion/dispatch/envoy/#running-envoy-on-one-machine)
+- **Envoy on your machine.** [Running Envoy on one machine](https://cybermonklabs.github.io/legion/dispatch/envoy/#running-envoy-on-one-machine)
   starts NATS and the listener with one Compose file, for agent sessions on that machine to
-  message each other. [Running the listener](https://sjawhar.github.io/legion/dispatch/envoy/#running-the-listener)
+  message each other. [Running the listener](https://cybermonklabs.github.io/legion/dispatch/envoy/#running-the-listener)
   lists its settings and health checks.
-- **Legion.** [Running Legion](https://sjawhar.github.io/legion/legion/running-legion/) is the
+- **Legion.** [Running Legion](https://cybermonklabs.github.io/legion/legion/running-legion/) is the
   operator's guide: the cluster, the GitHub Apps, `legion.yaml` and the model route.
-  [Using Legion](https://sjawhar.github.io/legion/legion/using-legion/) covers handing it an issue.
-  The `legion` CLI ships on each `legion-v*` [release](https://github.com/sjawhar/legion/releases) as
+  [Using Legion](https://cybermonklabs.github.io/legion/legion/using-legion/) covers handing it an issue.
+  The `legion` CLI ships on each `legion-v*` [release](https://github.com/cybermonklabs/legion/releases) as
   `legion-<os>-<arch>.tar.gz` for Linux and macOS, and the worker image carries the same binary at
   `/opt/legion/bin/legion`.
 
@@ -154,7 +154,7 @@ tests use a running nats-server with JetStream instead when `LEGION_TEST_NATS_UR
 and `LEGION_TEST_NATS_MONITOR_URL` (its monitoring endpoint) are both set, one package at a time
 (`go test -p 1`). The repository's conventions and each part's commands are in `AGENTS.md` at the
 root and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The
-documentation site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers
+documentation site's [contributing page](https://cybermonklabs.github.io/legion/contributing/) covers
 writing its pages.
 
 ## License
@@ -173,8 +173,8 @@ dependency's license cannot be determined:
 | `@sjawhar/pi-envoy`, `@sjawhar/pi-legion` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
 | `packages/claude-envoy` (committed bundle) | `packages/claude-envoy/dist/THIRD_PARTY_NOTICES` |
 | Dispatch web app | `THIRD_PARTY_NOTICES.txt` beside the bundle, served at `/THIRD_PARTY_NOTICES.txt` |
-| Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://sjawhar.github.io/legion/THIRD_PARTY_NOTICES.txt) |
-| `ghcr.io/sjawhar/legion/envoy`, `ghcr.io/sjawhar/legion-worker` images | `/usr/share/doc/legion/THIRD_PARTY_NOTICES` |
+| Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://cybermonklabs.github.io/legion/THIRD_PARTY_NOTICES.txt) |
+| `ghcr.io/cybermonklabs/legion/envoy`, `ghcr.io/cybermonklabs/legion-worker` images | `/usr/share/doc/legion/THIRD_PARTY_NOTICES` |
 | `legion-<os>-<arch>.tar.gz` (`legion-v*` releases) | `legion-<os>-<arch>/THIRD_PARTY_NOTICES` |
 | `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz`, `agent-secrets-darwin-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
 

@@ -617,31 +617,55 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 	return persistence.Version(version), nil
 }
 
-// recoverPruneStatement finishes, in one statement, a prune its crash left half done: when the
-// room $1 names has a checkpoint row (PruneAfter commits it before it deletes), it deletes the
-// room's updates above the checkpoint's ceiling and the checkpoint itself, which the delete locks
-// as it reads its ceiling; with no checkpoint it deletes nothing. It answers whether there was a
-// prune to finish. Every durable append runs it under the document's advisory lock before its gate
-// reads the head: recoverPruneTx in a caller's transaction, and a room's batch in its first
-// pipeline (appendRoomTx).
-const recoverPruneStatement = `
-	with recovered as (
-		delete from doc_checkpoints where artifact_id = $1 returning ceiling
-	), pruned as (
-		delete from doc_updates where artifact_id = $1 and version > (select ceiling from recovered)
-	)
-	select exists (select 1 from recovered)
-`
+// takePruneCheckpointStatement takes the checkpoint row a prune its crash left half done holds for
+// the room $1 names (PruneAfter commits it before it deletes), and answers its ceiling, or no row
+// when there is no prune to finish. Every durable append runs it under the document's advisory
+// lock before its gate reads the head: recoverPruneTx in a caller's transaction, and a room's
+// batch in its first pipeline (appendRoomTx). It names doc_checkpoints alone. A statement that
+// names a delete from doc_updates takes that table's ROW EXCLUSIVE lock whether or not it deletes a
+// row, so folding finishPruneStatement into it would put every append's doc_updates lock ahead of
+// its insert on every append rather than only on the rare one that finishes a prune.
+const takePruneCheckpointStatement = `delete from doc_checkpoints where artifact_id = $1 returning ceiling`
+
+// finishPruneStatement deletes the updates of the room $1 names above $2, the ceiling a prune's
+// checkpoint recorded (takePruneCheckpointStatement): the rest of the prune that checkpoint began.
+const finishPruneStatement = `delete from doc_updates where artifact_id = $1 and version > $2`
+
+// pruneCheckpoint is what takePruneCheckpointStatement read: whether the room had a checkpoint, and
+// its ceiling.
+type pruneCheckpoint struct {
+	found   bool
+	ceiling int64
+}
+
+// scan reads takePruneCheckpointStatement's answer, no row being no checkpoint.
+func (c *pruneCheckpoint) scan(row pgx.Row) error {
+	switch err := row.Scan(&c.ceiling); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read document prune checkpoint: %w", err)
+	}
+	c.found = true
+	return nil
+}
 
 // recoverPruneTx finishes a prune whose checkpoint committed and whose deletion of the updates past
 // it did not (PruneAfter), inside tx, which holds the room's lock, and reports whether there was
-// one to finish (recoverPruneStatement).
+// one to finish: one round trip when there is none (takePruneCheckpointStatement), a second
+// (finishPruneStatement) when there is.
 func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) (bool, error) {
-	var recovered bool
-	if err := tx.QueryRow(ctx, recoverPruneStatement, room).Scan(&recovered); err != nil {
+	var checkpoint pruneCheckpoint
+	if err := checkpoint.scan(tx.QueryRow(ctx, takePruneCheckpointStatement, room)); err != nil {
+		return false, err
+	}
+	if !checkpoint.found {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, finishPruneStatement, room, checkpoint.ceiling); err != nil {
 		return false, fmt.Errorf("recover pruned document updates: %w", err)
 	}
-	return recovered, nil
+	return true, nil
 }
 
 // errRoomLockBusy is a room lock another holder has, for work that does not wait for it.

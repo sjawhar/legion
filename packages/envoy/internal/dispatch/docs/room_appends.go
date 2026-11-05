@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A room's browser updates reach the store through ygo's per-room persistence worker, which calls
@@ -161,8 +163,9 @@ func (p *PgVersioned) appendUpdates(ctx context.Context, room string, updates []
 // lock and a connection of the room-appends pool (store.Pool.RoomAppends) throughout, and sends its
 // statements as pgx pipelines, three round trips from the document's session lock to its release:
 //
-//  1. pg_advisory_lock, begin, pg_advisory_xact_lock, the prune recovery (recoverPruneStatement)
-//     and the gate's read (queueAppendGate);
+//  1. pg_advisory_lock, begin, pg_advisory_xact_lock, the prune checkpoint's read
+//     (takePruneCheckpointStatement) and the gate's read (queueAppendGate), with one more round
+//     trip, the prune's rest and the gate read again, on the rare append that finds a checkpoint;
 //  2. once the gate has passed, the append's writes (appendWrites) and commit;
 //  3. pg_advisory_unlock, once the commit's bookkeeping is done: each stored class marked stored
 //     with its credit held at its version (RoomFlush.markStored), afterAppendCommit, the room
@@ -240,10 +243,22 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	opening.Queue(`select pg_advisory_lock(hashtext($1))`, room)
 	opening.Queue(`begin`)
 	opening.Queue(`select pg_advisory_xact_lock(hashtext($1))`, room)
-	opening.Queue(recoverPruneStatement, room)
+	var checkpoint pruneCheckpoint
+	opening.Queue(takePruneCheckpointStatement, room).QueryRow(checkpoint.scan)
 	gate := queueAppendGate(opening, room, appendBrowser)
 	if err := send(ctx, opening); err != nil {
 		return 0, fmt.Errorf("begin document update: %w", err)
+	}
+	if checkpoint.found {
+		// A prune its crash left half done: the rest of it, and the gate read again on the head
+		// that leaves, cost this append one more round trip (recoverPruneTx says why the first
+		// pipeline does not hold the delete).
+		finishing := &pgx.Batch{}
+		store.QueueExec(finishing, "recover pruned document updates", finishPruneStatement, room, checkpoint.ceiling)
+		gate = queueAppendGate(finishing, room, appendBrowser)
+		if err := send(ctx, finishing); err != nil {
+			return 0, fmt.Errorf("finish the document's prune: %w", err)
+		}
 	}
 	head, err := gate.head(appendingThrough(ctx, room, flush))
 	if err != nil {
