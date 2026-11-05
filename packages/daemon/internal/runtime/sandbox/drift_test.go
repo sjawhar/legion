@@ -397,7 +397,7 @@ func TestPodDriftReadsASuspendedSandboxAsItsOwnReplacementOrAsAGonePod(t *testin
 	g := newRig(t, nil)
 	// The pod of a suspended Sandbox stays terminating, which is the window every reading below
 	// is taken in: the suspension has landed and the pod has not ended.
-	g.suspendDelay = time.Minute
+	g.suspendDelay.Store(int64(time.Minute))
 	loc := g.spawn(workerSpec(t))
 	name := loc.Sandbox.Name
 	r2 := secondRuntime(t, g, func(o *Options) { o.Image = nextImage })()
@@ -506,7 +506,7 @@ func TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs(t *testing.T) {
 			g := newRig(t, nil, withOptions(longBoot))
 			// The pod stays terminating until this test ends it, which is the window the reading
 			// is taken in: the suspension has landed and the pod has not ended.
-			g.suspendDelay = time.Minute
+			g.suspendDelay.Store(int64(time.Minute))
 			spec := workerSpec(t)
 			loc := g.spawn(spec)
 			sandboxName := loc.Sandbox.Name
@@ -541,10 +541,17 @@ func TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs(t *testing.T) {
 			}
 
 			// End the pod the replacement is waiting out, as the cluster does once it has
-			// terminated, so the act under test finishes as it would there.
-			if err := g.kube.Tracker().Delete(podsGVR, testNamespace, sandboxName); err != nil {
-				t.Fatal(err)
-			}
+			// terminated, so the act under test finishes as it would there. The rig's own
+			// controller ends it, by shortening the delay it holds a terminating pod for: a
+			// delete the row made itself, behind that controller, is undone by the controller's
+			// next write of the deletion timestamp, because the fake tracker's Update adds an
+			// object it does not find rather than refusing. The pod came back microseconds after
+			// the row deleted it, awaitPodGone's own read of the API then found it, and the
+			// replacement waited the whole minute out (INFRA-985).
+			g.suspendDelay.Store(0)
+			g.eventually("the pod the replacement is waiting out to end", func() bool {
+				return g.pod(sandboxName) == nil
+			})
 			if err := <-replaced; err != nil {
 				t.Fatalf("the replacement: %v", err)
 			}

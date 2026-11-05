@@ -343,8 +343,10 @@ type rig struct {
 	// node, past workspace-init, and Running at once.
 	hold      atomic.Bool
 	autoStart atomic.Bool
-	// suspendDelay is how long a pod the controller deletes stays terminating first.
-	suspendDelay time.Duration
+	// suspendDelay is how long a pod the controller deletes stays terminating first, in
+	// nanoseconds. It is atomic because a test may shorten it while control() is running, to ask
+	// for a pod it has been holding terminating to end now (endTerminatingPod).
+	suspendDelay atomic.Int64
 	// noController leaves every object as the test wrote it.
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
@@ -664,7 +666,7 @@ func (g *rig) control() {
 				// going to create. That is what red this package's pod-drift row about 4 times in
 				// 100 under load, at every bound it was given, with the controller reading
 				// `generation 3, Running, pod uid-pod-13 terminating` for ever (INFRA-985).
-				if started, ok := terminating[pod.UID]; ok && time.Since(started) >= g.suspendDelay {
+				if started, ok := terminating[pod.UID]; ok && time.Since(started) >= time.Duration(g.suspendDelay.Load()) {
 					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
 				}
 			case s.mode() == modeSuspended && owned:
