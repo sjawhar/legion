@@ -92,6 +92,33 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+	// A block shape of bare exits: a quoted typed block whose last line holds the quote's marker
+	// alone, ended by a paragraph outside the quote, repeated. Each such block ends where its
+	// content did, which puts its exits into the stream before the events of the lines already
+	// read; writing them in one by one moved the stream and walked every line's marks per block,
+	// which is quadratic in the blocks (7.7 s for 4,000 of them in a mebibyte, against main's
+	// 0.15 s), and the inserts are collected and written once now (insertEvents, writeInserts).
+	{
+		repeat := "> :::callout{#c%d kind=\"note\" title=\"T\"}\n>\nb\n"
+		unit := len(fmt.Sprintf(repeat, 1000))
+		full := parseFullTarget / unit
+		small := full / growthStep
+		name := "quoted typed blocks ending on a bare line"
+		t.Run(name, func(t *testing.T) {
+			growsLinearly(t, name, []int{small * unit, full * unit}, linearSlack, func(size int) (time.Duration, error) {
+				var text strings.Builder
+				for index := 0; index < size/unit; index++ {
+					fmt.Fprintf(&text, repeat, index)
+				}
+				body := text.String()
+				return cpuTimeOf(again(func() {
+					if _, err := ParseForWrite(body, nil); err != nil && !refusedForItsMarks(err) && !errors.Is(err, ErrSchema) {
+						t.Fatalf("%s at %d bytes: %v", name, size, err)
+					}
+				}))
+			})
+		})
+	}
 	// Two-part shapes: an opener half repeated, then a closer half repeated, so each closer looks
 	// back past every run before it. goldmark's ProcessDelimiters walks a closer back over every
 	// earlier run of either character, so `~~a ` then `a* ` and `*a ` then `a~ ` took 3.8-4.2 s at

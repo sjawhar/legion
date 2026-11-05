@@ -424,16 +424,14 @@ func rowCells(segment gmtext.Segment, source []byte, visit func(index int, value
 // transform is goldmark's table transformer, reading the paragraph's lines with their indentation
 // expanded where it holds a tab (tabExpandedLines); a paragraph that stays one keeps its lines. A
 // table that takes the paragraph's first line takes the paragraph's place, starting where its text
-// does and after the blank line before it if there was one; goldmark gives it neither. The browser
-// list spacing reads both, the blank line through blankAfterAttr, since goldmark's looseness, which
-// reads HasBlankPreviousLines, has never seen it. The lines before the table's header row that
+// does and after the blank line before it if there was one; goldmark gives it neither. The lines
+// before the table's header row that
 // goldmark would not leave of its own accord are left a paragraph first (textBeforeTable).
 func (t lazyTableRows) transform(node *ast.Paragraph, rows tableRows, reader gmtext.Reader, pc parser.Context) {
 	textBeforeTable(node, rows, reader.Source())
 	lines := node.Lines()
 	first := lines.At(0)
 	start := first.TrimLeftSpace(reader.Source()).Start
-	blank := node.HasBlankPreviousLines()
 	parent, previous := node.Parent(), node.PreviousSibling()
 	// Goldmark's transformer consumes the lines it takes as rows, so where they start is read before
 	// it runs. A table takes the paragraph's lines from its header row to the paragraph's end.
@@ -472,7 +470,6 @@ func (t lazyTableRows) transform(node *ast.Paragraph, rows tableRows, reader gmt
 			return
 		}
 		placed.SetPos(start)
-		placed.SetAttribute(blankAfterAttr, blank)
 		table = placed
 	}
 	markRows(table, rowStarts, lazyStarts, rowSegments, reader.Source())
@@ -504,7 +501,7 @@ func textBeforeTable(node *ast.Paragraph, rows tableRows, source []byte) {
 	before := ast.NewParagraph()
 	before.SetLines(text)
 	// The blank line before the paragraph is the blank line before the text, not before the table,
-	// which the text now stands between (blankAfterAttr, transform).
+	// which the text now stands between (transform).
 	before.SetBlankPreviousLines(node.HasBlankPreviousLines())
 	node.SetBlankPreviousLines(false)
 	node.Parent().InsertBefore(node.Parent(), node, before)

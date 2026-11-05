@@ -19,7 +19,7 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 // refused.
 //
 // The blank lines indented code keeps past where goldmark ends it are that code's, and space
-// nothing (heldCodeLines, markBlocksAfterHeldCode).
+// nothing (heldCodeLines).
 //
 // One shape is still refused, where goldmark reads the blocks themselves otherwise than that
 // parser does: an empty list item before a blank line and a block its outer item holds, where
@@ -27,7 +27,6 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 func browserListSpacing(root ast.Node, source []byte) error {
 	lines := newSourceLines(source)
 	lines.held = heldCodeLines(root, lines)
-	markBlocksAfterHeldCode(root, lines)
 	spread := readSpreads(root, lines)
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
@@ -129,57 +128,11 @@ func browserOnlyShape(root ast.Node) string {
 	return shape
 }
 
-// blankAfterAttr marks a block goldmark made from a paragraph that followed a blank line, which
-// its HasBlankPreviousLines does not carry over (lazyTableRows.transform), and the block right
-// after indented code's held lines, which follows no blank line (markBlocksAfterHeldCode).
-var blankAfterAttr = []byte("pmdoc-blank-after")
-
-// blankBefore reports whether a blank line comes right before block. A line indented code holds
-// past where goldmark ends it is the code's, so the block right after one follows none.
-func blankBefore(block ast.Node) bool {
-	if blank, ok := block.Attribute(blankAfterAttr); ok {
-		return blank.(bool)
-	}
-	if keepsBlankLinesAfter(block.PreviousSibling()) {
-		return false
-	}
-	return block.HasBlankPreviousLines()
-}
-
 // heldCodeLines is the lines each indented code block holds past where goldmark ends it
 // (codeHeldAttr): the code's text, which spaces nothing, so no counter of blank lines counts them
 // (sourceLines.held).
 func heldCodeLines(root ast.Node, lines sourceLines) map[int]bool {
 	var held map[int]bool
-	eachHeldCode(root, func(code *ast.CodeBlock, from int) {
-		if held == nil {
-			held = map[int]bool{}
-		}
-		segments := code.Lines()
-		for index := from; index < segments.Len(); index++ {
-			held[lines.lineOf(segments.At(index).Start)] = true
-		}
-	})
-	return held
-}
-
-// markBlocksAfterHeldCode records on the block on the line right after an indented code block's
-// last held line that it follows no blank line (blankAfterAttr), whatever goldmark records on it,
-// even where that line holds only its quotes' markers (blankBefore). It runs after the parse, so it
-// decides over what lazyTableRows.transform records there.
-func markBlocksAfterHeldCode(root ast.Node, lines sourceLines) {
-	eachHeldCode(root, func(code *ast.CodeBlock, _ int) {
-		segments := code.Lines()
-		last := lines.lineOf(segments.At(segments.Len() - 1).Start)
-		if next := nextBlock(code); next != nil && lines.lineOf(startOf(next)) == last+1 {
-			next.SetAttribute(blankAfterAttr, false)
-		}
-	})
-}
-
-// eachHeldCode calls visit with each indented code block that holds lines past where goldmark
-// ends it, and the index of the first of them (codeHeldAttr).
-func eachHeldCode(root ast.Node, visit func(code *ast.CodeBlock, from int)) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
@@ -188,61 +141,21 @@ func eachHeldCode(root ast.Node, visit func(code *ast.CodeBlock, from int)) {
 		case *ast.Paragraph, *ast.TextBlock, *ast.Heading:
 			return ast.WalkSkipChildren, nil
 		case *ast.CodeBlock:
-			if from, ok := node.Attribute(codeHeldAttr); ok {
-				visit(node, from.(int))
+			from, ok := node.Attribute(codeHeldAttr)
+			if !ok {
+				return ast.WalkContinue, nil
+			}
+			if held == nil {
+				held = map[int]bool{}
+			}
+			segments := node.Lines()
+			for index := from.(int); index < segments.Len(); index++ {
+				held[lines.lineOf(segments.At(index).Start)] = true
 			}
 		}
 		return ast.WalkContinue, nil
 	})
-}
-
-// keepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed that takes
-// the blank lines after node as its own lines, so that they spread nothing: every container
-// between the block and node, node included, continues across a blank line, and the browser
-// editor's parser reads such a line as the code's, even where the code's text drops it
-// (blankTaker). A quote between ends at a blank line without its marker, so the line is not its
-// code's.
-func keepsBlankLinesAfter(node ast.Node) bool {
-	if !endsInOpenFence(node) {
-		return false
-	}
-	for container := lastFencedCode(node).Parent(); container != node.Parent(); container = container.Parent() {
-		if _, quote := container.(*ast.Blockquote); quote {
-			return false
-		}
-	}
-	return true
-}
-
-// endsInOpenFence reports whether node ends in a fenced code block no fence closed, and that runs
-// to node's end: a typed block between them, node included, that its own fence closes ends the code
-// there, so the lines after it are not the code's.
-func endsInOpenFence(node ast.Node) bool {
-	code := lastFencedCode(node)
-	if code == nil {
-		return false
-	}
-	if _, closed := code.Attribute(fenceClosedAttr); closed {
-		return false
-	}
-	for container := code.Parent(); container != node.Parent(); container = container.Parent() {
-		if typed, ok := container.(*typedDirective); ok && typed.Closed {
-			return false
-		}
-	}
-	return true
-}
-
-// lastFencedCode is the fenced code block node ends in, through the last block of each container
-// it ends in, or nil when it ends in no fenced code block.
-func lastFencedCode(node ast.Node) *ast.FencedCodeBlock {
-	for node != nil && node.Type() == ast.TypeBlock {
-		if code, ok := node.(*ast.FencedCodeBlock); ok {
-			return code
-		}
-		node = node.LastChild()
-	}
-	return nil
+	return held
 }
 
 // startsContainer reports whether block opens a container the browser editor's parser keeps open

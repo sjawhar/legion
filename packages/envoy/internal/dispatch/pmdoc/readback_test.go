@@ -39,7 +39,7 @@ func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.
 // alike, which is what this pins: the row is written out padded, and that markdown reads back as
 // the tree it was stored from. Measured against the engine over the 99 documents of this class
 // found in a 50,000-document sample: 99 of 99 of their stored renderings read alike in both
-// parsers (INFRA-722's implement handoff).
+// parsers (sjawhar/legion#2507).
 func TestParsePadsAShortRowAndStoresWhatReadsBackAlike(t *testing.T) {
 	markdown := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |\n"
 	doc, err := Parse(markdown)

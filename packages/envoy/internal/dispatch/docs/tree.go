@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -147,13 +146,14 @@ func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdo
 }
 
 // askRefusalInstead is err, or the refusal of an ask written with its options and no question
-// where that is what err is about. The renderer writes such an ask's empty paragraphs as nothing
+// where err is the refusal of a document whose own rendering reads back otherwise
+// (pmdoc.ErrMisreadRendering). The renderer writes such an ask's empty paragraphs as nothing
 // (both parsers read one back), so markdown writing two of them renders to one the read-back
 // cannot match, and the write is refused for the rendering rather than for the ask. The author's
 // fault is the ask, so it is named: this reads the markdown again without the read-back check and
 // returns the ask rule's own refusal when it has one.
 func askRefusalInstead(markdown string, err error) error {
-	if err == nil || !strings.Contains(err.Error(), "reads back otherwise") {
+	if !errors.Is(err, pmdoc.ErrMisreadRendering) && !errors.Is(err, pmdoc.ErrRenderingRefused) {
 		return err
 	}
 	tree, parseErr := pmdoc.Parse(markdown)

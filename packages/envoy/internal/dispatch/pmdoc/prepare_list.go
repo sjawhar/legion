@@ -3,6 +3,8 @@ package pmdoc
 import (
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
+	"slices"
+	"sort"
 )
 
 // This file ports the two upstream functions that decide a list's and a list item's spread in the
@@ -102,6 +104,20 @@ const (
 	kindDefinition
 )
 
+// token is the kind of event this container's enter and exit are written as: a quote and a list
+// are the two the walks over the stream tell apart, and a typed block and a footnote definition
+// are containers of no kind of their own there.
+func (k containerKind) token() spreadToken {
+	switch k {
+	case kindQuote:
+		return tokenQuote
+	case kindList:
+		return tokenList
+	default:
+		return tokenContainer
+	}
+}
+
 // openContainer is one container the line machine holds open, with the state its continuation
 // reads and writes.
 type openContainer struct {
@@ -157,6 +173,9 @@ type lineMachine struct {
 	// stream, which the exits of a typed block's bare last line are put between.
 	lineFirst []int
 	lineLast  []int
+	// inserts are the events to put before an event of the stream, which writeInserts writes in
+	// once the document is read.
+	inserts []eventInsert
 	// bare is, by line, whether the line held nothing but its line ending once the containers
 	// out to the innermost typed block had stripped it, so that the block read it as no line of
 	// its own (directive-container.ts, exitsOfAnUnclosedDirectiveContainer, `bare`).
@@ -311,6 +330,13 @@ func (m *lineMachine) markFlow(node ast.Node) {
 	}
 }
 
+// eventInsert is events to put before the event at at, which writeInserts does once the whole
+// document is read.
+type eventInsert struct {
+	at     int
+	events []spreadEvent
+}
+
 // run reads the document line by line and writes the event stream.
 func (m *lineMachine) run() []spreadEvent {
 	// fenceDepth is how many containers stood around a fenced code block no fence closed that is
@@ -338,11 +364,21 @@ func (m *lineMachine) run() []spreadEvent {
 		lazyEnd = continued != len(m.stack)
 	}
 	last := len(m.lines.starts) - 1
-	if m.exitsATypedBlock(0) && lazyEnd && m.typedIsLazy(0, continued) && last >= 0 && m.bare[last] {
+	switch {
+	case m.exitsATypedBlock(0) && lazyEnd && m.typedIsLazy(0, continued) && last >= 0 && m.bare[last]:
 		m.exitBare(0, last)
-	} else {
+	case !m.endsInLineEnding && last >= 0 && m.bare[last] && m.exitsATypedBlock(0):
+		// A source that ends with no line ending ends in the flow, which reads the end of the
+		// document rather than another line, so no continuation runs there and nothing is lazy.
+		// Where its last line held nothing of the block but the containers' own prefixes, the
+		// block read that line as no line of its own just as it does mid-document, so its
+		// content ends before the line (directive-container.ts,
+		// exitsOfAnUnclosedDirectiveContainer with `bare`, and contentEnd).
+		m.exitBare(0, last)
+	default:
 		m.exit(0, lazyEnd, continued)
 	}
+	m.writeInserts()
 	return m.events
 }
 
@@ -454,7 +490,7 @@ func (m *lineMachine) readLine(line, fenceDepth int) int {
 	switch {
 	case blank && fenceDepth >= 0 && continued >= fenceDepth:
 		// A fenced code block no fence closed takes every line after it while the containers
-		// around it go on, so the line is its text and no blank line (keepsBlankLinesAfter).
+		// around it go on, so the line is its text and no blank line.
 		blank = false
 	case fenceDepth >= 0:
 		fenceDepth = -1
@@ -506,16 +542,11 @@ func (m *lineMachine) exitBare(keep, line int) {
 	var inner, own, outer []spreadEvent
 	for index := len(m.stack) - 1; index >= keep; index-- {
 		entry := m.stack[index]
-		event := spreadEvent{token: tokenContainer, node: entry.node}
-		switch entry.kind {
-		case kindDirective:
+		event := spreadEvent{token: entry.kind.token(), node: entry.node}
+		if entry.kind == kindDirective {
 			event.settled = true
 			own = append(own, event)
 			continue
-		case kindQuote:
-			event.token = tokenQuote
-		case kindList:
-			event.token = tokenList
 		}
 		if index > block {
 			inner = append(inner, event)
@@ -534,23 +565,47 @@ func (m *lineMachine) exitBare(keep, line int) {
 	m.stack = m.stack[:keep]
 }
 
-// insertEvents puts added into the stream before the event at index, and moves the line marks
-// that stand at or after it along with the events they name.
+// insertEvents records that added stands in the stream before the event at index, which
+// writeInserts puts there once the whole document is read. The events are not moved here, so the
+// line marks keep naming the events they named and an insert costs what it adds: a document of
+// thousands of such exits would otherwise move the stream and walk every line's marks once per
+// exit, which is quadratic in its lines (a 1 MiB body of 4,000 bare exits took 7.7 s that way,
+// and 0.08 s this way). The patched mdast-util-from-markdown collects prepareList's own
+// insertions the same way and rebuilds the events once.
 func (m *lineMachine) insertEvents(index int, added []spreadEvent) {
 	if len(added) == 0 {
 		return
 	}
-	m.events = append(m.events, added...)
-	copy(m.events[index+len(added):], m.events[index:len(m.events)-len(added)])
-	copy(m.events[index:], added)
-	for line := range m.lineFirst {
-		if m.lineFirst[line] >= index {
-			m.lineFirst[line] += len(added)
-		}
-		if m.lineLast[line] >= index {
-			m.lineLast[line] += len(added)
-		}
+	m.inserts = append(m.inserts, eventInsert{at: index, events: added})
+}
+
+// writeInserts rebuilds the stream with every recorded insert in place, each before the event it
+// names and, where several name one event, in the order they were recorded.
+func (m *lineMachine) writeInserts() {
+	if len(m.inserts) == 0 {
+		return
 	}
+	added := 0
+	for _, insert := range m.inserts {
+		added += len(insert.events)
+	}
+	// Two inserts before one event stand in the order the stream had them: the second insert
+	// named the event the first now stands before, so it goes ahead of it.
+	slices.Reverse(m.inserts)
+	sort.SliceStable(m.inserts, func(left, right int) bool { return m.inserts[left].at < m.inserts[right].at })
+	out := make([]spreadEvent, 0, len(m.events)+added)
+	next := 0
+	for index := range m.events {
+		for next < len(m.inserts) && m.inserts[next].at == index {
+			out = append(out, m.inserts[next].events...)
+			next++
+		}
+		out = append(out, m.events[index])
+	}
+	for ; next < len(m.inserts); next++ {
+		out = append(out, m.inserts[next].events...)
+	}
+	m.events, m.inserts = out, nil
 }
 
 // exitsATypedBlock reports whether a typed block stands among the containers past keep, which
@@ -711,11 +766,9 @@ func (m *lineMachine) openContainer(entry opening, cursor *lineCursor, line int)
 		held.size, held.initialBlank, held.further = size, initialBlank, false
 		m.events = append(m.events, spreadEvent{token: tokenItemPrefix, enter: true, node: entry.item})
 	case kindDirective:
-		directive, _ := entry.node.(*typedDirective)
-		indent := 0
-		if directive != nil {
-			indent = directive.indent
-		}
+		// Every kindDirective opening is read off a *typedDirective (newLineMachine).
+		directive := entry.node.(*typedDirective)
+		indent := directive.indent
 		m.events = append(m.events,
 			spreadEvent{token: tokenContainer, enter: true, node: entry.node},
 			spreadEvent{token: tokenContent, enter: true},
@@ -789,20 +842,13 @@ func (m *lineMachine) skipDefinitionLabel(cursor *lineCursor) {
 func (m *lineMachine) exit(keep int, lazyLine bool, continued int) {
 	for index := len(m.stack) - 1; index >= keep; index-- {
 		entry := m.stack[index]
-		token := tokenContainer
-		switch entry.kind {
-		case kindQuote:
-			token = tokenQuote
-		case kindList:
-			token = tokenList
-		}
 		// resolveContentExits settles a typed block's own exit where micromark's flow construct
 		// put it, so subtokenize does not move it back over the line endings before it - unless
 		// the line was lazy for that construct and its own continuation did not reach the line,
 		// where the construct left the exit to micromark (directive-container.ts,
 		// exitsOfAnUnclosedDirectiveContainer, `settled`).
 		m.events = append(m.events, spreadEvent{
-			token:   token,
+			token:   entry.kind.token(),
 			node:    entry.node,
 			settled: entry.kind == kindDirective && !(lazyLine && index >= continued),
 		})
@@ -902,4 +948,32 @@ func prepareList(events []spreadEvent, start, length int, found spreads) {
 		}
 	}
 	found[events[start].node] = listSpread
+}
+
+// moveContainerExits is micromark-util-subtokenize's move of a container's exit back over the line
+// endings before it: it steps over line endings, linePrefix and listItemIndent and stops at
+// anything else, types the first line ending it reaches a lineEnding and every later one a
+// lineEndingBlank, and puts the exit before that first one.
+func moveContainerExits(events []spreadEvent) {
+	for index := range events {
+		event := events[index]
+		if event.enter || !event.token.container() || event.settled {
+			continue
+		}
+		lineIndex := 0
+		for other := index - 1; other >= 0; other-- {
+			if events[other].token != tokenLineEnding && events[other].token != tokenLineEndingBlank {
+				break
+			}
+			if lineIndex > 0 {
+				events[lineIndex].token = tokenLineEndingBlank
+			}
+			events[other].token = tokenLineEnding
+			lineIndex = other
+		}
+		if lineIndex > 0 {
+			copy(events[lineIndex+1:index+1], events[lineIndex:index])
+			events[lineIndex] = event
+		}
+	}
 }

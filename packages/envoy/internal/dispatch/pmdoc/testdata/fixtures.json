@@ -57272,6 +57272,68 @@
     "rendered_by_milkdown": "> *\n>   [^f]: :::callout{#b-000006 kind=\"note\" title}\n>       ```\n>       ```\n>       :::\n"
   },
   {
+    "name": "quoted-typed-block-ending-with-no-line-feed",
+    "markdown": "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> - x\n>\n>",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "c1"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000002"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000003"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000004"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ARIBAAcBC3Byb3NlbWlycm9yAwpibG9ja3F1b3RlBwABAAMHY2FsbG91dAcAAQEDC2J1bGxldF9saXN0BwABAgMJbGlzdF9pdGVtBwABAwMJcGFyYWdyYXBoBwABBAYEAAEFAXgoAAEEB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAQMFbGFiZWwBdwPigKIoAAEDCGxpc3RUeXBlAXcGYnVsbGV0KAABAwZzcHJlYWQBeSgAAQMHYmxvY2tJZAF3CGItMDAwMDAzKAABAgZzcHJlYWQBeSgAAQIHYmxvY2tJZAF3CGItMDAwMDAyKAABAQRraW5kAXcEbm90ZSgAAQEFdGl0bGUBdwFUKAABAQdibG9ja0lkAXcCYzEoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMQA=",
+    "rendered_by_milkdown": "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> * x\n> :::\n"
+  },
+  {
     "name": "quoted-typed-block-inner-list-ends",
     "markdown": "Lists inside an unclosed typed block in a quote, after the blank lines that end the block: the list the next item belongs to, and the whitespace those lines hold.\n\n> :::callout{#qi1 kind=\"note\" title=\"T\"}\n> - x\n>   - y\n>\n> - z\n\nNext.\n\n> - a\n>   :::callout{#qi2 kind=\"note\" title=\"T\"}\n>   - x\n>     - y\n>\n>   - z\n\nNext.\n\n> - a\n>   :::callout{#qi3 kind=\"note\" title=\"T\"}\n>   - x\n>\t\n>\t\n\nNext.\n\n> 1. a\n>    :::callout{#qi4 kind=\"note\" title=\"T\"}\n>    - x\n>\t\n>\t\n\nNext.\n\n> > - a\n> >   :::callout{#qi5 kind=\"note\" title=\"T\"}\n> >   - x\n> >\t\n> >\t\n\nNext.\n\n> > > - a\n> > >   :::callout{#qi6 kind=\"note\" title=\"T\"}\n> > >   - x\n> > >\t\n> > >\t\n\nNext.\n\n> > - a\n> >     :::callout{#qi7 kind=\"note\" title=\"T\"}\n> >     - x\n> > \t\n> > \t\n\nNext.\n\n> > - a\n> >     :::callout{#qi8 kind=\"note\" title=\"T\"}\n> >     - x\n> >\t\t\n> >\t\t\n\nNext.\n\n> > 10. a\n> >     :::callout{#qi9 kind=\"note\" title=\"T\"}\n> >     - x\n> > \t\n> > \t\n",
     "pm_json": {

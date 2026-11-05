@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // skip names what a comparison leaves aside: the attributes it names, or all of them, and with
@@ -133,7 +134,10 @@ func documentMisread(doc *Node) (WrittenReadBack, string, error) {
 	read, err := readBackWritten(doc, maxSpanCells)
 	if err != nil {
 		if errors.Is(err, ErrSchema) {
-			return WrittenReadBack{}, err.Error(), nil
+			// The rendering cannot be read at all, so the refusal that names the shape is what
+			// the caller is told, rather than the sentence about reading back otherwise: the
+			// shape is what its author can act on (ErrRenderingRefused).
+			return WrittenReadBack{}, "", fmt.Errorf("%w: %s", ErrRenderingRefused, strings.TrimPrefix(err.Error(), ErrSchema.Error()+": "))
 		}
 		return WrittenReadBack{}, "", err
 	}
@@ -174,6 +178,17 @@ func RefuseMisreadWrite(before, after *Node) error {
 	return refuseMisread(newMisread(before, after, 0))
 }
 
+// ErrRenderingRefused is the refusal of a document whose own rendering no reader of this package
+// reads at all: the markdown a write would store is outside the schema, and the refusal it wraps
+// names the shape. A caller that answers such a write with a reason of its own tests for this as
+// it tests for ErrMisreadRendering.
+var ErrRenderingRefused = fmt.Errorf("%w: the markdown the document would be stored as cannot be read back", ErrSchema)
+
+// ErrMisreadRendering is the refusal of a document whose own rendering reads back otherwise. A
+// caller that answers such a write with a reason of its own (docs' ask rules) tests for this
+// rather than for the sentence below.
+var ErrMisreadRendering = fmt.Errorf("%w: the markdown the document would be stored as reads back otherwise", ErrSchema)
+
 func refuseMisread(misread string, err error) error {
 	if err != nil {
 		return err
@@ -182,7 +197,7 @@ func refuseMisread(misread string, err error) error {
 		return nil
 	}
 	slog.Warn("pmdoc: refused a write whose markdown reads back otherwise", "misread", misread)
-	return fmt.Errorf("%w: the markdown the document would be stored as reads back otherwise (%s)", ErrSchema, misread)
+	return fmt.Errorf("%w (%s)", ErrMisreadRendering, misread)
 }
 
 // misread is a block that reads back otherwise: its id, what differs (the same for the same

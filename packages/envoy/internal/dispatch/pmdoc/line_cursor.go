@@ -83,31 +83,3 @@ func (m *lineMachine) blankFrom(cursor lineCursor) bool {
 	}
 	return true
 }
-
-// moveContainerExits is micromark-util-subtokenize's move of a container's exit back over the line
-// endings before it: it steps over line endings, linePrefix and listItemIndent and stops at
-// anything else, types the first line ending it reaches a lineEnding and every later one a
-// lineEndingBlank, and puts the exit before that first one.
-func moveContainerExits(events []spreadEvent) {
-	for index := range events {
-		event := events[index]
-		if event.enter || !event.token.container() || event.settled {
-			continue
-		}
-		lineIndex := 0
-		for other := index - 1; other >= 0; other-- {
-			if events[other].token != tokenLineEnding && events[other].token != tokenLineEndingBlank {
-				break
-			}
-			if lineIndex > 0 {
-				events[lineIndex].token = tokenLineEndingBlank
-			}
-			events[other].token = tokenLineEnding
-			lineIndex = other
-		}
-		if lineIndex > 0 {
-			copy(events[lineIndex+1:index+1], events[lineIndex:index])
-			events[lineIndex] = event
-		}
-	}
-}

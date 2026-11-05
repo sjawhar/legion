@@ -38,7 +38,7 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 
 // blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
 // ends in a footnote definition, before next, the next item or the block after the list: those
-// lines are the definition's (definitionEndSpreadsItem), so an item spread by none of its own
+// lines are the definition's (blanksEndingQuotedList), so an item spread by none of its own
 // lines takes what spreads it (definitionSpreadBlanks), and none spreads the list. Otherwise it
 // takes none before a quote, a list or a definition and before the next item, and one before
 // anything else, which would continue the definition's paragraph - except after a definition
@@ -61,7 +61,7 @@ func (r *renderer) definitionEndsItem(item *Node) bool {
 
 // definitionSpreadBlanks is how many blank lines after a footnote definition in a quote spread the
 // list item holding it, before next, as the browser editor's parser counts them there, where they
-// are the definition's (definitionBlanksInQuote, definitionEndSpreadsItem): one before a quote, a
+// are the definition's (blanksEndingQuotedList, blanksEndingQuotedList): one before a quote, a
 // list or a definition, and two before anything else, the next item and the quote's end included.
 func definitionSpreadBlanks(next *Node) int {
 	if next != nil && quoteListOrDefinition(next) {
@@ -178,7 +178,7 @@ func spacedAfter(list *Node, quoted bool) *Node {
 		return spacedAfter(inner, quoted)
 	case quoted && inner.Type == "footnote_definition":
 		// The blank lines after an item ending in a footnote definition are the definition's,
-		// and spread the item (definitionEndSpreadsItem).
+		// and spread the item (blanksEndingQuotedList).
 		return last
 	case quoted:
 		return list
@@ -282,13 +282,13 @@ func opensAfterParagraphAlone(block *Node) bool {
 }
 
 // opensAfterBlock reports whether child, written on the line after previous with no blank line
-// between them, opens as itself: what opensAfterParagraph says of it, except for two blocks whose
-// answer the block before decides. A table's header row interrupts a paragraph of its own
+// between them, opens as itself: what opensAfterParagraphAlone says of it, except for two blocks
+// whose answer the block before decides. A table's header row interrupts a paragraph of its own
 // container as GitHub's tables do, while after a list, a quote or another container it is read as
 // one more line of the paragraph that container ends in. A list opens on the line after a
 // container whatever its first item is, since only a paragraph of the same block takes that line
 // as its own text: a list that interrupts no paragraph - one starting past one, or one whose
-// first item is empty - still opens after a quote or a list, as main writes it.
+// first item is empty - still opens after a quote or a list.
 func opensAfterBlock(previous, child *Node) bool {
 	if child.Type == "table" {
 		return previous.Type == "paragraph"
