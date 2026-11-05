@@ -80,7 +80,17 @@ jobs:
           # GitHub documents the array as holding up to 2048 commits (docs.github.com, "Webhook
           # events and payloads", push), and 2048 whole messages pass the 128 KiB Linux allows
           # one environment string, which would kill this step at exec before it read anything.
-          COMMITS=$(jq -c '[.commits[]? | {id, message}]' "$GITHUB_EVENT_PATH")
+          # A payload whose `.commits` is not an array is one this step cannot read: the `jq`
+          # below ends the step on it, loudly, rather than handing the decision an empty push
+          # and going green having started nothing, the outcome `shell: bash` above is there to
+          # prevent. GitHub documents `commits` as present on every push, so only a payload
+          # this job was never meant to read reaches that error. An empty array is a shape of
+          # its own and no error: a push that adds no commit, as a force-push to a commit
+          # already on main is, carries nothing for this check to test, and the decision below
+          # says so and starts nothing.
+          COMMITS=$(jq -c 'if (.commits | type) == "array" then [.commits[] | {id, message}]
+                           else error("the push payload has no .commits array: .commits is \(.commits | type)") end' \
+            "$GITHUB_EVENT_PATH")
           payload_commits=$(jq 'length' <<<"$COMMITS")
           # The fallback for a payload GitHub cut: an array of exactly 2048 commits is at that
           # documented cap, so the push may hold more, and the range is read again from the

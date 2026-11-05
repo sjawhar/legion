@@ -35,8 +35,11 @@
 # unreported job at its live status: a job GitHub shows completed at its conclusion, one still
 # queued or running at that status (`queued`, `in_progress`), one the route does not list at all
 # as `unlisted`. None of those is `success`, so ci-ok.sh's verdict is failure, which is right: a
-# selected job that did not succeed fails ci-ok, and the run is about to be thrown away. A
-# refused read leaves those jobs unreported and the script waits as usual.
+# selected job that did not succeed fails ci-ok, and the run is about to be thrown away. A read
+# GitHub refuses three times there records those jobs as `unread`, which is no `success`
+# either: the verdict is posted all the same, because nothing of a force-cancelled run reports
+# after it. On a run that is not decided a refused read leaves the jobs unreported and the
+# script waits as usual.
 #
 # The report is uploaded before the list is read, and GitHub serves an artifact once its upload
 # finishes, so of two jobs that finish together the second to read the list finds both reports
@@ -166,34 +169,62 @@ fi
 # A job that ended before its first step ran (a service container that never started, a runner
 # lost) never reports, so a run whose other jobs all reported would never get ci-ok. When one or
 # two jobs are left unreported, or the verdict is decided and this run will decide nothing more,
-# read the run's jobs once (the latest attempt's, as GitHub lists them): each such job GitHub
-# shows completed stands at its conclusion, a called workflow's jobs (`<job> / <its job>`)
-# together. Fewer reads than every job reading the list, which the token's hourly limit could not
-# carry; a job that ends unreported as the run's very last leaves ci-ok unposted, and re-running
-# it posts ci-ok. A failed read leaves the jobs unreported. On a decided run a job that is not
-# completed stands at the status GitHub shows it at (`queued`, `in_progress`), and one the route
-# does not list at all at `unlisted`: neither is `success`, so ci-ok.sh fails it.
+# read the run's jobs (the latest attempt's, as GitHub lists them): each such job GitHub shows
+# completed stands at its conclusion, a called workflow's jobs (`<job> / <its job>`) together.
+# Fewer reads than every job reading the list, which the token's hourly limit could not carry; a
+# job that ends unreported as the run's very last leaves ci-ok unposted, which a re-run posts on
+# a pull-request or dispatched run and nothing posts on a merge-group run, which is never
+# re-run: there the group sits in the queue until GitHub's 180-minute check timeout or a dequeue
+# takes it out. On a decided run a job that is not completed stands at the status GitHub shows
+# it at (`queued`, `in_progress`), and one the route does not list at all at `unlisted`: neither
+# is `success`, so ci-ok.sh fails it.
+#
+# The read is retried twice, on the same ladder as the artifact list above: GH_RETRY_SECONDS
+# (10 by default) and then twice as many apart. Three refusals leave the jobs unreported and the
+# script waits as usual — except on a merge_group run already decided, where waiting posts
+# nothing at all: the follower of this job's own report force-cancels the rest of the run, and a
+# force-cancel leaves every `if: always()` step skipped, so no later job of the run reports and
+# the group carries no ci-ok until that same timeout. There every job still unreported is
+# recorded `unread`, which is not `success`, so ci-ok.sh fails the verdict this job posts now.
+# It cannot be a pass: nothing this job can read shows those jobs succeeded, and the run is
+# being thrown away either way.
 unreported=$(jq '.pending | length' <<<"$decision")
-if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]; } \
-  && jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-    --jq '.jobs[] | {name, status, conclusion}'); then
-  decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" --argjson decided "$decided" '
-    def mine($job): [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))];
-    def ended($job):
-      mine($job) as $mine
-      | if ($mine | length) > 0 and all($mine[]; .status == "completed") then
-          [$mine[].conclusion]
-          | if any(. == "success" or . == "skipped" or . == "cancelled" | not) then "failure"
-            elif any(. == "cancelled") then "cancelled"
-            elif any(. == "success") then "success"
-            else "skipped" end
-        else null end;
-    def live($job):
-      [mine($job)[] | select(.status != "completed") | .status] | first // "unlisted";
-    reduce .pending[] as $job (.;
-      (ended($job) // (if $decided then live($job) else null end)) as $result
-      | if $result == null then . else (.pending -= [$job]) | (.needs[$job].result = $result) end)' \
-    <<<"$decision")
+if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]; }; then
+  jobs=
+  listed=false
+  for attempt in 1 2 3; do
+    if jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+      --jq '.jobs[] | {name, status, conclusion}'); then
+      listed=true
+      break
+    fi
+    [ "$attempt" -eq 3 ] || sleep $((attempt * ${GH_RETRY_SECONDS:-10}))
+  done
+  if [ "$listed" = true ]; then
+    decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" --argjson decided "$decided" '
+      def mine($job): [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))];
+      def ended($job):
+        mine($job) as $mine
+        | if ($mine | length) > 0 and all($mine[]; .status == "completed") then
+            [$mine[].conclusion]
+            | if any(. == "success" or . == "skipped" or . == "cancelled" | not) then "failure"
+              elif any(. == "cancelled") then "cancelled"
+              elif any(. == "success") then "success"
+              else "skipped" end
+          else null end;
+      def live($job):
+        [mine($job)[] | select(.status != "completed") | .status] | first // "unlisted";
+      reduce .pending[] as $job (.;
+        (ended($job) // (if $decided then live($job) else null end)) as $result
+        | if $result == null then . else (.pending -= [$job]) | (.needs[$job].result = $result) end)' \
+      <<<"$decision")
+  elif [ "$decided" = true ]; then
+    echo "::warning::GitHub refused this run's job list three times, and this merge-group run is already decided: every job that has not reported is read as unread, because no job of this run reports once its follower force-cancels it"
+    decision=$(jq 'reduce .pending[] as $job (.;
+      (.pending -= [$job]) | (.needs[$job].result = "unread"))' <<<"$decision")
+  else
+    echo "::warning::GitHub refused this run's job list three times; the jobs that have not reported stand unreported, and the last of them to finish posts ci-ok"
+  fi
 fi
 
 pending=$(jq -r '.pending | join(", ")' <<<"$decision")

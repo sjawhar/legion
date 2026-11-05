@@ -3920,7 +3920,7 @@ jobs:
             [ -n "$sha" ] || continue
             if conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
               --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
-                    else .check_runs[0].conclusion // empty end'); then
+                    else ([.check_runs[]?] | sort_by(.id) | last | .conclusion // empty) end'); then
               [ -z "$conclusion" ] ||
                 jq -nc --arg sha "$sha" --arg conclusion "$conclusion" '{($sha): $conclusion}' >>"$readings"
             else

@@ -45,12 +45,13 @@
 #                from a later run of the same group. `per_page=100` is required with it: the
 #                default page holds the 30 newest check runs of the commit. A commit that
 #                carries both is no failed group, so a `success` among them is the conclusion
-#                this map holds:
+#                this map holds, and among the rest the newest check run decides, which is the
+#                one GitHub's merge box and the Legion daemon read:
 #                  jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS" |
 #                    while read -r sha; do
 #                      gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
 #                        --jq 'if any(.check_runs[]?; .conclusion == "success") then "success"
-#                              else .check_runs[0].conclusion // empty end' |
+#                              else ([.check_runs[]?] | sort_by(.id) | last | .conclusion // empty) end' |
 #                        jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
 #                    done | jq -s 'add // {}'
 #   REPORT       the failed act's whole decision, which the caller reads from this run's

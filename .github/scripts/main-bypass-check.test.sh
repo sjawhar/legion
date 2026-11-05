@@ -298,4 +298,41 @@ shape "the words as the whole message, which makes them its subject" 'skip-check
 shape "skip-checks: false, which is no marker of GitHub's" \
   "$(printf 'plan: record the handoff\n\nCo-authored-by: a <a@example.com>\nskip-checks: false\n')" read
 
+echo "case: the workflow's own read of the push payload, on each shape .commits can take"
+# main-bypass-check.yaml gathers the push from $GITHUB_EVENT_PATH before it runs the decision
+# script, and that read is the one input shape no test below the workflow can reach. A payload
+# whose `.commits` is not an array is a payload this job cannot read: the read must end the step
+# rather than hand the decision an empty push, which would go green having started nothing — the
+# outcome `shell: bash` is there to prevent. An empty array is no such payload: it is a push that
+# added no commit, which the case "a push that carries no commit" above reads as carrying nothing
+# to test.
+read_payload() { # read_payload <event payload>: sets out (the gathered COMMITS, or the error) and status
+  printf '%s' "$1" > "$work/event.json"
+  local gather
+  gather=$(yq -r '.jobs[].steps[] | select(has("run")) | .run' "$bypass_workflow" |
+    awk '/COMMITS=\$\(jq -c/ {found = 1} found {print} found && /"\$GITHUB_EVENT_PATH"\)$/ {exit}')
+  set +e
+  out=$(GITHUB_EVENT_PATH="$work/event.json" bash --noprofile --norc -eo pipefail \
+    -c "$gather"$'\nprintf %s "$COMMITS"' 2>&1)
+  status=$?
+  set -e
+}
+failed() { [ "$status" -ne 0 ] && echo true || echo false; }
+
+read_payload "$(jq -nc --arg id "$bypassed" '{commits: [{id: $id, message: "fix: a commit", author: {name: "a"}}]}')"
+check "a push payload is read into the commits the decision wants" \
+  "$(is "$out" "$(jq -nc --arg id "$bypassed" '[{id: $id, message: "fix: a commit"}]')")"
+read_payload '{"ref": "refs/heads/main", "before": "0000", "after": "1111"}'
+check "a payload with no .commits at all ends the step" "$(failed)"
+check "naming what it could not read" "$(contains "$out" 'no \.commits array: \.commits is null')"
+read_payload '{"ref": "refs/heads/main", "commits": null}'
+check "a payload whose .commits is null ends the step" "$(failed)"
+check "naming what it could not read" "$(contains "$out" 'no \.commits array: \.commits is null')"
+read_payload '{"ref": "refs/heads/main", "commits": {"0": {"id": "a"}}}'
+check "a payload whose .commits is no array ends the step" "$(failed)"
+check "naming the type it found" "$(contains "$out" 'no \.commits array: \.commits is object')"
+read_payload '{"ref": "refs/heads/main", "commits": []}'
+check "a push that added no commit is read, not refused" "$(is "$status" 0)"
+check "as the empty push it is" "$(is "$out" '[]')"
+
 summary "the main bypass check's decision"

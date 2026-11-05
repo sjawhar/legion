@@ -273,4 +273,51 @@ run_cancels failed 41860898444 "$head_2589" "$(queue_branch 2589 "$main_tip")" "
 check "a report of cancelled, which a job its own timeout cut off leaves, ends this run too" \
   "$(is "$out" "$(printf 'cancel 41861688656\ncancel 41865489886\ncancel 41860898444')")"
 
+echo "case: the ci-ok cancel-started reads for a head does not depend on the order of .check_runs"
+# CI_OK is gathered by ci.yaml's `cancel-started` step, one check run read per head, and GitHub
+# documents no order for the check runs of a commit. A head the queue tested can carry more than
+# one ci-ok (`filter=all`, which that step's comment explains), so the read has to give the same
+# conclusion whichever order the page arrives in. A `success` among them wins, as it always has:
+# a head that carries one is no failed group. Otherwise the newest check run of the head decides
+# — the one GitHub and the Legion daemon read, since of two jobs that post, the later check run
+# is the one they show (.github/scripts/ci-ok-report.sh's header says so).
+ci_ok_read() { # ci_ok_read <check-runs page>: the conclusion cancel-started's read gives that head
+  local filter
+  filter=$(yq -r '.jobs["cancel-started"].steps[] | select(has("run")) | .run' \
+    "$script_dir/../workflows/ci.yaml" |
+    awk '/--jq .if any\(\.check_runs/ {found = 1} found {print} found && /end.\); then$/ {exit}' |
+    sed "s/^ *--jq '//; s/'); then\$//")
+  jq -r "$filter" <<<"$1"
+}
+# check_run <id> <conclusion>: one ci-ok check run of that read, an empty conclusion as the null
+# GitHub gives a check run that has not completed.
+check_run() {
+  jq -nc --argjson id "$1" --arg conclusion "$2" \
+    '{id: $id, name: "ci-ok", conclusion: (if $conclusion == "" then null else $conclusion end)}'
+}
+# runs_page <check run>...: the page `filter=all` returns, in the order given.
+runs_page() { printf '%s\n' "$@" | jq -s -c '{total_count: length, check_runs: .}'; }
+
+running=$(check_run 7 '')
+failed_later=$(check_run 9 failure)
+check "a failing ci-ok posted after an in-progress one dooms the groups below the head" \
+  "$(is "$(ci_ok_read "$(runs_page "$running" "$failed_later")")" failure)"
+check "and says so with the page in the other order" \
+  "$(is "$(ci_ok_read "$(runs_page "$failed_later" "$running")")" failure)"
+
+failed_first=$(check_run 9 failure)
+running_later=$(check_run 11 '')
+check "a ci-ok still running after a failing one leaves the head without one, which dooms nothing" \
+  "$(is "$(ci_ok_read "$(runs_page "$failed_first" "$running_later")")" "")"
+check "and leaves it without one with the page in the other order" \
+  "$(is "$(ci_ok_read "$(runs_page "$running_later" "$failed_first")")" "")"
+
+passed_earlier=$(check_run 3 success)
+check "a success among them wins, whatever its place in the page" \
+  "$(is "$(ci_ok_read "$(runs_page "$(check_run 20 failure)" "$passed_earlier")")" success)"
+check "and wins at the head of the page too" \
+  "$(is "$(ci_ok_read "$(runs_page "$passed_earlier" "$(check_run 20 failure)")")" success)"
+
+check "a head with no ci-ok at all carries none here" "$(is "$(ci_ok_read '{"total_count": 0, "check_runs": []}')" "")"
+
 summary "the merge-group cancel decision"
