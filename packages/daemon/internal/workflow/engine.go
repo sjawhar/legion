@@ -192,6 +192,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checkLookEnded(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
+	case intake.ControllerTick:
+		return e.statusRepairTick(ctx, tx)
 	default:
 		return intake.Result{}, nil
 	}
