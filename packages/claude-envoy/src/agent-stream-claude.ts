@@ -104,6 +104,13 @@ export interface ClaudeAgentStreamDeps {
   /** The clock a step's timestamp is allocated from, and every other message is stamped with. */
   readonly now: () => number
   /**
+   * Whether this session is a Legion pane rather than a terminal one. A pane is seeded with one
+   * command before anything else happens in it (`PANE_SEEDED_COMMAND`), which is the daemon
+   * naming the pane rather than a person writing to the agent, so the view draws neither the
+   * prompt that carried it nor the echo Claude Code wrote of it.
+   */
+  readonly isPane: boolean
+  /**
    * The Dispatch message a row of the conversation is, where it is one
    * (`./user-turn-state`). A person's own message would otherwise reach the page twice - as the
    * message Dispatch stored and as the row the session took it as - and the row's tag is how the
@@ -200,6 +207,71 @@ function roleOf(message: ModAppendMessage): "assistant" | "user" {
 }
 
 /**
+ * The tags Claude Code wraps its own bookkeeping of a slash command in.
+ *
+ * Measured on 2.1.310: a command a person runs writes three rows by the `command` door - the
+ * caveat row, which says the command's output went to the person rather than to the model and
+ * carries `isMeta: true`; the echo row, which holds what was typed; and the output row. The
+ * output row's `message.type` is `user` in some runs and `system` (`name: "local_command"`) in
+ * others, so the tag its text starts with is the only safe discriminator
+ * (`/legion/scratch/tmp/infra-1026-spike/config/projects/-legion-scratch-tmp-infra-1026-proof-work/22a2c318-8433-4659-9568-a5ce1a873926.jsonl:42-44`,
+ * this plugin's own mod running `/usage`).
+ */
+const COMMAND_BOOKKEEPING_TAGS = [
+  "<local-command-caveat>",
+  "<local-command-stdout>",
+  "<local-command-stderr>",
+] as const
+
+/** The command the daemon's bridge seeds a fresh Legion pane with before anything else
+ *  (`packages/daemon/internal/claudebridge/bridge.go:210-213`), which names the pane. */
+const PANE_SEEDED_COMMAND = "/rename"
+
+/** The value one of the echo row's tags holds, trimmed: the recorded row indents every tag after
+ *  the first, so the whitespace around a value is the row's layout and not part of it. */
+function taggedValue(text: string, tag: string): string | undefined {
+  const open = `<${tag}>`
+  const from = text.indexOf(open)
+  if (from === -1) return undefined
+  const to = text.indexOf(`</${tag}>`, from + open.length)
+  if (to === -1) return undefined
+  return text.slice(from + open.length, to).trim()
+}
+
+/**
+ * The plain command line a row of the `command` door echoes, or `undefined` where the row is not
+ * the echo of a command a person ran.
+ *
+ * Measured on 2.1.310: the echo row holds one text block naming `<command-name>/usage</command-
+ * name>`, `<command-message>usage</command-message>` and `<command-args></command-args>`,
+ * newline-separated, each tag on its own line (same transcript as
+ * `COMMAND_BOOKKEEPING_TAGS`). The command line is the name, and the arguments after a space
+ * where there are any - `/clear`, `/effort low` - which is what the person typed and all of the
+ * command the live view shows.
+ */
+export function claudeEchoedCommandLine(content: readonly ModContentBlock[]): string | undefined {
+  const text = flatten(content)
+  const name = taggedValue(text, "command-name")
+  if (name === undefined || name === "") return undefined
+  const args = taggedValue(text, "command-args") ?? ""
+  return args === "" ? name : `${name} ${args}`
+}
+
+/** Whether a row of the `command` door is Claude Code's bookkeeping of the command rather than
+ *  anything a person wrote: the caveat it records before the command runs, and the command's own
+ *  output, which published shows the person raw tags and a `/context` table in the agent's
+ *  conversation (INFRA-1026). */
+function isCommandBookkeeping(content: readonly ModContentBlock[]): boolean {
+  const text = flatten(content)
+  return COMMAND_BOOKKEEPING_TAGS.some((tag) => text.startsWith(tag))
+}
+
+/** Whether a line is the command a pane is seeded with, with or without the title it names. */
+function isPaneSeededRename(line: string): boolean {
+  return line === PANE_SEEDED_COMMAND || line.startsWith(`${PANE_SEEDED_COMMAND} `)
+}
+
+/**
  * A streamed tool call's arguments as the publisher should render them. They arrive as JSON text
  * a piece at a time, so a snapshot taken mid-block does not parse: the parsed value is handed
  * over once there is one, and until then the text as it arrived, which is what the viewer shows
@@ -259,7 +331,7 @@ export function claudeAgentStreamCommands(
 }
 
 export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgentStream {
-  const { publisher, now } = deps
+  const { isPane, publisher, now } = deps
   /** The timestamp each `(turnId, index)` step was first seen at, which is its ring slot. */
   const stepAt = new Map<string, number>()
   /** The last timestamp handed to a step, so the next one is strictly past it. */
@@ -292,9 +364,12 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
 
   /** One `turn.step` snapshot as the assistant message of that step. */
   const recordStep = (subject: string, event: Extract<ModEvent, { kind: "step" }>): void => {
-    // The step reports the effort its own request carried. A pick is not forgotten here: the
-    // mod goes on putting it on every later request, whatever model runs, so it stays the level
-    // in force until another pick changes it.
+    // The step reports the effort its own request carried, which is the truth about that
+    // request: a pick stands only while the steps agree with it. A step whose own effort is
+    // another level, or none at all, ends the pick and leaves the step itself to answer -
+    // measured live on 2.1.310, a pick of `low` with `claude-haiku-4-5` in force left the header
+    // reading `low` while the session's next request carried no effort at all (INFRA-1026).
+    if (event.effort !== picked) picked = undefined
     observed = { model: event.model, effort: event.effort }
     const content: ClaudeStreamPart[] = []
     let hiddenThinkingShown = false
@@ -343,6 +418,10 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
       // and one without it carries no such field, which is what tells the two apart.
       if (origin.kind === "plugin" && origin.asUser !== true) return
+      // The command a pane is seeded with arrives by this door, written to the session's input
+      // by the daemon's bridge before anything else happens in the pane: it names the pane, and
+      // no person sent it.
+      if (isPane && isPaneSeededRename(flatten(message.content))) return
       // Each block crosses as the part it is, as it does by every other door: the person's text
       // stays a part of its own and a picture becomes the `[image]` part the publisher names it
       // (`conversationParts` in `@legion/pi-shared/agent-stream`). Flattened into one
@@ -383,6 +462,30 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         )
       }
       return
+    }
+    if (door === "command") {
+      // A command a person ran writes three rows by this door and only one of them is a message
+      // (`COMMAND_BOOKKEEPING_TAGS`): the echo of what was typed, which the view draws as the
+      // plain command line the person would have typed - `/clear`, `/effort low` - rather than
+      // as the tags Claude Code wrote it in. A row that is neither the echo nor the bookkeeping
+      // goes the way every other row does, below.
+      const line = claudeEchoedCommandLine(message.content)
+      if (line !== undefined) {
+        if (isPane && isPaneSeededRename(line)) return
+        record(
+          subject,
+          {
+            content: [{ text: line, type: "text" }],
+            role: "user",
+            tag: uuid,
+            timestamp: now(),
+          },
+          false,
+          deps.tagFor?.(uuid),
+        )
+        return
+      }
+      if (isCommandBookkeeping(message.content)) return
     }
     const content = message.content.map(partOf)
     // A row that shows a reader nothing is the session's bookkeeping, not its conversation, so
@@ -429,10 +532,11 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         // Claude Code reports the effort on each request's `turn.step` and nowhere else, so a
         // pick is the only other thing that knows one: it set the effort the mod puts on every
         // later request whatever model runs it, so from the moment it lands it is the level in
-        // force, and it stays so until another pick changes it - a step of a model picked after
-        // it carries that very effort. Before this session's first request and before any pick
-        // there is a selector and no level to show; a step that named no effort is a model with
-        // no thinking to adjust. A step of another model is no answer about this one.
+        // force, and it survives a model pick whose later step reports that same effort. A step
+        // that reports another level, or none at all, ends the pick and answers for itself
+        // (`recordStep`). Before this session's first request and before any pick there is a
+        // selector and no level to show; a step that named no effort is a model with no thinking
+        // to adjust. A step of another model is no answer about this one.
         thinking:
           picked !== undefined
             ? { level: String(picked), levels: CLAUDE_EFFORT_LEVELS }

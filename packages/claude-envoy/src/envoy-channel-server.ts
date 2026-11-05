@@ -2125,6 +2125,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
           connection: bus,
           // Only a Claude-minted id follows `/clear`; the override names a fixed identity.
           followsSessionId: configuredValue(overrideSessionId) === undefined,
+          isPane: pane !== undefined,
           link,
           sessionId: identity.id,
           // The link's events have one consumer, and two things behind it need them: the

@@ -44,6 +44,9 @@ export interface AgentStreamOptions {
    * id names nothing Dispatch knows, so the stream stays where it started.
    */
   readonly followsSessionId: boolean
+  /** Whether this session is a Legion pane, whose first command the daemon's bridge writes
+   *  rather than a person (`./agent-stream-claude`, `PANE_SEEDED_COMMAND`). */
+  readonly isPane?: boolean
   readonly now?: () => number
   /** Where a failure that must not stop the session is written; the server's stderr by default. */
   readonly warn?: (text: string) => void
@@ -96,6 +99,7 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
     publish: (subject, payload) => connection.publish(subject, encoder.encode(payload)),
   })
   const stream = createClaudeAgentStream({
+    isPane: options.isPane === true,
     now,
     publisher,
     ...(options.tagFor === undefined ? {} : { tagFor: options.tagFor }),

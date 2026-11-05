@@ -60,7 +60,11 @@ interface Harness {
 
 /** A publisher a viewer is already watching, with a clock the test moves itself: a real one would
  *  make a step's allocated timestamp unpredictable, and the slot is the timestamp. */
-function harness(startAt = 1_000, tagFor?: (row: string) => string | undefined): Harness {
+function harness(
+  startAt = 1_000,
+  tagFor?: (row: string) => string | undefined,
+  isPane = false,
+): Harness {
   let clock = startAt
   const now = (): number => clock
   const published: AgentStreamFrame[] = []
@@ -69,6 +73,7 @@ function harness(startAt = 1_000, tagFor?: (row: string) => string | undefined):
     publish: (_subject, payload) => published.push(JSON.parse(payload) as AgentStreamFrame),
   })
   const stream = createClaudeAgentStream({
+    isPane,
     now,
     publisher,
     ...(tagFor === undefined ? {} : { tagFor }),
@@ -133,6 +138,22 @@ function appendRow(
     uuid: "row-1",
     ...overrides,
   }
+}
+
+/** The echo row Claude Code writes of a slash command a person ran, as 2.1.310 records it: one
+ *  text block naming the command, the message it carries and its arguments, newline-separated,
+ *  with every tag after the first indented (the transcripts `COMMAND_BOOKKEEPING_TAGS` names in
+ *  `../src/agent-stream-claude`). */
+function commandEcho(name: string, args: string, uuid: string): ModEvent {
+  const text = [
+    `<command-name>/${name}</command-name>`,
+    `            <command-message>${name}</command-message>`,
+    `            <command-args>${args}</command-args>`,
+  ].join("\n")
+  return appendRow("command", [{ text, type: "text" }], {
+    origin: { kind: "plugin", name: "claude-envoy" },
+    uuid,
+  })
 }
 
 test("a streaming step's snapshots stay one message, and its text grows", () => {
@@ -257,6 +278,79 @@ test("a command row keeps the row's own role and a note row an assistant one", (
   expect(messages(live.replay()).map((message) => [message.role, textOf(message)])).toEqual([
     ["user", "/compact"],
     ["assistant", "the session compacted"],
+  ])
+})
+
+// One command a person ran writes three rows by the `command` door: the caveat saying the
+// command's output went to the person rather than to the model, the echo of what was typed, and
+// the output itself (measured on 2.1.310 with this plugin's own mod running `/usage`). Recorded
+// as they stand, the caveat and the output draw a person the raw tags and Claude Code's
+// `/context` table inside the agent's conversation (INFRA-1026).
+test("a command's caveat row and its output record nothing", () => {
+  const live = harness()
+  const caveat =
+    "<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"
+  const stdout = "<local-command-stdout>Total cost:            $0.0993</local-command-stdout>"
+  live.feed(
+    appendRow("command", [{ text: caveat, type: "text" }], {
+      message: {
+        content: [{ text: caveat, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "plugin", name: "claude-envoy" },
+      uuid: "row-caveat",
+    }),
+    // The output row's own type is `user` in some runs and `system` in others, so the tag its
+    // text starts with is the only thing that says it is the command's output.
+    appendRow("command", [{ text: stdout, type: "text" }], {
+      message: {
+        content: [{ text: stdout, type: "text" }],
+        name: "local_command",
+        type: "system",
+      },
+      uuid: "row-stdout",
+    }),
+  )
+
+  expect(messages(live.replay())).toEqual([])
+})
+
+test("a command a person ran shows as the plain command line they typed", () => {
+  const live = harness()
+  live.feed(commandEcho("usage", "", "row-usage"), commandEcho("effort", "low", "row-effort"))
+
+  const kept = messages(live.replay())
+  expect(kept.map((message) => [message.role, textOf(message)])).toEqual([
+    ["user", "/usage"],
+    ["user", "/effort low"],
+  ])
+  expect(kept[0]?.parts).toEqual([{ text: "/usage", type: "text" }])
+})
+
+// A Legion pane is named before anything else happens in it: the daemon's bridge writes
+// `/rename <title>` to the session's input (`packages/daemon/internal/claudebridge/bridge.go`,
+// lines 210-213), so the prompt row it leaves and the echo Claude Code answers it with are the
+// pane being named rather than a person's first message. A terminal session has no such seed,
+// and a person who runs `/rename` there sees the command they ran (INFRA-1026).
+test("a pane's seeded rename records nothing, and a terminal session's rename still shows", () => {
+  const seeded = commandEcho("rename", "legion/INFRA-1026 worker", "row-rename")
+  const written = appendRow(
+    "prompt",
+    [{ text: "/rename legion/INFRA-1026 worker", type: "text" }],
+    { uuid: "row-rename-prompt" },
+  )
+
+  const pane = harness(1_000, undefined, true)
+  pane.feed(seeded, written)
+  expect(messages(pane.replay())).toEqual([])
+
+  const terminal = harness()
+  terminal.feed(seeded, written)
+  expect(messages(terminal.replay()).map(textOf)).toEqual([
+    "/rename legion/INFRA-1026 worker",
+    "/rename legion/INFRA-1026 worker",
   ])
 })
 
@@ -563,6 +657,30 @@ test("a model that reports no effort has no thinking to adjust", async () => {
   if (!settings.reported) throw new Error("the settings were not reported")
   expect(settings.model).toBe("anthropic/claude-sonnet-4-5")
   expect(settings.thinking).toBeNull()
+})
+
+// Measured live on 2.1.310 and rejected by the tester: after a thinking pick of `low` with
+// `claude-haiku-4-5` in force the header read `low` while the session's next request carried no
+// effort at all. A step tells the truth about the request it ran, so a step whose own effort is
+// not the picked one - another level, or none at all - ends the pick (INFRA-1026).
+test("a step of a model that reports no effort ends a thinking pick", async () => {
+  const recorded = await fixture("claude-2.1.310-no-effort")
+  const live = harness()
+  const rows = recorded.answers["config.list"]
+  const model = recorded.answers["session.model"]
+
+  // The pick is the level in force from the moment it lands, the session being idle.
+  live.stream.pickedEffort("low")
+  const picked = live.stream.settings(model, rows)
+  if (!picked.reported) throw new Error("the settings were not reported")
+  expect(picked.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })
+
+  // The recorded turn's steps name no effort at all, which is a model with no thinking to
+  // adjust: the pick is over, and the header has no level to show.
+  for (const event of recorded.events) live.feed(event)
+  const reported = live.stream.settings(model, rows)
+  if (!reported.reported) throw new Error("the settings were not reported")
+  expect(reported.thinking).toBeNull()
 })
 
 test("a step of another model answers nothing about the one the session runs now", async () => {
