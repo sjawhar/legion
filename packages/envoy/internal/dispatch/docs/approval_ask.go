@@ -126,13 +126,13 @@ func RewriteApprovalAsk(
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
 	reader := refs.NewReader(ctx, tx, "ask", ask.ID, serverURL)
-	changes, err := refs.ReplaceCountedEditWith(ctx, tx, reader, previous.Question, ask.Question)
+	changes, err := refs.ReplaceCountedEdit(ctx, tx, reader, previous.Question, ask.Question)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
 	}
 	// The rewording is a revision of the request's question part, read through the one reader,
 	// which its ask.edited names beside the request's own references.
-	changes, err = refs.IndexAskPartsCountedWith(ctx, tx, reader, *ask, editedAt, changes)
+	changes, err = refs.IndexAskPartsCounted(ctx, tx, reader, *ask, editedAt, changes)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}

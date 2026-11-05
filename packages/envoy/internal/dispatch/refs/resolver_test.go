@@ -147,7 +147,7 @@ func TestMentionsStoreTheWholeIdOfAShortReferenceAndTheKeysThatExist(t *testing.
 	} {
 		source := resolverSource(index + 1)
 		insertPrefixComment(t, tx, source, "ACME-1", test.body)
-		if _, err := ReplaceCounted(ctx, tx, "comment", source, test.body, resolverServer); err != nil {
+		if _, err := ReplaceCounted(ctx, tx, NewReader(ctx, tx, "comment", source, resolverServer), test.body); err != nil {
 			t.Fatalf("index %s: %v", test.name, err)
 		}
 		if got := storedRefs(t, tx, "comment", source); !reflect.DeepEqual(got, test.want) {
@@ -223,7 +223,7 @@ func TestMentionsStoreTheWholeIdOfAProjectDocumentsShortReference(t *testing.T) 
 	} {
 		source := resolverSource(index + 100)
 		insertPrefixComment(t, tx, source, "ACME-1", test.body)
-		if _, err := ReplaceCounted(ctx, tx, "comment", source, test.body, resolverServer); err != nil {
+		if _, err := ReplaceCounted(ctx, tx, NewReader(ctx, tx, "comment", source, resolverServer), test.body); err != nil {
 			t.Fatalf("index %s: %v", test.name, err)
 		}
 		if got := storedRefs(t, tx, "comment", source); !reflect.DeepEqual(got, test.want) {
@@ -292,7 +292,7 @@ func TestQuestionReferencesResolveAgainstTheTextsOwnDocument(t *testing.T) {
 		if test.source != anchored {
 			insertPrefixComment(t, tx, test.source, "ACME-1", test.body)
 		}
-		if _, err := ReplaceCounted(ctx, tx, "comment", test.source, test.body, resolverServer); err != nil {
+		if _, err := ReplaceCounted(ctx, tx, NewReader(ctx, tx, "comment", test.source, resolverServer), test.body); err != nil {
 			t.Fatalf("index %s: %v", test.name, err)
 		}
 		if got := storedRefs(t, tx, "comment", test.source); !reflect.DeepEqual(got, test.want) {
@@ -461,7 +461,7 @@ func TestAFailedResolverLeavesTheWriteStoringTheTextAsWritten(t *testing.T) {
 	slog.SetDefault(slog.New(logged))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	located := newResolver(ctx, failingQueryer{}, "comment", source, resolverServer).mentions(body)
+	located := NewReader(ctx, failingQueryer{}, "comment", source, resolverServer).mentions(body)
 	if want := text.ExtractAt(body, resolverServer); !reflect.DeepEqual(located, want) {
 		t.Errorf("a failed resolver read %#v; want the text as written, %#v", located, want)
 	}
@@ -515,7 +515,7 @@ func TestAResolverResolvesEachPrefixOnce(t *testing.T) {
 
 	cite := "dispatch://ACME-1/ask/" + resolverAsk[:8]
 	reads := 0
-	resolve := newResolver(ctx, countingQueryer{Queryer: tx, reads: &reads}, "comment", resolverSource(1), resolverServer)
+	resolve := NewReader(ctx, countingQueryer{Queryer: tx, reads: &reads}, "comment", resolverSource(1), resolverServer)
 	if located := resolve.mentions("See " + cite + "."); len(located) != 1 || located[0].ID != resolverAsk {
 		t.Fatalf("the first text read %#v; want the whole id of %s", located, resolverAsk)
 	}

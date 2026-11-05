@@ -4,12 +4,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -693,5 +696,123 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 	if wrongKind.Code != http.StatusBadRequest || decodeBody[refusedAnswer](t, wrongKind).Code != "INVALID_KIND" {
 		t.Fatalf("a kind that is no reference source: status=%d body=%s, want 400 INVALID_KIND",
 			wrongKind.Code, wrongKind.Body.String())
+	}
+}
+
+// unknownIDRouteProbe is what one resolving route needs beyond its path to reach its read of
+// the id: the body it refuses a request without, and whether the route is an agent's alone, so
+// a person's cookie is turned away before the row is read. The body is written here rather than
+// drawn from routeProbeBody because what this test needs is the opposite of that one's probe: a
+// request complete in everything but the id it names.
+type unknownIDRouteProbe struct {
+	body   any
+	bearer bool
+}
+
+// unknownIDRouteProbes is each resolving route whose default probe - routeProbeBody as a cookie
+// caller - is refused before the route reads the id, with what it takes to reach that read.
+// Every other row is driven with that default, and no row is left out of the test.
+var unknownIDRouteProbes = map[string]unknownIDRouteProbe{
+	"PATCH /api/v1/asks/{id}":                                {body: map[string]any{"question": "Which way?"}},
+	"POST /api/v1/asks/{id}/resolve":                         {body: map[string]any{"kind": "resolved", "reason": "Settled elsewhere."}},
+	"PUT /api/v1/me/asks/{id}/snooze":                        {body: map[string]any{"snoozed_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}},
+	"PATCH /api/v1/comments/{id}":                            {body: map[string]any{"body": "A remark."}},
+	"POST /api/v1/comments/{id}/deliveries":                  {body: map[string]any{"actor": sessionActor(), "delivery": "btw"}},
+	"POST /api/v1/comments/{id}/reply":                       {body: map[string]any{"actor": sessionActor(), "attempt": 1, "body": "A reply."}, bearer: true},
+	"POST /api/v1/messages/{id}/deliveries":                  {body: map[string]any{"actor": sessionActor(), "delivery": "btw"}},
+	"POST /api/v1/messages/{id}/deliveries/{attempt}/accept": {bearer: true},
+	"POST /api/v1/messages/{id}/reply":                       {body: map[string]any{"actor": sessionActor(), "attempt": 1, "body": "A reply."}, bearer: true},
+	"POST /api/v1/artifacts/{id}/rebuild":                    {body: map[string]any{}},
+	"POST /api/v1/artifacts/{id}/versions":                   {body: map[string]any{"summary": "A named version"}},
+	"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep":     {body: map[string]any{"text_sha256": strings.Repeat("0", 64)}},
+	"PUT /api/v1/me/documents/{id}/read":                     {body: map[string]any{"version": 1}},
+}
+
+// unknownIDRouteRequest sends one probe of a resolving route: a cookie caller, or the agent
+// bearer the three routes a person may not call need (routes_table_test's "bearer" credential).
+func unknownIDRouteRequest(t *testing.T, handler http.Handler, method, path string, probe unknownIDRouteProbe, fallback string) *httptest.ResponseRecorder {
+	t.Helper()
+	if !probe.bearer {
+		if probe.body != nil {
+			return dispatchRequest(t, handler, method, path, probe.body, "alice")
+		}
+		return dispatchRequest(t, handler, method, path, json.RawMessage(fallback), "alice")
+	}
+	encoded := []byte(fallback)
+	if probe.body != nil {
+		var err error
+		if encoded, err = json.Marshal(probe.body); err != nil {
+			t.Fatalf("encode the probe of %s %s: %v", method, path, err)
+		}
+	}
+	request := httptest.NewRequest(method, path, bytes.NewReader(encoded))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer agent-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// idRoutes names, per route, the 404 that route answers for an id of its kind it does not hold,
+// and the prefix layer answers a prefix that names none with that code, copied there by hand
+// (resolvePathValue). This drives every resolving row with a whole uuid nothing carries - which
+// the layer leaves as written (text.IsIDPrefix), so the answer is the handler's own - and holds
+// what the handler writes to what the table claims, the {block_id} of the two block routes with
+// a document that exists and a block id nothing carries. A row whose code is wrong fails by its
+// own name. The one route that answers no 404 for an id it does not hold (notFoundNone) is held
+// to that: its answer is anything but a 404.
+func TestEveryResolvingIDRouteAnswersTheNotFoundItNames(t *testing.T) {
+	// Every route the table mounts, the test hooks' one that takes a document id included.
+	handler, _ := newTestHandlerWithTestHooks(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unknown ids", "# Spec\n\nA passage.")
+	unknown := chosenID("e0000009", 7)
+	fill := func(pattern, id, blockID string) string {
+		path := strings.ReplaceAll(pattern, "/issues/{key}", "/issues/"+issue.Key)
+		path = strings.ReplaceAll(path, "{id}", id)
+		path = strings.ReplaceAll(path, "{block_id}", blockID)
+		path = strings.ReplaceAll(path, "{session_id}", "s1")
+		path = strings.ReplaceAll(path, "{number}", "1")
+		return strings.ReplaceAll(path, "{attempt}", "1")
+	}
+	for _, route := range (&server{deps: Deps{TestHooksEnabled: true}}).routes() {
+		name := route.Method + " " + route.Pattern
+		entry, named := idRoutes[name]
+		if !named || !entry.resolves() {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			probe := unknownIDRouteProbes[name]
+			// Each wildcard the row resolves, with every other value naming something that
+			// exists: the {id} against a document that is there for the {block_id}'s probe.
+			probes := []struct{ what, path, want string }{}
+			if entry.Kind != "" {
+				probes = append(probes, struct{ what, path, want string }{
+					"an id", fill(route.Pattern, unknown, "b1"), entry.NotFound,
+				})
+			}
+			if entry.Blocks {
+				probes = append(probes, struct{ what, path, want string }{
+					"a block id", fill(route.Pattern, issue.PrimaryArtifactID, unknown), entry.BlockNotFound,
+				})
+			}
+			for _, each := range probes {
+				answer := unknownIDRouteRequest(t, handler, route.Method, each.path, probe, routeProbeBody(route))
+				if each.want == notFoundNone {
+					if answer.Code == http.StatusNotFound {
+						t.Fatalf("%s answers 404 %s for %s nothing carries; idRoutes says it answers none: %s",
+							name, decodeBody[refusedAnswer](t, answer).Code, each.what, answer.Body.String())
+					}
+					continue
+				}
+				if answer.Code != http.StatusNotFound {
+					t.Fatalf("%s answers %d for %s nothing carries, not the 404 idRoutes names (%s): %s",
+						name, answer.Code, each.what, each.want, answer.Body.String())
+				}
+				if code := decodeBody[refusedAnswer](t, answer).Code; code != each.want {
+					t.Fatalf("%s answers 404 %q for %s nothing carries; idRoutes names %q, which is what a prefix nothing carries gets",
+						name, code, each.what, each.want)
+				}
+			}
+		})
 	}
 }

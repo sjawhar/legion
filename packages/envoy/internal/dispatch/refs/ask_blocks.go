@@ -143,9 +143,9 @@ func askPartsSum(parts []itemblocks.Block) string {
 // own text, so each part's mentions are read from that text alone and paired to it, with no
 // offset arithmetic into one body (blockPairs over the one part). An ask's text is prose, never
 // a typed block, so a part holds no block pointer and the pairs are its mentions alone. Every
-// part is read through the one resolver the ask's write built, so the question and the parts
+// part is read through the one Reader the ask's write built, so the question and the parts
 // resolve a bare key, a `#id` and a short id alike and the database answers once per kind.
-func askPartPairs(parts []itemblocks.Block, ids []string, r *resolver) []blockPair {
+func askPartPairs(parts []itemblocks.Block, ids []string, r *Reader) []blockPair {
 	var pairs []blockPair
 	for index, part := range parts {
 		located := r.mentions(part.Text)
@@ -166,17 +166,15 @@ func askPartPairs(parts []itemblocks.Block, ids []string, r *resolver) []blockPa
 // the part rows and the text of each at the new revision, reconciles the links the parts hold,
 // and stores the state. It bumps the revision only when the parts changed.
 //
+// The parts are read through r, the Reader of the write that holds the ask's text, which the
+// write that reconciled the ask's own question through it passes on (ReplaceCounted,
+// ReindexOwed), so one write asks the database once per kind for the question and its parts
+// together.
+//
 // It returns the targets of the part mentions it moved, which the caller's event counts.
-func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) ([]Target, error) {
-	return IndexAskPartsWith(ctx, tx, NewReader(ctx, tx, string(ItemAsk), ask.ID, serverURL), ask, at)
-}
-
-// IndexAskPartsWith is IndexAskParts through a reader the caller holds already, which a write
-// that reads the ask's own question through it passes on (ReplaceCountedWith, ReindexOwedItem),
-// so one write asks the database once per kind for the question and its parts together.
-func IndexAskPartsWith(ctx context.Context, tx pgx.Tx, r *Reader, ask model.Ask, at time.Time) ([]Target, error) {
+func IndexAskParts(ctx context.Context, tx pgx.Tx, r *Reader, ask model.Ask, at time.Time) ([]Target, error) {
 	parts := AskParts(ask)
-	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), r.resolve, at)
+	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), r, at)
 }
 
 // IndexAskPartsCounted is IndexAskParts for a writer that appends an event: it indexes the ask's
@@ -190,26 +188,12 @@ func IndexAskPartsWith(ctx context.Context, tx pgx.Tx, r *Reader, ask model.Ask,
 func IndexAskPartsCounted(
 	ctx context.Context,
 	tx pgx.Tx,
-	ask model.Ask,
-	serverURL string,
-	at time.Time,
-	beside model.ReferenceChanges,
-) (model.ReferenceChanges, error) {
-	return IndexAskPartsCountedWith(ctx, tx, NewReader(ctx, tx, string(ItemAsk), ask.ID, serverURL), ask, at, beside)
-}
-
-// IndexAskPartsCountedWith is IndexAskPartsCounted through a reader the caller holds already,
-// the one it reconciled the ask's question through (ReplaceCountedWith, ReplaceCountedEditWith):
-// every live write of an ask reads both texts through one reader.
-func IndexAskPartsCountedWith(
-	ctx context.Context,
-	tx pgx.Tx,
 	r *Reader,
 	ask model.Ask,
 	at time.Time,
 	beside model.ReferenceChanges,
 ) (model.ReferenceChanges, error) {
-	moved, err := IndexAskPartsWith(ctx, tx, r, ask, at)
+	moved, err := IndexAskParts(ctx, tx, r, ask, at)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -221,7 +205,7 @@ func IndexAskPartsCountedWith(
 }
 
 // indexAskParts is IndexAskParts over parts the caller has already read and summed.
-func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum string, r *resolver, at time.Time) ([]Target, error) {
+func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum string, r *Reader, at time.Time) ([]Target, error) {
 	makers, err := askPartMakers(ask, parts)
 	if err != nil {
 		return nil, err
@@ -303,7 +287,7 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bo
 	if stated && !owed && sum != nil && *sum == partsSum {
 		return false, nil
 	}
-	resolve := newResolver(ctx, tx, string(ItemAsk), askID, serverURL)
+	resolve := NewReader(ctx, tx, string(ItemAsk), askID, serverURL)
 	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, resolve, writtenAt); err != nil {
 		return false, fmt.Errorf("index the parts of ask %s: %w", askID, err)
 	}

@@ -91,7 +91,7 @@ func writeAskAnswer(t *testing.T, tx pgx.Tx, ask *model.Ask, user string, select
 func indexAskPartsAt(t *testing.T, tx pgx.Tx, ask model.Ask, index int) []Target {
 	t.Helper()
 	at := time.Date(2026, 10, 30, 12, 0, index, 0, time.UTC)
-	moved, err := IndexAskParts(context.Background(), tx, ask, askPartServer, at)
+	moved, err := IndexAskParts(context.Background(), tx, NewReader(context.Background(), tx, "ask", ask.ID, askPartServer), ask, at)
 	if err != nil {
 		t.Fatalf("index the parts of ask %s: %v", ask.ID, err)
 	}
@@ -548,11 +548,11 @@ func TestAnAskWriteReadsItsQuestionsOnce(t *testing.T) {
 
 	tx.queries = nil
 	reader := NewReader(ctx, tx, "ask", ask.ID, askPartServer)
-	if _, err := ReplaceCountedWith(ctx, tx, reader, ask.Question); err != nil {
+	if _, err := ReplaceCounted(ctx, tx, reader, ask.Question); err != nil {
 		t.Fatalf("index the ask's question: %v", err)
 	}
 	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	if _, err := IndexAskPartsCountedWith(ctx, tx, reader, ask, at, model.ReferenceChanges{}); err != nil {
+	if _, err := IndexAskPartsCounted(ctx, tx, reader, ask, at, model.ReferenceChanges{}); err != nil {
 		t.Fatalf("index the ask's parts: %v", err)
 	}
 

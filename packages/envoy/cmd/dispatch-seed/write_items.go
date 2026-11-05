@@ -143,7 +143,8 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 			// created_at)), so a re-index of it would date its parts as this one did.
 			stored := opening
 			stored.State, stored.Answer = ask.State, answer
-			if _, err := refs.IndexAskParts(ctx, tx, stored, serverURL, ask.CreatedAt); err != nil {
+			reader := refs.NewReader(ctx, tx, "ask", stored.ID, serverURL)
+			if _, err := refs.IndexAskParts(ctx, tx, reader, stored, ask.CreatedAt); err != nil {
 				return fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
 			}
 			// The event is owned by the ask's own owner and dated at the ask, as one appended

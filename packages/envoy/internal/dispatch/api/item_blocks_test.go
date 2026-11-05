@@ -177,7 +177,7 @@ func TestACommentsEditKeepsItsBlockIDs(t *testing.T) {
 }
 
 // A comment edited before blocks existed has its blocks indexed for the first time by the
-// reconciliation (refs.ReindexOwedItem): nothing recorded when those blocks were made, so each
+// reconciliation (refs.ReindexOwed): nothing recorded when those blocks were made, so each
 // has no making time, while a block a later edit adds is made at that edit.
 func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
@@ -194,8 +194,9 @@ func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
 			t.Fatalf("%s: %v", statement, err)
 		}
 	}
-	if err := refs.ReindexOwedItem(context.Background(), database.Pool, refs.OwedItem{Kind: "comment", ID: comment.ID, EnqueuedAt: time.Now()}, "https://dispatch.example"); err != nil {
-		t.Fatalf("reindex the comment: %v", err)
+	owed := refs.Owed{Queue: refs.BlockGrammarOwed, Kind: "comment", ID: comment.ID, EnqueuedAt: time.Now()}
+	if indexed, err := refs.ReindexOwed(context.Background(), database.Pool, owed, "https://dispatch.example"); err != nil || !indexed {
+		t.Fatalf("reindex the comment = %v (%v), want it indexed", indexed, err)
 	}
 	requireCommentBlocks(t, database, comment.ID, "first indexing", "b1@1 b2@1", 1)
 	var unmade int

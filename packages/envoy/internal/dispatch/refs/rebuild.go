@@ -206,68 +206,152 @@ func sourceText(ctx context.Context, q Queryer, kind, id string, forUpdate bool)
 	return body, writtenAt, true, nil
 }
 
-// OwedItem is one comment, ask or issue message owed an index with the block grammar
-// (block_grammar_owed), as of the write that last owed it (EnqueuedAt).
-type OwedItem struct {
+// OwedQueue is one queue of text owed a re-index: a table of (kind, id, enqueued_at) a trigger
+// upserts a row into for every source a write left indexed with a grammar older than the one
+// this build reads it with, which a drain lists oldest first (ListOwed), settles (SettleOwed)
+// and re-indexes (ReindexOwed). Dispatch holds the two below, and the fields are the whole of
+// the difference between them.
+type OwedQueue struct {
+	// table is the queue's table, which every statement of the drain names.
+	table string
+	// stopIfMoved is what the queue does with a row a write moved between the listing and the
+	// re-index: the whole-grammar queue writes nothing for one and leaves it owed, so the next
+	// pass reads the newer text, and the block-grammar queue indexes the text it read under the
+	// source row's lock - which is that newer text - and leaves the row owed all the same, for
+	// the pass that settles it. Either way the row stays owed and the index converges; this is
+	// which of the two passes writes it.
+	stopIfMoved bool
+}
+
+// BlockGrammarOwed is the queue of comments, asks and issue messages an older build indexed
+// without the block grammar (migration 0121, block_grammar_owed).
+var BlockGrammarOwed = OwedQueue{table: "block_grammar_owed"}
+
+// RefsGrammarOwed is the queue of sources an older build indexed without this build's whole
+// grammar (migration 20261103205037, refs_grammar_owed). A queue of its own rather than a row
+// in the block grammar's: that migration says why.
+var RefsGrammarOwed = OwedQueue{table: "refs_grammar_owed", stopIfMoved: true}
+
+// Owed is one source a queue owes an index, as of the write that last owed it (EnqueuedAt).
+//
+// Kind is the source's own kind - comment, ask or message - or, in the whole grammar's queue,
+// `artifact`, a document read at its latest version, or `scope`, whose id is a document whose
+// question blocks moved. Those last two name no text this re-indexes: what a `scope` row owes
+// is a re-index of every source whose text belongs to that document (ScopeSources) and what an
+// `artifact` row owes is a block index of that document, each the drain's own work
+// (docs.Service.reindexOwedText). ReindexOwed answers an error for either rather than reading
+// a row with no text of its own and settling it, so no caller can drain one by handing it here.
+type Owed struct {
+	Queue      OwedQueue
 	Kind       string
 	ID         string
 	EnqueuedAt time.Time
 }
 
-// OwedItems lists at most limit items owed an index with the block grammar, oldest first, and
-// locks nothing.
-func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
-	rows, err := q.Query(ctx, `
-		select kind, id::text, enqueued_at from block_grammar_owed order by enqueued_at, kind, id limit $1
-	`, limit)
+// reindexable reports whether the row names a text ReindexOwed can read and index: a comment,
+// an ask or an issue message, the three kinds sourceText reads as one source's own text.
+func (owed Owed) reindexable() bool {
+	switch ItemKind(owed.Kind) {
+	case ItemComment, ItemAsk, ItemMessage:
+		return true
+	}
+	return false
+}
+
+// listQuery is the statement a drain of this queue lists its oldest rows with.
+//
+// The order columns are written qualified: unqualified, `id` would name the selected `id::text`
+// rather than the table's uuid, so every tick would sort the whole tie group the seed enqueues
+// under one enqueued_at by a text it casts per row, and on the whole grammar's queue the index
+// that carries all three order columns (refs_grammar_owed_enqueued) could not serve the order
+// at all. The two orders are the same - a uuid's canonical text is its bytes in lowercase hex,
+// hyphens at fixed positions - so the rows come back as they always did
+// (TestTheDrainSortsEachQueueByItsTablesID).
+func (queue OwedQueue) listQuery() string {
+	return `
+		select o.kind, o.id::text, o.enqueued_at from ` + queue.table + ` o
+		order by o.enqueued_at, o.kind, o.id limit $1
+	`
+}
+
+// ListOwed lists at most limit sources queue owes an index, oldest first, and locks nothing.
+func ListOwed(ctx context.Context, q Queryer, queue OwedQueue, limit int) ([]Owed, error) {
+	rows, err := q.Query(ctx, queue.listQuery(), limit)
 	if err != nil {
-		return nil, fmt.Errorf("list the items owed a block index: %w", err)
+		return nil, fmt.Errorf("list what %s owes an index: %w", queue.table, err)
 	}
 	defer rows.Close()
-	owed := []OwedItem{}
+	owed := []Owed{}
 	for rows.Next() {
-		var item OwedItem
-		if err := rows.Scan(&item.Kind, &item.ID, &item.EnqueuedAt); err != nil {
-			return nil, fmt.Errorf("scan an item owed a block index: %w", err)
+		source := Owed{Queue: queue}
+		if err := rows.Scan(&source.Kind, &source.ID, &source.EnqueuedAt); err != nil {
+			return nil, fmt.Errorf("scan a row of %s: %w", queue.table, err)
 		}
-		owed = append(owed, item)
+		owed = append(owed, source)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list the items owed a block index: %w", err)
+		return nil, fmt.Errorf("list what %s owes an index: %w", queue.table, err)
 	}
 	return owed, nil
 }
 
-// ReindexOwedItem reconciles one owed item's refs with its text, read with this build's grammar,
-// and settles its owed row, in one transaction. It takes the source row first (sourceText,
-// forUpdate) and the owed row after, the order an edit takes them in (the row's update, then its
-// trigger's upsert), so the two never deadlock. The owed row is deleted only while it holds the
-// enqueued_at item was listed with: an edit that lands meanwhile moves it, and the item stays
-// owed for the next pass. A new edge takes the time the text was written (sourceText) and no
-// source_seq, since no event introduced it, as a rebuild's does; a re-index of text no one
-// rewrote appends no event, as rebuild-refs appends none. So no ?since= read lists such an edge
-// until a later write of the item stamps it with that write's event (Stamp), and then it is
-// listed as that write's. An item whose source is gone has its edges deleted with its owed row,
-// and its blocks and an ask's parts are indexed with its text (reindexText).
-func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
+// SettleOwed deletes source's row from its queue while it still holds the enqueued_at source
+// was listed with, and reports whether it did: a write that lands meanwhile moves that time,
+// and the source stays owed for the next pass, which reads its newer text.
+func SettleOwed(ctx context.Context, q Execer, source Owed) (bool, error) {
+	settled, err := q.Exec(ctx, `
+		delete from `+source.Queue.table+` where kind = $1 and id = $2::uuid and enqueued_at = $3
+	`, source.Kind, source.ID, source.EnqueuedAt)
+	if err != nil {
+		return false, fmt.Errorf("settle the index %s owes for %s %s: %w", source.Queue.table, source.Kind, source.ID, err)
+	}
+	return settled.RowsAffected() > 0, nil
+}
+
+// ReindexOwed reconciles one owed comment's, ask's or issue message's refs with its text, read
+// with the grammar this build reads it with, and settles its owed row, in one transaction. It
+// takes the source row first (sourceText, forUpdate) and the owed row after, the order a write
+// takes them in (the row's update, then its trigger's upsert), so the two never deadlock. The
+// owed row is settled only while it holds the enqueued_at source was listed with (SettleOwed):
+// one a write moved meanwhile is left owed, and whether its newer text is indexed by this pass
+// or the next is the queue's (OwedQueue.stopIfMoved). It reports whether it re-indexed the
+// source.
+//
+// A new edge takes the time the text was written (sourceText) and no source_seq, since no event
+// introduced it, as a rebuild's does; a re-index of text no one rewrote appends no event, as
+// rebuild-refs appends none. So no ?since= read lists such an edge until a later write of the
+// source stamps it with that write's event (Stamp), and then it is listed as that write's. A
+// source that is gone has its edges deleted with its owed row, and its blocks and an ask's
+// parts are indexed with its text (reindexText).
+func ReindexOwed(ctx context.Context, pool Pool, source Owed, serverURL string) (bool, error) {
+	if !source.reindexable() {
+		return false, fmt.Errorf("re-index %s %s: a %s row of %s names no text of its own",
+			source.Kind, source.ID, source.Kind, source.Queue.table)
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback(ctx)
-	body, writtenAt, found, err := sourceText(ctx, tx, item.Kind, item.ID, true)
+	body, writtenAt, found, err := sourceText(ctx, tx, source.Kind, source.ID, true)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := reindexText(ctx, tx, item.Kind, item.ID, body, serverURL, writtenAt, found); err != nil {
-		return err
+	if source.Queue.stopIfMoved {
+		settled, err := SettleOwed(ctx, tx, source)
+		if err != nil || !settled {
+			return false, err
+		}
 	}
-	if _, err := tx.Exec(ctx, `
-		delete from block_grammar_owed where kind = $1 and id = $2::uuid and enqueued_at = $3
-	`, item.Kind, item.ID, item.EnqueuedAt); err != nil {
-		return fmt.Errorf("settle the block index owed by %s %s: %w", item.Kind, item.ID, err)
+	if err := reindexText(ctx, tx, source.Kind, source.ID, body, serverURL, writtenAt, found); err != nil {
+		return false, err
 	}
-	return tx.Commit(ctx)
+	if !source.Queue.stopIfMoved {
+		if _, err := SettleOwed(ctx, tx, source); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit(ctx)
 }
 
 // reindexText reconciles one item's refs, and the blocks its text holds, with body as this build's
@@ -298,7 +382,7 @@ func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL strin
 			return err
 		}
 		if found {
-			if _, err := IndexAskPartsWith(ctx, tx, resolve, ask, writtenAt); err != nil {
+			if _, err := IndexAskParts(ctx, tx, resolve, ask, writtenAt); err != nil {
 				return fmt.Errorf("index the parts of ask %s: %w", id, err)
 			}
 		}
@@ -307,95 +391,6 @@ func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL strin
 		return fmt.Errorf("index %s %s: %w", kind, id, err)
 	}
 	return nil
-}
-
-// OwedSource is one source owed an index with this build's whole grammar (refs_grammar_owed,
-// migration 20261103205037), as of the write that last owed it (EnqueuedAt). Kind is a source's
-// own kind - comment, ask, message or artifact, a document read at its latest version - or
-// `scope`, whose id is a document whose question blocks moved: what that row owes is a re-index
-// of every source whose text belongs to that document (ScopeSources), not of the document alone.
-type OwedSource struct {
-	Kind       string
-	ID         string
-	EnqueuedAt time.Time
-}
-
-// OwedSources lists at most limit sources owed an index with the whole grammar, oldest first
-// (refs_grammar_owed_enqueued, which carries all three order columns and every column read), and
-// locks nothing.
-//
-// The order columns are written qualified: unqualified, `id` would name the selected `id::text`
-// rather than the table's uuid, and the index could not serve the order, leaving every tick
-// sorting the whole tie group the seed enqueues under one enqueued_at. The two orders are the
-// same - a uuid's canonical text is its bytes in lowercase hex, hyphens at fixed positions - so
-// the rows come back as they always did.
-func OwedSources(ctx context.Context, q Queryer, limit int) ([]OwedSource, error) {
-	rows, err := q.Query(ctx, `
-		select o.kind, o.id::text, o.enqueued_at from refs_grammar_owed o
-		order by o.enqueued_at, o.kind, o.id limit $1
-	`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list the sources owed an index with the whole grammar: %w", err)
-	}
-	defer rows.Close()
-	owed := []OwedSource{}
-	for rows.Next() {
-		var source OwedSource
-		if err := rows.Scan(&source.Kind, &source.ID, &source.EnqueuedAt); err != nil {
-			return nil, fmt.Errorf("scan a source owed an index with the whole grammar: %w", err)
-		}
-		owed = append(owed, source)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list the sources owed an index with the whole grammar: %w", err)
-	}
-	return owed, nil
-}
-
-// SettleOwedSource deletes source's row from the re-index queue while it still holds the
-// enqueued_at source was listed with, and reports whether it did: a write that lands meanwhile
-// moves that time, and the source stays owed for the next pass, which reads its newer text.
-func SettleOwedSource(ctx context.Context, q Execer, source OwedSource) (bool, error) {
-	settled, err := q.Exec(ctx, `
-		delete from refs_grammar_owed where kind = $1 and id = $2::uuid and enqueued_at = $3
-	`, source.Kind, source.ID, source.EnqueuedAt)
-	if err != nil {
-		return false, fmt.Errorf("settle the index owed by %s %s: %w", source.Kind, source.ID, err)
-	}
-	return settled.RowsAffected() > 0, nil
-}
-
-// ReindexOwedSource reconciles one owed comment's, ask's or issue message's refs with its text,
-// read with this build's whole grammar, and settles its owed row, in one transaction. It takes the
-// source row first (sourceText, forUpdate) and the owed row after, the order a write takes them in
-// (the row's update, then its trigger's upsert), so the two never deadlock. The owed row is
-// settled before the index is written and only while it holds the enqueued_at source was listed
-// with (SettleOwedSource): one a write moved meanwhile is left owed and nothing is written, so the
-// next pass reads the newer text. It reports whether it re-indexed the source.
-//
-// A new edge takes the time the text was written (sourceText) and no source_seq, since no event
-// introduced it, as a rebuild's does; a re-index of text no one rewrote appends no event, as
-// rebuild-refs appends none. So no ?since= read lists such an edge until a later write of the
-// source stamps it with that write's event (Stamp), and then it is listed as that write's. A
-// source that is gone has its edges deleted with its owed row.
-func ReindexOwedSource(ctx context.Context, pool Pool, source OwedSource, serverURL string) (bool, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	body, writtenAt, found, err := sourceText(ctx, tx, source.Kind, source.ID, true)
-	if err != nil {
-		return false, err
-	}
-	settled, err := SettleOwedSource(ctx, tx, source)
-	if err != nil || !settled {
-		return false, err
-	}
-	if err := reindexText(ctx, tx, source.Kind, source.ID, body, serverURL, writtenAt, found); err != nil {
-		return false, err
-	}
-	return true, tx.Commit(ctx)
 }
 
 // ReindexScopeSource re-indexes one comment, ask or issue message whose text belongs to a document

@@ -2,6 +2,7 @@ package refs
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func TestAWriteLeavesNothingOwed(t *testing.T) {
 		t.Fatalf("the comment's own write owes %v, want the comment alone", owed)
 	}
 
-	if _, err := ReplaceCounted(ctx, tx, "comment", comment, "Blocked on CORE-1.", refsGrammarServer); err != nil {
+	if _, err := ReplaceCounted(ctx, tx, NewReader(ctx, tx, "comment", comment, refsGrammarServer), "Blocked on CORE-1."); err != nil {
 		t.Fatalf("index the comment: %v", err)
 	}
 
@@ -125,7 +126,7 @@ func TestAMovedOwedRowStaysOwedAndIsNotIndexed(t *testing.T) {
 	`).Scan(&comment); err != nil {
 		t.Fatalf("write the comment: %v", err)
 	}
-	listed, err := OwedSources(ctx, database.Pool, 10)
+	listed, err := ListOwed(ctx, database.Pool, RefsGrammarOwed, 10)
 	if err != nil {
 		t.Fatalf("list what is owed: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestAMovedOwedRowStaysOwedAndIsNotIndexed(t *testing.T) {
 		t.Fatalf("move the comment's enqueued_at: %v", err)
 	}
 
-	indexed, err := ReindexOwedSource(ctx, database.Pool, listed[0], refsGrammarServer)
+	indexed, err := ReindexOwed(ctx, database.Pool, listed[0], refsGrammarServer)
 	if err != nil {
 		t.Fatalf("re-index the comment: %v", err)
 	}
@@ -159,11 +160,11 @@ func TestAMovedOwedRowStaysOwedAndIsNotIndexed(t *testing.T) {
 	}
 
 	// The next pass lists the time the write left and re-indexes the comment.
-	listed, err = OwedSources(ctx, database.Pool, 10)
+	listed, err = ListOwed(ctx, database.Pool, RefsGrammarOwed, 10)
 	if err != nil {
 		t.Fatalf("list what is owed again: %v", err)
 	}
-	if indexed, err := ReindexOwedSource(ctx, database.Pool, listed[0], refsGrammarServer); err != nil || !indexed {
+	if indexed, err := ReindexOwed(ctx, database.Pool, listed[0], refsGrammarServer); err != nil || !indexed {
 		t.Fatalf("re-index the comment on the next pass = %v (%v), want it indexed", indexed, err)
 	}
 	if owed := owedRows(t, database.Pool); len(owed) != 0 {
@@ -222,5 +223,39 @@ func TestTheScopeDrainReadsASourceBeforeItLocksIt(t *testing.T) {
 	// read answers: the unlocked read decides only whether to open the transaction.
 	if indexed, err := ReindexScopeSource(ctx, database.Pool, "comment", citing, refsGrammarServer); err != nil || !indexed {
 		t.Fatalf("the scope drain of a comment that writes a `#id` = %v (%v), want it re-indexed", indexed, err)
+	}
+}
+
+// Both queues are drained by one statement (OwedQueue.listQuery), and it orders each by its own
+// table's columns: an unqualified `id` names the selected `id::text` instead, so the planner
+// sorts a text it casts per row, and on the whole grammar's queue it cannot read the index that
+// carries all three order columns in order at all. A uuid's canonical text sorts as its bytes
+// do, so no row order can tell the two spellings apart; the plan can, and this reads it. The
+// whole grammar's queue reads its index in order and sorts nothing, which is what its index is
+// for; the block grammar's index carries enqueued_at alone, so that queue sorts the tie group,
+// by the table's uuid rather than by a text cast per row.
+func TestTheDrainSortsEachQueueByItsTablesID(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	for _, queue := range []OwedQueue{BlockGrammarOwed, RefsGrammarOwed} {
+		rows, err := database.Pool.Query(ctx, "explain (costs off) "+queue.listQuery(), 200)
+		if err != nil {
+			t.Fatalf("explain the drain of %s: %v", queue.table, err)
+		}
+		lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("read the plan of the drain of %s: %v", queue.table, err)
+		}
+		plan := strings.Join(lines, "\n")
+		for _, line := range lines {
+			key, sorts := strings.CutPrefix(strings.TrimSpace(line), "Sort Key: ")
+			if !sorts {
+				continue
+			}
+			if want := "enqueued_at, kind, id"; key != want {
+				t.Errorf("the drain of %s sorts by %q; want %q, the table's own columns, and never a cast of one:\n%s",
+					queue.table, key, want, plan)
+			}
+		}
 	}
 }

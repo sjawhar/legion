@@ -151,7 +151,7 @@ type liveAheadDocuments map[string]owedDocument
 
 // ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past after (a
 // document id; empty is the start), one batch of the items owed an index with the block grammar,
-// oldest first (refs.ReindexOwedItem), one batch of the comments, messages and asks owed a block
+// oldest first (refs.ReindexOwed), one batch of the comments, messages and asks owed a block
 // index of their own blocks, oldest owed_at first (refs.IndexOwedItemBlocks), and one batch of the
 // sources owed an index with the whole grammar, oldest first (reindexOwedText), each in its own
 // transaction taking the item row then its state row, never an owner row. The item blocks run
@@ -208,12 +208,13 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		tick.Cursor = ""
 	}
 
-	items, err := refs.OwedItems(ctx, s.store.Pool, blockIndexItemBatch)
+	items, err := refs.ListOwed(ctx, s.store.Pool, refs.BlockGrammarOwed, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, item := range items {
-		if err := refs.ReindexOwedItem(ctx, s.store.Pool, item, s.serverURL); err != nil {
+		indexed, err := refs.ReindexOwed(ctx, s.store.Pool, item, s.serverURL)
+		if err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
 			}
@@ -221,7 +222,9 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 				"kind", item.Kind, "id", item.ID, "error", err)
 			continue
 		}
-		tick.Items++
+		if indexed {
+			tick.Items++
+		}
 	}
 
 	itemBlocks, err := refs.OwedItemBlocks(ctx, s.store.Pool, blockIndexItemBatch)
@@ -243,7 +246,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		}
 	}
 
-	texts, err := refs.OwedSources(ctx, s.store.Pool, blockIndexItemBatch)
+	texts, err := refs.ListOwed(ctx, s.store.Pool, refs.RefsGrammarOwed, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
@@ -346,25 +349,26 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 	return owed, nil
 }
 
-// reindexOwedText drains one row of the re-index queue (refs_grammar_owed), the text an older
+// reindexOwedText drains one row of the re-index queue (refs.RefsGrammarOwed), the text an older
 // build indexed without the whole grammar, and reports whether it did: a comment, an ask or an
-// issue message through the item re-index (refs.ReindexOwedSource), a document by owing it a block
-// index (oweDocumentIndex), which is the whole of its re-index, and a `scope` row, which names a
-// document whose question blocks moved, through a re-index of every source whose text belongs to
-// that document (reindexScope). Each row is settled only while it still holds the enqueued_at it
-// was listed with, so a write that lands meanwhile leaves it owed for the next tick, which reads
-// its newer text.
-func (s *Service) reindexOwedText(ctx context.Context, source refs.OwedSource) (bool, error) {
+// issue message through the queue's own re-index (refs.ReindexOwed), a document by owing it a
+// block index (oweDocumentIndex), which is the whole of its re-index, and a `scope` row, which
+// names a document whose question blocks moved, through a re-index of every source whose text
+// belongs to that document (reindexScope). The last two name no text of their own, which is why
+// refs.ReindexOwed answers an error for either rather than settling such a row. Each row is
+// settled only while it still holds the enqueued_at it was listed with, so a write that lands
+// meanwhile leaves it owed for the next tick, which reads its newer text.
+func (s *Service) reindexOwedText(ctx context.Context, source refs.Owed) (bool, error) {
 	switch source.Kind {
 	case "comment", "ask", "message":
-		return refs.ReindexOwedSource(ctx, s.store.Pool, source, s.serverURL)
+		return refs.ReindexOwed(ctx, s.store.Pool, source, s.serverURL)
 	case "artifact":
 		return s.oweDocumentIndex(ctx, source.ID, &source)
 	case "scope":
 		if err := s.reindexScope(ctx, source.ID); err != nil {
 			return false, err
 		}
-		return refs.SettleOwedSource(ctx, s.store.Pool, source)
+		return refs.SettleOwed(ctx, s.store.Pool, source)
 	}
 	return false, fmt.Errorf("re-index %s %s: not a kind the queue holds", source.Kind, source.ID)
 }
@@ -383,14 +387,14 @@ func (s *Service) reindexOwedText(ctx context.Context, source refs.OwedSource) (
 // enqueued_at it was listed with, in the transaction that owes the index, so a write that lands
 // meanwhile leaves the row owed and owes nothing. A document that is gone owes no index and has
 // its row settled with it. It reports whether it drained the row.
-func (s *Service) oweDocumentIndex(ctx context.Context, artifactID string, source *refs.OwedSource) (bool, error) {
+func (s *Service) oweDocumentIndex(ctx context.Context, artifactID string, source *refs.Owed) (bool, error) {
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
 	if source != nil {
-		settled, err := refs.SettleOwedSource(ctx, tx, *source)
+		settled, err := refs.SettleOwed(ctx, tx, *source)
 		if err != nil || !settled {
 			return false, err
 		}

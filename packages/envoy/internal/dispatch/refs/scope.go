@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -276,9 +277,8 @@ type questionBlock struct {
 
 // questionBlocks is every question block markdown declares, in document order, the first of each
 // id: each line that, past its containers' quote and list markers, opens a typed block named ask
-// with three or more colons and holds `#id` among its attributes, outside fenced code. A fenced
-// example of a directive is code to pmdoc, so a `copied_from` it carries names no question of this
-// document.
+// holding an id, outside fenced code. A fenced example of a directive is code to pmdoc, so a
+// `copied_from` it carries names no question of this document.
 func questionBlocks(markdown string) []questionBlock {
 	blocks := []questionBlock{}
 	seen := map[string]struct{}{}
@@ -294,7 +294,7 @@ func questionBlocks(markdown string) []questionBlock {
 		if fence = openingFence(rest); fence.run > 0 {
 			continue
 		}
-		block, ok := askDirective(rest)
+		block, ok := askBlock(rest)
 		if !ok {
 			continue
 		}
@@ -345,73 +345,34 @@ func fenceRun(text string) codeFence {
 	return codeFence{char: text[0], run: run}
 }
 
-// blockIDShortcutEnd is every character a typed block's written `#id` cannot hold, the twin of
-// pmdoc's typedBlockIDShortcutExcluded: the id runs to the first of them, so a block whose id
-// holds a character no bare `#id` in prose can name (`q:1`, `décision`) is read under the id
-// pmdoc reads it under and is named by no mention.
-const blockIDShortcutEnd = "\t\n\r \"#&'.<=>`}"
-
-// askDirective reads a `:::ask{…}` line's id and copied_from, the line past its containers'
-// markers (trimContainerMarkers), by the attribute grammar of pmdoc's parseDirectiveAttributes:
-// `#` and a run of the characters an id shortcut holds (blockIDShortcutEnd) is the id,
-// `name="value"` an attribute whose value runs to the next unescaped quote.
-func askDirective(rest string) (questionBlock, bool) {
-	colons := 0
-	for colons < len(rest) && rest[colons] == ':' {
-		colons++
-	}
-	if colons < 3 {
+// askBlock is the question block one line opens, the line past its containers' markers
+// (trimContainerMarkers) and without its line ending, as pmdoc's parser is passed it: a typed
+// block named ask that holds an id, with the uuid of the ask its `copied_from` names where it
+// carries one. ok is false for every other line.
+//
+// The line is read by the one parser of a typed block's opening line
+// (pmdoc.ParseTypedDirectiveOpen), never by a grammar of its own, so this reads a line exactly
+// as the document's own parse reads it: an id written either way (`#id` and `id="…"`,
+// pmdoc.TypedBlockIDAttribute), and no block at all on a line that parser refuses. What stays
+// here is the line and fence scan alone (questionBlocks): refs parses no document.
+func askBlock(line string) (questionBlock, bool) {
+	name, attrs, ok := pmdoc.ParseTypedDirectiveOpen(strings.TrimRight(line, "\r\n"))
+	if !ok || name != "ask" {
 		return questionBlock{}, false
 	}
-	rest, ok := strings.CutPrefix(rest[colons:], "ask{")
-	if !ok {
+	id, _ := attrs[pmdoc.BlockIDAttr].(string)
+	if id == "" {
 		return questionBlock{}, false
 	}
-	attrs, ok := strings.CutSuffix(strings.TrimRight(rest, " \t\r\n"), "}")
-	if !ok {
-		return questionBlock{}, false
-	}
-	var block questionBlock
-	for offset := 0; offset < len(attrs); {
-		switch {
-		case attrs[offset] == '#':
-			start := offset + 1
-			offset = start
-			for offset < len(attrs) && strings.IndexByte(blockIDShortcutEnd, attrs[offset]) < 0 {
-				offset++
-			}
-			if block.id == "" {
-				block.id = attrs[start:offset]
-			}
-		case text.IsBlockIDByte(attrs[offset]):
-			start := offset
-			for offset < len(attrs) && text.IsBlockIDByte(attrs[offset]) {
-				offset++
-			}
-			name := attrs[start:offset]
-			if offset+1 >= len(attrs) || attrs[offset] != '=' || attrs[offset+1] != '"' {
-				continue
-			}
-			offset += 2
-			valueStart := offset
-			escaped := false
-			for offset < len(attrs) && (attrs[offset] != '"' || escaped) {
-				escaped = attrs[offset] == '\\' && !escaped
-				offset++
-			}
-			// Only the one attribute carries an id: every other value on the line - the state,
-			// the asker, the question's own wording - is left unparsed.
-			if name == "copied_from" {
-				if parsed, err := uuid.Parse(attrs[valueStart:offset]); err == nil {
-					block.copiedFrom = parsed.String()
-				}
-			}
-			offset++
-		default:
-			offset++
+	block := questionBlock{id: id}
+	// Only the one attribute carries an ask: every other value on the line - the state, the
+	// asker, the question's own wording - is left unread.
+	if copied, ok := attrs["copied_from"].(string); ok {
+		if parsed, err := uuid.Parse(copied); err == nil {
+			block.copiedFrom = parsed.String()
 		}
 	}
-	return block, block.id != ""
+	return block, true
 }
 
 // trimContainerMarkers drops the indentation, quote markers (`>`) and list markers (`-`, `*`, `+`,

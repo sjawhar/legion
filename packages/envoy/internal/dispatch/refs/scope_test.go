@@ -260,3 +260,36 @@ func TestQuestionMapReadsTheLatestVersionsQuestionBlocks(t *testing.T) {
 		}
 	}
 }
+
+// A block whose id holds a character no bare `#id` can name is written `id="…"`
+// (pmdoc.TypedBlockIDAttribute), and the question map reads that line as the document's own
+// parse does: the same parser reads both spellings (pmdoc.ParseTypedDirectiveOpen), so a
+// question written either way is in the map its `#id`s resolve against.
+func TestQuestionMapReadsABlockIDWrittenQuoted(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "ACME")
+	createReferenceIssue(t, tx, "ACME-1", "ACME")
+	spec := insertScopeDocument(t, tx, "ACME-1", "spec", true)
+	quoted := insertScopeBlockAsk(t, tx, "ACME-1", spec, "q 2")
+	shortcut := insertScopeBlockAsk(t, tx, "ACME-1", spec, "q1")
+	insertScopeVersion(t, tx, spec, 1, ":::ask{#q1}\nWhich?\n:::\n\n"+
+		`:::ask{id="q 2" state="open"}`+"\nWhich?\n:::\n")
+
+	got, err := QuestionMap(ctx, tx, spec)
+	if err != nil {
+		t.Fatalf("question map of the spec: %v", err)
+	}
+	want := map[string]text.Ref{
+		"q1":  text.Extract("dispatch://ACME-1/ask/"+shortcut, "")[0],
+		"q 2": text.Extract("dispatch://ACME-1/ask/"+quoted, "")[0],
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("question map of the spec = %#v; want %#v", got, want)
+	}
+}

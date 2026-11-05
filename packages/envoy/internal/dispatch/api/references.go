@@ -23,18 +23,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// askReader is the one reader a write of an ask reads its texts through (refs.NewReader), bound
-// to this server's URL: an ask's question (refs.ReplaceCountedWith, refs.ReplaceCountedEditWith)
-// and its parts (refs.IndexAskPartsCountedWith) are texts of one write, so the database answers
-// once per kind for the write rather than once for each of them.
-func (s *server) askReader(ctx context.Context, tx pgx.Tx, askID string) *refs.Reader {
-	return refs.NewReader(ctx, tx, "ask", askID, s.deps.ServerURL)
-}
-
-// indexAskParts is refs.IndexAskPartsCounted bound to this server's URL: the parts of the ask
-// this write just wrote - its question, its options and its answer - indexed in the same
-// transaction, written at `at`, with what they moved merged into beside, the counted changes the
-// same write already holds, so the event it appends names them all.
+// indexAskParts is refs.IndexAskPartsCounted for a write that holds the ask's parts alone: the
+// parts of the ask this write just wrote - its question, its options and its answer - indexed in
+// the same transaction through a reader of their own (refs.NewReader), written at `at`, with
+// what they moved merged into beside, the counted changes the same write already holds, so the
+// event it appends names them all. A write that reconciles the ask's question as well builds the
+// one reader itself and passes it to both (refs.ReplaceCounted, refs.IndexAskPartsCounted).
 func (s *server) indexAskParts(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -42,7 +36,7 @@ func (s *server) indexAskParts(
 	at time.Time,
 	beside model.ReferenceChanges,
 ) (model.ReferenceChanges, error) {
-	return refs.IndexAskPartsCounted(ctx, tx, ask, s.deps.ServerURL, at, beside)
+	return refs.IndexAskPartsCounted(ctx, tx, refs.NewReader(ctx, tx, "ask", ask.ID, s.deps.ServerURL), ask, at, beside)
 }
 
 // referencesSinceWait bounds how long a since read waits for the safe horizon to pass every event
@@ -168,26 +162,29 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 // document, and a document block's among the blocks of the document the reference names, at the
 // version it pins. A reference whose owner no scope holds is left as written: a block of an ask,
 // a comment or a message, whose blocks are numbered (`b2`) and are no id a prefix shortens. A
-// prefix nothing carries is left as written too (notFoundNone), and the read answers the 404 it
-// always did for a node it has no edge of.
+// prefix nothing carries is left as written too, and the read answers the 404 it always did for
+// a node it has no edge of.
 func (s *server) wholeReference(w http.ResponseWriter, r *http.Request, ref text.Ref, viewer refs.Viewer) (text.Ref, bool) {
 	block := ref.Kind == "block" && ref.Item == ""
 	kind, scope, written, ok := refs.PrefixScope(text.Prefix{Ref: ref, Block: block})
 	if !ok || !text.IsIDPrefix(written) {
 		return ref, true
 	}
-	// wholeID answers "" for every refusal it has written and for a prefix nothing carries,
-	// which this route leaves as written.
-	whole, ok := s.wholeID(w, r, kind, scope, written, viewer, notFoundNone)
+	// A prefix nothing carries is "" and no error, which this route leaves as written.
+	whole, err := s.wholeID(r.Context(), kind, scope, written, viewer)
+	if err != nil {
+		s.writeIDPrefixError(w, err)
+		return ref, false
+	}
 	if whole == "" {
-		return ref, ok
+		return ref, true
 	}
 	if block {
 		ref.Block = whole
 	} else {
 		ref.ID = whole
 	}
-	return ref, ok
+	return ref, true
 }
 
 // referenceQuestions is the question map GET /api/v1/references/questions answers: the document
@@ -240,10 +237,11 @@ func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if text.IsIDPrefix(id) {
-		// A prefix nothing carries is left as written (notFoundNone), and the read below
-		// answers this route's own 404 for a source whose text belongs to no document.
-		whole, ok := s.wholeID(w, r, kind, refs.Scope{}, id, refs.Viewer{Human: human}, notFoundNone)
-		if !ok {
+		// A prefix nothing carries is left as written, and the read below answers this route's
+		// own 404 for a source whose text belongs to no document.
+		whole, err := s.wholeID(r.Context(), kind, refs.Scope{}, id, refs.Viewer{Human: human})
+		if err != nil {
+			s.writeIDPrefixError(w, err)
 			return
 		}
 		if whole != "" {

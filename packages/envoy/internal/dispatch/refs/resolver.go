@@ -15,54 +15,57 @@ import (
 // writes bare, the `#id`s naming the question blocks of the document its text belongs to, and the
 // ask, comment, message and block ids it writes short, each resolved to the whole id, over q, the
 // pool or transaction the write runs in. Every indexing path reads its text through this call or
-// through the resolver behind it (newResolver), so a comment, an ask, a message, a document, a
-// block, an excerpt, the full rebuild (RebuildAll) and the re-index of old text (ReindexOwedItem)
+// through the Reader behind it (NewReader), so a comment, an ask, a message, a document, a
+// block, an excerpt, the full rebuild (RebuildAll) and the re-index of old text (ReindexOwed)
 // all store the same edges for the same text. fromKind and fromID are the source whose text body
 // is, as refs stores it: they decide which document a `#id` resolves against (ScopeOf). Each
 // mention keeps its byte offset, so a caller that places mentions in blocks passes the result
 // through unchanged.
 //
-// A lookup that fails is not a mention that fails: the resolver answers "nothing resolved" for
+// A lookup that fails is not a mention that fails: the reader answers "nothing resolved" for
 // that kind, and the text is indexed as it is written, the way a mention of a target that does
 // not exist is (CountedChanges). What it does not do is save a write: a query that fails inside
 // the write's own transaction aborts that transaction, so the write fails at its next statement
 // whatever this answers.
 func Mentions(ctx context.Context, q Queryer, fromKind, fromID, body, serverURL string) []text.Located {
-	return newResolver(ctx, q, fromKind, fromID, serverURL).mentions(body)
+	return NewReader(ctx, q, fromKind, fromID, serverURL).mentions(body)
 }
 
-// resolver is the database text.Resolver one write reads its text through, over the pool or
+// Reader is the database one write reads every text of its source through, over the pool or
 // transaction that write runs in and for the one source whose text it is: its kind and id decide
 // the document a `#id` resolves against, and the server URL is the one the mentions are read
 // with. It is one write's object, not a cache: a caller builds it, reads every text of that
 // source through it - a comment's body, an ask's question and each of its parts - and drops it,
 // so the database answers once per kind for a write however many texts it holds, and what it
-// answered is the one transaction's view.
+// answered is the one transaction's view. It is the text.Resolver every write of a text passes
+// to the function that indexes it (ReplaceCounted, ReplaceCountedEdit, IndexAskParts,
+// IndexAskPartsCounted), so a write that holds two texts of one source - an ask's question and
+// its parts - reads both through one.
 //
 // Every failure it meets reaching the database is logged here and answered as nothing resolved
 // for that kind, and no call site handles one: the swallow lives in this one place because the
-// rule is the resolver's own ("A write must never fail because of what its body cites", refs.go,
+// rule is the Reader's own ("A write must never fail because of what its body cites", refs.go,
 // CountedChanges), because answering per kind leaves the other kinds of one body resolved where a
 // call site could only drop them all, and because it leaves text.Resolver's error return for a
-// resolver that has a reason to fail a write. A prefix that names nothing and one two items or
+// reader that has a reason to fail a write. A prefix that names nothing and one two items or
 // more carry are no failures at all: the mention stays as the text wrote it, which is what
 // text.Mentions does with an answer that leaves it out.
-type resolver struct {
-	// ctx is the write's context, held because text.Resolver's methods take none: the resolver
+type Reader struct {
+	// ctx is the write's context, held because text.Resolver's methods take none: the reader
 	// lives for one write and is never stored.
 	ctx       context.Context
 	q         Queryer
 	kind, id  string
 	serverURL string
 
-	// issues is every key this resolver was asked about, to whether it names an issue, so the
+	// issues is every key this reader was asked about, to whether it names an issue, so the
 	// parts of one ask ask about a repeated key once.
 	issues map[string]bool
 	// questions is the question map of the source's document, loaded at most once (asked), and
 	// nil for a source that belongs to no document or whose map could not be read.
 	questions map[string]text.Ref
 	asked     bool
-	// items is the whole id each (kind, scope, prefix) this resolver resolved names, "" for one
+	// items is the whole id each (kind, scope, prefix) this reader resolved names, "" for one
 	// that names nothing or two items or more, so a body writing the same short id twice is one
 	// query.
 	items map[prefixKey]string
@@ -76,33 +79,14 @@ type prefixKey struct {
 	prefix string
 }
 
-func newResolver(ctx context.Context, q Queryer, fromKind, fromID, serverURL string) *resolver {
-	return &resolver{ctx: ctx, q: q, kind: fromKind, id: fromID, serverURL: serverURL}
-}
-
-// Reader is the database one write reads every text of its source through: an ask's question
-// and each of its parts, a comment's body, a document's version. It is the resolver above held
-// by a caller that reads two texts of one source - a write that reconciles the ask's own
-// references from its question (ReplaceCountedWith) and then indexes its parts
-// (IndexAskPartsWith) - so the database answers once per kind for that write however many texts
-// it holds, and what it answered is the one transaction's view.
-type Reader struct{ resolve *resolver }
-
 // NewReader is the Reader of one write of the text of the source fromKind/fromID, over q, the
 // pool or transaction that write runs in, with serverURL the server its mentions are read with.
-// A write that holds one text alone needs none: ReplaceCounted, ReplaceCountedEdit and
-// IndexAskParts each build their own.
 func NewReader(ctx context.Context, q Queryer, fromKind, fromID, serverURL string) *Reader {
-	return &Reader{resolve: newResolver(ctx, q, fromKind, fromID, serverURL)}
-}
-
-// mentions is text.Mentions of body read through r.
-func (r *Reader) mentions(body string) []text.Located {
-	return r.resolve.mentions(body)
+	return &Reader{ctx: ctx, q: q, kind: fromKind, id: fromID, serverURL: serverURL}
 }
 
 // mentions is text.Mentions of body resolved through r.
-func (r *resolver) mentions(body string) []text.Located {
+func (r *Reader) mentions(body string) []text.Located {
 	located, err := text.Mentions(body, r.serverURL, r)
 	if err != nil {
 		// Unreachable: r answers every failure as nothing resolved and returns none. A build
@@ -116,9 +100,9 @@ func (r *resolver) mentions(body string) []text.Located {
 
 // Issues reports which of keys names an issue that exists, so a bare key is stored as a
 // reference only when it has a target. Mentions asks with the distinct keys of one body, and
-// this reads the ones this resolver has not been asked about yet, which is all of them for the
+// this reads the ones this reader has not been asked about yet, which is all of them for the
 // first text it reads and the new ones alone for every text after it.
-func (r *resolver) Issues(keys []string) (map[string]bool, error) {
+func (r *Reader) Issues(keys []string) (map[string]bool, error) {
 	unknown := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if _, known := r.issues[key]; !known {
@@ -147,11 +131,11 @@ func (r *resolver) Issues(keys []string) (map[string]bool, error) {
 }
 
 // Questions is the question map of the document the source's text belongs to (ScopeOf, then
-// QuestionMap), loaded at most once per resolver and not at all unless a body holds a `#`
+// QuestionMap), loaded at most once per reader and not at all unless a body holds a `#`
 // candidate, which is when text.Mentions asks. A source that belongs to no document - a direct
 // message, a reply whose thread names none - has no question, and a text on an issue but on no
 // document resolves against the issue's spec, which ScopeOf answers with.
-func (r *resolver) Questions() (map[string]text.Ref, error) {
+func (r *Reader) Questions() (map[string]text.Ref, error) {
 	if r.asked {
 		return r.questions, nil
 	}
@@ -178,7 +162,7 @@ func (r *resolver) Questions() (map[string]text.Ref, error) {
 // the graph every authenticated caller reads, so it reads no direct message's first line). A
 // prefix that names nothing, one two items or more carry, and one whose owner no Scope holds are
 // all left out of the answer, which leaves the mention as the text wrote it.
-func (r *resolver) Items(prefixes []text.Prefix) (map[int]string, error) {
+func (r *Reader) Items(prefixes []text.Prefix) (map[int]string, error) {
 	resolved := make(map[int]string, len(prefixes))
 	for index, prefix := range prefixes {
 		kind, scope, id, ok := PrefixScope(prefix)
@@ -207,7 +191,7 @@ func (r *resolver) Items(prefixes []text.Prefix) (map[int]string, error) {
 
 // resolveItem is the whole id key names, "" where it names nothing or two items or more. An error
 // is a failure reaching the database alone.
-func (r *resolver) resolveItem(key prefixKey) (string, error) {
+func (r *Reader) resolveItem(key prefixKey) (string, error) {
 	candidate, err := ResolvePrefix(r.ctx, r.q, key.kind, key.scope, key.prefix, Viewer{})
 	switch {
 	case err == nil:
@@ -223,7 +207,7 @@ func (r *resolver) resolveItem(key prefixKey) (string, error) {
 // document the block is of, at the version the reference pins; an item's within the owner its
 // reference names, the issue or the project document it is written on
 // (`dispatch://<PROJECT>/artifact/<slug>/ask/<id>`, whose slug the parsed reference carries in
-// Document). Both callers of a short id ask it: the resolver that rewrites a body's short ids as
+// Document). Both callers of a short id ask it: the reader that rewrites a body's short ids as
 // it is indexed, and the `?to=` route that answers a node under its whole id.
 //
 // ok is false for a reference whose owner no Scope holds, which is then left as the text wrote
@@ -254,7 +238,7 @@ func PrefixScope(prefix text.Prefix) (kind string, scope Scope, id string, ok bo
 }
 
 // failed logs a failure reaching the database, which leaves the text indexed as it is written.
-func (r *resolver) failed(what string, err error) {
+func (r *Reader) failed(what string, err error) {
 	slog.Error("dispatch: could not "+what+"; it is indexed as it is written",
 		"kind", r.kind, "id", r.id, "error", err)
 }

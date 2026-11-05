@@ -36,35 +36,28 @@ type Target struct {
 	ID   string
 }
 
-// ReplaceCounted reconciles one source's references, read with the whole grammar over the
-// write's transaction (Mentions), and resolves the counted targets the event that source appends
-// has to name. Every write that indexes a body goes through it or one of its variants, so no
-// producer can reconcile the graph without holding what moved: replaceRefs itself
-// is unexported. It names the targets whose edges it inserted or deleted, which is all a first
-// write of a body moves; an edit whose event names what it moved goes through ReplaceCountedEdit
-// (ReplaceCountedItemEdit for a comment), and a document's version through
-// ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's or an issue
-// message's first write goes through ReplaceCountedItem, which indexes its blocks as well.
+// ReplaceCounted reconciles one source's references, read with the whole grammar through r, the
+// Reader of the write that holds that source's text (NewReader), and resolves the counted
+// targets the event that source appends has to name. Every write that indexes a body goes
+// through it or one of its variants, so no producer can reconcile the graph without holding what
+// moved: replaceRefs itself is unexported. It names the targets whose edges it inserted or
+// deleted, which is all a first write of a body moves; an edit whose event names what it moved
+// goes through ReplaceCountedEdit (ReplaceCountedItemEdit for a comment), and a document's
+// version through ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's
+// or an issue message's first write goes through ReplaceCountedItem, which indexes its blocks as
+// well.
+//
+// The source is r's own: a write that holds another text of the same source - an ask's parts
+// beside its question (IndexAskParts) - passes the one reader to both, so the database answers
+// once per kind for the write rather than once per text.
 func ReplaceCounted(
-	ctx context.Context,
-	tx pgx.Tx,
-	fromKind, fromID, body, serverURL string,
-) (model.ReferenceChanges, error) {
-	return ReplaceCountedWith(ctx, tx, NewReader(ctx, tx, fromKind, fromID, serverURL), body)
-}
-
-// ReplaceCountedWith is ReplaceCounted for the source r was built for, read through r: a write
-// that holds another text of the same source - an ask's parts beside its question
-// (IndexAskPartsWith) - reads both through the one reader, so the database answers once per kind
-// for the write rather than once per text.
-func ReplaceCountedWith(
 	ctx context.Context,
 	tx pgx.Tx,
 	r *Reader,
 	body string,
 ) (model.ReferenceChanges, error) {
 	found := text.Refs(r.mentions(body))
-	changed, err := replaceRefs(ctx, tx, r.resolve.kind, r.resolve.id, found, nil)
+	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -77,21 +70,11 @@ func ReplaceCountedWith(
 func ReplaceCountedEdit(
 	ctx context.Context,
 	tx pgx.Tx,
-	fromKind, fromID, previous, body, serverURL string,
-) (model.ReferenceChanges, error) {
-	return ReplaceCountedEditWith(ctx, tx, NewReader(ctx, tx, fromKind, fromID, serverURL), previous, body)
-}
-
-// ReplaceCountedEditWith is ReplaceCountedEdit for the source r was built for, read through r,
-// as ReplaceCountedWith is ReplaceCounted.
-func ReplaceCountedEditWith(
-	ctx context.Context,
-	tx pgx.Tx,
 	r *Reader,
 	previous, body string,
 ) (model.ReferenceChanges, error) {
 	found := text.Refs(r.mentions(body))
-	changed, err := replaceRefs(ctx, tx, r.resolve.kind, r.resolve.id, found, nil)
+	changed, err := replaceRefs(ctx, tx, r.kind, r.id, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}

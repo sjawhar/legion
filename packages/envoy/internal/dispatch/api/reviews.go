@@ -615,14 +615,14 @@ func (s *server) openApprovalAsk(
 	if err := asks.FollowAuthor(ctx, tx, ask.ID, actor); err != nil {
 		return nil, model.Event{}, err
 	}
-	reader := s.askReader(ctx, tx, ask.ID)
-	askChanges, err := refs.ReplaceCountedWith(ctx, tx, reader, ask.Question)
+	reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.deps.ServerURL)
+	askChanges, err := refs.ReplaceCounted(ctx, tx, reader, ask.Question)
 	if err != nil {
 		return nil, model.Event{}, err
 	}
 	// The request's parts - its question and its two review options - beside its own
 	// references, read through the same reader and both named by the ask.opened below.
-	askChanges, err = refs.IndexAskPartsCountedWith(ctx, tx, reader, ask, ask.CreatedAt, askChanges)
+	askChanges, err = refs.IndexAskPartsCounted(ctx, tx, reader, ask, ask.CreatedAt, askChanges)
 	if err != nil {
 		return nil, model.Event{}, err
 	}
