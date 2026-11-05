@@ -333,79 +333,84 @@ def go_notices_runs():
     return out
 
 
-# The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
-# simple form, pinned whole.
+def json_stream_script(command: str, stream: str, prelude: str = "") -> str:
+    """A test step that writes its `go test -json` stream to a file under $RUNNER_TEMP/go-test-json
+    and replays it to the log: the package result lines of a green run, the whole stream of a red
+    one (ci.yaml's envoy-go unit step says why). `prelude` is what the step runs between the
+    directory and the go command, the document service's memory sampler being the one there is."""
+    return f"""\
+mkdir -p "$RUNNER_TEMP/go-test-json"
+{prelude}s=0
+{command} > "$RUNNER_TEMP/go-test-json/{stream}" || s=$?
+if [ "$s" -eq 0 ]; then
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/{stream}"
+else
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/{stream}"
+fi
+exit $s"""
+
+
+# The steps of envoy-go, the race lane, envoy-smoke and listener-server-change whose go commands
+# are not in the simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
-UNIT_TEST_SCRIPT = r"""mkdir -p "$RUNNER_TEMP/go-test-json"
-waits="$RUNNER_TEMP/go-test-json/postgres-waits.txt"
-# One long-lived connection a server, re-running its query every five seconds through
-# psql's own \watch. A psql per sample per server was the first shape and it cost the
-# run dearly: two processes and two connections a second on a four-core runner under
-# full load is work the tests then do not get (run 42039747360).
-for port in 5432 5433; do
-  PGPASSWORD=ci psql -h localhost -p "$port" -U postgres -At -F'|' -c \
-    "select now(), $port, backend_type, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(coalesce(query, ''), 120) from pg_stat_activity where pid <> pg_backend_pid() \watch 5" \
-    >> "$waits" 2>/dev/null &
-done
-samplers="$(jobs -p)"
-trap 'kill $samplers 2>/dev/null || true' EXIT
-export PGCLONE_DISPOSABLE_SERVER=1  # both Postgres services die with the job, so pgclone need not drop what it made (dispatch://INFRA-1075)
-go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
-  xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
-rest=$!
-DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \
-  go test -json -count=1 -parallel 12 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
-routes=$!
-rest_status=0
-routes_status=0
-wait "$rest" || rest_status=$?
-wait "$routes" || routes_status=$?
-s=$rest_status
-if [ "$s" -eq 0 ]; then s=$routes_status; fi
-if [ "$s" -eq 0 ]; then
-  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
-else
-  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
-fi
-exit $s"""
+# One call over every package but internal/integration, the integration step's.
+UNIT_TEST_SCRIPT = json_stream_script(
+    "go list ./... | grep -Ev '/integration' | xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m",
+    "unit.json")
+
 NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
-NATSLIVE_SCRIPT = """\
-mkdir -p "$RUNNER_TEMP/go-test-json"
-s=0
-go test -json -count=1 -tags natslive ./internal/testnats/ > "$RUNNER_TEMP/go-test-json/natslive.json" || s=$?
-if [ "$s" -eq 0 ]; then
-  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
-else
-  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
-fi
-exit $s"""
+NATSLIVE_SCRIPT = json_stream_script("go test -json -count=1 -tags natslive ./internal/testnats/", "natslive.json")
 INTEGRATION_STEP = "Integration test envoy (a real NATS server, in the test process)"
-INTEGRATION_SCRIPT = """\
-mkdir -p "$RUNNER_TEMP/go-test-json"
-s=0
-go test -json -count=1 -timeout 300s ./internal/integration/ > "$RUNNER_TEMP/go-test-json/integration.json" || s=$?
-if [ "$s" -eq 0 ]; then
-  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
-else
-  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
-fi
-exit $s"""
-# envoy-go-race-docs's one test step. It is pinned rather than read as a plain command because the
-# memory sampler runs beside the go call: that job is the one the runner has killed for memory,
-# and go test prints nothing until the package ends, so the sampler is what says where the memory
-# went (dispatch://INFRA-1075).
+INTEGRATION_SCRIPT = json_stream_script("go test -json -count=1 -timeout 300s ./internal/integration/", "integration.json")
+# The race lane's four test steps. Each writes its stream for the same reason envoy-go's do: the
+# lane's per-package times are read from it (.github/scripts/go-test-times.py).
+RACE_STEP = "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch"
+RACE_PKGS = ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
+             "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."]
+RACE_SCRIPT = json_stream_script(f"go test -json -race -count=1 -timeout 30m {' '.join(RACE_PKGS)}", "race.json")
+RACE_PMDOC_STEP = "Race-test pmdoc"
+RACE_PMDOC_SCRIPT = json_stream_script("go test -json -race -count=1 -timeout 40m ./internal/dispatch/pmdoc/...",
+                                       "race-pmdoc.json")
+RACE_API_STEP = "Race-test the Dispatch API"
+RACE_API_SCRIPT = json_stream_script("go test -json -race -count=1 -timeout 30m ./internal/dispatch/api/",
+                                     "race-api.json")
+# envoy-go-race-docs's memory sampler runs beside its go call: that job is the one the runner has
+# killed for memory, and go test prints nothing until the package ends, so the sampler is what
+# says how big the test binary grew (dispatch://INFRA-1075).
 RACE_DOCS_STEP = "Race-test the document service"
-RACE_DOCS_SCRIPT = """\
+RACE_DOCS_SAMPLER = """\
 peak=0
+pid=
 while :; do
-  used=$(free -m | awk '/^Mem:/{print $3}')
-  if [ "$used" -gt "$peak" ]; then peak=$used; fi
-  echo "memory $(date -u +%T) used ${used} MiB, peak ${peak} MiB, biggest $(ps -eo rss=,comm= --sort=-rss | head -1)"
+  if [ ! -r "/proc/$pid/status" ]; then
+    pid=
+    for comm in /proc/[0-9]*/comm; do
+      read -r name < "$comm" 2>/dev/null || continue
+      if [ "$name" = "docs.test" ]; then pid=${comm#/proc/}; pid=${pid%/comm}; break; fi
+    done
+  fi
+  hwm=0
+  if [ -n "$pid" ]; then
+    { while read -r field value _; do
+        if [ "$field" = "VmHWM:" ]; then hwm=$value; break; fi
+      done < "/proc/$pid/status"; } 2>/dev/null || hwm=0
+  fi
+  if [ "$hwm" -gt "$peak" ]; then peak=$hwm; fi
+  printf 'memory %(%T)T docs.test pid %s, VmHWM %s MiB, peak %s MiB\\n' -1 "${pid:-none}" "$((hwm / 1024))" "$((peak / 1024))"
   sleep 20
 done &
 sampler=$!
 trap 'kill "$sampler" 2>/dev/null || true' EXIT
-go test -race -timeout 60m -p 2 -parallel 2 ./internal/dispatch/docs/"""
+"""
+RACE_DOCS_SCRIPT = json_stream_script(
+    "go test -json -race -count=1 -timeout 60m -p 2 -parallel 2 ./internal/dispatch/docs/",
+    "race-docs.json", prelude=RACE_DOCS_SAMPLER)
+# TEMPORARY, envoy-go's INFRA-1260 proof step: two go test calls, so not the simple form. It
+# leaves this table with the step (dispatch://INFRA-1260).
+PROOF_1260_STEP = "Twenty runs each of the two tests INFRA-1260 names"
+PROOF_1260_SCRIPT = """\
+go test -count=20 -run '^TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone$' ./internal/dispatch/embedqueue/
+go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -708,18 +713,21 @@ GATES = [
         # to the log, so none of them is in the simple form: -json is not a flag the check
         # reduces and a redirect is not in that form either (dispatch://INFRA-1075).
         #
-        # Two calls at once, which between them name every package but internal/integration, the
-        # integration step's: all of ./... but internal/dispatch/routes, and that package against
-        # the job's second Postgres. The superset ./... covers both.
+        # One call, which names every package but internal/integration, the integration step's:
+        # the superset ./... covers it.
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
-            (ENVOY, ["./internal/dispatch/routes"], "go test -count=1 -timeout 20m ./internal/dispatch/routes", {}),
         ]),
         pinned_step("envoy-go", NATSLIVE_STEP, ENVOY, NATSLIVE_SCRIPT, [
             (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
         ]),
         pinned_step("envoy-go", INTEGRATION_STEP, ENVOY, INTEGRATION_SCRIPT, [
             (ENVOY, ["./internal/integration/"], "go test ./internal/integration/", {}),
+        ]),
+        # TEMPORARY with the step it pins (dispatch://INFRA-1260).
+        pinned_step("envoy-go", PROOF_1260_STEP, ENVOY, PROOF_1260_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/embedqueue/"], "go test -run … ./internal/dispatch/embedqueue/", {}),
+            (ENVOY, ["./internal/dispatch/api/"], "go test -run … ./internal/dispatch/api/", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
         pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [
@@ -759,26 +767,28 @@ GATES = [
         (f"{ENVOY}/internal/testpg/testpg.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: const Image"),
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
-                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
-                 ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
-                         "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
+    # The lane's test steps write a `go test -json` stream to a file and replay it to the log, so
+    # none of them is in the simple form: -json is not a flag the check reduces and a redirect is
+    # not in that form either (dispatch://INFRA-1075, as envoy-go's own steps).
+    gate("envoy_go_race", "envoy-go-race", exact=[
+        pinned_step("envoy-go-race", RACE_STEP, ENVOY, RACE_SCRIPT, [
+            (ENVOY, RACE_PKGS, f"go test -race {' '.join(RACE_PKGS)}", {"race": True}),
+        ]),
     ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[
-        step_run("envoy-go-race-pmdoc", "Race-test pmdoc",
-                 "go test -race -timeout 40m ./internal/dispatch/pmdoc/...",
-                 ENVOY, ["./internal/dispatch/pmdoc/..."], race=True),
+    gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", exact=[
+        pinned_step("envoy-go-race-pmdoc", RACE_PMDOC_STEP, ENVOY, RACE_PMDOC_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/pmdoc/..."], "go test -race ./internal/dispatch/pmdoc/...", {"race": True}),
+        ]),
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
     ) + setup_go("envoy-go-race-pmdoc", f"{ENVOY}/go.mod") + bun_job("envoy-go-race-pmdoc") + CI_SELF),
 
-    gate("envoy_go_race_api", "envoy-go-race-api", runs=[
-        step_run("envoy-go-race-api", "Race-test the Dispatch API",
-                 "go test -race -timeout 30m ./internal/dispatch/api/",
-                 ENVOY, ["./internal/dispatch/api/"], race=True),
+    gate("envoy_go_race_api", "envoy-go-race-api", exact=[
+        pinned_step("envoy-go-race-api", RACE_API_STEP, ENVOY, RACE_API_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/api/"], "go test -race ./internal/dispatch/api/", {"race": True}),
+        ]),
     ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[

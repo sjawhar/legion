@@ -12,6 +12,13 @@ paths:
       # `queue` is a GitHub Actions concurrency key (docs.github.com, "Control the concurrency of
       # workflows and jobs"). actionlint does not know it yet: rhysd/actionlint#654 adds it.
       - 'unexpected key "queue" for "concurrency" section'
+      # `command` is a GitHub Actions service-container key: it overrides the image's CMD, and the
+      # runner passes it as the arguments after the image name of its `docker create`
+      # (docs.github.com, "Workflow syntax for GitHub Actions",
+      # `jobs.<job_id>.services.<service_id>.command`; ci.yaml's envoy-go lane gives each Postgres
+      # service its settings that way). GitHub shipped it on 2 April 2026 and actionlint merged it
+      # the same month (rhysd/actionlint#645, for #644), after release 1.7.12.
+      - 'unexpected key "command" for "services" section'
   .github/workflows/tests-closed.yaml:
     ignore:
       # The one job is skipped on purpose: the run joins ci.yaml's concurrency group and takes no
