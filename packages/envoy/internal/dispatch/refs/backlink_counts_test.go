@@ -18,7 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
-// backlinkFixture is one graph that fills every arm of graph_edges: each of the view's 26 arms
+// backlinkFixture is one graph that fills every arm of graph_edges: each of the view's 27 arms
 // emits at least one edge over it, and every node kind nodeLoaders resolves has a node with an
 // inbound edge. Every item kind holds a block that is no longer current, carrying a link of its
 // own and pointed at by a mention, an ask's part and a message's block by a reply as well, so
@@ -121,6 +121,10 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		values ('CORE-1', '{"kind":"user","id":"alice"}', 'a reply that cites', $1::uuid)
 		returning id::text
 	`, ownedComment)
+	execFixture(t, tx, "create the nested reply", `
+		insert into comments (issue_key, author, body, reply_to, answers)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'a nested reply', $1::uuid, $2::uuid)
+	`, ownedComment, citingComment)
 	execFixture(t, tx, "create the ask reply", `
 		insert into comments (issue_key, author, body, ask_id)
 		values ('CORE-1', '{"kind":"user","id":"alice"}', 'an answer', $1::uuid)
@@ -701,6 +705,7 @@ var graphViewArms = []graphViewArm{
 	{table: "asks", fromKind: "ask", kind: "owned_by", toKind: "artifact"},
 	{table: "comments", fromKind: "comment", kind: "owned_by", toKind: "artifact"},
 	{table: "comments", fromKind: "comment", kind: "replies_to", toKind: "comment"},
+	{table: "comments", fromKind: "comment", kind: "answers", toKind: "comment"},
 	{table: "comments", fromKind: "comment", kind: "replies_to", toKind: "ask"},
 	{table: "messages", fromKind: "message", kind: "replies_to", toKind: "message"},
 	{table: "ask_followers", fromKind: "ask", kind: "followed_by", toKind: "session"},
