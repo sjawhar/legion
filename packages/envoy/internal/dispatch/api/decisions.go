@@ -88,45 +88,6 @@ func artifactMissing(err error) bool {
 	return apiErr.code == "ARTIFACT_NOT_FOUND" || apiErr.code == "ARTIFACT_REFERENCE_AMBIGUOUS"
 }
 
-func (s *server) issueDecisionQuestions(ctx context.Context, key string) ([]issueAskRow, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select `+askReadColumns+` `+askReadFrom+`
-    where a.issue_key = $1 and a.state = 'open' and exists (
-      select 1 from artifacts d join document_blocks b on b.artifact_id=d.id
-      where d.issue_key=$1 and d.kind='doc' and d.id=a.block_artifact_id
-        and b.block_id=a.block_id and b.type='ask'
-    )
-		order by a.created_at, a.id
-  `, key)
-	if err != nil {
-		return nil, err
-	}
-	questions := []issueAskRow{}
-	for rows.Next() {
-		ask, reply, err := scanAskRead(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		questions = append(questions, issueAskRow{Ask: ask, LastReply: reply})
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	asks := make([]*model.Ask, len(questions))
-	for index := range questions {
-		asks[index] = &questions[index].Ask
-	}
-	if err := s.attachOpenedEventIDs(ctx, s.deps.Store.Pool, asks); err != nil {
-		return nil, err
-	}
-	if err := attachAskBacklinkCounts(ctx, s.deps.Store.Pool, asks); err != nil {
-		return nil, err
-	}
-	return questions, nil
-}
-
 func decisionTextSum(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
@@ -246,7 +207,7 @@ func (s *server) keptDecision(ctx context.Context, document model.Artifact, bloc
 	if document.IssueKey == nil {
 		return model.Decision{}, notFound
 	}
-	decisions, err := s.readDecisions(ctx, document, artifactReference(document), "")
+	decisions, err := s.readDecisionNodes(ctx, document, artifactReference(document), "")
 	if err != nil {
 		return model.Decision{}, err
 	}

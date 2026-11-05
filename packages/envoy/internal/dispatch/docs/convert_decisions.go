@@ -39,7 +39,7 @@ func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out 
 	rows, err := s.store.Pool.Query(ctx, `
  select a.id::text, a.issue_key, coalesce(spec.id::text,'')
  from artifacts a left join artifacts spec on spec.issue_key=a.issue_key and spec.is_primary and spec.kind='doc'
- where a.kind='doc' and (a.name='decisions.md' or a.slug='decisions-md')
+ where a.kind='doc' and (a.name='decisions.md' or a.slug='decisions-md' and a.name not like 'decision-history-%')
  order by a.issue_key,a.id`)
 	if err != nil {
 		return report, err
@@ -207,7 +207,7 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 			return report, err
 		}
 	}
-	_, specBlocks, err := s.TextWithBlocks(joined, source.spec)
+	specMarkdown, specBlocks, err := s.TextWithBlocks(joined, source.spec)
 	if err != nil {
 		return report, err
 	}
@@ -257,9 +257,32 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 	}
 	knownAsks := map[string]bool{}
 	for _, ask := range asks {
-		knownAsks[ask.ID] = true
+		knownAsks[ask.ID] = ask.State == "answered" && ask.Answer != nil
+	}
+	headings := decisionmigration.SectionHeadings(entries, legacyMarkdown, legacyBlocks)
+	keptHeadings := map[string]bool{}
+	if source.id != "" {
+		rows, err := tx.Query(joined, `select block_id from decision_keeps where artifact_id=$1::uuid`, source.id)
+		if err != nil {
+			return report, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return report, err
+			}
+			keptHeadings[id] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return report, err
+		}
 	}
 	for i := range entries {
+		if keptHeadings[headings[entries[i].ID]] {
+			entries[i].Drop = false
+		}
 		if entries[i].Drop {
 			for _, id := range entries[i].Asks {
 				if !knownAsks[id] {
@@ -403,21 +426,25 @@ func (s *Service) convertDecisionDocument(joined context.Context, tx pgx.Tx, sou
 		}
 		changed = true
 	}
+	pointer := "The decisions are in dispatch://" + source.key + "/artifact/decisions-md."
+	if source.id != "" && strings.Contains(specMarkdown, pointer) {
+		if _, err := s.ApplyOps(joined, source.spec, []model.EditOp{{Op: "replace", Find: pointer, With: "The decisions are the decision and answered ask nodes in this spec."}}, conversionActor, nil); err != nil {
+			return report, err
+		}
+		changed = true
+	}
 	if changed {
 		version, err := s.conversionVersion(joined, tx, source.spec, "Decision nodes replace the separate decision document")
 		if err != nil {
 			return report, err
 		}
-		if err := moveConvertedDecisionKeeps(joined, tx, source, entries, legacyMarkdown, legacyBlocks, version.Version.Number); err != nil {
+		if err := copyConvertedDecisionKeeps(joined, tx, source, entries, legacyMarkdown, legacyBlocks, version.Version.Number); err != nil {
 			return report, err
 		}
 	}
 	if source.id != "" {
 		history := "decision-history-" + source.id
-		if _, err := tx.Exec(joined, `update artifacts set name=$2,slug=$3 where id=$1::uuid`, source.id, history+".md", history); err != nil {
-			return report, err
-		}
-		if _, err := s.ReplaceText(joined, source.id, "Decision nodes are in dispatch://"+source.key+"/spec. Earlier versions retain the conversion history.\n", conversionActor); err != nil {
+		if _, err := tx.Exec(joined, `update artifacts set name=$2 where id=$1::uuid`, source.id, history+".md"); err != nil {
 			return report, err
 		}
 		if _, err := s.conversionVersion(joined, tx, source.id, "Retire the separate decision document"); err != nil {

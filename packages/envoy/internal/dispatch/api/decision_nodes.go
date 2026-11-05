@@ -25,8 +25,47 @@ const decisionDocumentsQuery = `
      and g.kind = 'part_of' and g.to_kind = 'artifact' and g.to_id = a.ref_key
    limit 1
  ) member on true
- where a.issue_key = $1 and a.kind = 'doc'
+ where a.issue_key = $1 and a.kind = 'doc' and a.name <> 'decision-history-'||a.id::text||'.md'
  order by a.is_primary desc, a.created_at, a.id::text`
+
+func (s *server) issueDecisionQuestions(ctx context.Context, key string) ([]issueAskRow, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select `+askReadColumns+` `+askReadFrom+`
+    where a.issue_key = $1 and a.state = 'open' and exists (
+      select 1 from artifacts d join document_blocks b on b.artifact_id=d.id
+      where d.issue_key=$1 and d.kind='doc' and d.id=a.block_artifact_id
+        and b.block_id=a.block_id and b.type='ask'
+    )
+		order by a.created_at, a.id
+  `, key)
+	if err != nil {
+		return nil, err
+	}
+	questions := []issueAskRow{}
+	for rows.Next() {
+		ask, reply, err := scanAskRead(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		questions = append(questions, issueAskRow{Ask: ask, LastReply: reply})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	asks := make([]*model.Ask, len(questions))
+	for index := range questions {
+		asks[index] = &questions[index].Ask
+	}
+	if err := s.attachOpenedEventIDs(ctx, s.deps.Store.Pool, asks); err != nil {
+		return nil, err
+	}
+	if err := attachAskBacklinkCounts(ctx, s.deps.Store.Pool, asks); err != nil {
+		return nil, err
+	}
+	return questions, nil
+}
 
 func (s *server) issueDecisionNodes(ctx context.Context, key string) (issueDecisions, error) {
 	answer := issueDecisions{OpenQuestions: []issueAskRow{}, Decisions: []model.Decision{}}
@@ -68,7 +107,7 @@ func (s *server) issueDecisionNodes(ctx context.Context, key string) (issueDecis
 			return answer, err
 		}
 		reference := artifactReference(document)
-		decisions, err := s.readDecisions(ctx, document, reference, specID)
+		decisions, err := s.readDecisionNodes(ctx, document, reference, specID)
 		if err != nil {
 			return answer, err
 		}
@@ -80,9 +119,9 @@ func (s *server) issueDecisionNodes(ctx context.Context, key string) (issueDecis
 	return answer, nil
 }
 
-// readDecisions reads each typed node's own text. Only the ask row can supply a person's
+// readDecisionNodes reads each typed node's own text. Only the ask row can supply a person's
 // decision: from_ask is provenance for an agent's choice, never permission to restate an answer.
-func (s *server) readDecisions(ctx context.Context, document model.Artifact, reference, specID string) ([]model.Decision, error) {
+func (s *server) readDecisionNodes(ctx context.Context, document model.Artifact, reference, specID string) ([]model.Decision, error) {
 	markdown, blocks, err := s.deps.Docs.TextWithBlocks(ctx, document.ID)
 	if err != nil {
 		return nil, err
@@ -101,6 +140,11 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 		if err != nil {
 			return nil, err
 		}
+		removed, err := s.removedDecisionPassages(ctx, document.ID, specID)
+		if err != nil {
+			return nil, err
+		}
+		links = append(links, removed...)
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `select `+askReadColumns+` `+askReadFrom+` where a.block_artifact_id=$1::uuid and a.state in ('answered','resolved')`, document.ID)
 	if err != nil {
@@ -143,6 +187,9 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 				decision.Kind = "person"
 			} else if ask.State == "resolved" {
 				decision.Replaced = true
+				if ask.Resolution != nil && ask.Resolution.Actor.Kind == "user" {
+					decision.Kind = "person"
+				}
 			} else {
 				continue
 			}

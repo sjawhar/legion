@@ -289,8 +289,8 @@ func TestDecisionNodesRetainClosedQuestionsAndCountOpenAsks(t *testing.T) {
 	if err := json.Unmarshal(before.Body.Bytes(), &census); err != nil {
 		t.Fatal(err)
 	}
-	if census.Source != 1 || census.Nodes != 1 || census.Differences != 0 {
-		t.Fatalf("open ask vanished from census: %s", before.Body.String())
+	if census.Source != 0 || census.Nodes != 0 || census.Differences != 0 {
+		t.Fatalf("an open ask is not a legacy decision section: %s", before.Body.String())
 	}
 	const reason = "No need to choose.\n\nKeep this wording."
 	resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", map[string]any{"kind": "resolved", "reason": reason}, "alice")
@@ -302,14 +302,14 @@ func TestDecisionNodesRetainClosedQuestionsAndCountOpenAsks(t *testing.T) {
 		t.Fatalf("closed question disappeared: %s", mustJSON(t, view))
 	}
 	closed := view.Decisions[0]
-	if !closed.Replaced || closed.Kind == "person" || closed.WaitingReview || len(closed.Asks) != 1 || closed.Asks[0] != ask.ID || !strings.HasSuffix(closed.Text, reason) || !strings.Contains(closed.Text, "- A: Original.") {
+	if !closed.Replaced || closed.Kind != "person" || closed.WaitingReview || len(closed.Asks) != 1 || closed.Asks[0] != ask.ID || !strings.HasSuffix(closed.Text, reason) || !strings.Contains(closed.Text, "- A: Original.") {
 		t.Fatalf("closed question was restated or misattributed: %#v", closed)
 	}
 	after := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
 	if err := json.Unmarshal(after.Body.Bytes(), &census); err != nil {
 		t.Fatal(err)
 	}
-	if after.Code != http.StatusOK || census.Source != 1 || census.Nodes != 1 || census.Differences != 0 {
-		t.Fatalf("closed census: %d %s", after.Code, after.Body.String())
+	if after.Code != http.StatusOK || census.Source != 0 || census.Nodes != 1 || census.Differences != 1 {
+		t.Fatalf("a native-only resolution has no legacy section: %d %s", after.Code, after.Body.String())
 	}
 }

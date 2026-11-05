@@ -369,6 +369,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err := refuseBlockPointers(ctx, op.tx, artifactID, tree.Node(), weighedFrom, offsets); err != nil {
 		return err
 	}
+	if contentChanged {
+		if err := refuseAgentDecisionChanges(ctx, op.tx, artifactID, actor, tree.Node()); err != nil {
+			return err
+		}
+	}
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
 	before, weighedFrom = pmdoc.ValidDocument{}, nil

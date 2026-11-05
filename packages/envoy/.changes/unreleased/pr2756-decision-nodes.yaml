@@ -1,5 +1,5 @@
 kind: Changed
-body: Read Decisions from native decision and ask nodes, preserve original answers and Keep receipts, and provide a dry-run-first conversion of separate decision documents into spec nodes.
+body: Read Decisions from native decision and ask nodes, refuse agents removing answered asks or supplying person attribution, and convert separate decision documents with stable links and an independent section-and-Keep comparison.
 time: 2026-11-04T10:40:00Z
 custom:
   Issue: pr2756
