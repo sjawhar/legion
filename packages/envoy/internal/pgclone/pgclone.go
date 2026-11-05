@@ -90,6 +90,19 @@ type Config struct {
 	DatabasePrefix string
 	TemplatePrefix string
 
+	// Empty makes this pool hand out databases carrying no migration at all, and reset one by
+	// making it empty again rather than by putting a template's rows back: schema public is
+	// dropped with everything in it and created again, every other schema, extension, event
+	// trigger and publication the test left goes, the database's own settings are reset, and
+	// the fingerprint below is then read to check that what came back is a fresh database
+	// (emptyStatements). It is for the tests that migrate - a migration test leaves a different
+	// schema behind, which no truncate can put back, so such a test is handed a clone of the
+	// migrated template by nobody and paid a create database and a drop database of its own.
+	//
+	// Migrate and SeedSchema belong to a migrated pool and are left unset on an empty one: the
+	// template is a copy of template1 and holds no row to snapshot.
+	Empty bool
+
 	// SeedSchema is the schema the template's own rows are snapshotted into. It lives in the
 	// template rather than in the test process, so every clone carries it from its first page
 	// and no test pays for taking the snapshot; the fingerprint leaves it out, since it is the
@@ -166,6 +179,13 @@ type Pool struct {
 	fingerprint string
 	restores    []string
 	sequences   []string
+
+	// An empty pool's reset drops what a migration test left instead (Config.Empty): leftovers
+	// is the one question it asks a database - which objects of schema public no extension owns,
+	// and which schemas, extensions, event triggers and publications a fresh database of this
+	// server would not hold. prepareEmpty builds it from the template, so it names nothing this
+	// package decided a fresh database holds.
+	leftovers string
 
 	// freeMu guards free, the databases a reset emptied and gave back, and recycling carries the
 	// databases their tests are done with to the reset workers that empty them.
@@ -322,9 +342,26 @@ func (p *Pool) Drop(name string) {
 // every database its tests left - the free list's and the ones no reset could take back - then
 // drops the template they were cloned from. A package whose tests take a database from this pool
 // uses the harness's Main as its TestMain.
-func (p *Pool) Main(m *testing.M) int {
+//
+// beside names the other pools of the same package: a package whose migration tests take an
+// empty database beside the migrated ones holds two (Config.Empty), and only one of them can own
+// m.Run. They are installed with this pool before the tests run and cleaned up after it, and
+// each reports its own lines.
+func (p *Pool) Main(m *testing.M, beside ...*Pool) int {
 	p.installed = true
-	code := m.Run()
+	for _, other := range beside {
+		other.installed = true
+	}
+	code := p.finish(m.Run())
+	for _, other := range beside {
+		code = other.finish(code)
+	}
+	return code
+}
+
+// finish is everything Main does once the tests have run: the emptying still in flight, the
+// databases the run leaves and the template, and the lines that say what the pool refused.
+func (p *Pool) finish(code int) int {
 	if p.admin == nil {
 		return code
 	}
@@ -423,6 +460,11 @@ func (p *Pool) recycle(ctx context.Context, name string) (bool, error) {
 // fingerprint is read once, after the wait: the backends of the pool the test just closed are
 // still exiting when the database arrives, and a fingerprint read beside them is a reading of a
 // database somebody still holds.
+//
+// An empty pool makes the database empty again before the fingerprint rather than after it
+// (emptyStatements): on a migrated pool the fingerprint decides whether the database may be
+// reset at all, and on an empty one it is the check that the reset worked, so a database the
+// reset could not put back the way a fresh one looks is dropped rather than handed on.
 func (p *Pool) reset(ctx context.Context, name string) (bool, error) {
 	conn, err := p.takeConn(ctx, name)
 	if err != nil {
@@ -445,6 +487,15 @@ func (p *Pool) reset(ctx context.Context, name string) (bool, error) {
 		p.noteChanged()
 		return false, nil
 	}
+	if p.config.Empty {
+		statements, err := p.emptyStatements(ctx, conn, name)
+		if err != nil {
+			return false, err
+		}
+		if _, err := conn.Exec(ctx, statements); err != nil {
+			return false, fmt.Errorf("empty the database: %w", err)
+		}
+	}
 	fingerprint, err := p.inspect(ctx, conn)
 	if err != nil {
 		return false, err
@@ -452,6 +503,9 @@ func (p *Pool) reset(ctx context.Context, name string) (bool, error) {
 	if fingerprint != p.fingerprint {
 		p.noteChanged()
 		return false, nil
+	}
+	if p.config.Empty {
+		return true, nil
 	}
 	// The probe runs only once the fingerprint has matched: it names each table of the schema,
 	// and on a database a test dropped a table of it is the fingerprint's answer that decides,
@@ -692,6 +746,27 @@ func (p *Pool) inspect(ctx context.Context, conn Querier) (string, error) {
 // the catalog after the session that made them ends, so one temporary table would otherwise make
 // a database unreusable for the rest of the run, and silently, since a dropped database is silent
 // by design.
+//
+// The seven branches after the schemas are the database outside schema public, which an empty
+// pool's reset has to put back as well (emptyStatements) and which a migrated pool's truncate
+// never touched: a type, because an enum or a domain adds no pg_class row and so no branch above
+// it sees one; an extension, because a migration test installs vector and a reused database must
+// not come back carrying it, nor come back without the one a fresh database has; an event
+// trigger, because one runs code of its own on every later test's DDL (internal/dispatch/store's
+// census tests leave one); a publication and a subscription, because each is a database-level
+// object a schema does not hold; a large object, because it lives in no schema at all; a default
+// privilege, because alter default privileges with no schema outlives everything here; and the
+// database's own row, which is where a grant on the database and a change of owner show up.
+//
+// An empty pool adds one branch more, publicObjects: every object of schema public that no
+// extension owns, whatever its kind. A migrated pool's reset leaves that schema standing and is
+// held to what it reads there - the columns, relations, constraints, functions and triggers
+// above - while an empty pool's reset takes the schema's objects away one kind at a time, so it
+// is held to the schema having none left. It is the same question emptyStatements asks, which is
+// what makes the fingerprint the check that the reset worked: an object of a kind emptyDrops does
+// not know is in this branch and the database is refused for it. It is not in a migrated pool's
+// fingerprint because there it would describe every relation of the schema on every reset, which
+// the branches above already carry at a measured cost.
 func (p *Pool) fingerprintQuery() string {
 	return `
 select coalesce((
@@ -730,12 +805,40 @@ select coalesce((
 			from pg_db_role_setting setting
 			join pg_database database on database.oid = setting.setdatabase
 			where database.datname = current_database()
+		union all
+		select format('type|%s|%s', type_of.typname, type_of.typtype)
+			from pg_type type_of
+			left join pg_class relation on relation.oid = type_of.typrelid
+			where type_of.typnamespace = 'public'::regnamespace
+				and type_of.typtype not in ('b', 'p')
+				and (relation.oid is null or relation.relkind = 'c')
+		union all
+		select format('extension|%s|%s|%s', extname, extversion, extnamespace::regnamespace::text)
+			from pg_extension
+		union all
+		select format('event trigger|%s|%s|%s', evtname, evtevent, evtenabled)
+			from pg_event_trigger
+		union all
+		select format('publication|%s', pubname) from pg_publication
+		union all
+		select format('subscription|%s', subname) from pg_subscription
+			where subdbid = (select oid from pg_database where datname = current_database())
+		union all
+		select format('large objects|%s', count(*)) from pg_largeobject_metadata
+		union all
+		select format('default privilege|%s|%s|%s', defaclnamespace::regnamespace::text,
+			defaclobjtype, defaclacl::text) from pg_default_acl
+		union all
+		select format('database|%s|%s', datdba::regrole::text, coalesce(datacl::text, ''))
+			from pg_database where datname = current_database()` + p.emptyObjects() + `
 	) entries
 ), '')`
 }
 
 // prepare opens the admin pool, makes the template every clone comes from, has the harness
-// migrate it, and starts the reset workers.
+// migrate it, and starts the reset workers. An empty pool's template carries no migration: the
+// copy of template1 is what its tests are handed, and what prepareEmpty reads is the shape a
+// reset has to put a database back into.
 func (p *Pool) prepare(raw string) error {
 	server, err := url.Parse(raw)
 	if err != nil {
@@ -769,15 +872,9 @@ func (p *Pool) prepare(raw string) error {
 		return fmt.Errorf("create the template database: %w", err)
 	}
 	p.template = name
-	template, close, err := p.config.Migrate(ctx, DatabaseURL(p.server, name))
-	if err != nil {
+	if err := p.prepareTemplate(ctx, name); err != nil {
 		return err
 	}
-	defer close()
-	if err := p.prepareReset(ctx, template); err != nil {
-		return err
-	}
-	close()
 	// Postgres refuses to clone a database another session is connected to. Refusing connections
 	// to the template keeps any stray session from making a clone wait or fail.
 	if _, err := admin.Exec(ctx, "alter database "+name+" with allow_connections false"); err != nil {
@@ -793,6 +890,30 @@ func (p *Pool) prepare(raw string) error {
 		go p.recycleWorker()
 	}
 	return nil
+}
+
+// prepareTemplate fills in everything a reset reads, from the template database as the pool will
+// hand it out: a migrated pool has the harness migrate it and reads the rows, the sequences and
+// the fingerprint a reset puts back (prepareReset), and an empty pool migrates nothing and reads
+// what a fresh database of this server holds (prepareEmpty). Either way the connections it opened
+// are closed before it returns, since nothing may be connected to a database Postgres is asked to
+// clone.
+func (p *Pool) prepareTemplate(ctx context.Context, name string) error {
+	dsn := DatabaseURL(p.server, name)
+	if p.config.Empty {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			return fmt.Errorf("connect to the template database: %w", err)
+		}
+		defer conn.Close(ctx)
+		return p.prepareEmpty(ctx, conn)
+	}
+	template, close, err := p.config.Migrate(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer close()
+	return p.prepareReset(ctx, template)
 }
 
 // resetSizes is how many databases this package empties at once and how many wait behind them.
