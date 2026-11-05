@@ -50,6 +50,17 @@ export function sameKeyRetryNote(made: string): string {
 }
 
 /**
+ * What a Retry promises once Dispatch has forgotten the write's key: the key is older than the
+ * `IDEMPOTENCY_KEY_TTL_MS` Dispatch keeps one for, so Dispatch holds nothing under it and a Retry
+ * is a new write, done a second time if the first one landed. `made` is what the write does once
+ * it lands (`delivered`, `saved`).
+ */
+export function expiredRetryNote(made: string): string {
+  const hours = IDEMPOTENCY_KEY_TTL_MS / 3_600_000;
+  return `Its key is more than ${hours} hours old, so Dispatch no longer holds it: a Retry is a new write, which can be ${made} a second time if the first one was.`;
+}
+
+/**
  * Whether Dispatch has forgotten `key` by `now`: the key was minted `IDEMPOTENCY_KEY_TTL_MS` ago
  * or longer, so a request under it is a new write to Dispatch rather than a repeat of the first.
  *
@@ -89,6 +100,18 @@ export class SendInterruptedError extends SendStoppedError {
   }
 }
 
+/** A write whose key Dispatch no longer holds (`keyExpired`): it was minted more than
+ *  `IDEMPOTENCY_KEY_TTL_MS` ago, so no attempt under it would be a repeat of the first - Dispatch
+ *  would run it as a new write. It ends as a stopped write does, so it offers what a stopped
+ *  write offers - Retry and Discard - and that Retry goes under a new key
+ *  (`retriesUnderItsKey`). */
+export class SendExpiredError extends SendStoppedError {
+  constructor() {
+    super(`Dispatch has not confirmed this message. ${expiredRetryNote("delivered")}`);
+    this.name = "SendExpiredError";
+  }
+}
+
 /** A write the reader discarded while it waited its turn behind another, before any attempt of it
  *  went out: it was never sent, so nothing of it reached Dispatch. */
 export class WriteDiscardedError extends Error {
@@ -103,10 +126,13 @@ export class WriteDiscardedError extends Error {
  * gave - any 4xx it answered - is its verdict on that key, which it would replay to the same key
  * for a day, so a Retry is the person's new action under a key of its own. A write that ended
  * without a verdict - stopped, or interrupted by a reload - may have landed, so its Retry asks
- * again under the same key, and Dispatch answers it with what the first one did.
+ * again under the same key, and Dispatch answers it with what the first one did. A write whose
+ * key ran out (`SendExpiredError`) is the one of those that does not: Dispatch has forgotten the
+ * key, so a request under it is a new write rather than a repeat of the first, and the Retry goes
+ * under a new key, as it would after Dispatch's own verdict.
  */
 export function retriesUnderItsKey(refusal: Error | undefined): boolean {
-  return refusal instanceof SendStoppedError;
+  return refusal instanceof SendStoppedError && !(refusal instanceof SendExpiredError);
 }
 
 /** What ended one attempt without Dispatch's verdict, and so makes the write again under its key:
@@ -234,7 +260,9 @@ export class OneRequestPerWriteError extends Error {
  * `planned` as if it was (`OneRequestPerWriteError`). `signal` stops the trying between attempts -
  * a wait ends at once, an attempt in flight is let finish, since it may already have reached
  * Dispatch and its answer is still the write's - and the write then rejects with
- * `SendStoppedError`.
+ * `SendStoppedError`. A key Dispatch no longer holds (`keyExpired`) ends the write with
+ * `SendExpiredError` before the attempt that would go under it - its first, or the one after a
+ * wait - since that attempt would be a new write to Dispatch rather than a repeat of the first.
  */
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
@@ -270,6 +298,9 @@ export async function writeUnderKey<T>(
   let unauthorizedWhileSignedIn = false;
   try {
     for (;;) {
+      // Dispatch keeps a key a day from its first request: once it has forgotten this one, an
+      // attempt under it would be a second write of the person's action rather than a repeat.
+      if (keyExpired(key, Date.now())) throw new SendExpiredError();
       try {
         return await attempt({
           deadlineMs: KEYED_SEND_ATTEMPT_MS,

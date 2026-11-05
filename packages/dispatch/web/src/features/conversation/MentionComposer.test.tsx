@@ -1968,7 +1968,7 @@ function sentKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): stri
   return createAgentMessage.mock.calls.map(([, , bounds]) => bounds.key);
 }
 
-const SEND_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SEND_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** Dispatch's verdict on a message to a session, which a Retry of the same message meets again. */
 const messageRefused = new ApiError(400, {

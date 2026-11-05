@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
+import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
-import { keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
+import { type KeptTab, keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
   ApiError,
@@ -16,11 +17,12 @@ import {
   KEYED_SEND_ATTEMPT_MS,
   OneRequestPerWriteError,
   SEND_DEADLINE_MS,
+  SendExpiredError,
   SendInterruptedError,
   SendStoppedError,
   WriteDiscardedError,
 } from "./keyed-write";
-import { KEPT_SEND_RESUME_MS } from "./write-storage";
+import { KEPT_SEND_RESUME_MS, type KeptState } from "./write-storage";
 import { defineWriteKind, plainWrite, type Write, Writes } from "./write-store";
 
 /** A page's query client, signed in: the store stamps every write with this login at its press
@@ -119,6 +121,38 @@ function storeOf(tab = keptTab(), login = "alice", files = memoryFiles()) {
 
 /** The write `writes` holds now, at `index` in press order. */
 const row = (writes: Writes, index = 0): Write | undefined => writes.rows()[index];
+
+/** A v7 key minted at `at`, as `newSendKey` mints one: its first twelve hex digits are that
+ *  millisecond, which `keyExpired` reads back. */
+function keyMinted(at: number): string {
+  const hex = at.toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
+}
+
+/** A page that has just resumed one status pick on CORE-1, kept in `tab` under `key` as it stood
+ *  (`state`) when the page that pressed it went away. */
+function resuming(tab: KeptTab, key: string, state: KeptState): Writes {
+  tab.storage.setItem(
+    `dispatch.write:${key}`,
+    JSON.stringify({
+      detail: null,
+      key,
+      kind: "write",
+      label: "CORE-1 set to done",
+      login: "alice",
+      presentation: "indicator",
+      pressedAt: Date.now(),
+      request: patch,
+      sent: true,
+      state,
+      target: null,
+      version: 1,
+    })
+  );
+  const writes = new Writes(signedIn(), tab.page(), memoryFiles());
+  writes.resume("alice");
+  return writes;
+}
 
 // One press is one key, and every attempt of that press carries it, so however many attempts
 // reach Dispatch it is one write there. Only an attempt that ended short of Dispatch's verdict is
@@ -1281,5 +1315,99 @@ test("a plain write on a line goes out as the very request it is kept as", async
     });
     await tick(1_500);
     expect(await other.catch((error: unknown) => error)).toBeInstanceOf(OneRequestPerWriteError);
+  });
+});
+
+// A tab that slept longer than Dispatch keeps a key wakes holding a write under a key Dispatch
+// has forgotten: making it again would write the person's comment, message or upload a second
+// time, so nothing goes out and it comes back for the reader to Retry as a new write.
+test("a resumed write whose key Dispatch has forgotten makes no attempt", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ key: "CORE-1" } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      const writes = resuming(tab, spent, { status: "sending" });
+      await tick(60_000);
+      expect(send).not.toHaveBeenCalled();
+      const resumed = row(writes);
+      expect(resumed?.status === "refused" && resumed.refusal).toBeInstanceOf(SendExpiredError);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// A lapsed sign-in puts a write that was out back in its line, to go again under its key once its
+// person signs in. One whose key Dispatch has forgotten has nothing to go back for: it is refused
+// there and then, rather than waiting in the line under a key no attempt may use.
+test("a held write whose key is spent is refused rather than put back in its line", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ key: "CORE-1" } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      const writes = resuming(tab, spent, { status: "sending" });
+      // The session lapses while the resumed write is out, which holds it.
+      writes.signedIn(undefined);
+      await tick(60_000);
+      const held = row(writes);
+      expect(held?.status === "refused" && held.refusal).toBeInstanceOf(SendExpiredError);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// Retry of a write whose key is spent is a new write: it goes out under a new key, which Dispatch
+// knows, and the page stops keeping the write under the old one.
+test("a Retry of a write whose key is spent goes out under a new key", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ key: "CORE-1" } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      const writes = resuming(tab, spent, { status: "sending" });
+      await settle();
+      writes.retry(row(writes)?.id ?? 0);
+      await settle();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0]?.[1] as WriteBounds).key).not.toBe(spent);
+      expect(writes.rows()).toEqual([]);
+      expect(tab.kept(spent)).toBeUndefined();
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// The deadline a write stops at is its key's own, so a Retry under that key is not another day of
+// trying: one retried two seconds before Dispatch forgets its key is tried for those two seconds,
+// under that same key, and then ends expired.
+test("a Retry under the write's own key stops when that key runs out", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockRejectedValue(unavailable);
+    try {
+      const nearlySpent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS + 2_000);
+      const writes = resuming(tab, nearlySpent, {
+        refusal: { kind: "stopped" },
+        status: "refused",
+      });
+      await settle();
+      writes.retry(row(writes)?.id ?? 0);
+      await tick(10_000);
+      const ended = row(writes);
+      expect(ended?.key).toBe(nearlySpent);
+      expect(ended?.status === "refused" && ended.refusal).toBeInstanceOf(SendExpiredError);
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
   });
 });

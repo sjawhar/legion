@@ -711,7 +711,7 @@ export class Writes {
     }
     const refusal =
       kept.state.status === "refused"
-        ? refusalFrom(kept.state.refusal)
+        ? refusalFrom(kept.state.refusal, kept.key, now)
         : new SendInterruptedError();
     this.#entries.set(entry.write.id, entry);
     this.#update(entry, { ...entry.write, refusal, status: "refused" });
@@ -827,7 +827,10 @@ export class Writes {
           const held = entry.held;
           entry.held = false;
           if (current()) {
-            if (held && refusal instanceof SendStoppedError) this.#rejoin(entry);
+            // A write a lapse held goes back in its line, to be made again under its key once
+            // its person signs in; one whose key Dispatch has forgotten meanwhile has no key to
+            // go under, so it is refused for the reader to Retry as a new write.
+            if (held && retriesUnderItsKey(refusal)) this.#rejoin(entry);
             else this.#refused(entry, refusal);
           }
           turn.settled.reject(refusal);

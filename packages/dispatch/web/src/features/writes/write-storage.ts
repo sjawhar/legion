@@ -1,5 +1,10 @@
 import { ApiError, WRITE_METHODS, type WriteMethod, type WriteRequest } from "../../api/client";
-import { SendInterruptedError, SendStoppedError } from "./keyed-write";
+import {
+  keyExpired,
+  SendExpiredError,
+  SendInterruptedError,
+  SendStoppedError,
+} from "./keyed-write";
 
 /**
  * Where every write to Dispatch waits out a reload (`write-store.ts`). Every `POST` and `PATCH`
@@ -199,13 +204,16 @@ export function keptRefusal(error: Error): KeptRefusal {
   return { kind: "error", message: error.message };
 }
 
-/** The refusal `kept` names, rebuilt as the error the write was refused with. */
-export function refusalFrom(kept: KeptRefusal): Error {
+/** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
+ *  the write it refused and `now` the time it is read back: a write the reader stopped under a
+ *  key Dispatch has forgotten since (`keyExpired`) comes back expired, since a Retry of it is now
+ *  a new write rather than the same one asked again. */
+export function refusalFrom(kept: KeptRefusal, key: string, now: number): Error {
   switch (kept.kind) {
     case "interrupted":
       return new SendInterruptedError();
     case "stopped":
-      return new SendStoppedError();
+      return keyExpired(key, now) ? new SendExpiredError() : new SendStoppedError();
     case "api":
       return new ApiError(kept.status, { code: kept.code ?? undefined, error: kept.message });
     case "error":
