@@ -40,7 +40,8 @@ test("the comment composer takes a 40,000-character body, and shows the server's
 
     // No maxLength holds the field to anything: a body of 40,000 characters stays whole.
     await field.fill(whole);
-    await expect.poll(async () => (await field.inputValue()).length).toBe(40_000);
+    // One readback, not two: `fill` resolves once the page has taken the text, and this one
+    // proves its length and its content together.
     expect(await field.inputValue()).toBe(whole);
 
     await form.getByRole("button", { exact: true, name: "Send" }).click();
