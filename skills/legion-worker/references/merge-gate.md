@@ -19,11 +19,20 @@ other change to the head voids it.
 ## The reviewer
 
 - The reviewer reads CI on GitHub and verifies the `Threads` facts and the issue's results there
-  and with `dispatch results --issue <issue>` — never from a handoff — then runs
+  and with `dispatch results --issue <issue>` — never from a handoff — then, when the diff
+  touches runtime code, runs
   `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   waits for each one's result with `wait`, since each runs as a job of its own, and records the
-  verdict from what those results say. The CI it reads is the head's own checks: no handoff is a
+  verdict from what those results say. A result that carries no report, or that names another
+  place for it, is a failed run, not a verdict: run that agent again, or read its transcript, and
+  record nothing from it until you have the findings text in front of you. Reading the agent's
+  diff yourself and recording that in its place is the same as answering the rubric from a bare
+  verdict — it is your own reading standing in for a review that did not happen, not the review
+  of your own that the round always asks for. When you can do neither — the agent will not run
+  again and its transcript holds no findings — that half of the round has no review: tell the
+  architect, do not approve, and wait with a `WAITING` line naming what you wait on until it
+  answers. The CI it reads is the head's own checks: no handoff is a
   commit, so every push to the branch is work whose head gets GitHub's workflow runs of its own.
   With `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid`, two reads. The required set is the
@@ -60,7 +69,9 @@ other change to the head voids it.
   Approval is refused while any `before_merge` check of the issue's own Verification document has no passing result that is current at the head being reviewed: `REQUEST_CHANGES` naming each such check by its block id, and `dispatch results --issue <issue>` is the read that decides it.
   An issue with no Verification document, or whose Verification document holds no `before_merge` check, is a gap you name in the review body, never a review that asks for changes: say which of the two it is, and tell the architect, who writes the checks. Your own findings and the checks that do exist still decide the review, and on an issue that has none the architect's acceptance is the gate.
   A result is current at that head while the head is the head of an open pull request, or the final head of a merged one, attributed to the check's own issue. A child's pull request never makes a root check's result current, and a child never records the result that proves a root's check. A child that carries part of a root's requirement proves it with a check on the child's own Verification document whose `serves` names that requirement, and that result is current at the child's head. A root's own checks are proven at the root's own head, or on the default branch for an `after_merge` check, in the root's last round.
-  Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
+  On a docs-only PR the `Thermo` line still records the simplify pass and the defects it
+  reported, and its pair half reads `thermonuclear pair: not run (docs-only)`.
+  Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
   reviewed — always named by SHA — carrying every inline comment in that single
   call: `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
@@ -154,7 +165,10 @@ reviewing until you finish.
   that changes only `docs/solutions/`, which READY still lets through: READY is refused
   `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
   the head back to review instead of completing, the move's reason naming the refusal's code and
-  what it found. A conflict merge pushed above the approved head with no review round after it
+  what it found. `READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own; every
+  one of them sends the head back to review and none is an error to retry, and the complete list,
+  with each remedy, is the merger's own role prompt part.
+  A conflict merge pushed above the approved head with no review round after it
   brings the base's paths above that head, so READY refuses it the same way; one sent back through
   `implementing` by the conflict procedure gets its confirmation before READY runs. A READY
   refusal's return reaches the reviewer as a new round, never a fingerprint confirmation. Retro
@@ -295,6 +309,11 @@ reviewing until you finish.
     controller topic. Either names this issue, the pull request, the merge commit, what you drove
     and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
     result's `observed` and in the summary.
+- **Numbers the daemon holds are read with the `legion` tool.** Where the verdict rests on what a
+  deployment's idle release has done, `read_release_records` answers a window of the daemon's own
+  records of its releases, resumes and holds: its one argument `since` is the RFC 3339 instant
+  the window starts at, and the tool's own description says what the answer carries. It reads
+  them with this session's own claim, so there is no credential to fetch and none on disk.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
   queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
   with its pod and disk; where a wake arrived while the look was open, the next look starts at once

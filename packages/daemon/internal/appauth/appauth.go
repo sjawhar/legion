@@ -97,17 +97,73 @@ func readBody(response *http.Response, what string) ([]byte, error) {
 type Tokens interface {
 	Token(ctx context.Context, role AppRole, owner string) (Lease, error)
 	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
-	// requests and metadata read. A pane holds one for every owner of the project but its issue's.
-	// An App on token_command gets what its command's read-only release holds instead: the secrets
-	// broker's is the same three permissions.
+	// requests, Actions and metadata read. A pane holds one for every owner of the project but
+	// the one its issue's repository is under (a configured rename's two owners count as that
+	// one, GitHubCredential), and a controller holds one for every owner it has. An App on
+	// token_command gets what its command's read-only release holds instead, which the command
+	// decides: the secrets broker's is the same four (its readOnlyPermissions). Either way an
+	// installation whose account has not granted the App Actions gets the other three rather
+	// than nothing (optionalReadPermission).
 	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
 
 // readPermissions narrows an installation token to reading a repository's contents, its pull
-// requests and its metadata: what a role needs of every repository of the project but its own
-// issue's. GitHub mints a token with the permissions a request names, each at most what the
-// installation holds.
-var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "metadata": "read"}
+// requests, its Actions runs and its metadata: what a role needs of every repository of the
+// project but its own issue's, and what a controller needs of every one of them. GitHub mints a
+// token with the permissions a request names, each at most what the installation holds.
+//
+// actions:read is here because reading a repository includes reading what its merges did: a
+// deployment check of a merge reads the push run that carries it, that run's jobs and a job's
+// log, and a role that cannot read them cannot tell a deploy that applied from one that was
+// skipped. Measured on 2026-11-04 against a private repository whose installation holds
+// actions:write: unnarrowed, actions/runs and actions/runs/{id}/jobs answered 200 and
+// actions/jobs/{id}/logs answered 302 to a signed URL that answered 200; narrowed to contents,
+// pull requests and metadata, all three answered 403 "Resource not accessible by integration".
+// The narrowing was the whole refusal, and no App
+// or installation setting was missing. It stays a read: actions:read cannot cancel, re-run or
+// dispatch a workflow, and reaches no Actions secret or variable, which are permissions of their
+// own.
+//
+// The set is the token's whole breadth and not one repository's: exchange sends permissions
+// alone, never repositories or repository_ids, so a narrowed token reaches every repository its
+// installation reaches on that owner, as its contents and pull request reads already did.
+var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "actions": "read", "metadata": "read"}
+
+// optionalReadPermission is the one permission of readPermissions an installation may not hold.
+// An App gets Actions by a grant each installation's account approves, and GitHub answers a token
+// request naming a permission its installation does not hold HTTP 422, minting nothing rather
+// than leaving that one out. One owner's failed mint drops a role's whole gh bundle
+// (GitHubCredential), so asking for actions outright would take contents and pull requests away
+// from every deployment whose App is not granted Actions. A read token is therefore asked for
+// again without it (exchangeRead).
+//
+// Asking again is the whole mechanism: it costs one request only where the grant is missing, it
+// keeps no record of what each installation holds for a later mint to go stale against, and the
+// day an account approves the grant the first request simply succeeds. Reading the installation's
+// own permissions instead (GET /app/installations/{id}) would cost a request for every
+// configured installation, which the exchange reaches without any discovery today, and a cache
+// that an approval does not invalidate. The other three permissions are what the daemon has
+// always asked for: an installation without one of them is a misconfigured App rather than a
+// grant awaiting approval, so they stay required.
+const optionalReadPermission = "actions"
+
+// withoutOptionalRead is permissions without optionalReadPermission. It copies, since
+// readPermissions is shared by every mint.
+func withoutOptionalRead(permissions map[string]string) map[string]string {
+	reduced := make(map[string]string, len(permissions))
+	for name, access := range permissions {
+		if name != optionalReadPermission {
+			reduced[name] = access
+		}
+	}
+	return reduced
+}
+
+// missingActionsMessage is written to the daemon's stderr, once per App role and owner, when
+// GitHub refuses a read token's permissions and the token is minted without actions: the lease is
+// served, and what it cannot read is said once rather than at every mint. It takes the role and
+// the owner, and carries no token.
+const missingActionsMessage = "appauth: the %s App's installation on %s does not hold actions, so its read-only token reads no Actions runs, jobs or job logs; grant the App Actions: Read and approve it on that account\n"
 
 // Options makes a token manager testable. The zero value uses api.github.com, http.DefaultClient,
 // the wall clock, and the daemon's own stderr for what a token_command writes there.
@@ -135,6 +191,10 @@ type Manager struct {
 	identities        map[string]GitIdentity
 	pendingIdentities map[string]*pendingIdentity
 	commands          map[string]*commandRun
+
+	// warnedMissingActions holds the read lease keys whose owner has already had
+	// missingActionsMessage written for it.
+	warnedMissingActions map[string]bool
 
 	// root ends every token_command run on Close (stop), runs counts the runs still going, and
 	// closed, set under mu, refuses a run after Close.
@@ -179,19 +239,20 @@ func New(apps config.GitHubApps, options Options) *Manager {
 	}
 	root, stop := context.WithCancel(context.Background())
 	return &Manager{
-		root:              root,
-		stop:              stop,
-		apps:              apps,
-		baseURL:           baseURL,
-		client:            client,
-		now:               now,
-		stderr:            stderr,
-		leases:            map[string]Lease{},
-		pending:           map[string]*pendingLease{},
-		installations:     map[AppRole]map[string]string{},
-		identities:        map[string]GitIdentity{},
-		pendingIdentities: map[string]*pendingIdentity{},
-		commands:          map[string]*commandRun{},
+		root:                 root,
+		stop:                 stop,
+		apps:                 apps,
+		baseURL:              baseURL,
+		client:               client,
+		now:                  now,
+		stderr:               stderr,
+		leases:               map[string]Lease{},
+		pending:              map[string]*pendingLease{},
+		installations:        map[AppRole]map[string]string{},
+		identities:           map[string]GitIdentity{},
+		pendingIdentities:    map[string]*pendingIdentity{},
+		commands:             map[string]*commandRun{},
+		warnedMissingActions: map[string]bool{},
 	}
 }
 
@@ -203,9 +264,11 @@ func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease,
 }
 
 // ReadToken is Token for a token narrowed to readPermissions, cached under a key of its own, so an
-// owner's write and read tokens never stand in for each other. In token mode it is the command's
-// read-only release (TokenCommandReadOnly), which for the secrets broker holds contents,
-// metadata and pull requests read, as readPermissions does.
+// owner's write and read tokens never stand in for each other, and minted without
+// optionalReadPermission where the installation does not hold it (exchangeRead). In token mode it
+// is the command's read-only release (TokenCommandReadOnly) instead, which the command decides;
+// the secrets broker's is readPermissions' own set, narrowed the same way. The role's own owner's
+// lease is unaffected either way, since Token asks the command for no narrowing at all.
 func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
 	return m.lease(ctx, role, owner, "read:", readPermissions)
 }
@@ -303,13 +366,13 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 	if err != nil {
 		return Lease{}, err
 	}
-	lease, err := m.exchange(ctx, jwt, installation, permissions)
+	lease, err := m.exchangeRead(ctx, jwt, installation, role, owner, permissions)
 	if errors.Is(err, errInstallationGone) && configuredInstallation(app, owner) == "" {
 		m.forgetInstallation(role, owner)
 		if installation, err = m.installation(ctx, role, app, owner); err != nil {
 			return Lease{}, err
 		}
-		lease, err = m.exchange(ctx, jwt, installation, permissions)
+		lease, err = m.exchangeRead(ctx, jwt, installation, role, owner, permissions)
 	}
 	if errors.Is(err, errInstallationGone) {
 		m.forgetInstallation(role, owner)
@@ -326,6 +389,37 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 	}
 	lease.Identity = identity
 	return lease, nil
+}
+
+// exchangeRead is exchange, asked again without readPermissions' one optional permission when
+// GitHub refuses the set it was sent (errPermissionsRefused, a 422): three reads serve a role
+// better than the bundle a failed mint would cost it (optionalReadPermission). A request that
+// names no actions, and the write token's, which names no permissions at all, pass straight
+// through, so a 422 to either stays the failure it is. A second refusal is the caller's error and
+// names a set actions is not in, so no cause is blamed on the missing grant.
+func (m *Manager) exchangeRead(ctx context.Context, jwt, installation string, role AppRole, owner string, permissions map[string]string) (Lease, error) {
+	lease, err := m.exchange(ctx, jwt, installation, permissions)
+	if !errors.Is(err, errPermissionsRefused) || permissions[optionalReadPermission] == "" {
+		return lease, err
+	}
+	lease, err = m.exchange(ctx, jwt, installation, withoutOptionalRead(permissions))
+	if err == nil {
+		m.warnMissingActions(role, owner)
+	}
+	return lease, err
+}
+
+// warnMissingActions writes missingActionsMessage the first time role's read token for owner is
+// minted without actions, and nothing on every mint after it.
+func (m *Manager) warnMissingActions(role AppRole, owner string) {
+	key := leaseKey("read:", role, owner)
+	m.mu.Lock()
+	warned := m.warnedMissingActions[key]
+	m.warnedMissingActions[key] = true
+	m.mu.Unlock()
+	if !warned {
+		fmt.Fprintf(m.stderr, missingActionsMessage, role, owner)
+	}
 }
 
 func (m *Manager) app(role AppRole) (config.GitHubApp, error) {
@@ -392,6 +486,11 @@ func (m *Manager) forgetInstallation(role AppRole, owner string) {
 
 // errInstallationGone is a token exchange GitHub answers 404: the installation is no longer there.
 var errInstallationGone = errors.New("the installation is gone")
+
+// errPermissionsRefused is a token exchange GitHub answers 422 to a request that named
+// permissions: they are not all the installation's to grant, and GitHub mints nothing rather than
+// leaving one out.
+var errPermissionsRefused = errors.New("the installation does not hold the permissions asked for")
 
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
 // about the owner, not GitHub's trouble, which a retry would only repeat.
@@ -490,7 +589,23 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 		if response.StatusCode == http.StatusNotFound {
 			return Lease{}, fmt.Errorf("%w: %w", errInstallationGone, failed)
 		}
-		return Lease{}, transient(response, body, failed)
+		refused := transient(response, body, failed)
+		if response.StatusCode == http.StatusUnprocessableEntity {
+			// GitHub documents its rate limits on a 429 and a 403 (githubrest.RateLimited), but
+			// the headers or the secondary-limit text of a limit on a 422 are that limit too,
+			// and no verdict on what the request asked for: the same request may pass later, so
+			// it is GitHub's trouble and never the installation's permissions.
+			if githubrest.RateLimitSignals(response, body) {
+				return Lease{}, &TransientError{Err: failed}
+			}
+			// Otherwise a 422 to a request that named permissions is the installation holding
+			// fewer of them than the request asked for. One to a request that named none (the
+			// write token's) says nothing about permissions and stays the refusal it is.
+			if permissions != nil {
+				return Lease{}, fmt.Errorf("%w: %w", errPermissionsRefused, refused)
+			}
+		}
+		return Lease{}, refused
 	}
 	body, err := readBody(response, "GitHub App token exchange")
 	if err != nil {

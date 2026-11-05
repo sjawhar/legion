@@ -14,8 +14,10 @@ import (
 // The copy-heap bound holds what the pod's full-state decodes hold live beside their product at
 // once. These decodes of a document's whole state - a room's load (its fold of a history of
 // several updates, the copy LoadDoc or a socket's admission decodes, the load hook's decode into
-// the room, bootstrapLoadedState), a write's fork from the store (coldFork) or a rebuilt fork of
-// a room (warmFork), the fold of a cold read, a version read or a compaction (foldRead), the
+// the room, bootstrapLoadedState), a write's fork where it is a decode - from the store
+// (coldFork, rebuildFork), or from the copy a read took of a room whose replica held no state
+// (warmFork, buildForkHeld) - the fold of a cold read, a version read or a compaction
+// (foldRead), the
 // replica's build from a base (renderedReplica.start), the measurer's copy for a server write
 // (structsAfter) and a rebuild's
 // decodes (its check of a resident room and of the stored history, nearACap, rebuildSource,
@@ -25,6 +27,10 @@ import (
 // back to its caller. The
 // copy a read of a resident room takes while the room's replica is busy (holdLive,
 // snapshotDocument) takes no grant: its callers hand it no request context to bound a wait by.
+// Neither does a warm fork of a room whose replica holds its state, which is the usual fork: it
+// clones the replica rather than decoding anything (Service.forkPoint), so it holds no encoded
+// state and no decoder above the copy it leaves, and it runs under the replica's lock, which the
+// room's update observer waits for.
 //
 // One holder of the bound decodes nothing: the count of an admission's stored version
 // (countStoredVersion), whose goldmark parse of the version's markdown and walk of the stored
