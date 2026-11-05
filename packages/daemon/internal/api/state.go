@@ -3,8 +3,9 @@
 // The shape here is designed from the LEGION-208 spec's Issue record, not ported from the
 // TypeScript daemon's `packages/contracts/src/legion-daemon-api.ts` (which still carries the
 // tossed worker queue and the Dispatch/GitHub mirror). Go is the source of truth for the wire:
-// `packages/contracts/src/legion-api.ts` mirrors these types as strict zod objects and is
-// held to them by the golden fixture in `packages/contracts/fixtures/daemon-api/`.
+// `packages/contracts/src/legion-api.ts` mirrors these types as zod objects, which strip a key
+// they do not name on the answer side, and is held to them by the golden fixture in
+// `packages/contracts/fixtures/daemon-api/`.
 package api
 
 import (
@@ -247,7 +248,7 @@ type AgentSecretsLoginView struct {
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
 // `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
-// `null`, which the plugin's strict reader refuses.
+// `null`, which the plugin's reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)

@@ -471,7 +471,7 @@ One name can hold different values in the two stores - the GitHub App secrets th
 `agent-secrets` names its store in output and every refusal; `secrets` names none today.
 
 CI runs the unit and integration tests, not this script;
-what only this run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word `--append-system-prompt`, the plugin's strict parse of the Go daemon's answers, the plugin gate against an installed manifest, the provider-key path, a pane's model turn through the configured route, and the Envoy role claim.
+what only this run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word `--append-system-prompt`, the plugin's parse of the Go daemon's answers, the plugin gate against an installed manifest, the provider-key path, a pane's model turn through the configured route, and the Envoy role claim.
 
 What it stands up, all of it the run's own:
 

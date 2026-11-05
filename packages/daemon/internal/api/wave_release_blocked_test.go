@@ -198,7 +198,7 @@ func TestWaveReleaseAnswersWhatItStartedAndWhatItHeld(t *testing.T) {
 // A child waiting on an issue the daemon has never observed has no mirror row to judge that issue
 // by, and an unobserved issue is not a finished one: the release holds the child and names the
 // issue it waits on, so the architect sees what the wait is even when the daemon has never heard
-// of it. The answer's other lists are arrays, never null, for the plugin's strict reader.
+// of it. The answer's other lists are arrays, never null, for the plugin's reader.
 func TestWaveReleaseHoldsAChildOnABlockerTheDaemonHasNeverObserved(t *testing.T) {
 	h, statuses := releaseHarness(t, true)
 	child := "LEGION-209"

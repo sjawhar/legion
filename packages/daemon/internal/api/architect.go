@@ -64,7 +64,7 @@ type WaveReleaseResponse struct {
 }
 
 // MarshalJSON keeps `released`, `started` and `held` arrays on the wire, empty rather than `null`:
-// the plugin parses this answer through a strict schema.
+// the plugin's parse of this answer refuses a null where it reads an array.
 func (wr WaveReleaseResponse) MarshalJSON() ([]byte, error) {
 	type wire WaveReleaseResponse
 	out := wire(wr)

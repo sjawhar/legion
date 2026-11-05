@@ -181,7 +181,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	for _, current := range claims {
 		// The daemon's own controller (`controller: daemon`) holds a claim on no issue: the state
 		// shows it as the project's controller (controllerLocator), never as an issue's worker,
-		// since an issue keyed "" refuses the whole document at every strict client.
+		// since an issue keyed "" refuses the whole document at every client, which reads an
+		// issue's `key` as a non-empty string.
 		if claim.IsController(current.Role, current.Issue, current.Tree) {
 			continue
 		}
@@ -190,8 +191,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if !known {
 			// A claim on an issue the workflow does not record — an operator's spawn, which is
 			// what Stage 2 makes and what the merge-queue holder is — is listed for the claim's
-			// sake, and says so: an empty phase and status refused the whole document at every
-			// strict client, over a row that is a legitimate state.
+			// sake, and says so: an empty phase is no value of the phase enum and an empty status
+			// is refused too, so the whole document would be refused over a row that is a
+			// legitimate state.
 			view = api.Issue{
 				Key:     current.Issue,
 				Phase:   api.Unrecorded,

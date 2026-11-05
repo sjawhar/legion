@@ -59,7 +59,7 @@ worker image from the daemon's commit.
 ## Daemon contract
 
 The plugin speaks to the Legion daemon (`packages/daemon`) through the daemon client
-(`@legion/pi-shared/daemon-client`), which reads every response through the strict schemas of
+(`@legion/pi-shared/daemon-client`), which reads every response through the schemas of
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/claim-session.ts`) or, for the controller, the controller session
 (`src/controller-session.ts`). `package.json` declares the contract it was built against as

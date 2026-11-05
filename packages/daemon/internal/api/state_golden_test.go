@@ -23,8 +23,9 @@ import (
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
 
 // goldenPath is the cross-language pin: Go writes the wire shape, and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict zod schema the
-// plugin reads with. Go is the source of truth; the fixture is how the schema is held to it.
+// `packages/contracts/src/legion-api.test.ts` parses it through the zod schema the plugin reads
+// with and holds the parse equal to the file, so a Go field with no zod line is named there. Go
+// is the source of truth; the fixture is how the schema is held to it.
 func goldenPath(name string) string {
 	return filepath.Join("..", "..", "..", "contracts", "fixtures", "daemon-api", name)
 }
@@ -460,9 +461,9 @@ func TestStateStage3Golden(t *testing.T) {
 }
 
 // An operator's claim on an issue the workflow does not record is listed for the claim's sake,
-// and says so rather than leaving its phase and status empty: an empty phase refused the whole
-// document at every strict client, over a row that is a legitimate state. internal/projection's
-// own test holds the producer to these values.
+// and says so rather than leaving its phase and status empty: an empty phase is no value of the
+// phase enum, so it refuses the whole document, over a row that is a legitimate state.
+// internal/projection's own test holds the producer to these values.
 func TestStateOperatorClaimGolden(t *testing.T) {
 	golden(t, "state-operator-claim.json", State{
 		Daemon: DaemonInfo{
@@ -497,8 +498,8 @@ func TestStateOperatorClaimGolden(t *testing.T) {
 }
 
 // golden pins one response's wire shape: Go writes it (`-update`), and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema of the
-// response it is. A fixture that differs from what Go now writes is stale.
+// `packages/contracts/src/legion-api.test.ts` parses it through the schema of the response it is
+// and holds the parse equal to the file. A fixture that differs from what Go now writes is stale.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()
 	encoded, err := json.MarshalIndent(value, "", "  ")
@@ -579,7 +580,7 @@ func TestReadyForUpdateRequestGolden(t *testing.T) {
 
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
-// proved every row has `"open": []`, not `null`, under the plugin's strict reader.
+// proved every row has `"open": []`, not `null`, under the plugin's reader.
 func TestCapabilityReportViewPartitionsTheRowsAndNeverMarshalsNull(t *testing.T) {
 	measured := time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC)
 	report := capabilities.Report{
@@ -733,7 +734,7 @@ func TestOperatorClaimsGolden(t *testing.T) {
 }
 
 // An issue the daemon has admitted but not yet given a worker still has to answer the plugin's
-// strict reader: `workers` is an object, never `null`.
+// reader: `workers` is an object, never `null`.
 func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
 	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: phase.Held})
 	if err != nil {

@@ -305,7 +305,7 @@ type BlockedIssue struct {
 }
 
 // MarshalJSON keeps `blockedBy` an array on the wire, empty rather than `null`: the plugin's
-// strict reader refuses a null.
+// reader refuses a null.
 func (b BlockedIssue) MarshalJSON() ([]byte, error) {
 	type wire BlockedIssue
 	out := wire(b)

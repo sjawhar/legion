@@ -71,7 +71,7 @@ const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", r
  * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
  * the lifecycle rows held behind their issues' running ones, `consumers` the lag of the daemon's
- * durable consumers and `repositories` the project's mapping, each of which the strict reader
+ * durable consumers and `repositories` the project's mapping, each of which the reader
  * requires; the rig has no deployment to report on, its one claim runs, it has no outbox and no
  * NATS, so the first four are the empty lists the daemon's MarshalJSON emits when there is none.
  * `settings` is the daemon's resolved legion.yaml with no credential in it, also required; the rig
