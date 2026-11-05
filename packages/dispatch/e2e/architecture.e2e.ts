@@ -82,6 +82,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): one row for the whole Architecture page - the seeded model and its six issues, the
+// bars over them, a drill-down, a row's details, a status change that has to move a bar, and the
+// Unassigned picker. Each clause of the title is a press the row has to make.
 test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker @phone", async ({
   browser,
 }, testInfo) => {

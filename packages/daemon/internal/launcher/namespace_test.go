@@ -19,9 +19,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
+// namespaceHelperEnv marks the test binary re-executed as the PID 1 launcher below: TestMain
+// leaves such a child the environment its test hands it (helperChildVariables).
+const namespaceHelperEnv = "LEGION_LAUNCHER_NAMESPACE_HELPER"
+
 // This helper runs the real launcher as PID 1, without a Docker daemon or a model process.
 func TestLauncherPIDOneHelper(t *testing.T) {
-	if os.Getenv("LEGION_LAUNCHER_NAMESPACE_HELPER") != "1" {
+	if os.Getenv(namespaceHelperEnv) != "1" {
 		return
 	}
 	if os.Getpid() != 1 {
@@ -71,7 +75,7 @@ func namespaceRig(t *testing.T, grace time.Duration) *rig {
 		t.Fatal(err)
 	}
 	args := append(append([]string{}, prefix...), "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "GOMAXPROCS=1",
-		"LEGION_LAUNCHER_NAMESPACE_HELPER=1", "LEGION_LAUNCHER_TEST_ADDRESS=tcp://"+listener.Addr().String(),
+		namespaceHelperEnv+"=1", "LEGION_LAUNCHER_TEST_ADDRESS=tcp://"+listener.Addr().String(),
 		"LEGION_LAUNCHER_TEST_PRIVATE="+g.private, "LEGION_LAUNCHER_TEST_GRACE="+grace.String(), self, "-test.run=^TestLauncherPIDOneHelper$")
 	command := exec.Command("sudo", args...)
 	var output bytes.Buffer
