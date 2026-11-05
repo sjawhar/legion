@@ -19,6 +19,7 @@ import {
 } from "../../theme/classes";
 import { GrantsSection } from "../credentials/GrantsSection";
 import { credentialPendingQuery } from "../credentials/pending";
+import { SignInsSection } from "../credentials/SignInsSection";
 import { DeliverySettingsForm } from "../delivery/DeliverySettingsForm";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -181,7 +182,10 @@ export function SettingsPage(): ReactNode {
         <ProjectsSection />
         <AgentTokensSection />
         {credentialsAvailable.isPending || credentialsAvailable.data === null ? null : (
-          <GrantsSection />
+          <>
+            <GrantsSection />
+            <SignInsSection />
+          </>
         )}
         <section aria-labelledby="repository-projects-heading">
           <h2

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -165,8 +166,9 @@ func TestInstallResolvesSymlinksAndTakesTheURLFromTheEnvironment(t *testing.T) {
 }
 
 // TestInstallWritesTheHelpersEnvironmentIntoTheUnit: each helper setting set in install's
-// environment (the socket, the operator file and the machine file, beside the broker URL) becomes
-// an Environment= line, so the unit's helper reads the machine file and listens on the socket
+// environment (the socket, the operator file, the machine file and the key directory whose
+// sign-ins say whose authority a session enrols under, beside the broker URL) becomes an
+// Environment= line, so the unit's helper reads the machine file and listens on the socket
 // install probed; one that is unset is left out, and a value a unit line would need escaped is
 // refused, writing nothing.
 func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
@@ -174,6 +176,7 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	dir := filepath.Dir(r.sock)
 	r.env["AGENT_SECRETS_OPERATOR_FILE"] = filepath.Join(dir, "operator")
 	r.env["AGENT_SECRETS_MACHINE_FILE"] = filepath.Join(dir, "machine.json")
+	r.env["AGENT_SECRETS_KEY_DIR"] = filepath.Join(dir, "keys")
 	if err := r.run("--url", "https://secrets.example"); err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +189,7 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 		"\nEnvironment=AGENT_SECRETS_HELPER_SOCK=" + r.sock + "\n",
 		"\nEnvironment=AGENT_SECRETS_OPERATOR_FILE=" + filepath.Join(dir, "operator") + "\n",
 		"\nEnvironment=AGENT_SECRETS_MACHINE_FILE=" + filepath.Join(dir, "machine.json") + "\n",
+		"\nEnvironment=AGENT_SECRETS_KEY_DIR=" + filepath.Join(dir, "keys") + "\n",
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("unit lacks %q:\n%s", want, data)
@@ -197,7 +201,8 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	if err := bare.run("--url", "https://secrets.example"); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ := os.ReadFile(bare.unit); strings.Count(string(data), "Environment=") != 1 {
+	// Two lines: the URL, and the sign-in directory, which install always writes (unitValue).
+	if data, _ := os.ReadFile(bare.unit); strings.Count(string(data), "Environment=") != 2 {
 		t.Fatalf("with only the URL set the unit has other Environment= lines:\n%s", data)
 	}
 
@@ -211,11 +216,112 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	}
 }
 
+// TestInstallWritesTheResolvedSignInDirectoryIntoTheUnit: the sign-in store falls back to
+// $XDG_STATE_HOME/agent-secrets (brokerclient.SignIns), and the unit carries neither this
+// shell's AGENT_SECRETS_SIGNIN_DIR nor its XDG_STATE_HOME. So install resolves the directory
+// and writes it, set or not: copied only when set, a box with a non-default XDG_STATE_HOME has
+// `agent-secrets login` write one directory while the unit's helper reads ~/.local/state, and
+// every session on it enrols as the machine rather than as the person signed in.
+func TestInstallWritesTheResolvedSignInDirectoryIntoTheUnit(t *testing.T) {
+	for _, c := range []struct{ name, stateHome, named string }{
+		{name: "a state home of its own", stateHome: "state"},
+		{name: "no state home at all"},
+		{name: "the directory named outright", stateHome: "state", named: "signins"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newInstallRig(t)
+			home := r.env["HOME"]
+			want := filepath.Join(home, ".local", "state", "agent-secrets", brokerclient.SignInsDir)
+			if c.stateHome != "" {
+				r.env["XDG_STATE_HOME"] = filepath.Join(home, c.stateHome)
+				want = filepath.Join(home, c.stateHome, "agent-secrets", brokerclient.SignInsDir)
+			}
+			if c.named != "" {
+				r.env[brokerclient.SignInDirVar] = filepath.Join(home, c.named)
+				want = filepath.Join(home, c.named)
+			}
+			if err := r.run("--url", "https://secrets.example"); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(r.unit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			line := "\nEnvironment=" + brokerclient.SignInDirVar + "=" + want + "\n"
+			if !strings.Contains(string(data), line) {
+				t.Errorf("unit lacks %q, so its helper reads another directory than `agent-secrets login` writes:\n%s", line, data)
+			}
+		})
+	}
+}
+
+// TestInstallWritesThisMachinesIdentityIntoTheUnit: without these the installed helper proves
+// no identity of its own — it falls back to the device-grant machine login, which a broker with
+// BROKER_MACHINE_LOGIN_URL unset does not serve — and knows no sign-in client, so it ignores
+// every `agent-secrets login` on the box. Each is written when set, with the same escaping and
+// absolute-path rules as the helper's own files.
+func TestInstallWritesThisMachinesIdentityIntoTheUnit(t *testing.T) {
+	r := newInstallRig(t)
+	dir := filepath.Dir(r.sock)
+	identity := map[string]string{
+		brokerclient.IdentityVar:               brokerclient.IdentityPool,
+		brokerclient.MachineTokenFileVar:       filepath.Join(dir, "token"),
+		brokerclient.MachineAudienceVar:        "https://secrets.example",
+		brokerclient.PoolAudienceVar:           "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v",
+		brokerclient.PoolAccountVar:            "example-fleet@example-project.iam.gserviceaccount.com",
+		brokerclient.SignInIssuerVar:           "https://accounts.google.com",
+		brokerclient.SignInClientIDVar:         "example-device-client.apps.googleusercontent.com",
+		brokerclient.SignInClientSecretFileVar: filepath.Join(dir, "device-client-secret"),
+		brokerclient.PersonVar:                 "ada@example.com",
+		brokerclient.SessionVar:                "this-box",
+	}
+	for name, value := range identity {
+		r.env[name] = value
+	}
+	// install loads the helper's own configuration, which reads the device client's secret.
+	if err := os.WriteFile(identity[brokerclient.SignInClientSecretFileVar], []byte("example-device-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(r.unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range identity {
+		if want := "\nEnvironment=" + name + "=" + value + "\n"; !strings.Contains(string(data), want) {
+			t.Errorf("unit lacks %q:\n%s", want, data)
+		}
+	}
+
+	spaced := newInstallRig(t)
+	spaced.env[brokerclient.PoolAccountVar] = "an account@example.com"
+	if err := spaced.run("--url", "https://secrets.example"); err == nil || !strings.Contains(err.Error(), brokerclient.PoolAccountVar) {
+		t.Fatalf("install with a spaced pool account: %v; want a refusal naming %s", err, brokerclient.PoolAccountVar)
+	}
+	if _, err := os.Stat(spaced.unit); !os.IsNotExist(err) {
+		t.Fatalf("a refused install wrote the unit: %v", err)
+	}
+
+	// An identity's own words are not paths, so a value with no leading slash is no refusal:
+	// a pool audience begins `//iam.googleapis.com/`, and a client id and a person never do.
+	relative := newInstallRig(t)
+	relative.env[brokerclient.IdentityVar] = brokerclient.IdentityMetadata
+	relative.env[brokerclient.MachineAudienceVar] = "https://secrets.example"
+	if err := relative.run("--url", "https://secrets.example"); err != nil {
+		t.Fatalf("install with a metadata identity: %v; want it written, since neither value is a path", err)
+	}
+}
+
 // TestInstallRefusesARelativeHelperPath: the unit's helper runs in another working directory than
 // install, so a relative path in any variable install writes would name another file; install
 // refuses it, naming the variable, and writes nothing.
 func TestInstallRefusesARelativeHelperPath(t *testing.T) {
-	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE"} {
+	for _, name := range []string{
+		"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE",
+		brokerclient.MachineTokenFileVar, brokerclient.SignInClientSecretFileVar,
+	} {
 		r := newInstallRig(t)
 		r.env[name] = "relative/" + strings.ToLower(name)
 		err := r.run("--url", "https://secrets.example")
