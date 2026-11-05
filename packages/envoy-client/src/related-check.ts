@@ -69,6 +69,33 @@ export function relatedCheckLines(
       `The check's past decision or title overlaps could not be shown: ${messageFor(error)}`
     );
   }
+  try {
+    lines.push(...askProxyLines(suggestions));
+  } catch (error) {
+    lines.push(`The ask's proxy advisory could not be shown: ${messageFor(error)}`);
+  }
+  return lines;
+}
+
+/**
+ * The proxy advisory, where the server sent one: the person this ask reaches has a skill holding
+ * their recorded advice, so the line points the agent there, and the answers they already wrote
+ * on this issue and on its parent follow it, newest first. It asks for no further ask and refuses
+ * nothing. A server predating the advisory sends none and this prints nothing.
+ */
+function askProxyLines(suggestions: Suggestions): string[] {
+  const proxy = suggestions.proxy;
+  if (proxy === undefined || proxy === null) return [];
+  const lines = [
+    `This ask reaches ${proxy.target}. Read ${proxy.skill} first: it holds their recorded advice, so a question it answers costs them no time.`,
+  ];
+  const answers = proxy.answers ?? [];
+  if (answers.length > 0) {
+    lines.push(`${proxy.target} has already answered on this issue or its parent:`);
+    for (const answer of answers) {
+      lines.push(answer.line === "" ? `- ${answer.ref}` : `- ${answer.ref} — ${answer.line}`);
+    }
+  }
   return lines;
 }
 
