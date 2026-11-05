@@ -2759,8 +2759,8 @@ directory is `${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>`, on th
 
 | Subcommand | What it does |
 | --- | --- |
-| `up --config FILE [--run ID] [--loadgen PATH]` | Starts every container of the specification below by image digest, each on the machine the file puts it on, with its CPU, memory and ephemeral limits and nothing silently defaulted, installs `loadgen` and the stub embedder on the load machine, and waits until Dispatch answers `/healthz`. It makes the run directory and names the run. |
-| `check --config FILE [--run ID]` | The read-back: every container's CPU, memory and image, Dispatch's network mode and ephemeral limit, the instance's own settings from the Cloud SQL Admin API, every machine's run-time limit from the Compute API, every endpoint setting of every container, and that each production address the file names is refused from every machine. One markdown table of expected beside found, and exit 1 on any difference. |
+| `up --config FILE [--run ID] [--loadgen PATH]` | Starts every container of the specification below by image digest, each on the machine the file puts it on, with its CPU and memory limits and nothing silently defaulted, installs `loadgen` and the stub embedder on the load machine, makes the database `cloudsql.database` names when the instance does not hold it yet, and waits until Dispatch answers `/healthz`. It makes the run directory and names the run. |
+| `check --config FILE [--run ID]` | The read-back: every container's CPU, memory and image, Dispatch's network mode, the instance's own settings from the Cloud SQL Admin API, every machine's run-time limit from the Compute API, every endpoint setting of every container, and that each production address the file names is refused from every machine. One markdown table of expected beside found, and exit 1 on any difference. |
 | `seed --config FILE [--run ID] [--embed-timeout 8h] [--workers 8]` | `loop-seed-plan`, `loop-seed-write` on the load machine, `loop-seed-check`, `loop-seed-export` and `seed-finish` with the embedding gate, each phase's wall clock and the gate's coverage progress in `<run>/seed.json`; then the template database. |
 | `reset --config FILE [--run ID]` | The whole reset (below), its duration recorded. |
 | `step --config FILE [--run ID] NAME FACTOR [--duration 10m] [--warmup 30s]` | One step: the reset, the VM sampler, the profiling tunnel (below), `loadgen run` at FACTOR, the profiles fetched from the machine Dispatch runs on, then `cgroup-merge`, `cloudsql-cpu` and `tables`. |
@@ -2822,10 +2822,15 @@ pod's authenticates anywhere. Before it reaches a machine, each subcommand:
    subcommand imports again at its start, so the expiry has only to outlast one subcommand's own
    work, and no key of a finished run is left behind for long;
 3. reads that account's POSIX user name from its login profile;
-4. runs every ssh as `ssh -F /dev/null -i <the run's private key> <that user>@<the machine's
-   host>`, so no `~/.ssh/config` of the pod's can change where an ssh goes or who it goes as.
-   `docker` on a machine runs under `sudo`, because that user is not root and the docker socket
-   is.
+4. runs every ssh as `ssh -F /dev/null -i <the run's private key> -o
+   StrictHostKeyChecking=accept-new -o UserKnownHostsFile=<the run directory>/known_hosts <that
+   user>@<the machine's host>`, so no `~/.ssh/config` of the pod's can change where an ssh goes
+   or who it goes as, and no `known_hosts` of the pod's decides what the run trusts. The
+   machines are made by a merge and this pod has never met them, so there is no host key to have
+   known beforehand: `accept-new` takes each machine's key the first time and refuses it if it
+   changes while the run lasts, which is the part worth refusing, since a machine replaced
+   mid-series is not the machine the earlier steps measured. `docker` on a machine runs under
+   `sudo`, because that user is not root and the docker socket is.
 
 The keypair is the run's own, made once under the run directory, mode 600, and copied nowhere; a
 second `up` of one run imports the key it already has. The minted token lives in one shell
@@ -2899,7 +2904,7 @@ them, above):
 
 | Container | CPU | Memory | Other |
 | --- | --- | --- | --- |
-| `dispatch` | 16 | 32 GiB | 8 GiB ephemeral, `DISPATCH_PPROF_PORT`, host networking |
+| `dispatch` | 16 | 32 GiB | `DISPATCH_PPROF_PORT`, host networking, the entrypoint `envoy-dispatch` |
 | `auth-proxy` | 200m | 256 MiB | |
 | `dispatch-listener` | 500m | 512 MiB | |
 | `nats` | none | none | JetStream, its store on its machine's disk |
@@ -2907,8 +2912,17 @@ them, above):
 | `load-listener-1` to `-4` | 500m | 512 MiB | The listeners the loop's sessions register on: the unit sessions round-robin over the first three and the driver takes the fourth |
 
 NATS and the hub listener have no limit, as production's hub VM gives its two processes the whole
-machine. Dispatch's 8 GiB ephemeral limit is the setting that exists because Autopilot's 1Gi
-default evicted production's Dispatch; `docker` takes it as `--storage-opt size=`.
+machine. Dispatch's container names its own entrypoint because the Envoy image carries four
+binaries and its entrypoint is `envoy-listener`: without `--entrypoint envoy-dispatch` that
+container runs a second listener, which on a machine with host networking binds the port the
+real listener already holds and exits "address already in use".
+
+Production's 8 GiB ephemeral limit — the setting that exists because Autopilot's 1Gi default
+evicted production's Dispatch — has no form here. `docker` takes such a limit as `--storage-opt
+size=`, which the daemon on these machines refuses ("`--storage-opt` is supported only for
+overlay over xfs with 'pquota' mount option": their overlay is over ext4), so Dispatch's
+writable layer is bounded by the machine's own disk instead. That is a difference from
+production, and the report names it; `check` reads back the network mode alone.
 
 Dispatch's identity is `DISPATCH_IDENTITY=header:X-Dispatch-User` with
 `DISPATCH_IDENTITY_HEADER_TRUSTED=1` and a shared agent token, as `stack.sh` sets them: the
@@ -2918,6 +2932,16 @@ reads the stub's certificate at startup (`SSL_CERT_FILE`) and a Dispatch started
 nothing to trust (The embedding gate and the stub embedder, above). `check` proves every endpoint
 setting of every container, and a setting whose value is a credential by its presence alone, so no
 token reaches its table.
+
+Dispatch's own environment carries `ENVOY_MACHINE_ID=dispatch` and `ENVOY_ALLOW_REMOTE_NATS=1`
+too, because NATS runs on a machine of its own here: without that variable every connect
+refuses a NATS server that is not this machine's and the process exits
+(`internal/bus/reach.go`). The wait on `/healthz` that follows reads `.ok and .nats`, as
+`stack.sh`'s `dispatch_healthy` does — the body carries no `status` field, and a Dispatch whose
+database is up but whose NATS is not would serve the API while every notification of a step went
+nowhere. Each poll reads the container's state first and refuses at once, printing the last 20
+lines of its log, when it is no longer running: that log is where every reason Dispatch refuses
+to start is written, and waiting out the bound tells a reader nothing it does not already know.
 
 ### The reset
 

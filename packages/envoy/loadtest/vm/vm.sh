@@ -7,16 +7,17 @@
 #
 #   vm.sh up --config FILE [--run ID] [--loadgen PATH]
 #       Starts every container of the deployment by image digest, each on the machine the
-#       deployment file puts it on, with the CPU, memory and ephemeral limits of the
-#       specification below and nothing silently defaulted, installs loadgen and the stub
-#       embedder on the load machine, and waits until Dispatch answers /healthz. With no --run
-#       it makes the run directory and names the run in <root>/current; with --run it starts the
+#       deployment file puts it on, with the CPU and memory limits of the specification below
+#       and nothing silently defaulted, installs loadgen and the stub embedder on the load
+#       machine, makes the database cloudsql.database names when the instance does not hold it
+#       yet, and waits until Dispatch answers /healthz. With no --run it makes the run
+#       directory and names the run in <root>/current; with --run it starts the
 #       deployment again under a run this pod started, and leaves <root>/current and that run's
 #       state.json as they are.
 #   vm.sh check --config FILE [--run ID]
 #       The read-back of acceptance criterion A1, as a markdown table of expected beside found:
-#       every container's CPU, memory and image, Dispatch's network mode and ephemeral limit,
-#       the instance's own settings from the Cloud SQL Admin API, every machine's run-time limit
+#       every container's CPU, memory and image, Dispatch's network mode, the instance's own
+#       settings from the Cloud SQL Admin API, every machine's run-time limit
 #       from the Compute API, every endpoint setting of every container, and that each
 #       production address the deployment file names is refused from every machine. Exit 1 on
 #       any difference.
@@ -43,8 +44,8 @@
 # back. Every container is started by image digest, never by a tag:
 #
 #   container           CPU    memory    other
-#   dispatch            16     32 GiB    8 GiB ephemeral, DISPATCH_PPROF_PORT=6060,
-#                                        host networking
+#   dispatch            16     32 GiB    DISPATCH_PPROF_PORT=6060, host networking,
+#                                        the entrypoint envoy-dispatch
 #   auth-proxy          200m   256 MiB
 #   dispatch-listener   500m   512 MiB
 #   nats                none   none      JetStream, its store on its machine's disk
@@ -175,8 +176,9 @@ export LC_ALL=C TZ=UTC
 
 VM_ROOT=${LOADTEST_VM_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest-vm}
 # R11's run-time limit: Google stops each VM 72 hours after it starts, and check reads it back
-# from the Compute API's .scheduling.maxRunDuration.
-MAX_RUN_DURATION=259200s
+# from the Compute API's .scheduling.maxRunDuration, which is an object -- {"seconds": "259200",
+# "nanos": 0} -- rather than the duration string the API takes on the way in.
+MAX_RUN_DURATION=259200
 # How long a wait on Dispatch's /healthz may take, and how long between two polls of it.
 HEALTHZ_SECONDS=900
 HEALTHZ_POLL_SECONDS=5
@@ -246,9 +248,13 @@ LOAD_LISTENERS=(load-listener-1 load-listener-2 load-listener-3 load-listener-4)
 # the template rename both stop all of it first, so nothing holds a connection or a consumer.
 DB_HOLDERS=(dispatch dispatch-listener "${LOAD_LISTENERS[@]}" hub-listener)
 # Dispatch's ephemeral storage limit, the setting that exists because Autopilot's 1Gi default
-# evicted production's Dispatch (agent-infra dispatch/Pulumi.prod.yaml appEphemeralStorage).
-# docker takes it as --storage-opt size=, which check reads back from HostConfig.StorageOpt.
-DISPATCH_EPHEMERAL=8G
+# evicted production's Dispatch (agent-infra dispatch/Pulumi.prod.yaml appEphemeralStorage, 8Gi).
+# It has no form on these machines and is not set: docker takes such a limit as
+# --storage-opt size=, which its own daemon refuses here -- "--storage-opt is supported only for
+# overlay over xfs with 'pquota' mount option", measured on the deployment's Container-Optimized
+# OS machines, whose overlay is over ext4. So Dispatch's writable layer is bounded by the
+# machine's own disk rather than by 8 GiB, which is a difference from production the report
+# names, and check reads back the network mode alone.
 # Where the stub embedder's certificate is mounted inside the Dispatch container (SSL_CERT_FILE).
 CERT_IN_CONTAINER=/etc/ssl/stub-embed.pem
 # The environment variables whose values are credentials: check proves each one is set and never
@@ -499,13 +505,34 @@ stub_embed_url() { printf 'https://%s:%s\n' "$(vm_host "$LOAD_VM")" "$(port_of s
 # with the run's own OS Login key and -F /dev/null after them: no ~/.ssh/config of this pod's
 # changes where an ssh of this script goes or who it goes as. It is also what loadgen vm-sample
 # is given, so the sampler reaches a machine exactly as this script does.
+#
+# The host keys go in a file of the run's own, under accept-new: these machines are made by a
+# merge and this pod has never met them, so there is no key to have known beforehand, and the
+# pod's own known_hosts must not decide what this run trusts. accept-new takes each machine's key
+# the first time and refuses it if it changes while the run lasts, which is the part worth
+# refusing: a machine replaced mid-series is not the machine the earlier steps measured.
 ssh_cmd() {
   local raw
   raw=$(cfg .ssh_command ssh)
   read -r -a SSH <<<"$raw"
   ((${#SSH[@]})) || die "the deployment file $CONFIG gives an empty ssh_command"
   [ -n "$SSH_KEY" ] || die "ssh_cmd: no OS Login key yet; oslogin_ready runs before the first ssh of a subcommand"
-  SSH+=(-F /dev/null -i "$SSH_KEY")
+  SSH+=(-F /dev/null -i "$SSH_KEY"
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$RUN_DIR/known_hosts")
+}
+
+# remote_argv ARGS...: ARGS as one word the machine's shell parses back into exactly these
+# arguments, each in single quotes with its own quotes escaped. ssh takes no argument vector: it
+# joins what it is given with spaces and the machine's shell splits the result again, so an
+# argument of this script that holds a space, a quote or a pipe arrives as several. Every remote
+# command of this script goes through here, which is why a `sh -c '<script>' sh <path>` reaches
+# the machine as the script and the path rather than as a dozen words.
+remote_argv() {
+  local arg out=
+  for arg in "$@"; do
+    out+=" '${arg//\'/\'\\\'\'}'"
+  done
+  printf '%s' "${out# }"
 }
 
 # on_vm VM ARGS...: ARGS run on VM, bounded. Its standard output and status are the command's.
@@ -513,7 +540,7 @@ on_vm() {
   local vm=$1
   shift
   ssh_cmd
-  timeout "$SSH_SECONDS" "${SSH[@]}" "$(vm_ssh "$vm")" -- "$@"
+  timeout "$SSH_SECONDS" "${SSH[@]}" "$(vm_ssh "$vm")" "$(remote_argv "$@")"
 }
 
 # on_vm_for SECONDS VM ARGS...: on_vm with a bound of its own, for the load and the seed.
@@ -521,15 +548,19 @@ on_vm_for() {
   local seconds=$1 vm=$2
   shift 2
   ssh_cmd
-  timeout "$seconds" "${SSH[@]}" "$(vm_ssh "$vm")" -- "$@"
+  timeout "$seconds" "${SSH[@]}" "$(vm_ssh "$vm")" "$(remote_argv "$@")"
 }
 
 # put_file VM FILE DEST: FILE written on VM as DEST, mode 600, its directory made first. The file
-# goes over ssh's standard input, so a credential in it never reaches a command line.
+# goes over ssh's standard input, so a credential in it never reaches a command line. It is
+# written beside DEST and renamed onto it, because a plain write onto a file that is running
+# answers ETXTBSY ("Text file busy") -- which is what a second up of a deployment whose loadgen
+# or stub embedder is still running would meet -- and because a rename leaves no half-written
+# file where a whole one was.
 put_file() {
   local vm=$1 file=$2 dest=$3
   # shellcheck disable=SC2016 # expanded by the VM's sh
-  on_vm "$vm" sh -c 'mkdir -p -- "$(dirname -- "$1")" && umask 077 && cat >"$1"' sh "$dest" <"$file" ||
+  on_vm "$vm" sh -c 'mkdir -p -- "$(dirname -- "$1")" && umask 077 && cat >"$1.new" && mv -f -- "$1.new" "$1"' sh "$dest" <"$file" ||
     die "copying $file to $vm as $dest failed"
 }
 
@@ -736,6 +767,8 @@ DISPATCH_PORT=$(port_of dispatch)
 DISPATCH_SERVER_URL=$(dispatch_url)
 DISPATCH_PPROF_PORT=$(port_of pprof)
 NATS_URLS=$(nats_url)
+ENVOY_MACHINE_ID=dispatch
+ENVOY_ALLOW_REMOTE_NATS=1
 ENVOY_URL=$(listener_url)
 ENVOY_TOKEN=$(cfg .secrets.listener_token)
 DISPATCH_EMBEDDER=azure
@@ -783,7 +816,7 @@ container_run_args() {
     dispatch)
       # Host networking, because DISPATCH_PPROF_PORT binds 127.0.0.1 only: on the host's loopback
       # the profile is reachable from its own machine, which is where step fetches it.
-      printf '%s\n' --network host --storage-opt "size=$DISPATCH_EPHEMERAL"
+      printf '%s\n' --network host
       printf '%s\n' --volume "$(cert_path):$CERT_IN_CONTAINER:ro"
       printf '%s\n' --env-file "$(container_env_file "$role")"
       ;;
@@ -800,6 +833,11 @@ container_run_args() {
       printf '%s\n' --env-file "$(container_env_file "$role")"
       ;;
   esac
+  # The Envoy image carries four binaries and its entrypoint is envoy-listener, so the container
+  # that is Dispatch must name envoy-dispatch itself. Without it that container runs a second
+  # listener, which on a machine with host networking binds the port the real listener already
+  # holds and exits "address already in use" -- measured on this deployment.
+  [ "$role" = dispatch ] && printf '%s\n' --entrypoint envoy-dispatch
   printf '%s\n' "$image"
   case $role in
     nats)
@@ -856,6 +894,11 @@ stub_embed_start() {
   work=$(remote_work)
   remote=$(remote_loadgen)
   on_vm "$LOAD_VM" mkdir -p -- "$work" || die "making $work on the $LOAD_VM VM failed"
+  # A stub embedder an earlier up left running still holds the port, so this one would answer
+  # "address already in use" and write no certificate. up is idempotent everywhere else; it is
+  # here too: whatever the last start recorded is ended first, and the wait below then sees this
+  # start's own certificate rather than the one before it.
+  stub_embed_stop
   # shellcheck disable=SC2016 # expanded by the load machine's sh
   on_vm "$LOAD_VM" sh -c 'rm -f "$3"; nohup setsid "$1" stub-embed -key "$2" -listen "$4" -cert-out "$3" -host "$5" >"$6/stub-embed.log" 2>&1 </dev/null & echo "$!" >"$6/stub-embed.pid"' \
     sh "$remote" "$(cfg .secrets.embed_key)" "$work/stub-embed.pem" "0.0.0.0:$(port_of stub_embed)" "$(vm_host "$LOAD_VM")" "$work" ||
@@ -895,14 +938,27 @@ db_exists() {
 
 # ---- Dispatch -----------------------------------------------------------------------------------
 
-# wait_healthz: poll Dispatch's /healthz until it answers ok, within HEALTHZ_SECONDS.
+# wait_healthz: poll Dispatch's /healthz until it answers ok, within HEALTHZ_SECONDS. A container
+# that is no longer running never will answer, so each poll reads its state first and refuses at
+# once with the end of its log, rather than spending the whole bound on a question already
+# settled. Its log is where every reason Dispatch refuses to start is written.
+#
+# What ok means is `.ok and .nats`, which is what stack.sh's dispatch_healthy reads: the body
+# carries no `status` field, and a Dispatch whose database is up but whose NATS is not would
+# serve the API while every notification of a step went nowhere.
 wait_healthz() {
-  local waited=0 body
+  local waited=0 body state
   while :; do
     if body=$(curl -fsS --max-time 10 "$(dispatch_url)/healthz" 2>/dev/null) &&
-      [ "$(jq -r '.status // empty' <<<"$body" 2>/dev/null)" = ok ]; then
+      jq -e '.ok and .nats' >/dev/null 2>&1 <<<"$body"; then
       note "Dispatch answers /healthz ok at $(dispatch_url)"
       return 0
+    fi
+    state=$(docker_on "$DISPATCH_VM" inspect -f '{{.State.Status}}' dispatch 2>/dev/null) || state=""
+    if [ -n "$state" ] && [ "$state" != running ]; then
+      note "the last of Dispatch's log on the $DISPATCH_VM VM:"
+      docker_on "$DISPATCH_VM" logs --tail 20 dispatch 2>&1 | sed 's/^/    /' || true
+      die "the Dispatch container on the $DISPATCH_VM VM is $state, so it will not answer /healthz at $(dispatch_url); its log is above"
     fi
     ((waited < HEALTHZ_SECONDS)) ||
       die "Dispatch did not answer /healthz ok at $(dispatch_url) within $HEALTHZ_SECONDS s (its last answer: ${body:-none})"
@@ -1062,8 +1118,20 @@ cmd_up() {
   on_vm "$LOAD_VM" mkdir -p -- "$(remote_work)" || die "up: making $(remote_work) on the $LOAD_VM VM failed"
   put_file "$LOAD_VM" "$bin" "$(remote_loadgen)"
   on_vm "$LOAD_VM" chmod 755 "$(remote_loadgen)" || die "chmod of $(remote_loadgen) on the $LOAD_VM VM failed"
-  # The stub embedder first: Dispatch reads its certificate at startup (SSL_CERT_FILE), so a
-  # Dispatch started before it has nothing to trust and every embed fails.
+  # The database Dispatch opens, if the instance does not hold it yet. A new instance ships with
+  # the login's own database and no other, and Dispatch exits "database does not exist" rather
+  # than making one; its migrations run themselves once it can open it.
+  local database
+  database=$(cfg .cloudsql.database dispatch)
+  if db_exists "$database"; then
+    note "the instance already holds the database $database"
+  else
+    psql_at postgres "create database \"$database\"" >/dev/null ||
+      die "up: making the database $database on the instance failed"
+    note "made the database $database on the instance"
+  fi
+  # The stub embedder before Dispatch: Dispatch reads its certificate at startup (SSL_CERT_FILE),
+  # so a Dispatch started before it has nothing to trust and every embed fails.
   stub_embed_start
   for role in "${CONTAINERS[@]%% *}"; do
     container_start "$role"
@@ -1088,7 +1156,8 @@ check_row() {
 }
 
 # check_containers: each container's CPU, memory and image, from the one docker inspect the
-# issue's acceptance criterion A1 names, and Dispatch's network mode and ephemeral limit.
+# issue's acceptance criterion A1 names, and Dispatch's network mode. There is no ephemeral
+# limit to read back: docker on these machines refuses one (the container table, above).
 check_containers() {
   local role vm got want
   for role in "${CONTAINERS[@]%% *}"; do
@@ -1097,8 +1166,8 @@ check_containers() {
     got=$(docker_on "$vm" inspect -f '{{.Name}} {{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.Config.Image}}' "$role" 2>/dev/null) || got=""
     check_row "$role name cpu memory image ($vm VM)" "$want" "$got"
   done
-  got=$(docker_on "$DISPATCH_VM" inspect -f '{{.HostConfig.NetworkMode}} {{index .HostConfig.StorageOpt "size"}}' dispatch 2>/dev/null) || got=""
-  check_row "dispatch network mode and ephemeral storage" "host $DISPATCH_EPHEMERAL" "$got"
+  got=$(docker_on "$DISPATCH_VM" inspect -f '{{.HostConfig.NetworkMode}}' dispatch 2>/dev/null) || got=""
+  check_row "dispatch network mode" "host" "$got"
 }
 
 # check_env: every endpoint setting of every container, expected beside found. A setting whose
@@ -1139,15 +1208,22 @@ check_run_duration() {
   local vm json
   for vm in "${VM_NAMES[@]}"; do
     json=$(vm_json "$vm") || json='{}'
-    check_row "$vm VM scheduling.maxRunDuration" "$MAX_RUN_DURATION" "$(jq -r '.scheduling.maxRunDuration // empty' <<<"$json" | tr -d '\n')"
+    check_row "$vm VM scheduling.maxRunDuration seconds" "$MAX_RUN_DURATION" "$(jq -r '.scheduling.maxRunDuration.seconds // empty' <<<"$json")"
   done
 }
 
 # check_production_refused: every production address R2 forbids is refused from every machine.
 # nc's non-zero exit is the expectation: an address that answers is a path into production.
+#
+# The addresses are read into an array first, and never streamed into the loop: ssh reads its own
+# standard input, so an ssh inside a `while read` fed by a pipe swallows the rest of the list and
+# every address after the first goes unchecked -- measured here, where the second address was
+# silently never tried.
 check_production_refused() {
   local vm address host port rc
-  while read -r address; do
+  local -a addresses=()
+  mapfile -t addresses < <(jq -r '(.production_addresses // [])[]' "$CONFIG")
+  for address in "${addresses[@]}"; do
     [ -n "$address" ] || continue
     valid address "$address" || die "check: production_addresses holds '$address', which is not <host>:<port>"
     host=${address%:*} port=${address##*:}
@@ -1156,7 +1232,7 @@ check_production_refused() {
       on_vm "$vm" nc -z -w5 "$host" "$port" >/dev/null 2>&1 || rc=$?
       check_row "$vm VM to production $address" "refused" "$([ "$rc" -ne 0 ] && echo refused || echo answered)"
     done
-  done < <(jq -r '(.production_addresses // [])[]' "$CONFIG")
+  done
 }
 
 cmd_check() {

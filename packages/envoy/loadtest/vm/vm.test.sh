@@ -5,28 +5,30 @@
 # network. cluster/cluster.test.sh is the model -- a $bin directory first on PATH holding one
 # small script per external program, each recording its argv and answering from $FAKE_DIR.
 #
-# The fakes: `ssh` records the call and runs the command here, so the deployment's machines are
-# this test's own directories and every program the driver runs on a machine (docker, nc, curl,
-# tar, sh, loadgen) is the fake or the real one on this PATH; `docker` keeps a container
-# registry per ssh target, computing from each `run` the NanoCpus, Memory, network mode and
-# storage option that docker itself would record, which its `inspect` then answers, so a reading
-# the test wants to differ is one file to rewrite; `curl` answers the metadata server, the token
-# mint, the OS Login key import and login profile, the Cloud SQL Admin API, the Compute API,
-# Dispatch's /healthz, the profiling port and, only while the fake tunnel of that port runs, a
-# read through the step's profiling tunnel; `psql` keeps a database list; `nc` refuses every
-# address unless the test says otherwise; `loadgen` records its argv and writes the files the
-# next step reads; `pprof-tunnel` is the deployment file's pprof_tunnel_command, which stands
-# for the `ssh -N -L ...` a step runs on the load machine. `jq`, `ssh-keygen` and `sudo`'s own
-# commands are the real ones.
+# The fakes: `ssh` records the call, parses what follows the target the way the machine's login
+# shell would -- one word, which is all ssh ever sends -- and runs it here, so the deployment's
+# machines are this test's own directories and every program the driver runs on a machine
+# (docker, nc, curl, tar, sh, loadgen) is the fake or the real one on this PATH; `docker` keeps
+# a container registry per ssh target, computing from each `run` the NanoCpus, Memory, network
+# mode, entrypoint and state that docker itself would record, which its `inspect` and `logs`
+# then answer, so a reading the test wants to differ is one file to rewrite; `curl` answers the
+# metadata server, the token mint, the OS Login key import and login profile, the Cloud SQL
+# Admin API, the Compute API, Dispatch's /healthz, the profiling port and, only while the fake
+# tunnel of that port runs, a read through the step's profiling tunnel; `psql` keeps a database
+# list and makes the database a `create database` names; `nc` refuses every address unless the
+# test says otherwise; `loadgen` records its argv, writes the files the next step reads, and as
+# the stub embedder holds a port, which a second stub on it is refused; `pprof-tunnel` is the
+# deployment file's pprof_tunnel_command, which stands for the `ssh -N -L ...` a step runs on
+# the load machine. `jq`, `ssh-keygen` and `sudo`'s own commands are the real ones.
 #
 # Asserts that: (a) every subcommand refuses a missing --config, and refuses one that is not
 # readable JSON, before it reaches a VM; (b) up starts every container of the specification, in
 # order, each with exactly the CPU, memory and image arguments the table names, Dispatch with
-# host networking and an 8 GiB ephemeral limit, each image by digest and none by tag, the stub
-# embedder before Dispatch, and waits on /healthz; (c) up refuses an image named by tag;
+# host networking and the entrypoint its image needs, each image by digest and none by tag, the
+# stub embedder before Dispatch, and waits on /healthz; (c) up refuses an image named by tag;
 # (d) check prints expected beside found for every value and exits 0 when they agree, and
 # non-zero when a container's memory differs, when a production address answers from a VM, and
-# when a VM's maxRunDuration is not 259200s, naming each; (e) check reads the instance's own
+# when a VM's maxRunDuration is not 259200 s, naming each; (e) check reads the instance's own
 # settings from the Cloud SQL Admin API and each container's endpoint settings, and never prints
 # a credential; (f) reset runs decision D6's steps in order -- the Dispatch and listener
 # containers stopped, the database dropped and made again from the template, NATS restarted on
@@ -67,8 +69,20 @@
 # are read in that order before the first ssh, every ssh runs as the user that profile named
 # with the key the run made, a second up of one run makes no second key, a refusal of any of the
 # three refuses up by name with nothing started, and no minted token reaches a command line or
-# any file the run keeps.
+# any file the run keeps; and (t) each of the eleven defects that driving this script against
+# the deployment itself found -- a remote argument holding a space, a quote or a pipe arriving
+# as one argument, the run's own known_hosts under accept-new, put_file's write beside the
+# target and rename onto it, a second up that stops the stub embedder the first left holding
+# the port, the Dispatch container's entrypoint and the --storage-opt this docker refuses,
+# ENVOY_MACHINE_ID and ENVOY_ALLOW_REMOTE_NATS in Dispatch's environment, the database up makes
+# when the instance lacks it, what wait_healthz takes for ready and when it refuses at once,
+# the run-time limit read out of the object the Compute API answers, and every production
+# address tried from every machine.
 set -euo pipefail
+# Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
+# given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
+# input is, no ssh of a case waits on it.
+exec </dev/null
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly vm=$here/vm.sh
@@ -109,11 +123,25 @@ mkdir -p "$fake" "$bin" "$tmp/root"
 cat >"$bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 # The fake ssh: records the call and runs the command here, so a machine's file system is this
-# test's own directories. vm.sh runs `ssh <options> <user@host> -- <command>` and the options
-# carry the run's own OS Login key, so the target is the first argument that is not an option
-# or an option's value; the whole argv goes to ssh.log, which is where the OS Login cases read
-# the user and the key back from. The target reaches the command in FAKE_SSH_TARGET, which the
-# fake docker uses to keep a container registry per machine.
+# test's own directories. vm.sh runs `ssh <options> <user@host> <one word>` and the options
+# carry the run's own OS Login key and the run's own known_hosts file, so the target is the
+# first argument that is not an option or an option's value; the whole argv goes to ssh.log,
+# which is where the OS Login cases read the user, the key and the host-key options back from.
+#
+# What follows the target is one word, because ssh has no argument vector: it joins what it is
+# given with spaces and the machine's login shell splits the result again. This fake does both
+# -- it joins the rest with spaces and parses that the way that shell would -- so an argument
+# vm.sh quoted with remote_argv arrives here as the one argument it quoted, and a case that
+# reads a remote command's arguments reads what the machine would have run. The parsed command
+# goes to actions.log, and the target reaches it in FAKE_SSH_TARGET, which the fake docker uses
+# to keep a container registry per machine.
+#
+# ssh also reads its own standard input to the end and sends it to the remote command, whether
+# or not that command reads it, which is why an ssh inside a `while read` fed by a pipe
+# swallows the rest of that pipe. This fake reads a pipe the same way, so a list streamed into
+# a loop around a remote command is lost here as it was lost on the deployment. A file -- what
+# put_file gives it -- and the /dev/null this test runs under are handed over untouched, as ssh
+# hands them over.
 set -u
 printf '%s\n' "$*" >>"$FAKE_DIR/ssh.log"
 target=""
@@ -124,9 +152,16 @@ while [ $# -gt 0 ]; do
     *) target=$1; shift; break ;;
   esac
 done
-[ "${1:-}" != -- ] || shift
+# How many words ssh was given after the target, one line per call: it joins them with spaces
+# whatever their number, so a caller that means one argument must hand it one word.
+printf '%s\n' "$#" >>"$FAKE_DIR/ssh.words"
+eval "set -- $*"
 printf 'ssh\t%s\t%s\n' "$target" "$*" >>"$FAKE_DIR/actions.log"
 export FAKE_SSH_TARGET=$target
+if [ -p /dev/stdin ]; then
+  cat | "$@"
+  exit $?
+fi
 exec "$@"
 EOF
 
@@ -134,7 +169,10 @@ cat >"$bin/docker" <<'EOF'
 #!/usr/bin/env bash
 # The fake docker: one registry per ssh target under FAKE_DIR/docker. `run` records what docker
 # itself would record of the arguments it was given -- NanoCpus, Memory, the image, the network
-# mode and the size storage option -- and `inspect` answers the three formats vm.sh reads.
+# mode and the entrypoint -- and `inspect` answers the five formats vm.sh reads. A container is
+# `running` from the moment it is started; a case that wants a Dispatch that died writes
+# `exited` into its .state file and its last words into its .log, which `logs` prints, as the
+# deployment's own Dispatch did when it refused to start.
 set -u
 target=${FAKE_SSH_TARGET:-local}
 printf 'docker\t%s\t%s\n' "$target" "$*" >>"$FAKE_DIR/actions.log"
@@ -151,14 +189,14 @@ case $verb in
     printf '%s\n' "$name"
     ;;
   run)
-    name="" cpus=- memory=- network=default storage='<no value>' envfile="" image=""
+    name="" cpus=- memory=- network=default entrypoint='<no value>' envfile="" image=""
     while [ $# -gt 0 ]; do
       case $1 in
         --name) name=$2; shift 2 ;;
         --cpus) cpus=$2; shift 2 ;;
         --memory) memory=$2; shift 2 ;;
         --network) network=$2; shift 2 ;;
-        --storage-opt) storage=${2#size=}; shift 2 ;;
+        --entrypoint) entrypoint=$2; shift 2 ;;
         --env-file) envfile=$2; shift 2 ;;
         --publish | --volume | --restart) shift 2 ;;
         --detach) shift ;;
@@ -175,7 +213,9 @@ case $verb in
       *) echo "docker run: memory $memory" >&2; exit 2 ;;
     esac
     printf '/%s %s %s %s\n' "$name" "$nano" "$bytes" "$image" >"$dir/$name.main"
-    printf '%s %s\n' "$network" "$storage" >"$dir/$name.net"
+    printf '%s\n' "$network" >"$dir/$name.net"
+    printf '%s\n' "$entrypoint" >"$dir/$name.entrypoint"
+    printf 'running\n' >"$dir/$name.state"
     : >"$dir/$name.env"
     [ -z "$envfile" ] || cat -- "$envfile" >"$dir/$name.env"
     printf '%s\n' "$(printf '%s%s' "$target" "$name" | sha256sum | cut -c1-64)" >"$dir/$name.id"
@@ -191,13 +231,19 @@ case $verb in
     done
     case $fmt in
       '{{.Name}} {{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.Config.Image}}') file=$dir/$name.main ;;
-      '{{.HostConfig.NetworkMode}} {{index .HostConfig.StorageOpt "size"}}') file=$dir/$name.net ;;
+      '{{.HostConfig.NetworkMode}}') file=$dir/$name.net ;;
+      '{{.State.Status}}') file=$dir/$name.state ;;
       '{{range .Config.Env}}{{println .}}{{end}}') file=$dir/$name.env ;;
       '{{.Id}}') file=$dir/$name.id ;;
       *) echo "fake docker: no answer for format $fmt" >&2; exit 2 ;;
     esac
     [ -f "$file" ] || { echo "Error: No such object: $name" >&2; exit 1; }
     cat -- "$file"
+    ;;
+  logs)
+    name=${!#}
+    [ -f "$dir/$name.main" ] || { echo "Error: No such object: $name" >&2; exit 1; }
+    [ ! -f "$dir/$name.log" ] || cat -- "$dir/$name.log"
     ;;
   *)
     echo "fake docker: no subcommand $verb" >&2
@@ -289,6 +335,9 @@ elif [[ $sql =~ ^drop\ database\ if\ exists\ ([A-Za-z0-9_]+) ]]; then
 elif [[ $sql =~ ^create\ database\ ([A-Za-z0-9_]+)\ template\ ([A-Za-z0-9_]+)$ ]]; then
   [ -e "$db/${BASH_REMATCH[2]}" ] || { echo "no template ${BASH_REMATCH[2]}" >&2; exit 1; }
   : >"$db/${BASH_REMATCH[1]}"
+elif [[ $sql =~ ^create\ database\ \"([A-Za-z0-9_]+)\"$ ]]; then
+  [ ! -e "$db/${BASH_REMATCH[1]}" ] || { echo "database ${BASH_REMATCH[1]} already exists" >&2; exit 1; }
+  : >"$db/${BASH_REMATCH[1]}"
 elif [[ $sql =~ ^alter\ database\ ([A-Za-z0-9_]+)\ rename\ to\ ([A-Za-z0-9_]+)$ ]]; then
   [ -e "$db/${BASH_REMATCH[1]}" ] || { echo "no database ${BASH_REMATCH[1]}" >&2; exit 1; }
   mv -- "$db/${BASH_REMATCH[1]}" "$db/${BASH_REMATCH[2]}"
@@ -353,7 +402,32 @@ case $cmd in
     printf '%s\n' "$*" >>"$FAKE_DIR/seed-finish.log"
     p=$(flag embed-progress) && printf '{"lacking": 0, "failed": 0}\n' >"$p"
     ;;
-  stub-embed) printf -- '-----FAKE CERT-----\n' >"$(flag cert-out)" ;;
+  stub-embed)
+    # The stub embedder holds a port for as long as it serves, and a second one on the same
+    # port answers "address already in use" and writes no certificate -- which is what a second
+    # up of a deployment whose first stub is still running meets. FAKE_DIR/stub-port is that
+    # port: the stub claims it, writes its certificate, and serves until it is killed or until
+    # the fakes' own directory goes with the case that started it, so no stub outlives its case.
+    # The claim waits a moment for a live holder, because vm.sh's own stop sends that holder a
+    # TERM just before this start and a port is freed by the exit that follows, not by the
+    # signal.
+    lock=$FAKE_DIR/stub-port
+    waited=0
+    while [ -f "$lock" ] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null; do
+      if ((waited >= 50)); then
+        printf 'fake stub-embed: listen tcp %s: bind: address already in use\n' "$(flag listen)" >&2
+        exit 1
+      fi
+      "$REAL_SLEEP" 0.1
+      waited=$((waited + 1))
+    done
+    printf '%s\n' "$$" >"$lock"
+    printf -- '-----FAKE CERT-----\n' >"$(flag cert-out)"
+    release() { [ "$(cat "$lock" 2>/dev/null)" != "$$" ] || rm -f -- "$lock"; exit 0; }
+    trap release TERM INT
+    while [ -d "$FAKE_DIR" ] && [ "$(cat "$lock" 2>/dev/null)" = "$$" ]; do "$REAL_SLEEP" 0.2; done
+    release
+    ;;
   vm-sample)
     printf '%s\n' "$*" >>"$FAKE_DIR/vm-sample.log"
     printf '{"role": "dispatch"}\n' >>"$(flag out)"
@@ -573,10 +647,14 @@ write_fixtures() {
     settings: {edition: "ENTERPRISE", tier: "db-custom-16-61440", availabilityType: "REGIONAL"}}' >"$fake/cloudsql.json"
   local name
   for name in lt-app lt-gen lt-nats; do
-    jq -n --arg n "$name" '{name: $n, status: "RUNNING", scheduling: {maxRunDuration: "259200s"}}' >"$fake/compute-$name.json"
+    # The Compute API answers maxRunDuration as an object, never as the duration string it takes
+    # on the way in, which is why vm.sh reads its seconds.
+    jq -n --arg n "$name" '{name: $n, status: "RUNNING",
+      scheduling: {automaticRestart: false, maxRunDuration: {seconds: "259200", nanos: 0}}}' >"$fake/compute-$name.json"
   done
   jq -n --arg u "$oslogin_user" '{posixAccounts: [{username: $u, uid: 1000}]}' >"$fake/loginprofile.json"
-  printf '{"status": "ok"}\n' >"$fake/healthz"
+  # Dispatch's /healthz body, as stack.sh's dispatch_healthy reads it: it carries no `status`.
+  printf '{"ok": true, "nats": true, "schema_version": 1337}\n' >"$fake/healthz"
   printf '6060\n' >"$fake/pprof-port"
 }
 
@@ -591,6 +669,37 @@ reset_fake() {
 run_vm() {
   set +e
   bash "$vm" "$@" >"$tmp/out" 2>&1
+  RC=$?
+  set -e
+}
+
+# The run directory of the functions below, which is no run of a subcommand's: ssh_cmd keeps
+# the run's known_hosts there and oslogin_ready its keypair.
+readonly fn_run=vm-20261103t000000-f00d
+readonly fn_run_dir=$tmp/root/$fn_run
+
+# run_fn [NAME=VALUE...] FUNCTION ARGS...: one function of vm.sh, driven here rather than
+# through a subcommand, its output in $tmp/out and its status in RC. vm.sh is sourced (its last
+# line runs main only when it is the program), the deployment file this test writes is read,
+# and the run, its directory, the OS Login user and the run's key are set as a subcommand sets
+# them before its first ssh, so a function that reaches a machine reaches the fakes. A leading
+# NAME=VALUE sets one of the script's own bounds -- which is how a poll of /healthz is given
+# ten seconds here rather than the nine hundred a subcommand gives it.
+run_fn() {
+  set +e
+  bash -c '
+    source "$1"
+    CONFIG=$2 RUN=$3 RUN_DIR=$4 SSH_USER=$5 SSH_KEY=$4/oslogin
+    shift 5
+    mkdir -p -- "$RUN_DIR"
+    : >"$SSH_KEY"
+    while [[ ${1:-} =~ ^[A-Z_]+= ]]; do
+      eval "$1"
+      shift
+    done
+    check_placement
+    "$@"
+  ' _ "$vm" "$config" "$fn_run" "$fn_run_dir" "$oslogin_user" "$@" >"$tmp/out" 2>&1
   RC=$?
   set -e
 }
@@ -658,10 +767,10 @@ run_vm up --config "$config"
 ((RC == 0)) || fail "up failed: see the output above"
 
 line=$(docker_run_line dispatch)
-for want in "--cpus 16" "--memory 32g" "--network host" "--storage-opt size=8G" "$dispatch_image"; do
+for want in "--cpus 16" "--memory 32g" "--network host" "$dispatch_image"; do
   [[ $line == *"$want"* ]] || fail "up's dispatch container has no '$want': $line"
 done
-pass "up starts Dispatch at 16 CPU, 32 GiB, 8 GiB ephemeral, host networking and its image digest"
+pass "up starts Dispatch at 16 CPU, 32 GiB, host networking and its image digest"
 
 line=$(docker_run_line auth-proxy)
 [[ $line == *"--cpus 0.2"* && $line == *"--memory 256m"* && $line == *"$proxy_image"* ]] ||
@@ -725,13 +834,13 @@ run_vm check --config "$config"
 grep -q '^| check | expected | found | ok |$' "$tmp/out" || fail "check printed no table header"
 grep -q '^| dispatch name cpu memory image (app VM) | /dispatch 16000000000 34359738368 .* | /dispatch 16000000000 34359738368 .* | yes |$' "$tmp/out" ||
   fail "check does not print Dispatch's expected CPU and memory beside what it found"
-grep -q '^| dispatch network mode and ephemeral storage | host 8G | host 8G | yes |$' "$tmp/out" ||
-  fail "check does not read back Dispatch's host networking and ephemeral limit"
+grep -q '^| dispatch network mode | host | host | yes |$' "$tmp/out" ||
+  fail "check does not read back Dispatch's host networking"
 grep -q '^| cloudsql databaseVersion | POSTGRES_18 | POSTGRES_18 | yes |$' "$tmp/out" ||
   fail "check does not read the instance's own settings from the Cloud SQL Admin API"
 grep -q '^| cloudsql settings.tier | db-custom-16-61440 | db-custom-16-61440 | yes |$' "$tmp/out" ||
   fail "check does not read the instance's tier"
-grep -q '^| app VM scheduling.maxRunDuration | 259200s | 259200s | yes |$' "$tmp/out" ||
+grep -q '^| app VM scheduling.maxRunDuration seconds | 259200 | 259200 | yes |$' "$tmp/out" ||
   fail "check does not read each VM's run-time limit from the Compute API"
 grep -q '^| app VM to production 10.139.0.2:5432 | refused | refused | yes |$' "$tmp/out" ||
   fail "check does not prove each production address refused from each VM"
@@ -766,12 +875,12 @@ grep -q '^| app VM to production 10.139.0.2:5432 | refused | answered | no |$' "
 pass "check exits non-zero when a production address answers from a VM"
 
 rm -f "$fake/nc/10.139.0.2-5432"
-jq '.scheduling.maxRunDuration = "86400s"' "$fake/compute-lt-app.json" >"$tmp/j" && mv "$tmp/j" "$fake/compute-lt-app.json"
+jq '.scheduling.maxRunDuration.seconds = "86400"' "$fake/compute-lt-app.json" >"$tmp/j" && mv "$tmp/j" "$fake/compute-lt-app.json"
 run_vm check --config "$config"
 ((RC != 0)) || fail "check exited 0 with a run-time limit that is not 72 hours"
-grep -q '^| app VM scheduling.maxRunDuration | 259200s | 86400s | no |$' "$tmp/out" ||
+grep -q '^| app VM scheduling.maxRunDuration seconds | 259200 | 86400 | no |$' "$tmp/out" ||
   fail "check does not show the run-time limit it expected beside the one it found"
-pass "check exits non-zero when a VM's maxRunDuration is not 259200s"
+pass "check exits non-zero when a VM's maxRunDuration is not 259200 s"
 
 # ---- (f) reset ------------------------------------------------------------------------------------
 
@@ -935,9 +1044,9 @@ pass "a step whose machine is already stopped is discarded before it starts, and
 reset_fake
 run_vm up --config "$config"
 ((RC == 0)) || fail "up failed before the seed case"
-# The database Dispatch made and migrated when up started it: the seed writes into it and the
+# The database up made on the instance and Dispatch migrated: the seed writes into it and the
 # last phase renames it to the template.
-: >"$fake/db/dispatch"
+[ -e "$fake/db/dispatch" ] || fail "up left no database for the seed to write into"
 run_vm seed --config "$config" --embed-timeout 8h
 ((RC == 0)) || fail "seed failed: see the output above"
 record=$(run_dir)/seed.json
@@ -1166,7 +1275,7 @@ grep -q '^| nats name cpu memory image (nats VM) | /nats 0 0 .* | /nats 0 0 .* |
   fail "check does not read NATS back from the machine the deployment file runs it on"
 grep -q '^| hub-listener name cpu memory image (nats VM) | .* | yes |$' "$tmp/out" ||
   fail "check does not read the hub listener back from the NATS machine"
-grep -q '^| nats VM scheduling.maxRunDuration | 259200s | 259200s | yes |$' "$tmp/out" ||
+grep -q '^| nats VM scheduling.maxRunDuration seconds | 259200 | 259200 | yes |$' "$tmp/out" ||
   fail "check does not read the NATS machine's run-time limit"
 for address in 10.139.0.2:5432 10.138.0.10:4222; do
   grep -q "^| nats VM to production $address | refused | refused | yes |$" "$tmp/out" ||
@@ -1279,7 +1388,7 @@ pass "up mints a token, imports the run's key and reads the login profile, in th
 key=$(run_dir)/oslogin
 [ -f "$key" ] && [ -f "$key.pub" ] || fail "up made no keypair in the run directory"
 [ "$(stat -c %a "$key")" = 600 ] || fail "the run's private key is mode $(stat -c %a "$key"), not 600"
-grep -q -- "-F /dev/null -i $key $app_target " "$fake/ssh.log" ||
+grep -q -- "-F /dev/null -i $key .* $app_target " "$fake/ssh.log" ||
   fail "up's ssh does not run as the OS Login user with the run's own key: $(head -n1 "$fake/ssh.log")"
 grep -v -- "-i $key " "$fake/ssh.log" | grep -q . &&
   fail "an ssh of this run ran without the run's own key: $(grep -v -- "-i $key " "$fake/ssh.log" | head -n1)"
@@ -1492,5 +1601,214 @@ while read -r secret; do
     fail "deployment.example.json holds '$secret' where a credential goes; the placeholder is \"...\""
 done < <(jq -r '(.secrets[], .cloudsql.password)' "$example")
 pass "deployment.example.json is valid JSON and names no routable address, no real machine and no credential"
+
+# ---- (t) the eleven the deployment itself found --------------------------------------------
+
+# Driving this script against the deployment of INFRA-1051 found eleven defects that every case
+# above agreed with, because a fake written from a script agrees with that script. These cases
+# hold each fix to what the deployment measured, and each one names the defect it stands for,
+# so a change that undoes one fails here by name rather than on the deployment again.
+
+reset_fake
+
+# 1. remote_argv. ssh has no argument vector: it joins what it is given with spaces and the
+# machine's shell splits the result again, so an argument holding a space, a quote or a pipe
+# arrived as several, and `sh -c '<script>' sh <path>` reached a machine as a dozen words.
+run_fn remote_argv 'a b' "it's" 'x|y' plain
+((RC == 0)) || fail "remote_argv refused arguments every remote command of this script may hold: $(cat "$tmp/out")"
+want="'a b' 'it'\\''s' 'x|y' 'plain'"
+[ "$(cat "$tmp/out")" = "$want" ] ||
+  fail "remote_argv wrote [$(cat "$tmp/out")], not [$want]"
+
+probe=$remote/argv.txt
+# shellcheck disable=SC2016 # expanded by the VM's sh
+run_fn on_vm app sh -c 'out=$1; shift; printf "[%s]\n" "$@" >"$out"' sh "$probe" 'a b' "it's" 'x|y'
+((RC == 0)) || fail "on_vm failed to run a command whose arguments hold a space, a quote and a pipe: $(cat "$tmp/out")"
+[ "$(cat "$probe")" = "$(printf '[a b]\n[%s]\n[x|y]' "it's")" ] ||
+  fail "the machine was given $(tr '\n' ' ' <"$probe")rather than the three arguments on_vm was given"
+[ "$(sort -u "$fake/ssh.words")" = 1 ] ||
+  fail "on_vm handed ssh $(sort -u "$fake/ssh.words" | tr '\n' ' ')words after the target, which ssh joins with spaces: a remote command must reach it as one"
+pass "a remote argument holding a space, a single quote or a pipe reaches the machine as exactly one argument"
+
+# The up every case below reads, and the fresh instance it runs against: reset_fake left the
+# instance holding no database, which is the state a new one ships in. Its output is kept
+# beside $tmp/out, because the cases below drive functions of their own over that file.
+[ ! -e "$fake/db/dispatch" ] || fail "the instance holds the database dispatch before any up"
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the cases of the eleven: see the output above"
+up_out=$tmp/up.out
+cp -- "$tmp/out" "$up_out"
+
+# 1 again, over every remote command of a whole subcommand rather than one call.
+[ "$(sort -u "$fake/ssh.words")" = 1 ] ||
+  fail "a remote command of up reached ssh as $(sort -u "$fake/ssh.words" | tr '\n' ' ')words, which ssh joins with spaces and the machine's shell splits again"
+pass "every remote command of a subcommand reaches ssh as one word"
+
+# 2. ssh_cmd takes each machine's host key into a file of the run's own under accept-new: these
+# machines are made by a merge and this pod has never met them, so there is no key to have known
+# beforehand and the pod's own known_hosts must not decide what the run trusts.
+grep -q -- "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$(run_dir)/known_hosts $app_target " "$fake/ssh.log" ||
+  fail "up's ssh does not take the machines' host keys into the run's own known_hosts: $(head -n1 "$fake/ssh.log")"
+grep -v -- "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$tmp/root/" "$fake/ssh.log" | grep -q . &&
+  fail "an ssh ran under this pod's own host keys: $(grep -v -- "UserKnownHostsFile=$tmp/root/" "$fake/ssh.log" | head -n1)"
+pass "every ssh accepts a new host key into the run's own known_hosts file and reads no other"
+
+# 3. put_file writes beside its target and renames it on, because a plain write onto a file that
+# is running answers ETXTBSY -- which is what a second up of a deployment whose loadgen or stub
+# embedder is still running meets -- and because a rename leaves no half-written file where a
+# whole one was.
+grep -qF 'cat >"$1.new" && mv -f -- "$1.new" "$1"' "$fake/actions.log" ||
+  fail "put_file does not write beside its target and rename it on: $(grep -F 'umask 077' "$fake/actions.log" | head -n1)"
+# The kernel under this pod refuses no write to a running binary, so this case puts in its place
+# a file the kernel does refuse to open for writing. What it proves is what ETXTBSY asks for:
+# put_file never opens the target itself, so a target it could not have opened is replaced all
+# the same, and nothing of the file it wrote beside it is left.
+busy=$remote/app/busy-loadgen
+printf 'the binary that is running\n' >"$busy"
+chmod 444 "$busy"
+! (printf 'a plain write\n' >"$busy") 2>/dev/null ||
+  fail "this case proves nothing: a plain write onto $busy went through"
+printf 'the binary up installs\n' >"$tmp/new-loadgen"
+run_fn put_file app "$tmp/new-loadgen" "$busy"
+((RC == 0)) || fail "put_file could not replace a file a plain write cannot open: $(cat "$tmp/out")"
+[ "$(cat "$busy")" = "the binary up installs" ] || fail "$busy holds '$(cat "$busy")' after put_file"
+[ ! -e "$busy.new" ] || fail "put_file left the file it wrote beside the target behind"
+[ "$(stat -c %a "$busy")" = 600 ] || fail "put_file left $busy at mode $(stat -c %a "$busy"), not 600"
+pass "put_file writes beside the target and renames it on, which replaces a file a plain write cannot open"
+
+# 5. The Dispatch container takes no --storage-opt: docker on Container-Optimized OS refuses one
+# ("supported only for overlay over xfs with 'pquota' mount option"), so production's 8 GiB
+# ephemeral limit has no form here and check reads back the network mode alone.
+grep -- ' run --name ' "$fake/docker.log" | grep -q -- '--storage-opt' &&
+  fail "up gave a container a --storage-opt, which the docker on these machines refuses"
+pass "no container is started with a --storage-opt this deployment's docker refuses"
+
+# 6. The Dispatch container names its own entrypoint: the Envoy image carries four binaries and
+# its entrypoint is envoy-listener, so without it that container ran a second listener and died
+# on the port the real one held.
+line=$(docker_run_line dispatch)
+[[ $line == *"--entrypoint envoy-dispatch $dispatch_image"* ]] ||
+  fail "up's Dispatch container does not name the entrypoint envoy-dispatch before its image: $line"
+grep -- ' run --name ' "$fake/docker.log" | grep -v -- ' --name dispatch ' | grep -q -- '--entrypoint' &&
+  fail "up gave a container other than Dispatch an entrypoint of its own: $(grep -- ' run --name ' "$fake/docker.log" | grep -v -- ' --name dispatch ' | grep -- '--entrypoint' | head -n1)"
+pass "the Dispatch container runs envoy-dispatch, and no other container names an entrypoint"
+
+# 7. Dispatch's environment carries ENVOY_MACHINE_ID and ENVOY_ALLOW_REMOTE_NATS: NATS is on a
+# machine of its own here, and without the second every connect refuses a NATS server that is
+# not this machine's (internal/bus/reach.go).
+env_file=$remote/app/env/dispatch.env
+grep -qx 'ENVOY_MACHINE_ID=dispatch' "$env_file" ||
+  fail "Dispatch's environment names no ENVOY_MACHINE_ID: $(cat "$env_file")"
+grep -qx 'ENVOY_ALLOW_REMOTE_NATS=1' "$env_file" ||
+  fail "Dispatch's environment does not allow the NATS of another machine: $(cat "$env_file")"
+pass "Dispatch's environment carries ENVOY_MACHINE_ID and ENVOY_ALLOW_REMOTE_NATS"
+
+# 8. up makes the database the deployment file names when the instance does not hold it: a new
+# instance ships with the login's own database and no other, and Dispatch exits rather than
+# making one.
+grep -q 'psql	create database "dispatch"' "$fake/actions.log" ||
+  fail "up did not make the database on an instance that holds none"
+grep -q 'made the database dispatch on the instance' "$up_out" || fail "up does not say it made the database"
+[ -e "$fake/db/dispatch" ] || fail "up left no database dispatch on the instance"
+
+# 5, 7, 10 and 11 read back, in the one check this section runs.
+: >"$fake/actions.log"
+run_vm check --config "$config"
+((RC == 0)) || fail "check failed after the up of these cases: see the output above"
+grep -q '^| dispatch network mode | host | host | yes |$' "$tmp/out" ||
+  fail "check does not read Dispatch's network mode back on its own"
+grep -qi 'ephemeral' "$tmp/out" &&
+  fail "check reads back an ephemeral limit, which this deployment's docker cannot set"
+grep -q '^| dispatch env ENVOY_MACHINE_ID | ENVOY_MACHINE_ID=dispatch | ENVOY_MACHINE_ID=dispatch | yes |$' "$tmp/out" ||
+  fail "check does not read Dispatch's ENVOY_MACHINE_ID back"
+grep -q '^| dispatch env ENVOY_ALLOW_REMOTE_NATS | ENVOY_ALLOW_REMOTE_NATS=1 | ENVOY_ALLOW_REMOTE_NATS=1 | yes |$' "$tmp/out" ||
+  fail "check does not read Dispatch's ENVOY_ALLOW_REMOTE_NATS back"
+
+# 10. The Compute API answers maxRunDuration as an object -- {"seconds": "259200", "nanos": 0} --
+# and never as the duration string it takes on the way in, so check reads its seconds: read
+# whole, the value equalled no expectation and every machine's row came back empty.
+for name in app generator nats; do
+  grep -q "^| $name VM scheduling.maxRunDuration seconds | 259200 | 259200 | yes |$" "$tmp/out" ||
+    fail "check does not read the $name machine's run-time limit out of the object the API answers: $(grep maxRunDuration "$tmp/out" | head -n1)"
+done
+pass "check reads every machine's run-time limit out of the object the Compute API answers"
+
+# 11. check tries every production address on every machine. The addresses were streamed into
+# the loop from a pipe, and the ssh of the first address read the rest of that pipe as its own
+# standard input, so every address after the first went unchecked.
+[ "$(grep -c '^| .* VM to production ' "$tmp/out")" = 6 ] ||
+  fail "check printed $(grep -c '^| .* VM to production ' "$tmp/out") production-address rows, not the 2 addresses on each of the 3 machines of this deployment"
+for address in 10.139.0.2:5432 10.138.0.10:4222; do
+  for name in app generator nats; do
+    grep -q "^| $name VM to production $address | refused | refused | yes |$" "$tmp/out" ||
+      fail "check did not try $address from the $name machine"
+  done
+done
+[ "$(grep -c '^nc	' "$fake/actions.log")" = 6 ] ||
+  fail "check made $(grep -c '^nc	' "$fake/actions.log") connections to production, not the 6 its table claims"
+pass "check tries every production address of the deployment file from every machine"
+
+# 4 and 8 again, over a second up of the same run: the stub embedder the first left running
+# holds its port, and the instance now holds the database.
+first_stub=$(cat "$remote/work/stub-embed.pid")
+[ -n "$first_stub" ] || fail "up recorded no pid for the stub embedder"
+[ "$(cat "$fake/stub-port")" = "$first_stub" ] ||
+  fail "the stub embedder up started does not hold the port it serves on"
+: >"$fake/actions.log"
+run_vm up --config "$config" --run "$(cat "$LOADTEST_VM_ROOT/current")"
+((RC == 0)) || fail "a second up over a running stub embedder failed: see the output above"
+
+# 4. stub_embed_start stops whatever the last start left running: a stub an earlier up left
+# holds the port, so the new one answers "address already in use" and writes no certificate.
+stop_at=$(line_at 'kill -TERM')
+start_at=$(grep -n 'loadgen	stub-embed' "$fake/actions.log" | head -n1 | cut -d: -f1)
+[ -n "$stop_at" ] || fail "the second up did not stop the stub embedder the first left running"
+[ -n "$start_at" ] && ((stop_at < start_at)) ||
+  fail "the second up started its stub embedder (line ${start_at:-none}) before it stopped the one before it (line $stop_at)"
+second_stub=$(cat "$remote/work/stub-embed.pid")
+[ "$second_stub" != "$first_stub" ] || fail "the second up started no stub embedder of its own (pid $second_stub)"
+[ "$(cat "$fake/stub-port")" = "$second_stub" ] ||
+  fail "the stub embedder of the second up does not hold the port, so it wrote no certificate of its own"
+pass "a second up stops the stub embedder the first left running and starts one that holds the port"
+
+# 8, the other way: the instance holds the database now, so up makes none and says so.
+grep -q 'create database' "$fake/actions.log" &&
+  fail "a second up made the database again over the one the instance holds"
+grep -q 'already holds the database dispatch' "$tmp/out" ||
+  fail "a second up does not say the instance already holds the database"
+pass "up makes the database when the instance lacks it and makes none when it has it"
+
+# 9. wait_healthz reads `.ok and .nats`, which is what stack.sh's dispatch_healthy reads: the
+# body carries no `status` field, and a Dispatch whose database is up but whose NATS is not
+# would serve the API while every notification of a step went nowhere. These three run the
+# function itself, so a poll's bound is ten seconds here rather than the nine hundred a
+# subcommand gives it.
+run_fn HEALTHZ_SECONDS=10 HEALTHZ_POLL_SECONDS=5 wait_healthz
+((RC == 0)) || fail "wait_healthz did not take an answer of ok and nats for ready: $(cat "$tmp/out")"
+grep -q 'answers /healthz ok' "$tmp/out" || fail "wait_healthz said nothing of the answer it took"
+
+printf '{"ok": true, "nats": false, "schema_version": 1337}\n' >"$fake/healthz"
+: >"$fake/actions.log"
+run_fn HEALTHZ_SECONDS=10 HEALTHZ_POLL_SECONDS=5 wait_healthz
+((RC != 0)) || fail "wait_healthz took a Dispatch whose NATS is not up for ready"
+grep -q 'did not answer /healthz ok' "$tmp/out" ||
+  fail "wait_healthz does not say that Dispatch never answered ok: $(cat "$tmp/out")"
+[ "$(grep -c 'healthz' "$fake/actions.log")" -ge 2 ] ||
+  fail "wait_healthz read /healthz once and gave up, rather than waiting out its bound"
+
+# A container that is no longer running never will answer, so the wait refuses at once with the
+# end of its log, which is where every reason Dispatch refuses to start is written.
+printf 'exited\n' >"$fake/docker/$app_target/dispatch.state"
+printf 'listen tcp 0.0.0.0:9020: bind: address already in use\n' >"$fake/docker/$app_target/dispatch.log"
+: >"$fake/actions.log"
+run_fn wait_healthz
+((RC != 0)) || fail "wait_healthz waited on a Dispatch container that is no longer running"
+grep -q 'the Dispatch container on the app VM is exited' "$tmp/out" ||
+  fail "the refusal does not name the container's state: $(cat "$tmp/out")"
+grep -q 'address already in use' "$tmp/out" ||
+  fail "the refusal does not print the end of the container's log: $(cat "$tmp/out")"
+[ "$(grep -c 'healthz' "$fake/actions.log")" = 1 ] ||
+  fail "wait_healthz read /healthz $(grep -c 'healthz' "$fake/actions.log") times before it read the container's state, rather than refusing at once"
+pass "wait_healthz returns on ok and nats, waits while NATS is not up, and refuses at once, naming the state and the log, when the container has exited"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'
