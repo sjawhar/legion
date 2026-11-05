@@ -5,11 +5,10 @@
 -- roleMessage), which is a durable row so the telling survives a restart and carries the outbox's
 -- own retry budget.
 --
--- The check is rewritten whole, naming every kind: this sets the list after every migration that
--- adds a kind.
-alter table outbox drop constraint outbox_kind_check;
-alter table outbox add constraint outbox_kind_check check (kind in (
-  'dispatch_status', 'dispatch_message', 'notice', 'controller_notice', 'supervise', 'gate_seed',
-  'linger_close', 'workspace_remove', 'merge_queue_publish', 'issue_branch', 'issue_suspend',
-  'auto_merge_disable', 'ready_merge', 'check_compare', 'check_look', 'check_bound',
-  'role_message', 'phase_ended'));
+-- The kind is named in no CHECK here. This branch sets the list once, in
+-- 20261105081500_outbox_kinds_of_both_releases, after the release it merged has added its own
+-- kinds: a rewrite here would run on a database that recorded that release's versions, where
+-- ADD CONSTRAINT validates the rows the table holds and a pending `issue_bundle` or
+-- `issue_release` of its idle release would fail the upgrade, leaving a daemon that cannot boot
+-- until someone deleted the row. Nothing between here and that migration writes a `role_message`
+-- row: the kind reaches the outbox only from a daemon of this release, which carries both.

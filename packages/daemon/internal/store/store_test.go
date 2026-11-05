@@ -682,6 +682,12 @@ var thisRelease = map[int]bool{
 
 const idleRelease = 20261101222956
 
+// retiredOutboxKinds are the kinds no lane holds any more: the three of the merge the daemon no
+// longer submits, which 20261029120800 deletes. A database of a release that still queued them is
+// upgraded with such a row pending, so the seeds below offer them too and keep the ones the
+// schema being upgraded takes.
+var retiredOutboxKinds = []record.OutboxKind{"ready_merge", "auto_merge_disable", "merge_queue_publish"}
+
 // Every outbox kind the daemon writes is one the schema's check admits, on a fresh database and on
 // databases that applied a lower migration late. 0016 (the READY packet's publish) and 0020
 // (controller_notice) would each redefine the check with the other's kind missing, and a database
@@ -744,16 +750,24 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 			if err != nil {
 				t.Fatalf("read the schema version: %v", err)
 			}
-			for _, queued := range []struct {
-				since int
-				kind  record.OutboxKind
-			}{{20, record.OutboxKindControllerNotice}, {34, record.OutboxKindIssueSuspend}, {66, record.OutboxKindPhaseEnded}} {
-				if version < queued.since {
-					continue
+			// Every kind the schema admits where this database stands, seeded before the upgrade
+			// runs. A row waits in the outbox until it finishes, so a deployment is upgraded with
+			// whatever its own release had queued, and `ADD CONSTRAINT … CHECK` validates the
+			// rows the table holds: a migration of this release whose list forgets a kind the
+			// other release queues fails the upgrade itself, and the daemon then fails to boot on
+			// every restart until someone deletes the row by hand. Which kinds those are is asked
+			// of the schema rather than listed here, by trying each and keeping the ones it
+			// takes — a kind a release adds to its own list is seeded by that alone, with no
+			// version to keep in step — and each failed insert is its own statement, so nothing
+			// it leaves behind reaches the next.
+			seeded := 0
+			for _, kind := range append(kinds, retiredOutboxKinds...) {
+				if _, err := store.pool.Exec(ctx, insert, string(kind)); err == nil {
+					seeded++
 				}
-				if _, err := store.pool.Exec(ctx, insert, string(queued.kind)); err != nil {
-					t.Fatalf("queue a %s row at schema %d: %v", queued.kind, version, err)
-				}
+			}
+			if version > 0 && seeded == 0 {
+				t.Fatalf("the schema at %d admitted no kind at all, so this case seeds nothing", version)
 			}
 			if _, err := store.Migrate(ctx); err != nil {
 				t.Fatalf("migrate: %v", err)

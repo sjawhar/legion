@@ -559,7 +559,7 @@ package api
 // report, and fails the claim once that run reaches `launch_failure_limit` — the fault that left an
 // implementer's every turn refused by its provider with its claim never failing. A plugin built
 // before 49 reports no turn, so its session's refusals are counted by nobody, and a plugin from
-// this contract posting to a daemon before 47 is answered "no route" for every turn it ends; the
+// this contract posting to a daemon before 49 is answered "no route" for every turn it ends; the
 // boot gate and `legion probe-image` refuse the mixed pair. `legion claims retry` gains the
 // optional body `{freshSession}` (`--fresh-session`), which starts the claim in a new session
 // rather than resuming the recorded one; a claim the provider refused out of its budget takes one
