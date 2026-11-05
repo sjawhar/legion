@@ -7,9 +7,9 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 ## The conversation
 
-Reach shared understanding with the person at the least cost of their time. A spec is a conversation with them, not a document you write and then ask about. A Legion phase worker writes none (`skill://legion-worker`). In order:
+Reach shared understanding with the person at the least cost of their time. A spec is a conversation, not a document you write and then ask about. A Legion phase worker writes none (`skill://legion-worker`). In order:
 
-1. Research: read the issue, the code and what the person has written.
+1. Read the issue, the code and what the person wrote.
 2. Send what you found and the questions it leaves open, a few at a time, before the spec states a design.
 3. Write each part only after the answers it rests on.
 4. A wrong premise or a changed request changes the request first.
@@ -39,7 +39,6 @@ For each spec, ask, comment and message:
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
-- Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name a new reader may not know, and what each issue you name does for them.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
@@ -53,7 +52,7 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, reread the problem and rewrite what the answer touches, deleting what it contradicts: an answer is integrated, never appended. Answer each comment in its own thread. Never narrate an edit: versions and comments hold the history.
+1. After a person's answer, comment or edit, reread the problem and rewrite what the answer touches, deleting what it contradicts: an answer is integrated, never appended. Answer each comment in its thread. Never narrate an edit: versions and comments hold the history.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent: it lists gaps, conflicts, uncheckable requirements, unclear text and needless questions. Fix or record each.
 3. Before each approval request, `wait` for a read-only fact check: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.
