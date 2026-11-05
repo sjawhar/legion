@@ -119,6 +119,22 @@ function isLive(sessionID: string): boolean {
   return state.liveSessions.has(sessionID) && state.records.get(sessionID) !== "absent";
 }
 
+/** The live window a session's own registration keeps it live for: `session.LiveWindow`, five
+ *  minutes. Past it a session is unresponsive rather than gone - it keeps its claims and its
+ *  messages - and only the registry calling it gone means it has stopped. */
+const LIVE_WINDOW_MS = 5 * 60 * 1000;
+
+/** What a Legion agent registry read answers as `live`: the session's own registration state, as
+ *  `sessionIsLive` judges it through `session.StateOf` - inside the live window - and never the
+ *  row's membership of this listener's session cache, which is what `isLive` above models for the
+ *  session routes. So a session whose seed stamped an old `last_seen` reads `live: false` here
+ *  while it is not gone, and a session this fixture holds no record of is never live. */
+function registrationIsLive(sessionID: string, now: number): boolean {
+  if (state.records.get(sessionID) === "absent") return false;
+  const session = state.sessions.find((item) => item.session_id === sessionID);
+  return session !== undefined && now - (session.last_seen ?? now) < LIVE_WINDOW_MS;
+}
+
 /** One role token's sessions oldest first, by start, then by when they were recorded, then by
  *  id - the listener's `oldestFirst`. */
 function oldestFirst(left: FakeLegionAgent, right: FakeLegionAgent): number {
@@ -150,6 +166,9 @@ function tokenOrder(sessions: readonly FakeLegionAgent[]): [number, string] {
  *  whose entries were recorded under two issues would otherwise call its newest entry unreplaced
  *  while the token's own read named its replacement. */
 function legionAnswer(selected: readonly FakeLegionAgent[]): Record<string, unknown>[] {
+  // One `now` for the whole read, as the listener judges every entry of an answer against one
+  // clock.
+  const now = Date.now();
   const chosen = new Set(selected.map((agent) => agent.session_id));
   const tokens = new Set(selected.map((agent) => agent.role_token));
   const byToken = new Map<string, FakeLegionAgent[]>();
@@ -172,7 +191,7 @@ function legionAnswer(selected: readonly FakeLegionAgent[]): Record<string, unkn
           return [
             {
               ...agent,
-              live: isLive(agent.session_id),
+              live: registrationIsLive(agent.session_id, now),
               recorded_at: agent.recorded_at ?? agent.started_at,
               replaced_at: next?.started_at ?? null,
               replaced_by: next?.session_id ?? null,

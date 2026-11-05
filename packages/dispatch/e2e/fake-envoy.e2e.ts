@@ -94,9 +94,12 @@ test("an interests seed whose body arrives during a session reseed is kept", asy
 });
 
 // The registry reads answer from the seeded entries as the listener's do: an issue's sessions by
-// role in workflow order and each role token's newest first, `live` from the live sessions and
-// `replaced_by`/`replaced_at` from the next session of the token to start; a session reseed keeps
-// the entries, as the real bucket outlives a session ending.
+// role in workflow order and each role token's newest first, `replaced_by`/`replaced_at` from the
+// next session of the token to start, and `live` from the session's own registration inside the
+// live window (`sessionIsLive` through `session.StateOf`), never from this listener's session
+// cache - so a session the cache holds whose registration is older than the window reads
+// `live: false` while it is not gone. A session reseed keeps the entries, as the real bucket
+// outlives a session ending.
 test("the Legion agent registry reads derive live and replacement, and outlive a session reseed", async () => {
   test.skip(test.info().project.name !== "chromium", "the fixture has no browser to vary");
   const { origin, stop } = await startFakeEnvoy();
@@ -126,10 +129,20 @@ test("the Legion agent registry reads derive live and replacement, and outlive a
       entry("new-reviewer", "E2E-1", "reviewer", "2026-10-26T02:00:00Z"),
       entry("old-reviewer", "E2E-1", "reviewer", "2026-10-26T01:00:00Z"),
       entry("implementer", "E2E-1", "implementer", "2026-10-26T00:00:00Z"),
+      entry("stale-tester", "E2E-1", "tester", "2026-10-26T00:30:00Z"),
       entry("elsewhere", "E2E-2", "tester", "2026-10-26T00:00:00Z"),
     ];
     expect((await put("/__fixture/legion-agents", seeded)).status).toBe(200);
-    const sessions: FakeSession[] = [{ session_id: "new-reviewer", title: "Legion reviewer" }];
+    // The reseed puts both sessions in the listener's cache; only the registration decides `live`,
+    // and the tester's is an hour old.
+    const sessions: FakeSession[] = [
+      { session_id: "new-reviewer", title: "Legion reviewer" },
+      {
+        last_seen: Date.now() - 60 * 60 * 1000,
+        session_id: "stale-tester",
+        title: "Legion tester",
+      },
+    ];
     expect((await put("/__fixture/sessions", sessions)).status).toBe(200);
 
     const issue = await fetch(`${origin}/v1/legion/agents?issue=E2E-1`);
@@ -137,6 +150,7 @@ test("the Legion agent registry reads derive live and replacement, and outlive a
     expect(await issue.json()).toMatchObject({
       entries: [
         { live: false, replaced_at: null, replaced_by: null, session_id: "implementer" },
+        { live: false, replaced_at: null, replaced_by: null, session_id: "stale-tester" },
         { live: true, replaced_at: null, replaced_by: null, session_id: "new-reviewer" },
         {
           live: false,
