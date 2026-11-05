@@ -59,10 +59,9 @@ func TestDecisionAnsweredAskRefusesAgentRemovalButAllowsPerson(t *testing.T) {
 func TestDecisionKeepRequiresPersonScope(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createReferenceAPIProject(t, handler, "CORE")
-	issue := createSpecIssue(t, handler, "CORE", "Context.\n")
-	legacy := uploadIssueDocument(t, handler, issue.Key, "decisions.md", "## The choice\n\nUse a table.\n")
+	issue := createSpecIssue(t, handler, "CORE", ":::decision{#choice title=\"The choice\"}\nUse a table.\n:::\n")
 	decision := decisionNamed(t, readIssueDecisions(t, handler, issue.Key), "The choice")
-	path := "/api/v1/artifacts/" + legacy.ID + "/blocks/" + decision.BlockID + "/keep"
+	path := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/blocks/choice/keep"
 	body := map[string]any{"text_sha256": decision.TextSHA256}
 	refused := agentRequest(t, handler, http.MethodPost, path, body, "agent-token")
 	if refused.Code != http.StatusForbidden {
@@ -153,6 +152,30 @@ func TestDecisionShadowFindsUnconvertedChangedAndUnkeptSections(t *testing.T) {
 	read(3)
 }
 
+func TestDecisionHistoricalPassagesExcludeLaterRelations(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", shipIt("Original passage.")+"\n")
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#later title=\"Later decision\" shaped=\"dispatch://" + issue.Key + "/spec#b-ship%5Fit\"}\nLater reasoning.\n:::"}})
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/decisions?artifact="+issue.PrimaryArtifactID+"&version=1", nil, "alice")
+	view := decodeBody[issueDecisions](t, response)
+	if response.Code != http.StatusOK || len(view.Decisions) != 1 || len(view.Decisions[0].Links) != 0 {
+		t.Fatalf("later decision drawn on older passage: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDecisionRemovedPassageRetainsOriginalWords(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", shipIt("Original passage.")+"\n")
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#choice title=\"A decision\" shaped=\"dispatch://" + issue.Key + "/spec#b-ship%5Fit\"}\nReasoning.\n:::"}})
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "delete", "block": "ship_it"}})
+	decision := decisionNamed(t, readIssueDecisions(t, handler, issue.Key), "A decision")
+	if len(decision.Links) != 1 || decision.Links[0].To.Pin == nil || decision.Links[0].To.Pin.State != "removed" || !strings.Contains(decision.Links[0].To.Pin.Text, "Original passage.") {
+		t.Fatalf("removed passage lost its history: %#v", decision)
+	}
+}
+
 func TestDecisionAgentCannotClaimAnotherDecider(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{})
 	createReferenceAPIProject(t, handler, "CORE")
@@ -161,7 +184,7 @@ func TestDecisionAgentCannotClaimAnotherDecider(t *testing.T) {
 		t.Run(session, func(t *testing.T) {
 			response := agentRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 				"actor": map[string]any{"kind": "session", "id": session},
-				"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#claim title=\"A person's choice\" decided_by=\"alice\"}\nWords the person never said.\n:::"}},
+				"ops":   []map[string]any{{"op": "insert", "after": "end", "markdown": ":::decision{#claim title=\"A person's choice\" decided_by=\"alice\"}\nWords the person never said.\n:::"}},
 			}, "agent-token")
 			if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "alice") || !strings.Contains(response.Body.String(), "claim") {
 				t.Fatalf("agent attribution: %d %s", response.Code, response.Body.String())
