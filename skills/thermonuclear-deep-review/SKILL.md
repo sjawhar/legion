@@ -8,6 +8,11 @@ disable-model-invocation: true
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
+Make your own scratch with `mktemp -d` and delete only the paths you made, each by its exact
+path. Never delete by a glob in a shared directory: every role of this issue writes into the same
+`$TMPDIR` on the issue's volume, so a sweep like `rm -rf "$TMPDIR"/tmp.*` deletes directories
+another role has open.
+
 ## Verdict
 
 The first line of the report is the verdict, in exactly this form, because a PR gate reads only that line:

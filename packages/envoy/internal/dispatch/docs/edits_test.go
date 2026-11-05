@@ -123,7 +123,7 @@ func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing
 	}
 	tableID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
 	op := model.EditOp{Op: "delete_row", Block: tableID, Index: []byte("1")}
-	snapshot, marks, table, err := tableAnchorCheck(tree, op)
+	snapshot, marks, table, err := tableAnchorCheck(newBatchTree(tree), op)
 	if err != nil || !table || len(marks) != 0 {
 		t.Fatalf("table snapshot = %#v marks=%#v err=%v", snapshot, marks, err)
 	}

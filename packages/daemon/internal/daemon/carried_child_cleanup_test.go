@@ -13,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -180,7 +179,7 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	t.Cleanup(stopRuntime)
 	newRuntime := func() *sandbox.Runtime {
 		t.Helper()
-		rt, err := sandbox.New(runtimeCtx, &rest.Config{Host: server.URL}, sandbox.Options{
+		rt, err := sandbox.New(runtimeCtx, sandboxRESTConfig(server.URL), sandbox.Options{
 			Namespace: "legion", Project: "legion", Store: st, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 			StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 			SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
@@ -261,5 +260,6 @@ func (f *carriedCleanup) launchedChildSandbox(uid string) {
 	s := issueSandbox(f.childSandbox, uid, f.childKey, f.childKey)
 	f.api.mu.Lock()
 	defer f.api.mu.Unlock()
-	f.api.objects[f.childSandbox] = s
+	f.api.objects["sandboxes"][f.childSandbox] = s
+	f.api.disks[f.childSandbox] = true
 }
