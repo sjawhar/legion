@@ -78,6 +78,10 @@ func TestPersonAliasesAndAuthoredEdgesUseStoredActors(t *testing.T) {
 	}
 }
 
+// A document's actors reach the aliases through the records an index can read a person out of:
+// the artifact's creator, and the actor of the artifact.version event every version write
+// appends. The version row's own authors array is not a source (20261104074751 says why), so
+// " Ghost ", credited on the version and named nowhere else, establishes no alias.
 func TestPersonAliasesIncludeEventClaimAndDocumentActorsWithoutInventingRoles(t *testing.T) {
 	ctx := context.Background()
 	database := openEmptyTestStore(t)
@@ -90,12 +94,13 @@ func TestPersonAliasesIncludeEventClaimAndDocumentActorsWithoutInventingRoles(t 
 		values ('CORE-1', 'CORE', 1, 'Graph', '{"kind":"system","id":"seed"}', '{"kind":"user","id":" Claim "}', now(), 'role:reviewer', 'U');
 		insert into events (issue_key, seq, type, actor, notify, payload) values
 		('CORE-1', 1, 'issue.updated', '{"kind":"user","id":" Event "}', false, '{}'),
-		('CORE-1', 2, 'issue.updated', '{"kind":"session","id":"token-session","owner":" Owner ","session_verified":true}', false, '{}');
+		('CORE-1', 2, 'issue.updated', '{"kind":"session","id":"token-session","owner":" Owner ","session_verified":true}', false, '{}'),
+		('CORE-1', 3, 'artifact.version', '{"kind":"user","id":" Credit "}', false, '{}');
 		with document as (
 			insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
 			values ('CORE-1', 'CORE', 'notes', 'notes.md', 'doc', '{"kind":"user","id":" Creator "}') returning id
 		) insert into artifact_versions (artifact_id, number, markdown, authors)
-		select id, 1, 'Words', '[{"kind":"user","id":" Credit "}]' from document;
+		select id, 1, 'Words', '[{"kind":"user","id":" Credit "},{"kind":"user","id":" Ghost "}]' from document;
 	`); err != nil {
 		t.Fatal(err)
 	}

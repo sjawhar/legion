@@ -26,6 +26,21 @@ create index events_graph_delivery_created on events (created_at desc)
   where type in ('ask.answered', 'comment.created', 'message.created', 'message.answered')
     and payload->>'id' <> '';
 
+-- Every source the alias view reads is a column one of the expression indexes above covers, so a
+-- person's lookup reads that person's rows and nothing else. artifact_versions.authors is not
+-- among them: a person can be read out of that array only after expanding it, and only a GIN
+-- index on artifact_versions could bound the expansion, which no migration may create. The table
+-- is 5.2 GiB and the pre-deploy census refuses a migration that locks a table above
+-- pgmigrate.CensusTableLimit, 1 GiB -- the same wall that gave 20261101182447 a table of its own
+-- instead of an index on artifact_versions.search. Unbounded, that arm cost a sequential scan of
+-- every version stored, twice, on every person read, and neither a page nor a since bounded it.
+--
+-- A document's actors still reach the view: whoever created it through artifacts.created_by, and
+-- the actor of each artifact.created and artifact.version event through events.actor. What is
+-- left out is a co-author a version credits who appears in no other record at all -- no people
+-- row, no comment, message, ask or event, no issue or artifact of their own. A person who edits
+-- a document in a browser has a people row and an agent that edits one writes events, so the
+-- case is narrow, but it is a bound this view accepts rather than one it proves empty.
 create view person_aliases (person, alias_kind, alias) as
   with actors as not materialized (
     select author as actor from comments
@@ -35,8 +50,6 @@ create view person_aliases (person, alias_kind, alias) as
     union all select created_by from issues
     union all select claimed_by from issues
     union all select created_by from artifacts
-    union all select credit.actor from artifact_versions v
-      cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb)) credit(actor)
   ), aliases as (
     select user_threads_login(email) as person, 'login' as alias_kind, user_threads_login(email) as alias from people
     union all

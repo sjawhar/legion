@@ -23,9 +23,12 @@ test("a person's graph lists authored and recorded received nodes @phone", async
     { login: "bob" }
   );
   await createComment(issue.key, { body: "Bob's unrelated node." }, { login: "bob" });
-  // Stored session actors carry owner only when the server verified a personal/broker token.
+  // A stored session actor carries owner and session_verified only where the server itself proved
+  // the session: bearerSessionActor copies the owner from the authenticated token, and only a
+  // broker-issued credential sets session_verified. The alias view takes a session alias from that
+  // flag alone, so the fixture writes both, the way a broker-proved session is stored.
   await sql(
-    `UPDATE comments SET author = author || '{"owner":"alice"}'::jsonb WHERE id = '${session.id}'`,
+    `UPDATE comments SET author = author || '{"owner":"alice","session_verified":true}'::jsonb WHERE id = '${session.id}'`,
     `UPDATE events SET published_destinations = array['notifications.agent.person-alice-session']
      WHERE type = 'comment.created' AND payload->>'id' = '${received.id}'`
   );

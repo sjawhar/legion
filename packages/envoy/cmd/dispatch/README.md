@@ -1622,6 +1622,8 @@ The alias view uses `user_threads_login` for canonical person ids and stores no 
 A stored session actor's `owner` is always the credential's own, but its session id is the request body's on every bearer but a broker-issued token, so a session alias is taken only from an actor carrying `session_verified`, which the server sets where the credential itself proved the session.
 No record establishes a role alias, and the view mints none.
 Expression indexes on each scalar actor source and on people's canonical logins serve identity lookups; partial topic and time indexes serve recorded event deliveries.
+`artifact_versions.authors` is no alias source: reading a person out of that array means expanding it, and only a GIN index on the 5.2 GiB table could bound the expansion, which the census refuses a migration for (`20261101182447` met the same wall and took a table of its own).
+A document's actors reach the view through `artifacts.created_by` and the actor of each `artifact.created` and `artifact.version` event.
 Index builds read the existing tables under `SHARE`, blocking writers while each index builds; the migration rewrites and refuses no row, and its census answers `0` while reporting those tables' sizes and locks.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.

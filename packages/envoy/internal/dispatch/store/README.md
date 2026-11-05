@@ -40,6 +40,9 @@ What a person received is read instead through their `login` and their proved `s
 A role delivery that reached nobody (kept on the role's lane for the next holder) belongs to no person and is shown on the role node alone.
 Delivery reads the four word-carrying event types used by `sessionanswers`, their `published_destinations`, and sent message/comment delivery attempts.
 The person page resolves proved session aliases through canonical-login expression indexes before reading delivery attempts through their session/time indexes and recorded event topics through a partial GIN index.
+Every alias source is a column one of those indexes covers.
+`artifact_versions.authors` is not one: a person can be read out of that array only by expanding it, and only a GIN index on the table could bound the expansion, which no migration may create — `artifact_versions` is 5.2 GiB and the pre-deploy census refuses a migration that locks a table above `pgmigrate.CensusTableLimit`.
+A document's actors reach the aliases through `artifacts.created_by` and through the actor of each `artifact.created` and `artifact.version` event, so what the bound leaves out is a co-author a version credits who appears in no other record at all.
 Received nodes default to deliveries in the last 30 days; `since` (RFC3339) selects another lower bound without limiting authored nodes.
 Role endpoints remain addressable in graph reads, including a delivery to a role alone.
 `envoy-dispatch census --deliveries` independently compares the graph's recipient sets with those records for every comment, message and ask created in the last 30 days.

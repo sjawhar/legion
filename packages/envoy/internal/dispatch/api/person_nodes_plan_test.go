@@ -37,7 +37,14 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 		insert into message_deliveries (message_id, attempt, delivery, session_id, state)
 		select md5('message' || n::text)::uuid, 1, 'aside', 'other', 'sent'
 		from generate_series(1, 20000) n;
+		insert into artifacts (id, issue_key, project_key, slug, name, kind, created_by)
+		values ('5bd02aa9-6c0f-4f1f-9d6b-9e8f1d2c3b4a', 'VOL-1', 'VOL', 'history', 'history.md', 'doc', '{"kind":"user","id":"doc-owner"}');
+		insert into artifact_versions (artifact_id, number, authors)
+		select '5bd02aa9-6c0f-4f1f-9d6b-9e8f1d2c3b4a', n,
+		       jsonb_build_array(jsonb_build_object('kind', 'user', 'id', 'writer-' || (n % 1000)::text))
+		from generate_series(1, 100000) n;
 		analyze comments; analyze events; analyze messages; analyze message_deliveries; analyze comment_deliveries;
+		analyze artifact_versions;
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +72,7 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 			if len(plans) != 1 {
 				t.Fatalf("unexpected EXPLAIN: %s", raw)
 			}
-			t.Logf("20001 comments, 20000 messages, 100000 recorded events, 20000 attempts per delivery table: planning %.3f ms, execution %.3f ms", plans[0].PlanningTime, plans[0].ExecutionTime)
+			t.Logf("20001 comments, 20000 messages, 100000 recorded events, 20000 attempts per delivery table, 100000 unrelated document versions: planning %.3f ms, execution %.3f ms", plans[0].PlanningTime, plans[0].ExecutionTime)
 			if strings.HasPrefix(query.name, "person") && (plans[0].PlanningTime > 50 || plans[0].ExecutionTime > 200) {
 				t.Errorf("person graph exceeds its 50 ms planning / 200 ms execution budget")
 			}
@@ -77,7 +84,9 @@ func TestPersonGraphPlansOnRecordedDeliveryVolume(t *testing.T) {
 				if relation != "" {
 					t.Logf("%s %s %s", kind, relation, index)
 				}
-				if strings.Contains(kind, "Seq Scan") && (relation == "events" || relation == "comments" || relation == "messages" || (query.name == "person" && (relation == "comment_deliveries" || relation == "message_deliveries"))) {
+				if strings.Contains(kind, "Seq Scan") && (relation == "events" || relation == "comments" || relation == "messages" ||
+					(strings.HasPrefix(query.name, "person") && relation == "artifact_versions") ||
+					(query.name == "person" && (relation == "comment_deliveries" || relation == "message_deliveries"))) {
 					t.Errorf("%s must not scan %s", query.name, relation)
 				}
 				children, _ := plan["Plans"].([]any)
