@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sjawhar/envoy/internal/dispatch/bytelru"
 )
@@ -32,6 +33,7 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 	if tree, held := displayCache.Get(key); held {
 		return tree
 	}
+	displayTreeBuilds.Add(1)
 	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
 	if err != nil {
 		slog.Warn("dispatch: display tree encoding failed", "error", err)
@@ -40,6 +42,24 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 	displayCache.Put(key, tree)
 	return tree
 }
+
+// displayTreeBuilds counts what DisplayTreeBuilds answers.
+var displayTreeBuilds atomic.Uint64
+
+// DisplayTreeBuilds is how many display trees of a stored text this process has read since it
+// started: one for every DisplayJSON the cache could not answer, which is every call that reads
+// the markdown. A caller served a tree from elsewhere - a stored tree, once there is a table of
+// them - calls DisplayJSON at all only on a miss, so a test that reads a comment list after a
+// restart holds this number where it stood, which is the proof that the trees the response
+// carried were stored rather than read.
+//
+// A read whose encoding then fails counts all the same: the number is the reading work a
+// response cost, and that work was done whether or not a tree came out of it.
+//
+// A snippet is no build (DisplaySnippetJSON). Its tree is cut fresh for one query, stored by
+// nobody and keyed by no version, so counting it would move a number whose only question is
+// whether a stored text had to be read again.
+func DisplayTreeBuilds() uint64 { return displayTreeBuilds.Load() }
 
 // DisplayHighlightMark is the mark DisplaySnippetJSON puts over what a search matched. It is a
 // mark of the display tree alone: no document stores it, no write accepts it, and it is not in
