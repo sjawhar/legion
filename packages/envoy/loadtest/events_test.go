@@ -701,13 +701,13 @@ func TestLoopEventPlanDrawsItsShares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := runConfig{mix: mix, loop: ls, human: 0.1}
-	sessions := []session{{id: sessionID(0), watched: []int{0}}}
+	pop := &population{name: populationLoop, sf: ls.seedFile(), loop: ls, mix: mix,
+		sessions: []session{{watched: []int{0}}}}
 	r := rand.New(rand.NewPCG(9, 1))
 	kinds, reopens, statuses := map[string]int{}, 0, 0
 	const draws = 100_000
 	for i := range draws {
-		p := planEvent(r, cfg, sessions, ls.seedFile(), int64(i+1))
+		p := planEvent(r, pop, 0.1, int64(i+1))
 		kinds[p.kind]++
 		pr := &ls.Proposals[p.issue]
 		switch p.kind {

@@ -109,7 +109,8 @@ func newReplaySetup(o replayOptions) (*replaySetup, error) {
 
 // newReplayStep lays out the roster: session i registers and subscribes its home issue (the issue
 // its claim holds, else issue i mod the kept issues) and further issues 37 apart until its
-// registration body reaches about replayRosterEntryBytes.
+// registration body reaches about replayRosterEntryBytes. A replay drives the one population,
+// whose writes are the bundle's own and whose event rate is 0.
 func newReplayStep(cfg runConfig, lg *log.Logger, nonce int64) *step {
 	rs := cfg.replay
 	sf := seedFile{Projects: []string{rs.plan.Project}}
@@ -119,34 +120,36 @@ func newReplayStep(cfg runConfig, lg *log.Logger, nonce int64) *step {
 		index[k] = i
 	}
 	n := len(sf.Issues)
-	st := &step{cfg: cfg, sf: sf, lg: lg, nonce: nonce, active: n, sessions: make([]session, len(rs.roster)), watchers: make([][]int, n)}
+	p := &population{name: populationBaseline, sf: sf, mix: cfg.mix, routes: cfg.routes,
+		events: cfg.events, requests: cfg.requests, eventStream: eventStream, requestStream: requestStream,
+		active: n, sessions: make([]session, len(rs.roster)), watchers: make([][]int, n)}
+	st := &step{cfg: cfg, lg: lg, nonce: nonce, pops: []*population{p}, ids: slices.Clone(rs.roster)}
 	for i, id := range rs.roster {
 		if n == 0 {
-			st.sessions[i] = session{id: id}
 			continue
 		}
 		home := i % n
 		if k, ok := rs.homes[id]; ok {
 			home = index[k]
 		}
-		s := session{id: id, home: home, watched: []int{home}}
-		size := len(st.registrationBody(s))
+		s := session{home: home, watched: []int{home}}
+		size := len(registrationBody(id, p.topics(s)))
 		for k := 1; k < n && size < replayRosterEntryBytes; k++ {
 			w := (home + k*37) % n
 			if slices.Contains(s.watched, w) {
 				continue
 			}
 			next := append(slices.Clone(s.watched), w)
-			nb := len(st.registrationBody(session{id: id, watched: next}))
+			nb := len(registrationBody(id, p.topics(session{watched: next})))
 			if nb > replayRosterEntryBytes+20 {
 				break
 			}
 			s.watched, size = next, nb
 		}
 		for _, w := range s.watched {
-			st.watchers[w] = append(st.watchers[w], i)
+			p.watchers[w] = append(p.watchers[w], i)
 		}
-		st.sessions[i] = s
+		p.sessions[i] = s
 	}
 	return st
 }

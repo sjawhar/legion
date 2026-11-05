@@ -295,8 +295,8 @@ func (r *relaySessions) summary() sessionDeliverySummary {
 
 // writeFrames writes relay-frames.csv in dir: one row per relay frame, in arrival order per
 // session, with the session id, the frame's dedupe identity and whether the session answered it
-// done (restart-report reads them).
-func (r *relaySessions) writeFrames(dir string, sessions []session, lg *log.Logger) {
+// done (restart-report reads them). ids are the step's sessions, by index.
+func (r *relaySessions) writeFrames(dir string, ids []string, lg *log.Logger) {
 	f, err := os.Create(filepath.Join(dir, "relay-frames.csv"))
 	if err != nil {
 		lg.Printf("write relay-frames.csv: %v", err)
@@ -306,7 +306,7 @@ func (r *relaySessions) writeFrames(dir string, sessions []session, lg *log.Logg
 	w := csv.NewWriter(f)
 	_ = w.Write([]string{"session", "subject", "stream_seq", "delivered", "stored_at_ns", "recv_ns", "event_id", "duplicate", "identity", "done"})
 	for _, rec := range r.frames.snapshot() {
-		_ = w.Write([]string{sessions[rec.Session].id, rec.Subject, strconv.FormatUint(rec.Seq, 10), strconv.Itoa(rec.Delivered),
+		_ = w.Write([]string{ids[rec.Session], rec.Subject, strconv.FormatUint(rec.Seq, 10), strconv.Itoa(rec.Delivered),
 			strconv.FormatInt(rec.StoredAt, 10), strconv.FormatInt(rec.Recv, 10), strconv.FormatInt(rec.EventID, 10),
 			strconv.FormatBool(rec.Duplicate), rec.Identity, strconv.FormatBool(rec.Done)})
 	}

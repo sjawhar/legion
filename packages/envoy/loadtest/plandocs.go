@@ -35,7 +35,7 @@ func planVersionDocs(cfg runConfig, sf seedFile) []docVersions {
 	// the window is start plus the warm-up, so the in-window arrivals are the same ones.
 	st.openWindow(time.Time{})
 	byDoc := map[string]*docVersions{}
-	st.planWrites(func(p eventPlan, in bool) {
+	st.planWrites(st.pops[0], func(p eventPlan, in bool) {
 		if !in || (p.kind != kindEdit && p.kind != kindUpload) {
 			return
 		}

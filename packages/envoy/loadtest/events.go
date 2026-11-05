@@ -95,16 +95,21 @@ var eventMixPresets = map[string]string{
 	// roots 1,495, replies 1,576, document versions 1,329). The 3:1 edit/upload split of the
 	// versions is INFERENCE from the production profile's write counts (editArtifact 6,
 	// uploadArtifact 2).
-	"production-2026-10-26": "comment=3,anchored=33,reply=35,edit=22,upload=7",
+	defaultEventMix: "comment=3,anchored=33,reply=35,edit=22,upload=7",
 	// The root report's mix, so its 1x row can be compared.
 	"report-2026-10-27": "comment=50,anchored=30,edit=20",
 	// The Verified Linux spec loop's own writes over a driver day, as the issue's plan counts
 	// them: 106 verdicts and 48 requirement lines for every 50 status changes. A step drives it
 	// against the loop's own seed (-loop-seed), which is the only seed these kinds read.
-	"spec-loop-2026-11-03": "verdict=106,requirement=48,status=50",
+	loopEventMix: "verdict=106,requirement=48,status=50",
 }
 
-const defaultEventMix = "production-2026-10-26"
+// defaultEventMix is the mix of the baseline population, production's own writes, and
+// loopEventMix the mix of the loop population: -event-mix and -loop-event-mix default to them.
+const (
+	defaultEventMix = "production-2026-10-26"
+	loopEventMix    = "spec-loop-2026-11-03"
+)
 
 // eventMixPresetNames lists the presets, sorted, for help and error text.
 func eventMixPresetNames() string {
@@ -256,20 +261,22 @@ type eventPlan struct {
 	reopen bool
 }
 
-// planEvent draws one write from the event stream: a session, one of its watched issues, a
-// person or the session as author, a kind, and the kind's quote or reply root. Under a loop seed
-// the kind's draws are the loop's (planLoopEvent), which replace the watched issue with the
-// proposal the kind's own weighted draw lands on.
-func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64) eventPlan {
-	sIdx := r.IntN(len(sessions))
-	s := sessions[sIdx]
+// planEvent draws one write of a population from its event stream: a session, one of the issues
+// that session watches in this population, a person or the session as author, a kind of the
+// population's mix, and the kind's quote or reply root. In the loop's population the kind's
+// draws are the loop's (planLoopEvent), which replace the watched issue with the proposal the
+// kind's own weighted draw lands on. human is the step's -human, the share of writes a person
+// makes, which both populations share.
+func planEvent(r *rand.Rand, pop *population, human float64, marker int64) eventPlan {
+	sIdx := r.IntN(len(pop.sessions))
+	s := pop.sessions[sIdx]
 	p := eventPlan{marker: marker, session: sIdx, issue: s.watched[r.IntN(len(s.watched))]}
-	p.human = r.Float64() < cfg.human
-	p.kind = cfg.mix.pick(r.Float64())
-	if cfg.loop != nil {
-		return planLoopEvent(r, cfg.loop, p)
+	p.human = r.Float64() < human
+	p.kind = pop.mix.pick(r.Float64())
+	if pop.loop != nil {
+		return planLoopEvent(r, pop.loop, p)
 	}
-	is := sf.Issues[p.issue]
+	is := pop.sf.Issues[p.issue]
 	switch p.kind {
 	case kindAnchored:
 		p.quote = is.Quotes[r.IntN(len(is.Quotes))]

@@ -357,3 +357,37 @@ func TestTablesReadTheOlderLiveTransport(t *testing.T) {
 	}
 	checkRowWidths(t, md)
 }
+
+// TestTablesShowEachPopulationOfATwoPopulationStep: a step that drove both populations
+// (summary.json `populations`) gets a row per population, so the report shows production's own
+// writes and reads beside the loop's at every factor; a step that drove one adds no such table.
+func TestTablesShowEachPopulationOfATwoPopulationStep(t *testing.T) {
+	one := stepData{name: "step-0x", sum: summary{Config: summaryConfig{Step: "step-0x"}}}
+	if md := renderTables([]stepData{one}); strings.Contains(md, "Each population") {
+		t.Fatalf("a step that drove one population got a populations table:\n%s", md)
+	}
+	two := stepData{name: "step-6x", sum: summary{
+		Config: summaryConfig{Step: "step-6x", EventsPerS: 25, RequestsPerS: 291},
+		Events: eventsSummary{Offered: 250, OfferedPerS: 25},
+		Populations: []populationSummary{
+			{Name: populationBaseline, Seed: "/work/seed.json", EventMix: eventMix{Name: defaultEventMix},
+				RouteMix: defaultRouteMixName, EventsPerS: 4, RequestsPerS: 60,
+				Events:   eventsSummary{OfferedPerS: 4, CommittedPerS: 4, IssueTopicReceipts: 120, ExpectedIssueTopicReceipts: 120},
+				Requests: requestsSummary{Sent: 600, SentPerS: 60, OK2xx: 600}},
+			{Name: populationLoop, Seed: "/work/loopseed.seed.json", EventMix: eventMix{Name: loopEventMix},
+				RouteMix: "routes-spec-loop-2026-11-03.txt", EventsPerS: 21, RequestsPerS: 231,
+				Events:   eventsSummary{OfferedPerS: 21, CommittedPerS: 20, IssueTopicReceipts: 600, ExpectedIssueTopicReceipts: 630},
+				Requests: requestsSummary{Sent: 2310, SentPerS: 231, OK2xx: 2300}},
+		},
+	}}
+	md := renderTables([]stepData{two})
+	text := section(md, "Each population of a two-population step")
+	for _, want := range []string{"| step-6x | baseline | /work/seed.json | " + defaultEventMix + " | 4.00 / 4.00 / 4.00 |",
+		"| step-6x | loop | /work/loopseed.seed.json | " + loopEventMix + " | 21.00 / 21.00 / 20.00 |",
+		"| 60.0 / 60.0 | 100.0% |", "| 231.0 / 231.0 | 99.6% |"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the populations table lacks %q:\n%s", want, text)
+		}
+	}
+	checkRowWidths(t, md)
+}
