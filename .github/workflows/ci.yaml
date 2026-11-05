@@ -1452,6 +1452,8 @@ jobs:
               # reads docs-site.yaml to find the steps the docs gate cites.
               - '.github/workflows/docs-pages.yaml'
               - '.github/workflows/docs-site.yaml'
+              # It holds ci-caches.yaml's cache saves to this file's restores.
+              - '.github/workflows/ci-caches.yaml'
               - '**/*.go'
               - '**/go.mod'
               - '**/go.sum'
@@ -1612,8 +1614,7 @@ jobs:
       # 2.2 GB entry per key change; keyed on the Go version, a go.sum change only downloads the
       # changed modules and rebuilds the changed packages, since Go's build cache is
       # content-addressed. Restored only when the notices step runs; ci-caches.yaml fills it.
-      - id: go-cache
-        if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
+      - if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1749,8 +1750,7 @@ jobs:
           cache: false
 
       # go-daemon, shared with test and pi-legion.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -1945,8 +1945,7 @@ jobs:
           cache: false
 
       # go-daemon, shared with typecheck and pi-legion.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2299,8 +2298,7 @@ jobs:
           go-version-file: packages/daemon/go.mod
           cache: false
       # go-daemon, shared with typecheck and test.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2546,8 +2544,7 @@ jobs:
           cache: false
       # go-envoy: its modules are the envoy module's, though this job builds the Dispatch server
       # and the dev OIDC issuer rather than the listener and natsd ci-caches.yaml builds.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2674,8 +2671,7 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2795,8 +2791,7 @@ jobs:
           cache: false
       # go-envoy-test: this job builds and runs the test binary of every package of the envoy
       # module, a set no other job builds, so it keeps a family of its own.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2874,8 +2869,7 @@ jobs:
           go-version-file: packages/envoy/infra/go.mod
           cache: false
       # go-envoy-infra.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -3129,8 +3123,7 @@ jobs:
           cache: false
       # go-envoy: its modules are the envoy module's, though this job builds the document
       # service's race test binary rather than the listener and natsd ci-caches.yaml builds.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -3264,8 +3257,7 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       # go-envoy: the test binary, and the listener cmdtest.Build makes from the same packages.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -3524,8 +3516,7 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       # go-envoy: the listener and natsd e2e-local.sh builds.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -3584,8 +3575,7 @@ jobs:
           cache: false
       # go-envoy: the listener and natsd test/envoy-stack.ts builds, as envoy-e2e-local's
       # e2e-local.sh does.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -3703,9 +3693,11 @@ jobs:
   #     all, which succeeded;
   #   * it carries no ci-ok-report step and reports nothing to ci-ok, so its id is in
   #     CI_OK_EXEMPT in this file's env, outside ci-ok's accounting;
-  #   * it runs this repository's own .github/scripts/merge-group-cancels.sh from the run's own
+  #   * it runs this repository's own .github/scripts/merge-group-cancels.sh out of the run's own
   #     checkout and nothing else: no bun, no go, no node, no installed dependency, no npm or
-  #     bunx tool. A merge-group run checks out the queued tree, so the script it runs is the
+  #     bunx tool. The followers run it through .github/actions/merge-group-cancel, the composite
+  #     action that holds the one step they all share, which calls the script out of that same
+  #     checkout. A merge-group run checks out the queued tree, so the script it runs is the
   #     queued change's copy, which that change's review has read;
   #   * its step's token is ${{ github.token }}, and its time limit is short: the act is a
   #     handful of API calls.
@@ -3720,8 +3712,11 @@ jobs:
     permissions:
       actions: write
     steps:
+      # The job reads nothing of the tree but .github/scripts/merge-group-cancels.sh (a follower
+      # also the composite action beside it), so the .github cone is the whole checkout it needs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
       - env:
           ACT: started
@@ -3773,23 +3768,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-ci-images:
     needs: ci-images
@@ -3801,23 +3782,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-typecheck:
     needs: typecheck
@@ -3829,23 +3796,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-test:
     needs: test
@@ -3857,23 +3810,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-docs:
     needs: docs
@@ -3885,23 +3824,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-contracts:
     needs: contracts
@@ -3913,23 +3838,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-conflicts-script:
     needs: conflicts-script
@@ -3941,23 +3852,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-client:
     needs: envoy-client
@@ -3969,23 +3866,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-pi-shared:
     needs: pi-shared
@@ -3997,23 +3880,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-pi-envoy:
     needs: pi-envoy
@@ -4025,23 +3894,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-pi-legion:
     needs: pi-legion
@@ -4053,23 +3908,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-dispatch-ui:
     needs: dispatch-ui
@@ -4081,23 +3922,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-dispatch:
     needs: dispatch
@@ -4109,23 +3936,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-dispatch-browser-multiprocess:
     needs: dispatch-browser-multiprocess
@@ -4137,23 +3950,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-claude-envoy:
     needs: claude-envoy
@@ -4165,23 +3964,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-go-checks:
     needs: envoy-go-checks
@@ -4193,23 +3978,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-go:
     needs: envoy-go
@@ -4221,23 +3992,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-infra-go:
     needs: envoy-infra-go
@@ -4249,23 +4006,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-go-race:
     needs: envoy-go-race
@@ -4277,23 +4020,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-go-race-pmdoc:
     needs: envoy-go-race-pmdoc
@@ -4305,23 +4034,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-go-race-api:
     needs: envoy-go-race-api
@@ -4333,23 +4048,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-go-race-docs:
     needs: envoy-go-race-docs
@@ -4361,23 +4062,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-dispatch-memory:
     needs: dispatch-memory
@@ -4389,23 +4076,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-dispatch-multiprocess:
     needs: dispatch-multiprocess
@@ -4417,23 +4090,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-listener-server-change:
     needs: listener-server-change
@@ -4445,23 +4104,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-broker-multiprocess:
     needs: broker-multiprocess
@@ -4473,23 +4118,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-smoke:
     needs: envoy-smoke
@@ -4501,23 +4132,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-e2e-local:
     needs: envoy-e2e-local
@@ -4529,23 +4146,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-envoy-session-stall:
     needs: envoy-session-stall
@@ -4557,23 +4160,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel
 
   cancel-ci-filters:
     needs: ci-filters
@@ -4585,20 +4174,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
-      - env:
-          ACT: failed
-          GH_TOKEN: ${{ github.token }}
-          HEAD_BRANCH: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
-          export RUNS
-          acts=$(.github/scripts/merge-group-cancels.sh)
-          while read -r act id; do
-            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
-            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
-              echo "::warning::force-cancel of run $id failed; it may have completed already"
-          done <<<"$acts"
+      - uses: ./.github/actions/merge-group-cancel

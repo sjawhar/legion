@@ -1,0 +1,33 @@
+name: Cancel the merge-group runs this group dooms
+description: >-
+  The last step of every follower cancel job of ci.yaml (`cancel-<job>`), which run the same act
+  on a different job: the comment above ci.yaml's `cancel-started` says what the act is and why.
+  .github/scripts/merge-group-cancels.sh decides it and makes no GitHub call; this step makes the
+  force-cancels it prints, in the order it printed them, and the `self` line last. A failed
+  force-cancel leaves a warning rather than a red job: the run it names may have completed
+  between the list and the call. The job needs `actions: write`, and a checkout of .github.
+
+  `cancel-started` is no caller: it holds its own body, which differs in ACT, in the CI_OK it
+  gathers for the walk and in the `self-doomed` token it acts on.
+
+runs:
+  using: composite
+  steps:
+    - name: Cancel the runs this group dooms, then this run
+      shell: bash
+      env:
+        ACT: failed
+        GH_TOKEN: ${{ github.token }}
+        HEAD_BRANCH: ${{ github.ref_name }}
+        HEAD_SHA: ${{ github.sha }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+          --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+        export RUNS
+        acts=$("$GITHUB_ACTION_PATH/../../scripts/merge-group-cancels.sh")
+        while read -r act id; do
+          case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+          gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+            echo "::warning::force-cancel of run $id failed; it may have completed already"
+        done <<<"$acts"

@@ -50,8 +50,11 @@ jobs:
     permissions:
       actions: write
     steps:
+      # The job reads nothing of the tree but .github/scripts/main-bypass-check.sh, so the
+      # .github cone is the whole checkout it needs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          sparse-checkout: .github
           persist-credentials: false
 
       - name: Start ci.yaml when a commit of this push was never tested
@@ -68,8 +71,9 @@ jobs:
           # many: one untested commit anywhere in the list starts the one run that tests main's
           # tip, so a longer read would change no decision this check can make.
           COMMITS=$(jq -c 'if . == null then [] else [.[] | {id, message}] end' <<<"$PAYLOAD_COMMITS")
-          if [ "$(jq 'length' <<<"$COMMITS")" -ge 20 ]; then
-            echo "the payload holds $(jq 'length' <<<"$COMMITS") commits, the cap GitHub documents, so this push may hold more: reading $PUSHED_BEFORE...$PUSHED_AFTER from the compare API"
+          payload_commits=$(jq 'length' <<<"$COMMITS")
+          if [ "$payload_commits" -ge 20 ]; then
+            echo "the payload holds $payload_commits commits, the cap GitHub documents, so this push may hold more: reading $PUSHED_BEFORE...$PUSHED_AFTER from the compare API"
             COMMITS=$(gh api --paginate "repos/$GITHUB_REPOSITORY/compare/$PUSHED_BEFORE...$PUSHED_AFTER" \
               --jq '.commits[] | {id: .sha, message: .commit.message}' | jq -s -c '.')
           fi

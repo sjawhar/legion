@@ -34,12 +34,15 @@
 #   CI_OK        a JSON object mapping a commit sha to that commit's ci-ok check-run conclusion
 #                (success, failure, …; a sha with no ci-ok is absent). The started act needs it;
 #                the failed act does not read it and defaults it to {}. From, over the head shas
-#                of RUNS:
-#                  jq -r '.[].headSha' <<<"$RUNS" | sort -u | while read -r sha; do
-#                    gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok" \
-#                      --jq '.check_runs[0].conclusion // empty' |
-#                      jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
-#                  done | jq -s 'add // {}'
+#                of the runs of RUNS that did not complete `success` — a run that completed
+#                `success` is no failed group, and a head left out carries no ci-ok here, which
+#                dooms nothing:
+#                  jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS" |
+#                    while read -r sha; do
+#                      gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok" \
+#                        --jq '.check_runs[0].conclusion // empty' |
+#                        jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
+#                    done | jq -s 'add // {}'
 #
 # ACT=failed — a selected job of the asking run has failed, so its group cannot merge and neither
 # can any group built on it. It cancels every run of RUNS that has not completed and whose chain of

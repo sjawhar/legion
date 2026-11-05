@@ -671,22 +671,17 @@ publishing_build() {
     "$1/.github/workflows/image.yaml"
 }
 
-every_input="              - 'package.json'
-              - 'packages/app/**'
-              - 'docker/**'
-              - '.dockerignore'
-              - '.github/workflows/image.yaml'"
 full_ci="(github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci'))"
 
 root=$(fixture narrowed-gate-loads)
-gate_build_job "$root" "$every_input"
+gate_build_job "$root" "$all_inputs"
 narrow_output "$root" "$full_ci"
 run_check "$root"
 check "a narrowed output passes where every build of the job publishes nothing" "$(is "$status" 0)"
 check "and its filter still decides the build" "$(contains "$out" 'jobs.docker.if (jobs.changes filter gated)')"
 
 root=$(fixture narrowed-gate-publishes)
-gate_build_job "$root" "$every_input"
+gate_build_job "$root" "$all_inputs"
 narrow_output "$root" "$full_ci"
 publishing_build "$root"
 run_check "$root"

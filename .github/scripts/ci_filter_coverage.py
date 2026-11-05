@@ -388,6 +388,16 @@ def step_label(step: dict) -> str:
     return str(step.get("name") or step.get("id") or step.get("uses") or str(step.get("run", "")).strip())
 
 
+def conditions(job: dict) -> list:
+    """A job's `if:` and each of its steps', as (the step, or None for the job's, the text)."""
+    return [(None, str(job.get("if", "")))] + [(s, str((s or {}).get("if", ""))) for s in job.get("steps") or []]
+
+
+def where_if(job_id: str, step) -> str:
+    """Where such a condition is: the job, and the step too when the condition is a step's."""
+    return f"job {job_id}" + (f' step "{step_label(step)}"' if step else "")
+
+
 def step_matches(step: dict, ref: str) -> bool:
     return ref in (step.get("name"), step.get("id"), str(step.get("uses", "")).split("@")[0],
                    str(step.get("run", "")).strip())
@@ -565,13 +575,13 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
         problems.append(f"::error file=.github/scripts/ci_job_reads.py::{name} is both a gate and EXCLUDED")
     gated = defaultdict(set)  # job -> filters its job-level if: names
     for job_id, job in jobs.items():
-        refs = [(None, str(job.get("if", "")))] + [(s, str(s.get("if", ""))) for s in job.get("steps") or []]
+        refs = conditions(job)
         for step, condition in refs:
             for name in GATE_REF.findall(condition):
                 if step is None:
                     gated[job_id].add(name)
                 if name not in gates and name not in excluded:
-                    where = f"job {job_id}" + (f' step "{step_label(step)}"' if step else "")
+                    where = where_if(job_id, step)
                     problems.append(f"::error file={WORKFLOW}::{where} is gated on filter {name}, which "
                                     f"ci_job_reads.py neither lists in GATES nor EXCLUDES; add the gate with its reads")
     for g in data.GATES:
@@ -937,10 +947,10 @@ def check_push_conditions(document: dict, problems: list) -> None:
     who writes the same test as a function call is the review's to catch."""
     for job_id, job in (document.get("jobs") or {}).items():
         job = job or {}
-        refs = [(None, str(job.get("if", "")))] + [(s, str((s or {}).get("if", ""))) for s in job.get("steps") or []]
+        refs = conditions(job)
         for step, condition in refs:
             for found in dict.fromkeys(m.group(0) for m in PUSH_CONDITION.finditer(condition)):
-                where = f"job {job_id}" + (f' step "{step_label(step)}"' if step else "")
+                where = where_if(job_id, step)
                 problems.append(f"::error file={WORKFLOW}::{where} has `if: {squash(condition)}`, which tests "
                                 f"`{found}`: {WORKFLOW} runs on a pull request, a merge group and a "
                                 f"workflow_dispatch, never on a push to main, so nothing that condition gates ever "
@@ -995,15 +1005,17 @@ def check_cache_round_trip(document: dict, problems: list) -> None:
                             f"there, or drop the save")
             continue
         for restore_job, restored in restores[family]:
-            if key != str(restored.get("key", "")).rstrip():
+            restored_key = str(restored.get("key", "")).rstrip()
+            restored_paths = path_lines(restored.get("path", ""))
+            if key != restored_key:
                 problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves family {family} under key "
                                 f"`{key}`, but job {restore_job} of {WORKFLOW} restores it under "
-                                f"`{str(restored.get('key', '')).rstrip()}`: a restore whose key is not the save's "
+                                f"`{restored_key}`: a restore whose key is not the save's "
                                 f"misses every time, and nothing fails - the job rebuilds from nothing instead")
-            if paths != path_lines(restored.get("path", "")):
+            if paths != restored_paths:
                 problems.append(f"::error file={CACHE_WORKFLOW}::job {job_id} saves family {family} from "
                                 f"{', '.join(paths) or '(no path)'}, but job {restore_job} of {WORKFLOW} restores "
-                                f"it into {', '.join(path_lines(restored.get('path', ''))) or '(no path)'}: the "
+                                f"it into {', '.join(restored_paths) or '(no path)'}: the "
                                 f"entry then holds other directories than the job reads, and the job rebuilds what "
                                 f"the fill already built")
     for job_id, family, given in cache_steps(caches, "restore"):

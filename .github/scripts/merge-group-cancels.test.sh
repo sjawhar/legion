@@ -30,17 +30,20 @@ head_2589=feadc17dfa5a6898bbb8e237f12c630663469b05
 head_2720=2b801fb42ce6576cee41d366e05ec3e1ac3acaf7
 head_2734=9c1f0b6e2a4d8f7c3b5a1e9d0c4f8a2b6d3e7f10
 
+# queue_branch <pull request> <parent sha>: the head branch of that group's run.
+queue_branch() { echo "gh-readonly-queue/main/pr-$1-$2"; }
+
 # mg_run <id> <pull request> <parent sha> <head sha> <status> <conclusion> <createdAt>
 #   [<runStartedAt>]: one run of `gh run list --workflow ci.yaml --event merge_group`. An empty
 # conclusion is null, as gh gives it for a run that has not completed. runStartedAt is a field gh
 # also carries and this script never reads; a case passes it to show a run that started late.
 mg_run() {
-  jq -n --argjson id "$1" --arg pr "$2" --arg parent "$3" --arg head "$4" \
+  jq -n --argjson id "$1" --arg branch "$(queue_branch "$2" "$3")" --arg head "$4" \
     --arg status "$5" --arg conclusion "$6" --arg created "$7" --arg started "${8:-}" \
     '{
        databaseId: $id,
        headSha: $head,
-       headBranch: "gh-readonly-queue/main/pr-\($pr)-\($parent)",
+       headBranch: $branch,
        status: $status,
        conclusion: (if $conclusion == "" then null else $conclusion end),
        createdAt: $created,
@@ -50,9 +53,6 @@ mg_run() {
 
 # runs <run>...: the RUNS array, in the order given (the script must not depend on it).
 runs() { printf '%s\n' "$@" | jq -s '.'; }
-
-# queue_branch <pull request> <parent sha>: the head branch of that group's run.
-queue_branch() { echo "gh-readonly-queue/main/pr-$1-$2"; }
 
 # run_cancels <act> <run id> <head sha> <head branch> <runs> [<ci-ok map>]: sets out (stdout, the
 # tokens), err (stderr, the reasoning) and status.

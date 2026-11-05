@@ -145,8 +145,9 @@ if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]
   && jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
     --jq '.jobs[] | {name, status, conclusion}'); then
   decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" --argjson decided "$decided" '
+    def mine($job): [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))];
     def ended($job):
-      [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))] as $mine
+      mine($job) as $mine
       | if ($mine | length) > 0 and all($mine[]; .status == "completed") then
           [$mine[].conclusion]
           | if any(. == "success" or . == "skipped" or . == "cancelled" | not) then "failure"
@@ -155,8 +156,7 @@ if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]
             else "skipped" end
         else null end;
     def live($job):
-      [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))
-       | select(.status != "completed") | .status] | first // "unlisted";
+      [mine($job)[] | select(.status != "completed") | .status] | first // "unlisted";
     reduce .pending[] as $job (.;
       (ended($job) // (if $decided then live($job) else null end)) as $result
       | if $result == null then . else (.pending -= [$job]) | (.needs[$job].result = $result) end)' \

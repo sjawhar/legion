@@ -35,14 +35,14 @@ commit() { jq -n --arg id "$1" --arg message "$2" '{id: $id, message: $message}'
 # list <json>...: the JSON array of them, in the order given.
 list() { printf '%s\n' "$@" | jq -s '.'; }
 
-# mg_run <head sha> <conclusion> [<workflow name>]: one row of
+# mg_run <head sha> <conclusion>: one row of
 # `gh run list --workflow ci.yaml --event merge_group --json conclusion,headSha,workflowName`.
 # An empty conclusion is null, as gh gives it for a run that has not completed.
 mg_run() {
-  jq -n --arg head "$1" --arg conclusion "$2" --arg name "${3:-CI}" \
+  jq -n --arg head "$1" --arg conclusion "$2" \
     '{conclusion: (if $conclusion == "" then null else $conclusion end),
       headSha: $head,
-      workflowName: $name}'
+      workflowName: "CI"}'
 }
 
 # ci_ok_run <conclusion>: one ci-ok check run of the check-runs read, conclusion as it gives it.
@@ -108,11 +108,13 @@ check "says what the one run it starts tests" \
 echo "case: a commit whose message carries a skip marker in its subject is passed over"
 for marker in '[skip ci]' '[ci skip]' '[no ci]' '[skip actions]' '[actions skip]'; do
   marked=$(list "$(commit "$bypassed" "chore(release): pi-legion 18.16.0 $marker")")
+  # The marker is a bracket expression to grep -E, so it is escaped once and read twice below.
+  escaped=$(sed 's/[][]/\\&/g' <<<"$marker")
   run_bypass "$marked" "$(readings "$bypassed" '[]')" "$(readings "$bypassed" '[]')"
   check "$marker in the subject starts nothing, though the commit has no run and no ci-ok" \
     "$(is "$out" "")"
   check "  and the marker is named" \
-    "$(contains "$err" "^commit $bypassed (chore(release): pi-legion 18.16.0 $(sed 's/[][]/\\&/g' <<<"$marker")) carries the skip marker $(sed 's/[][]/\\&/g' <<<"$marker"), so no run was ever expected for it: passed over\$")"
+    "$(contains "$err" "^commit $bypassed (chore(release): pi-legion 18.16.0 $escaped) carries the skip marker $escaped, so no run was ever expected for it: passed over\$")"
 done
 
 echo "case: a commit whose message carries the skip-checks trailer is passed over"

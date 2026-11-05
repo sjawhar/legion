@@ -39,7 +39,7 @@ they are complete.
 import json
 from pathlib import Path
 
-from ci_filter_coverage import Read, at, exact, gate, run
+from ci_filter_coverage import CACHE_WORKFLOW, Read, at, exact, gate, run
 
 ENVOY = "packages/envoy"
 DAEMON = "packages/daemon"
@@ -828,6 +828,7 @@ GATES = [
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (DOCS_SITE, "ci_filter_coverage.py looks the docs gate's step citations up in it"),
+        (CACHE_WORKFLOW, "ci_filter_coverage.py holds its cache saves to ci.yaml's restores"),
     ) + reads(*((path, f"check-ci-filters.sh holds its on.push.paths equal to the {name} filter (PUSH_WORKFLOWS)")
                 for name, path in PUSH_WORKFLOWS.items()))
       + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),

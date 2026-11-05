@@ -68,7 +68,6 @@ jobs:
                 timelineItems(last: 20, itemTypes: [ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT]) {
                   nodes {
                     __typename
-                    ... on AddedToMergeQueueEvent { createdAt }
                     ... on RemovedFromMergeQueueEvent { createdAt reason beforeCommit { oid } }
                   }
                 }
@@ -82,7 +81,6 @@ jobs:
                 | select(.value.__typename == "AddedToMergeQueueEvent") | .key] | last) as $added
             | [$nodes[(($added // -1) + 1):][]
                | select(.__typename == "RemovedFromMergeQueueEvent")] | last // empty'
-          removal=
           for attempt in 1 2 3 4 5 6 7; do
             removal=$(gh api graphql -F owner="${GITHUB_REPOSITORY%%/*}" -F name="${GITHUB_REPOSITORY#*/}" \
               -F number="$PR_NUMBER" -f query="$query" --jq "$select")
