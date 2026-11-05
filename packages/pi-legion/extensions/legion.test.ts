@@ -13,7 +13,11 @@ import {
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import {
+  LegionCapabilityReport,
+  type LegionCapabilityReportBody,
+} from "@legion/contracts/legion-api";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { noteInjectedUserTurn, noteTypedUserTurn } from "@legion/pi-shared/injected-user-turns";
@@ -44,7 +48,17 @@ import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
-import type { CapabilityHost } from "../src/capability-report";
+import {
+  type CapabilityHost,
+  ENVOY_TOOL_NAMES,
+  LIVE_CAPABILITIES,
+  type SearchQueryResult,
+} from "../src/capability-report";
+import {
+  CAPABILITY_ATTEMPTS,
+  CAPABILITY_FIRST_DUE_TICK,
+  CAPABILITY_RETRY_TICKS,
+} from "../src/capability-schedule";
 import { classifySession } from "../src/classify";
 
 const natsConnections: {
@@ -146,6 +160,7 @@ const { default: envoyExtension } = await import("../../pi-envoy/extensions/envo
 const {
   default: legionExtension,
   setLegionBootstrapExitForTests,
+  setLegionCapabilityBudgetsForTests,
   setLegionCapabilityHostForTests,
 } = await import("./legion");
 
@@ -276,6 +291,9 @@ afterEach(async () => {
   scheduledTimeouts.splice(0);
   widgetCalls.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
+  // The budgets a capability test shortened; production never sets them, and no later test may
+  // inherit a 20 ms check.
+  setLegionCapabilityBudgetsForTests(undefined);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
   for (const key of environmentKeys) {
@@ -665,6 +683,9 @@ async function claimPane(options: {
   readonly capabilityHost?: () => CapabilityHost;
   /** Whether the host exposes `pi.agents`; the subagents row fails first without it. */
   readonly agentsExposed?: boolean;
+  /** The host's live idle answer (`ctx.isIdle()`), read afresh at every reading. Absent leaves
+   * the context without the member, as a host that answers nothing about its idleness is. */
+  readonly idle?: () => boolean;
   readonly register?: () => Response | Promise<Response>;
   readonly ready?: (attempt: number) => Response | Promise<Response>;
   readonly readyPosted?: () => void;
@@ -786,6 +807,7 @@ async function claimPane(options: {
       intervals.push(callback);
     },
     ...(options.asyncJobs === undefined ? {} : { getAsyncJobSnapshot: options.asyncJobs }),
+    ...(options.idle === undefined ? {} : { isIdle: options.idle }),
     // The reminder's own timer: the host's `setTimeout` cannot be cancelled, so the pane keeps
     // every one armed and a test fires the one it means to.
     setTimeout: (callback, delayMs) => {
@@ -2834,6 +2856,427 @@ describe("Legion OMP extension", () => {
     expect(readyBodies[0]?.body).not.toHaveProperty("capabilities");
     expect(readyBodies[1]?.body).not.toHaveProperty("capabilities");
   });
+
+  /**
+   * INFRA-927: the session measures its six rows on its own 5 s interval, while it is idle, up to
+   * three times, until every row is present — the boot measured once, so a check that lost that
+   * race stayed reported open for the session's whole life. The machine is
+   * `src/capability-schedule.ts`; these tests drive it through the interval the pane armed, as
+   * the host does when the period is up, and read the tick count from the reports themselves.
+   */
+  describe("the capability report a session measures on its interval", () => {
+    /** The active tools every row needs beside the pane's own `read`, `task` and `wait`. */
+    const MEASURED_TOOLS = ["web_search", ...ENVOY_TOOL_NAMES];
+    /** The tick an implementer first measures at: `CAPABILITY_FIRST_DUE_TICK` and its index in
+     * `LEGION_ROLES`. */
+    const IMPLEMENTER_DUE_TICK = CAPABILITY_FIRST_DUE_TICK + LEGION_ROLES.indexOf("implementer");
+    /** One web search that answers, as the pane's host answers it. */
+    const searchAnswer: SearchQueryResult = {
+      content: [{ type: "text", text: "[1] Jujutsu" }],
+      details: { response: { provider: "stub" } },
+    };
+
+    /** The report a `claims/ready` body carries, read through the wire schema the daemon reads it
+     * with; the boot's own ready carries none. */
+    const capabilityReport = (body: unknown): LegionCapabilityReportBody | undefined =>
+      typeof body === "object" && body !== null && "capabilities" in body
+        ? LegionCapabilityReport.parse(body.capabilities)
+        : undefined;
+
+    /** How many measurements a recording host's `calls` hold: every measurement reads the MCP
+     * configuration exactly once, whatever each row answers. */
+    const measurements = (calls: readonly string[]): number =>
+      calls.filter((name) => name === "loadMCPConfigs").length;
+
+    /** `count` readings of the pane's managed interval: every callback it armed, as the host runs
+     * them when the period is up — the Envoy heartbeat's and this plugin's. */
+    const ticks = async (pane: ClaimPane, count: number): Promise<void> => {
+      for (let reading = 0; reading < count; reading += 1) {
+        for (const tick of pane.intervals) await tick();
+      }
+    };
+
+    /** Lets what a tick started run to its end: the interval callback awaits neither the activity
+     * report nor the schedule's tick, so a few turns of the event loop stand in for the awaits
+     * the production caller does not make. It waits on no duration — three `setTimeout(0)` turns
+     * cover the measurement's own file reads and the send's fetch — and a test asserting that
+     * something happened waits on that event instead; this is for asserting that nothing did.
+     */
+    const drain = async (): Promise<void> => {
+      for (let turn = 0; turn < 3; turn += 1) {
+        const passed = Promise.withResolvers<void>();
+        setTimeout(passed.resolve, 0);
+        await passed.promise;
+      }
+    };
+
+    interface CapabilitySession {
+      readonly pane: ClaimPane;
+      /** Every capability host member called, in order, over every measurement. */
+      readonly calls: string[];
+      /** Every report the session sent, in order, however the daemon answered it. */
+      readonly reports: LegionCapabilityReportBody[];
+      /** Resolves once the session has sent its `nth` report (1 is the first). */
+      readonly reported: (nth: number) => Promise<void>;
+    }
+
+    /** What a test waits on for one report: `Promise.withResolvers`, as far as the gate map
+     * holds it. */
+    interface ReportGate {
+      readonly promise: Promise<void>;
+      readonly resolve: () => void;
+    }
+
+    /**
+     * A booted claim pane whose six rows all read `ok`: `web_search` and every Envoy tool among
+     * its active tools before `session_start` snapshots them, `pi.agents` exposed, and a
+     * recording capability host. Its `claims/activity` answers 204 — the pane's stub 404s that
+     * route, and the warning its report then logs is not this machine's. Nothing has ticked yet.
+     */
+    const capabilitySession = async (
+      options: {
+        readonly role?: LegionRole;
+        readonly sessionId?: string;
+        readonly idle?: () => boolean;
+        readonly host?: Partial<CapabilityHost>;
+        readonly ready?: (attempt: number) => Response | Promise<Response>;
+      } = {}
+    ): Promise<CapabilitySession> => {
+      const calls: string[] = [];
+      const reports: LegionCapabilityReportBody[] = [];
+      const gates = new Map<number, ReportGate>();
+      const pane = await claimPane({
+        role: options.role ?? "implementer",
+        sessionId: options.sessionId ?? `ses_capability_${options.role ?? "implementer"}`,
+        agentsExposed: true,
+        capabilityHost: () => recordingCapabilityHost(calls, options.host),
+        idle: options.idle,
+        ready: options.ready,
+        extraRoutes: (url, body) => {
+          if (url.pathname === "/legion/v1/claims/activity") {
+            return new Response(null, { status: 204 });
+          }
+          if (url.pathname === "/legion/v1/claims/ready") {
+            const report = capabilityReport(body);
+            if (report !== undefined) {
+              reports.push(report);
+              gates.get(reports.length)?.resolve();
+            }
+          }
+          return undefined;
+        },
+      });
+      pane.activeTools.push(...MEASURED_TOOLS);
+      await pane.start();
+      return {
+        pane,
+        calls,
+        reports,
+        reported: (nth) => {
+          const gate = gates.get(nth) ?? Promise.withResolvers<void>();
+          gates.set(nth, gate);
+          if (reports.length >= nth) gate.resolve();
+          return gate.promise;
+        },
+      };
+    };
+
+    test("a session whose context answers nothing about its idleness measures at its due tick, and at no tick before it", async () => {
+      const session = await capabilitySession({ sessionId: "ses_capability_due" });
+      // The absent-answer case: this host tells nothing about its idleness, which counts as idle.
+      expect(session.pane.context.isIdle).toBeUndefined();
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK - 1);
+      await drain();
+      expect(measurements(session.calls)).toBe(0);
+      expect(session.reports).toEqual([]);
+
+      await ticks(session.pane, 1);
+      await session.reported(1);
+      await drain();
+
+      expect(measurements(session.calls)).toBe(1);
+      const report = session.reports[0];
+      expect(report?.rows.map((row) => row.name)).toEqual([...LIVE_CAPABILITIES]);
+      expect(report?.rows.every((row) => row.ok)).toBe(true);
+      // The report rides the claim's own ready, beside the credentials the daemon issued it: the
+      // boot's ready carries none, and this one carries the measurement.
+      expect(
+        daemonRequests(session.pane.requests).filter(
+          (request) => request.path === "/legion/v1/claims/ready"
+        )
+      ).toEqual([
+        {
+          path: "/legion/v1/claims/ready",
+          body: {
+            claimToken: session.pane.claimToken,
+            sessionId: "ses_capability_due",
+            secret: session.pane.registration.secret,
+            generation: session.pane.registration.generation,
+          },
+        },
+        {
+          path: "/legion/v1/claims/ready",
+          body: {
+            claimToken: session.pane.claimToken,
+            sessionId: "ses_capability_due",
+            secret: session.pane.registration.secret,
+            generation: session.pane.registration.generation,
+            capabilities: report,
+          },
+        },
+      ]);
+    });
+
+    test("a tick whose idle answer reads false starts no measurement, and the next idle tick measures", async () => {
+      let idle = false;
+      const session = await capabilitySession({
+        sessionId: "ses_capability_busy",
+        idle: () => idle,
+      });
+
+      // Two ticks past the due one, every one of them under a running turn.
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK + 2);
+      await drain();
+      expect(measurements(session.calls)).toBe(0);
+      expect(session.reports).toEqual([]);
+
+      idle = true;
+      await ticks(session.pane, 1);
+      await session.reported(1);
+
+      expect(measurements(session.calls)).toBe(1);
+      expect(session.reports[0]?.rows.every((row) => row.ok)).toBe(true);
+    });
+
+    test("a tick that finds this session's measurement still running starts no second one", async () => {
+      const searching = Promise.withResolvers<void>();
+      const answer = Promise.withResolvers<SearchQueryResult>();
+      const session = await capabilitySession({
+        sessionId: "ses_capability_running",
+        host: {
+          runSearchQuery: () => {
+            searching.resolve();
+            return answer.promise;
+          },
+        },
+      });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      // The measurement is in flight: its search is held open.
+      await searching.promise;
+      expect(measurements(session.calls)).toBe(1);
+
+      await ticks(session.pane, 1);
+      await drain();
+      expect(measurements(session.calls)).toBe(1);
+      expect(session.reports).toEqual([]);
+
+      answer.resolve(searchAnswer);
+      await session.reported(1);
+
+      expect(measurements(session.calls)).toBe(1);
+      expect(session.reports).toHaveLength(1);
+      expect(session.reports[0]?.rows.every((row) => row.ok)).toBe(true);
+    });
+
+    test("the six roles of a pod come due one tick apart: the architect at the sixth tick, the merger at the eleventh", async () => {
+      expect(CAPABILITY_FIRST_DUE_TICK).toBe(6);
+      expect(CAPABILITY_FIRST_DUE_TICK + LEGION_ROLES.length - 1).toBe(11);
+      for (const [index, role] of LEGION_ROLES.entries()) {
+        const session = await capabilitySession({ role, sessionId: `ses_capability_${role}` });
+        const due = CAPABILITY_FIRST_DUE_TICK + index;
+
+        await ticks(session.pane, due - 1);
+        await drain();
+        expect(measurements(session.calls), `the ${role} measures before tick ${due}`).toBe(0);
+
+        await ticks(session.pane, 1);
+        await session.reported(1);
+        expect(measurements(session.calls), `the ${role} measures at tick ${due}`).toBe(1);
+      }
+    });
+
+    test("a row that failed on its budget is measured again, and the second report is a measurement of its own", async () => {
+      setLegionCapabilityBudgetsForTests({ checkMs: 20, reportMs: 500 });
+      let searches = 0;
+      const session = await capabilitySession({
+        sessionId: "ses_capability_afresh",
+        host: {
+          // The first measurement's search never answers, so that row fails on its budget; the
+          // second's answers.
+          runSearchQuery: () => {
+            searches += 1;
+            return searches === 1
+              ? Promise.withResolvers<SearchQueryResult>().promise
+              : Promise.resolve(searchAnswer);
+          },
+        },
+      });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      await session.reported(1);
+      await drain();
+      const first = session.reports[0];
+      expect(first?.rows.find((row) => row.name === "web-search")).toEqual({
+        name: "web-search",
+        ok: false,
+        detail: "did not finish within 20 ms",
+      });
+      expect(first?.rows.filter((row) => row.ok)).toHaveLength(5);
+
+      // The next attempt is due `CAPABILITY_RETRY_TICKS` after the last one ended.
+      await ticks(session.pane, CAPABILITY_RETRY_TICKS - 1);
+      await drain();
+      expect(measurements(session.calls)).toBe(1);
+
+      await ticks(session.pane, 1);
+      await session.reported(2);
+      await drain();
+
+      const second = session.reports[1];
+      expect(second?.rows.map((row) => row.name)).toEqual([...LIVE_CAPABILITIES]);
+      expect(second?.rows.every((row) => row.ok)).toBe(true);
+      // A measurement of its own, not the first with one row patched: its own `measuredAt`, and
+      // every row measured afresh — each check asked the host a second time.
+      expect(Date.parse(String(second?.measuredAt))).toBeGreaterThan(
+        Date.parse(String(first?.measuredAt))
+      );
+      expect(measurements(session.calls)).toBe(2);
+      expect(session.calls.filter((name) => name === "discoverAgents")).toHaveLength(2);
+      expect(session.calls.filter((name) => name === "disabledAgents")).toHaveLength(2);
+      expect(session.calls.filter((name) => name === "runSearchQuery")).toHaveLength(2);
+      // `dispatch` and `gh`, once each per measurement.
+      expect(session.calls.filter((name) => name === "run")).toHaveLength(4);
+    });
+
+    test("a measurement that keeps failing a row is spent three times in all, and no later tick measures again", async () => {
+      setLegionCapabilityBudgetsForTests({ checkMs: 20, reportMs: 500 });
+      const session = await capabilitySession({
+        sessionId: "ses_capability_attempts",
+        host: { runSearchQuery: () => Promise.withResolvers<SearchQueryResult>().promise },
+      });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      await session.reported(1);
+      await drain();
+      for (const attempt of [2, 3]) {
+        await ticks(session.pane, CAPABILITY_RETRY_TICKS);
+        await session.reported(attempt);
+        await drain();
+      }
+      expect(CAPABILITY_ATTEMPTS).toBe(3);
+      expect(measurements(session.calls)).toBe(CAPABILITY_ATTEMPTS);
+      expect(session.reports).toHaveLength(CAPABILITY_ATTEMPTS);
+
+      // The attempts are spent: however many ticks follow, nothing is measured or sent again.
+      await ticks(session.pane, CAPABILITY_RETRY_TICKS * 4);
+      await drain();
+
+      expect(measurements(session.calls)).toBe(3);
+      expect(session.reports).toHaveLength(3);
+      expect(
+        session.reports.every((report) =>
+          report.rows.some((row) => row.name === "web-search" && !row.ok)
+        )
+      ).toBe(true);
+    });
+
+    test("a first report the daemon takes with every row present is the only one the session sends", async () => {
+      const session = await capabilitySession({ sessionId: "ses_capability_settled" });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      await session.reported(1);
+      await drain();
+      expect(session.reports[0]?.rows.every((row) => row.ok)).toBe(true);
+
+      await ticks(session.pane, CAPABILITY_RETRY_TICKS * 4);
+      await drain();
+
+      expect(measurements(session.calls)).toBe(1);
+      expect(session.reports).toHaveLength(1);
+    });
+
+    test("a turn that starts while the measurement runs holds its report until an idle tick", async () => {
+      let idle = true;
+      const searching = Promise.withResolvers<void>();
+      const answer = Promise.withResolvers<SearchQueryResult>();
+      const session = await capabilitySession({
+        sessionId: "ses_capability_held",
+        idle: () => idle,
+        host: {
+          runSearchQuery: () => {
+            searching.resolve();
+            return answer.promise;
+          },
+        },
+      });
+
+      await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+      await searching.promise;
+      // The turn starts while the measurement runs, and the measurement then answers: the report
+      // is held rather than sent from under a working session.
+      idle = false;
+      answer.resolve(searchAnswer);
+      await drain();
+      expect(measurements(session.calls)).toBe(1);
+      expect(session.reports).toEqual([]);
+
+      // Still busy: the held report waits, and no second measurement is started for it.
+      await ticks(session.pane, 1);
+      await drain();
+      expect(session.reports).toEqual([]);
+      expect(measurements(session.calls)).toBe(1);
+
+      idle = true;
+      await ticks(session.pane, 1);
+      await session.reported(1);
+
+      expect(session.reports).toHaveLength(1);
+      expect(session.reports[0]?.rows.every((row) => row.ok)).toBe(true);
+      // The report the held measurement made, not a second one.
+      expect(measurements(session.calls)).toBe(1);
+    });
+
+    test("a report the daemon refuses and one lost in transport each cost one log line, and the session measures again at its next due tick", async () => {
+      const session = await capabilitySession({
+        sessionId: "ses_capability_refused",
+        // The boot's own ready is the first; the schedule's reports are the ones after it.
+        ready: (attempt) => {
+          if (attempt === 2) return Response.json({ error: "claim is suspended" }, { status: 409 });
+          if (attempt === 3) throw new Error("connection refused");
+          return new Response(null, { status: 204 });
+        },
+      });
+
+      const { warnings } = await loggedWarnings(async () => {
+        await ticks(session.pane, IMPLEMENTER_DUE_TICK);
+        await session.reported(1);
+        await drain();
+        await ticks(session.pane, CAPABILITY_RETRY_TICKS);
+        await session.reported(2);
+        await drain();
+        await ticks(session.pane, CAPABILITY_RETRY_TICKS);
+        await session.reported(3);
+        await drain();
+      });
+
+      // Neither failure ends the session: it measured again at each due tick, and nothing exited.
+      expect(session.pane.exits).toEqual([]);
+      expect(measurements(session.calls)).toBe(3);
+      expect(session.reports).toHaveLength(3);
+      const failures = warnings.filter(
+        (warning) =>
+          warning.message === "legion: this session's capability report did not reach the daemon"
+      );
+      expect(failures).toHaveLength(2);
+      expect(failures.map((warning) => warning.context?.issue)).toEqual(["REPO-43", "REPO-43"]);
+      expect(String(failures[0]?.context?.error)).toContain("409: claim is suspended");
+      expect(String(failures[1]?.context?.error)).toContain("connection refused");
+      // The activity route answered 204, so no warning of the activity report's is among these.
+      expect(warnings.filter((warning) => warning.message.includes("activity report"))).toEqual([]);
+    });
+  });
 });
 
 /** What `launchedController` hands a test: the controller's fixture and its daemon and Envoy. */
@@ -3130,6 +3573,27 @@ async function loggedErrors<T>(
   });
   try {
     return { value: await run(), errors };
+  } finally {
+    stopSink();
+  }
+}
+
+/** One `logger.warn` line: its message, and the fields it carried. */
+interface LoggedWarning {
+  readonly message: string;
+  readonly context: Record<string, unknown> | undefined;
+}
+
+/** `logger.warn` lines while `run` runs, kept off the test's output. */
+async function loggedWarnings<T>(
+  run: () => Promise<T>
+): Promise<{ readonly value: T; readonly warnings: LoggedWarning[] }> {
+  const warnings: LoggedWarning[] = [];
+  const stopSink = logger.registerLogSink((entry) => {
+    if (entry.level === "warn") warnings.push({ message: entry.message, context: entry.context });
+  });
+  try {
+    return { value: await run(), warnings };
   } finally {
     stopSink();
   }
