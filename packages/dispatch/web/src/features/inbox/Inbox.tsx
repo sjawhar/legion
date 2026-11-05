@@ -726,15 +726,23 @@ export function Inbox({
       ? null
       : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`) ?? null);
   /** The row `l` was pressed on, which is the row Escape returns the focus to. Null for every
-   *  other way into the column, and cleared again on every way the focus leaves the column for
-   *  a row, so Escape then returns to the row the column is showing as it always has. */
+   *  other way into the column, and cleared again the moment the focus leaves the column, so
+   *  Escape then returns to the row the column is showing as it always has. */
   const paneReturn = useRef<string | null>(null);
-  /** The pointer's way into the selection, and one of the ways the focus leaves the column for a
-   *  row: the record `l` made is dropped here, so Escape from the column lands on the row the
-   *  column is showing rather than on a row the reader has since clicked away from. */
-  const selectRow = (askId: string) => {
-    paneReturn.current = null;
-    paneSelection.select(askId);
+  /** That clearing, as one rule over every way the focus leaves the column: `f`, Escape out of
+   *  the search box, a Tab or Shift+Tab onto a row's checkbox, a click into the list, and the
+   *  step `j`/`k` takes back to the selected row. React's `onBlur` bubbles from the column's
+   *  descendants, and `relatedTarget` is where the focus went - null where it went nowhere,
+   *  which is outside the column too - so the record is dropped exactly while the reader is no
+   *  longer in there, rather than in the three bindings that used to clear it by hand and left
+   *  every other way out holding a stale row. `l` focuses the scroller from a row outside this
+   *  wrapper, so no blur of it fires and the record `l` has just made stands; Escape's own run
+   *  reads the record before it focuses the row, so the blur that follows drops nothing it
+   *  still needs. */
+  const forgetPaneReturn = (event: FocusEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      paneReturn.current = null;
+    }
   };
   /** One step of the reader's, in whichever mode the Inbox is in: the selection the column
    *  follows, or the focus roving the rows. Chosen once, so no binding below asks again. */
@@ -748,7 +756,6 @@ export function Inbox({
   const move = (delta: 1 | -1) => {
     if (paneShown && focusInPane()) {
       paneSelection.selectedRow()?.focus();
-      paneReturn.current = null;
     }
     stepInMode(delta);
   };
@@ -894,9 +901,7 @@ export function Inbox({
         // without moving the focus. Every other way in records nothing and returns, as it
         // always has, to the row the column is showing.
         if (paneShown && focusInPane()) {
-          const origin = paneReturn.current;
-          paneReturn.current = null;
-          (originRow(origin) ?? paneSelection.selectedRow())?.focus();
+          (originRow(paneReturn.current) ?? paneSelection.selectedRow())?.focus();
           return;
         }
         const row = rowAround(document.activeElement);
@@ -906,9 +911,17 @@ export function Inbox({
           row?.focus();
         }
       },
+      // Both ways back are tested, because either can be the only one left. The column keeps a
+      // question whose row the typed text hides while the reader has an unsent answer in it
+      // (`pane-selection.ts`'s `paneAsk`), and there the row `l` was pressed on is the way out,
+      // the selected row having none; every other way into the column records no row, and there
+      // the selected row is the way out. With only the selected row tested, Escape in a column
+      // held open over a hidden row would match no binding and do nothing.
       when: () =>
         rowAround(document.activeElement) !== null ||
-        (paneShown && focusInPane() && paneSelection.selectedRow() !== null),
+        (paneShown &&
+          focusInPane() &&
+          (paneSelection.selectedRow() !== null || originRow(paneReturn.current) !== null)),
     },
     {
       // The column is the other half of the page, and `l` is the step into it: the scroller
@@ -1158,7 +1171,8 @@ export function Inbox({
     <div className="flex min-h-0 flex-1 gap-6">
       {listColumn}
       {subject === undefined ? null : (
-        <div className="min-w-0 flex-1" ref={paneRef}>
+        // biome-ignore lint/a11y/noStaticElementInteractions: nothing here is made interactive - the handler only reads where the focus has already gone, so the column needs no role of its own.
+        <div className="min-w-0 flex-1" onBlur={forgetPaneReturn} ref={paneRef}>
           <ReadingPane
             ask={subject}
             onAnswered={recordAnswered}
@@ -1275,7 +1289,7 @@ export function Inbox({
                       marked={marked.has(ask.id)}
                       onMark={onMark}
                       onRelease={ask.id === held?.ask.id ? release : undefined}
-                      onSelect={selectRow}
+                      onSelect={paneSelection.select}
                       ordinal={ordinals.get(ask.id)}
                       ownerKey={group.owner.key}
                       section={section}

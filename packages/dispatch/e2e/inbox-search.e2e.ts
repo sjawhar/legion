@@ -20,7 +20,7 @@ import {
   pickAssignee,
   searchInbox,
 } from "./inbox-filter";
-import { askControls, inboxRow, selectedRow, selectRow } from "./inbox-pane";
+import { askControls, inboxRow, paneScroller, selectedRow, selectRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -275,6 +275,15 @@ test.describe("inbox search", () => {
       await page.keyboard.press("f");
       await expect(box).toBeFocused();
       await expect(box).toHaveValue("");
+
+      // And `f` inside the box is a letter, not the key: the binding is not `inEditable` and a
+      // `search` input takes typed text (`keymap.ts`'s `TEXT_INPUT_TYPES`), so the registry
+      // passes the key through to the field rather than re-focusing what the reader is already
+      // in. The word is the seed's own, so the narrowing it makes is real too.
+      await page.keyboard.type("drift");
+      await expect(box).toHaveValue("drift");
+      await expect(box).toBeFocused();
+      await expect(rows(page)).toHaveCount(2);
     } finally {
       await alice.close();
     }
@@ -778,6 +787,57 @@ test.describe("inbox search", () => {
       for (const askId of [seed.clockAskId, seed.leaseAskId, seed.runbookAskId]) {
         await expect(inboxRow(page, askId)).toBeVisible();
       }
+    } finally {
+      await alice.close();
+    }
+  });
+
+  // The column keeps a question whose row the typed text hides while the reader has an unsent
+  // answer in it (`pane-selection.ts`'s `paneAsk`), so there is a column to read with no
+  // selected row beside it. Escape out of such a column is still one level out: it returns to
+  // the row `l` was pressed on, rather than matching no binding and doing nothing.
+  test("Escape leaves a column held open over a hidden row for the row `l` was pressed on", async ({
+    browser,
+  }) => {
+    const seed = await seedInbox();
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      await openInbox(page);
+
+      // The reader is part way through an answer to the clock question: that unsent text is what
+      // keeps the question in the column once its row goes. The column is where this width
+      // draws the card, the short rows beside it carrying none, so the one answer box on the
+      // page is the column's.
+      const typed = "The ledger, once the lease settles.";
+      await selectRow(page, seed.clockAskId);
+      const answer = page.locator("[data-ask-answer]");
+      await expect(answer).toHaveCount(1);
+      await answer.fill(typed);
+
+      // Two words the clock row does not hold: its row goes, its question stays in the column,
+      // and the list has no selected row left to return to.
+      await inboxSearchBox(page).focus();
+      await searchInbox(page, "ledger auditor");
+      await expect(rows(page)).toHaveCount(2);
+      await expect(inboxRow(page, seed.clockAskId)).toHaveCount(0);
+      await expect(selectedRow(page)).toHaveCount(0);
+      await expect(answer).toHaveValue(typed);
+
+      // Escape out of the box lands on the list's first row, and `l` from there records it.
+      await inboxSearchBox(page).focus();
+      await page.keyboard.press("Escape");
+      const landedId = await rows(page).first().getAttribute("data-inbox-row");
+      const landed = inboxRow(page, landedId ?? "");
+      await expect(landed).toBeFocused();
+      await page.keyboard.press("l");
+      await expect(paneScroller(page)).toBeFocused();
+
+      // And Escape hands the focus back to that row, with the answer still waiting in the
+      // column above it.
+      await page.keyboard.press("Escape");
+      await expect(landed).toBeFocused();
+      await expect(answer).toHaveValue(typed);
     } finally {
       await alice.close();
     }

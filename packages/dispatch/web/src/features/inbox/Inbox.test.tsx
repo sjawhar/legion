@@ -2974,6 +2974,59 @@ test("l reads the column, and Escape returns the focus to the row l was pressed 
   }
 });
 
+test("the record l made is dropped the moment the focus leaves the column, by any route", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+    const box = screen.getByRole("searchbox", { name: "Search asks" });
+
+    // The column is showing ask-b while the focus is on ask-a, so the row `l` records is not
+    // the row the column is showing.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // The search box takes the focus, where `f` hands it: one of the ways out of the column
+    // that no binding cleared. The reader then enters the column again the way a click does -
+    // the scroller itself, with no `l` to record a row - so Escape owes them the row the column
+    // is showing, not the row they pressed `l` on before they ever left.
+    box.focus();
+    expect(document.activeElement).toBe(box);
+    scroller().focus();
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+
+    // A row taking the focus is the other way out, pointer or Tab: the same rule drops the
+    // record there, so a column re-entered by click returns to the row it is showing.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+    shortRow("ask-a").focus();
+    scroller().focus();
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 test("Enter pressed inside the column belongs to the control holding it, and still leaves the list for the answer box", async () => {
   const narrow = widenToReadingPane();
   const rows = [
