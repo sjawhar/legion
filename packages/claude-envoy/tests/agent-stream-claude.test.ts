@@ -440,6 +440,66 @@ test("Claude Code's note of where it put a picture's bytes records nothing", () 
   ])
 })
 
+// A line a person types at the terminal while a turn is running reaches the view by the
+// `delivery` door, inside framing Claude Code wrote for the model (`../src/claude-rows`,
+// `claudeMidTurnMessage`). Measured on 2.1.310, where typing one sentence mid-turn wrote
+// `origin.kind: "composer"`, `type: "attachment"`, `name: "queued_command"` and that one text
+// block
+// (`/legion/scratch/tmp/t-term-h1/config/projects/-legion-scratch-tmp-t-term-h1-cwd/b6411755-7568-4608-93a5-1db3c839e038.jsonl:70`).
+// Recorded as it stands, it draws the tags and Claude Code's note to the model where the person
+// wrote one sentence (INFRA-1026).
+test("a line typed while a turn runs shows the person's words and none of the wrapper", () => {
+  const live = harness(1_000, () => "m1")
+  const typed = "TYPED-AT-TERMINAL-h1: say the word CEDAR when you can."
+  const wrapped = [
+    "<system-reminder>",
+    "The user sent a new message while you were working:",
+    typed,
+    "",
+    "This is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+    "</system-reminder>",
+  ].join("\n")
+  live.feed(
+    appendRow("delivery", [{ text: wrapped, type: "text" }], {
+      message: {
+        content: [{ text: wrapped, type: "text" }],
+        name: "queued_command",
+        role: "user",
+        type: "attachment",
+      },
+      origin: { kind: "composer" },
+      uuid: "row-typed",
+    }),
+  )
+
+  const kept = messages(live.replay())
+  expect(kept).toHaveLength(1)
+  expect(kept[0]?.role).toBe("user")
+  expect(kept[0]?.parts).toEqual([{ text: typed, type: "text" }])
+})
+
+// A `<system-reminder>` of any other kind is not that wrapper, and the view draws it as it draws
+// any other text row. Measured on 2.1.310: a peer session's message comes by the same `delivery`
+// door (`origin.kind: "peer"`), carrying an announcement of its own
+// (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q1q3q5.jsonl:223`). This pins the behaviour
+// the mid-turn reader leaves alone (INFRA-1026).
+test("a system reminder of another kind still crosses whole", () => {
+  const live = harness()
+  const peer =
+    "<system-reminder>\nAnother Claude session sent a message while you were working:\nping\n</system-reminder>"
+  live.feed(
+    appendRow("delivery", [{ text: peer, type: "text" }], {
+      message: { content: [{ text: peer, type: "text" }], role: "user", type: "attachment" },
+      origin: { kind: "peer" },
+      uuid: "row-peer",
+    }),
+  )
+
+  expect(messages(live.replay()).map((message) => message.parts)).toEqual([
+    [{ text: peer, type: "text" }],
+  ])
+})
+
 test("a row with nothing to show records nothing, and the rows around it still publish", () => {
   const live = harness()
   live.feed(

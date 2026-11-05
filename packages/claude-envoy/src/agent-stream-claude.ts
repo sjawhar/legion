@@ -32,6 +32,7 @@ import type {
 } from "../hooks/mod-protocol"
 import {
   claudeEchoedCommandLine,
+  claudeMidTurnMessage,
   claudeRowText,
   isCommandBookkeeping,
   isPictureAttachmentRow,
@@ -157,7 +158,14 @@ export interface ClaudeAgentStream {
  *  alone, which the viewer shows as `[image]` and the like. */
 function partOf(block: ModContentBlock): ClaudeStreamPart {
   const text = block["text"]
-  if (block.type === "text" && typeof text === "string") return { type: "text", text }
+  if (block.type === "text" && typeof text === "string") {
+    // A line a person typed while a turn was running reaches the view inside framing Claude Code
+    // wrote for the model, and the view shows the person's words alone (`./claude-rows`,
+    // `claudeMidTurnMessage`), as it shows a command without the tags it was recorded in. Read
+    // here rather than in `recordAppend` so that a row carrying this block beside others keeps
+    // every other block exactly as it crosses today.
+    return { type: "text", text: claudeMidTurnMessage(text) ?? text }
+  }
   const thinking = block["thinking"]
   if (block.type === "thinking" && typeof thinking === "string") {
     return { type: "thinking", thinking }

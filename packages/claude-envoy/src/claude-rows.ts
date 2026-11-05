@@ -11,6 +11,10 @@
 // A picture a person sent writes a row of the same kind: Claude Code's note of where it put the
 // bytes (`isPictureAttachmentRow`), which the live view drops as it drops the command's
 // bookkeeping.
+//
+// A line a person types while a turn is running arrives wrapped in framing of Claude Code's own
+// (`claudeMidTurnMessage`), and the live view draws the person's words out of it and none of the
+// wrapper.
 import type { ModContentBlock } from "../hooks/mod-protocol"
 
 /**
@@ -135,4 +139,57 @@ const PICTURE_ATTACHMENT_ROW = /^\[Image: source: \/[^\]]+\]$/
  *  drawn, it is a second user row for the one message the person sent (INFRA-1026). */
 export function isPictureAttachmentRow(content: readonly ModContentBlock[]): boolean {
   return PICTURE_ATTACHMENT_ROW.test(claudeRowText(content).trim())
+}
+
+/** The tags and the two fixed sentences the wrapper around a mid-turn message is made of
+ *  (`claudeMidTurnMessage`): the opening tag, the announcement, the person's words, Claude
+ *  Code's note to the model, the closing tag. */
+const MID_TURN_OPEN = "<system-reminder>"
+const MID_TURN_CLOSE = "</system-reminder>"
+const MID_TURN_ANNOUNCEMENT = "The user sent a new message while you were working:"
+const MID_TURN_NOTE = "This is how Claude Code surfaces messages the user sends mid-turn"
+
+/**
+ * The words a person typed while a turn was running, read out of the wrapper Claude Code hands
+ * them in, or `undefined` where the text is not that wrapper.
+ *
+ * Measured on 2.1.310: a line typed at the terminal mid-turn reaches the mod as one row by the
+ * `delivery` door (`origin.kind: "composer"`, `message.type: "attachment"`,
+ * `name: "queued_command"`, `/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:120`) whose
+ * single text block is
+ *
+ *     <system-reminder>
+ *     The user sent a new message while you were working:
+ *     TYPED-AT-TERMINAL-h1: say the word CEDAR when you can.
+ *
+ *     This is how Claude Code surfaces messages the user sends mid-turn - within the running
+ *     turn, often alongside the next tool result, rather than as a separate conversation turn.
+ *     Address the message above as you continue this turn.
+ *     </system-reminder>
+ *
+ * (`/legion/scratch/tmp/t-term-h1/config/projects/-legion-scratch-tmp-t-term-h1-cwd/b6411755-7568-4608-93a5-1db3c839e038.jsonl:70`).
+ * Drawn whole, that is tags and a note written to the model where the person wrote one sentence,
+ * which is the plumbing the view already drops for a command and for a picture's bytes.
+ *
+ * The words are found by the wrapper's shape and never by line number, since a person's message
+ * runs to as many lines, and as many blank ones, as they typed: everything between the
+ * announcement and the note is theirs. The note is looked for from the end, so a person who
+ * quotes its first words keeps their own. A wrapper holding no words answers `""`, which shows
+ * the reader nothing - right, because none of the framing is anybody's words.
+ *
+ * A `<system-reminder>` of any other kind answers `undefined` and the view draws it as it draws
+ * any other text row today, which this reader leaves alone: measured in the same spike, a peer
+ * session's message (`logs/mod3-q1q3q5.jsonl:223`) and the
+ * `[SYSTEM NOTIFICATION - NOT USER INPUT]` rows (`logs/mod3-q7-int.jsonl:13`) come by this same
+ * `delivery` door, and `<total_tokens>` by the `attachment` door the mod does not watch
+ * (`logs/mod2.jsonl:121`).
+ */
+export function claudeMidTurnMessage(text: string): string | undefined {
+  const body = text.trim()
+  if (!body.startsWith(MID_TURN_OPEN) || !body.endsWith(MID_TURN_CLOSE)) return undefined
+  const inner = body.slice(MID_TURN_OPEN.length, body.length - MID_TURN_CLOSE.length).trimStart()
+  if (!inner.startsWith(MID_TURN_ANNOUNCEMENT)) return undefined
+  const note = inner.lastIndexOf(MID_TURN_NOTE)
+  if (note < MID_TURN_ANNOUNCEMENT.length) return undefined
+  return inner.slice(MID_TURN_ANNOUNCEMENT.length, note).trim()
 }
