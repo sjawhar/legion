@@ -370,12 +370,13 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 	if !ok {
 		return nil, nil
 	}
-	if err := e.status(ctx, tx, issue, row.Status); err != nil {
+	status := PhaseStatus(row.To)
+	if err := e.status(ctx, tx, issue, status); err != nil {
 		return nil, err
 	}
 	issue.Phase, issue.Hold, issue.ReadyPendingVersion = row.To, nil, nil
-	if row.Status != "" {
-		issue.Status = row.Status
+	if status != "" {
+		issue.Status = status
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return nil, err

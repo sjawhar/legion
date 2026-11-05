@@ -835,7 +835,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 			return err
 		}
 	}
-	if err := e.status(ctx, tx, issue, row.Status); err != nil {
+	status := PhaseStatus(row.To)
+	if err := e.status(ctx, tx, issue, status); err != nil {
 		return err
 	}
 	from := issue.Phase
@@ -852,8 +853,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if issue.CarriesRun() {
 		issue.TakenBack = true
 	}
-	if row.Status != "" {
-		issue.Status = row.Status
+	if status != "" {
+		issue.Status = status
 	}
 	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
 	// any trigger voids it, so a later approval never advances the next merger's phase on it.
