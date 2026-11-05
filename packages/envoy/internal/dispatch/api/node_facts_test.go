@@ -565,7 +565,7 @@ func TestABlockSeenFirstAtItsDocumentsFirstIndexingHasNoMaker(t *testing.T) {
 			t.Fatalf("%s: %v", statement, err)
 		}
 	}
-	if _, err := deps.Docs.(*docs.Service).ReconcileBlockIndex(ctx, "", nil); err != nil {
+	if _, err := deps.Docs.(*docs.Service).ReconcileBlockIndex(ctx, docs.BlockIndexCursors{}, nil); err != nil {
 		t.Fatalf("reconcile the block index: %v", err)
 	}
 	requireIndexedAt(t, database, spec, 3)

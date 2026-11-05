@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,42 +89,98 @@ func mustExec(t *testing.T, q querier, sql string, args ...any) {
 	}
 }
 
-// seedEveryKind writes one or more items of every kind meaning search covers under project, the
-// texts chosen to catch a coverage text that is not the trigger's: Unicode, a comment longer than
-// embed's maxInputChars (32,000 runes, stored whole and cut only when sent), an unanswered and an
-// answered ask both with options, and a project document whose latest version is the one that
-// counts. It returns how many items it wrote.
-func seedEveryKind(t *testing.T, q querier, project string) int {
+// seededItems is what seedItems wrote, by the owner key its windows go under: the document's
+// artifact id, and <kind>/<uuid> for the comment, the two asks and the message.
+type seededItems struct {
+	issueKey                   string
+	document, comment, message string
+	unanswered, answered       string
+}
+
+// seedItems writes one or more items of every kind meaning search covers under project, the
+// texts chosen to catch a coverage text that is not the indexer's: Unicode, a comment longer
+// than embed's maxInputChars (32,000 runes, stored whole and cut only when sent), an unanswered
+// and an answered ask both with options, and a project document whose latest version is the one
+// that counts. It writes no window: an item's windows are its indexer's to write
+// (refs.IndexBlocks, refs.IndexItem, refs.IndexAskParts), and seedEveryKind writes them as that
+// indexer would.
+func seedItems(t *testing.T, q querier, project string) seededItems {
 	t.Helper()
 	ctx := context.Background()
-	issueKey := project + "-1"
+	items := seededItems{issueKey: project + "-1"}
 	mustExec(t, q, `insert into projects (key, name) values ($1, 'Test') on conflict (key) do nothing`, project)
 	mustExec(t, q, `
 		insert into issues (key, project_key, number, title, created_by, rank)
 		values ($1, $2, 1, 'Ünïcödé title — 日本語 ✓ 🚀', '{"kind":"user","id":"alice"}', 'A')
-	`, issueKey, project)
-	var artifactID string
+	`, items.issueKey, project)
 	if err := q.QueryRow(ctx, `
 		insert into artifacts (project_key, slug, name, kind, created_by, ref_key)
 		values ($1, 'notes-md', 'notes.md', 'doc', '{"kind":"user","id":"alice"}', $1 || '/notes-md')
 		returning id::text
-	`, project).Scan(&artifactID); err != nil {
+	`, project).Scan(&items.document); err != nil {
 		t.Fatalf("seed project document: %v", err)
 	}
-	mustExec(t, q, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 1, '# First draft', '[]')`, artifactID)
-	mustExec(t, q, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 2, '# Latest — naïve café', '[]')`, artifactID)
-	mustExec(t, q, `insert into comments (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', $2)`,
-		issueKey, strings.Repeat("ü long comment ", 2500))
-	mustExec(t, q, `
+	mustExec(t, q, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 1, '# First draft', '[]')`, items.document)
+	mustExec(t, q, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 2, '# Latest — naïve café', '[]')`, items.document)
+	if err := q.QueryRow(ctx, `
+		insert into comments (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', $2) returning id::text
+	`, items.issueKey, strings.Repeat("ü long comment ", 2500)).Scan(&items.comment); err != nil {
+		t.Fatalf("seed comment: %v", err)
+	}
+	if err := q.QueryRow(ctx, `
 		insert into asks (issue_key, author, question, options)
 		values ($1, '{"kind":"session","id":"asker"}', 'Ship it?', '[{"label":"Yes"},{"label":"No"}]')
-	`, issueKey)
-	mustExec(t, q, `
+		returning id::text
+	`, items.issueKey).Scan(&items.unanswered); err != nil {
+		t.Fatalf("seed unanswered ask: %v", err)
+	}
+	if err := q.QueryRow(ctx, `
 		insert into asks (issue_key, author, question, options, state, answer)
 		values ($1, '{"kind":"session","id":"asker"}', 'Which region?', '[{"label":"us"},{"label":"eu"}]', 'answered', '{"text":"eu, for latency","option":"eu"}')
-	`, issueKey)
-	mustExec(t, q, `insert into messages (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', 'Message — ✉')`, issueKey)
+		returning id::text
+	`, items.issueKey).Scan(&items.answered); err != nil {
+		t.Fatalf("seed answered ask: %v", err)
+	}
+	if err := q.QueryRow(ctx, `
+		insert into messages (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', 'Message — ✉') returning id::text
+	`, items.issueKey).Scan(&items.message); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	return items
+}
+
+// enqueueWindow writes one window of owner ownerKey, covering covers, as the indexer that wrote
+// those blocks writes it (refs.writeWindows, through embeddings_enqueue_window).
+func enqueueWindow(t *testing.T, q querier, kind, ownerKey, suffix, text string, covers ...string) {
+	t.Helper()
+	mustExec(t, q, `select embeddings_enqueue_window($1, $2, $3, $4)`, kind, ownerKey+"#"+suffix, text, covers)
+}
+
+// seedEveryKind writes the items of seedItems and the one window each of their indexers would
+// write for them, and returns how many embeddings rows that leaves: the issue's and one window
+// for each item.
+func seedEveryKind(t *testing.T, q querier, project string) int {
+	t.Helper()
+	items := seedItems(t, q, project)
+	enqueueWindow(t, q, "document_block", items.document, "b1", "notes.md\n\n# Latest — naïve café", "b1")
+	enqueueWindow(t, q, "comment_block", "comment/"+items.comment, "b1",
+		"Ünïcödé title — 日本語 ✓ 🚀\n\n"+strings.Repeat("ü long comment ", 2500), "b1")
+	enqueueWindow(t, q, "ask_part", "ask/"+items.unanswered, "b1", "Ship it?\n\nShip it?\n\nYes\n\nNo", "b1", "b2", "b3")
+	enqueueWindow(t, q, "ask_part", "ask/"+items.answered, "b1",
+		"Which region?\n\nWhich region?\n\nus\n\neu\n\neu — eu, for latency", "b1", "b2", "b3", "b4")
+	enqueueWindow(t, q, "message_block", "message/"+items.message, "b1", "Ünïcödé title — 日本語 ✓ 🚀\n\nMessage — ✉", "b1")
 	return 6
+}
+
+// seedWindowsAgain rewrites every window the database holds with the text and the covers it
+// already holds, as an indexer rewrites the windows of an owner whose blocks a write left
+// unchanged: refs.writeWindows writes an owner's windows at every index of its blocks, and
+// embeddings_enqueue_window writes a row only where the hash of its text moved.
+func seedWindowsAgain(t *testing.T, database *store.Store) {
+	t.Helper()
+	mustExec(t, database.Pool, `
+		select embeddings_enqueue_window(kind, id, text_snapshot, covers)
+		from embeddings where covers is not null`)
 }
 
 // drain runs ProcessBatch until a call finds nothing eligible, failing on any failed row.
@@ -193,12 +251,14 @@ func coverage(t *testing.T, database *store.Store, identity string) (items, curr
 	return report.Total.Items, report.Total.Current, report.Total.Lacking, report.Total.Failed, report.Total.OldestLackingSeconds
 }
 
-// The server embeds content no trigger saw with no command: items written with the triggers off
-// have no row, and Run's pass at startup and its scan loop give every one a vector.
+// The server embeds content no trigger saw with no command: an issue written with its trigger
+// off has no row, and Run's pass at startup and its scan loop give it a vector. The items
+// written beside it hold no window, and the pass adds none: a window is the block index's to
+// write, not the queue's, so no kind but the issue has an item to cover here.
 func TestRunEmbedsItemsNoTriggerSawWithNoCommand(t *testing.T) {
 	database := storetest.Open(t)
-	var seeded int
-	withTriggersOff(t, database, func(q querier) { seeded = seedEveryKind(t, q, "PRET") })
+	seeded := 1
+	withTriggersOff(t, database, func(q querier) { seedItems(t, q, "PRET") })
 	var rows int
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from embeddings`).Scan(&rows); err != nil {
 		t.Fatalf("count rows: %v", err)
@@ -239,7 +299,7 @@ func TestRunEmbedsItemsNoTriggerSawWithNoCommand(t *testing.T) {
 // Run with no embedder starts nothing: no pass adds a row.
 func TestRunWithNoEmbedderDoesNothing(t *testing.T) {
 	database := storetest.Open(t)
-	withTriggersOff(t, database, func(q querier) { seedEveryKind(t, q, "NOEM") })
+	withTriggersOff(t, database, func(q querier) { seedItems(t, q, "NOEM") })
 	Run(context.Background(), Deps{Store: database})
 	var rows int
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from embeddings`).Scan(&rows); err != nil {
@@ -250,9 +310,10 @@ func TestRunWithNoEmbedderDoesNothing(t *testing.T) {
 	}
 }
 
-// coverageSources' texts and hashes are the triggers' own: once every item the triggers enqueued
-// is embedded, two passes and updates that fire the triggers without changing any text write no
-// row, and nothing is embedded again.
+// What the issue's trigger and the indexers' windows already enqueued is left alone: once every
+// row is embedded, two passes, an update that fires the issue trigger without changing its text
+// and a rewrite of the windows of an owner nothing changed (as every index of unchanged blocks
+// makes) write no row, and nothing is embedded again.
 func TestCoverChangesNothingTheTriggersAlreadyEnqueued(t *testing.T) {
 	database := storetest.Open(t)
 	seeded := seedEveryKind(t, database.Pool, "PARI")
@@ -273,6 +334,7 @@ func TestCoverChangesNothingTheTriggersAlreadyEnqueued(t *testing.T) {
 	mustExec(t, database.Pool, `
 		insert into artifact_versions (artifact_id, number, markdown, authors)
 		select artifact_id, number + 1, markdown, authors from artifact_versions where number = 2`)
+	seedWindowsAgain(t, database)
 	drain(t, deps)
 
 	after := snapshotRows(t, database)
@@ -927,46 +989,26 @@ func TestTheIdentityRecheckDropsAVectorTheOldConfigurationCommitsAfterTheBootPas
 	})
 }
 
-// runCoverage holds no timer once a run finds no row of another identity: with none at boot it
-// returns after the boot pass, and with some it returns after the first recheck that finds none
-// left, having dropped and re-admitted them.
-func TestTheCoverageLoopStopsOnceNoForeignRowRemains(t *testing.T) {
-	for name, tc := range map[string]struct {
-		seed    func(t *testing.T, database *store.Store)
-		recheck time.Duration
-	}{
-		// An hour's interval: a loop that armed a recheck would not return within the test.
-		"none at boot": {
-			seed: func(t *testing.T, database *store.Store) {
-				seedIssue(t, database, "NONE", "NONE-1", "Embedded here")
-				drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
-			},
-			recheck: time.Hour,
-		},
-		"some at boot": {
-			seed:    func(t *testing.T, database *store.Store) { seedForeignRows(t, database, "SOME") },
-			recheck: 200 * time.Millisecond,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			database := storetest.Open(t)
-			tc.seed(t, database)
-			shortenIdentityRecheck(t, tc.recheck)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			runCoverage(ctx, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity), proven: newProof()})
-			if ctx.Err() != nil {
-				t.Fatal("the coverage loop still waited after 10s, want it returned once no foreign row remained")
-			}
-			var foreign bool
-			if err := database.Pool.QueryRow(context.Background(), foreignRows, coverageKinds, configuredIdentity).Scan(&foreign); err != nil {
-				t.Fatalf("look for foreign rows: %v", err)
-			}
-			if foreign {
-				t.Error("foreign rows remain after the loop returned")
-			}
-		})
-	}
+// A vector another identity commits is dropped whenever it lands, not only while an earlier pass
+// had already found rows of that identity: here the boot pass finds none, and the vector lands
+// after it. Nothing but the identity steps would take it back - the scan selects only rows whose
+// embedded_hash is distinct from content_hash, which this row's is not, and search compares a
+// stored vector only with a query vector of its own identity - so without them the issue would
+// be matched by no meaning search for the life of the process.
+func TestTheIdentityRecheckDropsAVectorCommittedAfterAPassThatFoundNone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "CLEAN", "CLEAN-1", "Embedded here at boot")
+	shortenIdentityRecheck(t, time.Second)
+	runQueue(t, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity)})
+	// The boot drain embeds the issue here, so the boot pass's look for rows of another identity
+	// finds none: the database holds one row and this process made its vector.
+	eventually(t, 15*time.Second, "the boot pass and the boot drain", func() bool {
+		return modelOf(t, database, "CLEAN-1") == configuredIdentity
+	})
+	commitForeignVector(t, database, "CLEAN-1")
+	eventually(t, 20*time.Second, "CLEAN-1's foreign vector dropped and embedded again here", func() bool {
+		return modelOf(t, database, "CLEAN-1") == configuredIdentity
+	})
 }
 
 // A boot pass that skipped the identity steps because the embedder had not answered its canary
@@ -1070,16 +1112,48 @@ func TestCoverageOfAnEmptyBacklogHasNoOldestAge(t *testing.T) {
 		t.Errorf("total %+v, want %d items all current and no oldest age", got, seeded)
 	}
 	for kind, counts := range map[string]int64{
-		"issue": report.Kinds.Issue.Items, "document": report.Kinds.Document.Items, "comment": report.Kinds.Comment.Items,
-		"ask": report.Kinds.Ask.Items, "message": report.Kinds.Message.Items,
+		"issue": report.Kinds.Issue.Items, "document_block": report.Kinds.DocumentBlock.Items,
+		"comment_block": report.Kinds.CommentBlock.Items, "ask_part": report.Kinds.AskPart.Items,
+		"message_block": report.Kinds.MessageBlock.Items,
 	} {
 		want := int64(1)
-		if kind == "ask" {
+		if kind == "ask_part" {
 			want = 2
 		}
 		if counts != want {
 			t.Errorf("%s items = %d, want %d", kind, counts, want)
 		}
+	}
+}
+
+// The pass never brings back a whole-text row the block index retired: the kinds the windows
+// replaced have no source table, so no statement of the pass inserts one, and a database whose
+// items all hold windows reads as covered with the whole-text rows gone. Without this the pass
+// would re-insert every retired row at every boot and pay an embedder for each.
+func TestTheCoveragePassDoesNotRestoreRetiredWholeTextRows(t *testing.T) {
+	database := storetest.Open(t)
+	seeded := seedEveryKind(t, database.Pool, "RTRD")
+	// The rows the release before this one's triggers wrote, which its block index has retired
+	// now that every owner holds a window.
+	items := snapshotRows(t, database)
+	embedder := newPlaceEmbedder(configuredIdentity)
+	deps := Deps{Store: database, Embedder: embedder}
+	drain(t, deps)
+
+	cover(t, deps)
+	cover(t, deps)
+	drain(t, deps)
+	after := snapshotRows(t, database)
+	if len(after) != len(items) {
+		t.Fatalf("%d rows after two passes, %d before: %v", len(after), len(items), slices.Sorted(maps.Keys(after)))
+	}
+	for key := range after {
+		if _, seededRow := items[key]; !seededRow {
+			t.Errorf("the pass added %s, a row no indexer wrote", key)
+		}
+	}
+	if got, current, _, _, _ := coverage(t, database, configuredIdentity); got != int64(seeded) || current != got {
+		t.Errorf("coverage = %d items, %d current; want the %d windows and the issue, all current", got, current, seeded)
 	}
 }
 
@@ -1154,11 +1228,12 @@ func (p *pausingProxy) serve(client net.Conn) {
 // Run's coverage pass and its scan loop run side by side, so each must hold a connection of its
 // own: the pass is never refused as a second connection of one caller (store.ErrNestedAcquire)
 // because the scan loop has a cursor open at that moment, which ends the pass until the next tick,
-// 10 minutes later, and leaves content no trigger saw without a row. Here the scan loop's claim
-// has received its first row (a long title) and waits for the rest, cursor open, while the pass's
-// first statement waits on an uncommitted insert of the row it would add. The insert commits, the
-// pass's next statement starts while the claim's cursor is still open, and the pass must still
-// reach the comment no trigger saw, which the scan then embeds.
+// 10 minutes later, and leaves content no trigger saw with no vector of its own. Here the scan
+// loop's claim has received its first row (a long title) and waits for the rest, cursor open,
+// while the pass's insert of the issue row it would add waits on an uncommitted insert of that
+// same row. The insert commits, the pass's next statement - the repair of the issue whose title
+// changed with the triggers off - starts while the claim's cursor is still open, and the pass
+// must still reach that issue, which the scan then embeds.
 func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -1169,7 +1244,15 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 		mustExec(t, q, `
 			insert into issues (key, project_key, number, title, created_by, rank)
 			values ('SIDE-1', 'SIDE', 1, $1, '{"kind":"user","id":"alice"}', 'A')`, blockedTitle)
-		mustExec(t, q, `insert into comments (issue_key, author, body) values ('SIDE-1', '{"kind":"user","id":"alice"}', 'Written before the triggers')`)
+	})
+	// SIDE-3 is the content no trigger saw: its row is embedded at the title a trigger did see,
+	// and its title then changes with the triggers off, so only the pass's repair statement
+	// reaches the title it holds now. It is seeded and embedded before SIDE-2, so the scan
+	// loop's first claim holds the long title alone.
+	seedIssue(t, database, "SIDE", "SIDE-3", "Title the trigger saw")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+	withTriggersOff(t, database, func(q querier) {
+		mustExec(t, q, `update issues set title = 'Title changed with the triggers off' where key = 'SIDE-3'`)
 	})
 	seedIssue(t, database, "SIDE", "SIDE-2", longTitle)
 
@@ -1196,7 +1279,7 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 	proxied := &store.Store{Pool: store.NewPool(opened)}
 	defer proxied.Pool.Close()
 
-	// The pass's first statement, the issue kind's insert of missing rows, waits on this one.
+	// The pass's insert of the issue kind's missing rows waits on this one.
 	insert, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the inserting transaction: %v", err)
@@ -1255,7 +1338,7 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after Run: items %d current %d lacking %d failed %d, want all 3 current: the coverage pass stopped before the comment no trigger saw", items, current, lacking, failed)
+			t.Fatalf("after Run: items %d current %d lacking %d failed %d, want all 3 current: the coverage pass stopped before the issue no trigger saw", items, current, lacking, failed)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

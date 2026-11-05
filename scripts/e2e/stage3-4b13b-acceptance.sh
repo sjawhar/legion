@@ -1062,22 +1062,18 @@ note "merged $repo#${pr_of[$root2]} in merging: pr-merged $n, pr-closed-unmerged
 pass
 
 # ---- 7a. the merger's pane: no grant file, and no `legion` run from bash ----------------------------
-# utf16_len: stdin's length in UTF-16 code units, as Dispatch's len16 and MessageBodyLength count it.
-utf16_len() { python3 -c 'import sys; print(len(sys.stdin.read().encode("utf-16-le")) // 2)'; }
-cap_refusals() { tool_outcomes "$1" | jq -c '[.[] | select(.tool == "legion" and (.text | contains("READY_PACKET_TOO_LONG")))]'; }
 begin merger-pane-mints-no-grant
 # This check replaced ready-cap-refused-at-the-boundary, which drove the daemon's completion route
 # from this shell with a grant the merger's bash hook had minted into the pane's LEGION_GRANT_FILE
 # before a `legion state --json` command. Neither exists (LEGION-631): the `legion` tool mints its
 # grants in-process for its own daemon calls, no pane carries a grant file, no agent runs `legion`
-# from bash, and the CLI has no `handoff complete`. The READY cap at its exact boundary
-# (record.MessagePostLimit, one unit over) is the daemon's own test now (internal/api
-# handoff_test.go, the READY one unit over the limit, refused naming <limit+1>/<limit>), on the
-# Dispatch cap internal/daemon/outbox_scratch_dispatch_test.go measures; the merger's own over-cap
-# packet, refused READY_PACKET_TOO_LONG through the tool, is counted in
-# ready-posted-and-published-to-holder below. What stands here is the absence: the merger's pane
-# environment names no grant, its gh reads the role's files under GH_CONFIG_DIR, and no bash
-# command the merger has run invokes `legion`.
+# from bash, and the CLI has no `handoff complete`. The daemon carries no length of its own: it
+# holds a READY packet to the bounds Dispatch publishes, refusing one past them at
+# handoff_complete (READY_PACKET_TOO_LONG), which the daemon's own tests measure
+# (internal/api/handoff_test.go, and internal/daemon/outbox_scratch_dispatch_test.go for a
+# 40,000-character packet posted whole).
+# What stands here is the absence: the merger's pane environment names no grant, its gh reads the
+# role's files under GH_CONFIG_DIR, and no bash command the merger has run invokes `legion`.
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
 for absent in LEGION_GRANT_FILE LEGION_GRANT; do
   ! tr '\0' '\n' <"/proc/$merger_omp/environ" | grep -q "^$absent=" || fail "$root1's merger pane still carries $absent"
@@ -1105,7 +1101,7 @@ if ! role_held_by merge-queue "$holder_session"; then
   until_true 300 "the holder session to claim merge-queue again" role_held_by merge-queue "$holder_session"
 fi
 [ "$(ready_messages "$root1" | jq length)" = 0 ] || soft "$root1 already had a READY message before its merger's completion"
-send_agent "$root1" merger "Acceptance READY operation: verify the merge gate as your instructions describe. Then, as a deliberate proof of the READY packet's length limit, first end the phase with the legion tool (op handoff_complete, ready true) using as the summary your READY packet followed by the pull request body quoted in full and then a padding paragraph of at least 2,500 characters; that first call is expected to be refused. Then do exactly what the refusal tells you, and end this phase with the legion tool: op handoff_complete, ready true, and a packet built exactly as your instructions describe as the summary. Then wait."
+send_agent "$root1" merger "Acceptance READY operation: verify the merge gate as your instructions describe, build your READY packet exactly as they describe, and end this phase with the legion tool: op handoff_complete, ready true, and the packet as the summary. Then wait."
 wait_for_phase "$root1" awaiting_merge 900
 until_true 180 "the daemon's READY message on $root1" ready_count_at_least "$root1" 1
 sleep 20
@@ -1124,15 +1120,6 @@ grep -F '"customType":"envoy-message"' "$(holder_file)" | grep -F -- "$first_lin
 [ -s "$evidence/holder-ready-delivery.jsonl" ] || soft "the holder saw the READY line, but not as an Envoy delivery"
 [ "$(no_holder_messages "$root1" | jq length)" = 0 ] || soft "$root1 was told merge-queue had no holder while one held it"
 note "READY on $root1 by $(jq -r '.[0].actor' "$evidence/ready-messages-$root1.json"): '$first_line' — the merger's summary verbatim; the merger itself posted/published nothing; the holder session received it as an Envoy delivery"
-f=$(claim_session_file "$root1" merger)
-cap_refusals "$f" >"$evidence/ready-cap-merger-refusals-$root1.json"
-posted_len=$(jq -j '.[0].body' "$evidence/ready-messages-$root1.json" | utf16_len)
-note "the merger's own over-cap attempt: $(jq length "$evidence/ready-cap-merger-refusals-$root1.json") READY_PACKET_TOO_LONG refusal(s) ($(jq -r '[.[].text | .[0:150]] | join(" | ")' "$evidence/ready-cap-merger-refusals-$root1.json")); the posted packet is $posted_len UTF-16 units"
-[ "$posted_len" -le 31956 ] || soft "$root1's posted READY is $posted_len units, over record.MessagePostLimit (31956)"
-# The tool's path through the READY cap, as measured: the census's claim that both completion
-# callers met the refusal live rests on this count, so it is a file, not only a log line.
-jq -n --arg issue "$root1" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root1.json")" --argjson posted "$posted_len" \
-  '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root1.json"
 pass
 
 begin merge-at-awaiting-merge-gives-no-pr-merged
@@ -1187,12 +1174,6 @@ jq -e --arg d "legion-daemon:$project" 'length == 1 and .[0].actor == $d' "$evid
 merger_self_posted "$root3" >"$evidence/merger-self-posts-$root3.json"
 [ "$(jq length "$evidence/merger-self-posts-$root3.json")" = 0 ] || soft "$root3's merger posted or published READY itself"
 note "approval advanced $root3 to awaiting_merge and the daemon posted the stored packet: '$(head -1 <<<"$packet3")'; then: '$(jq -r '.[0].body' "$evidence/no-holder-messages-$root3.json")'"
-posted_len3=$(jq -j '.[0].body' "$evidence/ready-messages-$root3.json" | utf16_len)
-[ "$posted_len3" -le 31956 ] || soft "$root3's posted READY is $posted_len3 units, over record.MessagePostLimit (31956)"
-cap_refusals "$(claim_session_file "$root3" merger)" >"$evidence/ready-cap-merger-refusals-$root3.json"
-jq -n --arg issue "$root3" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root3.json")" --argjson posted "$posted_len3" \
-  '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root3.json"
-note "$root3's posted READY is $posted_len3 UTF-16 units; its merger met $(jq length "$evidence/ready-cap-merger-refusals-$root3.json") READY_PACKET_TOO_LONG refusal(s)"
 pass
 
 begin production-untouched
