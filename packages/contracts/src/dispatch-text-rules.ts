@@ -72,6 +72,26 @@ export function pictureCaption(name: string): string {
 }
 
 /**
+ * The pieces a picture line is written from, each repetition bounded so that a reader scans a
+ * text once however it is written. Unbounded, the caption and the title had a body of many `![`
+ * rescanned from each one of them: quadratic work on text a person writes (CodeQL
+ * `js/polynomial-redos`). Every bound sits past what a writer can reach:
+ *
+ * - a caption is a file name (`pictureCaption`), which no file system Dispatch takes an upload
+ *   from carries past 255 bytes and which escaping at most doubles, so 512 characters is past
+ *   any of them; a line break ends a picture in markdown, so no caption holds one;
+ * - an address is `dispatch://` and a target id, which holds at most
+ *   MAX_REFERENCE_TARGET_BYTES (2048) UTF-8 bytes, so 2048 characters is at least as much;
+ * - a version is a positive int64, whose largest value is 19 digits;
+ * - a title is the short quoted string a writer may put after the address, past which 256
+ *   characters is; at most four spaces or one line break and an indent separate the two.
+ */
+const PICTURE_CAPTION = String.raw`(?:\\.|[^\\\]\n]){0,512}`;
+const PICTURE_ADDRESS = String.raw`dispatch://[^\s()]{1,2048}@v[1-9][0-9]{0,18}`;
+const PICTURE_TITLE = String.raw`(?:\s{1,4}"(?:\\.|[^\\"]){0,256}")?`;
+const PICTURE_SYNTAX = String.raw`!\[${PICTURE_CAPTION}\]\((${PICTURE_ADDRESS})${PICTURE_TITLE}\)`;
+
+/**
  * The syntax a picture line is written in, as a regular expression of its own:
  * `![<caption>](<address>)` for a Dispatch address that names a version, escaped characters
  * inside the caption, and an optional quoted title after the address. The address is the first
@@ -83,7 +103,7 @@ export function pictureCaption(name: string): string {
  * object would have each reader start where another left off.
  */
 export function pictureSyntax(): RegExp {
-  return /!\[(?:\\.|[^\\\]])*\]\((dispatch:\/\/[^\s()]+@v[1-9][0-9]*)(?:\s+"(?:\\.|[^\\"])*")?\)/g;
+  return new RegExp(PICTURE_SYNTAX, "g");
 }
 
 /** The picture types a model is shown and the server stores as `kind: image`: what their bytes

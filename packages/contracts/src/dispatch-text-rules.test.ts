@@ -4,6 +4,7 @@ import {
   isSessionId,
   MAX_REFERENCE_TARGET_BYTES,
   pictureCaption,
+  pictureSyntax,
   referenceTargetFits,
   SESSION_ID_PATTERN,
   utf8Bytes,
@@ -93,5 +94,39 @@ describe("pictureCaption", () => {
       "shot \\[v2\\] \\`final\\`\\\\draft.png"
     );
     expect(pictureCaption("two\twords\r\nmore  here.png")).toBe("two words more here.png");
+  });
+});
+
+// The caption and title bounds, which keep a reader from rescanning a body of many `![` from
+// every one of them: a picture written the ordinary way still reads, and one whose caption or
+// title runs past its bound is no picture at all.
+describe("pictureSyntax", () => {
+  const address = "dispatch://LEGION-1/artifact/shot-png@v1";
+
+  test("reads the pictures a text shows, each address its first group", () => {
+    const text = `Here ![shot.png](${address}) and ![a\\]b.png](${address} "the shot").`;
+    expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([
+      address,
+      address,
+    ]);
+  });
+
+  test("reads a caption and a title that fill their bound", () => {
+    const text = `![${"c".repeat(512)}](${address} "${"t".repeat(256)}")`;
+    expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([address]);
+  });
+
+  test("reads no picture whose caption or title runs past its bound", () => {
+    const longCaption = `![${"c".repeat(513)}](${address})`;
+    const longTitle = `![shot.png](${address} "${"t".repeat(257)}")`;
+    expect([...longCaption.matchAll(pictureSyntax())]).toEqual([]);
+    expect([...longTitle.matchAll(pictureSyntax())]).toEqual([]);
+  });
+
+  // A line break ends a picture in markdown, so a caption that crosses one is text, not a
+  // caption: the picture on the second line still reads.
+  test("reads no caption across a line break", () => {
+    const text = `![shot\n.png](${address})\n![two.png](${address})`;
+    expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([address]);
   });
 });
