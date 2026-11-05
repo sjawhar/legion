@@ -2478,9 +2478,16 @@ jobs:
       # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
       # to launch.
       #
-      # The 8-minute budget is two bounded attempts of `apt-get update` at 60 s, two of the
-      # download at 90 s, about 60 s of unpack and about 90 s for the browser download: 450 s in
-      # all, rounded up. Healthy today is a 38 s median and a 102 s 95th percentile for the step.
+      # The 8-minute budget is the step's own retry arithmetic, not its measured maximum, which
+      # the new bounds make unreachable: two bounded attempts of `apt-get update` at 60 s, two of
+      # the download at 90 s, then the unpack, the browser download and the two apt simulations
+      # of the list check, none of which touch the Ubuntu mirror. Measured in job 127238648049,
+      # the slowest install this job has run, 613 of its 634 s were that mirror serving 114 MB at
+      # 186 kB/s; unpacking 181 packages and `playwright install` together took 14 s there, and
+      # in job 127214381394 Chromium, its headless shell and ffmpeg downloaded in 6 s. So the
+      # arithmetic is 120 + 180 s of bounded apt, 20 s of unpack, 90 s for the browsers and 30 s
+      # for the check: 440 s, rounded up to 8 min. Healthy today is a 38 s median and a 102 s
+      # 95th percentile for the whole step.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
@@ -2504,21 +2511,24 @@ jobs:
           # One retry, then the step fails by its own name rather than leaving the job's budget
           # to cancel the browser step after it. The first argument is what the log calls the
           # phase: a mirror that answers the second time costs one more bound, and one that
-          # never answers ends the step here.
+          # never answers ends the step here. `timeout` exits 124 when it killed the command, so
+          # the status separates a mirror that stalled from one that refused.
           twice() {
             local what=$1
             shift
             "$@" && return 0
-            echo "::warning::$what failed or timed out; one more attempt"
+            echo "::warning::$what failed with exit $? (124 is the timeout); one more attempt"
             "$@" && return 0
-            echo "::error::$what failed twice; the apt mirror is the suspect"
+            echo "::error::$what failed twice, the second time with exit $? (124 is the timeout);" \
+              "the apt mirror is the suspect"
             return 1
           }
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
-          # sudo holding it. $packages is left unquoted on purpose, to split into words.
+          # sudo holding it.
           twice "apt-get update" sudo timeout 60 apt-get update
           # Download only, so an attempt the timeout kills holds no dpkg lock and the retry is
           # free to start. It prints what it fetched, which is this step's own byte record.
+          # $packages is left unquoted on purpose, to split into words.
           twice "the package download" sudo timeout 90 apt-get install -y --no-install-recommends -d $packages
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
@@ -2527,23 +2537,44 @@ jobs:
           bunx playwright install chromium webkit firefox
           # Has the pinned list fallen behind Playwright? install-deps --dry-run simulates its
           # whole ubuntu24.04-x64 list against what is now installed, prints what is missing and
-          # exits 1 when anything is, which must not end the step.
+          # exits 1 when anything is, which must not end the step. It exits non-zero for its own
+          # failures too, so read the output rather than the status: a run that reports neither
+          # outcome checked nothing, and must not pass as a clean one.
           dry_run=$(bunx playwright install-deps --dry-run chromium webkit firefox 2>&1 || true)
           echo "$dry_run"
+          case "$dry_run" in
+            *"Missing system dependencies ("* | *"All system dependencies are installed."*) ;;
+            *) echo "::error::playwright install-deps --dry-run reported neither the packages it" \
+                 "found missing nor that all are installed, so it failed before it could check" \
+                 "the pinned list; its output is above"
+               exit 1 ;;
+          esac
           missing=$(printf '%s\n' "$dry_run" | awk '
             /^Missing system dependencies \([0-9]+\):$/ { reading = 1; next }
             reading && /^  [^ ]/ { print $1; next }
             reading { reading = 0 }' | sed '/^$/d' | sort -u)
           # What that missing set is expected to be: the closure of the four media packages the
           # list drops. A simulation needs no root. Both sides are read after the install, in
-          # this step, so the comparison cannot go stale.
-          dropped=$(apt-get install -s --no-install-recommends gstreamer1.0-libav \
-            gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60 |
-            awk '$1 == "Inst" { print $2 }' | sed '/^$/d' | sort -u)
+          # this step, so the comparison cannot go stale. The status is taken before the pipe,
+          # because this shell has errexit and no pipefail: a simulation that failed would
+          # otherwise leave an empty set and blame the pinned list for apt's failure.
+          simulated=$(apt-get install -s --no-install-recommends gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-good libavcodec60 2>&1) || {
+            echo "$simulated"
+            echo "::error::the simulated install of the four media packages this step drops" \
+              "failed, so what Playwright reports missing cannot be compared against it"
+            exit 1
+          }
+          dropped=$(printf '%s\n' "$simulated" | awk '$1 == "Inst" { print $2 }' | sed '/^$/d' | sort -u)
+          # Either side can be empty, and printf then writes one blank line: against a non-empty
+          # other side it is comm's only output and $( ) strips it, against an empty one the two
+          # blank lines match and -2 drops them. Both ways $unexpected ends up empty.
           unexpected=$(comm -23 <(printf '%s\n' "$missing") <(printf '%s\n' "$dropped"))
           if [ -n "$unexpected" ]; then
             echo "::error::Playwright now needs system packages this step's list does not hold:" \
-              "$(printf '%s ' $unexpected)"
+              "$(printf '%s ' $unexpected)" \
+              "- re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
+              "lib/coreBundle.js, as the comment above this step says."
             exit 1
           fi
           echo "The pinned list is current: every package Playwright reports missing is in the" \
@@ -2715,16 +2746,14 @@ jobs:
     #   every other step summed                                         68 s   94 s  135 s
     #   the whole job                                                  207 s  305 s  516 s
     #
-    # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
-    # next whole minute, with a floor of two minutes; an install step's budget comes from its own
-    # arithmetic instead. So 202 s x 1.15 = 232 s -> 4 min for the dashboard step, 13 s x 1.15 =
-    # 15 s -> the two-minute floor for the sign-in step, and 4 min for the install step, for the
-    # reason its own comment gives. The job budget is the sum of its step budgets plus the
-    # measured maximum of every step without one, rounded up: 4 + 4 + 2 min plus 135 s = 13 min.
-    #
-    # Budgets on the steps and not on the job alone, because a step the runner cancels at its own
-    # budget is a failed step rather than a cancelled job: the `if: failure()` upload below still
-    # runs, where a job budget cancelling the job leaves it unrun.
+    # The rule, and the reason the budgets sit on the steps rather than on the job alone, are the
+    # dispatch job's head's; this job states only what it measured and what that rule gives here.
+    # 202 s x 1.15 = 232 s -> 4 min for the dashboard step, 13 s x 1.15 = 15 s -> the two-minute
+    # floor for the sign-in step, and 4 min for the install step, for the reason its own comment
+    # gives. The job budget is the sum of its step budgets plus the measured maximum of every
+    # step without one, rounded up: 4 + 4 + 2 min plus 135 s = 13 min. The step budget that a
+    # cancellation preserves here is the `if: failure()` upload below, which a cancelled job
+    # leaves unrun.
     timeout-minutes: 13
     services:
       postgres:
@@ -2801,10 +2830,11 @@ jobs:
         # fonts-noto-color-emoji are on the image already. A row that later needs CJK or Thai
         # glyphs would fail visibly.
         #
-        # The 4-minute budget: this step downloads browsers only, Playwright's own download
-        # retries five times across mirrors inside it, and healthy today is a 20 s median and a
-        # 34 s 95th percentile, with a 339 s maximum that included the apt fetch this step no
-        # longer makes.
+        # The 4-minute budget: this step downloads browsers only, and Playwright's own download
+        # retries five times across mirrors inside it. Of the 339 s maximum above, measured in
+        # job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at 66.4 kB/s, which this
+        # step no longer asks for; Chromium, its headless shell and ffmpeg downloaded in 6 s
+        # there. Healthy today is a 20 s median and a 34 s 95th percentile for the whole step.
         timeout-minutes: 4
         run: bunx playwright install chromium
         working-directory: packages/dispatch
