@@ -364,24 +364,25 @@ func TestTheServedSetIsTheDocumentedSet(t *testing.T) {
 
 // fillPod gives a registry one reading of every series an issue pod serves.
 func fillPod(r *Registry) {
-	pair := Pair{Role: "implement", Kind: KindBuild}
+	pair := r.Pair("implement", KindBuild)
+	totals := r.Totals()
 	r.AddCPUSeconds(pair, 3)
 	r.SetAnonymousBytes(pair, 2<<20)
 	r.SetResidentBytes(pair, 4<<20)
-	r.SetVolumeBytes("issue", "disk", RoleShared, 8<<20)
-	r.SetPodMemoryBytes(900 << 20)
-	r.SetPodCPUSeconds(238)
-	r.SetPodProcessMemoryBytes(700 << 20)
-	r.SetPodSharedMemoryBytes(57344)
+	r.SetVolumeBytes(r.Volume("issue", "disk", RoleShared), 8<<20)
+	r.SetTotalMemoryBytes(totals, 900<<20)
+	r.SetTotalCPUSeconds(totals, 238)
+	r.SetProcessMemoryBytes(totals, 700<<20)
+	r.SetSharedMemoryBytes(totals, 57344)
 }
 
 // fillNode gives a registry one reading of every series node mode serves.
 func fillNode(r *Registry) {
 	pod := GradePod{Pod: "grade-7", Namespace: "grade", Queue: "grade-queue", Owner: "lean"}
-	r.AddGradeCPUSeconds(pod, KindBuild, 12)
-	r.SetGradeResidentBytes(pod, KindBuild, 64<<20)
-	r.SetGradePodMemoryBytes(pod, 128<<20)
-	r.SetGradePodCPUSeconds(pod, 41)
+	r.AddCPUSeconds(r.GradeKind(pod, KindBuild), 12)
+	r.SetResidentBytes(r.GradeKind(pod, KindBuild), 64<<20)
+	r.SetTotalMemoryBytes(r.GradeTotals(pod), 128<<20)
+	r.SetTotalCPUSeconds(r.GradeTotals(pod), 41)
 }
 
 // fillSelf gives a registry one reading of every series the sampler serves about itself.
@@ -400,7 +401,8 @@ func fillSelf(r *Registry) {
 func TestAPeakRisesWithTheValueAndIsResetByAScrape(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
-	pair := Pair{Role: "implement", Kind: KindTest}
+	pair := registry.Pair("implement", KindTest)
+	totals := registry.Totals()
 	labels := []string{"INFRA", "INFRA-1208", "implement", string(KindTest)}
 
 	registry.SetResidentBytes(pair, 100)
@@ -408,10 +410,10 @@ func TestAPeakRisesWithTheValueAndIsResetByAScrape(t *testing.T) {
 	registry.SetResidentBytes(pair, 200)
 	registry.SetAnonymousBytes(pair, 50)
 	registry.SetAnonymousBytes(pair, 40)
-	registry.SetPodMemoryBytes(900)
-	registry.SetPodMemoryBytes(500)
-	registry.SetPodProcessMemoryBytes(800)
-	registry.SetPodProcessMemoryBytes(400)
+	registry.SetTotalMemoryBytes(totals, 900)
+	registry.SetTotalMemoryBytes(totals, 500)
+	registry.SetProcessMemoryBytes(totals, 800)
+	registry.SetProcessMemoryBytes(totals, 400)
 
 	first := scrape(t, registry)
 	if got := first.value(t, memoryResidentBytes, labels...); got != 200 {
@@ -459,11 +461,13 @@ func TestAGradePodsPeakIsResetByAScrape(t *testing.T) {
 	registry := NewNodeRegistry(at.now)
 	pod := GradePod{Pod: "grade-7", Namespace: "grade", Queue: "grade-queue", Owner: "lean"}
 	labels := []string{"grade-7", "grade", string(KindBuild), "grade-queue", "lean"}
+	kind := registry.GradeKind(pod, KindBuild)
+	totals := registry.GradeTotals(pod)
 
-	registry.SetGradeResidentBytes(pod, KindBuild, 900)
-	registry.SetGradeResidentBytes(pod, KindBuild, 300)
-	registry.SetGradePodMemoryBytes(pod, 1000)
-	registry.SetGradePodMemoryBytes(pod, 400)
+	registry.SetResidentBytes(kind, 900)
+	registry.SetResidentBytes(kind, 300)
+	registry.SetTotalMemoryBytes(totals, 1000)
+	registry.SetTotalMemoryBytes(totals, 400)
 
 	first := scrape(t, registry)
 	if got := first.value(t, gradeMemoryResidentPeakBytes, labels...); got != 900 {
@@ -487,8 +491,8 @@ func TestAGradePodsPeakIsResetByAScrape(t *testing.T) {
 func TestAPairLeavesTheOutputAnHourAfterItsLastProcess(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
-	old := Pair{Role: "implement", Kind: KindBuild}
-	recent := Pair{Role: "implement", Kind: KindAgent}
+	old := registry.Pair("implement", KindBuild)
+	recent := registry.Pair("implement", KindAgent)
 
 	registry.AddCPUSeconds(old, 30)
 	registry.SetResidentBytes(old, 1<<20)
@@ -528,8 +532,8 @@ func TestAGradePodsKindLeavesTheOutputAfterAnHour(t *testing.T) {
 	at := newClock()
 	registry := NewNodeRegistry(at.now)
 	pod := GradePod{Pod: "grade-7", Namespace: "grade", Queue: "grade-queue", Owner: "lean"}
-	registry.AddGradeCPUSeconds(pod, KindBuild, 12)
-	registry.SetGradePodMemoryBytes(pod, 1<<20)
+	registry.AddCPUSeconds(registry.GradeKind(pod, KindBuild), 12)
+	registry.SetTotalMemoryBytes(registry.GradeTotals(pod), 1<<20)
 
 	at.advance(time.Hour + time.Second)
 	read := scrape(t, registry)
@@ -540,7 +544,7 @@ func TestAGradePodsKindLeavesTheOutputAfterAnHour(t *testing.T) {
 		t.Error("the pod's own totals left the output with its kinds, and only the API server takes a pod away")
 	}
 
-	registry.ForgetGradePod(pod)
+	registry.ForgetOwner(registry.GradeTotals(pod))
 	read = scrape(t, registry)
 	if read.has(gradePodMemoryBytes, "grade-7", "grade", "grade-queue", "lean") {
 		t.Error("a pod that is gone is still served")
@@ -554,16 +558,17 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
 	fillSelf(registry)
-	registry.SetPodMemoryBytes(900 << 20)
-	registry.SetPodCPUSeconds(238)
-	registry.SetPodProcessMemoryBytes(700 << 20)
-	registry.SetPodSharedMemoryBytes(57344)
-	registry.SetVolumeBytes("issue", "disk", RoleShared, 8<<20)
+	totals := registry.Totals()
+	registry.SetTotalMemoryBytes(totals, 900<<20)
+	registry.SetTotalCPUSeconds(totals, 238)
+	registry.SetProcessMemoryBytes(totals, 700<<20)
+	registry.SetSharedMemoryBytes(totals, 57344)
+	registry.SetVolumeBytes(registry.Volume("issue", "disk", RoleShared), 8<<20)
 
 	// Forty pairs of five series each, one minute apart, is 200 droppable series beside the
 	// eighteen the cap may never drop and the one volume.
 	for i := range 40 {
-		pair := Pair{Role: "implement", Kind: Kind("k" + strconv.Itoa(100+i))}
+		pair := registry.Pair("implement", Kind("k"+strconv.Itoa(100+i)))
 		registry.AddCPUSeconds(pair, 1)
 		registry.SetAnonymousBytes(pair, 1<<20)
 		registry.SetResidentBytes(pair, 2<<20)
@@ -612,17 +617,18 @@ func TestTheCapDropsVolumesLastAndNeverTheTotals(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
 	fillSelf(registry)
-	registry.SetPodMemoryBytes(900 << 20)
-	registry.SetPodCPUSeconds(238)
-	registry.SetPodProcessMemoryBytes(700 << 20)
-	registry.SetPodSharedMemoryBytes(57344)
+	totals := registry.Totals()
+	registry.SetTotalMemoryBytes(totals, 900<<20)
+	registry.SetTotalCPUSeconds(totals, 238)
+	registry.SetProcessMemoryBytes(totals, 700<<20)
+	registry.SetSharedMemoryBytes(totals, 57344)
 
-	pair := Pair{Role: "implement", Kind: KindBuild}
+	pair := registry.Pair("implement", KindBuild)
 	registry.AddCPUSeconds(pair, 1)
 	registry.SetResidentBytes(pair, 2<<20)
 	at.advance(time.Minute)
 	for i := range 190 {
-		registry.SetVolumeBytes("volume-"+strconv.Itoa(100+i), "memory", RoleShared, 1<<20)
+		registry.SetVolumeBytes(registry.Volume("volume-"+strconv.Itoa(100+i), "memory", RoleShared), 1<<20)
 	}
 
 	// Eighteen series the cap may never drop, three of the one pair and 190 volumes is 211.
@@ -669,11 +675,11 @@ func TestTheCapIsPerGradePod(t *testing.T) {
 	fillSelf(registry)
 	for i := range 40 {
 		pod := GradePod{Pod: "grade-" + strconv.Itoa(100+i), Namespace: "grade", Queue: "q", Owner: "lean"}
-		registry.SetGradePodMemoryBytes(pod, 1<<20)
-		registry.SetGradePodCPUSeconds(pod, 1)
+		registry.SetTotalMemoryBytes(registry.GradeTotals(pod), 1<<20)
+		registry.SetTotalCPUSeconds(registry.GradeTotals(pod), 1)
 		for _, kind := range []Kind{KindBuild, KindTest, KindOther} {
-			registry.AddGradeCPUSeconds(pod, kind, 1)
-			registry.SetGradeResidentBytes(pod, kind, 1<<20)
+			registry.AddCPUSeconds(registry.GradeKind(pod, kind), 1)
+			registry.SetResidentBytes(registry.GradeKind(pod, kind), 1<<20)
 		}
 	}
 
@@ -695,12 +701,12 @@ func TestTheExpositionIsSortedAndStable(t *testing.T) {
 	fillSelf(registry)
 	fillPod(registry)
 	for _, name := range []string{"work", "cache", "issue", "home"} {
-		registry.SetVolumeBytes(name, "memory", RoleShared, 1<<20)
+		registry.SetVolumeBytes(registry.Volume(name, "memory", RoleShared), 1<<20)
 	}
 	for _, role := range []string{"review", "implement", "plan"} {
 		for _, kind := range []Kind{KindTool, KindAgent, KindBuild} {
-			registry.AddCPUSeconds(Pair{Role: role, Kind: kind}, 1)
-			registry.SetResidentBytes(Pair{Role: role, Kind: kind}, 1<<20)
+			registry.AddCPUSeconds(registry.Pair(role, kind), 1)
+			registry.SetResidentBytes(registry.Pair(role, kind), 1<<20)
 		}
 	}
 
@@ -749,7 +755,7 @@ func TestALabelValueIsEscaped(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
 	name := "a\"b\\c\nd"
-	registry.SetVolumeBytes(name, "memory", RoleShared, 42)
+	registry.SetVolumeBytes(registry.Volume(name, "memory", RoleShared), 42)
 
 	read := scrape(t, registry)
 	want := `legion_sampler_volume_used_bytes{project="INFRA",issue="INFRA-1208",volume="a\"b\\c\nd",medium="memory",role="shared"} 42`
@@ -770,21 +776,21 @@ func TestALabelValueIsEscaped(t *testing.T) {
 func TestACounterIsNeverServedLowerThanBefore(t *testing.T) {
 	at := newClock()
 	registry := NewPodRegistry("INFRA", "INFRA-1208", at.now)
-	pair := Pair{Role: "implement", Kind: KindBuild}
+	pair := registry.Pair("implement", KindBuild)
+	totals := registry.Totals()
 	labels := []string{"INFRA", "INFRA-1208", "implement", string(KindBuild)}
 
 	registry.AddCPUSeconds(pair, 10)
-	registry.SetPodCPUSeconds(100)
+	registry.SetTotalCPUSeconds(totals, 100)
 	registry.SetSelfCPUSeconds(5)
 	registry.SetRestarts(3)
-	registry.SetReadErrors(SourceProc, 7)
+	registry.AddReadError(SourceProc)
 	first := scrape(t, registry)
 
 	registry.AddCPUSeconds(pair, -4)
-	registry.SetPodCPUSeconds(2)
+	registry.SetTotalCPUSeconds(totals, 2)
 	registry.SetSelfCPUSeconds(1)
 	registry.SetRestarts(0)
-	registry.SetReadErrors(SourceProc, 0)
 	second := scrape(t, registry)
 
 	for _, test := range []struct {
@@ -796,7 +802,7 @@ func TestACounterIsNeverServedLowerThanBefore(t *testing.T) {
 		{podCPUSecondsTotal, []string{"INFRA", "INFRA-1208"}, 100},
 		{selfCPUSecondsTotal, nil, 5},
 		{restartsTotal, nil, 3},
-		{readErrorsTotal, []string{string(SourceProc)}, 7},
+		{readErrorsTotal, []string{string(SourceProc)}, 1},
 	} {
 		if got := first.value(t, test.id, test.labels...); got != test.want {
 			t.Errorf("%s is first served as %v, not the %v it was given", metrics[test.id].name, got, test.want)
@@ -807,7 +813,7 @@ func TestACounterIsNeverServedLowerThanBefore(t *testing.T) {
 	}
 
 	registry.AddCPUSeconds(pair, 2)
-	registry.SetPodCPUSeconds(120)
+	registry.SetTotalCPUSeconds(totals, 120)
 	third := scrape(t, registry)
 	if got := third.value(t, cpuSecondsTotal, labels...); got != 12 {
 		t.Errorf("the pair's counter is %v, not the 12 of a rise charged on top of its 10", got)
@@ -854,7 +860,7 @@ func livePodRegistry() *Registry {
 	r := NewPodRegistry("INFRA", "INFRA-1208", nil)
 	fillSelf(r)
 	fillPod(r)
-	tool := Pair{Role: "implement", Kind: KindTool}
+	tool := r.Pair("implement", KindTool)
 	r.AddCPUSeconds(tool, 16458.18)
 	r.SetAnonymousBytes(tool, 142483456)
 	r.SetResidentBytes(tool, 187703296)

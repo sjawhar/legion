@@ -625,6 +625,41 @@ func useAnonymousReader(t *testing.T) *[]int {
 	return read
 }
 
+// A node runs hundreds of processes no series will ever carry — the kubelet, the container
+// runtime, the sampler itself — and a command line read for each of them would cost the node an
+// open for nothing. So a pass reads one only for a process it could place in a pod of this node,
+// and only on the pass that first saw it: a process keeps the program it runs, where an issue
+// pod's pass waits for a process's second sighting before it reads one at all (Walk.Next).
+func TestNodeModeReadsACommandLineOnlyForAPodsOwnProcesses(t *testing.T) {
+	f := newNodeFixture(t)
+	f.addPod(nodePodObject("grade-run-7-ab12", buildPodUID, map[string]string{ownerLabel: "alice"}))
+	f.writeProcesses(
+		nodeProc{fakeProcess: fakeProcess{pid: 100, parent: 1, start: 1000, own: 50, pages: 300,
+			args: []string{"go", "build", "./..."}},
+			cgroup: container(systemdPod(buildPodUID, "burstable"), "aa11")},
+		nodeProc{fakeProcess: fakeProcess{pid: 200, parent: 1, start: 1000, own: 25, pages: 100,
+			args: []string{"/usr/bin/containerd"}},
+			cgroup: "/system.slice/containerd.service"},
+	)
+	read := cmdlineReads(t)
+
+	c := f.collector(f.options())
+	f.list(c)
+	c.pass(0)
+	c.pass(2)
+
+	if want := []int{100}; !slices.Equal(*read, want) {
+		t.Errorf("the passes read a command line for %v, want the %v of this node's own pods", *read, want)
+	}
+	// The kind that read gave stands, and the process of no pod is charged to nobody.
+	e := f.scrape()
+	wantValue(t, e, 0.5, gradeCPUSecondsTotal,
+		"grade-run-7-ab12", gradeNamespace, string(KindBuild), "", "alice")
+	if got := e.value(t, readErrorsTotal, string(SourceProc)); got != 0 {
+		t.Errorf("%g reads of /proc failed, want none at all:\n%s", got, e.text)
+	}
+}
+
 // A node whose kubelet runs the legacy hierarchy is refused and counted, never served as a node
 // of pods that spend nothing. Under cgroup v1 a pod's own cgroup path carries no controller
 // segment, so the directory that path names at the mount root holds neither cpu.stat nor

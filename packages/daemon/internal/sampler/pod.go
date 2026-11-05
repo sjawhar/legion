@@ -262,8 +262,15 @@ type podCollector struct {
 	// meminfo, the two cgroup files of its layout, and the stat and smaps of each process
 	// the walk below is holding. The walk reads its own stats through it, so one reader
 	// holds one descriptor of each file however many of this collector's readings want it.
-	reader   *procread.Reader
-	walk     *Walk
+	reader *procread.Reader
+	// walk is the process pass, which both profiles run, and attribution the half of it
+	// that is an issue pod's: the roles file this collector reads before every pass, and
+	// the kinds of dispatch://INFRA-1208/spec#b-a-kinds.
+	walk        *Walk
+	attribution *podAttribution
+	// totals is the key the pod's own cgroup readings are served under, which is this pod's
+	// project and issue and never moves.
+	totals   Series
 	pageSize int64
 	// totalsEvery, walkEvery and smapsEvery are those three rates in ticks of podInterval,
 	// and totalsFloor is how many ticks the memory totals may be made to wait: totalsSlowed
@@ -306,9 +313,6 @@ type podCollector struct {
 	lastWalk, lastTotals         int64
 	walkCost                     float64
 
-	// procErrors are the /proc reads this collector failed, beside the walk's own count.
-	procErrors uint64
-
 	// groups is the cgroup profile's memory of each command cgroup, including cgroups that are
 	// gone: a removed cgroup keeps the last values read until the hour window drops it, which
 	// is what docs/sampler-metrics.md promises whoever writes those cgroups.
@@ -317,13 +321,13 @@ type podCollector struct {
 	logged map[ReadSource]string
 }
 
-// groupReading is one command cgroup as the passes have read it: the pair its series are charged
-// to, the last reading of its files, the most it is known to have held within this scrape's
-// window, and when it was last there to be read. The next pass's rise is taken from that last
-// reading itself — the CPU already charged is its CPUSeconds and the peak already seen its
-// MemoryPeakBytes — so neither is held a second time beside it.
+// groupReading is one command cgroup as the passes have read it: the owner and kind its series
+// are charged to, the last reading of its files, the most it is known to have held within this
+// scrape's window, and when it was last there to be read. The next pass's rise is taken from
+// that last reading itself — the CPU already charged is its CPUSeconds and the peak already
+// seen its MemoryPeakBytes — so neither is held a second time beside it.
 type groupReading struct {
-	pair   Pair
+	work   Work
 	group  procread.Group
 	within int64
 	seen   time.Time
@@ -343,7 +347,7 @@ func newPodCollector(opts PodOptions) (*podCollector, error) {
 		layout:      layout,
 		cgroups:     cgroupTreePresent(opts.CgroupRoot),
 		reader:      reader,
-		walk:        NewWalk(opts.Root, opts.Rules, reader),
+		totals:      opts.Registry.Totals(),
 		pageSize:    int64(os.Getpagesize()),
 		totalsEvery: ticksPer(totalsInterval, podInterval),
 		walkEvery:   ticksPer(walkInterval, podInterval),
@@ -354,6 +358,10 @@ func newPodCollector(opts PodOptions) (*podCollector, error) {
 		groups:      map[string]*groupReading{},
 		logged:      map[ReadSource]string{},
 	}
+	// The walk reports what it could not read through this collector's own failed, which is
+	// where every other read that fails is counted and logged too.
+	c.attribution = newPodAttribution(opts.Root, opts.Rules, c.failed)
+	c.walk = NewWalk(opts.Root, reader, c.attribution, c.failed)
 	c.totalsFloor = totalsSlowed * c.totalsEvery
 	// Both readings stand their own floor behind the first tick, so tick zero reads
 	// everything however much the sampler's own first reading cost (readsWalk, readsTotals).
@@ -545,7 +553,7 @@ func (c *podCollector) readCPUTotal() {
 		c.noTotals(err)
 		return
 	}
-	c.opts.Registry.SetPodCPUSeconds(cpu)
+	c.opts.Registry.SetTotalCPUSeconds(c.totals, cpu)
 }
 
 // readMemoryTotals is the memory the pod holds and the memory its processes hold: the pod
@@ -566,7 +574,7 @@ func (c *podCollector) readMemoryTotals() {
 	if err != nil {
 		c.noTotals(err)
 	} else {
-		c.opts.Registry.SetPodMemoryBytes(memory)
+		c.opts.Registry.SetTotalMemoryBytes(c.totals, memory)
 	}
 
 	info, err := readMemInfo(c.reader)
@@ -584,8 +592,8 @@ func (c *podCollector) readMemoryTotals() {
 	if c.layout == procread.LayoutV2 {
 		process += info.Shmem
 	}
-	c.opts.Registry.SetPodProcessMemoryBytes(process)
-	c.opts.Registry.SetPodSharedMemoryBytes(info.Shmem)
+	c.opts.Registry.SetProcessMemoryBytes(c.totals, process)
+	c.opts.Registry.SetSharedMemoryBytes(c.totals, info.Shmem)
 }
 
 // noTotals answers for a reading of the pod's own cgroup that did not come: a read that failed is
@@ -640,29 +648,34 @@ func readSelf(reader *procread.Reader, pageSize int64, registry *Registry, faile
 // stat, and then the numbers of whichever profile this pod is. The walk runs under both profiles,
 // because the cgroup profile reads a command's kind from the processes in its cgroup and only the
 // walk knows what a process is doing.
+//
+// The roles file is handed to the walk's attribution rather than to the walk, since which role
+// owns a process is the one thing an issue pod's pass decides that a node's does not.
 func (c *podCollector) readProcesses() {
 	c.readRoles()
-	pass, err := c.walk.Next(c.roles)
+	c.attribution.roles = c.roles
+	pass, err := c.walk.Next()
 	if err != nil {
 		c.failed(SourceProc, err)
 		return
 	}
-	c.publishProcErrors()
 	c.processes = pass.Processes
 	if c.cgroups {
 		c.readCgroups(pass)
 		return
 	}
-	for pair, spent := range pass.CPUSeconds {
-		c.opts.Registry.AddCPUSeconds(pair, spent)
+	for work, spent := range pass.CPUSeconds {
+		c.opts.Registry.AddCPUSeconds(c.series(work), spent)
 	}
-	resident := map[Pair]int64{}
-	for _, process := range pass.Processes {
-		resident[process.Pair] += process.ResidentBytes
+	for work, bytes := range pass.ResidentBytes {
+		c.opts.Registry.SetResidentBytes(c.series(work), bytes)
 	}
-	for pair, bytes := range resident {
-		c.opts.Registry.SetResidentBytes(pair, bytes)
-	}
+}
+
+// series is the key one pair of this pod's work is served under: its role and its kind, beside
+// the project and the issue the registry carries itself.
+func (c *podCollector) series(work Work) Series {
+	return c.opts.Registry.Pair(work.Owner, work.Kind)
 }
 
 // readRoles takes the roles file as it stands for this pass. A file that is missing or half
@@ -708,7 +721,8 @@ func (c *podCollector) readVolumes() {
 			}
 			c.reported[volume.Name] = true
 		}
-		c.opts.Registry.SetVolumeBytes(volume.Name, volume.Medium, volume.owner(), used)
+		c.opts.Registry.SetVolumeBytes(
+			c.opts.Registry.Volume(volume.Name, volume.Medium, volume.owner()), used)
 	}
 }
 
@@ -762,7 +776,7 @@ func (c *podCollector) readSmaps() {
 	order := c.smapsOrder()
 	began, measured := c.selfCPUSeconds()
 	budget := c.smapsLeft(began, measured)
-	anonymous := map[Pair]int64{}
+	anonymous := map[Work]int64{}
 	read := 0
 	for budget > 0 && read < len(order) {
 		process := order[read]
@@ -775,7 +789,7 @@ func (c *podCollector) readSmaps() {
 		case err != nil:
 			c.failed(SourceProc, err)
 		default:
-			anonymous[process.Pair] += bytes
+			anonymous[process.Work] += bytes
 		}
 		// The budget is read after the process rather than before it, so a window with
 		// anything at all to spend reaches at least one process and the pass always moves
@@ -789,8 +803,8 @@ func (c *podCollector) readSmaps() {
 	// Only the pairs this window reached are set: a pair no process of which was read keeps the
 	// value of the window that last read one, which is a reading of its memory from ten or
 	// twenty seconds ago rather than a zero it never held.
-	for pair, bytes := range anonymous {
-		c.opts.Registry.SetAnonymousBytes(pair, bytes)
+	for work, bytes := range anonymous {
+		c.opts.Registry.SetAnonymousBytes(c.series(work), bytes)
 	}
 	c.carried = make([]int, 0, len(order)-read)
 	for _, process := range order[read:] {
@@ -908,7 +922,7 @@ func (c *podCollector) readCgroups(pass Pass) {
 	}
 	kinds := make(map[int]Kind, len(pass.Processes))
 	for _, process := range pass.Processes {
-		kinds[process.PID] = process.Pair.Kind
+		kinds[process.PID] = process.Work.Kind
 	}
 	// A cgroup this pass does not read holds what it held: the peak it is known to have
 	// reached within this scrape's window is its last memory reading and nothing above it.
@@ -928,7 +942,7 @@ func (c *podCollector) readCgroups(pass Pass) {
 			reading = &groupReading{}
 			c.groups[name] = reading
 		}
-		reading.pair = Pair{Role: c.groupRole(name), Kind: c.groupKind(dir, kinds, reading.pair.Kind)}
+		reading.work = Work{Owner: c.groupRole(name), Kind: c.groupKind(dir, kinds, reading.work.Kind)}
 		// memory.peak is the most the cgroup has ever held. Where it has risen since the
 		// last pass, that much was held since the last pass, which is what the registry's
 		// peak series is for; where it has not, the reading of this moment is all this
@@ -946,7 +960,7 @@ func (c *podCollector) readCgroups(pass Pass) {
 		}
 		reading.group = group
 		reading.seen = now
-		c.opts.Registry.AddCPUSeconds(reading.pair, rise)
+		c.opts.Registry.AddCPUSeconds(c.series(reading.work), rise)
 	}
 	c.chargeCgroupMemory(now)
 }
@@ -956,29 +970,29 @@ func (c *podCollector) readCgroups(pass Pass) {
 // whose series have left the registry has no use for the last reading of a cgroup that ended an
 // hour ago, and that is what bounds this map.
 func (c *podCollector) chargeCgroupMemory(now time.Time) {
-	resident := map[Pair]int64{}
-	peak := map[Pair]int64{}
-	anonymous := map[Pair]int64{}
+	resident := map[Work]int64{}
+	peak := map[Work]int64{}
+	anonymous := map[Work]int64{}
 	for name, reading := range c.groups {
 		if now.Sub(reading.seen) > activeWindow {
 			delete(c.groups, name)
 			continue
 		}
-		resident[reading.pair] += reading.group.MemoryBytes
-		peak[reading.pair] += reading.within
-		anonymous[reading.pair] += reading.group.AnonBytes
+		resident[reading.work] += reading.group.MemoryBytes
+		peak[reading.work] += reading.within
+		anonymous[reading.work] += reading.group.AnonBytes
 	}
-	for pair, bytes := range resident {
+	for work, bytes := range resident {
 		// The peak goes in first and the reading of this moment second: the registry keeps
 		// the most it was handed since the last scrape beside the last value handed to it,
 		// so this serves the memory the pair holds now and the most it held in between.
-		if high := peak[pair]; high > bytes {
-			c.opts.Registry.SetResidentBytes(pair, high)
+		if high := peak[work]; high > bytes {
+			c.opts.Registry.SetResidentBytes(c.series(work), high)
 		}
-		c.opts.Registry.SetResidentBytes(pair, bytes)
+		c.opts.Registry.SetResidentBytes(c.series(work), bytes)
 	}
-	for pair, bytes := range anonymous {
-		c.opts.Registry.SetAnonymousBytes(pair, bytes)
+	for work, bytes := range anonymous {
+		c.opts.Registry.SetAnonymousBytes(c.series(work), bytes)
 	}
 }
 
@@ -1027,25 +1041,14 @@ func (c *podCollector) groupKind(dir string, kinds map[int]Kind, last Kind) Kind
 // every reading here is independent of every other, and a pod whose volumes cannot be read still
 // reports its CPU.
 //
-// A /proc failure is counted beside the walk's own, which the walk keeps itself, so that the two
-// counts are one number that only rises; the other sources are counted one failure at a time.
+// The process walk reports through this too, which is why it keeps no count of its own: there is
+// one number for the /proc reads that failed and one place that counts them.
 func (c *podCollector) failed(source ReadSource, err error) {
-	if source == SourceProc {
-		c.procErrors++
-		c.publishProcErrors()
-	} else {
-		c.opts.Registry.AddReadError(source)
-	}
+	c.opts.Registry.AddReadError(source)
 	message := fmt.Sprintf("sampler: %s read failed: %v", source, err)
 	if c.logged[source] == message {
 		return
 	}
 	c.logged[source] = message
 	c.opts.Log(message)
-}
-
-// publishProcErrors serves the /proc reads that failed: the walk's own count, which it keeps
-// between passes, and this collector's.
-func (c *podCollector) publishProcErrors() {
-	c.opts.Registry.SetReadErrors(SourceProc, c.procErrors+c.walk.ReadErrors())
 }

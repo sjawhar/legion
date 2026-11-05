@@ -115,9 +115,18 @@ func statLine(process fakeProcess) string {
 	return fmt.Sprintf("%d (%s) %s\n", process.pid, comm, strings.Join(fields, " "))
 }
 
-// newWalk is a walk of the fixture's own /proc, reading through a reader of its own whose
-// descriptors the test releases when it ends — the reader a collector hands its walk.
-func newWalk(t *testing.T, root string, rules Rules) *Walk {
+// testWalk is a walk of the fixture's own /proc with the attribution an issue pod's collector
+// gives it, and the reads it reported as failed: a collector counts those as
+// legion_sampler_read_errors_total{source="proc"}, and a test of the walk alone holds them here.
+type testWalk struct {
+	*Walk
+	attribution *podAttribution
+	failures    []error
+}
+
+// newWalk is that walk, reading through a reader of its own whose descriptors the test releases
+// when it ends — the reader a collector hands its walk.
+func newWalk(t *testing.T, root string, rules Rules) *testWalk {
 	t.Helper()
 	reader := procread.NewReader(root, procread.DetectLayout(root))
 	t.Cleanup(func() {
@@ -125,14 +134,20 @@ func newWalk(t *testing.T, root string, rules Rules) *Walk {
 			t.Errorf("the walk's reader could not be closed: %v", err)
 		}
 	})
-	return NewWalk(root, rules, reader)
+	walk := &testWalk{}
+	walk.attribution = newPodAttribution(root, rules, walk.failed)
+	walk.Walk = NewWalk(root, reader, walk.attribution, walk.failed)
+	return walk
 }
 
-// next is one pass over the fixture, which must never fail: a pass fails only where /proc itself
-// cannot be listed.
-func next(t *testing.T, walk *Walk, roles map[string]int) Pass {
+func (w *testWalk) failed(_ ReadSource, err error) { w.failures = append(w.failures, err) }
+
+// next is one pass over the fixture, with the roles file as it stands for that pass, which must
+// never fail: a pass fails only where /proc itself cannot be listed.
+func next(t *testing.T, walk *testWalk, roles map[string]int) Pass {
 	t.Helper()
-	pass, err := walk.Next(roles)
+	walk.attribution.roles = roles
+	pass, err := walk.Next()
 	if err != nil {
 		t.Fatalf("the pass failed: %v", err)
 	}
@@ -144,7 +159,7 @@ func next(t *testing.T, walk *Walk, roles map[string]int) Pass {
 // describes. The pass that first sees a process reads no command line of it and hands it its
 // nearest ancestor's kind (Walk.Next), which the two tests below are about and the rest take as
 // read.
-func settled(t *testing.T, walk *Walk, roles map[string]int) Pass {
+func settled(t *testing.T, walk *testWalk, roles map[string]int) Pass {
 	t.Helper()
 	next(t, walk, roles)
 	return next(t, walk, roles)
@@ -176,25 +191,25 @@ func cmdlineReads(t *testing.T) *[]int {
 	return read
 }
 
-// pairOf is the role and kind the pass gave this process, and a failure where the pass did not
+// workOf is the owner and kind the pass gave this process, and a failure where the pass did not
 // report it at all.
-func pairOf(t *testing.T, pass Pass, pid int) Pair {
+func workOf(t *testing.T, pass Pass, pid int) Work {
 	t.Helper()
 	for _, process := range pass.Processes {
 		if process.PID == pid {
-			return process.Pair
+			return process.Work
 		}
 	}
 	t.Fatalf("the pass did not report process %d", pid)
-	return Pair{}
+	return Work{}
 }
 
-// wantCPU fails unless the pass charged this pair these seconds. The comparison allows the last
+// wantCPU fails unless the pass charged this work these seconds. The comparison allows the last
 // bits of a division, since a reaped rise is split in proportion and not in whole ticks.
-func wantCPU(t *testing.T, pass Pass, pair Pair, want float64) {
+func wantCPU(t *testing.T, pass Pass, work Work, want float64) {
 	t.Helper()
-	if got := pass.CPUSeconds[pair]; math.Abs(got-want) > 1e-9 {
-		t.Errorf("the pass charged %v %g seconds, want %g", pair, got, want)
+	if got := pass.CPUSeconds[work]; math.Abs(got-want) > 1e-9 {
+		t.Errorf("the pass charged %v %g seconds, want %g", work, got, want)
 	}
 }
 
@@ -243,28 +258,28 @@ func TestAPassGivesEveryProcessItsRoleAndItsKind(t *testing.T) {
 
 	for _, test := range []struct {
 		pid  int
-		want Pair
+		want Work
 		why  string
 	}{
-		{1, Pair{RoleShared, KindShared}, "the launcher is in no role's subtree"},
-		{2, Pair{RoleShared, KindShared}, "the sampler is its own shared process"},
-		{3, Pair{RoleShared, KindShared}, "the test Postgres is shared"},
-		{4, Pair{RoleShared, KindBuild}, "a stray build a person left behind is still a build"},
-		{5, Pair{RoleShared, KindBuild}, "and so is the compiler that build started"},
-		{10, Pair{"implementer", KindAgent}, "the role-init process is the role's own"},
-		{11, Pair{"implementer", KindAgent}, "and so is the worker-shim it runs"},
-		{12, Pair{"implementer", KindAgent}, "and the harness the shim runs"},
-		{13, Pair{"implementer", KindTool}, "a shell the harness started that no rule names"},
-		{14, Pair{"implementer", KindBuild}, "the build that shell started"},
-		{15, Pair{"implementer", KindBuild}, "and the compiler the build started"},
-		{16, Pair{"implementer", KindTool}, "a language server is a tool"},
-		{17, Pair{"implementer", KindTest}, "a shell told to test and then build is a test run"},
-		{18, Pair{"implementer", KindTest}, "and the linker that test run started"},
-		{20, Pair{"reviewer", KindAgent}, "the second role's init"},
-		{21, Pair{"reviewer", KindAgent}, "the Claude harness of that role"},
-		{22, Pair{"reviewer", KindTool}, "and what that harness ran"},
+		{1, Work{RoleShared, KindShared}, "the launcher is in no role's subtree"},
+		{2, Work{RoleShared, KindShared}, "the sampler is its own shared process"},
+		{3, Work{RoleShared, KindShared}, "the test Postgres is shared"},
+		{4, Work{RoleShared, KindBuild}, "a stray build a person left behind is still a build"},
+		{5, Work{RoleShared, KindBuild}, "and so is the compiler that build started"},
+		{10, Work{"implementer", KindAgent}, "the role-init process is the role's own"},
+		{11, Work{"implementer", KindAgent}, "and so is the worker-shim it runs"},
+		{12, Work{"implementer", KindAgent}, "and the harness the shim runs"},
+		{13, Work{"implementer", KindTool}, "a shell the harness started that no rule names"},
+		{14, Work{"implementer", KindBuild}, "the build that shell started"},
+		{15, Work{"implementer", KindBuild}, "and the compiler the build started"},
+		{16, Work{"implementer", KindTool}, "a language server is a tool"},
+		{17, Work{"implementer", KindTest}, "a shell told to test and then build is a test run"},
+		{18, Work{"implementer", KindTest}, "and the linker that test run started"},
+		{20, Work{"reviewer", KindAgent}, "the second role's init"},
+		{21, Work{"reviewer", KindAgent}, "the Claude harness of that role"},
+		{22, Work{"reviewer", KindTool}, "and what that harness ran"},
 	} {
-		if got := pairOf(t, pass, test.pid); got != test.want {
+		if got := workOf(t, pass, test.pid); got != test.want {
 			t.Errorf("process %d is %v, want %v: %s", test.pid, got, test.want, test.why)
 		}
 	}
@@ -321,20 +336,20 @@ func TestAHarnessPromptNamingAToolchainIsNoBuild(t *testing.T) {
 
 	for _, test := range []struct {
 		pid  int
-		want Pair
+		want Work
 		why  string
 	}{
-		{12, Pair{"implementer", KindAgent}, "the harness is the role's own machinery"},
-		{13, Pair{"implementer", KindTool}, "a shell under the harness that no rule names"},
-		{14, Pair{"implementer", KindTool}, "and what that shell started"},
+		{12, Work{"implementer", KindAgent}, "the harness is the role's own machinery"},
+		{13, Work{"implementer", KindTool}, "a shell under the harness that no rule names"},
+		{14, Work{"implementer", KindTool}, "and what that shell started"},
 	} {
-		if got := pairOf(t, pass, test.pid); got != test.want {
+		if got := workOf(t, pass, test.pid); got != test.want {
 			t.Errorf("process %d is %v, want %v: %s", test.pid, got, test.want, test.why)
 		}
 	}
-	wantCPU(t, pass, Pair{"implementer", KindBuild}, 0)
-	wantCPU(t, pass, Pair{"implementer", KindTool}, 5)
-	wantCPU(t, pass, Pair{"implementer", KindAgent}, 1)
+	wantCPU(t, pass, Work{"implementer", KindBuild}, 0)
+	wantCPU(t, pass, Work{"implementer", KindTool}, 5)
+	wantCPU(t, pass, Work{"implementer", KindAgent}, 1)
 }
 
 // A real build under the same harness is still a build, and it is the only one: the words of the
@@ -357,20 +372,20 @@ func TestOnlyTheRealBuildUnderAPromptingHarnessIsABuild(t *testing.T) {
 
 	for _, test := range []struct {
 		pid  int
-		want Pair
+		want Work
 		why  string
 	}{
-		{13, Pair{"implementer", KindTool}, "the shell beside the build is no part of it"},
-		{14, Pair{"implementer", KindTool}, "nor is what that shell started"},
-		{40, Pair{"implementer", KindBuild}, "a shell told to build is a build"},
-		{41, Pair{"implementer", KindBuild}, "and so is the compiler it started"},
+		{13, Work{"implementer", KindTool}, "the shell beside the build is no part of it"},
+		{14, Work{"implementer", KindTool}, "nor is what that shell started"},
+		{40, Work{"implementer", KindBuild}, "a shell told to build is a build"},
+		{41, Work{"implementer", KindBuild}, "and so is the compiler it started"},
 	} {
-		if got := pairOf(t, pass, test.pid); got != test.want {
+		if got := workOf(t, pass, test.pid); got != test.want {
 			t.Errorf("process %d is %v, want %v: %s", test.pid, got, test.want, test.why)
 		}
 	}
-	wantCPU(t, pass, Pair{"implementer", KindBuild}, 9)
-	wantCPU(t, pass, Pair{"implementer", KindTool}, 5)
+	wantCPU(t, pass, Work{"implementer", KindBuild}, 9)
+	wantCPU(t, pass, Work{"implementer", KindTool}, 5)
 }
 
 // A shell copied to another name is not a shell this engine knows, so the command its -c takes is
@@ -386,11 +401,11 @@ func TestAShellCopiedToAnotherNameUnderTheHarnessIsATool(t *testing.T) {
 	writeProc(t, root, tree...)
 	pass := next(t, newWalk(t, root, Rules{}), rolesOf())
 
-	if got, want := pairOf(t, pass, 30), (Pair{"implementer", KindTool}); got != want {
+	if got, want := workOf(t, pass, 30), (Work{"implementer", KindTool}); got != want {
 		t.Errorf("the burn loop is %v, want %v", got, want)
 	}
-	wantCPU(t, pass, Pair{"implementer", KindBuild}, 0)
-	wantCPU(t, pass, Pair{"implementer", KindTool}, 24.4)
+	wantCPU(t, pass, Work{"implementer", KindBuild}, 0)
+	wantCPU(t, pass, Work{"implementer", KindTool}, 24.4)
 }
 
 // harnessTree is the three processes a role's work hangs under, none of them spending anything:
@@ -430,11 +445,11 @@ func TestAProcessOfOnePassIsNeverReadForItsCommandLine(t *testing.T) {
 	compile := fakeProcess{pid: 50, parent: 12, own: 300, args: []string{"go", "build", "./..."}}
 	writeProc(t, root, append(slices.Clone(above), compile)...)
 	appeared := next(t, walk, rolesOf())
-	if got, want := pairOf(t, appeared, 50), (Pair{"implementer", KindTool}); got != want {
+	if got, want := workOf(t, appeared, 50), (Work{"implementer", KindTool}); got != want {
 		t.Errorf("the build on the pass that first saw it is %v, want %v", got, want)
 	}
-	wantCPU(t, appeared, Pair{"implementer", KindTool}, 3)
-	wantCPU(t, appeared, Pair{"implementer", KindBuild}, 0)
+	wantCPU(t, appeared, Work{"implementer", KindTool}, 3)
+	wantCPU(t, appeared, Work{"implementer", KindBuild}, 0)
 	if want := []int{1, 10, 12}; !slices.Equal(*read, want) {
 		t.Errorf("the pass read %v for a command line, want the %v it had seen before", *read, want)
 	}
@@ -442,8 +457,8 @@ func TestAProcessOfOnePassIsNeverReadForItsCommandLine(t *testing.T) {
 	above[2].reaped = 300
 	writeProc(t, root, above...)
 	ended := next(t, walk, rolesOf())
-	wantCPU(t, ended, Pair{"implementer", KindBuild}, 0)
-	wantCPU(t, ended, Pair{"implementer", KindTool}, 0)
+	wantCPU(t, ended, Work{"implementer", KindBuild}, 0)
+	wantCPU(t, ended, Work{"implementer", KindTool}, 0)
 	if want := []int{1, 10, 12}; !slices.Equal(*read, want) {
 		t.Errorf("the command lines read are %v: process 50 lived one pass and %v was read for it", *read, want)
 	}
@@ -465,26 +480,26 @@ func TestAProcessThatSurvivesIsReadOnTheNextPassAndTakesItsOwnRule(t *testing.T)
 	build := fakeProcess{pid: 50, parent: 12, own: 300, args: []string{"go", "build", "./..."}}
 	writeProc(t, root, append(slices.Clone(above), build)...)
 	appeared := next(t, walk, rolesOf())
-	wantCPU(t, appeared, Pair{"implementer", KindTool}, 3)
-	wantCPU(t, appeared, Pair{"implementer", KindBuild}, 0)
+	wantCPU(t, appeared, Work{"implementer", KindTool}, 3)
+	wantCPU(t, appeared, Work{"implementer", KindBuild}, 0)
 
 	// The build is still running on the next pass, which reads its command line: the two
 	// seconds it has spent since are a build's, and so is every second it spends after them.
 	build.own = 500
 	writeProc(t, root, append(slices.Clone(above), build)...)
 	settled := next(t, walk, rolesOf())
-	if got, want := pairOf(t, settled, 50), (Pair{"implementer", KindBuild}); got != want {
+	if got, want := workOf(t, settled, 50), (Work{"implementer", KindBuild}); got != want {
 		t.Errorf("the build on the pass that read it is %v, want %v", got, want)
 	}
-	wantCPU(t, settled, Pair{"implementer", KindBuild}, 2)
-	wantCPU(t, settled, Pair{"implementer", KindTool}, 0)
+	wantCPU(t, settled, Work{"implementer", KindBuild}, 2)
+	wantCPU(t, settled, Work{"implementer", KindTool}, 0)
 	if want := []int{1, 10, 12, 50}; !slices.Equal(*read, want) {
 		t.Errorf("the command lines read are %v, want %v: each on the pass after the one that first saw it", *read, want)
 	}
 
 	build.own = 800
 	writeProc(t, root, append(slices.Clone(above), build)...)
-	wantCPU(t, next(t, walk, rolesOf()), Pair{"implementer", KindBuild}, 3)
+	wantCPU(t, next(t, walk, rolesOf()), Work{"implementer", KindBuild}, 3)
 }
 
 // The pass reports the processes largest resident memory first, so a reader spending a budget on
@@ -531,17 +546,17 @@ func TestTheFirstPassChargesTheLifetimeAndTheNextChargesTheRise(t *testing.T) {
 	// the stat the pass has already read says; the `go` has no command line read yet and
 	// carries the kind of the nearest ancestor that has one, which under a harness is tool.
 	first := next(t, walk, rolesOf())
-	wantCPU(t, first, Pair{RoleShared, KindShared}, 1)
-	wantCPU(t, first, Pair{"implementer", KindAgent}, 2)
-	wantCPU(t, first, Pair{"implementer", KindTool}, 3)
-	wantCPU(t, first, Pair{"implementer", KindBuild}, 0)
+	wantCPU(t, first, Work{RoleShared, KindShared}, 1)
+	wantCPU(t, first, Work{"implementer", KindAgent}, 2)
+	wantCPU(t, first, Work{"implementer", KindTool}, 3)
+	wantCPU(t, first, Work{"implementer", KindBuild}, 0)
 
 	tree[0].own, tree[1].own, tree[3].own = 110, 205, 600
 	writeProc(t, root, tree...)
 	second := next(t, walk, rolesOf())
-	wantCPU(t, second, Pair{RoleShared, KindShared}, 0.10)
-	wantCPU(t, second, Pair{"implementer", KindAgent}, 0.05)
-	wantCPU(t, second, Pair{"implementer", KindBuild}, 3)
+	wantCPU(t, second, Work{RoleShared, KindShared}, 0.10)
+	wantCPU(t, second, Work{"implementer", KindAgent}, 0.05)
+	wantCPU(t, second, Work{"implementer", KindBuild}, 3)
 }
 
 // A pid the kernel handed to another process is another process: its starting moment differs from
@@ -557,7 +572,7 @@ func TestAReusedPIDStartsAgainRatherThanRising(t *testing.T) {
 
 	build.own = 5000
 	writeProc(t, root, launcher, build)
-	wantCPU(t, next(t, walk, nil), Pair{RoleShared, KindBuild}, 50)
+	wantCPU(t, next(t, walk, nil), Work{RoleShared, KindBuild}, 50)
 
 	// The kernel hands the number on. The pass that meets the new process charges the three
 	// ticks it has spent and nothing of the fifty seconds the build spent under the same pid,
@@ -567,16 +582,16 @@ func TestAReusedPIDStartsAgainRatherThanRising(t *testing.T) {
 		fakeProcess{pid: 7, parent: 1, args: []string{"gopls"}, own: 3, start: 9000},
 	)
 	second := next(t, walk, nil)
-	if got := pairOf(t, second, 7); got != (Pair{RoleShared, KindShared}) {
+	if got := workOf(t, second, 7); got != (Work{RoleShared, KindShared}) {
 		t.Errorf("the reused pid is %v, want the kind of the process above it", got)
 	}
-	wantCPU(t, second, Pair{RoleShared, KindShared}, 0.03)
+	wantCPU(t, second, Work{RoleShared, KindShared}, 0.03)
 
 	third := next(t, walk, nil)
-	if got := pairOf(t, third, 7); got != (Pair{RoleShared, KindTool}) {
+	if got := workOf(t, third, 7); got != (Work{RoleShared, KindTool}) {
 		t.Errorf("the reused pid is %v once read, want the new process's own kind", got)
 	}
-	wantCPU(t, third, Pair{RoleShared, KindTool}, 0)
+	wantCPU(t, third, Work{RoleShared, KindTool}, 0)
 }
 
 // The CPU a parent reaps for a child the walk saw belongs to that child's kind, and only the part
@@ -597,16 +612,16 @@ func TestAParentChargesAReapedChildsOwnKind(t *testing.T) {
 	writeProc(t, root, sighted(tree)...)
 	next(t, walk, rolesOf())
 	writeProc(t, root, tree...)
-	wantCPU(t, next(t, walk, rolesOf()), Pair{"implementer", KindBuild}, 0.50)
+	wantCPU(t, next(t, walk, rolesOf()), Work{"implementer", KindBuild}, 0.50)
 
 	// The build ended at 80 ticks, 30 of them after the pass that last read it, and the
 	// harness reaped all 80.
 	tree[2].reaped = 80
 	writeProc(t, root, tree[:3]...)
 	second := next(t, walk, rolesOf())
-	wantCPU(t, second, Pair{"implementer", KindBuild}, 0.30)
-	wantCPU(t, second, Pair{"implementer", KindTool}, 0)
-	wantCPU(t, second, Pair{"implementer", KindAgent}, 0)
+	wantCPU(t, second, Work{"implementer", KindBuild}, 0.30)
+	wantCPU(t, second, Work{"implementer", KindTool}, 0)
+	wantCPU(t, second, Work{"implementer", KindAgent}, 0)
 }
 
 // A build is two processes and not one: the shell the agent started,
@@ -637,7 +652,7 @@ func TestABuildReapedWithItsShellIsChargedOnce(t *testing.T) {
 	shell := fakeProcess{pid: 50, parent: 12, own: 1, args: []string{"bash", "-c", "time go build -a -o /dev/null ./..."}}
 	driver := fakeProcess{pid: 51, parent: 50, own: 40, args: []string{"go", "build", "-a", "-o", "/dev/null", "./..."}}
 	compile := fakeProcess{pid: 60, parent: 51, own: 60, args: []string{"/usr/lib/go/pkg/tool/linux_amd64/compile", "-o", "a.out"}}
-	build := Pair{"implementer", KindBuild}
+	build := Work{"implementer", KindBuild}
 	walk := newWalk(t, root, Rules{})
 	var charged float64
 
@@ -668,8 +683,8 @@ func TestABuildReapedWithItsShellIsChargedOnce(t *testing.T) {
 	writeProc(t, root, above...)
 	third := next(t, walk, rolesOf())
 	wantCPU(t, third, build, 0.16)
-	wantCPU(t, third, Pair{"implementer", KindTool}, 0)
-	wantCPU(t, third, Pair{"implementer", KindAgent}, 0)
+	wantCPU(t, third, Work{"implementer", KindTool}, 0)
+	wantCPU(t, third, Work{"implementer", KindAgent}, 0)
 	charged += third.CPUSeconds[build]
 
 	// The three passes together charged the CPU the tree really spent: the shell's 2 ticks,
@@ -703,8 +718,8 @@ func TestTwoReapedChildrenShareTheRiseInProportion(t *testing.T) {
 	tree[2].reaped = 60
 	writeProc(t, root, tree[:3]...)
 	second := next(t, walk, rolesOf())
-	wantCPU(t, second, Pair{"implementer", KindBuild}, 0.15)
-	wantCPU(t, second, Pair{"implementer", KindTest}, 0.05)
+	wantCPU(t, second, Work{"implementer", KindBuild}, 0.15)
+	wantCPU(t, second, Work{"implementer", KindTest}, 0.05)
 }
 
 // A rise with no child the walk ever saw is the whole life of a child that began and ended
@@ -728,10 +743,10 @@ func TestCPUFromAChildNoReadSawGoesToTheParentsKind(t *testing.T) {
 	tree[3].reaped = 40 // the shell reaped a compiler of its own
 	writeProc(t, root, tree...)
 	second := next(t, walk, rolesOf())
-	wantCPU(t, second, Pair{RoleShared, KindShared}, 0.25)
-	wantCPU(t, second, Pair{"implementer", KindBuild}, 0.40)
-	wantCPU(t, second, Pair{"implementer", KindTool}, 0.70)
-	wantCPU(t, second, Pair{"implementer", KindAgent}, 0)
+	wantCPU(t, second, Work{RoleShared, KindShared}, 0.25)
+	wantCPU(t, second, Work{"implementer", KindBuild}, 0.40)
+	wantCPU(t, second, Work{"implementer", KindTool}, 0.70)
+	wantCPU(t, second, Work{"implementer", KindAgent}, 0)
 }
 
 // The roles file is read again on each pass, so a generation that ends between two passes gives
@@ -744,7 +759,7 @@ func TestEachPassTakesTheRolesFileAsItStandsNow(t *testing.T) {
 		fakeProcess{pid: 10, parent: 1, args: []string{"legion", "role-init", "--role", "implementer"}},
 		harness)
 	walk := newWalk(t, root, Rules{})
-	if got := pairOf(t, next(t, walk, map[string]int{"implementer": 10}), 12); got != (Pair{"implementer", KindAgent}) {
+	if got := workOf(t, next(t, walk, map[string]int{"implementer": 10}), 12); got != (Work{"implementer", KindAgent}) {
 		t.Errorf("the harness of the running generation is %v, want the role's agent", got)
 	}
 
@@ -752,7 +767,7 @@ func TestEachPassTakesTheRolesFileAsItStandsNow(t *testing.T) {
 	// names no pid for the role.
 	harness.parent = 1
 	writeProc(t, root, launcher, harness)
-	if got := pairOf(t, next(t, walk, map[string]int{"implementer": 0}), 12); got != (Pair{RoleShared, KindShared}) {
+	if got := workOf(t, next(t, walk, map[string]int{"implementer": 0}), 12); got != (Work{RoleShared, KindShared}) {
 		t.Errorf("the orphan of an ended generation is %v, want shared", got)
 	}
 
@@ -760,7 +775,7 @@ func TestEachPassTakesTheRolesFileAsItStandsNow(t *testing.T) {
 	writeProc(t, root, launcher, harness,
 		fakeProcess{pid: 30, parent: 1, args: []string{"legion", "role-init", "--role", "implementer"}},
 		fakeProcess{pid: 31, parent: 30, args: []string{"omp", "--mode", "rpc"}})
-	if got := pairOf(t, next(t, walk, map[string]int{"implementer": 30}), 31); got != (Pair{"implementer", KindAgent}) {
+	if got := workOf(t, next(t, walk, map[string]int{"implementer": 30}), 31); got != (Work{"implementer", KindAgent}) {
 		t.Errorf("the harness of the new generation is %v, want the role's agent", got)
 	}
 }
@@ -781,7 +796,7 @@ func TestAProcessThatEndsMidPassIsSkippedAndOtherFailuresAreCounted(t *testing.T
 			t.Errorf("the pass reported process 42, which ended before it was read")
 		}
 	}
-	if got := walk.ReadErrors(); got != 0 {
+	if got := len(walk.failures); got != 0 {
 		t.Errorf("the walk counted %d read errors, want none for a process that ended", got)
 	}
 
@@ -792,7 +807,7 @@ func TestAProcessThatEndsMidPassIsSkippedAndOtherFailuresAreCounted(t *testing.T
 	if pass := next(t, walk, nil); len(pass.Processes) != 1 {
 		t.Errorf("the pass reported %d processes, want the one it could read", len(pass.Processes))
 	}
-	if got := walk.ReadErrors(); got != 1 {
+	if got := len(walk.failures); got != 1 {
 		t.Errorf("the walk counted %d read errors, want the one stat it could not parse", got)
 	}
 }

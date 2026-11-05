@@ -75,6 +75,54 @@ type Options struct {
 	Log func(string)
 }
 
+// collectorOptions is the one of the two collectors a sampler runs, as the sampler's own
+// process asks for it: what it refuses to run with, the word /healthz carries, the root the
+// memory guard reads its own smaps under, the registry GET /metrics writes, and the loop
+// itself. *PodOptions and *NodeOptions are the two, so which mode this is is decided once —
+// where the options are checked — and nowhere else.
+type collectorOptions interface {
+	check() error
+	mode() string
+	root() string
+	registry() *Registry
+	run(ctx context.Context, passed func()) error
+}
+
+// mode, root, registry and run of an issue pod's collector.
+func (opts *PodOptions) mode() string        { return "pod" }
+func (opts *PodOptions) root() string        { return opts.Root }
+func (opts *PodOptions) registry() *Registry { return opts.Registry }
+
+// run reads the pod until the context ends, telling the sampler's process about every pass it
+// finishes. The options are copied, since Passed is the service's and not the caller's.
+func (opts *PodOptions) run(ctx context.Context, passed func()) error {
+	pod := *opts
+	pod.Passed = passed
+	return RunPod(ctx, pod)
+}
+
+// mode, root, registry and run of a node's collector.
+func (opts *NodeOptions) mode() string        { return "node" }
+func (opts *NodeOptions) root() string        { return opts.Root }
+func (opts *NodeOptions) registry() *Registry { return opts.Registry }
+
+// run reads the node until the context ends, as the issue pod's own does.
+func (opts *NodeOptions) run(ctx context.Context, passed func()) error {
+	node := *opts
+	node.Passed = passed
+	return RunNode(ctx, node)
+}
+
+// collector is the collector these options name. Nothing reads it before check has refused
+// options naming neither or both, which is the one place the two fields are weighed against
+// each other.
+func (opts Options) collector() collectorOptions {
+	if opts.Node != nil {
+		return opts.Node
+	}
+	return opts.Pod
+}
+
 // check refuses options the sampler could not run with, in the shape PodOptions.check uses: the
 // field, lower case, and what it must be. The collector's own options are checked here too, so
 // nothing is bound for a sampler that would refuse its collector a moment later.
@@ -88,37 +136,8 @@ func (opts Options) check() error {
 		return errors.New("sampler: one sampler reads an issue pod or a node, never both")
 	case opts.Log == nil:
 		return errors.New("sampler: log is required")
-	case opts.Pod != nil:
-		return opts.Pod.check()
-	default:
-		return opts.Node.check()
 	}
-}
-
-// mode is the word /healthz carries and the one the log line names: which of the two collectors
-// this sampler runs.
-func (opts Options) mode() string {
-	if opts.Node != nil {
-		return "node"
-	}
-	return "pod"
-}
-
-// root is the root every read is given, the collector's own: "/" in a pod and on a node, a
-// fixture directory in a test. The guard reads the sampler's own memory under it.
-func (opts Options) root() string {
-	if opts.Node != nil {
-		return opts.Node.Root
-	}
-	return opts.Pod.Root
-}
-
-// registry is where the collector's readings land and what GET /metrics writes.
-func (opts Options) registry() *Registry {
-	if opts.Node != nil {
-		return opts.Node.Registry
-	}
-	return opts.Pod.Registry
+	return opts.collector().check()
 }
 
 // Run is the sampler's process: it serves GET /metrics and GET /healthz on Listen and reads the
@@ -149,7 +168,8 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("the sampler could not listen on %s: %w", opts.Listen, err)
 	}
-	s := &service{opts: opts, registry: opts.registry()}
+	collector := opts.collector()
+	s := &service{opts: opts, collector: collector, registry: collector.registry()}
 	// The guard's own reader, where it had to make one, is released with the run it guarded.
 	defer s.release()
 	server := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -160,7 +180,7 @@ func Run(ctx context.Context, opts Options) error {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	opts.Log(fmt.Sprintf("sampler: serving %s mode on %s", opts.mode(), listener.Addr()))
+	opts.Log(fmt.Sprintf("sampler: serving %s mode on %s", collector.mode(), listener.Addr()))
 
 	collecting, stop := context.WithCancel(ctx)
 	collected, ended := make(chan error, 1), make(chan struct{})
@@ -194,17 +214,19 @@ func Run(ctx context.Context, opts Options) error {
 	}
 }
 
-// service is one Run: what it was given, the registry it serves, whether a pass has been made,
-// the reader the guard falls back to, and the last line the guard logged, so a reading that fails
-// every second is reported once and not sixty times a minute, as the collectors report their own.
+// service is one Run: what it was given, the collector it runs, the registry it serves, whether
+// a pass has been made, the reader the guard falls back to, and the last line the guard logged,
+// so a reading that fails every second is reported once and not sixty times a minute, as the
+// collectors report their own.
 //
 // The flag is read by the HTTP handler and written by Run's own loop, which is why it is atomic;
 // the logged line and the reader belong to the guard alone, which is Run's own loop.
 type service struct {
-	opts     Options
-	registry *Registry
-	pass     atomic.Bool
-	logged   string
+	opts      Options
+	collector collectorOptions
+	registry  *Registry
+	pass      atomic.Bool
+	logged    string
 	// own is the reader the guard takes its own reading of /proc/self/smaps through, made on
 	// the first reading it has to take itself and nil until then: the collector publishes a
 	// reading every second, so the guard reads for itself only where that has stopped, and a
@@ -223,15 +245,7 @@ type health struct {
 
 // collect runs the collector of this sampler's mode until the context ends.
 func (s *service) collect(ctx context.Context) error {
-	passed := func() { s.pass.Store(true) }
-	if s.opts.Node != nil {
-		node := *s.opts.Node
-		node.Passed = passed
-		return RunNode(ctx, node)
-	}
-	pod := *s.opts.Pod
-	pod.Passed = passed
-	return RunPod(ctx, pod)
+	return s.collector.run(ctx, func() { s.pass.Store(true) })
 }
 
 func (s *service) handler() http.Handler {
@@ -253,7 +267,7 @@ func (s *service) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(health{Mode: s.opts.mode(), Pass: s.pass.Load()})
+		_ = json.NewEncoder(w).Encode(health{Mode: s.collector.mode(), Pass: s.pass.Load()})
 	})
 	return mux
 }
@@ -278,7 +292,7 @@ func (s *service) overLimit() error {
 	anonymous, published := s.registry.SelfAnonymousBytes(2 * guardInterval)
 	if !published {
 		if s.own == nil {
-			s.own = procread.NewReader(s.opts.root(), procread.LayoutNone)
+			s.own = procread.NewReader(s.collector.root(), procread.LayoutNone)
 		}
 		read, err := readAnonymous(s.own, selfPID())
 		if err != nil {

@@ -283,7 +283,8 @@ func TestTheGuardReadsWhatTheCollectorPublished(t *testing.T) {
 	guardEvery(t, time.Second)
 	f := newPodFixture(t)
 	pod := f.options()
-	s := &service{opts: Options{Pod: &pod, Log: func(line string) { f.log = append(f.log, line) }}, registry: f.registry}
+	opts := Options{Pod: &pod, Log: func(line string) { f.log = append(f.log, line) }}
+	s := &service{opts: opts, collector: opts.collector(), registry: f.registry}
 
 	// Nothing published yet: the guard reads for itself, and a reading under the limit
 	// leaves the sampler running.
@@ -501,7 +502,9 @@ func costTree(processes int) []fakeProcess {
 // where nearly all of it sits (INFRA-1208). The client is in this process too, so what it
 // reports is a round trip and not the server's half alone.
 func BenchmarkScrape(b *testing.B) {
-	s := &service{opts: Options{Log: func(string) {}}, registry: livePodRegistry()}
+	pod := PodOptions{Root: "/", Registry: livePodRegistry()}
+	opts := Options{Pod: &pod, Log: func(string) {}}
+	s := &service{opts: opts, collector: opts.collector(), registry: pod.Registry}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatalf("the benchmark could not listen: %v", err)

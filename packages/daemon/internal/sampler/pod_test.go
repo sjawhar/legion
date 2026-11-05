@@ -561,8 +561,9 @@ func TestAVolumeIsServedOnceItPassesAMebibyteAndKeepsItsSeries(t *testing.T) {
 }
 
 // Every read that fails is counted under its own source and the pass goes on: the /proc count
-// holds the walk's own failures beside the collector's, and a pod whose cgroup files cannot be
-// read still reports the memory its processes hold.
+// holds the walk's failures and the collector's own, since the walk reports through the same
+// place, and a pod whose cgroup files cannot be read still reports the memory its processes
+// hold.
 func TestEveryReadErrorIsCountedUnderItsSourceAndThePassGoesOn(t *testing.T) {
 	f := newPodFixture(t)
 	tree := append(podTree(), fakeProcess{pid: 99, parent: 1, args: []string{"sleep"}, unparsable: true})

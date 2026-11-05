@@ -191,9 +191,9 @@ func RunNode(ctx context.Context, opts NodeOptions) error {
 	}
 }
 
-// nodeCollector is one RunNode's state: the pod set the watcher holds, what the last pass read of
-// each process, and the last message logged for each source, so a read that fails every second is
-// reported once and not sixty times a minute.
+// nodeCollector is one RunNode's state: the pod set the watcher holds, the walk that reads the
+// node's processes, and the last message logged for each source, so a read that fails every
+// second is reported once and not sixty times a minute.
 //
 // The mutex guards what the two goroutines share — the pod set, and the logged messages beside
 // it. Everything else here belongs to the sampling loop alone.
@@ -207,14 +207,15 @@ type nodeCollector struct {
 	// not among them — which directory holds a pod's totals is read from a process's own
 	// cgroup path, and the set of them moves as the node's pods come and go.
 	reader *procread.Reader
+	// walk is the process pass, which is the issue pod's own, and attribution the half of it
+	// that is a node's: the pod a process's cgroup path names, and the three kinds of
+	// docs/sampler-metrics.md.
+	walk        *Walk
+	attribution *nodeAttribution
 
 	mu     sync.Mutex
 	pods   map[types.UID]nodePod
 	logged map[ReadSource]string
-
-	// last is the reading each process of the node left behind, which is what charges the
-	// rise alone and what the CPU a parent reaps is spread over.
-	last map[int]*nodeProcess
 }
 
 // nodePod is one pod of this node as the collector holds it: the labels every series of it
@@ -226,24 +227,9 @@ type nodePod struct {
 	cgroup string
 }
 
-// nodeProcess is what the passes remember of one process of the node: the walk's own reading,
-// and the pod and pod cgroup its own cgroup path names, read once — a process never leaves the
-// cgroup it was made in.
-//
-// The reading is tree.go's, and the pair it holds is the pod uid and the kind this process's work
-// was last counted as, so that the CPU a parent reaps for a child that has ended is spread by the
-// one rule both modes follow (chargeReaped). An issue pod charges a role and a kind; a node
-// charges a pod and a kind, and the uid stands where the role does.
-type nodeProcess struct {
-	reading
-	uid    types.UID
-	cgroup string
-}
-
-// nodeReading is what takes the reading out of one of this collector's processes, which is the
-// reading it holds.
-func nodeReading(process *nodeProcess) *reading { return &process.reading }
-
+// newNodeCollector is a node's collector, with the walk it reads its processes through: the
+// attribution is given the pod set of each pass before that pass runs (readProcesses), and the
+// cgroup directory it reads for a pod goes back into the set through learn.
 func newNodeCollector(opts NodeOptions) (*nodeCollector, error) {
 	if err := opts.check(); err != nil {
 		return nil, err
@@ -261,8 +247,9 @@ func newNodeCollector(opts NodeOptions) (*nodeCollector, error) {
 		reader: procread.NewReader(opts.Root, procread.LayoutNone),
 		pods:   map[types.UID]nodePod{},
 		logged: map[ReadSource]string{},
-		last:   map[int]*nodeProcess{},
 	}
+	c.attribution = newNodeAttribution(opts.Root, opts.Rules, c.failed, c.learn)
+	c.walk = NewWalk(opts.Root, c.reader, c.attribution, c.failed)
 	c.opts.Log(fmt.Sprintf("sampler: node %s: reading %s for the pods of this node", opts.NodeName, opts.Root))
 	return c, nil
 }
@@ -308,63 +295,27 @@ func (c *nodeCollector) learn(uid types.UID, dir string) {
 
 // readProcesses is one walk of the node: every process's stat, the pod each belongs to, and the
 // CPU and resident memory each pod's kinds hold. A process of no pod this sampler serves — the
-// kubelet, the container runtime, a pod of an excluded namespace — is read and charged to nobody,
-// since only its stat says whether the pid is still the process the last pass read.
+// kubelet, the container runtime, a pod of an excluded namespace — is read and charged to
+// nobody, since only its stat says whether the pid is still the process the last pass read.
+//
+// The pass itself is the walk's, which is the one an issue pod makes: this hands it the pod set
+// of this pass and takes the owners and kinds it answers with. The owner of a node's pass is a
+// pod uid, which is what publish turns back into the labels the pod's series carry.
 func (c *nodeCollector) readProcesses(pods map[types.UID]nodePod) {
-	pids, err := procread.PIDs(c.opts.Root)
+	c.attribution.pods = pods
+	pass, err := c.walk.Next()
 	if err != nil {
 		c.failed(SourceProc, err)
 		return
 	}
-	stats := make(map[int]procread.Stat, len(pids))
-	live := make([]int, 0, len(pids))
-	for _, pid := range pids {
-		stat, err := c.reader.Stat(pid)
-		switch {
-		case unreadable(err):
-			continue
-		case err != nil:
-			c.failed(SourceProc, err)
-			continue
-		}
-		stats[pid] = stat
-		live = append(live, pid)
-	}
-	reaped := forget(c.last, stats, nodeReading, c.reader)
-	c.seed(live, stats)
-
-	kinds := make(map[int]Kind, len(live))
-	cpu := make(map[Pair]float64, len(live))
-	resident := make(map[Pair]int64, len(live))
-	charges := ledger[*nodeProcess]{cpu: cpu, last: c.last, of: nodeReading, stats: stats}
-	for _, pid := range live {
-		process, stat := c.last[pid], stats[pid]
-		var pair Pair
-		if pod, served := pods[process.uid]; served {
-			if pod.cgroup == "" && process.cgroup != "" {
-				pod.cgroup = process.cgroup
-				pods[process.uid] = pod
-				c.learn(process.uid, process.cgroup)
-			}
-			pair = Pair{Role: string(process.uid), Kind: c.kindOf(pid, stats, kinds)}
-			charges.charge(pair, rise(stat.UserTicks+stat.SystemTicks, process.own), stat.Parent)
-			charges.chargeReaped(pair, pid,
-				rise(stat.ChildUserTicks+stat.ChildSystemTicks, process.reaped), reaped[pid])
-			resident[pair] += int64(stat.ResidentPages) * c.pageSize
-		}
-		process.own = stat.UserTicks + stat.SystemTicks
-		process.reaped = stat.ChildUserTicks + stat.ChildSystemTicks
-		process.parent = stat.Parent
-		process.pair = pair
-	}
-	for pair, spent := range cpu {
-		c.publish(types.UID(pair.Role), func(pod GradePod) {
-			c.opts.Registry.AddGradeCPUSeconds(pod, pair.Kind, spent)
+	for work, spent := range pass.CPUSeconds {
+		c.publish(types.UID(work.Owner), func(pod GradePod) {
+			c.opts.Registry.AddCPUSeconds(c.opts.Registry.GradeKind(pod, work.Kind), spent)
 		})
 	}
-	for pair, bytes := range resident {
-		c.publish(types.UID(pair.Role), func(pod GradePod) {
-			c.opts.Registry.SetGradeResidentBytes(pod, pair.Kind, bytes)
+	for work, bytes := range pass.ResidentBytes {
+		c.publish(types.UID(work.Owner), func(pod GradePod) {
+			c.opts.Registry.SetResidentBytes(c.opts.Registry.GradeKind(pod, work.Kind), bytes)
 		})
 	}
 }
@@ -385,14 +336,45 @@ func (c *nodeCollector) publish(uid types.UID, write func(GradePod)) {
 	}
 }
 
-// seed gives a process the passes have not read before a reading of its own: the pod its cgroup
-// path names, that pod's own cgroup directory, and — for a process of any pod of this node — the
-// kind its command line gives. A process in no pod's cgroup has no command line read at all,
-// since a node runs hundreds of processes of its own that no series will ever carry.
+// nodeAttribution is a node's half of a pass: which pod a process belongs to, read from the
+// cgroup path the kernel wrote for it, and what its work is counted as in node mode's three
+// words. Everything else of the pass — the readings kept between passes, pid reuse, the CPU a
+// parent reaped — is the walk's, and is the same body an issue pod's sampler runs.
+type nodeAttribution struct {
+	root   string
+	rules  Rules
+	failed func(ReadSource, error)
+	// learn hands the collector the cgroup directory a pass read for a pod, so the totals of
+	// the seconds between two walks are read without walking /proc again.
+	learn func(types.UID, string)
+	// pods is the pod set this pass works on, which the collector sets before the pass: the
+	// copy the watcher's own set was cloned into, which this fills in cgroup directories on.
+	pods map[types.UID]nodePod
+	// seen is the pod and the rule each process of the node was read with, once.
+	seen map[int]*nodeSighting
+}
+
+// nodeSighting is what a node's policy reads of one process, on the pass that first sees it and
+// never again: a process keeps the cgroup it was made in and the program it runs, so a second
+// read could only cost the pass the time it takes.
+type nodeSighting struct {
+	uid    types.UID
+	cgroup string
+	rule   Kind
+}
+
+func newNodeAttribution(root string, rules Rules, failed func(ReadSource, error), learn func(types.UID, string)) *nodeAttribution {
+	return &nodeAttribution{root: root, rules: rules, failed: failed, learn: learn, seen: map[int]*nodeSighting{}}
+}
+
+// Seen reads the pod a process belongs to, that pod's own cgroup directory, and — for a process
+// of any pod of this node — the kind its command line gives. A process in no pod's cgroup has no
+// command line read at all, since a node runs hundreds of processes of its own that no series
+// will ever carry.
 //
-// Both reads happen once, on the pass that first saw the process: a process keeps the cgroup it
-// was made in and the program it runs, so a second read could only cost the pass the time it
-// takes.
+// Both reads are made on the pass that first saw the process, where an issue pod's policy waits
+// for the pass after it to read a command line: a node charges a process it cannot place to
+// nobody at all, so the read that places it cannot wait.
 //
 // A pod whose cgroup path the legacy hierarchy wrote is refused and counted
 // (procread.ErrCgroupV1): node mode reads a pod's totals from the unified hierarchy's own files,
@@ -401,35 +383,55 @@ func (c *nodeCollector) publish(uid types.UID, write func(GradePod)) {
 // process of such a pod, and what is logged is the sentinel itself rather than the refusal naming
 // that process's own file: every process of a legacy node answers the same way, so the log says
 // it once (failed) where those refusals would be a line for each of them.
-func (c *nodeCollector) seed(live []int, stats map[int]procread.Stat) {
-	for _, pid := range live {
-		if _, held := c.last[pid]; held {
-			continue
-		}
-		process := &nodeProcess{reading: reading{pid: pid, start: stats[pid].StartTicks}}
-		c.last[pid] = process
-		uid, dir, err := procread.PodCgroup(c.opts.Root, pid)
-		switch {
-		case errors.Is(err, procread.ErrCgroupV1):
-			c.failed(SourceCgroup, procread.ErrCgroupV1)
-			continue
-		case err != nil:
-			if !unreadable(err) {
-				c.failed(SourceProc, err)
-			}
-			continue
-		case uid == "":
-			continue
-		}
-		process.uid, process.cgroup = types.UID(uid), dir
-		args, err := procread.ReadCmdline(c.opts.Root, pid)
-		if err != nil && !unreadable(err) {
-			c.failed(SourceProc, err)
-		}
-		if kind, named := c.opts.Rules.Kind(args); named {
-			process.rule = kind
-		}
+func (p *nodeAttribution) Seen(pid int, _ procread.Stat, first bool) {
+	if !first {
+		return
 	}
+	entry := &nodeSighting{}
+	p.seen[pid] = entry
+	uid, dir, err := procread.PodCgroup(p.root, pid)
+	switch {
+	case errors.Is(err, procread.ErrCgroupV1):
+		p.failed(SourceCgroup, procread.ErrCgroupV1)
+		return
+	case err != nil:
+		if !unreadable(err) {
+			p.failed(SourceProc, err)
+		}
+		return
+	case uid == "":
+		return
+	}
+	entry.uid, entry.cgroup = types.UID(uid), dir
+	entry.rule, _ = ruleKind(p.root, pid, p.rules, p.failed)
+}
+
+// Forget drops a process that is gone.
+func (p *nodeAttribution) Forget(pid int) { delete(p.seen, pid) }
+
+// Attribute is the pod and the kind of every process of this pass. A process of no pod this
+// sampler serves answers no owner at all, which is what charges it to nobody, and the first
+// process of a pod a pass reads gives the collector that pod's own cgroup directory.
+func (p *nodeAttribution) Attribute(live []int, stats map[int]procread.Stat) map[int]Work {
+	kinds := make(map[int]Kind, len(live))
+	attributed := make(map[int]Work, len(live))
+	for _, pid := range live {
+		entry, read := p.seen[pid]
+		if !read {
+			continue
+		}
+		pod, served := p.pods[entry.uid]
+		if !served {
+			continue
+		}
+		if pod.cgroup == "" && entry.cgroup != "" {
+			pod.cgroup = entry.cgroup
+			p.pods[entry.uid] = pod
+			p.learn(entry.uid, entry.cgroup)
+		}
+		attributed[pid] = Work{Owner: string(entry.uid), Kind: p.kindOf(pid, stats, kinds)}
+	}
+	return attributed
 }
 
 // kindOf is what one process's work is counted as in node mode's three words: the kind its own
@@ -438,35 +440,24 @@ func (c *nodeCollector) seed(live []int, stats map[int]procread.Stat) {
 // nor a test is `other` (docs/sampler-metrics.md, "The kinds").
 //
 // The climb stops at the pod's edge: above a pod's own processes stand the container runtime and
-// the kubelet, whose work is nobody's. What each process answers is kept, as the issue pod's walk
-// keeps its own climb, so a pass climbs each chain once however many processes stand on it.
-func (c *nodeCollector) kindOf(pid int, stats map[int]procread.Stat, known map[int]Kind) Kind {
-	chain := make([]int, 0, 8)
-	answer := KindOther
-	for range len(stats) + 1 {
-		if kind, held := known[pid]; held {
-			answer = kind
-			break
-		}
-		process, read := c.last[pid]
+// the kubelet, whose work is nobody's. It is the climb an issue pod's role and kind take, which
+// keeps what each process answers, so a pass climbs each chain once however many processes stand
+// on it.
+func (p *nodeAttribution) kindOf(pid int, stats map[int]procread.Stat, known map[int]Kind) Kind {
+	return climb(pid, len(stats)+1, KindOther, known, func(pid int) (Kind, int) {
+		entry, read := p.seen[pid]
 		if !read {
-			break
+			return KindOther, -1
 		}
-		chain = append(chain, pid)
-		if process.rule != "" {
-			answer = nodeKind(process.rule)
-			break
+		if entry.rule != "" {
+			return nodeKind(entry.rule), -1
 		}
-		parent, held := c.last[stats[pid].Parent]
-		if !held || parent.uid != process.uid {
-			break
+		parent, held := p.seen[stats[pid].Parent]
+		if !held || parent.uid != entry.uid {
+			return KindOther, -1
 		}
-		pid = stats[pid].Parent
-	}
-	for _, pid := range chain {
-		known[pid] = answer
-	}
-	return answer
+		return KindOther, stats[pid].Parent
+	})
 }
 
 // nodeKind is a rule's answer in node mode's vocabulary. A rule may answer `tool` as well as
@@ -503,8 +494,9 @@ func (c *nodeCollector) readTotals(pods map[types.UID]nodePod) {
 			continue
 		}
 		c.publish(uid, func(pod GradePod) {
-			c.opts.Registry.SetGradePodMemoryBytes(pod, memory)
-			c.opts.Registry.SetGradePodCPUSeconds(pod, cpu)
+			totals := c.opts.Registry.GradeTotals(pod)
+			c.opts.Registry.SetTotalMemoryBytes(totals, memory)
+			c.opts.Registry.SetTotalCPUSeconds(totals, cpu)
 		})
 	}
 }
@@ -636,7 +628,7 @@ func (c *nodeCollector) replace(pods map[types.UID]nodePod) {
 			pods[uid] = fresh
 		}
 		if !kept || fresh.pod != held.pod {
-			c.opts.Registry.ForgetGradePod(held.pod)
+			c.forget(held.pod)
 		}
 	}
 	c.pods = pods
@@ -658,7 +650,7 @@ func (c *nodeCollector) update(ctx context.Context, pod *corev1.Pod) {
 	held, known := c.pods[pod.UID]
 	c.pods[pod.UID] = nodePod{pod: grade, cgroup: held.cgroup}
 	if known && held.pod != grade {
-		c.opts.Registry.ForgetGradePod(held.pod)
+		c.forget(held.pod)
 	}
 }
 
@@ -668,8 +660,14 @@ func (c *nodeCollector) drop(uid types.UID) {
 	defer c.mu.Unlock()
 	if held, known := c.pods[uid]; known {
 		delete(c.pods, uid)
-		c.opts.Registry.ForgetGradePod(held.pod)
+		c.forget(held.pod)
 	}
+}
+
+// forget takes every series of one grade pod out of the registry: its totals and each kind of
+// its work, which the registry drops together by the owner they are counted against.
+func (c *nodeCollector) forget(pod GradePod) {
+	c.opts.Registry.ForgetOwner(c.opts.Registry.GradeTotals(pod))
 }
 
 // served is whether this pod is reported at all: not one whose own label asks to be left alone,

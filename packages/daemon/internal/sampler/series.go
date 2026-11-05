@@ -15,6 +15,12 @@ import (
 // sampler serves, under which labels and at which moment a reading leaves the output. The
 // contract it carries is written for a reader in docs/sampler-metrics.md, and a test reads that
 // document and compares it with the table below, so neither can move without the other.
+//
+// There is one series model and not one for each mode: every reading the registry holds is keyed
+// by its owner — the pod the 200-series cap counts it against — and the label values its series
+// carry, and which metric each reading is served as comes from the mode's own row of modeSeries.
+// So a series added to the contract is added in one setter and one row, where before it was two
+// of each (dispatch://INFRA-1208, the review of pull request 2786).
 
 // ContentType is the media type of what Write writes: the Prometheus text format, version 0.0.4,
 // which is what a Managed Prometheus collector scrapes. The sampler writes that format itself —
@@ -115,6 +121,12 @@ const (
 	metricCount
 )
 
+// noMetric is a reading the mode does not serve: node mode reads no smaps, so its work holds no
+// anonymous memory, and no grade pod has a volume or a /proc/meminfo of its own. A reading whose
+// metric is this one is held in the registry and written nowhere, which is what keeps a mode's
+// exposition to the mode's own table.
+const noMetric metricID = metricCount
+
 // metric is one row of the contract: the name a collector sees, the type it is read as, the help
 // line the exposition carries, the labels every series of it holds in the order they are
 // written, and the modes that serve it.
@@ -130,6 +142,11 @@ const (
 	counterType = "counter"
 	gaugeType   = "gauge"
 )
+
+// maxLabels is the most label values a series of this contract carries, which is the five of a
+// grade pod's kind and of a volume. The values are held in an array of that width rather than a
+// slice, so that one of them is a map key and costs a reading no allocation at all.
+const maxLabels = 5
 
 // podLabels are on every series an issue pod's sampler serves about the pod: the project and the
 // issue, which the daemon passes on the command line from the pod's legion.dev/project and
@@ -278,6 +295,76 @@ var metrics = [metricCount]metric{
 	},
 }
 
+// workMetrics is which metric each reading of one owner's work of one kind is served as in one
+// mode: an issue pod's role and kind pair, or a grade pod's kind. A reading the mode does not
+// serve is noMetric — node mode reads no smaps and serves no anonymous memory — and no
+// collector of that mode ever takes one.
+type workMetrics struct {
+	cpuSeconds               metricID
+	anonymous, anonymousPeak metricID
+	resident, residentPeak   metricID
+}
+
+// totalMetrics is the same for the cgroup totals of one owner: the issue pod's own, and each
+// grade pod's. A node reads no /proc/meminfo of another pod, so neither the memory its processes
+// hold nor its shared memory is served there.
+type totalMetrics struct {
+	memory, memoryPeak         metricID
+	cpuSeconds                 metricID
+	processMemory, processPeak metricID
+	sharedMemory               metricID
+}
+
+// modeSeries is the whole of what one mode serves about the pods it reads: which metric each
+// reading of an owner's work, of an owner's totals and of a volume is written as. A registry
+// holds its own row, so the exposition asks the row and never the mode.
+type modeSeries struct {
+	work       workMetrics
+	totals     totalMetrics
+	volumeUsed metricID
+}
+
+// served is each mode's row. The two of them are the one place a reading of the registry is tied
+// to the name it goes out under.
+var served = map[Mode]modeSeries{
+	ModePod: {
+		work: workMetrics{
+			cpuSeconds:    cpuSecondsTotal,
+			anonymous:     memoryAnonymousBytes,
+			anonymousPeak: memoryAnonymousPeakBytes,
+			resident:      memoryResidentBytes,
+			residentPeak:  memoryResidentPeakBytes,
+		},
+		totals: totalMetrics{
+			memory:        podMemoryBytes,
+			memoryPeak:    podMemoryPeakBytes,
+			cpuSeconds:    podCPUSecondsTotal,
+			processMemory: podProcessMemoryBytes,
+			processPeak:   podProcessMemoryPeakBytes,
+			sharedMemory:  podSharedMemoryBytes,
+		},
+		volumeUsed: volumeUsedBytes,
+	},
+	ModeNode: {
+		work: workMetrics{
+			cpuSeconds:    gradeCPUSecondsTotal,
+			anonymous:     noMetric,
+			anonymousPeak: noMetric,
+			resident:      gradeMemoryResidentBytes,
+			residentPeak:  gradeMemoryResidentPeakBytes,
+		},
+		totals: totalMetrics{
+			memory:        gradePodMemoryBytes,
+			memoryPeak:    gradePodMemoryPeakBytes,
+			cpuSeconds:    gradePodCPUSecondsTotal,
+			processMemory: noMetric,
+			processPeak:   noMetric,
+			sharedMemory:  noMetric,
+		},
+		volumeUsed: noMetric,
+	},
+}
+
 // counter is a number that only rises. A reader hands it either the rise since the last pass
 // (add, which is what the process walk answers) or the whole count the kernel reports (set,
 // which is what a cgroup file and /proc hold), and in both cases what is served never goes
@@ -322,70 +409,76 @@ func (g *gauge) set(bytes float64) {
 
 func (g *gauge) resetPeak() { g.peak = g.value }
 
-// pairSeries is what one role and kind pair holds, and when a process of it last ran, which is
-// what the hour window reads.
-type pairSeries struct {
+// workSeries is what one owner's work of one kind holds, and when a process of it last ran,
+// which is what the hour window reads. One type serves both modes: a node writes no anonymous
+// memory into it and a gauge nothing has read is served nowhere, which is how the same body
+// answers a four-label pair of an issue pod and a five-label kind of a grade pod.
+type workSeries struct {
 	cpuSeconds counter
 	anonymous  gauge
 	resident   gauge
 	lastActive time.Time
 }
 
-// podSeries is the pod's own accounting: its cgroup's memory and CPU, and the memory its
-// processes hold, each served only once something has read it, since a pod whose cgroup files
-// this kernel does not write has no zero to report.
-type podSeries struct {
+// totalSeries is one owner's own cgroup accounting: the issue pod's, and each grade pod's. Each
+// reading is served only once something has read it, since a pod whose cgroup files this kernel
+// does not write has no zero to report, and a node reads neither of the last two at all.
+type totalSeries struct {
 	memory        gauge
 	cpuSeconds    counter
 	processMemory gauge
 	sharedMemory  gauge
 }
 
-// gradeSeries is one grade pod of node mode: its cgroup's totals and one set of series for each
-// kind of work its processes do.
-type gradeSeries struct {
-	memory     gauge
-	cpuSeconds counter
-	kinds      map[Kind]*gradeKindSeries
-}
+// shape is which of the three kinds of series a key names, and so which of the registry's maps
+// a reading lands in and which row of its mode decides the metric. The zero shape is a reading
+// of the other mode, which every setter holds and nothing serves.
+type shape uint8
 
-// gradeKindSeries is one kind of one grade pod's work. Node mode reads no smaps, so it has
-// resident memory and no anonymous memory.
-type gradeKindSeries struct {
-	cpuSeconds counter
-	resident   gauge
-	lastActive time.Time
-}
+const (
+	shapeNone shape = iota
+	shapeWork
+	shapeTotals
+	shapeVolume
+)
 
-// volumeKey is one volume as its series is labelled: the volume's name, the medium the pod spec
-// declares for it, and the role that owns it or `shared`.
-type volumeKey struct {
-	name   string
-	medium string
-	role   string
+// Series names one set of series the registry keeps: the mode that serves them, which of the
+// three shapes they are, the pod the 200-series cap counts them against, and the label values
+// each of them carries, in the order its metric declares them.
+//
+// It is one type for both modes, and the mode's own labels go into it where the series is named
+// (Registry.Pair and the four beside it). A Series of the other mode is the zero value, which
+// every setter below holds and nothing serves: a reading handed to the wrong mode's name reaches
+// no collector, whatever a caller does.
+type Series struct {
+	mode   Mode
+	shape  shape
+	owner  string
+	labels [maxLabels]string
 }
 
 // Registry is every series the sampler serves: the value a reader last gave it, the most a
-// memory series has held since the last scrape, and when a pair of labels last had a process of
+// memory series has held since the last scrape, and when an owner's work last had a process of
 // its own. One registry serves one mode, and the exposition writes the metrics of that mode
-// alone, so a reading handed to the wrong mode's method is never served under a name that mode's
-// collector does not know.
+// alone.
 //
 // Every method takes the registry's lock, so the collector's loop and the HTTP handler may run
 // at once, which they do: the loop writes each second and a scrape arrives whenever it arrives.
 type Registry struct {
-	mode    Mode
+	mode Mode
+	// served is this mode's row of the table above: which metric each reading it holds is
+	// written as. It is read once, here, so nothing below asks the mode what it serves.
+	served  modeSeries
 	project string
 	issue   string
-	// now is the clock the hour window and each pair's last activity are read from, so a test
+	// now is the clock the hour window and each key's last activity are read from, so a test
 	// drives the window without sleeping.
 	now func() time.Time
 
 	mu       sync.Mutex
-	pairs    map[Pair]*pairSeries
-	volumes  map[volumeKey]*gauge
-	grades   map[GradePod]*gradeSeries
-	pod      podSeries
+	work     map[Series]*workSeries
+	totals   map[Series]*totalSeries
+	volumes  map[Series]*gauge
 	self     selfSeries
 	errors   map[ReadSource]*counter
 	restarts counter
@@ -430,60 +523,114 @@ func newRegistry(mode Mode, project, issue string, now func() time.Time) *Regist
 	}
 	return &Registry{
 		mode:    mode,
+		served:  served[mode],
 		project: project,
 		issue:   issue,
 		now:     now,
-		pairs:   map[Pair]*pairSeries{},
-		volumes: map[volumeKey]*gauge{},
-		grades:  map[GradePod]*gradeSeries{},
+		work:    map[Series]*workSeries{},
+		totals:  map[Series]*totalSeries{},
+		volumes: map[Series]*gauge{},
 		errors:  errors,
 	}
 }
 
-// AddCPUSeconds charges a role and kind pair the CPU one pass found, which is the rise since the
-// pass before and never a total (Pass.CPUSeconds). A pass that found the pair and no CPU charges
-// zero, which is how a pair that is running and idle stays in the hour window.
-func (r *Registry) AddCPUSeconds(pair Pair, seconds float64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	series := r.pair(pair)
-	series.cpuSeconds.add(seconds)
+// Pair is the series of one role's work of one kind in an issue pod, which carries the pod's
+// project and issue beside the two. It counts against the sampler's own pod, which is the one
+// the cap is held over there.
+func (r *Registry) Pair(role string, kind Kind) Series {
+	return r.series(ModePod, shapeWork, "", r.project, r.issue, role, string(kind))
 }
 
-// SetAnonymousBytes is the anonymous memory a role's work of one kind holds now, summed over its
-// processes. The smaps budget decides how often it is read, so this moves less often than the
-// resident reading beside it.
-func (r *Registry) SetAnonymousBytes(pair Pair, bytes int64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pair(pair).anonymous.set(float64(bytes))
+// Volume is the series of one volume, under the medium the pod spec declares and the role that
+// owns it. A volume is read once however many roles mount it.
+func (r *Registry) Volume(name, medium, role string) Series {
+	return r.series(ModePod, shapeVolume, "", r.project, r.issue, name, medium, role)
 }
 
-// SetResidentBytes is the resident memory a role's work of one kind holds now.
-func (r *Registry) SetResidentBytes(pair Pair, bytes int64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pair(pair).resident.set(float64(bytes))
+// Totals is the issue pod's own cgroup readings and the memory its processes hold.
+func (r *Registry) Totals() Series {
+	return r.series(ModePod, shapeTotals, "", r.project, r.issue)
 }
 
-// pair is the pair's series, made if this is the first reading of it, with its activity moved to
-// now: every reading of a pair is a process of that pair having run.
-func (r *Registry) pair(pair Pair) *pairSeries {
-	series := r.pairs[pair]
+// GradeKind is the series of one grade pod's work of one kind in node mode, which carries the
+// pod's own four labels beside the kind. It counts against that pod and not against the node, so
+// a node serving thirty pods is not capped as though the thirty were one.
+func (r *Registry) GradeKind(pod GradePod, kind Kind) Series {
+	return r.series(ModeNode, shapeWork, gradeKey(pod),
+		pod.Pod, pod.Namespace, string(kind), pod.Queue, pod.Owner)
+}
+
+// GradeTotals is one grade pod's own cgroup readings.
+func (r *Registry) GradeTotals(pod GradePod) Series {
+	return r.series(ModeNode, shapeTotals, gradeKey(pod),
+		pod.Pod, pod.Namespace, pod.Queue, pod.Owner)
+}
+
+// series is one key of this registry's own mode, and the zero Series for a name of the other
+// mode's: node mode serves no volume and an issue pod no grade pod, whatever a caller does.
+func (r *Registry) series(mode Mode, shape shape, owner string, labels ...string) Series {
+	if mode != r.mode {
+		return Series{}
+	}
+	key := Series{mode: mode, shape: shape, owner: owner}
+	copy(key.labels[:], labels)
+	return key
+}
+
+// AddCPUSeconds charges one owner's work of one kind the CPU one pass found, which is the rise
+// since the pass before and never a total (Pass.CPUSeconds). A pass that found the work and no
+// CPU charges zero, which is how work that is running and idle stays in the hour window.
+func (r *Registry) AddCPUSeconds(key Series, seconds float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if series := r.workOf(key); series != nil {
+		series.cpuSeconds.add(seconds)
+	}
+}
+
+// SetAnonymousBytes is the anonymous memory one owner's work of one kind holds now, summed over
+// its processes. The smaps budget decides how often it is read, so this moves less often than
+// the resident reading beside it, and node mode never reads it at all.
+func (r *Registry) SetAnonymousBytes(key Series, bytes int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if series := r.workOf(key); series != nil {
+		series.anonymous.set(float64(bytes))
+	}
+}
+
+// SetResidentBytes is the resident memory one owner's work of one kind holds now.
+func (r *Registry) SetResidentBytes(key Series, bytes int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if series := r.workOf(key); series != nil {
+		series.resident.set(float64(bytes))
+	}
+}
+
+// workOf is that work's series, made if this is the first reading of it, with its activity moved
+// to now: every reading of it is a process of it having run. A key of the other mode, and one
+// naming another shape, answers nil and is held.
+func (r *Registry) workOf(key Series) *workSeries {
+	if key.mode != r.mode || key.shape != shapeWork {
+		return nil
+	}
+	series := r.work[key]
 	if series == nil {
-		series = &pairSeries{}
-		r.pairs[pair] = series
+		series = &workSeries{}
+		r.work[key] = series
 	}
 	series.lastActive = r.now()
 	return series
 }
 
-// SetVolumeBytes is the bytes used in one volume, under the medium the pod spec declares and the
-// role that owns it. A volume is read once however many roles mount it.
-func (r *Registry) SetVolumeBytes(name, medium, role string, bytes int64) {
+// SetVolumeBytes is the bytes used in one volume.
+func (r *Registry) SetVolumeBytes(key Series, bytes int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := volumeKey{name: name, medium: medium, role: role}
+	if key.mode != r.mode || key.shape != shapeVolume {
+		return
+	}
 	used := r.volumes[key]
 	if used == nil {
 		used = &gauge{}
@@ -492,92 +639,74 @@ func (r *Registry) SetVolumeBytes(name, medium, role string, bytes int64) {
 	used.set(float64(bytes))
 }
 
-// SetPodMemoryBytes is the memory the pod's own cgroup holds.
-func (r *Registry) SetPodMemoryBytes(bytes int64) {
+// SetTotalMemoryBytes is the memory one owner's own cgroup holds.
+func (r *Registry) SetTotalMemoryBytes(key Series, bytes int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pod.memory.set(float64(bytes))
+	if series := r.totalOf(key); series != nil {
+		series.memory.set(float64(bytes))
+	}
 }
 
-// SetPodCPUSeconds is the CPU the pod's own cgroup has spent since it started, which is a total
-// and not a rise.
-func (r *Registry) SetPodCPUSeconds(seconds float64) {
+// SetTotalCPUSeconds is the CPU one owner's own cgroup has spent since it started, which is a
+// total and not a rise.
+func (r *Registry) SetTotalCPUSeconds(key Series, seconds float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pod.cpuSeconds.set(seconds)
+	if series := r.totalOf(key); series != nil {
+		series.cpuSeconds.set(seconds)
+	}
 }
 
-// SetPodProcessMemoryBytes is the memory the pod's processes hold: AnonPages, plus Shmem on a
+// SetProcessMemoryBytes is the memory the pod's processes hold: AnonPages, plus Shmem on a
 // kernel that keeps the two apart.
-func (r *Registry) SetPodProcessMemoryBytes(bytes int64) {
+func (r *Registry) SetProcessMemoryBytes(key Series, bytes int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pod.processMemory.set(float64(bytes))
+	if series := r.totalOf(key); series != nil {
+		series.processMemory.set(float64(bytes))
+	}
 }
 
-// SetPodSharedMemoryBytes is the pod's Shmem.
-func (r *Registry) SetPodSharedMemoryBytes(bytes int64) {
+// SetSharedMemoryBytes is the pod's Shmem.
+func (r *Registry) SetSharedMemoryBytes(key Series, bytes int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pod.sharedMemory.set(float64(bytes))
+	if series := r.totalOf(key); series != nil {
+		series.sharedMemory.set(float64(bytes))
+	}
 }
 
-// AddGradeCPUSeconds charges one grade pod's kind of work the CPU one pass found, as
-// AddCPUSeconds does for a role and kind pair.
-func (r *Registry) AddGradeCPUSeconds(pod GradePod, kind Kind, seconds float64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.gradeKind(pod, kind).cpuSeconds.add(seconds)
-}
-
-// SetGradeResidentBytes is the resident memory one grade pod's work of one kind holds now.
-func (r *Registry) SetGradeResidentBytes(pod GradePod, kind Kind, bytes int64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.gradeKind(pod, kind).resident.set(float64(bytes))
-}
-
-// SetGradePodMemoryBytes is the memory one grade pod's cgroup holds.
-func (r *Registry) SetGradePodMemoryBytes(pod GradePod, bytes int64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.grade(pod).memory.set(float64(bytes))
-}
-
-// SetGradePodCPUSeconds is the CPU one grade pod's cgroup has spent since it started.
-func (r *Registry) SetGradePodCPUSeconds(pod GradePod, seconds float64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.grade(pod).cpuSeconds.set(seconds)
-}
-
-// ForgetGradePod drops every series of a pod that is gone, which is what bounds a node's
-// registry: the hour window takes a pod's kinds, and this takes its totals the moment the API
-// server says the pod has ended.
-func (r *Registry) ForgetGradePod(pod GradePod) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.grades, pod)
-}
-
-func (r *Registry) grade(pod GradePod) *gradeSeries {
-	series := r.grades[pod]
+// totalOf is that owner's totals, made if this is the first reading of them. The hour window
+// does not reach them: an issue pod's stand for as long as the sampler runs, and a grade pod's
+// until the API server says the pod has ended (ForgetOwner).
+func (r *Registry) totalOf(key Series) *totalSeries {
+	if key.mode != r.mode || key.shape != shapeTotals {
+		return nil
+	}
+	series := r.totals[key]
 	if series == nil {
-		series = &gradeSeries{kinds: map[Kind]*gradeKindSeries{}}
-		r.grades[pod] = series
+		series = &totalSeries{}
+		r.totals[key] = series
 	}
 	return series
 }
 
-func (r *Registry) gradeKind(pod GradePod, kind Kind) *gradeKindSeries {
-	grade := r.grade(pod)
-	series := grade.kinds[kind]
-	if series == nil {
-		series = &gradeKindSeries{}
-		grade.kinds[kind] = series
+// ForgetOwner drops every series of an owner that is gone — its totals, and every kind of its
+// work — which is what bounds a node's registry: the hour window takes a pod's kinds, and this
+// takes the whole of the pod the moment the API server says it has ended.
+func (r *Registry) ForgetOwner(key Series) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if key.mode != r.mode {
+		return
 	}
-	series.lastActive = r.now()
-	return series
+	delete(r.totals, key)
+	for held := range r.work {
+		if held.owner == key.owner {
+			delete(r.work, held)
+		}
+	}
 }
 
 // SetSelfCPUSeconds is the CPU the sampler's own process has spent since it started.
@@ -612,28 +741,18 @@ func (r *Registry) SelfAnonymousBytes(within time.Duration) (int64, bool) {
 	return int64(r.self.anonymous), true
 }
 
-// AddReadError counts one read of this source that failed.
+// AddReadError counts one read of this source that failed. Every read the sampler makes is
+// counted here, the process walk's among them, so the number only rises and no reader keeps a
+// count of its own to publish.
 func (r *Registry) AddReadError(source ReadSource) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.readErrors(source).add(1)
-}
-
-// SetReadErrors is the whole count of this source's failed reads, for a reader that keeps its
-// own (the process walk's ReadErrors).
-func (r *Registry) SetReadErrors(source ReadSource, total uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.readErrors(source).set(float64(total))
-}
-
-func (r *Registry) readErrors(source ReadSource) *counter {
 	errors := r.errors[source]
 	if errors == nil {
 		errors = &counter{read: true}
 		r.errors[source] = errors
 	}
-	return errors
+	errors.add(1)
 }
 
 // SetRestarts is how often the launcher has started the sampler again, which the launcher counts
@@ -660,8 +779,7 @@ func (r *Registry) SetTotalsDeferred(count uint64) {
 }
 
 // SetWalkDeferred is how many walk passes the sampler's own cap has deferred, a count that only
-// rises: the collector keeps it and hands over the whole of it, as it hands over the walk's
-// read errors.
+// rises: the collector keeps it and hands over the whole of it.
 func (r *Registry) SetWalkDeferred(count uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -672,32 +790,40 @@ func (r *Registry) SetWalkDeferred(count uint64) {
 // and the number served.
 type sample struct {
 	metric metricID
-	labels []string
+	labels [maxLabels]string
 	value  float64
 }
 
 // The tiers the cap drops in, lowest first: every role and kind pair, and in node mode every
 // grade pod's kind, goes before any volume.
 const (
-	tierPair = iota
+	tierWork = iota
 	tierVolume
 )
 
-// group is what the cap drops as one: the series of one role and kind pair, of one volume, or of
-// one kind of one grade pod's work. A pair's five series are kept or dropped together, since
-// half a pair's memory is worse to read than none of it.
+// group is what the cap drops as one: the series of one owner's work of one kind, or of one
+// volume. A pair's five series are kept or dropped together, since half a pair's memory is worse
+// to read than none of it.
 type group struct {
 	// owner is the pod the cap counts this group against: the sampler's own pod in an issue
 	// pod, and the grade pod in node mode, so a node serving thirty pods is not capped as
 	// though the thirty were one.
 	owner string
-	// tier and last are the drop order: the lowest tier first and, within it, the pair whose
-	// process ran longest ago. key breaks a tie, so two scrapes of one state drop the same
-	// groups.
+	// tier and last are the drop order: the lowest tier first and, within it, the work whose
+	// process ran longest ago. The labels break a tie, so two scrapes of one state drop the
+	// same groups.
 	tier    int
 	last    time.Time
-	key     string
+	labels  [maxLabels]string
 	samples []sample
+}
+
+// add holds one series of this group, and holds nothing for a metric this mode does not serve.
+func (g *group) add(id metricID, value float64) {
+	if id == noMetric {
+		return
+	}
+	g.samples = append(g.samples, sample{metric: id, labels: g.labels, value: value})
 }
 
 // Write serves every series the registry holds, in the Prometheus text format, and resets every
@@ -705,7 +831,7 @@ type group struct {
 // scraped (dispatch://INFRA-1141/spec#b-r-peaks). The reset happens whether or not the write
 // itself succeeds, because a reader that read half an exposition has still read the peaks in it.
 //
-// It also applies the hour window, dropping a pair no process has run in for an hour, and the
+// It also applies the hour window, dropping work no process has run in for an hour, and the
 // 200-series cap, counting what the cap removed as legion_sampler_series_dropped.
 func (r *Registry) Write(w io.Writer) error {
 	_, err := w.Write(r.exposition())
@@ -727,7 +853,7 @@ func (r *Registry) exposition() []byte {
 	now := r.now()
 	r.expire(now)
 
-	fixed := newFixedSamples(r.mode)
+	fixed := newFixedSamples()
 	r.addSelf(fixed)
 	r.addTotals(fixed)
 	kept, dropped := applyCap(r.droppable(), fixed.counts)
@@ -741,20 +867,13 @@ func (r *Registry) exposition() []byte {
 	return body
 }
 
-// expire drops every pair of labels no process of which has run within the hour window. It is
-// what bounds the registry: a pod that has run a hundred build commands holds the pairs of the
-// last hour and nothing older.
+// expire drops every key no process of which has run within the hour window. It is what bounds
+// the registry: a pod that has run a hundred build commands holds the pairs of the last hour and
+// nothing older, and a node holds each of its pods' kinds on the same rule.
 func (r *Registry) expire(now time.Time) {
-	for pair, series := range r.pairs {
+	for key, series := range r.work {
 		if now.Sub(series.lastActive) > activeWindow {
-			delete(r.pairs, pair)
-		}
-	}
-	for _, grade := range r.grades {
-		for kind, series := range grade.kinds {
-			if now.Sub(series.lastActive) > activeWindow {
-				delete(grade.kinds, kind)
-			}
+			delete(r.work, key)
 		}
 	}
 }
@@ -762,42 +881,39 @@ func (r *Registry) expire(now time.Time) {
 // resetPeaks takes every peak down to the reading beside it, which is what makes a peak the most
 // held since the last scrape rather than since the sampler started.
 func (r *Registry) resetPeaks() {
-	for _, series := range r.pairs {
+	for _, series := range r.work {
 		series.anonymous.resetPeak()
 		series.resident.resetPeak()
 	}
-	for _, grade := range r.grades {
-		grade.memory.resetPeak()
-		for _, series := range grade.kinds {
-			series.resident.resetPeak()
-		}
+	for _, series := range r.totals {
+		series.memory.resetPeak()
+		series.processMemory.resetPeak()
 	}
-	r.pod.memory.resetPeak()
-	r.pod.processMemory.resetPeak()
 }
 
 // fixedSamples are the series of one scrape that the cap never drops: the samples themselves,
 // how many of them stand against each pod's cap, and where the dropped count sits, since that
 // number is only known once the cap has run over everything else.
 type fixedSamples struct {
-	mode      Mode
 	samples   []sample
 	counts    map[string]int
 	droppedAt int
 }
 
-func newFixedSamples(mode Mode) *fixedSamples {
-	return &fixedSamples{mode: mode, counts: map[string]int{}, droppedAt: -1}
+func newFixedSamples() *fixedSamples {
+	return &fixedSamples{counts: map[string]int{}, droppedAt: -1}
 }
 
 // add holds one series that the cap never drops, counted against the pod named by owner. A
-// metric the registry's mode does not serve is passed over, so a reading handed to the wrong
-// mode's method reaches no collector.
+// metric the registry's mode does not serve is passed over, which is how a grade pod's totals
+// hold no reading of a /proc/meminfo no node reads.
 func (s *fixedSamples) add(owner string, id metricID, value float64, labels ...string) {
-	if metrics[id].modes&s.mode == 0 {
+	if id == noMetric {
 		return
 	}
-	s.samples = append(s.samples, sample{metric: id, labels: labels, value: value})
+	one := sample{metric: id, value: value}
+	copy(one.labels[:], labels)
+	s.samples = append(s.samples, one)
 	s.counts[owner]++
 }
 
@@ -819,86 +935,55 @@ func (r *Registry) addSelf(s *fixedSamples) {
 	s.add("", walkDeferred, r.deferredWalks)
 }
 
-// addTotals holds the pod totals, which the cap never drops either: an issue pod's own cgroup
-// readings, or, in node mode, each grade pod's. A total no read has answered yet is left out
-// rather than served as a zero.
+// addTotals holds the cgroup totals of every owner, which the cap never drops either: an issue
+// pod's own readings, or, in node mode, each grade pod's. A total no read has answered yet is
+// left out rather than served as a zero.
 func (r *Registry) addTotals(s *fixedSamples) {
-	if r.pod.memory.read {
-		s.add("", podMemoryBytes, r.pod.memory.value, r.project, r.issue)
-		s.add("", podMemoryPeakBytes, r.pod.memory.peak, r.project, r.issue)
-	}
-	if r.pod.cpuSeconds.read {
-		s.add("", podCPUSecondsTotal, r.pod.cpuSeconds.value, r.project, r.issue)
-	}
-	if r.pod.processMemory.read {
-		s.add("", podProcessMemoryBytes, r.pod.processMemory.value, r.project, r.issue)
-		s.add("", podProcessMemoryPeakBytes, r.pod.processMemory.peak, r.project, r.issue)
-	}
-	if r.pod.sharedMemory.read {
-		s.add("", podSharedMemoryBytes, r.pod.sharedMemory.value, r.project, r.issue)
-	}
-	for pod, grade := range r.grades {
-		owner := gradeKey(pod)
-		labels := []string{pod.Pod, pod.Namespace, pod.Queue, pod.Owner}
-		if grade.memory.read {
-			s.add(owner, gradePodMemoryBytes, grade.memory.value, labels...)
-			s.add(owner, gradePodMemoryPeakBytes, grade.memory.peak, labels...)
+	ids := r.served.totals
+	for key, series := range r.totals {
+		labels := key.labels[:]
+		if series.memory.read {
+			s.add(key.owner, ids.memory, series.memory.value, labels...)
+			s.add(key.owner, ids.memoryPeak, series.memory.peak, labels...)
 		}
-		if grade.cpuSeconds.read {
-			s.add(owner, gradePodCPUSecondsTotal, grade.cpuSeconds.value, labels...)
+		if series.cpuSeconds.read {
+			s.add(key.owner, ids.cpuSeconds, series.cpuSeconds.value, labels...)
+		}
+		if series.processMemory.read {
+			s.add(key.owner, ids.processMemory, series.processMemory.value, labels...)
+			s.add(key.owner, ids.processPeak, series.processMemory.peak, labels...)
+		}
+		if series.sharedMemory.read {
+			s.add(key.owner, ids.sharedMemory, series.sharedMemory.value, labels...)
 		}
 	}
 }
 
 // droppable are the groups the cap may drop, each with the moment its processes last ran.
 func (r *Registry) droppable() []group {
-	groups := make([]group, 0, len(r.pairs)+len(r.volumes)+len(r.grades))
-	if r.mode == ModePod {
-		for pair, series := range r.pairs {
-			labels := []string{r.project, r.issue, pair.Role, string(pair.Kind)}
-			g := group{tier: tierPair, last: series.lastActive, key: pair.Role + "\x00" + string(pair.Kind)}
-			if series.cpuSeconds.read {
-				g.samples = append(g.samples, sample{cpuSecondsTotal, labels, series.cpuSeconds.value})
-			}
-			if series.anonymous.read {
-				g.samples = append(g.samples,
-					sample{memoryAnonymousBytes, labels, series.anonymous.value},
-					sample{memoryAnonymousPeakBytes, labels, series.anonymous.peak})
-			}
-			if series.resident.read {
-				g.samples = append(g.samples,
-					sample{memoryResidentBytes, labels, series.resident.value},
-					sample{memoryResidentPeakBytes, labels, series.resident.peak})
-			}
-			groups = append(groups, g)
+	groups := make([]group, 0, len(r.work)+len(r.volumes))
+	ids := r.served.work
+	for key, series := range r.work {
+		g := group{owner: key.owner, tier: tierWork, last: series.lastActive, labels: key.labels}
+		if series.cpuSeconds.read {
+			g.add(ids.cpuSeconds, series.cpuSeconds.value)
 		}
-		// A volume has no activity of its own: it is dropped after every pair, and
-		// between volumes by name, so the same volume goes first every time.
-		for key, used := range r.volumes {
-			labels := []string{r.project, r.issue, key.name, key.medium, key.role}
-			groups = append(groups, group{
-				tier:    tierVolume,
-				key:     key.name + "\x00" + key.medium + "\x00" + key.role,
-				samples: []sample{{volumeUsedBytes, labels, used.value}},
-			})
+		if series.anonymous.read {
+			g.add(ids.anonymous, series.anonymous.value)
+			g.add(ids.anonymousPeak, series.anonymous.peak)
 		}
-		return groups
+		if series.resident.read {
+			g.add(ids.resident, series.resident.value)
+			g.add(ids.residentPeak, series.resident.peak)
+		}
+		groups = append(groups, g)
 	}
-	for pod, grade := range r.grades {
-		owner := gradeKey(pod)
-		for kind, series := range grade.kinds {
-			labels := []string{pod.Pod, pod.Namespace, string(kind), pod.Queue, pod.Owner}
-			g := group{owner: owner, tier: tierPair, last: series.lastActive, key: string(kind)}
-			if series.cpuSeconds.read {
-				g.samples = append(g.samples, sample{gradeCPUSecondsTotal, labels, series.cpuSeconds.value})
-			}
-			if series.resident.read {
-				g.samples = append(g.samples,
-					sample{gradeMemoryResidentBytes, labels, series.resident.value},
-					sample{gradeMemoryResidentPeakBytes, labels, series.resident.peak})
-			}
-			groups = append(groups, g)
-		}
+	// A volume has no activity of its own: it is dropped after every pair, and between
+	// volumes by name, so the same volume goes first every time.
+	for key, used := range r.volumes {
+		g := group{owner: key.owner, tier: tierVolume, labels: key.labels}
+		g.add(r.served.volumeUsed, used.value)
+		groups = append(groups, g)
 	}
 	return groups
 }
@@ -927,7 +1012,7 @@ func applyCap(groups []group, fixed map[string]int) ([]group, int) {
 		if c := x.last.Compare(y.last); c != 0 {
 			return c
 		}
-		return cmp.Compare(x.key, y.key)
+		return slices.Compare(x.labels[:], y.labels[:])
 	})
 	dropped := 0
 	drop := make([]bool, len(groups))
@@ -972,7 +1057,7 @@ func render(samples []sample) []byte {
 			continue
 		}
 		m := &metrics[id]
-		slices.SortFunc(series, func(a, b sample) int { return slices.Compare(a.labels, b.labels) })
+		slices.SortFunc(series, func(a, b sample) int { return slices.Compare(a.labels[:], b.labels[:]) })
 		body = append(body, "# HELP "...)
 		body = append(body, m.name...)
 		body = append(body, ' ')
@@ -990,20 +1075,22 @@ func render(samples []sample) []byte {
 }
 
 // appendSeries writes one series: its name, its labels in the metric's own order, and its value.
+// The metric's own row says how many of them it carries, so a key wider than the metric leaves
+// its last values unwritten rather than inventing a label name for them.
 func appendSeries(body []byte, m *metric, s sample) []byte {
 	body = append(body, m.name...)
-	for i, value := range s.labels {
+	for i, name := range m.labels {
 		if i == 0 {
 			body = append(body, '{')
 		} else {
 			body = append(body, ',')
 		}
-		body = append(body, m.labels[i]...)
+		body = append(body, name...)
 		body = append(body, '=', '"')
-		body = appendEscaped(body, value)
+		body = appendEscaped(body, s.labels[i])
 		body = append(body, '"')
 	}
-	if len(s.labels) > 0 {
+	if len(m.labels) > 0 {
 		body = append(body, '}')
 	}
 	body = append(body, ' ')
