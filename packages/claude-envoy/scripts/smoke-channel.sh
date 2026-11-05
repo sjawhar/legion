@@ -106,16 +106,31 @@ wait_for_delivery() {
   return 1
 }
 
+# wait_for_teardown returns 0 once a read of the session list leaves the session out, 1 when the
+# last list it read still held the session at the deadline, and 2 when it never read the list. A
+# read that fails (no answer, a non-200 such as the listener's refilling 503, a body that is not a
+# list) says nothing about the session, so it is retried, never taken for its absence;
+# teardown_read_error keeps the last such failure for the message.
+teardown_read_error=""
 wait_for_teardown() {
-  local deadline=$((SECONDS + teardown_timeout)) response
+  local deadline=$((SECONDS + teardown_timeout)) response listed=0 rc
+  local curl_error="${workdir}/teardown-curl.err"
   while (( SECONDS < deadline )); do
-    response="$(curl --connect-timeout 2 --max-time 5 -fsS "${envoy_url}/v1/sessions?dir=${workdir}" 2>/dev/null || true)"
-    if ! jq -e --arg id "$target_session" '.[] | select(.session_id == $id)' <<<"$response" >/dev/null 2>&1; then
-      return 0
+    if response="$(curl --connect-timeout 2 --max-time 5 -fsS "${envoy_url}/v1/sessions?dir=${workdir}" 2>"$curl_error")"; then
+      rc=0
+      jq -e --arg id "$target_session" 'any(.[]; .session_id == $id)' <<<"$response" >/dev/null 2>&1 || rc=$?
+      case "$rc" in
+        0) listed=1 ;;
+        1) return 0 ;;
+        *) teardown_read_error="GET /v1/sessions answered a body that is not a session list: ${response:0:200}" ;;
+      esac
+    else
+      teardown_read_error="$(tr '\n' ' ' <"$curl_error")"
     fi
     sleep 1
   done
-  return 1
+  (( listed )) && return 1
+  return 2
 }
 
 # The channel server gets a known direct Envoy route through the QA override.
@@ -153,5 +168,11 @@ wait_for_delivery || fail "Claude did not write the exact channel payload within
 printf 'delivery observed; terminating Claude session and checking deregistration\n'
 tmux kill-session -t "$tmux_session" || fail "tmux kill-session failed"
 tmux_session=""
-wait_for_teardown || fail "Envoy session remained registered after ${teardown_timeout}s"
+teardown_rc=0
+wait_for_teardown || teardown_rc=$?
+case "$teardown_rc" in
+  0) ;;
+  1) fail "Envoy session remained registered after ${teardown_timeout}s" ;;
+  *) fail "could not read Envoy's session list within ${teardown_timeout}s of the teardown, so deregistration is unproven: ${teardown_read_error:-no read finished}" ;;
+esac
 printf 'PASS: Envoy event arrived through Claude Code channel notifications and the session deregistered — %s\n' "$session_row"
