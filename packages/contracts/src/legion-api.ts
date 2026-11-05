@@ -324,7 +324,7 @@ const legionHeldOutboxRow = z.object({
  * already running, both held in the claim's machine and lost with a restart, which raises the wave
  * again through its own paths; and `catch-up`, the notice a start writes to an architect already
  * running in place of a launch, which waits on its own outbox row. */
-const legionWakeWaiting = z.strictObject({
+const legionWakeWaiting = z.object({
   claim: nonEmptyString,
   issue: issueKey,
   role: z.enum(LEGION_ROLES),

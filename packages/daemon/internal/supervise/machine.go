@@ -1469,19 +1469,21 @@ func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Durati
 
 // wakeNow is the wake's turn (TimerWake): the launch the gate held runs now, and takes no second
 // token — its reservation was taken once, before it waited. A suspension held meanwhile ends here
-// instead of in a launch, exactly as relaunchAgain ends one: a suspend that reaches a parked claim
-// is held rather than run (holdSuspendUntilReady on a claim with no process, holdSuspension on one
-// in a turn), and the wake's turn is when that hold is answered. The process the claim still
-// records, where it records one, is stopped first, as the relaunch this wake holds would have
-// stopped it (replaceProcess, endHeld).
+// instead of in a launch, exactly as relaunchAgain ends one, and the process the claim records is
+// stopped first, as the relaunch this wake holds would have stopped it (replaceProcess, endHeld).
+//
+// Every hold found here is over a process that still runs: the suspend of a claim in a turn
+// (holdSuspension) and the suspend of a launch that did start a process (holdSuspendUntilReady),
+// which are the only two the machine keeps, and letGo drops a hold with the process it is held
+// for. A suspend of a parked claim that records no process is held no more — it is decided where
+// it arrives, since there is no process to protect and the wake's turn is tens of minutes away
+// over a wave (holdSuspendUntilReady) — and that suspension takes the wake with it, so no turn of
+// such a claim is reached at all.
 func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 	waiting := m.wake
 	m.wake = nil
 	if m.held != nil {
-		if m.claim.Locator != nil {
-			return m.endHeld(ctx)
-		}
-		return m.suspendedFor(ctx, *m.held)
+		return m.endHeld(ctx)
 	}
 	m.wakeRan(waiting.kind, true, m.deps.Clock.Now().Sub(waiting.reserved))
 	return waiting.run(ctx)

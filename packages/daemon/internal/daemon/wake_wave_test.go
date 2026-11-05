@@ -990,17 +990,24 @@ func TestAnOperatorsResumeAndTheControllersOwnWakeNeverWait(t *testing.T) {
 }
 
 // Every event that reaches a claim the pacing holds is decided while the wave still waits, with
-// the clock where the wave left it: a suspend is answered and held for the launch, a stop and a
-// tree close retire their claims and take their wakes with them, and a task delivered to a claim
-// whose turn has not come is queued as it is for any launch in flight. None of them waits for a
-// turn, and none of them moves anyone else's: every wake still waiting is due at the moment it
-// already held. Then the suspended claim's own turn comes: it launches nothing, and the drop costs
-// the queue nothing — every wake behind it runs at the turn it already had.
+// the clock where the wave left it: a suspend suspends its claim where it arrives, a stop and a
+// tree close retire theirs, each of the three taking that claim's wake with it, and a task
+// delivered to a claim whose turn has not come is queued as it is for any launch in flight. None
+// of them waits for a turn, and none of them moves anyone else's: every wake still waiting is due
+// at the moment it already held. Then the turns come: the three claims whose wakes went launch
+// nothing at theirs, and the drops cost the queue nothing — every wake behind them runs at the
+// turn it already had.
 //
-// The negative control is the wait held inside the machine's decision instead of in a timer: the
-// suspend of a waiting claim is then not decided until that claim's turn, which this test reads as
-// an unanswered route, and the issue's own lane logs a row held behind it
-// (TestALaneRunsOnWhileTheClaimsWakeWaits).
+// The suspend is the one that waited until this issue's tester found it. A claim the gate parked
+// launching with no process holds no process for a suspension to protect, and over a wave its turn
+// is tens of minutes out, so a drain answered 202 and applied only at that turn leaves the
+// operator waiting that long — and a restart inside it forgets the hold, which lives in memory
+// alone, and relaunches the claim the operator told it to drain
+// (supervise's holdSuspendUntilReady, and the restart's own proof below).
+//
+// The negative control is that wait put back, the suspension held for the claim's turn: the route
+// then answers 202 with the claim still launching, which this test reads at the suspend itself,
+// and the claim is suspended only when its turn comes.
 func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) {
 	cfg := waveConfig(t)
 	waveClaims(t, cfg, claim.RoleArchitect, func(i int, _ claim.Token) supervise.Claim { return unfinishedLaunch(t, i) })
@@ -1031,16 +1038,22 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	if stopped == "" || len(roots) < 3 {
 		t.Fatalf("the queue holds %d roots and the stoppable claim %q, want three roots and one claim that is not a root", len(roots), stopped)
 	}
-	held, closed, delivered := roots[0], roots[1], roots[2]
+	drained, closed, delivered := roots[0], roots[1], roots[2]
 
-	// The suspend: answered 202, the suspension held for the launch the claim is waiting for, and
-	// the claim still in the queue — a suspend is not one of the requests that drop a wake.
-	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(held)+"/suspend", nil, true)
-	if status != http.StatusAccepted {
-		t.Fatalf("the suspend of a waiting claim = %d; body %s, want 202 with the suspension held", status, body)
+	// The suspend: decided where it arrives, because the claim it reaches records no process for
+	// the suspension to protect. The claim is suspended by the operator at once, in the store as
+	// well as in memory, and its wake goes with it, as a stop's and a close's do.
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(drained)+"/suspend", nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("the suspend of a waiting claim = %d; body %s, want 200 with the claim suspended", status, body)
 	}
-	if c := d.claim(held); !c.SuspensionHeld || c.State != string(supervise.StateLaunching) {
-		t.Fatalf("the suspended waiting claim is %s with suspensionHeld %v, want launching with the suspension held", c.State, c.SuspensionHeld)
+	if c := d.claim(drained); c.State != string(supervise.StateSuspended) || c.SuspendedBy != string(supervise.SuspendedByOperator) || c.SuspensionHeld {
+		t.Fatalf("the suspended waiting claim is %s suspended by %q with suspensionHeld %v, want suspended by the operator with nothing held",
+			c.State, c.SuspendedBy, c.SuspensionHeld)
+	}
+	if stored := storedClaim(t, cfg, drained); stored.State != supervise.StateSuspended || stored.SuspendedBy != supervise.SuspendedByOperator {
+		t.Fatalf("the stored claim is %s suspended by %q, want suspended by the operator: a restart must relaunch no drained claim",
+			stored.State, stored.SuspendedBy)
 	}
 
 	// The stop and the tree close: each retires its claim at once, and the retirement takes the
@@ -1080,35 +1093,30 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 		t.Fatalf("the test clock is at %s, want %s: every event was decided without a wake's turn coming", now, origin)
 	}
 	after := waitingWakes(t, d)
-	if len(after) != len(waiting)-2 {
-		t.Fatalf("%d wakes wait after the three events, want %d: the stop and the close took their own wakes and no others",
-			len(after), len(waiting)-2)
+	if len(after) != len(waiting)-3 {
+		t.Fatalf("%d wakes wait after the three events, want %d: the suspend, the stop and the close took their own claims' wakes and no others",
+			len(after), len(waiting)-3)
 	}
 	for _, wake := range after {
-		if wake.Claim == stopped || wake.Claim == closed {
-			t.Fatalf("the wake of the retired claim %s still waits, want it gone with the retirement", wake.Claim)
+		if wake.Claim == drained || wake.Claim == stopped || wake.Claim == closed {
+			t.Fatalf("the wake of the decided claim %s still waits, want it gone with the decision", wake.Claim)
 		}
 		if was := promised[wake.Claim]; !wake.DueAt.Equal(was) {
 			t.Fatalf("the wake of %s is due at %s, want the turn it already held, %s", wake.Claim, wake.DueAt, was)
 		}
 	}
 
-	// Each turn in order: the suspended claim launches nothing at its own, and every wake behind it
-	// runs at the turn it already held — a dropped wake frees nothing and takes nothing.
+	// Each turn in order: the three claims whose wakes went launch nothing at the turns those
+	// wakes held, and every wake behind them runs at the turn it already held — a dropped wake
+	// frees nothing and takes nothing.
 	launched := 1
 	for _, wake := range waiting {
 		clock.advanceTo(wake.DueAt)
 		switch wake.Claim {
-		case held:
-			testwait.Eventually(t, "the suspension held for the waiting claim to be run at its turn", func() bool {
-				return d.claim(held).State == string(supervise.StateSuspended)
-			})
-			if got := rt.launchesOf(held); got != 0 {
-				t.Fatalf("the claim suspended while it waited launched %d times at its turn, want none", got)
-			}
-		case stopped, closed:
+		case drained, stopped, closed:
 			if got := rt.launchesOf(wake.Claim); got != 0 {
-				t.Fatalf("the retired claim %s launched %d times at the turn its wake held, want none", wake.Claim, got)
+				t.Fatalf("the claim %s, whose wake went with the event that decided it, launched %d times at the turn that wake held, want none",
+					wake.Claim, got)
 			}
 		default:
 			launched++
@@ -1124,6 +1132,10 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	}
 	if got := len(rt.launches()); got != launched {
 		t.Fatalf("%d launches once every turn has come, want %d: the wave less the suspended and the two retired claims", got, launched)
+	}
+	if c := d.claim(drained); c.State != string(supervise.StateSuspended) {
+		t.Fatalf("the claim suspended while its wake waited is %s once every turn has come, want it left %s",
+			c.State, supervise.StateSuspended)
 	}
 	if left := waitingWakes(t, d); len(left) != 0 {
 		t.Fatalf("wakesWaiting once every turn has come = %+v, want none", left)
@@ -1324,6 +1336,90 @@ func TestARestartRaisesTheWakesStillWaitingAndEachHappensOnce(t *testing.T) {
 	}
 }
 
+// R2 of dispatch://INFRA-976/spec asks of a waiting wake that it lose nothing, not only that its
+// claim still decide: an operator's suspend of a claim whose wake waits over no process writes no
+// outbox row and, were it held, would live in the machine's memory alone, so a restart inside the
+// tens of minutes such a wake waits would forget the drain while the claim stood persisted
+// launching — and boot relaunches every unfinished launch it finds (launchUnfinished), the claim
+// the operator drained among them. Decided where it arrives, the suspension is written: the
+// restart finds the claim suspended, raises no wake for it and launches nothing of it, while
+// every other claim of the wave is still woken exactly once.
+//
+// The negative control is the suspension held for the wake's turn instead: the claim is then
+// stored launching when the daemon stops, the restart counts it among the unfinished launches,
+// and it is relaunched — the drain undone by a restart nobody connected to it.
+func TestASuspendDecidedWhileTheWakeWaitedSurvivesARestart(t *testing.T) {
+	cfg := waveConfig(t)
+	tokens := waveClaims(t, cfg, claim.RoleImplementer, func(i int, _ claim.Token) supervise.Claim { return unfinishedLaunch(t, i) })
+	clock, logged := newWaveClock(), &syncBuffer{}
+	rt := newWaveRuntime(clock)
+
+	d := startWaveDaemon(t, cfg, clock, rt, logged, nil)
+	waiting := awaitWave(t, d, waveSize)
+
+	// The claim the operator drains is the last of the queue, whose turn is the whole wave away.
+	drained := waiting[len(waiting)-1].Claim
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(drained)+"/suspend", nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("the suspend of a waiting claim = %d; body %s, want 200 with the claim suspended", status, body)
+	}
+	if stored := storedClaim(t, cfg, drained); stored.State != supervise.StateSuspended || stored.SuspendedBy != supervise.SuspendedByOperator {
+		t.Fatalf("the stored claim is %s suspended by %q before the restart, want %s by the operator",
+			stored.State, stored.SuspendedBy, supervise.StateSuspended)
+	}
+	launchedFirst := map[claim.Token]int{}
+	for _, launch := range rt.launches() {
+		launchedFirst[launch.claim]++
+	}
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	restartClock, restartLog := newWaveClock(), &syncBuffer{}
+	restarted := newWaveRuntime(restartClock)
+	restartOrigin := restartClock.Now()
+	second := startWaveDaemon(t, cfg, restartClock, restarted, restartLog, nil)
+
+	// The drained claim comes back suspended, and the wave the restart raises is the rest of the
+	// queue: the claim already launched records a process and is re-adopted, and the drained one is
+	// no unfinished launch at all.
+	if c := second.claim(drained); c.State != string(supervise.StateSuspended) || c.SuspendedBy != string(supervise.SuspendedByOperator) {
+		t.Fatalf("after the restart the drained claim is %s suspended by %q, want %s by the operator",
+			c.State, c.SuspendedBy, supervise.StateSuspended)
+	}
+	again := awaitWave(t, second, waveSize-2)
+	for _, wake := range again {
+		if wake.Claim == drained {
+			t.Fatalf("the restart holds a wake for the drained claim, %+v, want none: it is suspended, not an unfinished launch", wake)
+		}
+	}
+	assertSpread(t, "the restart's own wave", wakeMoments(restartOrigin, again), restartOrigin)
+	runWave(t, restartClock, restarted, again, 1)
+
+	total := map[claim.Token]int{}
+	for token, count := range launchedFirst {
+		total[token] += count
+	}
+	for _, launch := range restarted.launches() {
+		total[launch.claim]++
+	}
+	for _, token := range tokens {
+		want := 1
+		if token == drained {
+			want = 0
+		}
+		if total[token] != want {
+			t.Fatalf("%s launched %d times over the restart, want %d: the drained claim is relaunched never and every other wake happens once",
+				token, total[token], want)
+		}
+	}
+	if c := second.claim(drained); c.State != string(supervise.StateSuspended) {
+		t.Fatalf("the drained claim is %s once the restart's wave has gone, want it left %s", c.State, supervise.StateSuspended)
+	}
+	if left := waitingWakes(t, second); len(left) != 0 {
+		t.Fatalf("wakesWaiting once the restart's wave has gone = %+v, want none", left)
+	}
+}
+
 // pacedLaneTree is a lane tree whose claims' launches draw on a limiter a wave of forty has
 // already spent, so the next launch this issue raises is held exactly as the fortieth of a roll
 // is: the limiter is the daemon's own, at the shipped pace, and the machines keep the lane's own
@@ -1361,8 +1457,8 @@ func waitingWakeOf(t *testing.T, tree *laneTree, role claim.Role) (*supervise.Ma
 // rather than holding the lane until the claim's turn, the suspend that follows it runs on the
 // same lane and is decided there and then, and no row of the issue is ever held long enough to
 // raise the daemon's held-row warning — two minutes of lease ticks pass with the wake still
-// waiting and nothing is logged. The suspension is held for the launch the claim is waiting for,
-// which is what the claim's own turn then runs.
+// waiting and nothing is logged. The suspend of that claim is decided where it lands, since the
+// claim records no process while its wake waits, and the wake goes with it.
 //
 // The negative control is this same wait held inside the machine's decision, where the gated
 // runtime holds the architect's start: the suspend is then not decided until that start returns,
@@ -1387,28 +1483,13 @@ func TestALaneRunsOnWhileTheClaimsWakeWaits(t *testing.T) {
 		t.Fatalf("the runtime launched %v while the wake waits, want nothing", spawned)
 	}
 
-	// The suspend of that same claim: the machine takes it the moment the row runs and holds it
-	// for the launch the claim is waiting for (holdSuspendUntilReady), which answers the row the
-	// wait every durable caller retries on — the row waits on a backoff of its own rather than on
-	// the lane, exactly as it does today for a launch in flight.
-	suspend := mustOutboxRow(t, tree.root.Key, record.SuperviseRequest{Op: "suspend", Tree: tree.root.Tree,
-		Role: claim.RoleArchitect, Generation: tree.root.Generation}, tree.clock.Now())
-	tree.commit(t, "architect-suspend", suspend)
-	testwait.Eventually(t, "the suspension to be held for the claim whose wake waits", func() bool {
-		return machine.Claim().SuspensionHeld
-	})
-	// The wake keeps the turn it already held: a suspend is not one of the requests that drop one.
-	if _, still := waitingWakeOf(t, tree, claim.RoleArchitect); still.At != wake.At {
-		t.Fatalf("the wake is due at %s after the suspend, want the turn it already held, %s", still.At, wake.At)
-	}
-
 	// A row of another lane of the same issue — the board lane's status write — runs while that
 	// claim's wake still waits: the lanes of an issue are not held behind one another, and none of
 	// them is held behind a wake.
 	tree.commit(t, "board-status", mustOutboxRow(t, tree.root.Key,
 		record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, tree.clock.Now()))
 	testwait.Eventually(t, "the board row of the same issue to run while the wake waits", func() bool {
-		return tree.client.count() == 1 && outboxRows(t, tree.pool) == 1
+		return tree.client.count() == 1 && outboxRows(t, tree.pool) == 0
 	})
 
 	// Two minutes of lease ticks with the wake still waiting — the harness holds every timer, the
@@ -1421,26 +1502,44 @@ func TestALaneRunsOnWhileTheClaimsWakeWaits(t *testing.T) {
 	if held := heldWarnings(t, logged.String()); len(held) != 0 {
 		t.Fatalf("the lane logged %v held behind a running row, want none: no row waits on a wake's turn", held)
 	}
-	if rows := outboxRows(t, tree.pool); rows != 1 {
-		t.Fatalf("%d rows are left while the wake waits, want the suspend alone, waiting on its own backoff", rows)
+	if rows := outboxRows(t, tree.pool); rows != 0 {
+		t.Fatalf("%d rows are left while the wake waits, want none: each row of the issue ran where it stood", rows)
+	}
+	if _, still := waitingWakeOf(t, tree, claim.RoleArchitect); still.At != wake.At {
+		t.Fatalf("the wake is due at %s after two minutes of ticks, want the turn it already held, %s", still.At, wake.At)
 	}
 
-	// The claim's own turn runs the suspension the hold kept, and launches nothing.
-	if fired := tree.clock.fire(wake.At.Sub(reservedAt)); fired != 1 {
-		t.Fatalf("the wake's timer fired %d times at its turn, want the one the gate armed for %s", fired, wake.At.Sub(reservedAt))
-	}
-	testwait.Eventually(t, "the suspension held for the waiting claim to be run at its turn", func() bool {
-		return machine.Claim().State == supervise.StateSuspended
+	// The suspend of that same claim: the machine decides it the moment the row runs, and the row
+	// finishes there. The claim records no process while its wake waits, so the suspension has no
+	// process to protect and nothing to wait for (holdSuspendUntilReady): it suspends the claim
+	// where it arrives — written, so a restart relaunches nothing — and takes the wake with it,
+	// rather than answering the wait every durable caller retries on and landing at a turn tens of
+	// minutes out.
+	suspend := mustOutboxRow(t, tree.root.Key, record.SuperviseRequest{Op: "suspend", Tree: tree.root.Tree,
+		Role: claim.RoleArchitect, Generation: tree.root.Generation}, tree.clock.Now())
+	tree.commit(t, "architect-suspend", suspend)
+	testwait.Eventually(t, "the suspend row to finish with the claim whose wake waited", func() bool {
+		return outboxRows(t, tree.pool) == 0
 	})
+	if c := machine.Claim(); c.State != supervise.StateSuspended || c.SuspensionHeld {
+		t.Fatalf("the claim whose wake waited is %s with suspensionHeld %v, want %s with nothing held",
+			c.State, c.SuspensionHeld, supervise.StateSuspended)
+	}
+	if still := machine.View().WakeWaiting; still != nil {
+		t.Fatalf("the pacing holds %+v over the suspended claim, want the wake gone with the suspension", *still)
+	}
+
+	// The moment the wake would have had: its timer went with the suspension, so nothing fires at
+	// it and nothing is launched.
+	if fired := tree.clock.fire(wake.At.Sub(reservedAt)); fired != 0 {
+		t.Fatalf("%d timers fired at the turn the dropped wake held, want none: the suspension disarmed it", fired)
+	}
+	if c := machine.Claim(); c.State != supervise.StateSuspended {
+		t.Fatalf("the suspended claim is %s at the turn its wake held, want it left %s", c.State, supervise.StateSuspended)
+	}
 	if spawned := spawnedRoles(tree.rt); len(spawned) != 0 {
 		t.Fatalf("the runtime launched %v at the suspended claim's turn, want nothing", spawned)
 	}
-	// The suspend row's next attempt finds the claim suspended and finishes: the row the pacing
-	// made wait is answered once, by the turn, rather than left in the outbox.
-	fireSweep(t, tree.clock)
-	testwait.Eventually(t, "the suspend row to finish once its claim is suspended", func() bool {
-		return outboxRows(t, tree.pool) == 0
-	})
 }
 
 // A second start of a claim whose wake the pacing already holds takes no second token and starts

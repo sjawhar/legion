@@ -229,28 +229,6 @@ func TestAWakeDroppedBeforeItsTurnLaunchesNothingAndTheNextKeepsItsMoment(t *tes
 	h.wantWakeLine(thirdToken, "waitedFor="+(2*wakeInterval+2*wakePart).String())
 }
 
-// A suspension of a claim whose wake is waiting is answered as a wait, as one of a claim mid-launch
-// is, and lands at the wake's turn: the claim is suspended there rather than launched.
-func TestASuspendWhileTheWakeWaitsLandsAtItsTurn(t *testing.T) {
-	h := pacedHarness(t, wakeRate)
-	second := h.machineFor(wakeClaim(secondToken, StateQueued))
-
-	h.must(RequestSpawn{Claim: h.token})
-	h.mustPostTo(second, RequestSpawn{Claim: secondToken})
-	err := h.postTo(second, RequestSuspend{Claim: secondToken, Reason: "the operator drains the daemon", By: SuspendedByOperator})
-
-	if !suspensionHeld(err) {
-		t.Fatalf("the suspension of a waiting claim answered %v, want ErrSuspendHeld", err)
-	}
-	h.clock.Advance(wakeInterval + wakePart)
-	second.Wait()
-
-	if state := second.Claim().State; state != StateSuspended {
-		t.Fatalf("the suspended claim is %s, want %s", state, StateSuspended)
-	}
-	h.wantStarts(secondToken, 0)
-}
-
 // R2 of dispatch://INFRA-976/spec: a wake that waits blocks nothing and loses nothing, and its
 // claim "still decides a suspend, a stop, a tree close". A roll or a restart puts hundreds of
 // claims in the queue, so a claim far down it waits tens of minutes, and an operator's drain of
