@@ -9,6 +9,7 @@ import {
   placeCaret,
   selectEditorText,
 } from "./editor";
+import { nextFrames } from "./frames";
 import { commentWithBody } from "./margin-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -22,14 +23,6 @@ test.beforeEach(async () => {
 /** The provisional or recorded comment marks in `page`'s editor. */
 function commentMarks(page: Page): Locator {
   return documentEditor(page).locator('span[data-proof="comment"][data-id]');
-}
-
-/** Waits two rendering frames, so a composer a key press opened has had its chance to render. */
-function nextFrames(page: Page): Promise<void> {
-  return page.evaluate(
-    () =>
-      new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())))
-  );
 }
 
 // Ctrl+Alt+M (Cmd+Option+M on a Mac) is Google Docs' chord for the bar's Comment button. The

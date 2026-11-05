@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -29,13 +32,33 @@ const (
 type launchers struct {
 	mu       sync.Mutex
 	sessions map[claim.Token]*launcherSession
+
+	// saved is the bundle an issue's last release left and restored the confirmation that drops
+	// it, the daemon's store behind both (Options.SavedWorkspaceBundle, WorkspaceBundleRestored).
+	// A launchers built without the pair restores nothing.
+	saved    runtime.SavedWorkspaceBundle
+	restored runtime.WorkspaceBundleRestored
+	log      *slog.Logger
 }
 
 type launcherSession struct {
-	owner  *launchers
-	token  claim.Token
-	id     string
-	podUID string
+	owner *launchers
+	token claim.Token
+	// issue is the exact issue key this launcher's pod is of, as the role Secret's annotation
+	// carried it to the hello's authentication (launcherCredential.issue): the key the release
+	// saved that workspace's bundle under. "" for a pod of no issue, the project controller's.
+	issue string
+	// podCreated is when the API server stamped this launcher's pod created
+	// (corev1.Pod's CreationTimestamp, as the resolver read it off the pod the connection was
+	// accepted for). It is what says whether this pod is the one a release's saved work is for:
+	// a pod created after the save is the pod the teardown's launch made and is sent the work,
+	// and one that is not is refused, which spends the bundle's one attempt and sends it to no
+	// pod again (store.TakeWorkspaceBundleForRestore). The pod the work was taken off is told
+	// apart by its uid and not by this, so a role relaunched in the pod being released spends
+	// nothing.
+	podCreated time.Time
+	id         string
+	podUID     string
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -46,12 +69,16 @@ type launcherSession struct {
 	closed  bool
 }
 
-func newLaunchers() *launchers { return &launchers{sessions: map[claim.Token]*launcherSession{}} }
+func newLaunchers(saved runtime.SavedWorkspaceBundle, restored runtime.WorkspaceBundleRestored, log *slog.Logger) *launchers {
+	return &launchers{sessions: map[claim.Token]*launcherSession{}, saved: saved, restored: restored, log: log}
+}
 
-// accept registers a launcher connection. The newest authenticated connection for a role wins:
-// a half-open predecessor is closed so its pending requests fail instead of waiting forever.
-func (d *launchers) accept(token claim.Token, hello shimwire.LauncherHello) *launcherSession {
-	s := &launcherSession{owner: d, token: token, id: hello.LauncherID, podUID: hello.PodUID, ready: make(chan struct{}), waiters: map[string]chan shimwire.Frame{}}
+// accept registers a launcher connection of the pod of issue, created at podCreated. The newest
+// authenticated connection for a role wins: a half-open predecessor is closed so its pending
+// requests fail instead of waiting forever.
+func (d *launchers) accept(token claim.Token, issue string, podCreated time.Time, hello shimwire.LauncherHello) *launcherSession {
+	s := &launcherSession{owner: d, token: token, issue: issue, podCreated: podCreated, id: hello.LauncherID, podUID: hello.PodUID,
+		ready: make(chan struct{}), waiters: map[string]chan shimwire.Frame{}}
 	d.mu.Lock()
 	old := d.sessions[token]
 	d.sessions[token] = s
@@ -101,6 +128,10 @@ func (s *launcherSession) ServeLauncher(conn net.Conn, reader *bufio.Reader, wri
 			s.deliver(value.ID, value)
 		case shimwire.LauncherStopResult:
 			s.deliver(value.ID, value)
+		case shimwire.LauncherBundleResult:
+			s.deliver(bundleWaiter(value.ID, value.Index), value)
+		case shimwire.LauncherRestored:
+			s.owner.restoreReported(s, value)
 		default:
 			return
 		}
@@ -255,6 +286,11 @@ func (e startRefusal) Error() string {
 }
 
 func (d *launchers) start(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherStart) error {
+	// The work the release took off the pod this one replaces goes over first: the launcher holds
+	// the bundle and restores it into the workspace before it runs the role's command, so the
+	// restore has to be in its hands before any generation of the pod is started, this one
+	// included (internal/launcher's bundleRestore). It never stops the start.
+	d.restoreWorkspace(ctx, token, podUID)
 	answer, _, err := d.request(ctx, token, podUID, command, command.ID)
 	if err != nil {
 		return err
@@ -273,6 +309,168 @@ func (d *launchers) start(ctx context.Context, token claim.Token, podUID string,
 	}
 	return nil
 }
+
+// bundleRestoreBound is how long the hop of one pod's saved bundle may take. The 40 MiB a release
+// carries at most is 160 slices of shimwire.LauncherBundlePayloadBytes, each one round trip the
+// launcher answers out of memory, so this is room for a slow connection rather than for the
+// common case; a hop that outruns it costs the restore and never the start.
+const bundleRestoreBound = 2 * time.Minute
+
+// restoreWorkspace carries the bundle the last release of this pod's issue saved to the pod's
+// launcher. The launcher applies it to the workspace before the first role of the pod runs, so
+// every call is from a start that has not been issued yet (start), and it reports what the
+// restore did in a frame of its own, which is what the saved copy is dropped on
+// (restoreReported).
+//
+// Nothing here stops a role. A slice the launcher refuses, a body that did not arrive as it was
+// sent, a store that cannot be read and a connection that fails are each logged and left: a pod
+// that never starts is worse than one whose workspace holds only what was pushed, and the
+// launcher writes the agent its own notice of what was lost (internal/launcher's restoreWorkspace).
+//
+// One attempt per bundle, and the read is it: the store records the pod this send is for before
+// it answers the body, and answers nothing for that bundle afterwards
+// (store.TakeWorkspaceBundleForRestore). So a roles container that restarts, a pod that replaces
+// this one and a third pod after an eviction are each sent nothing, and no bundle is ever applied
+// over work a running pod's roles have done since the save. The work itself stays in the
+// database, which holds the issue's pod (workflow.IdleHoldBundleUnrestored) until the issue's
+// work is over.
+//
+// Whose attempt it is the session's own pod decides, and the store decides it: a release stops
+// the roles of the pod it is releasing, so a role relaunched in that pod before the teardown
+// deletes it reaches here too, for the workspace the work was taken from, and the store knows
+// that pod by the uid the save recorded and answers it nothing, leaving the attempt for the pod
+// that replaces it. Every other pod spends the attempt the first time it asks, and a pod that
+// is not newer than the save (launcherSession.podCreated) spends it on a refusal: nothing is
+// sent to it, and nothing is sent to the pod after it either, since its roles go on working and
+// pushing from the workspace its own fetch provisioned. That refusal is this hop's one warning
+// an operator must read — the work is in the database and no pod will put it back on its own.
+func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, podUID string) {
+	if d.saved == nil || d.restored == nil {
+		return
+	}
+	// The session names the issue its pod is of, as the Secret its launcher authenticated with
+	// did, and when that pod was created, as the API server stamped it. A launcher that never
+	// arrives is the start's own error to report, not this hop's.
+	session, err := d.await(ctx, token, podUID)
+	if err != nil || session.issue == "" {
+		return
+	}
+	issue := session.issue
+	restoring, cancel := context.WithTimeout(ctx, bundleRestoreBound)
+	defer cancel()
+	bundle, take, err := d.saved(restoring, issue, podUID, session.podCreated)
+	if err != nil {
+		d.log.Warn("launcher bundle: the saved workspace bundle could not be taken for this pod's one restore attempt, so the pod starts on what was pushed",
+			"issue", issue, "launcher", token, "pod", podUID, "error", err)
+		return
+	}
+	if take == runtime.WorkspaceBundleRefusedOlder {
+		d.log.Warn("launcher bundle: this pod was not created after the release's save, so the saved workspace bundle is refused and no pod is sent it again; the work stays in the daemon's database and holds the issue's pod",
+			"issue", issue, "launcher", token, "pod", podUID, "created", session.podCreated,
+			"saved", bundle.At, "head", bundle.Head, "release", bundle.Release)
+		return
+	}
+	// Nothing was released, the restore is already confirmed, the release saved a workspace that
+	// had nothing unpushed, this bundle has had its one attempt, or this is the pod the work was
+	// taken off: the pod starts on what its fetch provisioned, as every pod of an issue that was
+	// never released does.
+	if take != runtime.WorkspaceBundleSend || len(bundle.Bundle) == 0 {
+		return
+	}
+	frames, err := bundleFrames(issue, bundle)
+	if err != nil {
+		d.log.Warn("launcher bundle: the saved workspace bundle could not be sliced, so the pod starts on what was pushed",
+			"issue", issue, "launcher", token, "error", err)
+		return
+	}
+	for _, frame := range frames {
+		answer, _, err := d.request(restoring, token, podUID, frame, bundleWaiter(frame.ID, frame.Index))
+		if err != nil {
+			d.log.Warn("launcher bundle: a slice of the saved workspace bundle did not reach the launcher, so the pod starts on what was pushed",
+				"issue", issue, "launcher", token, "slice", frame.Index, "slices", frame.Count, "error", err)
+			return
+		}
+		result, ok := answer.(shimwire.LauncherBundleResult)
+		if !ok {
+			d.log.Warn("launcher bundle: the launcher answered a bundle slice with another frame, so the pod starts on what was pushed",
+				"issue", issue, "launcher", token, "slice", frame.Index, "answer", answer.FrameType())
+			return
+		}
+		if !result.OK {
+			d.log.Warn("launcher bundle: the launcher refused a slice of the saved workspace bundle, so the pod starts on what was pushed",
+				"issue", issue, "launcher", token, "slice", frame.Index, "slices", frame.Count, "error", result.Error)
+			return
+		}
+		if !result.Held {
+			continue
+		}
+		// Held ends the sequence: the launcher has the whole, digest-checked body and applies it
+		// before its first role runs. The daemon's copy stays until the launcher reports what
+		// the restore itself did (restoreReported) — a restore can still fail, and the work is
+		// then in the daemon's database alone, which is where the launcher's notice says it is,
+		// and where it stays: this send was the bundle's one attempt.
+		d.log.Info("launcher bundle: the released workspace's saved work reached the pod that replaces it",
+			"issue", issue, "launcher", token, "bytes", len(bundle.Bundle), "slices", len(frames))
+		return
+	}
+	d.log.Warn("launcher bundle: the launcher took every slice of the saved workspace bundle without holding the whole",
+		"issue", issue, "launcher", token, "slices", len(frames))
+}
+
+// restoreReported drops the saved bundle of the release a launcher's report names, once that
+// launcher reports that its restore put the work back. It is the one confirmation a bundle is
+// deleted on: a restore that failed, and a pod no role ever started in, leave the work in the
+// daemon's database, where it stays, since the bundle's one attempt has been recorded and no pod
+// is sent it again (restoreWorkspace). Nothing else ever deletes it, so the issue's close and its
+// tree's close are what end a bundle no pod restored (outbox's dropReleasedWork).
+//
+// The release's own id is what the delete reads. A launcher keeps its report until some
+// connection carries it (internal/launcher's bundleRestore.owed), so one can reach the daemon
+// after the issue's next release has saved a bundle of its own; deleting the issue's row on such
+// a report would take that newer bundle, whose work no pod holds any more. The store deletes the
+// row only while it is still the release the report names (DeleteRestoredWorkspaceBundle), so a
+// late report deletes nothing.
+//
+// It runs on the launcher's own frame loop rather than in a goroutine of its own, so a pod whose
+// restore is confirmed has its bundle gone before any later frame of that launcher is read; the
+// delete is one indexed row.
+func (d *launchers) restoreReported(s *launcherSession, report shimwire.LauncherRestored) {
+	if d.restored == nil || s.issue == "" {
+		return
+	}
+	if !report.OK {
+		d.log.Warn("launcher bundle: the pod's launcher could not restore the released workspace's saved work, which had its one attempt and stays in the database until the issue's work is over",
+			"issue", s.issue, "launcher", s.token, "sequence", report.ID, "release", report.Release, "error", report.Error)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	if err := d.restored(ctx, s.issue, report.Release); err != nil {
+		d.log.Warn("launcher bundle: the restored workspace bundle could not be dropped from the store",
+			"issue", s.issue, "launcher", s.token, "release", report.Release, "error", err)
+		return
+	}
+	d.log.Info("launcher bundle: the pod's launcher restored the released workspace's saved work, which is dropped from the database",
+		"issue", s.issue, "launcher", s.token, "sequence", report.ID, "release", report.Release)
+}
+
+// bundleFrames are the slices that carry issue's saved bundle. The sequence's id is the issue, the
+// release that saved the bundle and the digest of the body (shimwire.SplitWorkspaceBundle), so it
+// is the same every time the same bundle is sent, which is what a pod whose launcher reconnects
+// needs: the launcher answers a slice it has already taken under an id it knows with the answer it
+// gave, Held included, and refuses only a payload that differs from the one that id carried —
+// which another bundle of the same issue never is, since another release is another sequence
+// (internal/launcher's bundleRestore.receive).
+func bundleFrames(issue string, b runtime.WorkspaceBundle) ([]shimwire.LauncherBundle, error) {
+	return shimwire.SplitWorkspaceBundle("restore-"+issue, b.Release, shimwire.WorkspaceBundle{
+		Bundle: b.Bundle, Head: b.Head, Tips: b.Tips, Bookmarks: b.Bookmarks, At: b.At,
+	})
+}
+
+// bundleWaiter names the request one slice's answer belongs to. A sequence is answered slice by
+// slice, so its id alone would name as many answers as it has slices; the launcher keys its own
+// results by the same pair.
+func bundleWaiter(sequence string, index int) string { return sequence + "/" + strconv.Itoa(index) }
 
 func (d *launchers) stop(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherStop) error {
 	answer, session, err := d.request(ctx, token, podUID, command, command.ID)

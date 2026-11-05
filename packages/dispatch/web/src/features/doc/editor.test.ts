@@ -50,6 +50,10 @@ test("bindRemoteMarks keeps an accepted suggestion's text when its projection ar
   const handle = await createEditor(root, {
     awareness: null,
     blockSchema,
+    // This row reads the marks binding, never the document's decision blocks.
+    onAskBlockHosts: () => {},
+    // No picture in this row's document, so nothing ever asks for a latest version.
+    watchPicture: () => () => {},
     user: { color: "#f59e0b", name: "alice" },
     ydoc: browser,
   });

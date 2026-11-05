@@ -152,7 +152,11 @@ test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
   );
-  expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull();
+  // The margin's own code is fetched after the first paint (`features/margin/MarginColumn.tsx`),
+  // so its control arrives on a later frame than the shell's.
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull()
+  );
   expect(screen.queryByRole("navigation", { name: "Issues" })).toBeNull();
   expect(screen.queryByRole("complementary", { name: "Review margin" })).toBeNull();
 });
@@ -163,7 +167,10 @@ test("desktop exposes the persistent sidebar navigation and review margin", asyn
   await waitFor(() =>
     expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull()
   );
-  expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
+  // As above: the margin lands once its chunk has.
+  await waitFor(() =>
+    expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull()
+  );
   expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();
 });

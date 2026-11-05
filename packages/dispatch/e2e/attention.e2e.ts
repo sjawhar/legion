@@ -111,7 +111,8 @@ test("a reader at the Conversation top follows a new card @phone", async ({ brow
 test("loading older Activity rows keeps the reader anchor @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Older events" });
-  for (let index = 0; index < 250; index += 1) {
+  // One more than the Activity tab's 200-row page (`ActivityTab.tsx`), so a second page exists.
+  for (let index = 0; index < 205; index += 1) {
     await createMessage(issue.key, { body: `Older message ${index}` }, session);
   }
 

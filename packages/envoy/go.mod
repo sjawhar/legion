@@ -164,5 +164,7 @@ require (
 // cleanup a remote apply runs, so a copy that replays the room's commit log (newDocumentCopy) and
 // a room loading its stored history (bootstrapLoadedState) make no commit the room never made
 // (#369). Two await upstream pull requests: a per-apply scan budget stacked on #333, which
-// Dispatch does not set, and Doc.Clone, retained from v1.54.1-sami.4, which Dispatch does not call.
+// Dispatch does not set, and Doc.Clone, retained from v1.54.1-sami.4, which copies a document
+// without encoding or decoding it: a write's fork of its room is that room's replica cloned
+// (warmFork, forkPoint).
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.1

@@ -16,7 +16,13 @@ Every pod of a machine id, active or standby:
 - is a member of the role lane's core-NATS queue group `envoy-listener-<machine id>`; NATS
   hands each message of a queue group to one member, so no role message is delivered by
   two pods;
-- runs the self-health monitor over its caches.
+- runs the self-health monitor over its caches;
+- reports the Legion wakes the routes it serves raise — a role send with no live holder, a send
+  to a session that is gone — and says it is alive and reporting on the same topic at its start
+  and every `listenerReadyInterval` after it (`wake.go`). Every pod reports, because every pod
+  serves those routes and one request reaches one of them; the report an agent delivery raises
+  when it gives up is the holder's, off the durable path. A report is one event id the daemon
+  marks once, so two pods both saying one listener is alive is the same answer twice.
 
 Only the pod holding the machine's **delivery lease** receives the durable consumer, writes its
 policy, and runs the loops one deliverer runs: the interest reaper, the role-claim reaper, the
