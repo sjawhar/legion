@@ -235,10 +235,12 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		return false
 	}
 	if served {
-		// The same line a lease held elsewhere writes, and for the same reason: this tick would
-		// be the pass some process has already made of this period, and the loops' tests count
-		// one skip either way.
-		slog.Info("dispatch duty: leased pass skipped", "lease", name)
+		// The line a lease held elsewhere writes too, and for the same reason: this tick would be
+		// the pass some process has already made of this period, and the loops' tests count one
+		// skip either way. It carries the period as well, which the skip above cannot: that one
+		// has no lease and so no boundary read. A test reading two processes' logs can then tell
+		// a skip of this period from a skip of the next.
+		slog.Info("dispatch duty: leased pass skipped", "lease", name, "period", boundary.UTC().Format(time.RFC3339Nano))
 		return false
 	}
 	pass(ctx)
@@ -258,7 +260,12 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		return false
 	}
 	recordPassOn(conn, name, boundary, period)
-	slog.Info("dispatch duty: leased pass ran", "lease", name)
+	// The boundary is the period this pass served. A row whose own run time passes its period
+	// leaves the next honest pass in the next period, so a reader counting passes over a whole
+	// run cannot tell two passes of one period - which the lease forbids - from one pass each of
+	// two periods, which it allows; the period here is what tells them apart
+	// (requireLeasedOncePerPeriod, cmd/dispatch/multiprocess_test.go).
+	slog.Info("dispatch duty: leased pass ran", "lease", name, "period", boundary.UTC().Format(time.RFC3339Nano))
 	return true
 }
 
