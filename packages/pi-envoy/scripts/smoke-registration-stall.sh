@@ -11,11 +11,10 @@
 #                  and no write from this script beyond the one delete.
 #
 # The two numbers every budget below is measured in — the pane's refresh interval and the
-# listener's record lifetime — are read at run time out of the files that define them
-# (packages/envoy-client/src/envoy-settings.ts and packages/envoy/internal/session/registry.go,
-# the same two .github/scripts/check-heartbeat-margin.sh parses), never copied here: a copy would
-# go stale the moment either moves and this smoke would measure against a budget the tree no
-# longer has.
+# listener's record lifetime — are read at run time from `@legion/contracts`
+# (`SESSION_HEARTBEAT_MS` and `SESSION_RECORD_LIFETIME_MS`, declared once each in
+# packages/contracts/src/envoy-session.ts), never copied here: a copy would go stale the moment
+# either moves and this smoke would measure against a budget the tree no longer has.
 #
 # The listener is the operator's (ENVOY_URL and ENVOY_TOKEN_FILE), or `--local-stack` builds
 # natsd and the listener from this checkout with `go build` and runs both on loopback ports of
@@ -54,29 +53,21 @@ local_stack_fail=refuse
 # shellcheck source=packages/pi-envoy/scripts/local-stack.sh
 source "${script_dir}/local-stack.sh"
 
-# The refresh interval and the record lifetime, out of the tree rather than out of this file.
-settings_file="${repo_root}/packages/envoy-client/src/envoy-settings.ts"
-registry_file="${repo_root}/packages/envoy/internal/session/registry.go"
-readonly settings_file registry_file
-[[ -r "$settings_file" ]] ||
-  refuse "${settings_file} is not readable: this smoke reads DEFAULT_HEARTBEAT_MS from it"
-[[ -r "$registry_file" ]] ||
-  refuse "${registry_file} is not readable: this smoke reads OpenSessionRegistry's default ttl from it"
-default_heartbeat_ms="$(sed -nE 's/^export const DEFAULT_HEARTBEAT_MS = ([0-9_]+);.*$/\1/p' \
-  "$settings_file" | tr -d _)"
-[[ "$default_heartbeat_ms" =~ ^[0-9]+$ ]] ||
-  refuse "${settings_file} declares no single plain-decimal DEFAULT_HEARTBEAT_MS this smoke can read"
-readonly default_heartbeat_ms
-record_ttl="$(sed -nE 's/^[[:space:]]*opts := sessionRegistryOpts\{.*ttl: ([0-9_]+) \* time\.(Second|Minute).*$/\1 \2/p' \
-  "$registry_file" | tr -d _)"
-[[ "$record_ttl" =~ ^[0-9]+\ (Second|Minute)$ ]] ||
-  refuse "${registry_file} declares no single OpenSessionRegistry default ttl in <n> * time.Second|Minute form this smoke can read"
-if [[ "$record_ttl" == *Minute ]]; then
-  record_lifetime_s=$((${record_ttl% *} * 60))
-else
-  record_lifetime_s="${record_ttl% *}"
-fi
-readonly record_ttl record_lifetime_s
+# The refresh interval and the record lifetime, read from @legion/contracts — the one declaration
+# of each, which both languages are generated from — rather than scraped out of a source file,
+# since no pattern over program text can tell a live declaration from one inside a comment. bun
+# runs in this package's directory, where its own @legion/contracts dependency resolves from.
+command -v bun >/dev/null 2>&1 || refuse "bun is required"
+contracts_timing="$(cd -- "${repo_root}/packages/pi-envoy" &&
+  bun -e 'import { SESSION_HEARTBEAT_MS, SESSION_RECORD_LIFETIME_MS } from "@legion/contracts";
+console.log(SESSION_HEARTBEAT_MS, SESSION_RECORD_LIFETIME_MS);')" ||
+  refuse "reading SESSION_HEARTBEAT_MS and SESSION_RECORD_LIFETIME_MS from @legion/contracts failed (the reason is above)"
+[[ "$contracts_timing" =~ ^[0-9]+[[:space:]][0-9]+$ ]] ||
+  refuse "@legion/contracts answered \"${contracts_timing}\" for SESSION_HEARTBEAT_MS and SESSION_RECORD_LIFETIME_MS, which is not two whole numbers"
+read -r default_heartbeat_ms record_lifetime_ms <<<"$contracts_timing"
+record_lifetime_s=$((record_lifetime_ms / 1000))
+readonly contracts_timing default_heartbeat_ms record_lifetime_ms record_lifetime_s
+note "read from @legion/contracts: refresh interval ${default_heartbeat_ms} ms (SESSION_HEARTBEAT_MS), record lifetime ${record_lifetime_s}s (SESSION_RECORD_LIFETIME_MS)"
 
 arm=""
 control=0
@@ -164,13 +155,13 @@ for tool in "${required[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || refuse "${tool} is required"
 done
 
-# What the pane's refresh interval will be: DEFAULT_HEARTBEAT_MS as the tree declares it, unless
-# the operator shortened it, which is what every "one refresh interval" budget below is measured
-# in.
+# What the pane's refresh interval will be: SESSION_HEARTBEAT_MS as @legion/contracts declares
+# it, unless the operator shortened it, which is what every "one refresh interval" budget below
+# is measured in.
 refresh_ms="${heartbeat_ms:-$default_heartbeat_ms}"
 readonly refresh_ms
 readonly refresh_s=$(((refresh_ms + 999) / 1000))
-note "read from the tree: refresh interval ${default_heartbeat_ms} ms (DEFAULT_HEARTBEAT_MS, ${settings_file}), record lifetime ${record_lifetime_s}s (${record_ttl}, OpenSessionRegistry's default ttl, ${registry_file}); this run refreshes every ${refresh_s}s"
+note "this run refreshes every ${refresh_s}s"
 
 arm_label="$arm"
 ((control == 0)) || arm_label="${arm}, control"

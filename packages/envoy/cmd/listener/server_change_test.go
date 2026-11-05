@@ -68,8 +68,9 @@ const (
 	serverChangeHeartbeat = 30 * time.Second
 
 	// serverChangeAttemptTimeout and serverChangeRetryDelay are envoy-client's publish attempt and
-	// the wait before its one retry (DEFAULT_TIMEOUT_MS and RETRY_DELAY_MS in
-	// packages/envoy-client/src/transport.ts).
+	// the wait before its one retry (contracts.ListenerCallTimeout and
+	// contracts.ListenerCallRetryDelay, generated from LISTENER_CALL_TIMEOUT_MS and
+	// LISTENER_CALL_RETRY_DELAY_MS in packages/contracts).
 	serverChangeAttemptTimeout = 5 * time.Second
 	serverChangeRetryDelay     = 250 * time.Millisecond
 	// serverChangeReplayTimeout is envoy-client's replay call timeout (REPLAY_TIMEOUT_MS).
