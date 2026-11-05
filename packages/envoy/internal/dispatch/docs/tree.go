@@ -138,9 +138,14 @@ func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
 // where the two render alike, which its caller compares markdown for.
 func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdoc.WrittenReadBack, error) {
 	parsed, read, err := pmdoc.ParseWritten(markdown, live)
+	// The ask rule reads the parse's own refusal, before uploadedInput names it the caller's
+	// (ErrInvalidMarkdown), since that naming does not carry the refusal it wraps.
+	if ask := askRefusalInstead(markdown, err); ask != err {
+		return nil, pmdoc.WrittenReadBack{}, ask
+	}
 	tree, err := uploadedInput(parsed, err)
 	if err != nil {
-		return nil, pmdoc.WrittenReadBack{}, askRefusalInstead(markdown, err)
+		return nil, pmdoc.WrittenReadBack{}, err
 	}
 	return tree, read, nil
 }
