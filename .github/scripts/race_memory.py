@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run a command and say how much memory its process tree used, failing when the peak passes a
-limit. It exists for envoy-go-race-docs (dispatch://INFRA-1085), the job that race-tests the
-document service alone: the runner killed it three times for memory, and a job the kernel's
-out-of-memory killer takes leaves no number behind to argue with.
+"""Run a command and say how much memory the largest process of its tree used, killing that tree
+and failing the moment the peak passes a limit. It exists for envoy-go-race-docs
+(dispatch://INFRA-1085), the job that race-tests the document service alone: the runner killed it
+three times for memory, and a job the kernel's out-of-memory killer takes leaves no number behind
+to argue with.
 
 The sampler runs beside the command rather than `/usr/bin/time -v` around it because a killed
 run must still say something. `go test` buffers a package's output until the package ends, and
@@ -11,10 +12,19 @@ neither: the log stops mid-step with no output at all, which is how this job fai
 writes a line every 5 s as the run goes, naming the tests running at that moment and the largest
 process of the tree, so the last lines before a kill name what was running and how big it was.
 
-The peak is `VmHWM`, the kernel's own high-water mark of resident memory, because it sees what
-happens between two samples; the largest sampled `VmRSS` is the fallback for a kernel that
-reports no `VmHWM` (gVisor is one), and it can miss a peak that rose and fell inside one 5-second
-gap. choose_peak() says which of the two a run used, and so does the last line of the log.
+The number is one process, the largest of the tree, and not a sum over it: one race binary is
+what grows, and a total over `go test`, the compiler's children and that binary would hide which
+of them it was. The peak is that process's `VmHWM`, the kernel's own high-water mark of resident
+memory, because it sees what happens between two samples; the largest sampled `VmRSS` is the
+fallback for a kernel that reports no `VmHWM` (gVisor is one), and it can miss a peak that rose
+and fell inside one 5-second gap. choose_peak() says which of the two a run used, and so does the
+last line of the log. Either number is read from a process that was alive when the walk read it,
+so what a test binary grows to in its last seconds is never seen: the next walk finds it gone.
+
+The first walk whose peak passes the limit ends the run there and then: the log names that walk's
+tests and the second it was taken, the command's process group is sent SIGTERM and then SIGKILL,
+and the script exits 1, so the step goes red while the runner still has room rather than after an
+hour of running on. A command that had already ended of its own accord keeps its own status.
 
 Usage: race_memory.py <command> [args...], for example
 
@@ -28,6 +38,7 @@ running tests are known; the command's stderr is not touched and goes straight t
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -41,6 +52,13 @@ from pathlib import Path
 DEFAULT_LIMIT_KB = 8388608
 
 SAMPLE_SECONDS = 5.0
+
+# How long the command's process group has between SIGTERM and SIGKILL. SIGTERM is what lets
+# `go test` and the test binary under it write out what they are holding - the -json lines of the
+# tests still running, the race detector's own report - and a 4-vCPU runner swapping nothing needs
+# a moment to schedule all of that. One sampling interval is long enough for it and short enough
+# that a step the limit has already failed does not sit there.
+TERM_GRACE_SECONDS = SAMPLE_SECONDS
 
 # The -json actions that end a test. "cont" and "pause" leave it running; "output" carries the
 # text and changes nothing.
@@ -234,6 +252,34 @@ def limit_from_env(environ: Mapping[str, str]) -> tuple[int, str]:
         raise ValueError(f"RACE_MEM_LIMIT_KB is {raw!r}, not a number of kB") from None
 
 
+def stop_command(process: subprocess.Popen, log: Log) -> None:
+    """Stop the command and everything it started: SIGTERM to its process group, then SIGKILL to
+    whatever is still there after the grace above.
+
+    The command has a session of its own (`start_new_session=True` in main), so the group holds it
+    and its descendants and not this script, which lives on to write the lines that follow. The
+    SIGKILL goes out whether or not the command itself went, because a descendant still holding
+    the command's stdout would otherwise keep the reader thread waiting for an end of file that
+    never comes.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        # The whole group has gone already: it ended between the walk and this signal.
+        return
+    try:
+        process.wait(timeout=TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.line(
+            f"race memory: the command was still running {TERM_GRACE_SECONDS:.0f} s after "
+            "SIGTERM, so its process group is being killed"
+        )
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(
@@ -251,7 +297,15 @@ def main(argv: list[str]) -> int:
     log.line(f"race memory: the limit is {limit_kb} kB ({source})")
 
     try:
-        process = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, bufsize=1)
+        process = subprocess.Popen(
+            # A session of its own, so that a peak over the limit can be answered by killing the
+            # command and every process it started, and this script is not in that group.
+            argv,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
     except OSError as error:
         print(f"race memory: cannot run {argv[0]}: {error}", file=sys.stderr)
         return 127
@@ -266,22 +320,29 @@ def main(argv: list[str]) -> int:
     # runs inside the memory it measures. The Sample already carries both of the walk's numbers,
     # so nothing is read twice.
     peak_hwm_kb = 0
-    peak_rss_kb = 0
     highest: Sample | None = None
+    over: Sample | None = None
     started = time.monotonic()
     while True:
         walked = tree_statuses(process.pid)
         sample = summarize(walked, time.monotonic() - started, tests.names())
         if sample is not None:
-            walk_kb, walk_field = choose_peak(sample.hwm_kb, sample.rss_kb)
-            if walk_field == "VmHWM":
-                peak_hwm_kb = max(peak_hwm_kb, walk_kb)
-            else:
-                peak_rss_kb = max(peak_rss_kb, walk_kb)
+            peak_hwm_kb = max(peak_hwm_kb, sample.hwm_kb or 0)
             # Strictly greater, so the first of equally high samples is the one kept.
             if highest is None or sample.rss_kb > highest.rss_kb:
                 highest = sample
             log.line(sample.line())
+            walk_kb, walk_field = choose_peak(sample.hwm_kb, sample.rss_kb)
+            if walk_kb > limit_kb:
+                over = sample
+                log.line(
+                    f"race memory: at {sample.seconds:.1f} s the peak of {walk_kb} kB "
+                    f"({walk_field}) passed the limit of {limit_kb} kB; these tests were "
+                    f"running: {sample.tests}. Stopping the command. VmHWM can be reached "
+                    "between two samples, so the peak itself may belong to an earlier moment."
+                )
+                stop_command(process, log)
+                break
         try:
             process.wait(timeout=SAMPLE_SECONDS)
         except subprocess.TimeoutExpired:
@@ -293,26 +354,19 @@ def main(argv: list[str]) -> int:
         process.stdout.close()
     status = process.wait()
 
-    peak_kb, field = choose_peak(peak_hwm_kb, peak_rss_kb)
+    peak_kb, field = choose_peak(peak_hwm_kb, highest.rss_kb if highest is not None else 0)
     log.line(f"race memory: the peak was {peak_kb} kB ({field}), the limit {limit_kb} kB")
 
-    if peak_kb > limit_kb:
-        where = (
-            f"the highest sampled VmRSS, {highest.rss_kb} kB at {highest.seconds:.1f} s, "
-            f"had these tests running: {highest.tests}"
-            if highest is not None
-            else "no sample saw the process tree"
-        )
-        log.line(
-            f"race memory: the peak of {peak_kb} kB passed the limit of {limit_kb} kB; {where}. "
-            "VmHWM can be reached between two samples, so the peak may belong to another moment."
-        )
-
-    if status != 0:
-        # A signalled command has a negative returncode; report it as a shell does.
-        return status if status > 0 else 128 - status
-    if peak_kb > limit_kb:
+    if status > 0:
+        # The command ended of its own accord, and its own status says more than the limit does:
+        # a test that failed has named itself in the log above.
+        return status
+    if over is not None:
         return 1
+    if status < 0:
+        # Signalled by something other than this script - the kernel's out-of-memory killer, say.
+        # A signalled command has a negative returncode; report it as a shell does.
+        return 128 - status
     return 0
 
 

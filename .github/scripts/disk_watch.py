@@ -175,9 +175,9 @@ def start(path: str, state_path: str) -> int:
         print(f"disk: {path} cannot be read ({problem.strerror}), nothing to watch")
         return 0
     print_space([path] + tool_directories())
-    # Written before the sampler starts, so the sampler always finds a state file, and written
-    # again below for the sampler's pid, keeping whatever the sampler has seen by then.
-    write_state(state_path, {"path": path, "before_kb": before, "least_kb": before, "sampler_pid": None})
+    # The sampler is started before the state is written: it sleeps a second before its first
+    # read and skips a state file that is not there yet, so one write, with its pid in it, is
+    # all the file ever needs.
     sampler = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "sample", "--path", path, "--state", state_path],
         # The sampler outlives this step, so it must hold none of the step's pipes: a child still
@@ -187,9 +187,10 @@ def start(path: str, state_path: str) -> int:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    state = read_state(state_path) or {"path": path, "before_kb": before, "least_kb": before}
-    state["sampler_pid"] = sampler.pid
-    write_state(state_path, state)
+    write_state(
+        state_path,
+        {"path": path, "before_kb": before, "least_kb": before, "sampler_pid": sampler.pid},
+    )
     print(f"disk: watching {path}, free {before} kB, sampler pid {sampler.pid}")
     return 0
 
@@ -214,15 +215,9 @@ def sample(path: str, state_path: str) -> int:
         # Nearly every sample finds the file already saying this, and the file is on the very
         # file system being measured, so a sample that would rewrite the same bytes writes
         # nothing.
-        if state.get("least_kb") == least and state.get("sampler_pid") == os.getpid():
+        if state.get("least_kb") == least:
             continue
         state["least_kb"] = least
-        # This process is the sampler, so its own pid is the one the report must stop; taking it
-        # from here rather than from the file keeps a sample written before `start`'s second
-        # write from putting a null back. That repair is why the guard above also asks whose pid
-        # the file names: a first sample landing between `start`'s two writes finds a null there
-        # and writes.
-        state["sampler_pid"] = os.getpid()
         write_state(state_path, state)
     return 0
 

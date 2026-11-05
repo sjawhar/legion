@@ -3160,12 +3160,14 @@ jobs:
       # Under the sampler, not bare: the race detector maps about four bytes of shadow memory per
       # byte of heap, and this package's race binary asked for more than the runner's 16 GiB,
       # which has no swap. The kernel killed this step three times with no output at all, which
-      # names no test (dispatch://INFRA-1085). .github/scripts/race_memory.py samples the process
-      # tree beside the run and fails the step itself once the peak passes RACE_MEM_LIMIT_KB,
-      # 8388608 kB, half the runner, so the log names the tests running at the peak. -json is the
-      # stream the sampler reads to know them; it writes every Output field back out, so the log
-      # still carries the --- FAIL lines and the package's own line. -count=1 because the job
-      # restores the Go build cache above, and a cached pass must not stand in for a run.
+      # names no test (dispatch://INFRA-1085). .github/scripts/race_memory.py samples the largest
+      # process beside the run and, at the first sample whose peak passes RACE_MEM_LIMIT_KB,
+      # 8388608 kB, half the runner, kills the run's process group and fails this step there and
+      # then, so the log names the tests that were running while the runner still had room.
+      # -json is the stream the sampler reads to know them; it writes every Output field back
+      # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
+      # because the job restores the Go build cache above, and a cached pass must not stand in
+      # for a run.
       - name: Race-test the document service
         run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
