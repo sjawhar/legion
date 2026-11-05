@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts"
 import { messageFor } from "@legion/envoy-client/errors"
 import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
-import type { ModConfigRow, ModEvent } from "../hooks/mod-protocol"
+import type { ModConfigRow, ModEffort, ModEvent } from "../hooks/mod-protocol"
 import { claudeAgentStreamCommands, createClaudeAgentStream } from "./agent-stream-claude"
 import type { ChannelForwarderConnection, ChannelTopicSubscription } from "./channel-forwarder"
 import type { ModLink } from "./mod-link"
@@ -64,6 +64,9 @@ export interface AgentStreamRunner {
   /** Read the session's model and levels again and publish them: a pick has just changed one,
    *  and the header must show it before the reply naming it reaches the page. */
   readonly refresh: () => void
+  /** The effort a person's pick put in force, shown by the header at once: Claude Code reports
+   *  an effort only on a request of its own, and an idle session makes none. */
+  readonly pickedEffort: (effort: ModEffort) => void
 }
 
 /**
@@ -263,6 +266,11 @@ export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner
   return {
     refresh(): void {
       refreshSettings()
+    },
+    pickedEffort(effort: ModEffort): void {
+      if (stopped) return
+      stream.pickedEffort(effort)
+      publishSettings()
     },
     stop(): void {
       if (stopped) return

@@ -529,6 +529,9 @@ export function register(on: On): void {
         ...(stopReason === undefined ? {} : { stopReason }),
       })
     }
+    // Before the request: a row appended after this moment is in no request of this step, and
+    // the server has nothing else that says when a request left (`mod-protocol`, `step-request`).
+    link.send({ kind: "step-request", turnId: request.turnId, index: request.index })
     const stream = next(request)
     let snapshotAt = 0
     for await (const chunk of stream) {

@@ -110,6 +110,10 @@ export interface UserTurnRouterOptions {
   /** Refreshes the live view's settings frame, so the header already shows a pick's new value
    *  when the reply naming it arrives. */
   readonly refreshSettings: () => void
+  /** Tells the live view the effort a thinking pick put in force. Claude Code reports an effort
+   *  only on a request's own `turn.step`, so a refresh alone leaves the header on the level the
+   *  session ran at before the pick until its next turn. */
+  readonly effortPicked: (effort: ModEffort) => void
   /** Where a failure that must not stop the session is written. */
   readonly warn: (text: string) => void
   /** How long a command runs before the person is told it is still running; `COMMAND_WAITING_MS`
@@ -322,7 +326,11 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     try {
       if (name === "model" && value !== "") said = await pickModel(value)
       else if (effort !== undefined) {
-        said = thinkingPicked((await session.setEffort(effort)) ?? effort)
+        const inForce = (await session.setEffort(effort)) ?? effort
+        // The mod puts this effort on every later request from here on, so the header can say
+        // so now rather than at the session's next turn.
+        options.effortPicked(inForce)
+        said = thinkingPicked(inForce)
       } else {
         said = typedInputReply(body, {
           handled: "command",

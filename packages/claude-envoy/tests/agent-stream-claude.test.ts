@@ -276,6 +276,49 @@ test("an unknown content part renders as its type in brackets", () => {
   ])
 })
 
+test("a row with nothing to show records nothing, and the rows around it still publish", () => {
+  const live = harness()
+  live.feed(
+    appendRow("prompt", [{ text: "is 391 prime?", type: "text" }], { uuid: "row-prompt" }),
+    // What Claude Code's engine writes after every turn: a system row by the `notice` door,
+    // named `turn_duration`, carrying no content blocks (measured on 2.1.310). Published, it is
+    // an empty bubble per turn.
+    appendRow("notice", [], {
+      message: { content: [], name: "turn_duration", type: "system" },
+      origin: { kind: "engine" },
+      uuid: "row-duration",
+    }),
+    // A row whose only block is an empty text block shows as little, and goes the same way.
+    appendRow("notice", [{ text: "", type: "text" }], {
+      message: { content: [{ text: "", type: "text" }], type: "system" },
+      origin: { kind: "engine" },
+      uuid: "row-blank",
+    }),
+    // A notice that carries text is a row of the conversation, and still reaches the viewer.
+    appendRow("notice", [{ text: "the Stop hook was skipped", type: "text" }], {
+      message: {
+        content: [{ text: "the Stop hook was skipped", type: "text" }],
+        name: "informational",
+        type: "system",
+      },
+      origin: { kind: "engine" },
+      uuid: "row-notice",
+    }),
+    // A tool result with no output is a result, not a message: it keeps its own path, where its
+    // call's id is its slot.
+    appendRow("tool-result", [{ content: [], tool_use_id: "toolu_1", type: "tool_result" }], {
+      origin: { kind: "tool", tool: "Bash" },
+      uuid: "row-result",
+    }),
+  )
+
+  const replayed = live.replay()
+  expect(messages(replayed).map(textOf)).toEqual(["is 391 prime?", "the Stop hook was skipped"])
+  expect(toolResults(replayed).map((result) => [result.toolCallId, result.output])).toEqual([
+    ["toolu_1", ""],
+  ])
+})
+
 test("a thinking block with no text publishes one fixed sentence, once per step", () => {
   const live = harness()
   live.feed(
@@ -407,6 +450,46 @@ test("the settings frame reports the models a pick can send and the level the st
   const after = live.stream.settings("claude-opus-5-5", rows)
   if (!after.reported) throw new Error("the settings were not reported")
   expect(after.thinking).toEqual({ level: "max", levels: CLAUDE_EFFORT_LEVELS })
+})
+
+test("a thinking pick is the level the header shows at once, until a step reports it back", async () => {
+  const recorded = await fixture("claude-2.1.310-turn")
+  const live = harness()
+  const rows = recorded.answers["config.list"]
+
+  // Before the session's first request and before any pick there is no level to show.
+  const before = live.stream.settings("claude-opus-5-5", rows)
+  if (!before.reported) throw new Error("the settings were not reported")
+  expect(before.thinking).toEqual({ level: null, levels: CLAUDE_EFFORT_LEVELS })
+
+  // The session has run: the recorded turn's steps ran at max.
+  for (const event of recorded.events) live.feed(event)
+  const ran = live.stream.settings("claude-opus-5-5", rows)
+  if (!ran.reported) throw new Error("the settings were not reported")
+  expect(ran.thinking).toEqual({ level: "max", levels: CLAUDE_EFFORT_LEVELS })
+
+  // A person picks low. Claude Code reports an effort only on a request of its own and the
+  // session is idle, so the pick is what the header shows, from now rather than from the next
+  // turn.
+  live.stream.pickedEffort("low")
+  const picked = live.stream.settings("claude-opus-5-5", rows)
+  if (!picked.reported) throw new Error("the settings were not reported")
+  expect(picked.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })
+
+  // The next turn's step reports the level the pick set, and the step is the fact from there on.
+  live.feed(
+    step({
+      done: true,
+      effort: "low",
+      index: 0,
+      model: "claude-opus-5-5",
+      parts: [{ text: "ready", type: "text" }],
+      turnId: "turn-2",
+    }),
+  )
+  const reported = live.stream.settings("claude-opus-5-5", rows)
+  if (!reported.reported) throw new Error("the settings were not reported")
+  expect(reported.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })
 })
 
 test("a model that reports no effort has no thinking to adjust", async () => {

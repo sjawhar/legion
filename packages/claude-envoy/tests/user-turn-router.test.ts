@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { type DispatchDelivery, renderInbound } from "@legion/envoy-client/delivery"
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import type { ModCallArguments, ModCallName, ModCallResults, ModEvent } from "../hooks/mod-protocol"
-import { modSession } from "../src/mod-session"
+import { modSession, UNREAD_ROW_PROMPT } from "../src/mod-session"
 import {
   createUserTurnRouter,
   modelPicked,
@@ -116,7 +116,8 @@ interface Harness {
   readonly stateFile: string
   readonly directory: string
   readonly replies: { readonly delivery: DispatchDelivery; readonly body?: string }[]
-  /** Every reply posted and every settings refresh, in the order they happened. */
+  /** Every pick handed to the live view, every reply posted and every settings refresh, in the
+   *  order they happened. */
   readonly order: string[]
   readonly accepts: { readonly id: string; readonly attempt: number }[]
   readonly observe: (event: ModEvent) => void
@@ -151,6 +152,7 @@ async function harness(input: {
           return input.accept(id, attempt)
         },
       }) as unknown as DispatchClient,
+    effortPicked: (effort) => order.push(`picked:${effort}`),
     refreshSettings: () => order.push("refresh"),
     reply: async (delivery, result) => {
       order.push(`reply:${result.body ?? result.error ?? ""}`)
@@ -338,7 +340,9 @@ test("during a turn the body is a row of the conversation, and idle it is the pr
     // The row is recorded as the Dispatch message it is, which is what tags it on the live view.
     expect(session.state.messageOf("row-1")).toBe(MESSAGE)
 
-    // The turn's next request read it, so the turn ending prompts nothing.
+    // A request went out after the row, which is the request that read it, so the turn ending
+    // prompts nothing. Its snapshots follow, as they do in a session.
+    session.observe({ kind: "step-request", turnId: "turn-1", index: 1 })
     session.observe({
       kind: "step",
       turnId: "turn-1",
@@ -363,6 +367,7 @@ test("a row no request read is followed by exactly one prompt that is not the pe
   const session = await harness({ link: mod.link, accept: () => accepted("look at this") })
   try {
     session.observe({ kind: "turn-start", turnId: "turn-1" })
+    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
     session.observe({
       kind: "step",
       turnId: "turn-1",
@@ -372,7 +377,7 @@ test("a row no request read is followed by exactly one prompt that is not the pe
       done: true,
     })
     await session.router.route(frame(personSends("look at this")))
-    // No step began after the row, so the model never read it.
+    // No request went out after the row, so the model never read it.
     session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
     await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt for the row")
 
@@ -380,6 +385,66 @@ test("a row no request read is followed by exactly one prompt that is not the pe
     expect(submits).toHaveLength(1)
     expect(submits[0]?.asUser).toBeUndefined()
     expect(submits[0]?.text).toContain("Dispatch")
+  } finally {
+    await rm(session.directory, { recursive: true, force: true })
+  }
+})
+
+// The sequence measured on the live stack, where the message was lost: the person's Send landed
+// after the turn's last request had gone out, and that request's first snapshot arrived after
+// the row. Counting the snapshots read the row as one the request had carried, and the turn
+// ended with nothing pointing at it.
+test("a Send delivered after a turn's last request went out is pointed at, though that request's snapshots follow it", async () => {
+  const mod = fakeMod({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => ({ uuid: "row-late" }),
+  })
+  const session = await harness({ link: mod.link, accept: () => accepted("Also say harbour.") })
+  try {
+    session.observe({ kind: "turn-start", turnId: "turn-1" })
+    // The first request: the model answers with a tool call and the tool runs.
+    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
+    session.observe({
+      kind: "step",
+      turnId: "turn-1",
+      index: 0,
+      model: "claude-sonnet-4-5",
+      parts: [{ args: '{"command":"sleep 12"}', id: "toolu_1", name: "Bash", type: "tool-call" }],
+      done: true,
+    })
+    session.observe({
+      kind: "append",
+      uuid: "row-result",
+      door: "tool-result",
+      origin: { kind: "tool", tool: "Bash" },
+      message: {
+        type: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+      },
+    })
+    // The tool result frees the next request, which goes out before the person's Send arrives.
+    session.observe({ kind: "step-request", turnId: "turn-1", index: 1 })
+
+    await session.router.route(frame(personSends("Also say harbour.")))
+    expect(mod.madeOf("session.append")).toHaveLength(1)
+
+    // That request's snapshots arrive seconds later, after the row: the turn writes its prose
+    // and ends, having made no request that could have read the row.
+    session.observe({
+      kind: "step",
+      turnId: "turn-1",
+      index: 1,
+      model: "claude-sonnet-4-5",
+      parts: [{ text: "Fog settles on the harbour.", type: "text" }],
+      done: true,
+    })
+    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
+    await waitFor(async () => mod.madeOf("prompt.submit").length === 1, "the prompt for the row")
+
+    const submits = mod.madeOf("prompt.submit")
+    expect(submits).toHaveLength(1)
+    expect(submits[0]?.asUser).toBeUndefined()
+    expect(submits[0]?.text).toBe(UNREAD_ROW_PROMPT)
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }
@@ -489,7 +554,10 @@ test("a thinking pick sets the effort of every later request and answers naming 
     await waitFor(async () => session.replies.length === 1, "the pick's reply")
 
     expect(mod.madeOf("set-effort")).toEqual([{ effort: "high" }])
-    expect(session.order).toEqual(["refresh", `reply:${thinkingPicked("high")}`])
+    // The live view is told the level the pick put in force before the reply naming it goes
+    // out: Claude Code reports an effort only on a request of its own, and an idle session
+    // makes none.
+    expect(session.order).toEqual(["picked:high", "refresh", `reply:${thinkingPicked("high")}`])
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }

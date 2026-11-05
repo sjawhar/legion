@@ -297,6 +297,14 @@ export type ModEvent =
   | { readonly kind: "session-id"; readonly sessionId: string }
   | { readonly kind: "session-end"; readonly reason: ModSessionEndReason }
   | { readonly kind: "turn-start"; readonly turnId: string }
+  /**
+   * The request for one step of a turn is going out, sent at the top of the `turn.step` hook
+   * before the request is made. It is the only event that says when a request left: a step's
+   * first `step` snapshot follows its first chunk, which was measured 2.4 s later on 2.1.310,
+   * and a row appended in between is in no request. The conversation this request carries is
+   * every row appended before this event.
+   */
+  | { readonly kind: "step-request"; readonly turnId: string; readonly index: number }
   /** One snapshot of a `turn.step`, at most ten a second while it streams and once more when it
    *  ends. `parts` is the whole step so far, not a delta. */
   | {

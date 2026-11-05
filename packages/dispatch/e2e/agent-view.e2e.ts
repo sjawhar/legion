@@ -433,6 +433,34 @@ test("the conversation view replays what the session held, streams its next turn
   }
 });
 
+// A turn that calls no tool is still a turn in progress: its tool cards would carry their own
+// `running…`, and prose has none, so the turn itself carries the mark while it streams
+// (INFRA-1026 R3).
+test("a turn that only writes prose is marked while it streams, and the mark goes when it ends", async ({
+  browser,
+}) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    // The replay's turns ended before the reader arrived, so nothing is marked.
+    await expect(page.getByTestId("agent-message-running")).toHaveCount(0);
+
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "There are", true));
+    await expect(assistant.last()).toContainText("There are");
+    await expect(assistant.last().getByTestId("agent-message-running")).toHaveText("writing…");
+
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "There are two.", false));
+    await expect(assistant.last()).toContainText("There are two.");
+    await expect(page.getByTestId("agent-message-running")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 // A person talks to a session while it works, as at its terminal: a turn still streaming does
 // not hold Send, and the message goes out at once, before the turn ends. Taking it does not
 // stop the turn, and the thread grows no empty extra turn while it streams on.

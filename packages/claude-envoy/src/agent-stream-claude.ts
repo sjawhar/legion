@@ -126,6 +126,13 @@ export interface ClaudeAgentStream {
     model: string | undefined,
     rows: readonly ModConfigRow[] | undefined,
   ) => AgentStreamSettingsState
+  /**
+   * The effort a person's pick put in force. Claude Code reports an effort only on a request's
+   * own `turn.step`, so until the session's next turn its report is the level before the pick;
+   * the pick itself is what set the effort the mod puts on every later request, so from the
+   * moment it lands the settings frame says so, and the next step reports the same value.
+   */
+  readonly pickedEffort: (effort: ModEffort) => void
   /** Forget the conversation's timestamps and the effort read off it: the session id moved, and
    *  the publisher was reset with it. */
   readonly reset: () => void
@@ -173,6 +180,15 @@ function partOf(block: ModContentBlock): ClaudeStreamPart {
     }
   }
   return { type: block.type }
+}
+
+/** Whether a part puts anything in front of a reader: text or thinking with characters in it, a
+ *  tool call, or a kind the publisher names in brackets (`[image]`). An empty text part is the
+ *  one that shows nothing, since `conversationParts` keeps it as the empty string it is. */
+function shows(part: ClaudeStreamPart): boolean {
+  if (part.type === "text") return part.text !== ""
+  if (part.type === "thinking") return part.thinking !== ""
+  return true
 }
 
 /** Under which role a row of the conversation is shown. Claude Code names the role on the rows
@@ -249,6 +265,8 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
   /** The last timestamp handed to a step, so the next one is strictly past it. */
   let allocated = 0
   let observed: ObservedEffort | undefined
+  /** The effort a pick put in force, until a step of the session reports one itself. */
+  let picked: ModEffort | undefined
 
   /** The timestamp this step keeps for every snapshot of it. */
   const timestampFor = (turnId: string, index: number): number => {
@@ -273,7 +291,9 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
 
   /** One `turn.step` snapshot as the assistant message of that step. */
   const recordStep = (subject: string, event: Extract<ModEvent, { kind: "step" }>): void => {
+    // The step's own report is the newer fact: a pick before it set this very effort.
     observed = { model: event.model, effort: event.effort }
+    picked = undefined
     const content: ClaudeStreamPart[] = []
     let hiddenThinkingShown = false
     for (const part of event.parts) {
@@ -321,10 +341,12 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
       // and one without it carries no such field, which is what tells the two apart.
       if (origin.kind === "plugin" && origin.asUser !== true) return
+      const prompt: ClaudeStreamPart = { text: flatten(message.content), type: "text" }
+      if (!shows(prompt)) return
       record(
         subject,
         {
-          content: [{ text: flatten(message.content), type: "text" }],
+          content: [prompt],
           role: "user",
           tag: uuid,
           timestamp: now(),
@@ -355,10 +377,19 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       }
       return
     }
+    const content = message.content.map(partOf)
+    // A row that shows a reader nothing is the session's bookkeeping, not its conversation, so
+    // nothing is recorded for it: the publisher would key it into a slot of its own and the view
+    // would draw an empty bubble. Claude Code's engine writes one such row per turn, by the
+    // `notice` door (`type: "system"`, `name: "turn_duration"`, no content blocks, measured on
+    // 2.1.310), which is one empty bubble per turn of the conversation. A tool result with no
+    // output is a result rather than a message and left alone: it went out above, by its call's
+    // id.
+    if (!content.some(shows)) return
     record(
       subject,
       {
-        content: message.content.map(partOf),
+        content,
         role: roleOf(message),
         tag: uuid,
         timestamp: now(),
@@ -373,8 +404,11 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       if (event.kind === "step") recordStep(subject, event)
       else if (event.kind === "append") recordAppend(subject, event)
       // Every other event says something about the session rather than its conversation: its id,
-      // its model, a turn's boundaries. The server reads those; the view shows no message for
-      // them.
+      // its model, a turn's boundaries, a request going out. The server reads those; the view
+      // shows no message for them.
+    },
+    pickedEffort(effort: ModEffort): void {
+      picked = effort
     },
     settings(
       model: string | undefined,
@@ -385,16 +419,21 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       return {
         models: listedModels(rows),
         reported: true,
-        // Claude Code reports the effort on each request's `turn.step` and nowhere else, so
-        // before this session's first request there is a selector and no level to show, and a
-        // step that named none is a model with no thinking to adjust. A step of another model is
-        // no answer about this one.
+        // Claude Code reports the effort on each request's `turn.step` and nowhere else, so a
+        // pick is the only other thing that knows one: it set the effort the mod puts on every
+        // later request, and it is newer than every step before it, so it is what the header
+        // shows until a step reports the same value back. Before this session's first request
+        // and before any pick there is a selector and no level to show; a step that named no
+        // effort is a model with no thinking to adjust. A step of another model is no answer
+        // about this one.
         thinking:
-          observed !== undefined && observed.model === model
-            ? observed.effort === undefined
-              ? null
-              : { level: String(observed.effort), levels: CLAUDE_EFFORT_LEVELS }
-            : { level: null, levels: CLAUDE_EFFORT_LEVELS },
+          picked !== undefined
+            ? { level: String(picked), levels: CLAUDE_EFFORT_LEVELS }
+            : observed !== undefined && observed.model === model
+              ? observed.effort === undefined
+                ? null
+                : { level: String(observed.effort), levels: CLAUDE_EFFORT_LEVELS }
+              : { level: null, levels: CLAUDE_EFFORT_LEVELS },
         // Absent when the session has no model selected, which is `modelReference`'s own answer
         // for a name that is empty (`AgentStreamSettingsReported.model`).
         ...(reference === undefined ? {} : { model: reference }),
@@ -403,6 +442,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     reset(): void {
       stepAt.clear()
       observed = undefined
+      picked = undefined
     },
   }
 }

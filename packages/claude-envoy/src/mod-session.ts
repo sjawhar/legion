@@ -1,7 +1,7 @@
 // The Claude Code session as the router drives it (INFRA-1026): what the mod says is happening in
 // it, and the calls that put something into it.
 //
-// Two measured facts shape everything here, both on 2.1.310 in this pod:
+// Three measured facts shape everything here, all on 2.1.310 in this pod:
 //
 //   - `$.prompt.submit` resolves only once the turn it starts has ended. So a submit is never
 //     awaited by a caller that has a frame to answer, and at most one is ever in flight: a second
@@ -9,6 +9,11 @@
 //   - a row `$.session.append` adds is read at the turn's next request, and not at all when no
 //     request follows it. So a row added to a running turn is watched until that turn ends, and
 //     one the turn never read is pointed at by a prompt of its own.
+//   - a turn's next request goes out about 50 ms after the tool result that freed it, and its
+//     first chunk arrives seconds later (2.4 s and 2.5 s in the recorded runs). So which request
+//     a row made it into is read off `step-request`, which the mod sends as the request goes
+//     out, and never off the `step` snapshots, which follow the first chunk: a row added in the
+//     seconds between the two would otherwise look read by a request that left without it.
 //
 // The turn tracking is built from the mod's events alone (`../hooks/mod-protocol`), which have one
 // consumer: the live view reads them and hands each one here (`observe`), so nothing in this file
@@ -91,8 +96,9 @@ export interface ModSessionOptions {
 /** One row handed to a running turn, watched until that turn has read it or ended. */
 interface WatchedRow {
   readonly turnId: string
-  /** The steps begun when the row was added: a step begun after it is the request that read it. */
-  readonly steps: number
+  /** The requests the session had made when the row was added: one made after it is the request
+   *  that read it. */
+  readonly requests: number
 }
 
 /**
@@ -103,10 +109,13 @@ export function modSession(options: ModSessionOptions): ModSession {
   const { link, warn } = options
   /** The turn running now, as `turn-start` and `turn-complete` report it. */
   let turn: string | undefined
-  /** How many requests the session has begun, counted over its whole life: a step's snapshots all
-   *  carry its own `(turnId, index)`, so the count rises once per request. */
-  let steps = 0
-  const stepsSeen = new Set<string>()
+  /** How many requests the session has made, counted over its whole life. Counted from
+   *  `step-request`, which the mod sends as each request goes out, and never from a `step`
+   *  snapshot: that one follows the request's first chunk, seconds later (2.4 s measured on
+   *  2.1.310), so a row added in between would look read by a request that had already left
+   *  without it. Each request is counted once, by its own `(turnId, index)`.  */
+  let requests = 0
+  const requestsSeen = new Set<string>()
   /** The rows handed to a running turn that it has not read. */
   const watched = new Map<string, WatchedRow>()
   /** Whether a `$.prompt.submit` is in flight: it holds until its turn ends, so the next one
@@ -144,7 +153,7 @@ export function modSession(options: ModSessionOptions): ModSession {
     for (const [row, entry] of watched) {
       if (entry.turnId !== turnId) continue
       watched.delete(row)
-      if (entry.steps === steps) unread = true
+      if (entry.requests === requests) unread = true
     }
     // One prompt however many rows went unread: they are all above it, and the model reads the
     // conversation, not a list.
@@ -158,11 +167,11 @@ export function modSession(options: ModSessionOptions): ModSession {
         turn = event.turnId
         return
       }
-      if (event.kind === "step") {
+      if (event.kind === "step-request") {
         const key = `${event.turnId}\u0000${event.index}`
-        if (stepsSeen.has(key)) return
-        stepsSeen.add(key)
-        steps++
+        if (requestsSeen.has(key)) return
+        requestsSeen.add(key)
+        requests++
         return
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
@@ -187,7 +196,7 @@ export function modSession(options: ModSessionOptions): ModSession {
       }
       // The turn may have ended while the row was being stored: then no request will read it, and
       // it is pointed at at once rather than waiting for a `turn-complete` that has been and gone.
-      if (turn === running) watched.set(result.uuid, { turnId: running, steps })
+      if (turn === running) watched.set(result.uuid, { requests, turnId: running })
       else void submit(UNREAD_ROW_PROMPT, false)
       return result.uuid
     },
