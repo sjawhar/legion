@@ -47,6 +47,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -91,6 +92,7 @@ type mergedRootWaitsLive struct {
 // pull request opened from the waiting root's branch, which must leave the merge the root waits
 // on, and last the child's merge, which closes the root on that merge.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
+	fixtureenv.Live(t)
 	r := newMergedRootWaitsLive(t)
 	r.step("step1-the-acceptance-lands-while-the-child-runs", r.acceptanceAccepted)
 	r.step("step2-the-merged-root-waits-for-its-child", r.rootMergeWaits)

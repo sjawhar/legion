@@ -807,8 +807,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "session" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != "" {
 		t.Fatalf("record enrollment = %+v, want kind=session operator=%s and no slot", readBack.Enrollment, testApprover)
 	}
-	if readBack.LifetimeSeconds != nil {
-		t.Fatalf("record lifetime_seconds = %d, want null for a request naming no lifetime (until the session ends)", *readBack.LifetimeSeconds)
+	if readBack.LifetimeSeconds == nil || *readBack.LifetimeSeconds != 43200 {
+		t.Fatalf("record lifetime_seconds = %v, want 43200, the 12-hour default for a request naming no lifetime", readBack.LifetimeSeconds)
 	}
 	if readBack.Session.Request != sessionID || readBack.Session.Enrollment != "" {
 		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
@@ -871,8 +871,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		listed.RecordID == nil || *listed.RecordID != recordID || listed.Enrollment.Slot != nil {
 		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] granted on approval by %s, resting on record %s, on an enrollment with no slot", listed, testApprover, recordID)
 	}
-	if listed.ExpiresAt != nil {
-		t.Fatalf("listed grant expires_at = %s, want null for a grant that lasts until its session ends", listed.ExpiresAt)
+	if listed.ExpiresAt == nil || listed.ExpiresAt.Sub(time.Now()) < 11*time.Hour || listed.ExpiresAt.Sub(time.Now()) > 13*time.Hour {
+		t.Fatalf("listed grant expires_at = %v, want about 12 hours from now, the default for a request naming no lifetime", listed.ExpiresAt)
 	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both

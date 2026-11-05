@@ -84,8 +84,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	if err != nil {
 		return nil, nil, err
 	}
-	// One snapshot of the policy serves both the re-check and the minters' inputs, so a release
-	// mints for the github-owners the grant was just checked against, never a later read's.
+	// One policy snapshot serves both the grant re-check and the minters' name, tier and owners.
 	set := m.Policy.Get()
 	if policyVersion != set.Version || anyServiceOwned(set, granted) {
 		requester, err := m.requester(ctx, m.Store.Pool, enr)
@@ -121,7 +120,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.release(ctx, g, secrets.MintRequest{GitHubOwners: set.Secrets[g.name].GitHubOwnerLogins(), GitHubNarrowing: narrowing})
+		value, err := m.release(ctx, g, set.Secrets[g.name], narrowing)
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
@@ -241,23 +240,25 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 	return reason
 }
 
-// release is one granted name's value. A stored secret reads its frozen source and ignores req. A
-// kind source reads its frozen store source the same way, through the store's own Read (on Secret
-// Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value in
-// req to the kind's minter and returns only what the minter makes. req.GitHubOwners is the name's
-// github-owners in the policy snapshot Values checked the grant against, so a list narrowed after
-// a grant holds at the grant's next release, and a name that snapshot does not serve gets none,
-// which the github-app minter refuses. Only the github-app minter reads req.GitHubNarrowing. A
-// minter's refusal of the narrowing itself (secrets.ErrMintNarrowingRefused) is returned as it is,
+// release is one granted name's value. A stored secret reads its frozen source and ignores the
+// policy metadata and narrowing. A kind source reads its frozen store source (on Secret
+// Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value
+// and the name, tier and GitHub owners from the policy snapshot Values checked to the minter.
+// An Azure login also requires this name's grant decision to be approval, never automatic.
+// Only the github-app minter reads narrowing. A minter's refusal of the narrowing itself
+// (secrets.ErrMintNarrowingRefused) is returned as it is,
 // for Values to log as a refused narrowing, and is no mint failure. A deleted secret stops
 // releasing once the policy drops it: `agent-secrets secret delete` rereads the name at once.
-func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.MintRequest) (string, error) {
+func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (string, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
 		return "", fmt.Errorf("secret %s: %w", g.name, err)
 	}
 	if !minted {
 		return m.Secrets.Read(ctx, source)
+	}
+	if kind == policy.KindAzureLogin && g.decision != policy.Approval {
+		return "", fmt.Errorf("%w: %w: Azure login requires a person's approval", ErrMintFailed, secrets.ErrMintRefused)
 	}
 	mint := m.Minters[kind]
 	if mint == nil {
@@ -267,8 +268,10 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.Mi
 	if err != nil {
 		return "", err
 	}
-	req.Value = value
-	token, err := mint(ctx, req)
+	token, err := mint(ctx, secrets.MintRequest{
+		Name: g.name, HumanTier: served.Tier == policy.TierHuman, Value: value,
+		GitHubOwners: served.GitHubOwnerLogins(), GitHubNarrowing: narrowing,
+	})
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
 		return "", err
 	}

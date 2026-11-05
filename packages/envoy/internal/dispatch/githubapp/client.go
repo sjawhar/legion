@@ -57,6 +57,11 @@ var (
 	// ErrFileTooLarge is a directory entry whose recorded size exceeds
 	// MaxFileSize: it is refused before its blob is fetched.
 	ErrFileTooLarge = errors.New("file too large")
+	// ErrRepositoryUnreadable is GitHub's 403 or 404 on a repository read the installation may
+	// not make, or on a repository or commit it cannot see: the answer a check result's currency
+	// reads as "unknown" rather than as "older" (CheckRepositoryResponse, which CommitOnBranch,
+	// DefaultBranch and delivery's own pull-request reads all classify their answers by).
+	ErrRepositoryUnreadable = errors.New("the GitHub App cannot read the repository")
 )
 
 // MaxFileSize bounds one architecture file. The tree entry's size is checked

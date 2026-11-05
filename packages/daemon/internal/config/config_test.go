@@ -679,12 +679,12 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		{
 			name: "github app has no private key source",
 			body: minimalFile + "github_apps: {implement: {app_id: \"1\"}, review: {app_id: \"2\", private_key: key}}\n",
-			want: "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret",
+			want: "github_apps.implement requires exactly one of private_key, private_key_command, private_key_secret, or token_command",
 		},
 		{
 			name: "github app has two private key sources",
 			body: minimalFile + "github_apps: {implement: {app_id: \"1\", private_key: key, private_key_command: \"printf key\"}, review: {app_id: \"2\", private_key: key}}\n",
-			want: "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret",
+			want: "github_apps.implement requires exactly one of private_key, private_key_command, private_key_secret, or token_command",
 		},
 		{
 			name: "github app secret is not a single key name",
@@ -1374,7 +1374,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		},
 		{
 			key: "worker_idle_retire_seconds", line: "worker_idle_retire_seconds: 600", class: tossed,
-			wantPrefix: "unknown key worker_idle_retire_seconds: ",
+			want: "unknown key worker_idle_retire_seconds: an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)",
 		},
 		{
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,

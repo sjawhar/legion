@@ -51,7 +51,7 @@ reach that does, and a page is in that reach.
 
 The fix was entirely on the branch: forward merge `a2056893`
 (`jj new <the issue branch> main@origin`, never a rebase), with that service repointed at
-`ghcr.io/sjawhar/legion/ci@sha256:2358fcba…`, the digest `.github/ci-images.yaml` already held.
+`ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba…`, the digest `.github/ci-images.yaml` already held.
 The unchanged-diff fingerprint moved by exactly those three lines, which the pull request's
 forward-merge comment quotes.
 

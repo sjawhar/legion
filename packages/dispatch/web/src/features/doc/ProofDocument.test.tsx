@@ -49,8 +49,9 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
 // `setProps` with a new `nodeViews` map over a built document re-runs ProseMirror's view update
 // across every node of it, which for the 406,319-character document was one task of 1,218 ms on
 // a phone at 4x CPU throttling - longer than any batch of the build it followed
-// (dispatch://INFRA-341, R11).
-test("ProofDocument installs the document's typed blocks before the editor's build", async () => {
+// (dispatch://INFRA-341, R11). `createEditor` is what installs them, from the chunk the editor
+// library is in (`features/doc/editor.ts`), out of what this page hands it.
+test("the document's typed blocks are on the view before the editor's build", async () => {
   const { editors, sync, view } = renderProofDocument();
 
   try {

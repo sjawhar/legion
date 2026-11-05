@@ -87,7 +87,7 @@ function anchorElementFor(thread: Thread): HTMLElement | null {
  * region leaves the mark's offset in the document's own layout, which is all a placement may
  * depend on. One read per layout pass: the answer is the same for every thread in it.
  */
-function regionOrigin(region: HTMLElement): number {
+export function regionOrigin(region: HTMLElement): number {
   let scrolled = 0;
   const root = region.ownerDocument.documentElement;
   for (let node = region.parentElement; node !== null && node !== root; node = node.parentElement) {

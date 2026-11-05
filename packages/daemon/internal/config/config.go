@@ -33,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -179,6 +180,11 @@ type Config struct {
 	// (runtime.tmux.pi_config_files, or runtime.kubernetes.pod.env's PI_CONFIG_FILES); a role it
 	// leaves out names those alone. Nil while the file names none.
 	RoleConfigFiles map[claim.Role][]string
+	// RepositoryRenames is `repository_renames`: the repository pairs this deployment treats as
+	// one repository wherever a name is compared, because a repository moved while Legion's
+	// records keep the name each was written under. The zero value, which answers as
+	// strings.EqualFold does, while the file configures none.
+	RepositoryRenames ghrepo.Renames
 }
 
 const (
@@ -230,7 +236,7 @@ var countKeys = []struct {
 // would.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
-	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
+	"worker_idle_retire_seconds": `an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
@@ -293,6 +299,7 @@ type fileConfig struct {
 	Counts                 map[string]int
 	WorkerBackends         map[claim.Role]runtime.Backend
 	RoleConfigFiles        map[claim.Role][]string
+	RepositoryRenames      []ghrepo.Rename
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -434,6 +441,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.WorkerBackends, err = readWorkerBackends(value, key)
 		case "role_config_files":
 			file.RoleConfigFiles, err = readRoleConfigFiles(value, key)
+		case repositoryRenamesKey:
+			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -970,6 +979,12 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles
 	if err := checkRoleConfigFiles(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkRepositoryRenames(file, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -54,12 +55,19 @@ const (
 // Entry that session's entry (Live), and Release what the release of a lapsed claim came to:
 // store.ExpiredRoleClaimReleased, store.ExpiredRoleClaimMissing when the claim was already gone,
 // or store.ExpiredRoleClaimRetained when the claim store kept it (a listener's grace for a claim
-// it restored).
+// it restored). ClaimRevision is the claim store's revision of the claim record the resolution
+// leaves behind, which GET /v1/roles/<role> reports as claim_revision and a conditional claim
+// names as its precondition: the revision the claim was read at while a record stands (Live, and
+// Lapsed with its claim retained), and zero where none does - Unclaimed, and Lapsed with its
+// claim released or found already gone. A resolution whose claim came from a firstHolder
+// (ResolveHolderFrom) read no record and carries zero whatever the store holds, since the copy
+// names a holder and no revision; a caller that reports the revision reads the claim store.
 type Resolution struct {
-	State   State
-	Holder  string
-	Entry   session.SessionEntry
-	Release store.ExpiredRoleClaimRelease
+	State         State
+	Holder        string
+	Entry         session.SessionEntry
+	Release       store.ExpiredRoleClaimRelease
+	ClaimRevision uint64
 }
 
 // Step names the read a resolution failed at.
@@ -106,6 +114,20 @@ func (e *ReadError) Unwrap() error { return e.Err }
 // resolutionAttempts bounds how often ResolveHolder reads the claim again after a release found it
 // superseded.
 const resolutionAttempts = 2
+
+// PatternString is the shape of a role token: the pattern POST /v1/roles/set accepts, so it is
+// every token a claim can name. A role message under a token it refuses can reach no holder and
+// is kept for none (Valid).
+const PatternString = `^[a-z0-9][a-z0-9_-]*$`
+
+var pattern = regexp.MustCompile(PatternString)
+
+// Valid reports whether role is a token a claim can name (PatternString). The listener's role
+// routes and Dispatch's outbox both ask it, so the two cannot drift over which role a message
+// may be kept for.
+func Valid(role string) bool {
+	return pattern.MatchString(role)
+}
 
 // Registered is the liveness that counts any registered session as live: any entry.
 func Registered(session.SessionEntry) bool { return true }
@@ -170,7 +192,7 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 		}
 		entry, err := sessions.Holder(ctx, holder, live)
 		if err == nil {
-			return Resolution{State: Live, Holder: holder, Entry: entry}, nil
+			return Resolution{State: Live, Holder: holder, Entry: entry, ClaimRevision: claim.Revision}, nil
 		}
 		if !errors.Is(err, nats.ErrKeyNotFound) {
 			return Resolution{Holder: holder}, &ReadError{Step: SessionRead, Holder: holder, Err: err}
@@ -182,7 +204,16 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 		if release == store.ExpiredRoleClaimSuperseded {
 			continue
 		}
-		return Resolution{State: Lapsed, Holder: holder, Release: release}, nil
+		// A released claim and one already gone leave no record, so the revision this
+		// resolution read names nothing a later claim can be conditional on; a retained one
+		// (a restored claim still inside its grace) is still in the store at the revision
+		// read, and a conditional claim against it is exactly how a scheduler takes a role
+		// its restart-grace holder never came back for.
+		revision := claim.Revision
+		if release != store.ExpiredRoleClaimRetained {
+			revision = 0
+		}
+		return Resolution{State: Lapsed, Holder: holder, Release: release, ClaimRevision: revision}, nil
 	}
 	return Resolution{State: Churned}, nil
 }

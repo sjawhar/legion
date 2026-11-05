@@ -121,6 +121,10 @@ func writeStoredOrderReport(out io.Writer, report docs.StoredOrderReport) {
 		fmt.Fprintf(out, " compacted=%q", fmt.Sprintf("%d versions record updates below the compaction base %d and were not compared",
 			report.VersionsCompacted, report.Base))
 	}
+	if report.UpdatesAwaitingPredecessor > 0 {
+		fmt.Fprintf(out, " awaiting=%q", fmt.Sprintf("%d updates park structs no later update carries: an edit stored ahead of one it builds on that has not arrived, or a dependency never stored",
+			report.UpdatesAwaitingPredecessor))
+	}
 	if report.Refused != "" {
 		fmt.Fprintf(out, " refused=%q", report.Refused)
 	}

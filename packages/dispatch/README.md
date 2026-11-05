@@ -9,7 +9,7 @@ suggestions, artifacts, and durable event history. The Go server in
 
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
-the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
+the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the
 repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
 feed keep the issue, Inbox, documents, and sidebar current.
 
@@ -66,8 +66,9 @@ requests at a broker the caller runs, as the secrets broker's docs rig
 (`docs/site/media/broker/rig.sh`) does with the token its local issuer
 (`packages/envoy/cmd/dev-oidc-issuer`) keeps.
 
-`DATABASE_URL` is required and must name an isolated loopback database:
-`e2e/seed.ts` truncates it before every scenario and never selects a shared
+`DATABASE_URL` is a one-lane run's input unless it names a Postgres of its own
+(lanes, below), and must name an isolated
+loopback database: `e2e/seed.ts` empties it before every row and never selects a shared
 default, and the dev sign-in flag refuses a non-loopback host. psql runs without
 `PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
 never checked. The harness ports `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
@@ -77,7 +78,7 @@ server serves on a port the OS chooses and holds until it serves: the Dispatch
 server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by
 binding port 0. Each reports its port on its listening line, and `e2e/run.ts`
 exports them before Playwright starts, so no run shares a port with another and
-none truncates the database behind a server it did not start. Set, a port is
+none empties the database behind a server it did not start. Set, a port is
 used as given, and an occupied one fails with `address already in use`.
 Running `playwright test` without the wrapper refuses, naming `e2e/run.ts`,
 unless every port is set and `DISPATCH_E2E_REUSE_SERVERS=1` says they name a
@@ -105,6 +106,40 @@ Arguments after the config go to Playwright, as in
 `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/broadcast.e2e.ts`
 (`bun run e2e` runs the same after the SPA build). `e2e/run.ts` stops the harness
 when Playwright exits and exits with Playwright's status.
+
+`DISPATCH_E2E_WORKERS` runs the suite in parallel: it is how many Playwright
+workers the run has, unset or empty being one, and `e2e/run.ts` starts one lane
+per worker before Playwright starts. A lane is a whole harness of its own — a
+Dispatch server, the three fakes, the plain-HTTP proxy, a file-store bucket and
+ports the OS chose — and a Postgres of its own, because `e2e/seed.ts` empties
+its lane's database before every row. A worker finds its lane by
+`TEST_PARALLEL_INDEX`, which Playwright gives it and a restarted worker keeps;
+`e2e/harness-ports.ts` resolves it for the ports and for psql's database alike.
+
+A lane's Postgres comes from one of two variables, and a run of more than one
+lane that sets neither is refused. On a machine with Docker and no Postgres
+binaries, `DISPATCH_E2E_PG_IMAGE` is a `docker run` of the image digest you
+name, which is what CI does. On a machine with a Postgres installation and no
+Docker, such as an issue pod, `DISPATCH_E2E_PG_BIN` is a directory holding
+`initdb` and `pg_ctl`. Each lane's data lives under the run's own temporary
+directory and goes with the run.
+
+```bash
+cd packages/dispatch
+DISPATCH_E2E_WORKERS=4 \
+DISPATCH_E2E_PG_BIN=/usr/lib/postgresql/18/bin \
+  bun run e2e
+```
+
+More than one worker refuses, before anything starts and naming the variable, a
+`DATABASE_URL`, `PLAYWRIGHT_BASE_URL`, `DISPATCH_E2E_PROCESSES=2`,
+`DISPATCH_E2E_REUSE_SERVERS` or harness port you set yourself: each names one
+database, one set of servers or one port that every lane would otherwise share,
+and a shared one is one lane emptying another's rows. A `--workers` or `-j` that
+differs from the lane count is refused too; set `DISPATCH_E2E_WORKERS` instead.
+Every other mode is one lane and one worker: the deployed run, two-process mode,
+a run against servers you started (`DISPATCH_E2E_REUSE_SERVERS=1`) and
+`bun run dispatch:local`. `AGENTS.md`'s end-to-end section has the whole model.
 
 `e2e/run-server.sh` on its own is the server for a shell caller: with
 `DATABASE_URL`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT` and the broker switch's
@@ -181,7 +216,7 @@ step; the database's container stays.
 
 Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it must be a single
 `postgres://` URL whose host (its `host` query parameter when it has one, as for libpq) is
-`127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
+`127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is emptied and reseeded on
 every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
 starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
 That script runs the container from its pinned image, pgvector on PostgreSQL 18, the version
@@ -243,11 +278,11 @@ failure prints `FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
     `PASS: R12 component: this server has no architecture source, so it holds no component node`;
     a source present is a `FAIL` naming `COMPONENT_SOURCE=existing`.
 - `DEV_SIGNIN_LOGIN`, optional, a login the server's dev sign-in route (`/auth/_dev/signin`) signs
-  in: `bun run dispatch:local` has the route, a deployed server does not. Editing a comment is a
-  person's write, by its author alone, so the A13 and A15 comment sections sign that person in with a
+  in: `bun run dispatch:local` has the route, a deployed server does not. Editing a comment needs
+  the `person` scope, and is its author's alone, so the A13 and A15 comment sections sign that person in with a
   cookie jar, write the comments that person edits, and send each edit with the dashboard's origin.
   Unset, each of those two sections prints one
-  `SKIP: … PATCH /api/v1/comments/{id} is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; …`
+  `SKIP: … PATCH /api/v1/comments/{id} needs the person scope, which this bearer does not hold, and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; …`
   line, and every other section runs.
 
 It writes two issues in `PROJECT`: the first holds the spec, comments, messages and the documents
@@ -262,6 +297,48 @@ DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
   bash packages/dispatch/e2e/acceptance/block-graph.sh
 ```
 
+`e2e/acceptance/verification.sh` drives the verification rules the same way, through the HTTP API
+and the same real CLI. It covers a `plan_task` and a `check` that serve a spec's `requirement`, and
+the `serves` and `needs` edges `GET /api/v1/references` lists for them; every attribute a `check`
+carries, read back on the head of `dispatch read --ref`; the refusals a pointer earns — a block no
+document holds, a block of an issue in another tree, a `needs` naming a block outside its own plan
+— and a `when` the schema does not know, each `400 INVALID_MARKDOWN` naming the pointer or the
+attribute; a requirement's id through a `move`; `dispatch result` and `dispatch results`, with a
+check id no Verification document in reach holds refused `400 UNKNOWN_CHECK` and a pass counting a
+skipped case refused `400 RESULT_CONTRADICTS`; the one write a closed issue takes, a result for an
+`after_merge` check, beside the result for a `before_merge` check and the document write it still
+refuses `409 ISSUE_CLOSED`; the coverage flags `dispatch read --issue` prints after `Coverage: `,
+cleared by a check of the issue and by a check of a child, back when that check is deleted, with
+the missing plan task named only once the issue has a plan document; the gap an approval request's
+answer names and the covered spec that earns none; `dispatch plan-approve`, refused `409
+NOT_PLAN_DOCUMENT` on a spec, and `dispatch request-approval`, refused `409
+PLAN_APPROVED_BY_REVIEW` on a plan; and the one request that names a spec and its Verification
+document together. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two optional ones:
+
+- `FAKE_GITHUB_PORT`, the harness's fake GitHub, which the server reads as
+  `DISPATCH_GITHUB_API_BASE`. The currency section seeds it with one repository holding one pull
+  request whose title names the issue, replacing every repository the fake served, maps that
+  repository as `PROJECT`'s default and removes the mapping on exit, so a result recorded at that
+  pull request's head reads `current`. Unset, or with `PROJECT` already naming a default
+  repository, one `SKIP: currency …` line stands in for the section.
+- `DEV_SIGNIN_LOGIN`, as `block-graph.sh` takes it. Recording a review is a person's write alone,
+  so the two review sections sign that person in with a cookie jar and answer the approval requests
+  the script opened; unset, each prints one
+  `SKIP: review …: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews needs a person's …`
+  line and every other section runs.
+
+It writes four issues in `PROJECT` — a root with a spec, a Verification document and a plan, a
+child of it, a sibling in another tree and one more whose spec and Verification document are
+approved together — and closes every one of them, also when a check fails, which withdraws any
+approval request it left open. Nothing it writes is read by a second run. Against
+`bun run dispatch:local`:
+
+```bash
+DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
+  FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice \
+  bash packages/dispatch/e2e/acceptance/verification.sh
+```
+
 `e2e/acceptance/block-coverage.sh` takes the first three inputs, with `PROJECT` optional (unset,
 every project), and only reads. For every document it can list (each project's documents and each
 issue's documents), it counts the document as not indexed when `GET /api/v1/artifacts/{id}/blocks`
@@ -269,7 +346,7 @@ lists blocks while `GET /api/v1/references?to=<document>&kind=part_of` lists non
 `documents=<n> indexed=<n> not_indexed=<n>`, then each not-indexed document's reference. A document
 with no blocks counts as indexed, since it owes no nodes.
 
-Both source `e2e/acceptance/lib.sh`, the preamble they share: it refuses an unset input or a
+All three source `e2e/acceptance/lib.sh`, the preamble they share: it refuses an unset input or a
 missing command with exit 2, and reads the bearer from `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`
 without printing it, unsetting both so no process the script starts inherits it.
 
@@ -310,12 +387,13 @@ E2E_AGENT_TOKEN=acceptance-token \
 bun run e2e:deployed
 cd ../envoy/deploy/compose
 "${compose[@]}" down -v
-docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
+docker rmi "ghcr.io/cybermonklabs/legion/envoy:${acceptance_image_tag}"
 ```
 
-`e2e/seed.ts` truncates its database before each scenario. Always set
+`e2e/seed.ts` empties its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has seven projects. `chromium` runs every spec except the two plain-HTTP specs. `iphone`
+The suite has eleven projects. `chromium` runs every spec except the two plain-HTTP specs and the
+three the `-alone` projects below take. `iphone`
 runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or
 its `test.describe`'s title); which tests take the tag is in `packages/dispatch/AGENTS.md`, "Phone
 acceptance". An untagged test drops out of `iphone` with no failure. The iPhone project uses
@@ -342,6 +420,14 @@ upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-ou
 `e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
 tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
 tab's lock.
+The last three projects run the rows whose claim is a wall-clock time, with the machine to
+themselves: `chromium-alone` runs `e2e/heavy-document-writes.e2e.ts` (a document write answers in
+under a second), `e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
+holding the main thread for a second), and `firefox-alone` and `webkit-alone` run
+`e2e/heavy-bodies.e2e.ts` in the other two engines. Each names every project before it in
+`dependencies` and caps its own workers at one, so Playwright starts them only after the rest of
+the run and takes one row at a time: four lanes on one machine make a second of wall clock
+unmeasurable. A project whose dependency has a failing row does not run at all.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check

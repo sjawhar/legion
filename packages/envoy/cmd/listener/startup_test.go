@@ -356,6 +356,9 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 	sessions, records := bucket(bus.SessionBucket, 5*time.Minute), bucket(bus.CIStateBucket, 0)
 	put(roles, "reviewer", store.RoleClaim{HolderSessionID: "ses_live", ClaimedAt: now})
 	put(interests, "ses_live", store.Interest{SessionID: "ses_live", MachineID: "startup-legacy", Topics: []string{contracts.AgentSubject("ses_live")}, UpdatedAt: now})
+	// Written straight to the bucket as an earlier build's listener wrote it, serving port and
+	// all: no registration carries a port since dispatch://INFRA-889, and this test is about
+	// what a listener makes of the records it finds on its start.
 	put(sessions, "ses_live", session.SessionEntry{Port: 1, MachineID: "startup-legacy", UpdatedAt: now})
 	for _, kv := range []natsgo.KeyValue{roles, interests, sessions, records} {
 		readable, unreadable := testnats.LegacyKeys(kv.Bucket(), "k")
@@ -388,24 +391,23 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 // githubWebhookEnv mounts the listener's GitHub webhook route, the one route that uses the CI store.
 var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET=ci-route-secret", "ENVOY_REVIEWER_APP_ID=1"}
 
-// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit whose
-// checks finished a minute ago and have not settled, so any summary loop reading the bucket settles
-// it at its first pass after the record reaches its cache, on the next tick of the loop's grid. It
-// returns the bucket and the record's key.
-func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
+// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit of
+// owner/repo#number at sha whose checks finished a minute ago and have not settled, so any
+// summary loop reading the bucket settles it at its first pass after the record reaches its
+// cache, on the next tick of the loop's grid. It returns the bucket and the record's key.
+func seedDueCIRecord(t *testing.T, client *bus.Client, owner, repo, number, sha string) (natsgo.KeyValue, string) {
 	t.Helper()
 	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("create the CI bucket: %v", err)
 	}
-	sha := strings.Repeat("d", 40)
-	key := cistore.Key("acme", "widgets", "7", sha)
-	record := `{"owner":"acme","repo":"widgets","number":"7","sha":"` + sha + `",` +
-		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/acme/widgets/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
+	key := cistore.Key(owner, repo, number, sha)
+	record := `{"owner":"` + owner + `","repo":"` + repo + `","number":"` + number + `","sha":"` + sha + `",` +
+		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/` + owner + `/` + repo + `/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
 		`"suites":{},"last_event_at":` + strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + `,` +
 		`"generation":1,"emitted_count":0,"settled_emitted":false,"schema":1}`
 	if _, err := kv.Put(key, []byte(record)); err != nil {
-		t.Fatalf("store the CI record: %v", err)
+		t.Fatalf("store the CI record of %s/%s#%s: %v", owner, repo, number, err)
 	}
 	return kv, key
 }
@@ -435,7 +437,7 @@ func ciSettled(t *testing.T, client *bus.Client) bool {
 func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	kv, key := seedDueCIRecord(t, client)
+	kv, key := seedDueCIRecord(t, client, "acme", "widgets", "7", strings.Repeat("d", 40))
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "no-github-route")
 	listener.waitHealthy(t)
@@ -476,7 +478,7 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 func TestAListenerWithAGitHubRouteSettlesTheCIBucket(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	kv, key := seedDueCIRecord(t, client)
+	kv, key := seedDueCIRecord(t, client, "acme", "widgets", "7", strings.Repeat("d", 40))
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "github-route", githubWebhookEnv...)
 	listener.waitHealthy(t)

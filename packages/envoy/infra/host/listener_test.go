@@ -25,7 +25,7 @@ const (
 	imageType     = "docker:index/remoteImage:RemoteImage"
 	commandType   = "command:remote:Command"
 	listenerType  = "envoy-infra:host:Listener"
-	exampleImage  = "ghcr.io/sjawhar/legion/envoy:example"
+	exampleImage  = "ghcr.io/cybermonklabs/legion/envoy:example"
 )
 
 // newMocks returns the mock engine host's tests run on. A RemoteImage's state gets an imageId, as
@@ -80,10 +80,9 @@ func run(t *testing.T, args *host.ListenerArgs, check func(*host.Listener), pkgs
 // exampleArgs are the existing Docker-host container's values, on placeholders.
 func exampleArgs() *host.ListenerArgs {
 	return &host.ListenerArgs{
-		MachineID:  "example-host-a",
-		NatsUrls:   pulumi.StringArray{pulumi.String("nats://hub.internal.example:4222")},
-		Image:      exampleImage,
-		HostBridge: pulumi.StringRef("127.0.0.1"),
+		MachineID: "example-host-a",
+		NatsUrls:  pulumi.StringArray{pulumi.String("nats://hub.internal.example:4222")},
+		Image:     exampleImage,
 	}
 }
 
@@ -92,7 +91,6 @@ var exampleEnvs = []string{
 	"ENVOY_MACHINE_ID=example-host-a",
 	"NATS_URLS=nats://hub.internal.example:4222",
 	"ENVOY_ALLOW_REMOTE_NATS=1",
-	"ENVOY_HOST_BRIDGE=127.0.0.1",
 }
 
 // envsOf returns a container registration's envs and whether they are secret.
@@ -216,42 +214,6 @@ func TestListenerWaitForHealthy(t *testing.T) {
 		require.Equal(t, resource.NewProperty(false), in["wait"])
 		require.NotContains(t, in, resource.PropertyKey("waitTimeout"))
 	})
-}
-
-// subscribeAllTopics unset or false leaves the container's environment exactly as it was before
-// the input existed, so no existing stack's container is replaced; true appends the opt-in last.
-func TestListenerSubscribeAllTopics(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		set  *bool
-		want []string
-	}{
-		{"unset renders the environment unchanged", nil, exampleEnvs},
-		{"false renders the environment unchanged", pulumi.BoolRef(false), exampleEnvs},
-		{"true appends ENVOY_SUBSCRIBE_ALL_TOPICS=1 last", pulumi.BoolRef(true), append(slices.Clone(exampleEnvs), "ENVOY_SUBSCRIBE_ALL_TOPICS=1")},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			args := exampleArgs()
-			args.SubscribeAllTopics = c.set
-			m, err := run(t, args, nil, "docker")
-			require.NoError(t, err)
-			envs, _ := envsOf(t, m.One(t, containerType))
-			require.Equal(t, c.want, envs)
-		})
-	}
-}
-
-// The watchdog recreates a removed container from its env file, so the opt-in reaches that file
-// too, as its one added line: a recreated listener keeps subscribing every notification topic.
-func TestListenerWatchdogCarriesSubscribeAllTopics(t *testing.T) {
-	args := exampleArgs()
-	args.SubscribeAllTopics = pulumi.BoolRef(true)
-	cmd, _ := watchdogOf(t, args)
-
-	want := strings.Replace(readGolden(t, "watchdog-create.golden"),
-		"ENVOY_HOST_BRIDGE=127.0.0.1\nENVEOF\n", "ENVOY_HOST_BRIDGE=127.0.0.1\nENVOY_SUBSCRIBE_ALL_TOPICS=1\nENVEOF\n", 1)
-	require.NotEqual(t, readGolden(t, "watchdog-create.golden"), want, "the golden holds the env file's last line")
-	require.Equal(t, want, cmd.Inputs["create"].StringValue())
 }
 
 func TestListenerAdoptAliasesEachChildToItsRootLevelName(t *testing.T) {

@@ -49,7 +49,7 @@ func breakInterestReads(t *testing.T, registry *store.Registry) {
 // the reads break: each answers 200 listing the session.
 func TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering(t *testing.T) {
 	const missed = "ses_interest_read_broken_pipe"
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{missed: 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{missed})
 	state := &listenerDeps{registry: registry, sessions: sessions}
 	get := func(handler http.HandlerFunc, path string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()

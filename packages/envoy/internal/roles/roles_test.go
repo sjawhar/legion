@@ -17,6 +17,7 @@ import (
 // releases answered in turn on each ReleaseExpiredRoleClaim, after onRelease when it is set.
 type claims struct {
 	holders   []string
+	revision  uint64
 	readErr   error
 	releases  []store.ExpiredRoleClaimRelease
 	release   error
@@ -31,7 +32,11 @@ func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
 	}
 	holder := c.holders[min(c.reads, len(c.holders)-1)]
 	c.reads++
-	return store.RoleClaim{HolderSessionID: holder}, nil
+	claim := store.RoleClaim{HolderSessionID: holder}
+	if holder != "" {
+		claim.Revision = c.revision
+	}
+	return claim, nil
 }
 
 func (c *claims) ReleaseExpiredRoleClaim(_ context.Context, _, sessionID string, _ time.Duration) (store.ExpiredRoleClaimRelease, error) {
@@ -109,6 +114,49 @@ func TestResolveHolderReadsEachState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ClaimRevision is the revision of the record the resolution leaves behind: the claim's own while
+// one stands (a live holder, a lapsed claim the store kept), zero where none does (no claim, a
+// lapsed claim released or already gone), and zero for a claim read from a firstHolder copy, which
+// carries no revision.
+func TestResolveHolderReportsTheRevisionOfTheClaimItLeaves(t *testing.T) {
+	live := sessions{entries: map[string]session.SessionEntry{"ses_live": {Title: "live"}}}
+	released := func(release store.ExpiredRoleClaimRelease) []store.ExpiredRoleClaimRelease {
+		return []store.ExpiredRoleClaimRelease{release}
+	}
+	for _, tc := range []struct {
+		name   string
+		claims *claims
+		want   uint64
+	}{
+		{"a live holder", &claims{holders: []string{"ses_live"}, revision: 7}, 7},
+		{"no claim", &claims{holders: []string{""}, revision: 7}, 0},
+		{"a lapsed claim released", &claims{holders: []string{"ses_gone"}, revision: 7, releases: released(store.ExpiredRoleClaimReleased)}, 0},
+		{"a lapsed claim already gone", &claims{holders: []string{"ses_gone"}, revision: 7, releases: released(store.ExpiredRoleClaimMissing)}, 0},
+		{"a lapsed claim the store kept", &claims{holders: []string{"ses_gone"}, revision: 7, releases: released(store.ExpiredRoleClaimRetained)}, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, live, "reviewer", anyEntry)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if resolution.ClaimRevision != tc.want {
+				t.Fatalf("claim revision %d, want %d (%+v)", resolution.ClaimRevision, tc.want, resolution)
+			}
+		})
+	}
+	t.Run("a holder read from a firstHolder copy", func(t *testing.T) {
+		bucket := &claims{holders: []string{"ses_live"}, revision: 7}
+		firstHolder := func(string) (string, error) { return "ses_live", nil }
+		resolution, err := roles.ResolveHolderFrom(context.Background(), bucket, firstHolder, live, "reviewer", anyEntry)
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if resolution.State != roles.Live || resolution.ClaimRevision != 0 || bucket.reads != 0 {
+			t.Fatalf("resolution %+v after %d bucket reads, want live at revision 0 with no bucket read", resolution, bucket.reads)
+		}
+	})
 }
 
 // live decides the holder: one it refuses is released as one that is gone.

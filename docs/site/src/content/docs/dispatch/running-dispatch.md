@@ -7,18 +7,18 @@ sidebar:
 
 Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and Google
 sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves is built from
-`packages/dispatch`. The container image `ghcr.io/sjawhar/legion/envoy` carries it as
+`packages/dispatch`. The container image `ghcr.io/cybermonklabs/legion/envoy` carries it as
 `/usr/local/bin/envoy-dispatch`.
 
-Pin the image by digest. Each `ghcr.io/sjawhar/legion/envoy:<commit>` image that
+Pin the image by digest. Each `ghcr.io/cybermonklabs/legion/envoy:<commit>` image that
 `.github/workflows/release-envoy-listener.yaml` publishes carries a GitHub artifact attestation
 from that workflow (images published before attestation began carry none), and a tag does not say
 which run pushed it (a run dispatched by hand from any branch pushes one too), so accept a digest
 only when a run on `main` built it:
 
 ```bash
-gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+gh attestation verify oci://ghcr.io/cybermonklabs/legion/envoy@sha256:… --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
@@ -26,9 +26,9 @@ gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawh
 the commit it names and pin that commit's image instead:
 
 ```bash
-docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest \
+docker buildx imagetools inspect --raw ghcr.io/cybermonklabs/legion/envoy:latest \
   | jq -r '.annotations["org.opencontainers.image.revision"]'
-docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # its Digest is the one to pin
+docker buildx imagetools inspect ghcr.io/cybermonklabs/legion/envoy:<that commit>   # its Digest is the one to pin
 ```
 
 ## What it needs
@@ -333,9 +333,10 @@ publish that was not reached, labelled `reason`. `denied` is a publish NATS refu
 server's own grant, `refused` one NATS refuses however often it is retried, `holder` a role
 forward its holder's resolution held pending with nothing sent (a stale holder, a claim the store
 kept, a read that failed), `unanswered` a forward NATS took whose answer never came - the role
-holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the
-stored copy - and `failed` any other failure. A denied publish also logs
-`dispatch outbox: publish event` at ERROR, naming the subject.
+holder's receipt - and `failed` any other failure. A holder whose entry an earlier listener
+stored with a port is counted on the stream's acknowledgement of the stored copy, until that
+entry lapses. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the
+subject.
 
 ## Behind a proxy
 

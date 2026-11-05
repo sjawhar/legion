@@ -262,7 +262,7 @@ package api
 // declaring it, then sjawhar/legion#2009 at 32 and released pi-legion v10.10.0 declaring it, each
 // without these shapes, so this branch takes the number above it, as the collision note says.)
 //
-// 34: sjawhar/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
+// 34: cybermonklabs/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
 // `/legion/scratch` (scratchRoot), and the values `mainEnvironment` sets name its directories:
 // every role container of a pod, a workflow role's and the controller's, is told the same
 // `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR` —
@@ -298,14 +298,14 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// 36: INFRA-229 (cybermonklabs/legion) -- `api.PullRequestView` gains `state`, the pull request's
 // `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
 // issue beneath it is still in the workflow and a merged root's close waits for the rest of its
 // tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
 // request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
 // request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
 //
-// 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
+// 37: cybermonklabs/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
 // generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
 // with the pod and deletes with it, so an issue's Sandbox owns no volume claim template and a
 // stopped issue's Sandbox is always deleted. Nothing carries a disk from one pod to the next, so
@@ -329,7 +329,7 @@ package api
 // released pi-legion declaring it, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 38: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// 38: cybermonklabs/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
 // issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
 // and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
 // keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no
@@ -487,7 +487,10 @@ package api
 // the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
 // when there is none — on the state's claims (`api.ClaimView`) and on the operator's
 // (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
-// before 46 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
+// before 46 refuses a state carrying either, so `GET /legion/v1/state`, which authenticates
+// nobody, serves a caller from a pod whose claims record a contract below 46 the claim views
+// without them (api's stateFor): the round serves that worker until its pod is replaced, and
+// every reader from 46 on takes both as optional. `legion.yaml` gains `pod_update_retask_hours` and
 // `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
 // before 46 has no op to signal with, so its worker answers by ending the turn the task started
 // (supervise.PodUpdateContract names this number), and a daemon before 46 answers that op's post
@@ -497,4 +500,27 @@ package api
 // 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
-const DaemonAPIVersion = 46
+//
+// 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
+// released claim is a new suspension source. Each session reports its activity to the daemon on
+// POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
+// runs background work and of which kinds, and when the phase reminder armed in it is due, if
+// one still is. The daemon releases an issue pod no claim of which has reported
+// background work and none of whose phase workers is due a reminder inside the idle period
+// (`runtime.kubernetes.idle_release`), suspending each of its claims with the new
+// `suspendedBy` value `released`, which keeps the claim's phase and its pending delivery and
+// which the operator routes now serve. A released pod's unpushed work travels as a git bundle,
+// which the shim builds on the daemon's `bundle-workspace` frame and the next pod's launcher
+// restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 48
+// knows neither frame, and a shim before 48 answers none, so the image probe holds this daemon
+// and the image that runs its roles together. A claim may read the deployment's release, resume
+// and hold records on POST /legion/v1/claims/release-records, which names its claim, that
+// claim's secret and the window's start in its body, as the other claim routes do: the secret is
+// a credential, and a query string reaches every proxy and access log between the pod and the
+// daemon. No session-facing body carries the new `suspendedBy` value: the state's
+// `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
+// claim apart from a suspended one on the operator claim routes, which no plugin calls. This
+// change adds ten store migrations. (This branch took 47 while main's #2538 was unmerged; main
+// then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
+// branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 48

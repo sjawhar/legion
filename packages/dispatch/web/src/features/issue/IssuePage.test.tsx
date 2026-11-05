@@ -950,6 +950,30 @@ test("IssuePage opens the Activity tab with the t v chord", async () => {
   }
 });
 
+test("IssuePage opens the Decisions tab with the t d chord", async () => {
+  const restore = stubIssuePage(issue);
+  const decisions = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [],
+    document: null,
+    open_questions: [],
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.keyDown(document.body, { key: "t" });
+    fireEvent.keyDown(document.body, { key: "d" });
+
+    await screen.findByRole("tab", { name: "Decisions", selected: true });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/decisions");
+    await waitFor(() => expect(decisions).toHaveBeenCalledWith("CORE-1"));
+  } finally {
+    view.unmount();
+    decisions.mockRestore();
+    restore();
+  }
+});
+
 test("IssuePage renders a not-found view for an unrecognized tab suffix without fetching the issue", async () => {
   const getIssueSpy = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getMyStateSpy = spyOn(api, "getMyState").mockResolvedValue({

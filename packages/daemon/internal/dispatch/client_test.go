@@ -303,8 +303,8 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
-// The artifact read carries the approval Dispatch derives, the latest review's time and its event's
-// sequence (none from a Dispatch that predates the sequence).
+// The artifact read carries the approval Dispatch derives, who gave the review it shows, the latest
+// review's time and its event's sequence (none from a Dispatch that predates the sequence).
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertBearer(t, r)
@@ -314,7 +314,8 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/artifacts/artifact-6":
 			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{
-				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12}})
+				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12,
+				"by": map[string]any{"kind": "user", "id": "alice"}}})
 		case "/api/v1/artifacts/artifact-7":
 			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
 				"state": "awaiting", "latest_version": 4, "version": 3, "at": "2026-10-23T17:00:00Z"}})
@@ -332,16 +333,17 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		t.Fatalf("read approval: %v", err)
 	}
 	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 ||
-		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 {
-		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by the review at sequence 12", approval)
+		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 ||
+		approval.By != (Actor{Kind: "user", ID: "alice"}) || approval.By.Name() != "user:alice" {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by user:alice, the review at sequence 12", approval)
 	}
 	awaiting, err := client.Approval(context.Background(), "artifact-7")
 	if err != nil {
 		t.Fatalf("read awaiting approval: %v", err)
 	}
-	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 ||
+	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 || awaiting.By != (Actor{}) ||
 		!awaiting.At.Equal(time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)) || awaiting.Seq != 0 {
-		t.Fatalf("awaiting approval = %#v, want an open request, its review's time and no sequence", awaiting)
+		t.Fatalf("awaiting approval = %#v, want an open request reviewed by nobody, its review's time and no sequence", awaiting)
 	}
 	draft, err := client.Approval(context.Background(), "artifact-8")
 	if err != nil {

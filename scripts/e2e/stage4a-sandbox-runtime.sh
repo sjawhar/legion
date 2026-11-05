@@ -84,10 +84,11 @@
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
 # read-only tokens (nothing is pushed to it); LEGION_E2E_IMPLEMENT_APP_ID and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME (this deployment's implement App by default) the App's numeric
-# id and the secrets broker key the `agent-secrets` client resolves to its private key (agent tier:
-# no person's grant), which prerequisites proves is that id's App against GitHub's GET /app before the run
-# writes anything (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
+# LEGION_E2E_IMPLEMENT_APP_SECRET (this deployment's implement App by default) the App's numeric
+# id and the secrets broker github-app secret the `agent-secrets` client releases its installation
+# tokens from (agent tier: no person's grant), which prerequisites proves is that id's App from its
+# token against GitHub (GraphQL's viewer, then GET /apps/<slug>) before the run writes anything
+# (lib/github-apps.sh; the run acts as no other App); LEGION_E2E_PREVIOUS_IMAGE
 # (required) a worker image by digest built from a commit of main at daemon API contract 37 or 38,
 # before one container (its issue pods run six role containers), which this checkout contains: previous-layout builds that commit's
 # own Stage 4a harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's
@@ -470,24 +471,20 @@ go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./intern
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
 # previous-layout's fixture: the previous release's own Stage 4a harness (LEGION_E2E_PREVIOUS_IMAGE's revision), with testdata/previouslayout's
-# one test added, built from an archive of that commit so no worktree or branch is made.
+# one test added, built from an archive of that commit so no worktree or branch is made. That
+# harness read the implement App's key from a secret store; testdata/previouslayout's App overlay
+# replaces its live_app_test.go so it mints from the same token command this harness is handed
+# (LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND, which its environment carries on), and no key is read.
 mkdir "$work/previous"
 git -C "$root" archive "$previous_base" go.work go.work.sum packages/daemon packages/envoy | tar -x -C "$work/previous" ||
   fail "archiving $previous_base for the previous release's harness failed"
 cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/fixture_test.go.txt" \
   "$work/previous/packages/daemon/internal/runtime/sandbox/zz_previous_layout_fixture_test.go"
+cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/live_app_test.go.txt" \
+  "$work/previous/packages/daemon/internal/runtime/sandbox/live_app_test.go"
 go -C "$work/previous/packages/daemon" test -c -tags e2e -o "$work/previous.test" ./internal/runtime/sandbox ||
   fail "building the previous release's ($previous_base) harness with the previous-layout fixture failed"
-note "built the previous release's ($previous_base) harness with the previous-layout fixture; its image $previous_image"
-# That harness reads the implement App's key with `secrets NAME -- …` from the local store; the key
-# is in the secrets broker. It runs through a wrapper that puts lib/secrets-via-broker.sh first on
-# its PATH as `secrets`, which makes that read `agent-secrets NAME --reason=… -- …`. The current
-# harness and every other process keep the operator's PATH.
-mkdir "$work/previous-bin"
-ln -s "$root/scripts/e2e/lib/secrets-via-broker.sh" "$work/previous-bin/secrets"
-# shellcheck disable=SC2016 # "$PATH" and "$@" are the wrapper's own, expanded when it runs
-printf '#!/bin/sh\nPATH=%s:"$PATH" exec %s "$@"\n' "'$work/previous-bin'" "'$work/previous.test'" >"$work/previous-harness"
-chmod 0700 "$work/previous-harness"
+note "built the previous release's ($previous_base) harness with the previous-layout fixture and the token-command App overlay; its image $previous_image"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
@@ -512,8 +509,8 @@ env \
   LEGION_E2E_PLATFORM="$platform" \
   LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
   LEGION_E2E_IMPLEMENT_APP_ID="$implement_app_id" \
-  LEGION_E2E_IMPLEMENT_APP_KEY_NAME="$implement_app_key_name" \
-  LEGION_E2E_IMPLEMENT_APP_KEY_COMMAND="$(app_key_command "$implement_app_key_name")" \
+  LEGION_E2E_IMPLEMENT_APP_SECRET="$implement_app_secret" \
+  LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND="$(app_token_command "$implement_app_secret")" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \
@@ -531,7 +528,7 @@ env \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
   LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
   LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
-  LEGION_E2E_PREVIOUS_HARNESS="$work/previous-harness" \
+  LEGION_E2E_PREVIOUS_HARNESS="$work/previous.test" \
   LEGION_E2E_PREVIOUS_IMAGE="$previous_image" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m &
 # Backgrounded and waited on, not run as env's own foreground child: a foreign command's shell

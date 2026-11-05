@@ -1124,9 +1124,13 @@ func TestGitHubHandlerPublishesAPushOfSeveralMegabytes(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.published[0].Payload), &payload); err != nil {
 		t.Fatalf("decode the push payload: %v", err)
 	}
-	if payload["commit_count"] != "1000" || payload["changed_paths_truncated"] != "true" {
-		t.Fatalf("push payload commit_count = %q, changed_paths_truncated = %q; want 1000 and true",
-			payload["commit_count"], payload["changed_paths_truncated"])
+	if payload["commit_count"] != "1000" {
+		t.Fatalf("push payload commit_count = %q, want 1000", payload["commit_count"])
+	}
+	for _, key := range [...]string{"changed_paths", "changed_paths_truncated", "forced"} {
+		if value, ok := payload[key]; ok {
+			t.Errorf("push payload carries %q = %q; no daemon reads it", key, value)
+		}
 	}
 }
 

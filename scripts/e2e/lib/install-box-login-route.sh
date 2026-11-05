@@ -205,6 +205,11 @@ modelRoles:
   review: $model
   oracle: $model
   deep: $model
+# Oh My Pi opens its setup wizard ("Setup step 1 of 5") in a fresh profile, and a pane waiting on
+# the wizard never starts its session. startup.setupWizard: false turns the wizard off, whatever
+# setup version the build counts to.
+startup:
+  setupWizard: false
 EOF
 [ -L "$link" ] || ln -s -- "$operator_db" "$link"
 {

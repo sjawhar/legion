@@ -45,6 +45,22 @@ rather than beside the module's other Postgres-backed packages: together they sh
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
+`packages/daemon/internal/daemon` is the daemon's slow, Postgres-backed package. The test job now
+runs it only under the race detector, in its race step, once per job; the plain step ("Test the Go
+daemon") leaves it out, and `go vet -tags e2e ./...` in the `typecheck` job still compiles it
+without the detector. On CI's runners, while the plain step still ran it, it took at most 625 s
+there over the 49 green main `test` jobs of 2026-11-01 to 2026-11-03, and up to 733.581 s in the
+jobs whose race step timed out (job 125688799071). Under `-race` it took up to 570 s over the 51
+green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709 measured, on main and on
+pull requests, and ran go test's own ten minutes out on main at 2201840998; the race step gives it
+30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared devbox), so a
+command that runs the whole package, alone or in a pattern that includes it, passes `-timeout 30m`:
+
+```sh
+cd packages/daemon
+go test -race -timeout 30m ./internal/daemon/
+```
+
 ## A database a Go test creates
 
 A Go test that creates a Postgres database writes `create database … strategy file_copy`, as
@@ -60,6 +76,44 @@ database's creation in a string without `strategy file_copy` on the same line.
 A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): the server
 `DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
 `packages/envoy/scripts/dev-postgres.sh`'s container.
+
+## A test that reads `GET /api/v1/references?since=` reads again
+
+A since read answers only the edges at or below the event log's safe horizon (`getReferences` and
+`sinceHorizon` in `packages/envoy/internal/dispatch/api/references.go`), and waits at most
+`referencesSinceWait`, one second, for a horizon above the events committed before the read. Past
+that wait it answers at the horizon it has and leaves the rest to a later read: the route defers,
+it never loses an edge. The horizon is instance-wide,
+so any transaction holding a transaction id on the Postgres instance holds it back, and in
+`packages/envoy/internal/dispatch/api` the holder is the test process itself: `storetest.Open`'s
+`create database … template … strategy file_copy` and `storetest`'s
+`drop database … with (force)` (`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
+
+So a read that answered within `referencesSinceWait` was not held back: what it listed is what it
+owed, and a wrong answer fails the test at once. Only a read held past that wait is read again,
+bounded by `eventFeedWait`. The helper is `awaitSinceRead`
+(`packages/envoy/internal/dispatch/api/references_test.go`), which takes the read as a function, so
+each call site keeps its own reader.
+
+A test that takes one read as final fails under a transaction someone else holds:
+`TestAnAnsweredAsksPartEdgesAreListedSince` failed about one run in six on main, 7 of 40 measured
+for dispatch://INFRA-592, and in this repository's own pod on 2026-11-02 it failed 15 of 40 runs
+with a transaction held 2 s of every 2.5 s; under that same pulse, reading again, it passed 40 of
+40.
+
+Prove such a test under a loop that holds the state, as
+`docs/solutions/testing/code-that-waits-on-instance-wide-database-state-is-tested-under-a-loop-that-holds-that-state-pr2392.md`
+prescribes:
+
+```sh
+while true; do
+  psql "$LEGION_TEST_PG_DSN" -Atc 'select pg_current_xact_id(), pg_sleep(2)'
+  sleep 0.5
+done
+```
+
+The holder must release each transaction: one that never commits holds the horizon back for good,
+so no bounded re-read succeeds under it and the test fails after `eventFeedWait`, naming the hold.
 
 ## A writer a test holds
 
@@ -94,6 +148,18 @@ So a test whose jj child names no directory opens and writes that clone, and the
 
 - A test that builds a repository of its own puts it under `t.TempDir()`, and `TMPDIR` must sit inside no checkout.
   Nothing refuses the fixtures' own `jj git init --colocate` (`runSetup`, `enclosingRepository`): it runs outside the runner, where `refuseEnclosingWorkspace` never sees it, so under a `TMPDIR` inside a checkout it would read that checkout's repository's configuration first, and migrate it when that repository still holds a legacy `.jj/repo/config.toml`.
+
+## A test that starts jj or git inherits no pod's environment
+
+A Legion issue pod hands every process its live workspace (`LEGION_WORKSPACE`), its git configuration (`GIT_CONFIG_*`), its GitHub credential and more.
+A test that let git or jj inherit them read and pushed the pod's own work: the shim's rescue test, run with no `LEGION_WORKSPACE` of its own, pushed the pod's workspace to the real origin as `legion/WIDGETS-42-rescue-…` branches.
+
+- A `packages/daemon` package whose tests run git or jj, as children or in-process through the code under test, calls `fixtureenv.Guard` in its `TestMain`, after any branch where the test binary runs as a helper child, and holds `fixtureenv.RequireGuarded` in a test.
+  Guard unsets every `LEGION_*`, `GIT_*`, `JJ_*`, `GH_*` and `GITHUB_*` variable, `SSH_AUTH_SOCK` and `SSH_ASKPASS`, keeping the tests' own inputs (`LEGION_TEST_*`, `LEGION_E2E*`, `GITHUB_ACTIONS`, and the names the package passes), and sets `GIT_ALLOW_PROTOCOL=file`, which a repository's own `protocol.<name>.allow` cannot override.
+  Code under test that names its own transport, as provisioning's `GIT_ALLOW_PROTOCOL=https` does, still uses it.
+  Guard does the same under the `e2e` build tag, whose untagged tests are the same fixtures.
+  A live proof of that build, which reaches a real cluster and GitHub on purpose, calls `fixtureenv.Live(t)` first in its entry point: that gives the test the process's own values back of everything Guard took out or set, until the test ends.
+- A fixture command runs under `fixtureenv.Isolated(home)`: the same variables dropped, a home of the test's, and an identity. A package whose code under test reads the process's home sets `fixtureenv.Home` on the process and gives its fixtures that same home (`packages/daemon/internal/workspace`'s `setupEnvironment`).
 
 ## Containers a test starts
 

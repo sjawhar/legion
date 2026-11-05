@@ -721,19 +721,34 @@ func negativelyAcknowledge(msg *natsgo.Msg) {
 	}
 }
 
-// handlePullRequestEnvelope processes one `kind:"pr"` envelope. Only a merge (action "closed",
-// merged "true") does anything; author and excluded-repository checks run on the envelope's own
-// fields first, with no GitHub call, so a merge by anyone outside the population costs nothing.
-// It reports whether it stored the pull request's row: a row it deleted, a pull request outside
-// the population, ships with nothing.
+// handlePullRequestEnvelope processes one `kind:"pr"` envelope. Every action — opened,
+// synchronize, reopened, edited and closed — records the pull request's head first
+// (recordPullRequestHead, pull_request_heads.go), for any author and any repository, since a
+// check result is measured against that head. A head write that fails is logged and the merge
+// handling goes on: the two writes are independent, and the reconcile's own pass repairs the
+// head. Only a merge (action "closed", merged "true") does anything for the delivery timeline
+// after that; its author and excluded-repository checks run on the envelope's own fields, so a
+// merge by anyone outside the population costs no GitHub call of its own. It reports whether
+// it stored the pull request's delivery row: a head write is not one, and neither is a row it
+// deleted or a pull request outside the population, so neither ships with anything.
 func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) (wrote bool, err error) {
-	if payload["kind"] != "pr" || payload["action"] != "closed" || payload["merged"] != "true" {
+	if payload["kind"] != "pr" {
 		return false, nil
 	}
 	repoFull := payload["repo"]
 	number, err := strconv.Atoi(payload["number"])
 	if err != nil {
-		return false, fmt.Errorf("merged-PR envelope: malformed number %q: %w", payload["number"], err)
+		return false, fmt.Errorf("pull-request envelope: malformed number %q: %w", payload["number"], err)
+	}
+	// The commit messages the head write read, when it needed them, so the merge below pages
+	// the same commits once rather than twice.
+	messages, headErr := in.recordPullRequestHead(ctx, payload, number)
+	if headErr != nil {
+		slog.Warn("dispatch delivery: record a pull request's head",
+			"repo", repoFull, "number", number, "error", headErr)
+	}
+	if payload["action"] != "closed" || payload["merged"] != "true" {
+		return false, nil
 	}
 	author := payload["author"]
 
@@ -773,7 +788,7 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 		return false, DeletePullRequest(ctx, in.pool, repoFull, number)
 	}
 
-	if err := completePullRequest(ctx, in.pool, in.github, owner, repo, repoFull, number, fetched); err != nil {
+	if err := completePullRequest(ctx, in.pool, in.github, owner, repo, repoFull, number, fetched, messages); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -790,13 +805,22 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 // (still partial, for reconcile's own caller; unwritten, for intake's, whose merged-PR search then
 // finds it), so the next pass retries the whole completion. A rate limit comes back as the
 // *githubapp.RateLimitError, which stops reconcile's batch.
-func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest) error {
-	messages, err := fetchCommitMessages(ctx, github, owner, repo, number)
-	if err != nil {
-		if limited, ok := githubapp.AsRateLimit(err); ok {
-			return limited
+//
+// read is the pull request's commit messages when the caller has already paged them — intake's
+// head write does, for a pull request its title, body and branch left unattributed — and nil
+// when it has not, which is reconcile's case and intake's commoner one; a non-nil read spares
+// this the same paginated call a second time.
+func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest, read []string) error {
+	messages := read
+	if messages == nil {
+		paged, err := fetchCommitMessages(ctx, github, owner, repo, number)
+		if err != nil {
+			if limited, ok := githubapp.AsRateLimit(err); ok {
+				return limited
+			}
+			return fmt.Errorf("complete %s#%d: %w", repoFull, number, err)
 		}
-		return fmt.Errorf("complete %s#%d: %w", repoFull, number, err)
+		messages = paged
 	}
 	inputs := attributionInputsFrom(attributionFacts{
 		Repo: repoFull, URL: fetched.URL, Title: fetched.Title, Body: fetched.Body,

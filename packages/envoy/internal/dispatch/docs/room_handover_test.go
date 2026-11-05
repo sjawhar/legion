@@ -548,13 +548,16 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	service.addConnection(artifactID, 11, bob)
 	hold := &roomHold{}
+	// A browser's update names the peer ygo applied it for; a nil origin is ygo's own cleanup,
+	// which credits no one (creditContentChange).
+	browser := &struct{ name string }{"bob's browser"}
 	dropped := []byte("the update the failure dropped")
-	droppedCredit := service.creditContentChange(artifactID, nil, hold)
+	droppedCredit := service.creditContentChange(artifactID, browser, hold)
 	service.queueUpdateClass(artifactID, dropped,
 		documentUpdateClass{seq: 1, contentChanged: true, durable: true, credit: droppedCredit}, false)
 	_, stranded := peerEdit(t, service.srv.GetDoc(artifactID), appendBlocks(t, "typed while the room was failing.\n"))
 	service.queueUpdateClass(artifactID, stranded,
-		documentUpdateClass{seq: 2, contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, nil, hold)}, false)
+		documentUpdateClass{seq: 2, contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, browser, hold)}, false)
 	state.mu.Lock()
 	state.failed = errors.New("the room failed on an append")
 	state.mu.Unlock()

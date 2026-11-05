@@ -54,7 +54,7 @@ var revision string
 // release build's boot wakes — a check whose merge the build carries. A Go constant is never
 // empty, so a non-release build's empty revision is what makes its boot compare nothing, as does
 // a deployment whose configured repository is another (the smoke rig's).
-const builtFromRepository = "sjawhar/legion"
+const builtFromRepository = "cybermonklabs/legion"
 
 // release is the legion-v* version a release binary was built for, linked in by the release
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
@@ -265,8 +265,11 @@ func pluginsLine(cfg config.Config) string {
 // starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
-// the seed. After it, one line per deployment capability the file alone leaves open, in the words
-// boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
+// the seed. After it, one line per configured repository rename (`repository_renames`), so an
+// operator reads back what the daemon will treat as one repository before a transfer moves the
+// events onto the new name; a file that configures none prints no such line. Then one line per
+// deployment capability the file alone leaves open, in the words boot logs it with
+// (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 // Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
 // `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
@@ -300,6 +303,10 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
+	for _, rename := range cfg.RepositoryRenames.Pairs() {
+		fmt.Fprintf(stdout, "repository rename: %s and %s are one repository wherever the daemon compares a name; keep the pair configured for as long as any record names %s\n",
+			rename.From, rename.To, rename.From)
+	}
 	deployment := daemon.Deployment(cfg)
 	for _, gap := range deployment.OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
@@ -500,24 +507,22 @@ func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runState prints the daemon's state. It reaches the daemon as every operator command does
+// (operatorCall): one decision of which daemon the command reads, and the bearer, which this
+// command alone may leave out, read from the same --operator-token-file. With one it also names
+// who suspended each stranded claim, which the state body does not carry (strandedSuspenders).
 func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("state", "usage: legion state [flags]", stderr)
-	asJSON := flags.Bool("json", false, "print the state as the daemon serves it")
-	configPath := flags.String("config", "", "path to legion.yaml (default "+defaultConfigPath+")")
-	port := flags.Int("port", 0, "port to read, overriding the configured one")
-	if code, ok := parseFlags(flags, args); !ok {
+	c := newOperatorCall("state", "usage: legion state [flags]\nthe configuration is named with --config <file>, never as an argument",
+		"file holding the operator bearer the daemon's operator_token_file names; with it the claims nothing will wake name who suspended each", stdout, stderr)
+	asJSON := c.flags.Bool("json", false, "print the state as the daemon serves it")
+	if code, ok := c.parse(args); !ok {
 		return code
 	}
-	if flags.NArg() > 0 {
-		fmt.Fprintf(stderr, "legion state: unexpected argument %q; name the configuration with --config <file>\n", flags.Arg(0))
-		return 2
-	}
-
-	address, err := daemonAddress(*configPath, *port)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion state: %v\n", err)
+	op, ok := c.connect()
+	if !ok {
 		return 1
 	}
+	address := op.base
 	body, err := get(ctx, address+"/legion/v1/state")
 	if err != nil {
 		fmt.Fprintf(stderr, "legion state: %v\n", err)
@@ -548,7 +553,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, roundsSummary(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
-	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims, strandedSuspenders(ctx, op, state.StrandedClaims)))
 	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -767,6 +772,7 @@ func heldSummary(held []api.HeldOutboxRow) string {
 var strandedPhrases = map[api.StrandedMove]string{
 	api.StrandedResume:           "resume",
 	api.StrandedSuspendedWorkers: "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json)",
+	api.StrandedReleasedNoResume: "released, woken over ten minutes ago and the pod never came back",
 	api.StrandedRetry:            "failed, retry",
 	api.StrandedWorkflowStart:    "failed, needs a workflow start",
 }
@@ -774,12 +780,14 @@ var strandedPhrases = map[api.StrandedMove]string{
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
 // and each by issue and role under the move that brings it back (api.StrandedClaim.Move, which the
 // boot's log line groups by too). A suspended phase worker's move is the troubleshooting page's "A
-// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows.
-func strandedSummary(stranded []api.StrandedClaim) string {
+// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows;
+// a released one is a pod whose wake was taken and whose replacement never took a turn, which is
+// the daemon's own log of that wake to read, not a suspension to lift.
+func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"
 	}
-	grouped := api.StrandedByMove(stranded)
+	grouped := api.StrandedByMove(stranded, suspended)
 	var groups []string
 	for _, move := range api.StrandedMoves() {
 		if named := grouped[move]; len(named) > 0 {
@@ -787,6 +795,31 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// strandedSuspenders is who suspended each stranded claim, which the state body does not carry:
+// every plugin parses that body with the strict schema of its own contract, so a key added to it
+// refuses the whole state in a session the daemon has not relaunched (api.StrandedClaim). The
+// operator claim routes serve it, and this reads them with the bearer --operator-token-file
+// names, on the daemon op already names. Without that flag, and when the daemon refuses the
+// bearer or answers nothing, the lookup is empty and every stranded claim reads as the plain
+// suspension it is, which `legion claims list --json` tells apart. The state is the operator's
+// one unguarded read, so nothing here fails the command.
+func strandedSuspenders(ctx context.Context, op operator, stranded []api.StrandedClaim) api.Suspenders {
+	if len(stranded) == 0 || op.bearer == "" {
+		return nil
+	}
+	timed, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	status, answer, err := op.do(timed, http.MethodGet, claimsRoute, nil)
+	if err != nil || status/100 != 2 {
+		return nil
+	}
+	var list api.OperatorClaims
+	if json.Unmarshal(answer, &list) != nil {
+		return nil
+	}
+	return api.SuspendersOfOperatorClaims(list.Claims)
 }
 
 // webhookAppLines are the lines an operator reads for the served repositories Dispatch's GitHub App

@@ -35,7 +35,12 @@ type ConsumerSpec struct {
 	// Deploys are the project's deploy workflows (`projects.<KEY>.deploys`), fixed for the boot:
 	// only a completed run of one of them is decoded (decodeWorkflowRun), since only such a run can
 	// wake a production check; every other workflow run is acknowledged without a transaction.
-	Deploys  []config.Deploy
+	Deploys []config.Deploy
+	// Renames is the deployment's repository equivalence (`repository_renames`,
+	// config.Config.RepositoryRenames): a deploy entry naming the repository as it was matches a
+	// run on the one it moved to (DeployOf). The zero value, which answers as a comparison
+	// without case does, while the deployment configures none.
+	Renames  ghrepo.Renames
 	AckWait  time.Duration
 	NakDelay time.Duration
 	Logger   *slog.Logger
@@ -95,7 +100,7 @@ type RetryLater struct {
 func (r *RetryLater) Error() string { return r.Err.Error() }
 func (r *RetryLater) Unwrap() error { return r.Err }
 
-// Consumers are this project's three durable JetStream consumers, created before intake runs so a
+// Consumers are this project's four durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
 // set GitHub intake hears and decodes, which SetRepositories replaces under mu. pool is the
 // Postgres every fact is applied on and every consumer's position is kept in (consumer_positions).
@@ -114,8 +119,15 @@ type Consumers struct {
 	// message counted pending and never delivered.
 	server jetstream.Consumer
 	github jetstream.Consumer
+	// wake is the durable on the Envoy listener's wake reports (legionWakeSubject): a message
+	// published to a role topic of a released pod, a message sent to the agent subject of a
+	// released session, and the listener's own `listener_ready`. It is a durable of its own for
+	// the same reason server is, and because every daemon consumes the subject: the listener does
+	// not know which daemon owns a session, so each reads every report and acts only on a
+	// released claim of its own.
+	wake jetstream.Consumer
 
-	progress struct{ dispatch, server, github *consumerProgress }
+	progress struct{ dispatch, server, github, wake *consumerProgress }
 
 	mu    sync.Mutex
 	repos []ghrepo.Repository
@@ -168,11 +180,22 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}
+	wake, err := openConsumer(ctx, stream, pool, spec.Logger, jetstream.ConsumerConfig{
+		Durable:       wakeConsumerName(spec.Project),
+		FilterSubject: legionWakeSubject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       spec.AckWait,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open the listener wake durable consumer: %w", err)
+	}
+	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, wake: wake,
+		repos: slices.Clone(spec.Repositories)}
 	opened := spec.Now()
 	consumers.progress.dispatch = &consumerProgress{name: dispatchConsumerName(spec.Project), opened: opened}
 	consumers.progress.server = &consumerProgress{name: dispatchServerConsumerName(spec.Project), opened: opened}
 	consumers.progress.github = &consumerProgress{name: githubConsumerName(spec.Project), opened: opened}
+	consumers.progress.wake = &consumerProgress{name: wakeConsumerName(spec.Project), opened: opened}
 	return consumers, nil
 }
 
@@ -372,11 +395,11 @@ func (p *consumerProgress) lastHandled() time.Time {
 	return p.handled
 }
 
-// Lag is the lag of the Dispatch, Dispatch-server and GitHub durable consumers, in that order
-// (ConsumerLag), read fresh from JetStream: per consumer one CONSUMER.INFO and, while messages
-// wait, one STREAM.MSG.GET per filter subject for the first message at or after the sequence above
-// its ack floor on that subject, the smallest sequence's time being the oldest; a message at that
-// sequence ends the reads, since no filter can give an older one. The three consumers are read at
+// Lag is the lag of the Dispatch, Dispatch-server, GitHub and listener-wake durable consumers, in
+// that order (ConsumerLag), read fresh from JetStream: per consumer one CONSUMER.INFO and, while
+// messages wait, one STREAM.MSG.GET per filter subject for the first message at or after the
+// sequence above its ack floor on that subject, the smallest sequence's time being the oldest; a
+// message at that sequence ends the reads, since no filter can give an older one. The consumers
 // the same time, each within consumerLagBound of its own, and each consumer's gets within
 // consumerOldestBound of their own, so a read that does not answer costs only its own consumer
 // its answer: never another consumer's info, nor its own consumer's waiting count.
@@ -384,7 +407,7 @@ func (p *consumerProgress) lastHandled() time.Time {
 // races Run's. A read that fails or runs out of its bound is that consumer's Unavailable; Lag
 // itself never fails, so the state that shows it is still served.
 func (c *Consumers) Lag(ctx context.Context) []ConsumerLag {
-	progress := []*consumerProgress{c.progress.dispatch, c.progress.server, c.progress.github}
+	progress := []*consumerProgress{c.progress.dispatch, c.progress.server, c.progress.github, c.progress.wake}
 	lags := make([]ConsumerLag, len(progress))
 	var reads sync.WaitGroup
 	for i, consumer := range progress {
@@ -461,7 +484,7 @@ func (c *Consumers) oldestWaiting(ctx context.Context, info *jetstream.ConsumerI
 	return oldest.Time, nil
 }
 
-// Run consumes the three durable consumers until ctx ends, and returns the error of the one that
+// Run consumes the four durable consumers until ctx ends, and returns the error of the one that
 // stops first. Every decoded fact enters ApplyFact on the consumers' pool; a committed transaction
 // is acknowledged, a rolled-back transaction is nacked with a delay, poison is terminated, and a
 // committed refusal is logged then acknowledged. Each message acknowledged or terminated is
@@ -481,6 +504,9 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 	})
 	group.Go(func() error {
 		return c.consumeConsumer(consumeContext, github, c.progress.github, handlers)
+	})
+	group.Go(func() error {
+		return c.consumeConsumer(consumeContext, c.wake, c.progress.wake, handlers)
 	})
 	return group.Wait()
 }
@@ -564,7 +590,7 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 // terminated as poison, with JetStream taking the acknowledgement or the termination, the two ways
 // a message leaves its consumer's waiting count. A nak is not handled: the message waits again.
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) bool {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, spec.Renames, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -641,13 +667,18 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 
 // recordedPullRequest says whether the daemon records the pull request a review or a checks
 // settlement names (PullRequestReview, PullRequestChecks), by repository and number as the workflow
-// looks it up (record.PullRequestRecorded), and is true for every other fact. It is one read of the
-// pool within AckWait, in no transaction and under no lock, made before the review's GitHub reads
-// (resolveReviewBody, resolveReviewPermission): the workflow applies either fact only to a recorded
-// pull request, so one of any other pull request is acknowledged with no transaction under the fact
-// lock (ApplyFact) and no GitHub read, whatever the number of other pull requests a mapped
-// repository reviews and checks. A pull request recorded after this read, by a later opened, gets
-// its checks and reviews from their next event or from the pass's read.
+// looks it up (record.PullRequestRecorded), and is true for every other fact. It asks under the
+// name the fact carries and then, when that finds nothing, under the other name of the pair that
+// names it (ghrepo.Under, ConsumerSpec.Renames), as the workflow reads the row: a pull request
+// already open when its repository was transferred is recorded under the name it moved from,
+// while the fact names the one it moved to. It is one read of the pool per name within the one
+// AckWait, in no transaction and under no lock, made before
+// the review's GitHub reads (resolveReviewBody, resolveReviewPermission): the workflow applies
+// either fact only to a recorded pull request, so one of any other pull request is acknowledged
+// with no transaction under the fact lock (ApplyFact) and no GitHub read, whatever the number of
+// other pull requests a mapped repository reviews and checks. A pull request recorded after this
+// read, by a later opened, gets its checks and reviews from their next event or from the pass's
+// read.
 func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.Pool, fact Fact) (bool, error) {
 	var repo string
 	var number int
@@ -661,7 +692,9 @@ func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.P
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	return record.PullRequestRecorded(read, pool, repo, number)
+	return ghrepo.Under(spec.Renames, repo, func(name string) (bool, error) {
+		return record.PullRequestRecorded(read, pool, name, number)
+	})
 }
 
 // readMapping runs ConsumerSpec.RepositoryMapping within AckWait; no reader reads nothing.
@@ -854,4 +887,8 @@ func dispatchServerConsumerName(project string) string {
 
 func githubConsumerName(project string) string {
 	return "legion-go-" + project + "-github"
+}
+
+func wakeConsumerName(project string) string {
+	return "legion-go-" + project + "-wake"
 }

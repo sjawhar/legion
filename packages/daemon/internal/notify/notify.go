@@ -109,13 +109,15 @@ const RoleTopicPrefix = "notifications.role."
 // every hold and a tree architect's own failed claim (workflow's noticeWithController), a root in
 // triage handed to Legion (admission), a root that gave its admission slot up while its architect
 // waits on a person (`awaiting-person`, workflow's enterAwaiting), a root admission took out of the
-// workflow because it held no slot and waited for none (`unslotted`, admit's releaseUnslotted), and
-// the slot wakes admission sends through wakeController, `slot-free`, `todo` and `tick`
-// (admit.Admission.wakeController and its callers say when; the tick alone carries
-// `openCapabilities`, the deployment capabilities with no decision,
-// admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`, `todo` or
-// `awaiting-person`: it names the free slots in its summary and report, and work reaches Legion
-// only when a person hands it over or a role reports a clear defect the controller files
+// workflow because it held no slot and waited for none (`unslotted`, admit's releaseUnslotted), a
+// person's decision on a tree Legion is not running (`parked-decision`, the outbox's parkDecision
+// and workflow's relayParkedDecision), an issue whose pod an update round cannot replace
+// (`update-stalled`, the daemon's reconcilePodUpdates), and the slot wakes admission sends through
+// wakeController, `slot-free`, `todo` and `tick` (admit.Admission.wakeController and its callers
+// say when; the tick alone carries `openCapabilities`, the deployment capabilities with no
+// decision, admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`,
+// `todo` or `awaiting-person`: it names the free slots in its summary and report, and work reaches
+// Legion only when a person hands it over or a role reports a clear defect the controller files
 // (skill://legion-controller, "Free slots"). It sits among the issue topics, where no
 // issue key (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it
 // while it holds the controller role (legionControllerNoticeSubject,
@@ -147,6 +149,24 @@ func New(baseURL, token string) *HTTPPublisher {
 }
 
 // Publish posts the listener envelope that preserves the outbox row's idempotent delivery key.
+//
+// It sends keep: false, so the listener refuses a role nobody holds with its 404 (ErrNoHolder
+// below) instead of keeping the message for the role's next holder. The daemon keeps its own
+// queue of notices, which does more than a kept copy can: the outbox row is held and each
+// architect's notices keep their order behind it, architectEnded finishes a row whose architect
+// is gone, a receipt timeout reholds the notice, and a merge-queue row posts a Dispatch message
+// when the role is unheld. One message has one keeper, so this sender keeps its own
+// (packages/daemon/internal/daemon/outbox.go).
+//
+// THIS BINARY SHIPS BEFORE THE ENVOY LISTENER THAT CARRIES THE KEPT LANE. The Envoy listener and
+// this binary are separate releases (.github/workflows/release-envoy-listener.yaml and
+// release.yaml), and a binary of the release before this one sends no keep field at all. Against
+// the new listener that publish is answered 202 with the message kept, which the older code reads
+// as neither success nor ErrNoHolder: its outbox row is held and keeps retrying while Envoy also
+// hands the message to the role's next holder, so the role gets it twice. Deploying this binary
+// first leaves no window in which two keepers hold one message. Measured on a live listener by
+// INFRA-839's tester on 2026-10-31: the old publisher got `listener returned 202 Accepted` with
+// errors.Is(err, ErrNoHolder) false, and the kept lane then held that message.
 func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payload any, dedupeKey string) error {
 	// The listener carries a payload as a JSON document in a string (its messageBody,
 	// packages/envoy/cmd/listener/api.go:68-80); an object there is refused as invalid JSON.
@@ -159,7 +179,8 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		Message   string `json:"message"`
 		Payload   string `json:"payload"`
 		DedupeKey string `json:"dedupe_key"`
-	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey})
+		Keep      bool   `json:"keep"`
+	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey, Keep: false})
 	if err != nil {
 		return fmt.Errorf("encode notice for %s: %w", topic, err)
 	}

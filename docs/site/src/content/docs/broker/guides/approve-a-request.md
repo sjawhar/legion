@@ -43,7 +43,8 @@ along:
   names a session other than its enrollment's. The enrollment above is the one the broker checked.
 - **Reason**: the `--reason` the agent gave, shown as plain text.
 - **Lasts once approved**: how long the grant would last from the moment you approve: the `--ttl`
-  the agent asked for, or **until the session ends**.
+  the agent asked for, **12 hours** when it named none, or **until the session ends** for a
+  secret tagged `default-grant=session`.
 - **Requested** and **Expires**: when it was made, and when it
   [expires](/legion/broker/concepts/#approvals) if nobody decides it.
 - **Approver**: who may decide it: an email, or anyone signed in for a shared secret.

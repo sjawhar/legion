@@ -17,40 +17,35 @@ import (
 )
 
 type SessionEntry struct {
-	Port         int      `json:"port"`
-	MachineID    string   `json:"machine_id"`
-	Dir          string   `json:"dir"`
-	Title        string   `json:"title"`
-	Capabilities []string `json:"capabilities"`
-	UpdatedAt    int64    `json:"updated_at"`
-	// Driving reports whether the claiming process is the one actually driving
-	// this session (its explicit -s target or a session it owns), as opposed to a
-	// process that merely has the session loaded from shared on-disk state.
-	Driving        bool `json:"driving,omitempty"`
-	SelfSubscribed bool `json:"self_subscribed,omitempty"`
+	// Port is always 0 for an entry this build writes: a registration naming a serving port is
+	// refused (cmd/listener's subscribeHandler), and no delivery opens a connection to a
+	// session. The field is kept because every released client parses it in the listener's
+	// answers, and because an entry an older listener stored can still carry a port until it
+	// lapses (the session bucket's TTL, 5 minutes by default).
+	Port           int      `json:"port"`
+	MachineID      string   `json:"machine_id"`
+	Dir            string   `json:"dir"`
+	Title          string   `json:"title"`
+	Capabilities   []string `json:"capabilities"`
+	UpdatedAt      int64    `json:"updated_at"`
+	SelfSubscribed bool     `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
-	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, and the
-	// address its owning listener reaches it at (Deliverer.hostFor), unless the session runs on
-	// that listener's machine (it registered through it, or Host is that listener's machine id)
-	// and its configured HostBridge wins. Only the owning listener delivers
-	// to the session; another leaves it to the owner (ErrWrongMachine), whatever Host says. The
-	// owner is the listener the session's stored subscription names, the one store.Registry.Match
-	// fans its topics out on, else, with no subscription stored, the one MachineID names (any
-	// listener when that is empty
-	// too). MachineID is the registering listener's own ENVOY_MACHINE_ID, whether every session
-	// registers through one shared listener or each machine runs its own; a re-registration
-	// through another listener moves it, while the stored subscription keeps its first listener's.
-	// Host is empty for a session whose plugin predates this field (subscribeBody had no "host");
-	// its owning listener then falls back to host.docker.internal when the session registered
-	// through it, else to MachineID, and HostOrMachine falls back to MachineID so every display
-	// caller sees a populated value.
+	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, as
+	// opposed to MachineID, which is the registering listener's own ENVOY_MACHINE_ID, whether
+	// every session registers through one shared listener or each machine runs its own; a
+	// re-registration through another listener moves both, this entry's and the machine the
+	// stored subscription names (store's mergeForUpsert). No delivery reads Host: a message
+	// reaches the session from its own consumer, relayed by the listener the entry names, or on
+	// the session's own subscription, wherever its process runs. Host is empty for a session
+	// whose plugin predates this field (subscribeBody had no "host"), and HostOrMachine falls
+	// back to MachineID so every display caller sees a populated value.
 	Host string `json:"host,omitempty"`
 	// Delivery is DeliveryConsumer when the session registered for consumer delivery and the
 	// listener it registered through holds its session consumer (bus.SessionConsumers): the
 	// session's stored messages reach it from that consumer, relayed by the listener that owns it,
-	// so the durable path acknowledges them with no push and no exception
-	// (Deliverer.DeliverWithResultForEntry). Empty for a session on the core path: a plugin that did
-	// not ask, an older listener, or a hub that refused the consumer.
+	// so the durable path acknowledges them with nothing to deliver and no exception
+	// (Resolve). Empty for a session on the core path: a plugin that did not ask, an older
+	// listener, or a hub that refused the consumer.
 	Delivery string `json:"delivery,omitempty"`
 	// Epoch is the session's delivery epoch while Delivery is DeliveryConsumer: a random string per
 	// plugin NATS connection, so a new one tells the relay the session reconnected and its consumer
@@ -84,12 +79,12 @@ type SessionEntry struct {
 const DeliveryConsumer = "consumer"
 
 // ConsumerHoldsStored reports whether the session's own consumer holds the stored message of
-// stream sequence storedSeq, so no delivery path owes it a push: a session on consumer delivery is
-// held every message at or after the sequence its consumer starts at (ConsumerStart). A durable
-// message below that start is in no consumer — a push NAKed, or a message deferred, before the
+// stream sequence storedSeq, so no delivery path owes it anything: a session on consumer delivery
+// is held every message at or after the sequence its consumer starts at (ConsumerStart). A
+// durable message below that start is in no consumer — one NAKed, or deferred, before the
 // consumer was created, and redelivered after it — and the durable path delivers it as it would
 // for a session with no consumer at all. storedSeq 0 names a message that is not the durable's
-// copy of a stored one (a core or live frame), whose stored copy the consumer holds whatever its
+// copy of a stored one (a core frame), whose stored copy the consumer holds whatever its
 // sequence.
 func (e SessionEntry) ConsumerHoldsStored(storedSeq uint64) bool {
 	return e.Delivery == DeliveryConsumer && (storedSeq == 0 || storedSeq >= e.ConsumerStart)
@@ -476,14 +471,11 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 // connection ahead of any write this listener sends on it later, so it cannot undo one, and
 // against another listener's write it is last-writer-wins, as every Put already is.
 func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry SessionEntry) error {
-	// Several live processes can hold the same session (shared on-disk state), and
-	// blind last-writer-wins routed deliveries to whichever heartbeated last —
-	// including processes not driving the session. mergeForClaim arbitrates.
-	cur, curErr := r.Get(sessionID)
-	entry, err := mergeForClaim(cur, curErr, entry, time.Now().UnixMilli())
-	if err != nil {
-		return err
-	}
+	// Several live processes can hold the same session (shared on-disk state) - a harness can
+	// keep a session's state on shared disk - and each heartbeats a claim of its own. The route
+	// follows whichever wrote last, and this write stamps the entry with the moment it was made,
+	// so a reader weighing the route's freshness (ClaimStaleAfter) reads the latest heartbeat.
+	entry.UpdatedAt = time.Now().UnixMilli()
 	buf, err := json.Marshal(entry)
 	if err != nil {
 		return err

@@ -10,7 +10,16 @@ interface FakeGithubRepo {
   readonly files?: Record<string, string>;
   readonly pulls?: Record<
     string,
-    { head_sha: string; merged?: boolean; state: string; title: string }
+    {
+      head_sha: string;
+      merged?: boolean;
+      state: string;
+      title: string;
+      body?: string;
+      head_ref?: string;
+      base_ref?: string;
+      updated_at?: string;
+    }
   >;
   readonly check_runs?: Record<
     string,
@@ -27,6 +36,10 @@ interface FakeGithubRepo {
     string,
     readonly { check_suite_id: number; event: string; id: number; name: string }[]
   >;
+  readonly default_branch?: string;
+  readonly commit_pulls?: Record<string, readonly number[]>;
+  readonly branch_commits?: Record<string, readonly string[]>;
+  readonly installation_missing?: boolean;
 }
 
 /** Replaces the fake GitHub's installations wholesale: repositories present are

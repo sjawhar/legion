@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -73,7 +74,7 @@ func readChecks(t *testing.T, database *store.Store, issueKey string) checksStat
 // An agent's or API write introducing a pointer to a block of a type the attribute does not allow
 // is refused, naming the attribute, the target's type and the allowed type, and writes nothing,
 // whether it creates the document, replaces it or edits it. A target the same write adds is read
-// as the write leaves it, and a target no document holds is accepted.
+// as the write leaves it, and a target no document holds is refused too.
 func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
@@ -89,8 +90,14 @@ func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
 		t.Fatalf("refused uploads left checks.md %+v, want no document", state)
 	}
 
-	if response := uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-nowhere")); response.Code != http.StatusCreated {
-		t.Fatalf("a pointer to a block no document holds: status=%d body=%s, want 201", response.Code, response.Body.String())
+	expectRefusal(t, "a new document pointing at a block no document holds", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-nowhere")), http.StatusBadRequest,
+		"INVALID_MARKDOWN", `"serves"`, spec+"#b-nowhere", "no document holds")
+	if state := readChecks(t, database, issue.Key); state.ID != "" {
+		t.Fatalf("the refused upload left checks.md %+v, want no document", state)
+	}
+
+	if response := uploadChecks(t, handler, issue.Key, claimMarkdown("c1", spec+"#b-r1")); response.Code != http.StatusCreated {
+		t.Fatalf("a pointer to the spec's requirement: status=%d body=%s, want 201", response.Code, response.Body.String())
 	}
 	saved := readChecks(t, database, issue.Key)
 	if saved.ID == "" || saved.Versions == 0 {
@@ -174,6 +181,103 @@ func TestARebuildFromMarkdownRefusesABlockPointerToADisallowedType(t *testing.T)
 	if rebuilt := rebuild(claimMarkdown("c1", "dispatch://"+issue.Key+"/spec#b-r1")); rebuilt.Code != http.StatusOK {
 		t.Fatalf("a rebuild pointing at a requirement: status=%d body=%s, want 200", rebuilt.Code, rebuilt.Body.String())
 	}
+}
+
+// A pointer names a block of the writing document's own issue or of an issue above it; one in a
+// sibling tree is refused, as is a needs naming a plan task of another document, and a document
+// its project holds points only inside itself. Every refusal names the reference and writes
+// nothing.
+func TestAWriteRefusesABlockPointerOutsideItsIssueOrDocument(t *testing.T) {
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	requirement := ":::requirement{#r1}\nA requirement.\n:::\n"
+	root := createSpecIssue(t, handler, "CORE", requirement)
+	middle := createChildIssue(t, handler, "CORE", root.Key, requirement)
+	issue := createChildIssue(t, handler, "CORE", middle.Key, requirement+"\n:::plan_task{#t9}\nTheirs.\n:::\n")
+	sibling := createChildIssue(t, handler, "CORE", middle.Key, requirement)
+	checks := "dispatch://" + issue.Key + "/artifact/checks-md"
+
+	// A requirement of the issue's own spec, of its parent's and of its root's is named.
+	for _, key := range []string{issue.Key, middle.Key, root.Key} {
+		if response := uploadChecks(t, handler, issue.Key, claimMarkdown("c1", "dispatch://"+key+"/spec#b-r1")); response.Code != http.StatusCreated {
+			t.Fatalf("a pointer at the requirement of %s: status=%d body=%s, want 201", key, response.Code, response.Body.String())
+		}
+	}
+	saved := readChecks(t, database, issue.Key)
+
+	siblingR1 := "dispatch://" + sibling.Key + "/spec#b-r1"
+	expectRefusal(t, "a pointer into a sibling tree", uploadChecks(t, handler, issue.Key, claimMarkdown("c1", siblingR1)), http.StatusBadRequest,
+		"INVALID_MARKDOWN", `"serves"`, siblingR1, sibling.Key, issue.Key)
+	theirTask := "dispatch://" + issue.Key + "/spec#b-t9"
+	ourTask := ":::plan_task{#t1}\nOurs.\n:::\n"
+	expectRefusal(t, "a needs naming a plan task of another document",
+		uploadChecks(t, handler, issue.Key, ourTask+"\n:::plan_task{#t2 needs=\""+theirTask+"\"}\nAfter theirs.\n:::\n"),
+		http.StatusBadRequest, "INVALID_MARKDOWN", `"needs"`, theirTask, "its own document")
+	if after := readChecks(t, database, issue.Key); !reflect.DeepEqual(after, saved) {
+		t.Fatalf("checks.md after refused writes = %+v, want %+v unchanged", after, saved)
+	}
+
+	// The control: a needs naming a plan task of the same document is written.
+	if response := uploadChecks(t, handler, issue.Key, ourTask+"\n:::plan_task{#t2 needs=\""+checks+"#b-t1\"}\nAfter ours.\n:::\n"); response.Code != http.StatusCreated {
+		t.Fatalf("a needs naming a plan task of the same document: status=%d body=%s, want 201", response.Code, response.Body.String())
+	}
+
+	// A document its project holds, and no issue does, points only at a block of itself.
+	handbook := createProjectDocument(t, handler, "CORE", "handbook.md", requirement)
+	notes := createProjectDocument(t, handler, "CORE", "notes.md", "Before.\n")
+	handbookR1 := "dispatch://CORE/artifact/" + handbook.Slug + "#b-r1"
+	outside := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": claimMarkdown("c1", handbookR1)}},
+	}, "alice")
+	expectRefusal(t, "a project document pointing at another document", outside, http.StatusBadRequest,
+		"INVALID_OP", `field "attributes"`, `"serves"`, handbookR1, "a block of itself")
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+handbook.ID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": claimMarkdown("c1", handbookR1)}},
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("a project document pointing at a requirement of its own: status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+}
+
+// A browser's write is never refused: a settled browser tree whose pointer names a block no
+// document holds writes its version and stores the pointer, which stays an unresolved reference,
+// as any citation of an absent block is.
+func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) {
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
+	documents, handler, database := browserDocumentService(t)
+	issue, _ := pointerSpec(t, handler)
+	if response := uploadChecks(t, handler, issue.Key, "Before.\n"); response.Code != http.StatusCreated {
+		t.Fatalf("upload checks.md: status=%d body=%s, want 201", response.Code, response.Body.String())
+	}
+	checks := readChecks(t, database, issue.Key)
+	missing := "dispatch://" + issue.Key + "/spec#b-nowhere"
+
+	writeBrowserDocument(t, documents, checks.ID, claimMarkdown("c1", missing))
+	// Settled on this goroutine, not through SettleNow's timer, which the browser's update can
+	// outrun: the room arms the settlement that update owes, at the hour-long settle window, as it
+	// drains the update, which can come after the text is live. That arming replaces SettleNow's
+	// timer before it fires or moves the generation under its settlement, which then writes
+	// nothing. SettleIssueDocuments runs the owed settlement itself, and again when a write
+	// supersedes it. The upload's live write already owes it, so the call cannot find none owed.
+	var owed bool
+	if err := database.Pool.QueryRow(context.Background(), `select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, checks.ID).Scan(&owed); err != nil {
+		t.Fatalf("read checks.md's pending settlement: %v", err)
+	}
+	if !owed {
+		t.Fatal("checks.md owes no settlement, want the upload's still owed")
+	}
+	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+		t.Fatalf("settle the issue's documents: %v", err)
+	}
+	if version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+checks.ID+"/versions/2", nil, "alice"); version.Code != http.StatusOK {
+		t.Fatalf("checks.md version 2 once settled: status=%d body=%s, want 200", version.Code, version.Body.String())
+	}
+
+	stored := readBlockRefs(t, database, checks.ID)
+	if len(stored) != 1 || stored[0].BlockID != "c1" || stored[0].Kind != "serves" || stored[0].ToID != issue.Key+"/spec#nowhere" {
+		t.Fatalf("block_refs of checks.md = %#v, want c1's serves row at the missing block", stored)
+	}
+	requireReferenceNotFound(t, handler, url.Values{"to": {missing}}, `no block "nowhere" in dispatch://`+issue.Key+"/spec")
 }
 
 // setBlockAttributes writes typed-block state through the live room's own service call, as the

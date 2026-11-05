@@ -235,9 +235,10 @@ func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
 // A spec's decisions are ask blocks, and the write that adds one already carries its words into
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
-// which stales the approval pinned to the version the agent wrote - and Legion's design gate,
-// open exactly while the approved version is the latest, closes with nothing in the event log
-// to explain it (LEGION-273).
+// which staled the approval pinned to the version the agent wrote and closed Legion's design gate
+// with nothing in the event log to explain it (LEGION-273). The approval carry now carries that
+// approval to such a version instead, which is a version and an artifact.approved event nothing in
+// the log explains, so settlement still writes none.
 func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -462,10 +463,8 @@ func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	`, askID, answerJSON); err != nil {
 		t.Fatalf("answer indexed ask: %v", err)
 	}
-	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-		tree.Children[0].Attrs["state"] = "open"
-		return tree
-	})
+	// The block still reads state="open" while its row is answered: a browser's edit setting it to
+	// open again would change nothing, and a transaction that changes nothing commits nothing.
 	settleCurrentGeneration(t, service, artifactID)
 	waitForDocumentText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\""+answer.At.Format(time.RFC3339Nano)+"\" selected=\"[]\"}\nShip it?\n:::\n")
 	var repaired int
@@ -3789,7 +3788,7 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 // (syncListOrderPlugin). The server parses headings with an empty id and every list item as a
 // bullet. A version records the rendered markdown alone, so such an update changes nothing a
 // version records: it credits no connected reader and settles without a version, which would
-// otherwise stale an approval.
+// otherwise be a version and, over an approved document, a carried approval no change explains.
 func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
 	for _, test := range []struct {
 		name     string

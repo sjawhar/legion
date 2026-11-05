@@ -1,10 +1,12 @@
 /** Head length, in UTF-16 units, for one-line summaries of event text. */
 const HEAD_LENGTH = 120;
 
-/** The first HEAD_LENGTH units of `text` on one line (whitespace collapsed), with an ellipsis when cut. */
-export function textHead(text: string): string {
+/** The first `length` units of `text` on one line (whitespace collapsed), with an ellipsis when
+ *  cut. `length` defaults to the event summaries' `HEAD_LENGTH`; a surface whose line is shorter,
+ *  such as `dispatch inbox`'s rows, names its own. */
+export function textHead(text: string, length: number = HEAD_LENGTH): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > HEAD_LENGTH ? `${flat.slice(0, HEAD_LENGTH)}…` : flat;
+  return flat.length > length ? `${flat.slice(0, length)}…` : flat;
 }
 
 /**

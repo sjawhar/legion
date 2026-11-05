@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 // What a reader opening a document waits for is the entry chunk: the browser downloads it,
 // compiles it and evaluates every static import of it in one main-thread task before anything
-// of the page's own runs (dispatch://INFRA-341, R11). The five parts below are not on the screen
+// of the page's own runs (dispatch://INFRA-341, R11). The parts below are not on the screen
 // when a document's first block is, and the issue page's own first render is the largest commit
 // the app makes, so neither belongs in that task. Both rules are shapes of `app.tsx`, which is
 // what this reads - as `e2e/__tests__/two-builds-routes.test.ts` reads its router.
@@ -26,7 +26,6 @@ const deferredParts = new Map(
 const parts: readonly { readonly name: string; readonly module: string }[] = [
   { module: "../inbox/InboxDrawer", name: "InboxDrawer" },
   { module: "../issue/CreateIssueDialog", name: "CreateIssueDialog" },
-  { module: "../margin/Margin", name: "Margin" },
   { module: "../refs/RefPreview", name: "RefPreviewHost" },
   { module: "../refs/agent-registry", name: "AgentRegistryPoller" },
 ];
@@ -60,6 +59,14 @@ describe("the shell's deferred parts", () => {
   test("the margin's default width is its own module, so the shell reads it without the margin", () => {
     expect(staticImports).toContain("./features/margin/margin-width");
     expect(staticImports).not.toContain("./features/margin/Margin");
+  });
+
+  test("the margin is loaded beside its own component, so the shell never pulls it in", () => {
+    // The fifth part the entry chunk does without. It is not in `deferred-shell.ts` because the
+    // rule for what the margin draws is the margin's own (`features/margin/MarginColumn.tsx`).
+    expect(staticImports).toContain("./features/margin/MarginColumn");
+    const column = source("../features/margin/MarginColumn.tsx");
+    expect(column).toContain('lazy(() => import("./Margin")');
   });
 
   test("the reference trigger every page renders is apart from the card's host", () => {

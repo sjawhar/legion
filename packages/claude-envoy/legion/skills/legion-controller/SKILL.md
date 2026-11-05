@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, held, worker-died, update-stalled), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
+description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, parked-decision, held, worker-died, update-stalled), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
 ---
 
 # Legion Controller
@@ -21,7 +21,8 @@ except a clear defect a role reports ([Issues handed to Legion](#issues-handed-t
 - Reach the daemon only through the `legion` tool: `read_state`, and `set_status` to `todo`, `backlog` or `icebox`. Run no `legion` from bash, because the tool holds the controller grant.
 - Never edit a repository, push a commit or call `handoff_complete`, and never forward a raw event to an architect, because the daemon runs the phases and raw events only fill the architect's context.
 - Never open a design gate, because only a person's approval of the root's spec in Dispatch opens it.
-- When a `dispatch` command fails, or a `curl` read fails or prints no JSON array, act on nothing it would decide and name its first line in your summary (the turn's last message), because an empty read is no evidence.
+- When a `dispatch` command fails, or a `curl` read of Dispatch fails or prints no JSON array, act on nothing it would decide and name its first line in your summary (the turn's last message), because an empty read is no evidence. A Slack read answers a JSON object, and `skill://legion-controller/references/slack-mentions.md` holds its own success test.
+- Before you say that a service or an API is out of reach, run the call through the secrets broker's client with the secret your instructions name (`skill://agent-secrets`), and report it unreachable only with the command you ran and its output.
 - Write every Dispatch comment, message and ask as `skill://dispatch-writing-specs`'s "Rules for the text" say.
 
 Launch, `gh`, pull requests, takeover: `skill://legion-controller/references/session.md`.
@@ -50,6 +51,8 @@ because Envoy keeps no copy of a wake sent while no controller ran.
    `skill://legion-controller/references/triage.md` "At every start" says.
 3. Catch up on the report issue
    (`skill://legion-controller/references/finding-asks.md#catch-up-at-every-start`).
+4. Run the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`),
+   because a decision a person made on a parked tree while no controller ran reaches you only there.
 
 ## Wakes
 
@@ -59,9 +62,10 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 |---|---|
 | `triage on <KEY>` | `skill://legion-controller/references/triage.md` |
 | `slot-free on <KEY>`, `todo on <KEY>` | Name the free slots; take nothing |
-| `tick on <PROJECT>` | The every-turn steps |
+| `tick on <PROJECT>` | The every-turn steps, then the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`) |
 | `unslotted on <KEY>` | Re-admit nothing; name it in your summary |
 | `awaiting-person on <KEY>` | Nothing: do not park or re-admit it, and take nothing for the slot it returned |
+| `parked-decision on <KEY>` | `skill://legion-controller/references/parked-decisions.md#deciding` |
 | `held on <KEY>` | Nothing, unless `reason: "escalated"`: then an escalation |
 | `worker-died on <KEY>` (`role: "architect"`) | Re-admit once its cause is gone, else park it |
 | `update-stalled on <KEY>` | `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled` |
@@ -117,6 +121,8 @@ these:
 - an issue a person asks you to start;
 - a tree you re-admit after its architect failed or after a hold, once you checked its cause is
   gone, or because a person asks;
+- a tree you parked for a hold (`Parked by Legion while it waits on:`), once a person's decision
+  gives it a next step (`skill://legion-controller/references/parked-decisions.md`);
 - stopped-session work that a person's ruling in the weekly plan moves to Legion.
 
 ## Findings, and the issues you file

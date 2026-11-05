@@ -11,7 +11,7 @@ tags:
   - audit-method
   - env-parsing
 date: 2026-09-13
-status: superseded — worker_idle_retire_seconds is rejected; a worker of an open issue stays live and is never retired or suspended for idleness
+status: superseded — worker_idle_retire_seconds is rejected; no worker is retired for idleness, and an idle window now releases the worker's issue pod instead (runtime.kubernetes.idle_release)
 module: packages/daemon/src/daemon/config.ts
 related_issues:
   - "LEGION-46"

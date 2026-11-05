@@ -181,7 +181,7 @@ func resolving(cause string) string {
 }
 
 // testManifest is testImage's manifest URL, as containerd quotes it.
-const testManifest = "https://ghcr.io/v2/sjawhar/legion-worker/manifests/sha256:" + testDigestHex
+const testManifest = "https://ghcr.io/v2/cybermonklabs/legion-worker/manifests/sha256:" + testDigestHex
 
 func (g *probeRig) containerAndCollector() {
 	tick := time.NewTicker(5 * time.Millisecond)

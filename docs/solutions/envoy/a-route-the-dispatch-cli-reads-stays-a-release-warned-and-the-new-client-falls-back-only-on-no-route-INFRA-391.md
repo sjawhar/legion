@@ -54,6 +54,6 @@ a new one.
 - The fixes were 5b0ef7b1ae, a8ccde7ce2 and 80d9243296. `isNoRoute` is in
   `packages/envoy-client/src/dispatch-http.ts`. The routes kept for older clients are in
   `routes_table.go`, with warns in `architecture_source.go`.
-- Proof: https://github.com/sjawhar/legion/pull/2209#issuecomment-6405051940. No fixed pairing
+- Proof: https://github.com/cybermonklabs/legion/pull/2209#issuecomment-6405051940. No fixed pairing
   gave false advice. The pre-fix CLI against the base server printed
   `Could not check whether project NOARCH has an architecture model: no route for GET …/architecture-sources`.

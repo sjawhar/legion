@@ -125,17 +125,26 @@ func TestAConcurrentRetagNeverLeavesAGitHubAppSecretWithoutOwners(t *testing.T) 
 // reread answers the secret served as stored (or as another kind) exits 1, saying the broker still
 // sees the old tags, to run the retag again, and to store no value yet; the reread answering the
 // kind the retag wrote exits 0. A retag that removes the kind is held to the same rule.
+//
+// Each refused row also reads the kind the refusal names. Without that, the message could name
+// any kind at all, or none, and this test would stay green: the operator it is written for has
+// to be told which kind the broker is still serving, because that is what says whether the retag
+// has to be run again or something else wrote the secret. A secret the broker serves with no
+// kind at all is named "a stored secret" (kindName), the words the refusal uses for it.
 func TestARetagExitsOneWhileTheBrokerServesTheOldKind(t *testing.T) {
 	for _, row := range []struct {
 		name, served string
 		args         []string
 		code         int
+		// refusal is what the stderr of a refused row must name: the kind the broker serves and
+		// the kind the retag wrote, in the refusal's own words.
+		refusal string
 	}{
-		{"stale: still stored", "", []string{"--kind", policy.KindGoogleLogin}, 1},
-		{"stale: the other kind", policy.KindGitHubApp, []string{"--kind", policy.KindGoogleLogin}, 1},
-		{"read", policy.KindGoogleLogin, []string{"--kind", policy.KindGoogleLogin}, 0},
-		{"removal stale", policy.KindGoogleLogin, []string{"--kind", "none"}, 1},
-		{"removal read", "", []string{"--kind", "none"}, 0},
+		{"stale: still stored", "", []string{"--kind", policy.KindGoogleLogin}, 1, "serves LOGIN_KEY as a stored secret, not " + policy.KindGoogleLogin},
+		{"stale: the other kind", policy.KindGitHubApp, []string{"--kind", policy.KindGoogleLogin}, 1, "serves LOGIN_KEY as " + policy.KindGitHubApp + ", not " + policy.KindGoogleLogin},
+		{"read", policy.KindGoogleLogin, []string{"--kind", policy.KindGoogleLogin}, 0, ""},
+		{"removal stale", policy.KindGoogleLogin, []string{"--kind", "none"}, 1, "serves LOGIN_KEY as " + policy.KindGoogleLogin + ", not a stored secret"},
+		{"removal read", "", []string{"--kind", "none"}, 0, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			local := secrets.NewLocal(policytest.Secret("LOGIN_KEY", "ada@example.com", policy.TierAgent, "v1"))
@@ -151,6 +160,9 @@ func TestARetagExitsOneWhileTheBrokerServesTheOldKind(t *testing.T) {
 			stale := strings.Contains(stderr, "it still sees the old tags") && strings.Contains(stderr, "Run this retag again") && strings.Contains(stderr, "store no value in LOGIN_KEY")
 			if stale != (row.code == 1) {
 				t.Fatalf("stderr %q; want the stale-tags message exactly when the kind is stale", stderr)
+			}
+			if row.refusal != "" && !strings.Contains(stderr, row.refusal) {
+				t.Fatalf("stderr %q does not say %q: the refusal has to name the kind the broker serves, which is what tells an operator whether to run the retag again", stderr, row.refusal)
 			}
 			if row.served != "" && (!strings.Contains(stdout, "broker: serving LOGIN_KEY from ") || !strings.Contains(stdout, "(kind "+row.served+")")) {
 				t.Fatalf("stdout %q does not name the served kind and the store it is in", stdout)

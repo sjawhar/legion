@@ -58,12 +58,12 @@ run and `empty-items-holding-the-next-line` on the next: lost output, not bad da
    second command that awaited `process.stdout.write`'s callback delivered all 200,001 with the
    flag set. How much the later command loses is the pipe's size when it writes, and on this box
    two sets of runs at the same Bun disagreed about that size, for a reason nobody found. The
-   code-quality review's (https://github.com/sjawhar/legion/pull/1622#issuecomment-5920832376):
+   code-quality review's (https://github.com/cybermonklabs/legion/pull/1622#issuecomment-5920832376):
    with nothing between the two commands 4 of 6 runs lost output, and with any command between
    them the second delivered all 200,001 bytes in 9 of 9; `F_GETPIPE_SZ` read 1,048,576 after the
    first command exited where it had read 65,536 before (2 runs), one fresh pipe read 1,048,576
    before any Bun ran, and 2,000,001 bytes came through as exactly 1,048,576, exit 0. The
-   implementer's (https://github.com/sjawhar/legion/pull/1622#issuecomment-5920990160): with
+   implementer's (https://github.com/cybermonklabs/legion/pull/1622#issuecomment-5920990160): with
    `sleep 0.2`, `sh -c true` or a probe between the two, the second delivered 65,536 of 200,001 in
    10 of 10 runs and 65,536 of 2,000,001 in one, and `F_GETPIPE_SZ` never read anything but
    65,536. Both `strace`s of the first command show only `F_SETFL O_NONBLOCK`, nothing that
@@ -75,7 +75,7 @@ run and `empty-items-holding-the-next-line` on the next: lost output, not bad da
    earlier Bun process: Go's `exec.Cmd` makes a pipe per command, a Bun parent that reads a
    child's output hands it a fresh socket, each `$(...)` that runs Bun holds one Bun process, and
    a Go program started on a non-blocking pipe waits rather than drops (the deep review's census,
-   https://github.com/sjawhar/legion/pull/1622#issuecomment-5919556239).
+   https://github.com/cybermonklabs/legion/pull/1622#issuecomment-5919556239).
 2. **console.log on a full non-blocking pipe loses the rest.** It writes what the pipe has room
    for, gets `EAGAIN` for the remainder, drops it, and the script exits 0. strace of a 20,000-byte
    `console.log` into a one-page pipe: `write(1, …, 20000) = 4096`, `write(1, …, 15904) = -1

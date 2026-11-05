@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -179,7 +181,7 @@ func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentS
 
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, true, nil)
+	return p.appendUpdate(ctx, room, update, true, nil, true)
 }
 
 // AppendUpdateWithCredit validates and stores one incremental V1 update of a room, with its
@@ -191,10 +193,22 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 // unstored ones through AppendRoomFlush instead, and reaches this only for an update its update
 // observer recorded no class for (StoreUpdateContext).
 func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, contentChanged, credit)
+	return p.appendUpdate(ctx, room, update, contentChanged, credit, true)
 }
 
-func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+// AppendParkedUpdate stores a room's parked bytes - what a peer's update kept but could not
+// integrate, since it waits for an edit the room has not received (storeParked) - as one update
+// with no class, no credit and no pending authors, and without marking the document owing a
+// settlement: they change nothing a settlement reads, and the commit that later integrates them
+// marks the document owed itself. It is gated on the room's cursor and announces the change as
+// any append does.
+func (p *PgVersioned) AppendParkedUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, false, nil, false)
+}
+
+// appendUpdate stores one update under the document's lock (appendUpdateTxClass); owes is
+// whether it marks the document owing a settlement.
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, owes bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
@@ -209,7 +223,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, nil)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, nil, owes)
 		if err != nil {
 			return err
 		}
@@ -308,7 +322,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 	if err := refuseUpdateItemCap(update); err != nil {
 		return 0, err
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil, true)
 }
 
 // AppendRoomUpdateTx appends inside tx an update a room of this process has already applied, with
@@ -319,7 +333,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 // append of the room's own persistence worker reaches the gate, since no ledger of its
 // transaction names the document (appendingCursor).
 func (p *PgVersioned) AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, flush)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, flush, true)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -377,7 +391,7 @@ func lockedHead(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
 	return currentUpdateCursor(ctx, tx, room)
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, flush *RoomFlush) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, flush *RoomFlush, owes bool) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -424,6 +438,9 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		select pg_notify('`+documentChangedChannel+`', $5)
 	`, room, int64(version), update, contentChanged, room, latest > 0); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
+	}
+	if !owes {
+		return version, nil
 	}
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one
@@ -839,7 +856,16 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, sour
 			return errRoomLockBusy
 		}
 	}
-	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
+	// The unlock is bounded and its answer read (duty.FreeSessionLock): fn may send nothing on
+	// this connection (passRoomLock), so nothing else bounds the wait on a half-open connection,
+	// and this room's writers queue on lock until it ends. A connection fn's cancelled statement
+	// already closed cannot run an unlock: Postgres drops its locks when the session ends. It says
+	// nothing here, since that statement's caller has its error.
+	defer func() {
+		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock(hashtext($1))`, room); err != nil && !errors.Is(err, duty.ErrSessionClosed) {
+			slog.Error("dispatch: free the document room lock", "room", room, "error", err)
+		}
+	}()
 	return fn(conn)
 }
 

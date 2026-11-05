@@ -402,7 +402,8 @@ test("AskRecipients never asks for subscribers unless the signed-in principal is
     });
     expect(toggle.textContent).toBe("Reaches 2");
     // Opening the list mounts the followers' names, which read the agent registry; once that read
-    // has begun, the card's fetches have all started, and the human-only one is not among them.
+    // has begun, the card's fetches have all started, and the one needing the `person` scope is
+    // not among them.
     fireEvent.click(toggle);
     await waitFor(() => expect(listAgents).toHaveBeenCalled());
     expect(getIssueSubscribers).not.toHaveBeenCalled();

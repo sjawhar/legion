@@ -49,6 +49,11 @@ var keyedWriteGuardStops = map[string]string{
 	// request's caller before its key is claimed and hands the handler that resolution
 	// (resolvedCallerKey), so none of it runs under the key.
 	"api.server.optionalActor": "the caller is resolved before the key is claimed",
+	// The pull requests GitHub names for a recorded result's commit, read and stored after that
+	// result's own transaction committed and marked the request's key. The rows are keyed
+	// (repo, number) and hold what GitHub says, so a repeat after a takeover writes exactly the
+	// same rows; a failure is only logged, and the result is never undone for it.
+	"api.server.readThroughPullRequests": "stores what GitHub says about a commit's pull requests, after the result marked its key",
 	// The pool itself: its statement methods are what the guard looks for at their call sites.
 	"store.Pool.Exec": "", "store.Pool.Query": "", "store.Pool.QueryRow": "", "store.Pool.SendBatch": "",
 	"store.Pool.CopyFrom": "", "store.Pool.Begin": "", "store.Pool.BeginTx": "", "store.Pool.begin": "",

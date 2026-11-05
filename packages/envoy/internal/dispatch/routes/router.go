@@ -138,6 +138,9 @@ type AppContextOptions struct {
 	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
 	// server's five seconds. See api.Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
+	// replaced; zero keeps the server's twelve seconds. See api.Deps.ListenerTakeoverWindow.
+	ListenerTakeoverWindow time.Duration
 	// ListenerRosterUncached is for end-to-end test processes only (cmd/dispatch:
 	// DISPATCH_TEST_ROSTER_UNCACHED); see api.DepsInput.
 	ListenerRosterUncached bool
@@ -194,6 +197,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Files:                  opts.Files,
 		TestHooksEnabled:       opts.TestHooksEnabled,
 		RouteRosterTTL:         opts.RouteRosterTTL,
+		ListenerTakeoverWindow: opts.ListenerTakeoverWindow,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
 		DashboardEntry:         opts.DashboardEntry,
 	})
@@ -229,9 +233,10 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 // errNoEventLog is what a context built with no Store answers for the event log's head.
 var errNoEventLog = errors.New("this server holds no store, so no event log to read the head of")
 
-// Architecture is the shared architecture importer the HTTP routes use, so the
-// server's five-minute sync ticker drives the same serialized Sync the Refresh
-// route and the sync tool do.
+// Architecture is the shared architecture importer the HTTP routes use, so
+// the server's five-minute sync ticker, the Refresh route and the sync tool
+// drive one importer, and so share one flight per source instead of each
+// fetching that source for itself.
 func (ctx *AppContext) Architecture() *architecture.Importer {
 	return ctx.apiDeps.Architecture
 }

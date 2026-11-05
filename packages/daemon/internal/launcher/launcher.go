@@ -38,6 +38,14 @@ import (
 // ahead of the next turn (pi-legion, src/workspace-recreated.ts).
 const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
 
+// WorkspaceRestoredVariable is how the same launcher tells that generation whether the pod's one
+// workspace-bundle restore put the released workspace's unpushed work back: "true" or "false",
+// set on every generation beside WorkspaceRecreatedVariable, so no value from the container's
+// environment reaches the child. A workspace recreated by a release and restored holds the work
+// its session remembers, where one recreated by anything else holds only what was pushed, and
+// the two are different notices (pi-shared, src/workspace-recreated.ts).
+const WorkspaceRestoredVariable = "LEGION_WORKSPACE_RESTORED"
+
 // Config is the launcher's configuration. The controller's pod names one role: Token, read from
 // its role-private projected Secret before Run is called, Role, and PrivateDir, that container's
 // own memory-backed directory, which no other container mounts. An issue pod's one container
@@ -136,10 +144,14 @@ func Run(ctx context.Context, cfg Config) error {
 // newManagers is one manager per role the launcher serves, each with its own token, private
 // directory, launcher id and, in an issue pod's container, its own prefix in the container's log.
 func newManagers(cfg Config) ([]*manager, error) {
+	// One restore per pod: the daemon sends the released workspace's bundle to whichever role's
+	// connection it reaches, and the first role to start applies it for the pod, with every other
+	// role's start waiting on that one restore.
+	restore := &bundleRestore{results: map[string]shimwire.LauncherBundleResult{}}
 	if cfg.RolesDir == "" {
 		return []*manager{{
 			cfg: cfg, role: cfg.Role, token: cfg.Token, private: cfg.PrivateDir, launcherID: randomID(),
-			stdout: cfg.Stdout, stderr: cfg.Stderr, requests: map[string]request{},
+			stdout: cfg.Stdout, stderr: cfg.Stderr, requests: map[string]request{}, restore: restore,
 		}}, nil
 	}
 	log := &roleLog{stdout: cfg.Stdout, stderr: cfg.Stderr}
@@ -160,7 +172,7 @@ func newManagers(cfg Config) ([]*manager, error) {
 		managers = append(managers, &manager{
 			cfg: cfg, role: role, token: strings.TrimSpace(string(token)), namespaced: true,
 			private: filepath.Join(cfg.RolesDir, role, RolePrivateDir), launcherID: randomID(),
-			log: log, stderr: own, requests: map[string]request{},
+			log: log, stderr: own, requests: map[string]request{}, restore: restore,
 		})
 	}
 	return managers, nil
@@ -233,6 +245,9 @@ func (m *manager) serve(ctx context.Context, address string) error {
 	if err := m.state(); err != nil {
 		return err
 	}
+	// A restore whose outcome no connection has carried yet goes over this one: until the daemon
+	// has it, the saved work stays in its database (bundleRestore.owed).
+	m.reportRestore()
 	for {
 		frame, err := readFrame(reader)
 		if err != nil {
@@ -244,6 +259,8 @@ func (m *manager) serve(ctx context.Context, address string) error {
 			answer = m.start(ctx, command)
 		case shimwire.LauncherStop:
 			answer = m.stop(command)
+		case shimwire.LauncherBundle:
+			answer = m.restore.receive(command)
 		default:
 			return fmt.Errorf("command: got %T", frame)
 		}
@@ -396,6 +413,10 @@ type manager struct {
 	child      *child
 	lastExit   *shimwire.LauncherExit
 	requests   map[string]request
+	// restore is the pod's one workspace-bundle restore, which every role manager of the
+	// container shares: the bundle a released pod's work was saved as arrives on one role's
+	// connection and is applied once, before the first role of the pod starts.
+	restore *bundleRestore
 }
 
 // state reports the actual child to the current daemon connection, if one is up. A state change
@@ -415,6 +436,28 @@ func (m *manager) state() error {
 		return fmt.Errorf("launcher state: %w", err)
 	}
 	return nil
+}
+
+// reportRestore tells the daemon what became of the bundle it sent this pod, when a report is
+// owed and this role has a connection to carry it: the daemon keeps the saved work in its
+// database until one arrives, so a report that cannot be written now is left for the next
+// connection of any role of the pod (serve) rather than dropped.
+func (m *manager) reportRestore() {
+	report := m.restore.owed()
+	if report == nil {
+		return
+	}
+	m.mu.Lock()
+	writer := m.writer
+	m.mu.Unlock()
+	if writer == nil {
+		return
+	}
+	if err := writer.WriteFrame(*report); err != nil {
+		m.logf("launcher: the restore's outcome did not reach the daemon (%v); the next connection reports it again", err)
+		return
+	}
+	m.restore.sent(report)
 }
 
 // start runs command's generation. ctx is the container's: once it has ended (the container's
@@ -485,7 +528,19 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	if err := keeper.open(ctx, sessions); err != nil {
 		return abandon(err.Error())
 	}
-	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
+	// The pod's one workspace-bundle restore, if a release saved one: after writeFiles, which
+	// clears the role's private directory, and before any role of the pod runs, so no role works
+	// a workspace that is half restored. Every other role's start waits here for this one. A
+	// restore that fails still starts the role, with a notice of what was lost in the log.
+	outcome := m.restore.apply(ctx, env)
+	if outcome.Notice != "" {
+		m.logf("launcher: %s", outcome.Notice)
+	}
+	m.reportRestore()
+	env = mergeEnv(env, []string{
+		WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated),
+		WorkspaceRestoredVariable + "=" + strconv.FormatBool(outcome.Restored),
+	})
 	process, err := m.command(command, env)
 	if err != nil {
 		return abandon(err.Error())

@@ -67,18 +67,21 @@ says which), its first line exactly `Clear defect from <your role token>`. It pr
 The controller hands it to the running tree whose code it is, and files a Legion root only when no
 tree owns that code. Either way it replies under your evidence comment with where the work went.
 You file nothing, and you wait for nothing. When the report issue is missing or closed, put the
-evidence in the message itself. A production check's `Production:` line then names the defect as
+evidence in the message itself. A production check's recorded result then names the defect as
 sent to the controller.
 
 ### When no controller takes it
 
-The controller topic is a live wake: a message published while no controller runs reaches nobody,
-and no controller reads it later. `envoy_publish`'s own answer tells you whether one took it. A
-publish to a role answers with its live `holder`. With no live controller it fails instead, with
-`no holder for role legion-<project>-controller` or a holder that lapsed, and the listener delivers
-nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404 without publishing").
-Then make the finding an ask, as [What the ask says](#what-the-ask-says) spells it, on the first
-of these that holds, so a person sees it and the controller finds it when it returns:
+`envoy_publish`'s own answer tells you whether a controller took the finding: a publish to a role
+answers with its live `holder`. With no live controller, or with one whose claim has lapsed, the
+answer says Envoy kept the message instead (`packages/envoy/cmd/listener`, the test "unheld role
+is kept and answered 202 without publishing on the role topic"). The next session that claims
+`legion-<project>-controller` is handed each kept message once, within one hour of the keep. A
+keep is not a delivery: a controller can stay away for the whole hour, and a message kept longer
+than an hour is dropped unread, so a kept finding can reach nobody. Treat a kept answer as a
+controller not taking it, and make the finding an ask as well, as [What the ask
+says](#what-the-ask-says) spells it, on the first of these that holds, so a person sees it and
+the controller finds it when it returns:
 
 1. **The report issue is open:** ask there, the question opening `Clear defect from <your role
    token>` and `--ref` naming your evidence comment. Then reply `Asked dispatch://<REPORT
@@ -111,7 +114,7 @@ of these that holds, so a person sees it and the controller finds it when it ret
    - Then post the evidence there and ask there, as [What the ask says](#what-the-ask-says)
      spells it. Say in your summary that you reopened or created it, so the controller knows.
 
-Name the ask in your summary, and in a production check's `Production:` line.
+Name the ask in your summary, and in the result a production check records.
 
 ## Where it goes
 
@@ -130,7 +133,7 @@ controller topic your `Legion addressing` line names (`expects_reply: none`), ho
 the issue it came from, the evidence and the decision it needs. The controller creates or reopens
 the report issue and opens the ask. When that publish fails because no controller holds the role,
 take step 2 or 3 of [When no controller takes it](#when-no-controller-takes-it). A production
-check's `Production:` line then names the finding as sent to the controller, or names the ask.
+check's recorded result then names the finding as sent to the controller, or names the ask.
 
 ## What the ask says
 
@@ -182,8 +185,8 @@ open, `envoy_publish` its reference, `dispatch://<REPORT KEY>/ask/<id>` (the id 
 `Asked <id> on …` line), to the controller topic your `Legion addressing` line names, with
 `expects_reply: none`. The controller follows the ask and files what the person's answer asks for;
 you file nothing, whatever the answer says. The controller itself skips this step, since it follows
-each ask it opens. When that publish names no holder, do nothing more for an ask on the report
-issue: the controller's catch-up follows it at its next start.
+each ask it opens. When the listener kept that publish rather than a holder taking it, do nothing
+more for an ask on the report issue: the controller's catch-up follows it at its next start.
 
 An ask on the report issue blocks nothing of your own issue: its work goes on. One on your own
 issue holds its acceptance, as step 2 of [When no controller takes

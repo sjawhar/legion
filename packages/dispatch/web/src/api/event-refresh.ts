@@ -722,6 +722,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   if (changesReferenceGraph(event)) {
     targets.push({ exact: true, queryKey: ["issue", key, "references"] });
   }
+  if (event.type === "decision.kept") {
+    // A Keep moves one decision's row of the issue's Decisions view and nothing else: it writes
+    // no document version, no ask and no issue field.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
+    return targets;
+  }
 
   if (
     event.type === "issue.created" ||
@@ -751,10 +757,20 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       { queryKey: ["artifacts", key] },
       { queryKey: ["comments", key] },
       // A reference to one of the issue's documents shows its name, kind and latest version.
-      { exact: true, queryKey: ["issue-summary", key] }
+      { exact: true, queryKey: ["issue-summary", key] },
+      // A version of the spec moves which requirements it marks and what serves them, and a
+      // version of the Verification document moves which checks there are: the two reads hang
+      // under the issue's key but are named here, since every issue target is `exact`.
+      { exact: true, queryKey: ["issue", key, "coverage"] },
+      { exact: true, queryKey: ["issue", key, "results"] }
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
+      // The Decisions view reads two of the issue's documents - its decisions.md for the
+      // decisions and its spec for each link's target - and the event names its document by
+      // name alone, which does not say which the spec is, so every version of the issue
+      // refreshes it. The query exists only while that tab is open.
+      targets.push({ exact: true, queryKey: ["decisions", key] });
     } else {
       // An uploaded document is an `attached_to` edge into its issue.
       targets.push(referencePanel(issueReference));
@@ -776,6 +792,19 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     }
     return targets;
   }
+  // A result is recorded against a check of this issue's Verification document, by the issue the
+  // payload names, which is this one only when the result was recorded here. Both issues' results
+  // reads move: the check's issue lists the new result under its check, and the recording issue
+  // lists the results it recorded. Nothing else reads a result — no document, ask, inbox or
+  // issue detail carries one — and this switch has a default, so the branch is deliberate and
+  // its test pins it.
+  if (event.type === "result.recorded") {
+    targets.push({ exact: true, queryKey: ["issue", key, "results"] });
+    if (event.payload.issue !== key) {
+      targets.push({ exact: true, queryKey: ["issue", event.payload.issue, "results"] });
+    }
+    return targets;
+  }
   if (isAskEvent(event)) {
     targets.push({ queryKey: inboxKey });
     appendAskReads(targets, event);
@@ -783,6 +812,9 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       return targets;
     }
     targets.push({ queryKey: ["asks", key] });
+    // The view lists the spec's open questions beside the decisions, and a decision's turn is
+    // its ask's.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
     if (movesOpenAsks(event)) {
       targets.push({ queryKey: projectsKey }, pinnedRow(key));
     }

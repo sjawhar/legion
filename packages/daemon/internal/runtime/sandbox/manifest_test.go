@@ -24,6 +24,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -552,11 +553,7 @@ func TestEveryRolesGitAsksItsOwnHelperForGitHubOutsideAnyClone(t *testing.T) {
 				fill := exec.Command("git", "credential", "fill")
 				fill.Dir = outside
 				fill.Stdin = strings.NewReader("url=" + tc.url + "\n\n")
-				for _, entry := range os.Environ() {
-					if !strings.HasPrefix(entry, "GIT_") && !strings.HasPrefix(entry, "PATH=") {
-						fill.Env = append(fill.Env, entry)
-					}
-				}
+				fill.Env = fixtureenv.Isolated(t.TempDir())
 				fill.Env = append(fill.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 					"GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+dir, "GIT_TERMINAL_PROMPT=0")
 				fill.Env = append(fill.Env, gitEnv...)
@@ -1190,7 +1187,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		edit func(*Options)
 		want string
 	}{
-		"tag image":                 {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
+		"tag image":                 {func(o *Options) { o.Image = "ghcr.io/cybermonklabs/legion-worker:latest" }, "not pinned by digest"},
 		"no class":                  {func(o *Options) { o.StorageClass = "" }, "no storage class"},
 		"no volume size":            {func(o *Options) { o.IssueVolume = resource.Quantity{} }, "no issue volume size"},
 		"unix stream":               {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
@@ -1202,6 +1199,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"the pool restated":         {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
 		"no tokens":                 {func(o *Options) { o.Tokens = nil }, "no provisioning token source"},
 		"no gh credential":          {func(o *Options) { o.GitHubCredential = nil }, "no github credential function"},
+		"no gh owners":              {func(o *Options) { o.GitHubOwners = nil }, "no github owners function"},
 		"no repository mapping":     {func(o *Options) { o.Mapped = nil }, "no repository mapping for the repository caches"},
 		"no cache volume":           {func(o *Options) { o.RepositoryCache.Volume = resource.Quantity{} }, "repository cache volume 0 is not a positive quantity"},
 		"no cache retention":        {func(o *Options) { o.RepositoryCache.Retain = 0 }, "repository cache retention 0s is not positive"},

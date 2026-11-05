@@ -153,9 +153,12 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // forward only after its receipt window (two seconds, longer while forwards queue behind others on
 // its role lane). A notice to the same architect written before the copy is queued is not held
 // behind the failed one, so it can arrive before the copy. A catch-up a newer one superseded
-// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up. Nor is
+// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up, so what
+// it named is handed over to that fresh catch-up instead (workflow.HandOverKept, through
+// supersededKept), the copy that would have carried its claims on never being written. Nor is
 // a notice whose architect stopped with its finished tree (stoppedWithTree): nothing of the close
-// is sent to it. Those checks read the claim from memory, outside ApplyFact's lock, which the
+// is sent to it, and a person's spec decision such a notice reports goes to the controller instead
+// (parkDecision). Those checks read the claim from memory, outside ApplyFact's lock, which the
 // ready handler holds, so a copy can still lose the race to a ready; the notice executor checks
 // again when it runs the row.
 func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reason, recipient string) error {
@@ -164,11 +167,14 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 	topic := notify.RoleTopicPrefix + string(reported.architect)
 	held := r.supervisedClaim(reported.architect)
 	if !holdsRole(held) {
-		lingers, err := r.issueTreeLingers(ctx, issue)
+		root, lingers, err := r.issueTree(ctx, issue)
 		if err != nil {
 			return err
 		}
 		if stoppedWithTree(lingers, held) {
+			if err := r.parkDecision(ctx, issue, root, notice, key, reported.row); err != nil {
+				return err
+			}
 			r.log.Info("outbox notice not re-held: its architect stopped with its finished tree",
 				"issue", issue, "kind", notice.Kind, "topic", topic, "key", key, "reason", reason, "state", held.State, "stopping", held.Stopping)
 			return nil
@@ -177,6 +183,14 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",
 			"issue", issue, "kind", notice.Kind, "topic", topic, "key", key, "reason", reason, "resends", notice.Resends)
+		// No copy carries a catch-up's claims on now, so what it named is handed over rather than
+		// left to the row's deletion (spentKept): while the root has an architect to hear it, a
+		// fresh catch-up of that architect's launch claims and names it; while it has none
+		// (lingering, out of the workflow, waiting for its slot), nothing is written and the
+		// decisions wait KEPT for the root's next start or ready to name (CatchUpTheTreesOwed).
+		if notice.CatchUp != nil && notice.CatchUp.Kept != nil {
+			return r.spentKept(ctx, issue, reported.claims, key)
+		}
 		return nil
 	}
 	due := r.now().Add(noticeReholdDelays[notice.Resends])
@@ -209,14 +223,37 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 			return err
 		}
 		queued = true
+		// A copy of a catch-up whose row still claims decisions (the confirmed route's answer, in the
+		// row's own run) takes those claims over before the row finishes and its deletion releases
+		// them, so no other start or catch-up names what the copy will.
+		if notice.CatchUp != nil && notice.CatchUp.Kept != nil && reported.claims != 0 {
+			id, err := r.records.EnqueueID(scoped, tx, row)
+			if err != nil {
+				return err
+			}
+			return r.records.MoveKeptClaims(scoped, tx, reported.claims, id)
+		}
 		return r.records.Enqueue(scoped, tx, row)
 	}); err != nil {
 		return err
 	}
 	committed()
 	if superseded {
-		r.log.Info("outbox catch-up not re-held: a newer catch-up supersedes it", "issue", issue, "key", key,
-			"generation", notice.CatchUp.Generation, "launch", notice.CatchUp.Launch, "reason", reason)
+		// The copy this re-hold would have queued is the only thing that would have taken the row's
+		// claims on (MoveKeptClaims), so what the row named is handed over here exactly as a
+		// superseded catch-up's own ending hands it over (supersededKept): unclaimed, and named at
+		// once by a fresh catch-up while the root has an architect to tell. A catch-up is enqueued
+		// for the root whose tree it states (workflow.QueueCatchUp), so the row's issue is that
+		// root. The hand-over is its own transaction, after this one: a receipt timeout marks no
+		// telling, so the told check supersededKept makes answers no here unless an earlier run of
+		// this row published.
+		if notice.CatchUp.Kept != nil && reported.claims != 0 {
+			if err := r.supersededKept(ctx, issue, reported.claims, key); err != nil {
+				return err
+			}
+		}
+		r.log.Info("outbox catch-up not re-held: a newer catch-up supersedes it; what it named is handed over",
+			"issue", issue, "key", key, "generation", notice.CatchUp.Generation, "launch", notice.CatchUp.Launch, "reason", reason)
 	}
 	if queued {
 		r.log.Info("outbox notice re-held: the listener could not forward it to its architect's session",
@@ -225,22 +262,22 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 	return nil
 }
 
-// issueTreeLingers says whether the tree of issue, as recorded, lingers or has closed. An issue
-// that is not recorded has no tree to finish.
-func (r *outbox) issueTreeLingers(ctx context.Context, issue string) (bool, error) {
-	lingers := false
-	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+// issueTree is the root of the tree of issue, as recorded, and whether that tree lingers or has
+// closed. An issue that is not recorded has no tree to finish.
+func (r *outbox) issueTree(ctx context.Context, issue string) (root string, lingers bool, err error) {
+	err = pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		recorded, err := r.records.Issue(ctx, tx, issue)
 		if err != nil || recorded == nil {
 			return err
 		}
+		root = recorded.Tree
 		lingers, err = record.TreeLingers(ctx, r.records, tx, recorded.Tree)
 		return err
 	})
 	if err != nil {
-		return false, fmt.Errorf("read the tree of %s: %w", issue, err)
+		return "", false, fmt.Errorf("read the tree of %s: %w", issue, err)
 	}
-	return lingers, nil
+	return root, lingers, nil
 }
 
 // catchUpSuperseded says whether a newer catch-up than catchUp exists for its architect: held, the
@@ -249,7 +286,9 @@ func (r *outbox) issueTreeLingers(ctx context.Context, issue string) (bool, erro
 // root, as recorded now, is at a later generation, and its re-admission's start writes one,
 // whether it finds the claim running or relaunches it. Neither holds for a catch-up that may be
 // the architect's only one: a claim relaunching or not yet ready has had no later ready, and one
-// its later ready will write drops the queued copy.
+// its later ready will write drops the queued copy. The newer catch-up was composed from what
+// nobody claimed, so the superseded one's decisions are its own to hand over rather than leave
+// with its row (the outbox's notice, workflow.HandOverKept).
 func catchUpSuperseded(catchUp record.CatchUp, held supervise.Claim, root *record.Issue) bool {
 	if claimTookRole(held.State) && held.Generation > catchUp.Launch {
 		return true
@@ -286,6 +325,10 @@ type reportedNotice struct {
 	notice    record.Notice
 	row       int64
 	architect claim.Token
+	// claims is the outbox row still running that claims the decisions the notice names (the
+	// confirmed route's answer, in the row's own run), 0 when that row has already finished (an
+	// earlier listener's report).
+	claims int64
 }
 
 // exceptionNotice reads the notice a report is about: a publish of this daemon's outbox (its

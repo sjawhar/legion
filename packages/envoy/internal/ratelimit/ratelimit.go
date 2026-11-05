@@ -43,7 +43,12 @@ func NewKeyed(limit Limit) *Keyed {
 }
 
 // Every is how often each of k's buckets gains a request back: how long a refused caller waits.
-func (k *Keyed) Every() time.Duration { return k.limit.Every }
+// It is read under k's lock, which SetRatesAt writes the rate under.
+func (k *Keyed) Every() time.Duration {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.limit.Every
+}
 
 // Allow takes one request from key's bucket now, reporting false when it has none left.
 func (k *Keyed) Allow(key string) bool {
@@ -101,6 +106,26 @@ func (k *Keyed) AllowBothAt(key string, shared *Bucket, now time.Time) (refused 
 	return Limit{}, true
 }
 
+// SetRatesAt sets, at now, the rate k's buckets refill at to address's and shared's to
+// sharedLimit's. Every bucket k holds keeps the tokens it has (rate.Limiter.SetLimitAt), so a
+// change of rate neither refills a bucket nor empties one, and the depth of a bucket that
+// already exists stays as it was: a burst is one caller's own momentary allowance, which the
+// rate it refills at does not change.
+//
+// Both rates move under k's one lock, because AllowBothAt is the only reader of either limit and
+// holds that lock: a reread is answered by the two rates of one sizing rather than by one rate
+// of each, and a refusal can never carry a rate no bucket has.
+func (k *Keyed) SetRatesAt(now time.Time, address Limit, shared *Bucket, sharedLimit Limit) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.limit = address
+	for _, bucket := range k.buckets {
+		bucket.SetLimitAt(now, rate.Every(address.Every))
+	}
+	shared.limit = sharedLimit
+	shared.bucket.SetLimitAt(now, rate.Every(sharedLimit.Every))
+}
+
 // bucket is key's bucket, made full when key has none. The caller holds k.mu.
 func (k *Keyed) bucket(key string, now time.Time) *rate.Limiter {
 	bucket, ok := k.buckets[key]
@@ -119,6 +144,11 @@ func (k *Keyed) bucket(key string, now time.Time) *rate.Limiter {
 }
 
 // Bucket is one Limit every caller shares: a bound on the work all of them together can cause.
+//
+// It holds no lock of its own: its limit is read in Keyed.AllowBothAt and written in
+// Keyed.SetRatesAt, both under the Keyed's lock, so the two buckets a reread is held to always
+// carry one sizing and a refusal always names a rate its bucket really refills at. A Bucket
+// passed to two Keyeds would lose that, and nothing does it.
 type Bucket struct {
 	limit  Limit
 	bucket *rate.Limiter

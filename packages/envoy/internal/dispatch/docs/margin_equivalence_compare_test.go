@@ -271,7 +271,7 @@ func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, fl
 	}
 
 	if resident {
-		kept, fresh := replicaRendering(t, side.service, ids.artifact)
+		kept, fresh := keptAndFreshRendering(t, side.service, ids.artifact)
 		if kept != fresh {
 			t.Errorf("the room's replica keeps a rendering of %s, not the room's own %s", document.shown(kept), document.shown(fresh))
 		}

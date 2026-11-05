@@ -30,12 +30,12 @@
 # to start otherwise (require_proof_human, lib/workflow.sh).
 # Legion's two role Apps are this deployment's own by default, and four inputs for another
 # deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secrets broker keys holding
-# their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
-# run writes anything, whichever pair it took. The App private keys are resolved through
-# private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
-# login from GitHub (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv,
-# or this transcript.
+# LEGION_E2E_IMPLEMENT_APP_SECRET and LEGION_E2E_REVIEW_APP_SECRET, the secrets broker github-app
+# secrets that release their installation tokens (lib/github-apps.sh). `prerequisites` proves each
+# App from its token before the run writes anything, whichever pair it took. The tokens are
+# released through each App's token_command to the daemon, and once to lib/app-logins.ts to prove
+# each App and read its bot login from GitHub (read_app_logins, lib/workflow.sh); they never enter
+# this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)

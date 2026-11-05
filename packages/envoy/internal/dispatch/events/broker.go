@@ -322,9 +322,10 @@ func Quiet(e model.Event) bool {
 	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
 		"settings.project_default_assignee.updated",
 		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated",
-		"user_thread_state.updated":
+		"user_thread_state.updated", "decision.kept":
 		// Settings, importer and per-viewer bookkeeping: retained on their log and carried by
-		// the event feed, but nobody is woken by them.
+		// the event feed, but nobody is woken by them. A Keep records that a person read a
+		// decision and agreed with it, which asks its agent for nothing.
 		return true
 	case "ask.edited":
 		// A version move of an approval request that an earlier version already moved since it was

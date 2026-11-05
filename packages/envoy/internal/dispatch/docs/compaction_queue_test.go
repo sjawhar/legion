@@ -170,6 +170,12 @@ func TestTheCompactionQueueComesBackToADocumentWhenItsRowsComeOfAge(t *testing.T
 	if wait := step.next.after; wait > compactMaxTailAge || wait < compactMaxTailAge-time.Minute {
 		t.Fatalf("the queue checks the young rows again in %s, want about %s", wait, compactMaxTailAge)
 	}
+	// The step is recorded before it settles, and recheckNow reaches only a room the queue has
+	// scheduled again: a recheck sent while the step is still settling misses the room, which then
+	// waits out the young rows' check, minutes away.
+	waitFor(t, 10*time.Second, "the queue to schedule the young rows' check", func() bool {
+		return queueWaitsOn(service, artifactID)
+	})
 	before := storedRows(t, service.store, artifactID)
 
 	ageUpdatesThrough(t, service.store, artifactID, everyVersion, compactMaxTailAge+time.Minute)

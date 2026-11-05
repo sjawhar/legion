@@ -5,11 +5,12 @@ import { lazy } from "react";
  *
  * A reader who opens `/issues/<KEY>/artifacts/<slug>` waits for the entry chunk to download,
  * compile and evaluate before anything of theirs runs - one main-thread task of about a second
- * on a phone at 4x CPU throttling (dispatch://INFRA-341, R11). None of the five below is on the
+ * on a phone at 4x CPU throttling (dispatch://INFRA-341, R11). None of the four below is on the
  * screen when the document's first block is, so none of them belongs in that task: the Inbox
  * drawer and the create-issue dialog open only when the reader asks for them, the agent registry
- * poller renders nothing at all, the margin is a column beside the document, and the reference
- * preview is a card that only a hover or a keyboard focus opens.
+ * poller renders nothing at all, and the reference preview is a card that only a hover or a
+ * keyboard focus opens. The margin, the fifth part the entry chunk does without, is loaded
+ * beside its own component instead (`features/margin/MarginColumn.tsx`).
  *
  * Each still appears exactly when it appears today. The shell wraps each in the `Suspense` shape
  * `InboxList` and the `Routes` already use (`app.tsx`), with a `null` fallback: its chunk is
@@ -28,11 +29,6 @@ export const InboxDrawer = lazy(() =>
 /** The create-issue dialog, mounted by the shell while it is open. */
 export const CreateIssueDialog = lazy(() =>
   import("../issue/CreateIssueDialog").then((module) => ({ default: module.CreateIssueDialog }))
-);
-
-/** The margin beside a document surface; it renders nothing on a route that has none. */
-export const Margin = lazy(() =>
-  import("../margin/Margin").then((module) => ({ default: module.Margin }))
 );
 
 /** The reference hover card's host. Only the card is here: the attribute that makes a link a

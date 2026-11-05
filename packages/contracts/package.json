@@ -80,7 +80,7 @@
   "scripts": {
     "gen:go": "bun run scripts/gen-go.ts",
     "check:go": "bun run scripts/gen-go.ts --check",
-    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts src/actor-label.ts src/agent-stream.ts src/claim-holds.ts src/dispatch-block-ref.ts src/dispatch-constants.ts src/dispatch-href.ts src/dispatch-text-references.ts src/dispatch-text-rules.ts src/related-forms.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts src/actor-label.ts src/agent-stream.ts src/claim-holds.ts src/dispatch-block-ref.ts src/dispatch-constants.ts src/dispatch-href.ts src/dispatch-text-references.ts src/dispatch-text-rules.ts src/related-forms.ts --outdir dist --root src --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ schemas/"

@@ -1,4 +1,0 @@
-kind: Fixed
-body: 'A `dispatch` command whose `--artifact` names nothing on an issue or a project holding more than eight documents and files says how many it holds (`documents and files` when a picture or file is among them, since `--artifact` names those too), lists the ones whose slug or filename is closest to the reference first (ASCII letter case ignored), then the newest, and names `dispatch read --issue <KEY>` or `dispatch read --project <KEY>` as the read that lists them all. `dispatch read --issue` now lists every document, picture and file of the issue under `Documents:`, and `dispatch read --project <KEY>` with no `--artifact` lists the project''s documents on no issue rather than refusing.'
-custom:
-    Issue: pr2672

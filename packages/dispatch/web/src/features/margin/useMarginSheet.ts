@@ -28,9 +28,9 @@ import {
   type MarginItem,
   type MarginItemAction,
   type MarginTab,
+  marginItemBlockId,
   marginItemId,
   marginItemMarkId,
-  marginItemRecord,
   threadMarkId,
   useMarginItems,
   useMarginOwner,
@@ -166,12 +166,23 @@ export function useMarginSheet(): MarginSheetModel {
     (eventId: number) => removePin(eventItemId({ id: eventId })),
     [removePin]
   );
+  // Only the report of the document whose cards this margin shows. A document the route has
+  // left can stay registered behind the next route's loading view - Suspense keeps the old page
+  // mounted, hidden, until the new page's code has arrived and its throttled reveal commits -
+  // and its report would read a press there as the reader working a placed document; an issue's
+  // Spec stays registered under the Conversation and withdraws its layout, which is what tells
+  // the decisions read that nothing shows them.
+  const placementsPublished =
+    placementsReported &&
+    visibleArtifact !== undefined &&
+    documentBridge?.artifactId === visibleArtifact.id;
   const {
     actionFailure,
     answeredAsksPending,
     asksPending,
     commentsError,
     commentsPending,
+    decisions,
     editComment,
     items,
     marginItems,
@@ -188,6 +199,7 @@ export function useMarginSheet(): MarginSheetModel {
     retryItem,
     threads,
   } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId, {
+    documentShown: placementsPublished,
     held: heldReplyKeys,
   });
   const onEdit = useCallback(
@@ -455,11 +467,10 @@ export function useMarginSheet(): MarginSheetModel {
     const markIds = selectedItems
       .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
-    const blockIds = selectedItems
-      .map((item) => marginItemRecord(item).anchor)
-      .flatMap((anchor) =>
-        anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
-      );
+    const blockIds = selectedItems.flatMap((item) => {
+      const blockId = marginItemBlockId(item);
+      return blockId === undefined ? [] : [blockId];
+    });
     documentBridge?.setActiveMarks([...new Set(markIds)]);
     documentBridge?.setActiveBlocks(blockIds);
   }, [documentBridge, hoveredItemId, marginItems, selectedItemId]);
@@ -472,16 +483,16 @@ export function useMarginSheet(): MarginSheetModel {
   );
   useEffect(() => {
     const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
-    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
-    if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
+    const blockId = item === undefined ? undefined : marginItemBlockId(item);
+    if (blockId === undefined) {
       selectedBlockFocus.current = undefined;
       return;
     }
-    if (selectedBlockFocus.current === anchor.block_id) {
+    if (selectedBlockFocus.current === blockId) {
       return;
     }
-    selectedBlockFocus.current = anchor.block_id;
-    focusBlock(anchor.block_id);
+    selectedBlockFocus.current = blockId;
+    focusBlock(blockId);
   }, [focusBlock, marginItems, selectedItemId]);
   const onSelectCard = useCallback(
     (id: string) => {
@@ -547,10 +558,7 @@ export function useMarginSheet(): MarginSheetModel {
     // left can stay registered behind the next route's loading view - Suspense keeps the old
     // page mounted, hidden, until the new page's code has arrived and its throttled reveal
     // commits - and its report would read a press there as the reader working a placed document.
-    placementsPublished:
-      placementsReported &&
-      visibleArtifact !== undefined &&
-      documentBridge?.artifactId === visibleArtifact.id,
+    placementsPublished,
     routeItemId,
     routeItemKey,
     setHoveredItemId,
@@ -583,6 +591,7 @@ export function useMarginSheet(): MarginSheetModel {
       asksPending,
       commentsError,
       commentsPending,
+      decisions,
       historicalAsks,
       marginRef,
       isClosed,

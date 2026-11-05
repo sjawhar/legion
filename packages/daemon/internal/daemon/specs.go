@@ -41,9 +41,11 @@ type specs struct {
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
-	// identity is the role's App bot identity every pane commits as, minted for the owner of the
-	// repository the launch works; nil for a daemon with no GitHub Apps.
-	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity every pane commits as, minted for the owner whose
+	// installation holds the repository the launch works — the record's name over a transfer, the
+	// mint's owner its serving one (workflowRuntime.identity); nil for a daemon with no GitHub
+	// Apps.
+	identity func(ctx context.Context, role claim.Role, repository ghrepo.Repository) (runtime.GitIdentity, error)
 	// repository is the repository an issue works and its default branch
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil for a daemon with no workflow, whose launches work no
@@ -169,7 +171,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		DeploymentInstructionsPath: s.instructions,
 	}
 	if s.identity != nil {
-		id, err := s.identity(ctx, c.Role, spec.Repository.Owner())
+		id, err := s.identity(ctx, c.Role, spec.Repository)
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}

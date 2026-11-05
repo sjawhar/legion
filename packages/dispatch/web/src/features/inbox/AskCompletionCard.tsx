@@ -1,3 +1,4 @@
+import { actorActText } from "@legion/contracts/actor-label";
 import { answerSelected } from "@legion/contracts/dispatch-constants";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -88,7 +89,7 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
                   <MarkdownBody markdown={previous.text} />
                 )}
                 <p className="mt-1">
-                  {previous.user} · <Timestamp at={previous.at} />
+                  {actorActText(previous.user, previous.act)} · <Timestamp at={previous.at} />
                 </p>
               </div>
             );
@@ -177,7 +178,7 @@ function AnsweredAsk({
               {" · "}
               Answered by{" "}
               <span className="font-semibold">
-                <AgentName actor={{ id: answer.user, kind: "user" }} inline />
+                <AgentName actor={{ act: answer.act, id: answer.user, kind: "user" }} inline />
               </span>{" "}
               <Timestamp at={answer.at} />
             </>

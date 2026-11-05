@@ -1,3 +1,4 @@
+import { actorActText } from "@legion/contracts/actor-label";
 import { answerSelected } from "@legion/contracts/dispatch-constants";
 import type { ReactNode } from "react";
 
@@ -50,7 +51,7 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
           <span
             className={`min-w-0 [overflow-wrap:anywhere] ${ask.state === "resolved" ? "basis-full" : ""}`}
           >
-            {answer.user} · <Timestamp at={answer.at} /> ·{" "}
+            {actorActText(answer.user, answer.act)} · <Timestamp at={answer.at} /> ·{" "}
             {chosen.length === 0 ? "No option chosen" : `Chose ${chosen.join(", ")}`}
           </span>
         )}

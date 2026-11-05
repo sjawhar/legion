@@ -989,10 +989,11 @@ test("a rotation rebuilds from the replay and keeps status live", async () => {
   expect(relayStatus()).toEqual(["Live"]);
 });
 
-// Dispatch relays a session's conversation to a person only. Refused, the view says it cannot
-// reach the conversation, and that holds for this session: no reconnect of the tab's socket sends
-// the view again or shows it reconnecting.
-test("a human-only refusal shows the view unavailable", async () => {
+// Dispatch relays a session's conversation only to a credential holding the `person` scope, which
+// a signed-in browser holds. Refused, the view says it cannot reach the conversation, and that
+// holds for this session: no reconnect of the tab's socket sends the view again or shows it
+// reconnecting.
+test("a missing-scope refusal shows the view unavailable", async () => {
   const queryClient = renderLiveView({
     agentState: {},
     messages: [],
@@ -1008,7 +1009,11 @@ test("a human-only refusal shows the view unavailable", async () => {
   act(() => first.open());
   act(() =>
     first.receive(
-      errorFrame(agentSubscription(first), "HUMAN_ONLY", "only users may perform this action")
+      errorFrame(
+        agentSubscription(first),
+        "OAUTH_SCOPE_REQUIRED",
+        "this socket's credential does not hold the person scope, which watching an agent's conversation requires"
+      )
     )
   );
   expect((await screen.findByTestId("agent-stream-unavailable")).textContent).toBe(

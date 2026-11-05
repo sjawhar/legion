@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
@@ -27,6 +28,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): one row for the whole project page - nine issues seeded across eight statuses,
+// the grouped board over them, eight filter presses, and the Documents tab down to a created
+// document with its editor. Each clause of the title is a press the row has to make.
 test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project @phone", async ({
   browser,
 }, testInfo) => {
@@ -56,10 +60,14 @@ test("project page groups issues by status in board order; filters narrow issues
   const bobs = await createIssue({ project: "CORE", title: "Bob's work" }, { login: "bob" });
   await patchIssue(bobs.key, { status: "in_progress" });
   await createAsk(bobs.key, { question: "Does Bob need to answer this?" }, session);
-  for (const issue of [triage, icebox, backlog, parent, needsYou, child, done]) {
-    const latest = await getIssue(issue.key);
-    await putIssueState(issue.key, { last_read_seq: latest.last_seq });
-  }
+  // Seven read marks, one round of round trips: the rows differ, the writes do not wait on
+  // each other.
+  await Promise.all(
+    [triage, icebox, backlog, parent, needsYou, child, done].map(async (issue) => {
+      const latest = await getIssue(issue.key);
+      await putIssueState(issue.key, { last_read_seq: latest.last_seq });
+    })
+  );
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -162,7 +170,7 @@ test("project page groups issues by status in board order; filters narrow issues
     await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
       "Design notes"
     );
-    await page.goto("/projects/CORE/documents");
+    await navigateInApp(page, "/projects/CORE/documents");
     await expect(page.getByRole("link", { name: "Design notes", exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("project-documents.png"), fullPage: true });
     await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);
@@ -283,13 +291,16 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     await expect(references).toContainText("depth 1");
     await expect(references).toContainText("depth 2");
     const tabs = page.getByRole("main").getByRole("tab");
-    await expect(tabs).toHaveCount(5);
+    await expect(tabs).toHaveCount(8);
     for (const [index, name] of [
       "Spec",
+      "Verification",
+      "Plan",
       "Conversation",
       "Children",
       "Artifacts (2)",
       "Activity",
+      "Decisions",
     ].entries()) {
       await expect(tabs.nth(index)).toHaveAccessibleName(name);
     }

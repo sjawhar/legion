@@ -3,8 +3,9 @@ package githubrest
 import (
 	"context"
 	"net/url"
-	"strings"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // PullRequest is one pull request as GitHub answers GET /pulls/{number} and lists it in GET
@@ -40,10 +41,11 @@ func (p PullRequest) IsMerged() bool {
 	return p.Merged || p.MergedAt != nil
 }
 
-// HeadIn says whether the pull request's head lives in repository (owner/name, in any case): a
-// branch of the repository itself, not of a fork, whose branch may carry any name.
-func (p PullRequest) HeadIn(repository string) bool {
-	return p.Head.Repo != nil && strings.EqualFold(p.Head.Repo.FullName, repository)
+// HeadIn says whether the pull request's head lives in repository (owner/name, in any case, or
+// the other name of a configured rename, renames): a branch of the repository itself, not of a
+// fork, whose branch may carry any name.
+func (p PullRequest) HeadIn(repository string, renames ghrepo.Renames) bool {
+	return p.Head.Repo != nil && renames.Same(p.Head.Repo.FullName, repository)
 }
 
 // OpenPullRequests is every open pull request of the client's repository, as GET

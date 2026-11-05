@@ -7,50 +7,35 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// askBlockIDs collects the id of every ask block tree holds. It never returns nil: a document
-// with none still returns an empty map, which askBlockSources.author reads as "no block is
-// unindexed" rather than as an unknown baseline (askBlockSources.observed).
+// askBlockIDs collects the id of every ask block tree holds (pmdoc.WalkAskBlocks). It never
+// returns nil: a document with none still returns an empty map, which askBlockSources.author
+// reads as "no block is unindexed" rather than as an unknown baseline
+// (askBlockSources.observed). A nil map therefore comes from no walk of a tree, only from a
+// caller that could not read the document it meant to walk
+// (renderedReplica.spliceTouched, observeAskBlocksForUpdate).
 func askBlockIDs(tree *pmdoc.Node) map[string]struct{} {
-	var ids map[string]struct{}
-	walkAskBlocks(tree, func(id string) {
-		if id == "" {
-			return
-		}
-		if ids == nil {
-			ids = make(map[string]struct{})
-		}
-		ids[id] = struct{}{}
-	})
-	if ids == nil {
-		return map[string]struct{}{}
-	}
+	ids := map[string]struct{}{}
+	addAskBlockIDs(ids, tree)
 	return ids
+}
+
+// addAskBlockIDs adds to ids the id of every ask block tree holds, skipping an ask block carrying
+// none: what askBlockIDs collects for a whole document, for a caller that collects the ask blocks
+// of several trees into one set (renderedReplica.spliceTouched).
+func addAskBlockIDs(ids map[string]struct{}, tree *pmdoc.Node) {
+	pmdoc.WalkAskBlocks(tree, func(id string) {
+		if id != "" {
+			ids[id] = struct{}{}
+		}
+	})
 }
 
 // askBlockOrder lists the id of every ask block tree holds in document order, "" for a block
 // with none.
 func askBlockOrder(tree *pmdoc.Node) []string {
 	var ids []string
-	walkAskBlocks(tree, func(id string) { ids = append(ids, id) })
+	pmdoc.WalkAskBlocks(tree, func(id string) { ids = append(ids, id) })
 	return ids
-}
-
-// walkAskBlocks calls visit with the id of each ask block tree holds, in document order, wherever
-// it stands: in a blockquote, a list item or another typed block. It does not descend into text,
-// which holds no block.
-func walkAskBlocks(tree *pmdoc.Node, visit func(id string)) {
-	if tree == nil {
-		return
-	}
-	if tree.Type == "ask" {
-		id, _ := tree.Attrs[pmdoc.BlockIDAttr].(string)
-		visit(id)
-	}
-	for _, child := range tree.Children {
-		if child.Type != "text" {
-			walkAskBlocks(child, visit)
-		}
-	}
 }
 
 // stampedAsk is an ask block a block-id stamp gave a new id: previous, the id it had ("" for

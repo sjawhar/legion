@@ -58,6 +58,27 @@ test("renders each approval state's label", () => {
     [{ latest_version: 3, state: "awaiting" }, "Awaiting approval"],
     [{ latest_version: 3, state: "approved", version: 3 }, "Approved v3"],
     [{ latest_version: 3, state: "changes_requested", version: 2 }, "Changes requested"],
+    [
+      // One request covering a spec and its issue's Verification document names both.
+      {
+        documents: [
+          { artifact_id: "artifact-1", name: "spec.md", requested_version: 3, version: 3 },
+          { artifact_id: "artifact-2", name: "verification.md", requested_version: 2, version: 2 },
+        ],
+        latest_version: 3,
+        state: "awaiting",
+      },
+      "Awaiting approval of spec.md v3 and verification.md v2",
+    ],
+    // A plan is approved by its plan review, never by a person.
+    [
+      { kind: "plan_review", latest_version: 3, state: "approved", version: 3 },
+      "Approved by plan review v3",
+    ],
+    [
+      { kind: "plan_review", latest_version: 4, state: "stale", version: 3 },
+      "Approved by plan review v3 · changed since",
+    ],
   ];
   for (const [approval, label] of cases) {
     const view = renderChip(artifact(approval), "list");

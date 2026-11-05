@@ -128,11 +128,11 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 // gates.design: off. The gate's opening advances no tree while the root waits (advanceAdmittedTree),
 // and the person has nothing left to decide that holds the tree, so the root resumes with the next
 // free slot, told how its spec stands, and its tree advances then. A wait on the gate under
-// gates.design: off (the operator switched the gate off while the root waited on it) is decided in
-// the same pass, since no approval request counts with the gate off (gateRequestArtifact): the wait
-// moves to a question of the tree still with the person, and is otherwise answered, so the
-// architect resumes and registers its spec, which opens the gate. It reports whether it answered
-// or moved any root's wait.
+// gates.design: off (the operator switched the gate off while the root waited on it) whose gate is
+// not open is decided in the same pass, since no approval request counts with the gate off
+// (gateRequestArtifact): the wait moves to a question of the tree still with the person, and is
+// otherwise answered, so the architect resumes and registers its spec, which opens the gate. It
+// reports whether it answered or moved any root's wait.
 func (e *Engine) answerOpenGates(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, held func(string) bool) (bool, error) {
 	answered := false
 	for _, root := range issues {
@@ -144,29 +144,31 @@ func (e *Engine) answerOpenGates(ctx context.Context, tx pgx.Tx, project string,
 		if err != nil {
 			return answered, err
 		}
-		if root.Awaiting.GateVersion != 0 && !e.armed() {
-			if err := e.leaveGateOff(ctx, tx, root, gate); err != nil {
+		if gate != nil && classify.DesignGateOpen(*gate) {
+			e.logOnCommit(ctx, "workflow: the design gate of a root waiting on a person is open, which answers its wait", "issue", root.Key,
+				"version", gate.LatestVersion, "ask", root.Awaiting.Ask)
+			if err := e.answerWait(ctx, tx, root, record.AnsweredByApproval, fmt.Sprintf("version %d", gate.LatestVersion)); err != nil {
 				return answered, err
 			}
 			answered = true
 			continue
 		}
-		if gate == nil || !classify.DesignGateOpen(*gate) {
-			continue
+		if root.Awaiting.GateVersion != 0 && !e.armed() {
+			if err := e.leaveGateOff(ctx, tx, root, gate); err != nil {
+				return answered, err
+			}
+			answered = true
 		}
-		e.logOnCommit(ctx, "workflow: the design gate of a root waiting on a person is open, which answers its wait", "issue", root.Key,
-			"version", gate.LatestVersion, "ask", root.Awaiting.Ask)
-		if err := e.answerWait(ctx, tx, root, record.AnsweredByApproval, fmt.Sprintf("version %d", gate.LatestVersion)); err != nil {
-			return answered, err
-		}
-		answered = true
 	}
 	return answered, nil
 }
 
-// leaveGateOff decides a wait on root's design gate once gates.design is off: the wait moves to the
-// oldest question of the tree still with the person, keeping where it began, and is otherwise
-// answered as the gate standing open answers a wait under gates.design: off.
+// leaveGateOff decides a wait on root's design gate, which is not open, once gates.design is off:
+// the wait moves to the oldest question of the tree still with the person, keeping where it began,
+// and is otherwise answered (AnsweredByApproval, at the version it waited on, its detail marked
+// gateOffAnswer), so the architect resumes told that the gate opens, with no approval, when it
+// registers its spec, or, should the gate be on again by then, that no person approved it
+// (resumeTask).
 func (e *Engine) leaveGateOff(ctx context.Context, tx pgx.Tx, root record.Issue, gate *record.DesignGate) error {
 	asks, err := e.store.RootAsks(ctx, tx, []string{root.Key})
 	if err != nil {
@@ -180,8 +182,15 @@ func (e *Engine) leaveGateOff(ctx context.Context, tx pgx.Tx, root record.Issue,
 	}
 	e.logOnCommit(ctx, "workflow: the design gate is off, which answers a root's wait on it", "issue", root.Key,
 		"version", root.Awaiting.GateVersion)
-	return e.answerWait(ctx, tx, root, record.AnsweredByApproval, fmt.Sprintf("version %d", root.Awaiting.GateVersion))
+	return e.answerWait(ctx, tx, root, record.AnsweredByApproval, fmt.Sprintf("version %d", root.Awaiting.GateVersion)+gateOffAnswer)
 }
+
+// gateOffAnswer ends the detail of a gate wait the gates.design: off rule answered (leaveGateOff).
+// That answer is recorded, and shown on the API, as AnsweredByApproval: the contract's answeredBy
+// enum, which strict readers check, has no value of its own for it. But no person approved
+// anything, so the detail tells the resume (resumeTask) never to say so, should the gate be on
+// again by then.
+const gateOffAnswer = ", answered with the design gate off"
 
 // act is what ReconcileAwaiting does with one root.
 type act int
@@ -447,17 +456,27 @@ const DesignApprovedWake = "this resume is your design-approved wake"
 // back is advice only while the gate is not open, since an open gate moves the root to planning,
 // where a hand-back starts no wait; the request's own thread is named only while the request is
 // open. armed says whether the design gate is armed: with it off, no approval is asked for,
-// register_gate is never the advice, and an open gate is no person's approval.
+// register_gate is never the advice, and an open gate is no person's approval. A wait the
+// gates.design: off rule answered (gateOffAnswer) is never said to be approved: under an armed
+// gate it is said as answered while the gate was off.
 func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, asks []record.RootAsk, armed bool) string {
 	gateOpen := gate != nil && classify.DesignGateOpen(*gate)
 	gateClosed := gate != nil && !gateOpen
+	version, gateOff := strings.CutSuffix(waiting.AnsweredDetail, gateOffAnswer)
+	gateOff = gateOff && waiting.AnsweredBy == record.AnsweredByApproval
 	var task strings.Builder
 	switch waiting.AnsweredBy {
 	case record.AnsweredByApproval:
-		if armed {
-			fmt.Fprintf(&task, "Your spec %s on %s was approved.", waiting.AnsweredDetail, key)
-		} else {
-			fmt.Fprintf(&task, "Your spec %s on %s is registered, and the design gate is off, so it needs no approval.", waiting.AnsweredDetail, key)
+		switch {
+		case armed && gateOff:
+			fmt.Fprintf(&task, "The design gate on %s was off when your wait was answered, so no person approved your spec %s then; the design gate is on again.",
+				key, version)
+		case armed:
+			fmt.Fprintf(&task, "Your spec %s on %s was approved.", version, key)
+		case gateOpen:
+			fmt.Fprintf(&task, "Your spec %s on %s is registered, and the design gate is off, so it needs no approval.", version, key)
+		default:
+			fmt.Fprintf(&task, "The design gate on %s is off, so no approval of your spec %s is asked for.", key, version)
 		}
 	case record.AnsweredByChanges:
 		fmt.Fprintf(&task, "A person requested changes to your spec on %s at %s.", key, waiting.AnsweredDetail)
@@ -493,8 +512,9 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 		fmt.Fprintf(&task, " Your spec is approved at version %d and the design gate is open: %s, so act on it as on design-approved.",
 			gate.LatestVersion, DesignApprovedWake)
 	case !armed:
-		fmt.Fprintf(&task, " The design gate is off and closed at version %d: it opens, needing no approval, when your spec is registered.", gate.LatestVersion)
-	case waiting.AnsweredBy == record.AnsweredByApproval:
+		fmt.Fprintf(&task, " The design gate is closed at version %d, as no registration of that version has opened it: when the spec is ready, "+
+			"register it at its current version, which opens the gate with no approval.", gate.LatestVersion)
+	case waiting.AnsweredBy == record.AnsweredByApproval && !gateOff:
 		fmt.Fprintf(&task, " That approval no longer stands: the spec is at version %d and is not approved.", gate.LatestVersion)
 	default:
 		fmt.Fprintf(&task, " Your spec is not approved at version %d.", gate.LatestVersion)

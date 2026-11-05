@@ -44,10 +44,8 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 		// A peer writes the answered ask's server attributes into the block first, so the
 		// settlement's own repair finds nothing to write and holds no slot. The peer's observer is
 		// held once it has classified and credited the edit and before it arms a settlement, so
-		// the room's generation stays where the settlement read it. Held before it classifies
-		// anything (beforeObserveUpdate), the edit would be classified by the observer of the
-		// repair's own empty transaction, which drains the room's update log too and arms a
-		// settlement, and the superseded settlement would write no version at all.
+		// the room's generation stays where the settlement read it, and the superseded
+		// settlement would write no version at all.
 		release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, func(tree *pmdoc.Node) *pmdoc.Node {
 			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 				if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == "ask-block" {

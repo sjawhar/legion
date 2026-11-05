@@ -95,8 +95,9 @@ knows, so a typo never becomes a caller that reaches nothing.
 The fake secrets file holds two secrets of `ada@example.com`'s, under the namespace
 `example/agent-secrets/` and on its example key: `DEMO_READ_TOKEN`, tagged `tier=agent`, which her
 own sessions ([the kinds of session](/legion/broker/concepts/#sessions-and-enrollment)) get without
-asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lasts until its session
-ends, or for the `--ttl` its request names. Every command below runs in that second shell.
+asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lasts for the `--ttl` its
+request names, else 12 hours (until its session ends for a secret tagged `default-grant=session`),
+and never past its session. Every command below runs in that second shell.
 
 ## Run a helper and log it in
 
@@ -160,8 +161,8 @@ A request has two ids: the request id `agent-secrets` prints and takes, and the 
 approval page's address ends in. `agent-secrets request NAME --json` prints both. **Deny** on the
 same page denies the request, and `agent-secrets` then exits 77.
 
-Each grant so far lasts until the session ends (`agent-secrets self` lists it `until this session
-ends`). A request may ask for less with `--ttl`, and the grant then ends on its own once that has
+Each grant so far lasts 12 hours, the default for a request with no `--ttl` (`agent-secrets self`
+lists its expiry). A request may ask for another lifetime with `--ttl`, and the grant then ends on its own once that has
 passed, while the session lives on:
 
 ```console

@@ -149,9 +149,9 @@ afterEach(() => {
 test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop landmarks", async () => {
   renderShellAt(800);
 
-  // The margin is a chunk of its own, so both its controls arrive a module load after the
-  // shell's own first commit (`features/shell/deferred-shell.ts`) - longer than `waitFor`'s
-  // default second under a loaded machine.
+  // The margin's own code is fetched after the first paint
+  // (`features/margin/MarginColumn.tsx`), so both its controls arrive a module load after the
+  // shell's own first commit - longer than `waitFor`'s default second under a loaded machine.
   await waitFor(
     () => {
       expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull();

@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { askgateState, sweepStores } from "./askgate-marker";
+import { askgateState, recordNamesStore, sweepStores } from "./askgate-marker";
 import { adviceMemory } from "./dispatch-execute";
 import { keyedLayerMemory, rememberKeyedLayer } from "./dispatch-http";
 import { shownPictures } from "./dispatch-picture-tools";
@@ -270,9 +270,10 @@ export function readSessionTitle(dir: string): string | undefined {
 /**
  * Removes the session directories nobody touched for 14 days, at most once a day: the root's
  * `.pruned` stamp records the last pass. A directory whose AskGate record a live process keeps
- * (`askgateState`), or whose record cannot be read, stays: removing it would let that session's
- * writes post with no marker. The same pass removes the AskGate marker stores of processes that
- * are gone (`sweepStores`).
+ * (`askgateState`), whose record cannot be read, or whose record names a marker store that is
+ * still there (`recordNamesStore`: its owner may be a process of another pid namespace that this
+ * one cannot look up) stays: removing it would let that session's writes post with no marker. The
+ * same pass removes the AskGate marker stores of processes that are gone (`sweepStores`).
  */
 export function pruneSessions(root: string, now: number): void {
   const stamp = join(root, PRUNED_STAMP);
@@ -292,7 +293,8 @@ export function pruneSessions(root: string, now: number): void {
     if (!entry.isDirectory()) continue;
     const dir = join(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+      const idle = now - statSync(dir).mtimeMs > IDLE_SESSION_MS;
+      if (idle && askgateState(dir, now).kind === "off" && !recordNamesStore(dir)) {
         rmSync(dir, { recursive: true, force: true });
       }
     } catch (error) {

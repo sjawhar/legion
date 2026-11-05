@@ -2,7 +2,6 @@ package pmdoc
 
 import (
 	"encoding/json"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -401,7 +400,8 @@ func writeHardbreakHTML(out *strings.Builder, n *Node) {
 // its card mounts into, whose header and footer hold no document text, and every other typed
 // block is the summary header and content hole `renderTypedBlock` draws
 // (`web/src/features/doc/typed-block-drawing.ts`). Both carry the block's client-owned attributes
-// as `data-proof-block-attr-*`, which is the schema wrapper's own stamp.
+// as `data-proof-block-attr-*`, which is the schema wrapper's own stamp, in the order the schema
+// declares them, which is the order the page's own wrapper writes them in.
 func writeTypedBlockHTML(out *strings.Builder, n *Node, typ BlockTypeSchema) {
 	frame := attrs{
 		{"class", "proof-typed-block proof-typed-block-" + n.Type},
@@ -413,14 +413,14 @@ func writeTypedBlockHTML(out *strings.Builder, n *Node, typ BlockTypeSchema) {
 			htmlAttr{"data-dispatch-ask-state", attributeChoice(n, typ, "state")},
 		)
 	}
-	for _, name := range sortedAttributeNames(typ) {
-		definition := typ.Attributes[name]
-		value, present := n.Attrs[name]
+	for _, definition := range typ.Attributes {
+		value, present := n.Attrs[definition.Name]
 		if definition.Server || !present || value == nil {
 			continue
 		}
 		frame = append(frame, htmlAttr{
-			"data-proof-block-attr-" + name, attributeText(definition, value),
+			"data-proof-block-attr-" + definition.Name,
+			attributeText(definition.BlockAttributeSchema, value),
 		})
 	}
 	writeOpenTag(out, "section", frame, n)
@@ -446,8 +446,9 @@ func writeTypedBlockHeader(out *strings.Builder, n *Node, typ BlockTypeSchema) {
 	writeEscapedText(out, n.Type)
 	out.WriteString("</span>")
 	var rest []string
-	for _, name := range sortedAttributeNames(typ) {
-		if typ.Attributes[name].Server || name == BlockIDAttr {
+	for _, definition := range typ.Attributes {
+		name := definition.Name
+		if definition.Server || name == BlockIDAttr {
 			continue
 		}
 		value := attributeDisplay(n.Attrs[name])
@@ -483,23 +484,12 @@ func writeTypedBlockHeader(out *strings.Builder, n *Node, typ BlockTypeSchema) {
 	out.WriteString("</header>")
 }
 
-// sortedAttributeNames orders a typed block's attributes by name, so one tree writes one page
-// whichever order Go's map hands them back in.
-func sortedAttributeNames(typ BlockTypeSchema) []string {
-	names := make([]string, 0, len(typ.Attributes))
-	for name := range typ.Attributes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
 // attributeChoice is an enum attribute's value, or its schema default where the node carries none.
 func attributeChoice(n *Node, typ BlockTypeSchema, name string) string {
 	if value := stringAttr(n.Attrs[name]); value != "" {
 		return value
 	}
-	return stringAttr(typ.Attributes[name].Default)
+	return stringAttr(typ.Attributes.Get(name).Default)
 }
 
 // attributeText is a typed block's attribute as its DOM attribute carries it

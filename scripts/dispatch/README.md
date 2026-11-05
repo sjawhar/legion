@@ -282,7 +282,7 @@ above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_
 - **Build**, always: `GET /healthz`, sent no token, read on 200 and on 503. It prints
   `build commit=<sha|null> schema=<n|null> ok=<true|false>`. Whether that commit carries a given
   merge is checked outside the script, with
-  `gh api repos/sjawhar/legion/compare/<merge>...<commit> --jq .status` (`ahead` or `identical`).
+  `gh api repos/cybermonklabs/legion/compare/<merge>...<commit> --jq .status` (`ahead` or `identical`).
   An unreadable `/healthz` makes the run unavailable.
 - **A1** (`--a1-query`): `GET /api/v1/search?q=<query>` fails when the answer has a `degraded`
   field, and passes when it has none and at least one result:

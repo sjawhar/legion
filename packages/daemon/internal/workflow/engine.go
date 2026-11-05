@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -27,7 +27,15 @@ import (
 // head's own CI turns red or it starts conflicting with its base before the merge; empty, the
 // READY is posted only.
 type Config struct {
-	Project        string
+	// Project is the project key, which is what the record's own tables hold: an issue's
+	// `project`, a production check's, the Dispatch mirror's.
+	Project string
+	// Pods is the daemon's record of the project's released pods, which the wakes read and write
+	// (Pods, wake.go). It holds the project as the claim-keyed tables spell it, derived from
+	// Project once where it is built (store.Store.PodRecordsOf), so this configuration carries
+	// one spelling of the project and a wake can file no row under another. Nil, as in every
+	// engine built without the pod tables, wakes nothing and records no listener report.
+	Pods           Pods
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int
@@ -36,7 +44,7 @@ type Config struct {
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
-	// BuiltFrom is the repository the daemon's binary is built from (`sjawhar/legion` in a release
+	// BuiltFrom is the repository the daemon's binary is built from (`cybermonklabs/legion` in a release
 	// build): a build the daemon boots on, or Dispatch announces every server process serves
 	// (server.started), is compared only against the open production checks of that repository,
 	// since no other repository's merge can be in it. Empty, no build is compared.
@@ -56,6 +64,13 @@ type Config struct {
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
 	Repositories Repositories
+	// RepositoryRenames is the deployment's repository equivalence (`repository_renames`,
+	// config.Config.RepositoryRenames): wherever the engine compares a repository's name — an
+	// issue's recorded one against a GitHub fact's, a check's against the build's — the two names
+	// of a configured rename are one repository, since GitHub's events name the repository a
+	// transfer moved to while the records keep the name they were written under. The zero value,
+	// which answers exactly as a comparison without case does, while none is configured.
+	RepositoryRenames ghrepo.Renames
 	// NoteUnread is told, inside the fact's transaction, of each issue the workflow did not record
 	// because its repository resolved Unread (left out for now, GitHub not answering its
 	// installation read): the daemon takes it into that repository's recovery whatever it resolves
@@ -74,9 +89,7 @@ var _ intake.Handler = (*Engine)(nil)
 
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
-	if cfg.DesignGate == "" {
-		cfg.DesignGate = config.DesignGateRootIssues
-	}
+	cfg.DesignGate = cfg.DesignGate.OrDefault()
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
 	}
@@ -102,6 +115,10 @@ func (e *Engine) now() time.Time { return e.cfg.Clock().UTC() }
 func (e *Engine) byReviewApp(login string) bool {
 	return e.cfg.ReviewAppLogin != "" && login == e.cfg.ReviewAppLogin
 }
+
+// sameRepository is whether a and b name one repository: the same name, compared without case as
+// GitHub compares names, or the two names of a configured rename (Config.RepositoryRenames).
+func (e *Engine) sameRepository(a, b string) bool { return e.cfg.RepositoryRenames.Same(a, b) }
 
 // Apply changes workflow-owned phase state for one durable intake fact. It never performs I/O;
 // every externally visible consequence is an outbox row committed with the record change.
@@ -138,6 +155,12 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 	case intake.Push:
 		return e.push(ctx, tx, fact)
 	case intake.PullRequestChecks:
+		// A settlement on the head of a released pod's pull request wakes that pod before the
+		// settlement is applied, so the woken role's task names the settlement this very
+		// transaction records (wakeOnSettlement).
+		if err := e.wakeOnSettlement(ctx, tx, fact); err != nil {
+			return intake.Result{}, err
+		}
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:
 		return e.requiredChecks(ctx, tx, fact)
@@ -183,6 +206,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checkLookEnded(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
+	case intake.ListenerWake:
+		return e.listenerWake(ctx, tx, fact)
+	case intake.PodBackstopDue:
+		return e.podBackstopDue(ctx, tx, fact)
 	default:
 		return intake.Result{}, nil
 	}
@@ -1135,24 +1162,34 @@ func (e *Engine) phaseRow(ctx context.Context, tx pgx.Tx, issue string, role cla
 }
 
 // issueForBranch is the issue whose branch (claim.IssueBranch) branch is, when it is recorded on
-// repo, as its record keeps GitHub's spelling (record.Issue.GitHubRepo), compared
-// case-insensitively as GitHub compares names: a pull request on legion/<KEY> in another repository
-// is never <KEY>'s.
+// repo, as its record keeps GitHub's spelling (record.Issue.GitHubRepo), compared as
+// sameRepository compares two names — without case, as GitHub compares names, and a configured
+// rename's two names as one repository: a pull request on legion/<KEY> in another repository is
+// never <KEY>'s.
 func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.Issue, error) {
 	key, ok := claim.BranchIssue(branch)
 	if !ok {
 		return nil, nil
 	}
 	issue, err := e.store.Issue(ctx, tx, key)
-	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
+	if err != nil || issue == nil || !e.sameRepository(issue.GitHubRepo, repo) {
 		return nil, err
 	}
 	return issue, nil
 }
 
 // pullRequest is the recorded pull request number of repo, when its issue is recorded on repo.
+// The read is made under the name the fact carries and then, when it finds nothing, under the
+// other name of the pair that names it (ghrepo.Under): a record keeps the repository it was
+// written under for its whole life, so a pull request already open when its repository was
+// transferred is recorded under the name it moved from while every event after names the one it
+// moved to. A deployment that configures no rename makes exactly the one query it always made; a
+// configured one makes the second only when the first finds nothing, which is the common case —
+// an event of a pull request this daemon does not record at all.
 func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number int) (*record.PullRequest, error) {
-	pr, err := e.store.PullRequestByNumber(ctx, tx, repo, number)
+	pr, err := ghrepo.Under(e.cfg.RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
+		return e.store.PullRequestByNumber(ctx, tx, name, number)
+	})
 	if err != nil || pr == nil {
 		return nil, err
 	}
@@ -1160,9 +1197,12 @@ func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number
 }
 
 // pullRequestByBranch is the recorded pull request of repo on branch, when its issue is recorded
-// on repo.
+// on repo. It reads under the same names as pullRequest, in the same order and for the same
+// reason.
 func (e *Engine) pullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.PullRequest, error) {
-	pr, err := e.store.PullRequestByBranch(ctx, tx, repo, branch)
+	pr, err := ghrepo.Under(e.cfg.RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
+		return e.store.PullRequestByBranch(ctx, tx, name, branch)
+	})
 	if err != nil || pr == nil {
 		return nil, err
 	}
@@ -1170,11 +1210,11 @@ func (e *Engine) pullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branc
 }
 
 // ownPullRequest is pr when the issue it is recorded for is recorded on repo, as its record keeps
-// GitHub's spelling, and nil otherwise: a GitHub fact applies to an issue only when it names the
-// issue's repository.
+// GitHub's spelling and sameRepository compares it, and nil otherwise: a GitHub fact applies to an
+// issue only when it names the issue's repository.
 func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, repo string) (*record.PullRequest, error) {
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
+	if err != nil || issue == nil || !e.sameRepository(issue.GitHubRepo, repo) {
 		return nil, err
 	}
 	return pr, nil

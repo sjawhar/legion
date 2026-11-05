@@ -145,7 +145,7 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 	logs := captureLogs(t)
 	const id = "deployed-id"
 	deployed := *streamCfg
-	deployed.Subjects = slices.Clone(streamSubjects[:len(streamSubjects)-1])
+	deployed.Subjects = slices.Clone(streamCarriedSubjects[:len(streamCarriedSubjects)-1])
 	deployed.Replicas = 1
 	deployed.Metadata = map[string]string{StreamIDMetadataKey: id}
 	if _, err := js.AddStream(&deployed); err != nil {
@@ -196,7 +196,7 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	const added = "notifications.newer.>"
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
 	newer := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	newer.Subjects = append(slices.Clone(streamSubjects), added)
+	newer.Subjects = append(slices.Clone(streamCarriedSubjects), added)
 	if err := ensureStreamWithConfig(js, &limited); err != nil {
 		t.Fatalf("the limited program's start: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 	js := streamTestJetStream(t)
 	roleLane := contracts.RoleTopicPrefix + ">"
 	legacy := *streamCfg
-	legacy.Subjects = append(slices.Clone(streamSubjects), roleLane)
+	legacy.Subjects = append(slices.Clone(streamCarriedSubjects), roleLane)
 	legacy.Metadata = map[string]string{StreamIDMetadataKey: "legacy-id"}
 	if _, err := js.AddStream(&legacy); err != nil {
 		t.Fatalf("deploy the stream with the role lanes: %v", err)
@@ -272,8 +272,8 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 	if want := []string{fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)}; err != nil || !slices.Equal(restored, want) {
 		t.Fatalf("the keeper's next pass restored %v (%v), want %v", restored, err, want)
 	}
-	if subjects := deployedStream(t, js).Config.Subjects; !slices.Equal(subjects, streamSubjects) {
-		t.Fatalf("subjects %v after the keeper's pass, want %v", subjects, streamSubjects)
+	if subjects := deployedStream(t, js).Config.Subjects; !slices.Equal(subjects, streamCarriedSubjects) {
+		t.Fatalf("subjects %v after the keeper's pass, want %v", subjects, streamCarriedSubjects)
 	}
 }
 
@@ -306,9 +306,9 @@ func TestTheKeepersSubjectsAddOnlyItsOwnThatOverlapNothingDeployed(t *testing.T)
 func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 	js := streamTestJetStream(t)
 	alpha := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	alpha.Subjects = append(slices.Clone(streamSubjects), "notifications.alpha.>")
+	alpha.Subjects = append(slices.Clone(streamCarriedSubjects), "notifications.alpha.>")
 	beta := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	beta.Subjects = append(slices.Clone(streamSubjects), "notifications.beta.>")
+	beta.Subjects = append(slices.Clone(streamCarriedSubjects), "notifications.beta.>")
 	beta.Subjects[slices.Index(beta.Subjects, "notifications.github.>")] = "notifications.github.pr.>"
 	if err := ensureStreamWithConfig(js, &alpha); err != nil {
 		t.Fatalf("the alpha release's start: %v", err)
@@ -613,7 +613,7 @@ func TestTheKeeperOfABackgroundClientRunsNoPassBeforeItsFirstReconcile(t *testin
 		t.Fatalf("JetStream context: %v", err)
 	}
 	deployed := *streamCfg
-	deployed.Subjects = slices.Clone(streamSubjects)
+	deployed.Subjects = slices.Clone(streamCarriedSubjects)
 	deployed.Subjects[slices.Index(deployed.Subjects, replacing)] = replaced
 	deployed.Metadata = map[string]string{StreamIDMetadataKey: "deployed-id"}
 	if _, err := js.AddStream(&deployed); err != nil {

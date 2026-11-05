@@ -6,6 +6,7 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import type { IssueDetails } from "../web/src/api/types";
 
 import {
   createComment,
@@ -172,8 +173,13 @@ async function replyUnderDocumentDecision(
     },
     { as: "agent" }
   );
-  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(1);
-  const [storage] = (await getIssue(issue.key)).open_asks;
+  let storage: IssueDetails["open_asks"][number] | undefined;
+  await expect
+    .poll(async () => {
+      [storage] = (await getIssue(issue.key)).open_asks;
+      return storage;
+    })
+    .toBeDefined();
   if (storage === undefined) {
     throw new Error("the storage decision was not indexed");
   }

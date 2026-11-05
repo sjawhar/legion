@@ -1,3 +1,4 @@
+import { actorActText } from "@legion/contracts/actor-label";
 import { answerSelected } from "@legion/contracts/dispatch-constants";
 import type { ReactNode } from "react";
 
@@ -44,7 +45,7 @@ function AskEventBody({
       {answer === null ? null : (
         <>
           <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-            Answered by {answer.user} <Timestamp at={answer.at} />
+            Answered by {actorActText(answer.user, answer.act)} <Timestamp at={answer.at} />
           </p>
           {answer.text === null || answer.text === "" ? null : (
             <div className="mt-2">

@@ -60,6 +60,9 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 		if err := json.Unmarshal(approval, &value); err != nil {
 			return model.Ask{}, fmt.Errorf("decode ask approval: %w", err)
 		}
+		// Every stored approval carries its documents list: the migration backfilled it and the
+		// asks_normalize_approval_documents trigger writes it for a row a release that knows
+		// only the four lead fields inserts during a rolling deploy.
 		ask.Approval = &value
 	}
 	ask.EditedAt = askTimestamp(editedAt)

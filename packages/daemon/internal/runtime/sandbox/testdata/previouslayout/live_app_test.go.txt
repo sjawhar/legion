@@ -1,0 +1,224 @@
+//go:build e2e
+
+// Stage 4a's previous-layout App overlay. scripts/e2e/stage4a-sandbox-runtime.sh copies this file
+// over live_app_test.go of the checkout of the commit LEGION_E2E_PREVIOUS_IMAGE was built from
+// (main at daemon API contract 37 or 38), beside fixture_test.go.txt, before it builds that
+// commit's Stage 4a harness. That commit's harness read the implement App's private key from a
+// secret store; the live proofs now hold no key, only the secrets broker's github-app secret, whose
+// release of installation tokens the token command prints (lib/github-apps.sh's
+// app_token_command, LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND, which this branch's harness hands on
+// in the fixture's environment). That commit's appauth has no token mode, so this file reads the
+// release itself: it declares exactly what that commit's live_test.go and runtime use of it
+// (implementTokens with its apps field, Token, Credential, and resolveApp setting r.tokens,
+// r.identity and the two default branches), and nothing else.
+
+package sandbox
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghbranch"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+)
+
+// releaseTokenPattern matches the GitHub token forms, which no error of this overlay may carry.
+var releaseTokenPattern = regexp.MustCompile(`(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})`)
+
+// limitedBuffer keeps at most limit bytes of a command's output; past it, it marks over and calls
+// overflow, which ends the command's process group.
+type limitedBuffer struct {
+	buf      bytes.Buffer
+	limit    int
+	over     bool
+	overflow func()
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.over || b.buf.Len()+len(p) > b.limit {
+		if !b.over {
+			b.over = true
+			b.overflow()
+		}
+		return 0, errors.New("token command output over its limit")
+	}
+	return b.buf.Write(p)
+}
+
+// releasedTokens runs the token command for an owner and caches each lease until fewer than
+// twenty minutes remain, as the daemon's token manager does.
+type releasedTokens struct {
+	command string
+	mu      sync.Mutex
+	leases  map[string]releasedLease
+}
+
+type releasedLease struct {
+	token     string
+	expiresAt time.Time
+}
+
+func (b *releasedTokens) lease(ctx context.Context, owner string, readOnly bool) (releasedLease, error) {
+	owner = strings.ToLower(owner)
+	key := owner
+	readOnlyValue := ""
+	if readOnly {
+		key, readOnlyValue = "read:"+owner, "1"
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if held, ok := b.leases[key]; ok && time.Until(held.expiresAt) > 20*time.Minute {
+		return held, nil
+	}
+	var stdout, stderr limitedBuffer
+	stdout.limit, stderr.limit = 1<<20, 1<<20
+	runCtx, cancel := context.WithTimeout(ctx, 35*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "sh", "-c", b.command)
+	procgroup.Configure(cmd)
+	cmd.Env = append(os.Environ(), "LEGION_GITHUB_OWNER="+owner, "LEGION_GITHUB_READ_ONLY="+readOnlyValue)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	stdout.overflow, stderr.overflow = cancel, cancel
+	if err := cmd.Run(); err != nil || stdout.over || stderr.over {
+		return releasedLease{}, fmt.Errorf("the implement App's token command for %s: %v (output over its limit: %t): %s", owner, err, stdout.over || stderr.over,
+			releaseTokenPattern.ReplaceAllString(strings.TrimSpace(stderr.buf.String()), "[redacted]"))
+	}
+	var release struct {
+		Installations map[string]struct {
+			Token     string `json:"token"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"installations"`
+	}
+	if json.Unmarshal(stdout.buf.Bytes(), &release) != nil {
+		return releasedLease{}, errors.New("the implement App's token command printed no release")
+	}
+	for login, entry := range release.Installations {
+		if !strings.EqualFold(login, owner) {
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339, entry.ExpiresAt)
+		if err != nil || entry.Token == "" {
+			return releasedLease{}, fmt.Errorf("the implement App's token command released %s's installation without a token and an expiry", login)
+		}
+		b.leases[key] = releasedLease{token: entry.Token, expiresAt: expiresAt}
+		return b.leases[key], nil
+	}
+	return releasedLease{}, fmt.Errorf("the implement App's token command released no installation on %s", owner)
+}
+
+// implementTokens is the harness's ProvisionTokens and GitHubCredential, as that commit's own.
+type implementTokens struct {
+	apps   *releasedTokens
+	owners []string
+}
+
+func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+	lease, err := t.apps.lease(ctx, owner, false)
+	return lease.token, err
+}
+
+func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner string) (ghconfig.Bundle, error) {
+	owner = strings.ToLower(owner)
+	if owner == "" {
+		owner = strings.ToLower(t.owners[0])
+	}
+	bundle := ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{}}
+	for _, name := range append([]string{owner}, t.owners...) {
+		name = strings.ToLower(name)
+		if _, done := bundle.Owners[name]; done {
+			continue
+		}
+		lease, err := t.apps.lease(ctx, name, name != owner)
+		if err != nil {
+			return ghconfig.Bundle{}, fmt.Errorf("mint the implement App's lease for %s: %w", name, err)
+		}
+		bundle.Owners[name] = ghconfig.Render(lease.token, "implement", lease.expiresAt)
+	}
+	return bundle, nil
+}
+
+// botIdentity is the token's App bot as git names it: GraphQL's viewer login and the noreply
+// email GET /users/<login> gives its id for.
+func botIdentity(ctx context.Context, token string) (runtime.GitIdentity, error) {
+	do := func(method, path, body string, into any) error {
+		request, err := http.NewRequestWithContext(ctx, method, "https://api.github.com"+path, strings.NewReader(body))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Authorization", "token "+token)
+		request.Header.Set("Accept", "application/vnd.github+json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("%s %s answered %d", method, path, response.StatusCode)
+		}
+		return json.NewDecoder(response.Body).Decode(into)
+	}
+	var viewer struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+		} `json:"data"`
+	}
+	if err := do(http.MethodPost, "/graphql", `{"query":"{viewer{login}}"}`, &viewer); err != nil {
+		return runtime.GitIdentity{}, err
+	}
+	login := viewer.Data.Viewer.Login
+	if !strings.HasSuffix(login, "[bot]") {
+		return runtime.GitIdentity{}, fmt.Errorf("the implement App's token acts as %q, not an App's bot", login)
+	}
+	var user struct {
+		ID int64 `json:"id"`
+	}
+	if err := do(http.MethodGet, "/users/"+url.PathEscape(login), "", &user); err != nil || user.ID <= 0 {
+		return runtime.GitIdentity{}, fmt.Errorf("the implement App's bot user %s: %v", login, err)
+	}
+	return runtime.GitIdentity{Name: login, Email: fmt.Sprintf("%d+%s@users.noreply.github.com", user.ID, login)}, nil
+}
+
+func (r *liveRig) resolveApp() error {
+	command := os.Getenv("LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND")
+	if command == "" {
+		return errors.New("LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND is unset: this branch's harness hands it to the previous release's fixture")
+	}
+	apps := &releasedTokens{command: command, leases: map[string]releasedLease{}}
+	branches := make([]string, 2)
+	var identity runtime.GitIdentity
+	for i, repo := range []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner} {
+		lease, err := apps.lease(r.ctx, repo.Owner(), false)
+		if err != nil {
+			return err
+		}
+		if branches[i], err = ghbranch.DefaultBranch(r.ctx, githubrest.Client{Token: lease.token, API: githubrest.RepositoryAPI("", repo)}, repo); err != nil {
+			return err
+		}
+		if i == 0 {
+			if identity, err = botIdentity(r.ctx, lease.token); err != nil {
+				return err
+			}
+		}
+	}
+	r.tokens = implementTokens{apps: apps, owners: []string{r.env.repo.Owner(), r.env.repoSecondOwner.Owner()}}
+	r.identity, r.defaultBranch, r.secondDefaultBranch = identity, branches[0], branches[1]
+	return nil
+}

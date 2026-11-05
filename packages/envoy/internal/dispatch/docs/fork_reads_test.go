@@ -129,10 +129,17 @@ func renderingProblem(write *liveWrite) string {
 	if write.markdown != markdown {
 		return fmt.Sprintf("the write's markdown (%d bytes) is not the fork's (%d bytes)", len(write.markdown), len(markdown))
 	}
-	if !slices.Equal(write.offsets, offsets) {
+	if !slices.EqualFunc(write.offsets, offsets, sameBlockOffset) {
 		return fmt.Sprintf("the write's %d block offsets are not the fork's %d", len(write.offsets), len(offsets))
 	}
 	return ""
+}
+
+// sameBlockOffset compares two rendered block offsets whole: their id, type and span, and the
+// typed attributes the render carried on them.
+func sameBlockOffset(held, read pmdoc.BlockOffset) bool {
+	return held.ID == read.ID && held.Type == read.Type && held.From == read.From &&
+		held.To == read.To && slices.Equal(held.Attributes, read.Attributes)
 }
 
 // forkReadsSection is one section of forkReadsDocument: its number, which every sentence of it

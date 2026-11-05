@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
@@ -86,6 +87,10 @@ type Settings struct {
 	// RoleConfigFiles is `role_config_files`, the Oh My Pi overlays one role names and no other
 	// does, by role, `{}` while the file names none.
 	RoleConfigFiles map[string][]string `json:"role_config_files"`
+	// RepositoryRenames is `repository_renames`, the pairs this deployment treats as one
+	// repository wherever a name is compared, in configured order, `[]` while the file
+	// configures none.
+	RepositoryRenames []RepositoryRenameSettings `json:"repository_renames"`
 }
 
 // RuntimeSettings is `runtime`: its name, the kubernetes block under that runtime alone, and the
@@ -130,6 +135,19 @@ type KubernetesSettings struct {
 	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
 	TestPostgres    bool                    `json:"test_postgres"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
+	// IdleRelease is the settled `runtime.kubernetes.idle_release`: how long an issue pod must
+	// have had no turn in progress and no turn due before the daemon releases it, and how long
+	// after a release the backstop wakes a phase worker whose phase is still open. Neither is a
+	// credential, and a role reads both to know whether its own pod may go away under it, so
+	// every pod may read them.
+	IdleRelease IdleReleaseSettings `json:"idle_release"`
+}
+
+// IdleReleaseSettings is the settled `runtime.kubernetes.idle_release`. Zero `idle_minutes` is
+// release switched off.
+type IdleReleaseSettings struct {
+	IdleMinutes     int `json:"idle_minutes"`
+	BackstopMinutes int `json:"backstop_minutes"`
 }
 
 // SchedulingSettings is `runtime.kubernetes.scheduling`; the selector and the tolerations are `{}`
@@ -204,6 +222,13 @@ type DeploySettings struct {
 	Repo     string `json:"repo"`
 	Workflow string `json:"workflow"`
 	Step     string `json:"step"`
+}
+
+// RepositoryRenameSettings is one `repository_renames` entry as the file writes it: the
+// repository as it was and the one it moved to, each `<owner>/<name>`.
+type RepositoryRenameSettings struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
@@ -283,6 +308,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Capabilities:                            CapabilitiesSettings{Decided: make(map[string]string, len(cfg.Capabilities.Decided))},
 		WorkerBackends:                          make(map[string]string, len(cfg.WorkerBackends)),
 		RoleConfigFiles:                         make(map[string][]string, len(cfg.RoleConfigFiles)),
+		RepositoryRenames:                       repositoryRenamesOf(cfg.RepositoryRenames),
 	}
 	for i, key := range cfg.ProviderKeys {
 		settings.ProviderKeys[i] = key.Env
@@ -316,6 +342,17 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for role, files := range cfg.RoleConfigFiles {
 		settings.RoleConfigFiles[string(role)] = stringsOf(files)
+	}
+	return settings
+}
+
+// repositoryRenamesOf is the configured equivalence as the state shows it: one `{from, to}` per
+// pair, in configured order, and `[]` for a deployment that configures none.
+func repositoryRenamesOf(renames ghrepo.Renames) []RepositoryRenameSettings {
+	pairs := renames.Pairs()
+	settings := make([]RepositoryRenameSettings, len(pairs))
+	for i, pair := range pairs {
+		settings[i] = RepositoryRenameSettings{From: pair.From.String(), To: pair.To.String()}
 	}
 	return settings
 }
@@ -356,6 +393,10 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
 			RetainHours:    block.RepositoryCache.RetainHours,
 			Resources:      reservationSettingsOf(block.RepositoryCache.Resources),
+		},
+		IdleRelease: IdleReleaseSettings{
+			IdleMinutes:     block.IdleRelease.IdleMinutes,
+			BackstopMinutes: block.IdleRelease.BackstopMinutes,
 		},
 	}
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)

@@ -174,7 +174,7 @@ func (s *Service) writeDocumentAskStates(
 		// id, as settlement makes its repairs (repairLive), and each repeat on the block at its place
 		// (markRepeatedAskBlocks), all in one rewrite of the fork, whose tree is the one current read.
 		// A document none of them changes is left as it was, and applyLive writes nothing for it.
-		_, _, err = rewriteLive(doc, nil, writes.apply)
+		_, err = rewriteLive(doc, nil, writes.apply)
 		return err
 	})
 	switch {

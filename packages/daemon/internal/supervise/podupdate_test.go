@@ -642,6 +642,24 @@ func TestPodUpdateOpensARoundForAStalePluginThatCanAnswer(t *testing.T) {
 	}
 }
 
+// A pod round's task tells the worker what the replacement takes beyond its unpushed commits: the
+// pod's scratch and temporary files, which no commit holds, and that evidence it still needs goes
+// on Dispatch before it answers. A plugin round keeps the disk, so its task says nothing of it.
+func TestThePodRoundsTaskSaysTheScratchGoesWithThePod(t *testing.T) {
+	pod := UpdateTask(testRound, testReasons)
+	for _, want := range []string{
+		"The pod's scratch and temporary files go with the pod",
+		"If you need such a file as evidence, put it on Dispatch before you answer.",
+	} {
+		if !strings.Contains(pod, want) {
+			t.Errorf("the pod round's task does not say %q:\n%s", want, pod)
+		}
+	}
+	if plugin := UpdateTask(PluginRound(PodUpdateContract+1), testReasons); strings.Contains(plugin, "scratch") {
+		t.Errorf("the plugin round's task speaks of scratch files the restart keeps:\n%s", plugin)
+	}
+}
+
 // A stale plugin on a claim that cannot answer keeps today's immediate relaunch: no round is
 // opened, and the process is replaced at once. The relaunch keeps the pod and the disk, so what
 // it costs is the turn alone.
@@ -868,6 +886,100 @@ func TestPodUpdateATurnAfterTheAnswerTakesItBackAndAsksAgain(t *testing.T) {
 	again := h.wantPrompts(2)[1]
 	if !asksRound(again.DeliveryID, testRound) || again.DeliveryID == first.DeliveryID {
 		t.Errorf("the ask after the foreign turn = %q, want a new ask of the round %q", again.DeliveryID, testRound)
+	}
+}
+
+// A turn the daemon sent nothing for, after the answer, is decided by whether the claim's plugin
+// can call ready_for_update (CannotAnswerUpdate). A plugin that cannot is told to end with a WAITING
+// line, and its own phase-stall reminder starts a turn when that wait is over: on the first
+// contract-46 roll every one of 194 withdrawals was such a turn, with nothing pending, and each
+// cost the round a re-ask and a model turn. That claim keeps its answer, asks nothing more, and
+// the round ends. A plugin that can answer holds its reminder while its answer stands, so the same
+// turn there is an Envoy notice or a person's steer: it takes the answer back and the round asks
+// again, as TestPodUpdateATurnAfterTheAnswerTakesItBackAndAsksAgain pins.
+func TestPodUpdateATurnTheDaemonSentNothingForKeepsOnlyTheAnswerOfAClaimThatCannotCallTheOp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		contract int
+		keeps    bool
+	}{
+		{name: "a plugin with no ready_for_update op", contract: PodUpdateContract - 1, keeps: true},
+		{name: "a plugin with the op", contract: PodUpdateContract, keeps: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := updateHarness(t, tc.contract)
+			h.reach(StateReady)
+			h.m.deps.PluginContract = PodUpdateContract
+			h.openUpdate(testRound, testReasons)
+			h.wantPrompts(1)
+			h.must(StreamTurnStart{Claim: h.token})
+			if !CannotAnswerUpdate(h.claim()) {
+				h.signalUpdate("c0ffee")
+			}
+			h.must(StreamTurnEnd{Claim: h.token})
+			answered := h.claim().UpdateSignalledAt
+			if answered == nil || h.claim().Pending != nil {
+				t.Fatalf("claim after the ask's turn = %+v, want the answer recorded and the ask retired", h.claim())
+			}
+
+			// The turn the daemon sent nothing for, the sweep's next post while it runs, and its end.
+			h.must(StreamTurnStart{Claim: h.token})
+			h.openUpdate(testRound, testReasons)
+			h.must(StreamTurnEnd{Claim: h.token})
+
+			c := h.wantRound(testRound)
+			if !tc.keeps {
+				if c.UpdateSignalledAt != nil {
+					t.Fatalf("UpdateSignalledAt = %v, want the answer taken back by a turn this plugin's reminder never starts", c.UpdateSignalledAt)
+				}
+				if again := h.wantPrompts(2)[1]; !asksRound(again.DeliveryID, testRound) {
+					t.Errorf("the second prompt = %q, want the round asking again", again.DeliveryID)
+				}
+				return
+			}
+			if c.UpdateSignalledAt == nil || !c.UpdateSignalledAt.Equal(*answered) {
+				t.Fatalf("UpdateSignalledAt = %v, want the answer of %v standing", c.UpdateSignalledAt, *answered)
+			}
+			if stored := h.store.load(h.token); stored.UpdateSignalledAt == nil {
+				t.Error("the store lost the answer the turn left standing")
+			}
+			h.wantPrompts(1)
+
+			h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+			h.wantRound("")
+		})
+	}
+}
+
+// The reminder turn of a claim below the contract confirms nothing it did not send: the next
+// phase's task, queued after the answer, stays held and unread through that turn, as an answered
+// round holds it (answeredOpenRound), and the round's end releases it.
+func TestPodUpdateAReminderTurnBelowTheContractLeavesTheNextTaskHeld(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract-1)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = PodUpdateContract
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token})
+	h.must(RequestDeliver{Claim: h.token, Task: "review the pull request"})
+	h.wantPrompts(1)
+
+	h.must(StreamTurnStart{Claim: h.token})
+
+	if c := h.claim(); c.UpdateSignalledAt == nil {
+		t.Fatal("the reminder turn took the answer back")
+	}
+	if p := h.pending(); p.Task != "review the pull request" || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending = %+v, want the next task held and unconfirmed", p)
+	}
+	h.must(StreamTurnEnd{Claim: h.token})
+	h.wantPrompts(1)
+
+	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+
+	if released := h.wantPrompts(2)[1]; released.Message != "review the pull request" {
+		t.Errorf("the task after the round = %q, want the held one", released.Message)
 	}
 }
 

@@ -58,12 +58,12 @@ func Remove(item Interest, topics []string) Interest {
 // dropPrivateStreamTopics removes from topics every one reaching a private stream subject other
 // than sessionID's own agent subject (bus.ReachesPrivateStreamSubject): another session's inbox, a
 // failed-delivery lane, the Legion controller lane, or a wildcard overlapping one. Registry.Match
-// fans a stored topic out to its serve-port session, so such a topic would hand that session
-// messages meant for another session or for the controller's role holder. The listener refuses
-// one at /v1/interests/subscribe; this drops one a row stored before that guard holds, so every
-// write of a row (Upsert, Remove) cleans it. sessionID is the row's key, not the session_id its
-// stored value names. It filters topics in place, so callers pass a slice they own (Merge's and
-// Remove's results are).
+// fans a stored topic out to the listener the row names, which delivers it to that row's session,
+// so such a topic would hand that session messages meant for another session or for the
+// controller's role holder. The listener refuses one at /v1/interests/subscribe; this drops one a
+// row stored before that guard holds, so every write of a row (Upsert, Remove) cleans it.
+// sessionID is the row's key, not the session_id its stored value names. It filters topics in
+// place, so callers pass a slice they own (Merge's and Remove's results are).
 func dropPrivateStreamTopics(sessionID string, topics []string) []string {
 	return slices.DeleteFunc(topics, func(topic string) bool {
 		return bus.ReachesPrivateStreamSubject(sessionID, topic)

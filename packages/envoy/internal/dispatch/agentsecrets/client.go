@@ -1,5 +1,5 @@
 // Package agentsecrets relays Dispatch's credential pages to the secrets broker's named-caller
-// API (its account routes: https://sjawhar.github.io/legion/broker/reference/api/). Dispatch lists
+// API (its account routes: https://cybermonklabs.github.io/legion/broker/reference/api/). Dispatch lists
 // the credential requests waiting on a person, each secret request linking to the broker's own
 // page, where that person, signed in to the broker, decides it; it relays a machine login's
 // decision with the code the person typed; and it relays a person's revoke of a grant or a

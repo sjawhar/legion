@@ -365,6 +365,21 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The person this credential acts for, where it holds the `person` scope, resolved here and
+	// not at the author check below: resolving a credential reads the store, and the pool
+	// refuses a second connection inside the transaction the next line opens
+	// (store.ErrNestedAcquire). It is nil for every credential that is nobody's person.
+	var asThePerson *model.Actor
+	if s.callerHoldsScope(r, model.ScopePerson) {
+		person, held := s.actingPerson(w, r)
+		if !held {
+			return
+		}
+		if person, ok = actSessionFromBody(w, person, input.Actor); !ok {
+			return
+		}
+		asThePerson = &person
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -407,8 +422,18 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
-		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
-		return
+		// A session rewording its own ask is recorded as that session acting for its owner, as
+		// it always was, so nothing a session reads back of its own reword changes. Rewording
+		// somebody else's is the person's act, which needs the `person` scope: a credential of
+		// theirs that holds it is recorded as the person with the agent beside them, exactly as
+		// their browser's reword is recorded as them, and every other credential keeps the
+		// refusal.
+		if asThePerson == nil {
+			writeError(w, "NOT_AUTHOR", http.StatusForbidden,
+				"only the asking session, or a credential holding the person scope, may edit an ask")
+			return
+		}
+		actor = *asThePerson
 	}
 
 	previous := model.NewAskEditPrevious(ask)
@@ -954,9 +979,15 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 	return ask, nil
 }
 
-// pgx caches prepared plans by query text. State and ownership each have a fixed
-// query so the partial open-ask index remains eligible under generic plans. They are vars, not
-// consts, because askReadFrom builds its anchor join from store.CastableUUID.
+// pgx caches prepared plans by query text. State and ownership each have a fixed query, with the
+// state written in as a literal, so that the index a state carries stays eligible under a
+// generic plan too: an issue's open asks read asks_open (0001), the partial index on
+// (issue_key) where state = 'open', which a $-parameterized state would lose. A document's asks
+// read asks_artifact_id (0032) and filter the state, whatever state is asked for:
+// asks_open_artifact, the partial index 0009 built for the open case, went unused for the nine
+// days the index audit measured and migration 20261101182440 drops it. An issue's asks with no
+// state filter read asks_issue_key (20261101182426). They are vars, not consts, because
+// askReadFrom builds its anchor join from store.CastableUUID.
 var (
 	listIssueAsksQueryAll = `select ` + askReadColumns + ` ` + askReadFrom + `
 		where a.issue_key = $1 order by a.created_at, a.id`
@@ -1008,6 +1039,21 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 		return nil, nil, err
 	}
 	defer rows.Close()
+	asks, replies, err := scanAskReads(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := loadAskDetails(ctx, q, askReadPointers(asks)); err != nil {
+		return nil, nil, err
+	}
+	return asks, replies, nil
+}
+
+// scanAskReads reads the rows an askReadColumns query returns, in the order it listed them, with
+// the newest reply in each ask's thread keyed by ask id; an ask nobody has replied to has no
+// entry. The issue read queues one of those queries in a batch (getIssue) and reads its rows
+// with this, so the two paths decode an ask the same way.
+func scanAskReads(rows pgx.Rows) ([]model.Ask, map[string]model.AskLastReply, error) {
 	asks := []model.Ask{}
 	replies := map[string]model.AskLastReply{}
 	for rows.Next() {
@@ -1023,17 +1069,17 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	askPointers := make([]*model.Ask, len(asks))
-	for index := range asks {
-		askPointers[index] = &asks[index]
-	}
-	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
-	if err := attachAskReadFields(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
 	return asks, replies, nil
+}
+
+// askReadPointers addresses each ask in place, which the opened-event and backlink-count
+// loaders fill.
+func askReadPointers(asks []model.Ask) []*model.Ask {
+	pointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		pointers[index] = &asks[index]
+	}
+	return pointers
 }
 
 // lockAskForTransition reads one ask and locks its row for the transition about to be applied.
@@ -1062,14 +1108,7 @@ func (s *server) attachOpenedEventIDs(
 	q queryer,
 	asks []*model.Ask,
 ) error {
-	askIDs := make([]string, 0, len(asks))
-	seen := make(map[string]struct{}, len(asks))
-	for _, ask := range asks {
-		if _, exists := seen[ask.ID]; !exists {
-			seen[ask.ID] = struct{}{}
-			askIDs = append(askIDs, ask.ID)
-		}
-	}
+	askIDs := distinctAskIDs(asks)
 	if len(askIDs) == 0 {
 		return nil
 	}
@@ -1078,6 +1117,27 @@ func (s *server) attachOpenedEventIDs(
 	if err != nil {
 		return err
 	}
+	return applyOpenedEventIDs(asks, openedEventIDs)
+}
+
+// distinctAskIDs is each listed ask's id once, in the order the asks are listed: the argument
+// events.OpenedEventIDs takes, whether it is run on its own or queued in a batch
+// (events.QueueOpenedEventIDs, through queueAskDetails).
+func distinctAskIDs(asks []*model.Ask) []string {
+	askIDs := make([]string, 0, len(asks))
+	seen := make(map[string]struct{}, len(asks))
+	for _, ask := range asks {
+		if _, exists := seen[ask.ID]; !exists {
+			seen[ask.ID] = struct{}{}
+			askIDs = append(askIDs, ask.ID)
+		}
+	}
+	return askIDs
+}
+
+// applyOpenedEventIDs stamps each ask with its identity event. An ask the query answered none
+// for has no identity to serve, so the read fails rather than answering an ask without one.
+func applyOpenedEventIDs(asks []*model.Ask, openedEventIDs map[string]int64) error {
 	for _, ask := range asks {
 		openedEventID, ok := openedEventIDs[ask.ID]
 		if !ok {

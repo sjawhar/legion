@@ -1,0 +1,90 @@
+# listener.yaml: the copy's Envoy listener, production's dispatch-listener at
+# its size (500m / 512Mi, request = limit) on production's listener image by digest, with an
+# environment written from scratch: the copy's NATS, without auth, and a random API token from the
+# run's Secret. ENVOY_NATS_REPLICAS=3 makes the listener create ENVOY_NOTIFICATIONS on three
+# replicas; cluster.sh starts it before Dispatch and checks the stream's replicas. The
+# Deployment starts at 0 replicas; cluster.sh scales it. cluster.sh fills every placeholder.
+apiVersion: v1
+kind: Service
+metadata:
+  name: listener
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+spec:
+  type: ClusterIP
+  selector:
+    dispatch-loadtest/run: __RUN_ID__
+    dispatch-loadtest/role: listener
+  ports:
+    - name: http
+      port: 9020
+      targetPort: 9020
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: listener
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      dispatch-loadtest/run: __RUN_ID__
+      dispatch-loadtest/role: listener
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: dispatch-loadtest
+        dispatch-loadtest/run: __RUN_ID__
+        dispatch-loadtest/role: listener
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        # The image's entrypoint is envoy-listener.
+        - name: envoy-listener
+          image: __LISTENER_IMAGE__
+          env:
+            - name: PORT
+              value: "9020"
+            - name: ENVOY_LISTEN_HOST
+              value: 0.0.0.0
+            - name: ENVOY_MACHINE_ID
+              value: loadtest
+            - name: NATS_URLS
+              value: nats://nats.__NAMESPACE__.svc:4222
+            - name: ENVOY_ALLOW_REMOTE_NATS
+              value: "1"
+            - name: ENVOY_NATS_REPLICAS
+              value: "3"
+            - name: ENVOY_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: listener-credentials
+                  key: ENVOY_API_TOKEN
+          ports:
+            - name: http
+              containerPort: 9020
+          readinessProbe:
+            exec:
+              command: [curl, -fsS, http://127.0.0.1:9020/healthz]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 1Gi

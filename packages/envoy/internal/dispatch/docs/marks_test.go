@@ -894,7 +894,8 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 
 // An anchored comment writes its quote mark and its margin projection inside the comment's own
 // transaction. Neither changes the document's content, so the settlement after them records no
-// version: a version no edit produced would stale an approval pinned to the latest one.
+// version: a version no edit produced would be one, and over an approved document a carried
+// approval, that nothing explains.
 func TestTransactionalMarkWritesSettleWithoutAVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour

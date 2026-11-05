@@ -1127,13 +1127,14 @@ describe("dispatch_doc_edit's decision block checks", () => {
 });
 
 // The server sends `superseded_approval` only on the write that replaced a person's approved
-// version, so the line is about that one write: what it stored, whose approval it staled, and
-// what the reader does next. The negative is the ordinary case - a write on a document nobody
-// approved, one whose approval was already stale, and one whose version carried that approval
-// forward all arrive here with the field absent, and print nothing.
+// version, so the line is about that one write: what it stored, whose approval it staled, how that
+// approval comes back, and what the reader does next. The negative is the ordinary case - a write
+// on a document nobody approved, one whose approval was already stale, and one whose version
+// carried that approval forward (an answer to a decision block, or text the approved version held
+// exactly, an undo among them) all arrive here with the field absent, and print nothing.
 describe("a document write that superseded a person's approval", () => {
   const supersededLine =
-    "Stored version 15, superseding version 14, which alice approved. That approval is stale until someone approves version 15, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with `dispatch request-approval`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.";
+    "Stored version 15, superseding version 14, which alice approved. That approval is stale until someone approves version 15 or a later write stores the text of version 14 again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with `dispatch request-approval`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.";
   const superseded = { approved_version: 14, version: 15, approved_by: "alice" };
 
   test.each([
