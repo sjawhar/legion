@@ -7,14 +7,25 @@
 // (sjawhar/legion#2519). What a row here holds the main thread for is measured by
 // `main-thread-hold.ts`, which `nested-directive.e2e.ts` measures its own two rows with, so one
 // instrument and one bound answer for both (sjawhar/legion#2612).
-import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
 // engine around it (`markdown-engine.ts`) is a browser module this spec's process cannot load.
-// The two shortest rows below sit one character under it, so they prove the body the page parses
-// on its own thread stays inside the same bound as the ones the worker takes.
+// It is no rule over the rows below: every body here is a stored comment, message or reply, and
+// a stored text is drawn from the tree the server read it into and parsed nowhere, whatever its
+// length (sjawhar/legion#2712). What it still gives the table is a size. The two shortest rows
+// sit one character under it, which is the longest body the page would ever have parsed on its
+// own thread, so the table spans from there to the comment cap.
 import { markdownWorkerThreshold } from "../web/src/features/refs/markdown-worker-threshold";
-import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createMessage,
+  createProject,
+  getIssue,
+  putIssueState,
+} from "./api";
 import {
   bracketRun,
   calloutBracketRun,
@@ -35,6 +46,15 @@ declare global {
     /** How far the reader's own scroll moved the page, once `scrollOnTheFirstBatch` has run it;
      *  0 until then. */
     __heavyBodiesReaderScrolled?: number;
+    /** When each batch of a sliced paint reached the page, on the page's own clock
+     *  (`watchTheFill`). */
+    __heavyBodiesBatches?: number[];
+    /** Where Jump to latest placed the newest card, read in the page the moment the reader took
+     *  it (`jumpToLatestOnTheFirstBatch`); `undefined` until then. */
+    __heavyBodiesJumpPlaced?: number;
+    /** When the reader pressed the mouse, on the page's own clock (`recordTheReadersPress`);
+     *  0 until they do. */
+    __heavyBodiesPressedAt?: number;
   }
 }
 
@@ -44,14 +64,12 @@ const agent = {
 };
 
 /**
- * The parse worker's own chunk, as Vite names a module worker's bundle - the diagram renderer
- * already ships `mermaid-render.worker-<hash>.js` from
- * `new Worker(new URL("./mermaid-render.worker.ts", import.meta.url), { type: "module" })`. The
- * three rows that hold or refuse the worker's answer address the worker by this URL, so the
- * implementation must bundle the parse worker as its own chunk named from
- * `markdown-parse.worker.ts`; nothing else here depends on how the worker is built.
+ * The element a sliced paint is filling: it carries the pending marker from before its first
+ * batch until after its last, whether or not the reader was ever shown pending text
+ * (`useRenderedMarkdown.tsx`). A stored body is never shown as text - the server's tree is drawn
+ * in the commit that mounts it - so this mark is all that says a body is still landing.
  */
-const workerChunk = /markdown-parse\.worker[^/]*\.js(\?.*)?$/;
+const fillingBody = "[data-markdown-pending]";
 
 /** How many items `- x\n` repeated to one character under the worker's threshold spells: the
  *  last one is cut short of its newline and is a list item all the same. Derived, so the row
@@ -90,42 +108,64 @@ function textLength(element: Locator): Promise<number> {
   return element.evaluate((node) => node.textContent?.length ?? 0);
 }
 
-interface HeldWorker {
-  /** Lets the held chunk through, so the worker loads and answers. */
-  readonly release: () => void;
-  /** Whether the page has asked for the worker's chunk at all. */
-  readonly requested: () => boolean;
+/**
+ * Records when each batch of a sliced paint reached the page, on the page's own clock, so a row
+ * can say that the body landed across tasks and name the window it measured.
+ *
+ * A `MutationObserver` is what sees a batch rather than a poll from this process: each batch is
+ * a task of its own (`paintAcrossTasks` in `useRenderedMarkdown.tsx`), and the whole fill of an
+ * 8,000-item list is a few hundred milliseconds. It watches the document, not the body: a body
+ * that has yet to arrive is not in the page when this is installed, and a stored one starts
+ * filling in the tasks after the commit that mounted it, with nothing to hold it up.
+ */
+async function watchTheFill(page: Page): Promise<void> {
+  await page.addInitScript((filling) => {
+    const batches: number[] = [];
+    window.__heavyBodiesBatches = batches;
+    new MutationObserver((records) => {
+      for (const record of records) {
+        if (
+          record.addedNodes.length > 0 &&
+          record.target instanceof Element &&
+          record.target.closest(filling) !== null
+        ) {
+          batches.push(Date.now());
+          return;
+        }
+      }
+    }).observe(document, { childList: true, subtree: true });
+  }, fillingBody);
+}
+
+/** Every batch of a sliced paint the page has seen, as `watchTheFill` recorded it. */
+function batchesOfTheFill(page: Page): Promise<readonly number[]> {
+  return page.evaluate(() => window.__heavyBodiesBatches ?? []);
 }
 
 /**
- * Holds the parse worker's chunk in flight, so every long body on the page stays pending until
- * the row lets it through. The route is on the context, not the page: a module worker's own
- * script is fetched for the page that created it, and the context catches it whichever way the
- * engine attributes it.
+ * The body landed across tasks, which is the window each row below is about: the reader's place,
+ * their own scrolling and their selection all have to survive the batches a long body arrives
+ * in. A document of fewer nodes than one batch reaches the page in a single task and leaves no
+ * such window (`paintsAcrossTasks` in `useRenderedMarkdown.tsx`), so a row that met none of it
+ * measured nothing and reds here rather than passing quietly. The count and the span are kept on
+ * the result either way: a runner that lands an 8,000-item list in two batches is read there
+ * rather than as a silent green.
  */
-async function holdTheWorkerChunk(context: BrowserContext): Promise<HeldWorker> {
-  let letThrough = (): void => {};
-  const held = new Promise<void>((resolve) => {
-    letThrough = resolve;
+async function expectTheBodyFilledAcrossTasks(page: Page): Promise<void> {
+  const batches = await batchesOfTheFill(page);
+  test.info().annotations.push({
+    description:
+      batches.length === 0
+        ? "no batch of a sliced paint reached the page"
+        : `${batches.length} batches over ${(batches.at(-1) ?? 0) - (batches[0] ?? 0)} ms`,
+    type: "the long body's fill",
   });
-  let asked = false;
-  await context.route(workerChunk, async (route) => {
-    asked = true;
-    await held;
-    await route.continue();
-  });
-  return { release: letThrough, requested: () => asked };
-}
-
-/** The page asked for the worker's chunk, which is what holding or refusing it can act on. */
-async function expectTheWorkerWasAskedFor(held: HeldWorker): Promise<void> {
-  await expect
-    .poll(() => held.requested(), {
-      message:
-        "the page never asked for a markdown-parse.worker chunk: a long body is still parsed on " +
-        "the reader's own thread",
-    })
-    .toBe(true);
+  expect(
+    batches.length,
+    "the long body reached the page in one task, so none of the reader's own work happened " +
+      "while it was landing: a stored body of 8,000 items is painted in slices " +
+      "(`paintsAcrossTasks` in `useRenderedMarkdown.tsx`)"
+  ).toBeGreaterThan(1);
 }
 
 async function seedIssue(title: string): Promise<{ key: string }> {
@@ -228,15 +268,15 @@ const rows: readonly Row[] = [
 // shows a two-line preview of the body (`ThreadCard`), open it shows the body itself. The
 // reference a reader follows to a comment - `/issues/<key>/comments/<id>` - lands on the
 // Conversation tab with that thread open, so these rows measure what a reader who followed one
-// waits for: both of the card's parses of the body, preview and body, from the first comments GET.
+// waits for: both of the card's draws of the body, preview and body, from the first comments GET.
 for (const row of rows) {
   // SLOW(>=2s): the draw is the measurement. Each row of the table seeds its own body, opens a
   // page that has loaded nothing and waits for the whole formatted shape - the comments GET of
-  // a body up to the comment cap, the parse (the worker's, or the page's own for the two bodies
-  // under its threshold) and the paint that attaches as many as 16,000 elements in batches -
-  // and the hold it asserts is read over exactly that. The heaviest body is 32,000 characters,
-  // which is what a reader is given to draw and what the bound is about, so no part of this is
-  // fixture a faster seed could take out.
+  // a body up to the comment cap, the draw of the tree it arrived with - no body here is parsed,
+  // in the worker or on the page's own thread - and the paint that attaches as many as 16,000
+  // elements in batches - and the hold it asserts is read over exactly that. The heaviest body
+  // is 32,000 characters, which is what a reader is given to draw and what the bound is about,
+  // so no part of this is fixture a faster seed could take out.
   test(`Conversation draws a comment of ${row.name} without holding the main thread for a second`, async ({
     browser,
   }) => {
@@ -421,57 +461,93 @@ async function atRest(
   return place;
 }
 
+/**
+ * How many short turns the reader has read before the long one arrives. Enough that the long
+ * turn, which is the newest and so the first card in the document, stays wholly above the
+ * reader's window even after they scroll back towards it by 200 px
+ * (`scrollOnTheFirstBatch`): a body the reader can see is left where it is as it fills, since
+ * its own top does not move and that is where they read from, and only a body above them is put
+ * back for (`keepTheReadersPlace` in `useRenderedMarkdown.tsx`). Twelve turns leave 724 px
+ * between the two in Chromium at 1280x720 (measured), 80 px of it above the window, which a
+ * reader scrolling back crosses; these leave some 900 px above it.
+ */
+const readTurns = 24;
+
+/**
+ * A Conversation of `readTurns` short turns the reader has already read, with every card of it in
+ * the page: what the long turn each row below publishes arrives above. Answers the issue and the
+ * turn cards, newest first.
+ *
+ * They are messages rather than comments because the Conversation draws a message's body whole,
+ * where a comment card shows a two-line preview until its thread is opened (`ThreadCard`), and
+ * the body drawn whole is the one that fills in slices. The conversation is marked read before
+ * the page opens it, so no card ever carries a `New` mark the page would take back off it: the
+ * turn that arrives next is the only unread one, and its own mark is inside the card that
+ * arrives with it (`e2e/conversation.e2e.ts` reads the same shape).
+ */
+async function aConversationTheReaderHasRead(
+  page: Page,
+  title: string
+): Promise<{ readonly cards: Locator; readonly issue: { readonly key: string } }> {
+  const issue = await seedIssue(title);
+  for (let turn = 1; turn <= readTurns; turn += 1) {
+    await createMessage(issue.key, { body: `Turn ${turn} is short and already formatted.` }, agent);
+  }
+  await putIssueState(issue.key, { last_read_seq: (await getIssue(issue.key)).last_seq });
+  await page.goto(`/issues/${issue.key}/conversation`);
+  const cards = page.locator('[data-turn^="message:"]');
+  await expect(cards).toHaveCount(readTurns);
+  return { cards, issue };
+}
+
 // The reader's place is proven in Chromium and WebKit: the compensation reads layout the two
-// engines measure and anchor differently.
-// SLOW(>=2s): the row holds the body pending, reads the reader's place once the page has stopped
-// moving - 600 ms of one answer, since a deep link's own `New` marks relayout the document after
-// it lands (`atRest`) - and only then lets the 8,000 items format above that place. The late
-// paint it is about is that formatting, so the row pays a whole draw of 16,000 elements after a
-// whole load.
-test("a long comment above the reader keeps the comment they are reading where it was when it formats", async ({
+// engines measure and anchor differently. This file runs in each engine's own `-alone` project,
+// where the clock rows have the machine to themselves (`e2e/playwright.config.ts`), so those are
+// the project names a row of it can run under.
+// SLOW(>=2s): the row loads a Conversation of `readTurns` turns, waits for it to come to rest -
+// 600 ms of one answer (`atRest`) - and only then lets a message of 8,000 items arrive above the
+// reader. What it is about is that message filling, so the row pays a whole draw of 16,000
+// elements after a whole load.
+test("a long message arriving above the reader keeps the turn they are reading where it was while it fills", async ({
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
+    testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
     "the reader's place is proven in Chromium and WebKit"
   );
-  const issue = await seedIssue("A late paint above the reader");
-  for (let turn = 1; turn <= 12; turn += 1) {
-    await createComment(issue.key, { body: `Turn ${turn} is short and already formatted.` }, agent);
-  }
-  // The newest card is the first in the document, so the long body sits above every other turn;
-  // its own deep link lands with its thread open, which is where the body itself is drawn.
-  const long = await createComment(issue.key, { body: plainList }, agent);
-
   const alice = await asUser(browser, "alice");
   try {
-    const held = await holdTheWorkerChunk(alice);
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/comments/${long.id}`);
-    const cards = page.locator('[data-turn^="comment:"]');
-    await expect(cards).toHaveCount(13);
-    const longCard = cards.first();
-    await expect(longCard.locator("[data-markdown-pending]")).toHaveCount(1);
-    await expectTheWorkerWasAskedFor(held);
+    await watchTheFill(page);
+    const { cards, issue } = await aConversationTheReaderHasRead(
+      page,
+      "A late fill above the reader"
+    );
 
     const reading = cards.last();
     await reading.scrollIntoViewIfNeeded();
     await expect(reading).toBeVisible();
     const before = await atRest(
       async () => (await reading.boundingBox())?.y,
-      "the comment the reader is on"
+      "the turn the reader is on"
     );
-    expect(before, "the comment the reader is on is on screen").not.toBeUndefined();
+    expect(before, "the turn the reader is on is on screen").not.toBeUndefined();
 
-    held.release();
+    // The newest card is the first in the document, so the arriving body sits above every turn
+    // the reader has read; its 8,000 items land in the tasks after the commit that inserted it,
+    // which is what the reader's place has to survive.
+    await createMessage(issue.key, { body: plainList }, agent);
+    const longCard = cards.first();
+    await expect(cards).toHaveCount(readTurns + 1);
     await expect(markdownBody(longCard).locator("li")).toHaveCount(8_000);
     await expectSettled(longCard);
+    await expectTheBodyFilledAcrossTasks(page);
 
     const after = (await reading.boundingBox())?.y;
-    expect(after, "the comment the reader is on is still on screen").not.toBeUndefined();
+    expect(after, "the turn the reader is on is still on screen").not.toBeUndefined();
     expect(
       Math.abs((after ?? 0) - (before ?? 0)),
-      "the comment the reader was on moved when the long body above it formatted"
+      "the turn the reader was on moved while the long body above it filled"
     ).toBeLessThan(2);
   } finally {
     await alice.close();
@@ -479,92 +555,94 @@ test("a long comment above the reader keeps the comment they are reading where i
 });
 
 /**
- * Scrolls the page once, the moment the first batch of the pending body reaches it, so the
+ * Scrolls the page once, the moment the first batch of a filling body reaches it, so the
  * reader's scroll lands between two batches of the paint rather than before or after the whole
- * of it. A `MutationObserver` on the pending element is what sees the batch; `window.scrollBy`
+ * of it. A `MutationObserver` is what sees that batch, and it watches the document rather than
+ * the body: the turn whose body this is has not arrived when the row installs it. `window.scrollBy`
  * moves the page exactly as a wheel, a key or a drag of the scrollbar does, and what the page
  * is given to tell them apart by is the same in each case: its own scroll position changed, and
- * the content under the formatting body with it.
+ * the content under the filling body with it.
  */
 async function scrollOnTheFirstBatch(page: Page, by: number): Promise<void> {
-  await page.evaluate((distance) => {
-    const pending = document.querySelector("[data-markdown-pending]");
-    if (pending === null) {
-      throw new Error("no body is waiting on the parse worker");
-    }
-    window.__heavyBodiesReaderScrolled = 0;
-    const observer = new MutationObserver(() => {
-      if (pending.childElementCount === 0) {
-        return;
-      }
-      observer.disconnect();
-      const from = window.scrollY;
-      window.scrollBy(0, distance);
-      window.__heavyBodiesReaderScrolled = window.scrollY - from;
-    });
-    observer.observe(pending, { childList: true });
-  }, by);
+  await page.evaluate(
+    ({ distance, filling }) => {
+      window.__heavyBodiesReaderScrolled = 0;
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          if (
+            record.addedNodes.length === 0 ||
+            !(record.target instanceof Element) ||
+            record.target.closest(filling) === null
+          ) {
+            continue;
+          }
+          observer.disconnect();
+          const from = window.scrollY;
+          window.scrollBy(0, distance);
+          window.__heavyBodiesReaderScrolled = window.scrollY - from;
+          return;
+        }
+      });
+      observer.observe(document, { childList: true, subtree: true });
+    },
+    { distance: by, filling: fillingBody }
+  );
 }
 
-// A reader does not sit still for the ~32 batches a body of 8,000 items lands in. With the
+// A reader does not sit still for the ~48 batches a body of 8,000 items lands in. With the
 // reader's place read once before the first batch and put back after the last, a reader who
-// scrolled by S while the body formatted was carried back by exactly S - the correction for the
+// scrolled by S while the body landed was carried back by exactly S - the correction for the
 // body's growth swallowed their own scroll whole (sjawhar/legion#2519). The row scrolls between
 // two batches and asks for exactly one thing: the card they are reading ends where their scroll
 // put it, with the rest of the body still landing above it.
 // SLOW(>=2s): the scroll has to land between two batches of the paint, so the row waits out the
-// page coming to rest (600 ms, `atRest`), then the ~32 batches the 8,000 items arrive in: the
-// window it measures exists only while that draw runs, and a shorter body has no such window.
-test("a reader who scrolls while a long body above them formats keeps where they scrolled to", async ({
+// page coming to rest (600 ms, `atRest`), then the batches the 8,000 items arrive in: the window
+// it measures exists only while that fill runs, and a shorter body has no such window.
+test("a reader who scrolls while a long body above them fills keeps where they scrolled to", async ({
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
+    testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
     "the reader's place is proven in Chromium and WebKit"
   );
-  const issue = await seedIssue("A reader scrolling through a late paint");
-  for (let turn = 1; turn <= 12; turn += 1) {
-    await createComment(issue.key, { body: `Turn ${turn} is short and already formatted.` }, agent);
-  }
-  const long = await createComment(issue.key, { body: plainList }, agent);
-
   const alice = await asUser(browser, "alice");
   try {
-    const held = await holdTheWorkerChunk(alice);
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/comments/${long.id}`);
-    const cards = page.locator('[data-turn^="comment:"]');
-    await expect(cards).toHaveCount(13);
-    const longCard = cards.first();
-    await expect(longCard.locator("[data-markdown-pending]")).toHaveCount(1);
-    await expectTheWorkerWasAskedFor(held);
+    await watchTheFill(page);
+    const { cards, issue } = await aConversationTheReaderHasRead(
+      page,
+      "A reader scrolling through a late fill"
+    );
 
     const reading = cards.last();
     await reading.scrollIntoViewIfNeeded();
     await expect(reading).toBeVisible();
     const before = await atRest(
       async () => (await reading.boundingBox())?.y,
-      "the comment the reader is on"
+      "the turn the reader is on"
     );
-    expect(before, "the comment the reader is on is on screen").not.toBeUndefined();
+    expect(before, "the turn the reader is on is on screen").not.toBeUndefined();
 
-    // Back up through the turns they have read: the deep link left them at the end of the page,
-    // where scrolling further down moves nothing.
+    // Back up through the turns they have read: the reader is at the end of the page, where
+    // scrolling further down moves nothing.
     await scrollOnTheFirstBatch(page, -200);
-    held.release();
+    await createMessage(issue.key, { body: plainList }, agent);
+    const longCard = cards.first();
+    await expect(cards).toHaveCount(readTurns + 1);
     await expect(markdownBody(longCard).locator("li")).toHaveCount(8_000);
     await expectSettled(longCard);
+    await expectTheBodyFilledAcrossTasks(page);
 
     const scrolled = await page.evaluate(() => window.__heavyBodiesReaderScrolled ?? 0);
     expect(
       Math.abs(scrolled),
-      "the reader scrolled while the body above them formatted"
+      "the reader scrolled while the body above them filled"
     ).toBeGreaterThan(0);
     const after = (await reading.boundingBox())?.y;
-    expect(after, "the comment the reader is on is still on screen").not.toBeUndefined();
+    expect(after, "the turn the reader is on is still on screen").not.toBeUndefined();
     expect(
       Math.abs((after ?? 0) - ((before ?? 0) - scrolled)),
-      "the reader was carried off the place they scrolled to while the body above them formatted"
+      "the reader was carried off the place they scrolled to while the body above them filled"
     ).toBeLessThan(2);
   } finally {
     await alice.close();
@@ -572,9 +650,8 @@ test("a reader who scrolls while a long body above them formats keeps where they
 });
 
 /** How far the newest card's top sits under the docked composer, which is where Jump to latest
- *  places the reader. The deep link this row lands on also opens the comment in the margin, whose
- *  card carries a reply composer of the same name, so the docked one - the first in the page - is
- *  the one named here. */
+ *  places the reader. A card opened in the margin carries a reply composer of the same name, so
+ *  the docked one - the first in the page - is the one named here. */
 async function underTheComposer(page: Page): Promise<number> {
   const composer = await page.getByRole("form", { name: "Comment composer" }).first().boundingBox();
   const newest = await page.locator("[data-turn]").first().boundingBox();
@@ -584,143 +661,198 @@ async function underTheComposer(page: Page): Promise<number> {
   return newest.y - (composer.y + composer.height);
 }
 
-// SLOW(>=2s): a reader reaches Jump to latest only from a page of thirteen turns they have
-// scrolled back through, and the place it gives them is read once the page has come to rest
-// (600 ms, `atRest`). What the row proves - that the place survives the late paint - is then the
-// 8,000 items formatting under the composer, which is a whole draw of 16,000 elements.
-test("Jump to latest keeps a newest long comment under the composer when it formats late", async ({
+/**
+ * Takes Jump to latest in the page the moment the first batch of a filling body reaches it, and
+ * records where it placed the newest card - its top under the composer's bottom, which is what
+ * `underTheComposer` reads from this process.
+ *
+ * The click is the page's own because the window is a few tasks wide: the whole fill of an
+ * 8,000-item list is a few hundred milliseconds, and a click driven from here - which waits for
+ * the button to be actionable and scrolls it into view first - would land once the body had
+ * finished landing. What the row is about is the place a reader is given while the newest body
+ * is still filling under it.
+ */
+async function jumpToLatestOnTheFirstBatch(page: Page): Promise<void> {
+  await page.evaluate((filling) => {
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (
+          record.addedNodes.length === 0 ||
+          !(record.target instanceof Element) ||
+          record.target.closest(filling) === null
+        ) {
+          continue;
+        }
+        observer.disconnect();
+        const jump = document.querySelector<HTMLElement>('[data-testid="jump-to-latest"]');
+        jump?.click();
+        const composer = document
+          .querySelector('[aria-label="Comment composer"]')
+          ?.getBoundingClientRect();
+        const newest = document.querySelector("[data-turn]")?.getBoundingClientRect();
+        if (jump !== null && composer !== undefined && newest !== undefined) {
+          window.__heavyBodiesJumpPlaced = newest.y - (composer.y + composer.height);
+        }
+        return;
+      }
+    });
+    observer.observe(document, { childList: true, subtree: true });
+  }, fillingBody);
+}
+
+// SLOW(>=2s): a reader reaches Jump to latest only from a page of turns they have scrolled back
+// through, so the row loads `readTurns` of them, scrolls back through them and waits for the page
+// to come to rest (600 ms of one answer, `atRest`) before a longer one of 8,000 items arrives.
+// What it proves - that the place Jump to latest gives survives the fill - is then those 8,000
+// items landing under the composer, which is a whole draw of 16,000 elements.
+test("Jump to latest keeps a newest long turn under the composer while it fills", async ({
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
+    testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
     "the reader's place is proven in Chromium and WebKit"
   );
-  const issue = await seedIssue("A late paint at the newest turn");
-  for (let turn = 1; turn <= 12; turn += 1) {
-    await createComment(issue.key, { body: `Turn ${turn} is short and already formatted.` }, agent);
-  }
-  const long = await createComment(issue.key, { body: plainList }, agent);
-
   const alice = await asUser(browser, "alice");
   try {
-    const held = await holdTheWorkerChunk(alice);
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/comments/${long.id}`);
-    const newest = page.locator('[data-turn^="comment:"]').first();
-    await expect(page.locator('[data-turn^="comment:"]')).toHaveCount(13);
-    await expect(newest.locator("[data-markdown-pending]")).toHaveCount(1);
-    await expectTheWorkerWasAskedFor(held);
+    await watchTheFill(page);
+    const { cards, issue } = await aConversationTheReaderHasRead(
+      page,
+      "A late fill at the newest turn"
+    );
 
-    // The reader reads back through the older turns, which is where Jump to latest appears, and
-    // then takes it: it places the newest card immediately under the docked composer.
+    // The reader reads back through the older turns, which is where Jump to latest appears once
+    // a newer one arrives.
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-    const jump = page.getByTestId("jump-to-latest");
-    await expect(jump).toBeVisible();
-    await jump.click();
-    const placed = await atRest(() => underTheComposer(page), "the newest card's place");
-    expect(placed, "Jump to latest placed the newest card").not.toBeUndefined();
+    await atRest(
+      () => page.evaluate(() => window.scrollY),
+      "the page the reader scrolled back through"
+    );
 
-    held.release();
+    await jumpToLatestOnTheFirstBatch(page);
+    await createMessage(issue.key, { body: plainList }, agent);
+    const newest = cards.first();
+    await expect(cards).toHaveCount(readTurns + 1);
     await expect(markdownBody(newest).locator("li")).toHaveCount(8_000);
     await expectSettled(newest);
+    await expectTheBodyFilledAcrossTasks(page);
 
+    const placed = await page.evaluate(() => window.__heavyBodiesJumpPlaced);
+    expect(
+      placed,
+      "the reader never took Jump to latest while the newest body was filling"
+    ).not.toBeUndefined();
     expect(
       Math.abs((await underTheComposer(page)) - (placed ?? 0)),
-      "the newest card left the place Jump to latest gave it when it formatted"
+      "the newest card left the place Jump to latest gave it while its body filled"
     ).toBeLessThan(2);
   } finally {
     await alice.close();
   }
 });
 
-// A reader who opens a long body reads its text while the worker is still parsing: it is in the
-// page as text, and it is theirs to select and copy. Nothing covers it and nothing turns
-// selection off, so a drag across the pending card answers with the body's own words.
-// SLOW(>=2s): the body has to be in the page as pending text for the drag to cross, so the row
-// loads the card with the worker's chunk held, drags across it, and then lets that same body
-// through to its 8,000 items - the selection is only worth proving of a body that still ends
-// formatted, and formatting 8,000 items is the draw it is.
-test("a long body's text can be selected while the worker still owes its formatting", async ({
+/** When the reader pressed the mouse, on the page's own clock, so a row can say which batches of
+ *  a fill landed after their drag had begun. */
+async function recordTheReadersPress(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    window.__heavyBodiesPressedAt = 0;
+    document.addEventListener(
+      "mousedown",
+      () => {
+        window.__heavyBodiesPressedAt = Date.now();
+      },
+      { capture: true, once: true }
+    );
+  });
+}
+
+/** How long the row below waits for a body to begin filling before it says none did. Well inside
+ *  the suite's own test timeout, so a run where nothing fills reads as this row's reason rather
+ *  than as a timeout in the middle of its drag. */
+const REACH_THE_FILL_MS = 15_000;
+
+// A reader who opens a long body reads the part of it that has landed while the rest is still
+// landing: it is in the page as the list it is, and it is theirs to select and copy. Nothing
+// covers it and nothing turns selection off, so a drag across a body still filling answers with
+// the body's own words.
+// SLOW(>=2s): the drag has to cross the body between two batches of its fill, so the row opens
+// the card, waits for the first batch, drags from where that batch put the body, and then waits
+// out the rest of the 8,000 items - the selection is only worth proving of a body that still
+// ends formatted, and formatting 8,000 items is the draw it is.
+test("a long body's text can be selected while its formatting is still landing", async ({
   browser,
 }) => {
-  const issue = await seedIssue("A pending body a reader copies");
+  const issue = await seedIssue("A filling body a reader copies");
   const comment = await createComment(issue.key, { body: plainList }, agent);
 
   const alice = await asUser(browser, "alice");
   try {
-    const held = await holdTheWorkerChunk(alice);
     const page = await alice.newPage();
+    await watchTheFill(page);
+    await recordTheReadersPress(page);
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     const card = page.locator('[data-turn^="comment:"]');
     await expect(card).toHaveCount(1);
-    const pending = card.locator("[data-markdown-pending]").first();
-    await expect(pending).toHaveCount(1);
-    await expectTheWorkerWasAskedFor(held);
-    await expect(pending).toContainText("- x");
-
-    await pending.scrollIntoViewIfNeeded();
-    const box = await pending.boundingBox();
-    if (box === null) {
-      throw new Error("the pending body is not on screen");
+    // Where the drag starts, answered by the page in the task the first batch landed in: every
+    // read from this process costs a round trip, and what the drag has to land inside is the
+    // rest of the fill. The body is taller than the window, so its top sits at the top of the
+    // page, under the docked composer: the drag starts below that, inside the body itself. A
+    // body that never fills leaves this waiting out the row's own deadline, so what it answers
+    // then is the row's own reason rather than a bare timeout.
+    const start = await page
+      .waitForFunction(
+        (filling) => {
+          const body = document.querySelector(filling);
+          if (body === null || body.firstElementChild === null) {
+            return null;
+          }
+          const box = body.getBoundingClientRect();
+          const composer = document
+            .querySelector('[aria-label="Comment composer"]')
+            ?.getBoundingClientRect();
+          const under = composer === undefined ? 4 : composer.y + composer.height + 4;
+          return { x: box.x + 4, y: Math.max(box.y + 4, under) };
+        },
+        fillingBody,
+        { polling: "raf", timeout: REACH_THE_FILL_MS }
+      )
+      .catch(() => {
+        throw new Error(
+          "no body in the page was ever filling, so the drag had nothing to cross while it " +
+            "landed: a stored body of 8,000 items is painted in slices (`paintsAcrossTasks` in " +
+            "`useRenderedMarkdown.tsx`)"
+        );
+      });
+    const from = await start.jsonValue();
+    if (from === null) {
+      throw new Error("the page answered no place to start the drag from");
     }
-    // The pending body is one run of text taller than the window, so its top sits at the top of
-    // the page, under the docked composer: the drag starts below that, inside the body itself.
-    const composer = await page
-      .getByRole("form", { name: "Comment composer" })
-      .first()
-      .boundingBox();
-    const under = composer === null ? 4 : composer.y + composer.height + 4;
-    const from = { x: box.x + 4, y: Math.max(box.y + 4, under) };
     await page.mouse.move(from.x, from.y);
     await page.mouse.down();
     await page.mouse.move(from.x + 120, from.y + 28, { steps: 8 });
     await page.mouse.up();
 
     const selected = await page.evaluate(() => window.getSelection()?.toString() ?? "");
-    expect(selected, "a drag across the pending body selected none of it").toContain("x");
+    expect(selected, "a drag across the filling body selected none of it").toContain("x");
     expect(selected.trim(), "the selection holds something other than the body").toMatch(
       /^[-x\s]+$/
     );
 
-    held.release();
     await expect(markdownBody(card).locator("li")).toHaveCount(8_000);
     await expectSettled(card);
-  } finally {
-    await alice.close();
-  }
-});
-
-// A worker that cannot be created, whose chunk fails to load, that crashes or that misses its
-// deadline falls back to parsing on the page, never to no formatting: the reader waits, and then
-// reads the body as a list. `data-markdown-fallback` keeps meaning only that the parser itself
-// refused the body, so it is absent here. This row measures no main-thread gap: the page is
-// doing on its own thread what the worker could not.
-// SLOW(>=2s): with the worker's chunk refused, the 8,000 items are parsed and painted on the
-// page's own thread, which is the slower of the two paths by design and the one this row is
-// here to prove still ends in a formatted list.
-test("a comment of 8,000 list items still ends formatted when the parse worker's chunk cannot load", async ({
-  browser,
-}) => {
-  const issue = await seedIssue("A worker chunk that never loads");
-  const comment = await createComment(issue.key, { body: plainList }, agent);
-
-  const alice = await asUser(browser, "alice");
-  try {
-    let asked = false;
-    await alice.route(workerChunk, async (route) => {
-      asked = true;
-      await route.abort();
-    });
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    const card = page.locator('[data-turn^="comment:"]');
-    await expect(card).toHaveCount(1);
-    await expect(markdownBody(card).locator("li")).toHaveCount(8_000);
-    await expectSettled(card);
+    // The drag crossed a body that was still being added to, which is what the row is about: a
+    // body already whole when the press landed answers with the same words and proves nothing of
+    // them.
+    const { batches, pressedAt } = await page.evaluate(() => ({
+      batches: window.__heavyBodiesBatches ?? [],
+      pressedAt: window.__heavyBodiesPressedAt ?? 0,
+    }));
     expect(
-      asked,
-      "the page never asked for a markdown-parse.worker chunk, so none was refused"
-    ).toBe(true);
+      batches.filter((at) => at >= pressedAt).length,
+      "the body had finished landing before the drag began, so the selection crossed a body " +
+        `nothing was being added to: ${batches.length} batches landed, the last of them ` +
+        `${pressedAt - (batches.at(-1) ?? 0)} ms before the press`
+    ).toBeGreaterThan(0);
   } finally {
     await alice.close();
   }

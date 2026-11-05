@@ -12,6 +12,11 @@
 // its whole paint had landed: the regression this change has now repeated twice
 // (sjawhar/legion#2519, `useRenderedMarkdown`).
 import { expect, type Page, test } from "@playwright/test";
+// `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
+// engine around it (`markdown-engine.ts`) is a browser module this spec's process cannot load.
+// The row at the end of this file sizes its turn by it, since a turn under it is parsed on the
+// page's own thread and asks for no worker chunk to refuse.
+import { markdownWorkerThreshold } from "../web/src/features/refs/markdown-worker-threshold";
 import { type FakeSession, setLiveSessions } from "./agents";
 import { publishAgentStreamFrame } from "./api";
 import { expectSettled, looseTextLength, markdownBody } from "./heavy-bodies-page";
@@ -245,7 +250,7 @@ const reachThePaintMs = 15_000;
  * So the stream waits for the page rather than for its own clock: no frame goes out until the
  * turn's body is being filled a batch at a time, and from there the frames land in a page with
  * a paint running - the opening body's own, which is 4,000 paragraphs in some sixteen batches
- * (`ATTACH_BATCH` in `MarkdownBody.tsx`), and then the paints the frames themselves bring.
+ * (`ATTACH_BATCH` in `useRenderedMarkdown.tsx`), and then the paints the frames themselves bring.
  *
  * Two other things end the wait, and both leave the guards below to red rather than passing a
  * row that measured nothing. A body painted whole - every block of it in one task, which is
@@ -418,6 +423,70 @@ test("a reader who opens the live view while a long turn streams is never shown 
         `${samples.length} recorded ones followed a frame published into its own paint, at ` +
         `${streamedParagraphs} paragraphs and ${streamedFrameGapMs} ms a frame`
     ).toBeGreaterThan(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * The parse worker's own chunk, as Vite names a module worker's bundle - the diagram renderer
+ * already ships `mermaid-render.worker-<hash>.js` from
+ * `new Worker(new URL("./mermaid-render.worker.ts", import.meta.url), { type: "module" })`. The
+ * row below addresses the worker by this URL, so the implementation must bundle the parse worker
+ * as its own chunk named from `markdown-parse.worker.ts`; nothing else here depends on how the
+ * worker is built.
+ */
+const workerChunk = /markdown-parse\.worker[^/]*\.js(\?.*)?$/;
+
+/** The paragraphs the turn below holds: enough that it is longer than `markdownWorkerThreshold`
+ *  and so the worker's to parse, since `paragraph <n>` and the blank line after it are at least
+ *  13 characters. A turn under that length is parsed on the page's own thread and asks for no
+ *  chunk to refuse. */
+const refusedChunkParagraphs = Math.ceil(markdownWorkerThreshold / "paragraph 0\n\n".length) + 50;
+
+// A worker that cannot be created, whose chunk fails to load, that crashes or that misses its
+// deadline falls back to parsing on the page, never to no formatting: the reader waits, and then
+// reads the turn as its paragraphs. `data-markdown-fallback` keeps meaning only that the parser
+// itself refused the body, so it is absent here. This row measures no main-thread gap: the page
+// is doing on its own thread what the worker could not.
+//
+// It belongs to this spec rather than to `heavy-bodies.e2e.ts`, where it was written, because a
+// live agent turn is the text the worker still parses: a stored comment, message or ask reply
+// arrives with the tree the server read it into and is parsed nowhere, whatever its length
+// (`markdown-engine.ts`), so no body of the Conversation, the Inbox or a hover card asks for the
+// worker's chunk at all (sjawhar/legion#2712).
+// SLOW(>=2s): with the worker's chunk refused, the turn is parsed and painted on the page's own
+// thread, which is the slower of the two paths by design and the one this row is here to prove
+// still ends in a formatted turn.
+test("a long streamed turn still ends formatted when the parse worker's chunk cannot load", async ({
+  browser,
+}) => {
+  const session = streamingSession.session_id;
+  await setLiveSessions([streamingSession]);
+  await publishAgentStreamFrame(
+    session,
+    { frames: [turnFrame(1, refusedChunkParagraphs, false)], session_id: session, v: 1 },
+    "replay"
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    let asked = false;
+    await alice.route(workerChunk, async (route) => {
+      asked = true;
+      await route.abort();
+    });
+    const page = await alice.newPage();
+    await page.goto(`/agents/${session}/live`);
+    const turns = page.getByTestId("agent-message-assistant");
+    await expect(turns).toHaveCount(1);
+    const turn = turns.last();
+    await expect(markdownBody(turn).locator("p")).toHaveCount(refusedChunkParagraphs);
+    await expectSettled(turn);
+    expect(
+      asked,
+      "the page never asked for a markdown-parse.worker chunk, so none was refused"
+    ).toBe(true);
   } finally {
     await alice.close();
   }
