@@ -30,12 +30,11 @@ func TestUnifiedInboxDocumentAnswerOverlapAndMentionExpansion(t *testing.T) {
  ('00000000-0000-0000-0000-000000000104','CORE-1','{"kind":"session","id":"agent"}','Mention expansion');
  insert into messages(id,author,body,target) values
  ('00000000-0000-0000-0000-000000000105','{"kind":"user","id":"bob"}','Private direct mention','session:other');
- insert into refs(from_kind,from_id,kind,to_kind,to_id,created_at) values
- ('message','00000000-0000-0000-0000-000000000104','mentions','person_mention','alice',now()),
- ('message','00000000-0000-0000-0000-000000000105','mentions','person_mention','alice',now());
- insert into block_refs(artifact_id,block_id,from_node,kind,to_kind,to_id,created_version) values
- ('00000000-0000-0000-0000-000000000100','part:one','CORE/artifact/notes#part:one','mentions','person_mention','alice',1),
- ('00000000-0000-0000-0000-000000000200','part:one','CORE-1/spec#part:one','mentions','person_mention','alice',1);
+ insert into identity_mentions(owner_kind,owner_id,from_kind,from_id,to_kind,to_id,created_at) values
+ ('message','00000000-0000-0000-0000-000000000104','message','00000000-0000-0000-0000-000000000104','person','alice',now()),
+ ('message','00000000-0000-0000-0000-000000000105','message','00000000-0000-0000-0000-000000000105','person','alice',now()),
+ ('artifact','00000000-0000-0000-0000-000000000100','block','CORE/artifact/notes#part:one','person','alice',now()),
+ ('artifact','00000000-0000-0000-0000-000000000200','block','CORE-1/spec#part:one','person','alice',now());
  `); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +102,7 @@ func TestInboxShadowCutoverRequiresEveryCompleteUTCUserDay(t *testing.T) {
  cross join (values('alice'),('bob')) people(person)`); err != nil {
 		t.Fatal(err)
 	}
-	report, err := readInboxShadowReport(ctx, database.Pool)
+	report, err := readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +112,7 @@ func TestInboxShadowCutoverRequiresEveryCompleteUTCUserDay(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update inbox_shadow_days set errors=1 where person='bob' and day=(statement_timestamp() at time zone 'UTC')::date-2`); err != nil {
 		t.Fatal(err)
 	}
-	report, err = readInboxShadowReport(ctx, database.Pool)
+	report, err = readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +122,7 @@ func TestInboxShadowCutoverRequiresEveryCompleteUTCUserDay(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update inbox_shadow_days set errors=0,max_gap_seconds=121 where person='bob'`); err != nil {
 		t.Fatal(err)
 	}
-	report, err = readInboxShadowReport(ctx, database.Pool)
+	report, err = readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}

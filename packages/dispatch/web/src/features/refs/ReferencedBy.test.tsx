@@ -54,6 +54,27 @@ afterEach(() => {
   restore = undefined;
 });
 
+test("a role endpoint has a readable source label", async () => {
+  const { getReferences, view } = renderPanel({
+    edges: [
+      {
+        created_at: createdAt,
+        direction: "in",
+        kind: "mentions",
+        node: { id: "reviewer", kind: "role" },
+        source_seq: 7,
+      },
+    ],
+    node: { id: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  expect(await within(panel).findByText("Role · reviewer")).toBeTruthy();
+});
+
 test("two blocks of one document version citing the node are two rows under that document, each linked to its block", async () => {
   const notes = "dispatch://OPS-1/artifact/notes-md";
   const consoleError = spyOn(console, "error");

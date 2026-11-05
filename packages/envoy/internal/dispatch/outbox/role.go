@@ -124,6 +124,24 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 				dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err, now)
 			}
 		}
+		// A role forward and a mention fallback use different listener dedupe keys.
+		// Leave a holder's copy to the forward, including a forward awaiting a retry.
+		kept := event.destinationsOf[:0]
+		for _, dest := range event.destinationsOf {
+			duplicate := false
+			if dest.label == "publish mention fallback to" {
+				for _, route := range event.destinationsOf {
+					if route.forward != nil && route.forward.holder == dest.id {
+						duplicate = true
+						break
+					}
+				}
+			}
+			if !duplicate {
+				kept = append(kept, dest)
+			}
+		}
+		event.destinationsOf = kept
 	}
 }
 

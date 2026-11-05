@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // Edge is a resolved identity mention, independent of any graph view.
@@ -22,10 +23,12 @@ const SourcesSQL = `select 'comment' as kind, c.id::text as id from comments c
     or exists (select 1 from comment_deliveries d where d.comment_id=c.id and d.created_at >= $1)
  union all select 'message', m.id::text from messages m
  where m.created_at >= $1 or exists (select 1 from message_deliveries d where d.message_id=m.id and d.created_at >= $1)
- union all select 'block', node_id from document_blocks where changed_at >= $1`
+ union all select 'block', d.node_id from document_blocks d
+ where d.changed_at >= $1 or exists (select 1 from artifact_versions v where v.artifact_id=d.artifact_id and v.created_at >= $1)`
 
-// Recorded reads the existing writers' records, not the graph or a re-parse of source text.
-// Routes are decoded from their recorded address, and session ownership from verified aliases.
+// Recorded reparses current source bodies and document versions independently of the
+// reference indexes. Explicit comment mention resolutions and verified session aliases
+// supplement those bodies; direct-message destinations are deliveries, not mentions.
 func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, error) {
 	set := map[Edge]struct{}{}
 	add := func(kind, id, targetKind, targetID string) {
@@ -33,28 +36,30 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 			set[Edge{kind, id, targetKind, targetID}] = struct{}{}
 		}
 	}
-	rows, err := q.Query(ctx, `select r.from_kind, r.from_id, r.to_kind, r.to_id from refs r
- join (`+SourcesSQL+`) s on s.kind=r.from_kind and s.id=r.from_id
- where r.to_kind in ('person_mention','session_mention','role_mention')
- union all select 'block', r.from_node, r.to_kind, r.to_id from block_refs r
- join document_blocks d on d.artifact_id=r.artifact_id and d.block_id=r.block_id
- where d.changed_at >= $1 and r.kind='mentions' and r.to_kind in ('person_mention','session_mention','role_mention')`, since)
+	rows, err := q.Query(ctx, `select s.kind,s.id,c.body from (`+SourcesSQL+`) s join comments c on s.kind='comment' and c.id::text=s.id
+	 union all select s.kind,s.id,m.body from (`+SourcesSQL+`) s join messages m on s.kind='message' and m.id::text=s.id`, since)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var e Edge
-		if err := rows.Scan(&e.FromKind, &e.FromID, &e.ToKind, &e.ToID); err != nil {
+		var kind, id, body string
+		if err := rows.Scan(&kind, &id, &body); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		e.ToKind = strings.TrimSuffix(e.ToKind, "_mention")
-		set[e] = struct{}{}
+		for _, ref := range text.Extract(body, "") {
+			if refs.IsIdentity(ref.Kind) {
+				add(kind, id, ref.Kind, text.TargetID(ref))
+			}
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	rows.Close()
+	if err := documentMentions(ctx, q, since, add); err != nil {
+		return nil, err
+	}
 	rows, err = q.Query(ctx, `select m.comment_id::text,m.target,m.resolved_session_id from comment_mentions m
  join (`+SourcesSQL+`) s on s.kind='comment' and s.id=m.comment_id::text`, since)
 	if err != nil {
@@ -79,9 +84,7 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 	}
 	rows.Close()
 	rows, err = q.Query(ctx, `select 'comment',d.comment_id::text,d.session_id,d.resolve_error from comment_deliveries d
- join (`+SourcesSQL+`) s on s.kind='comment' and s.id=d.comment_id::text where d.session_id <> ''
- union all select 'message',d.message_id::text,d.session_id,null::text from message_deliveries d
- join (`+SourcesSQL+`) s on s.kind='message' and s.id=d.message_id::text where d.session_id <> ''`, since)
+	 join (`+SourcesSQL+`) s on s.kind='comment' and s.id=d.comment_id::text where d.session_id <> ''`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -94,25 +97,6 @@ func Recorded(ctx context.Context, q refs.Queryer, since time.Time) ([]Edge, err
 		}
 		if failure == nil || !strings.HasPrefix(*failure, "no live session ") {
 			add(kind, id, "session", session)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows.Close()
-	rows, err = q.Query(ctx, `select m.id::text,m.target from messages m
- join (`+SourcesSQL+`) s on s.kind='message' and s.id=m.id::text where m.target is not null`, since)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var id, target string
-		if err := rows.Scan(&id, &target); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if route, err := model.ParseRoute(target); err == nil {
-			add("message", id, route.Kind, route.ID)
 		}
 	}
 	if err := rows.Err(); err != nil {

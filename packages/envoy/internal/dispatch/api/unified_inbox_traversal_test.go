@@ -44,7 +44,7 @@ func TestUnifiedInboxIncludesDepth64AndIgnoresAnOrphanCycle(t *testing.T) {
 	if err := observeInboxShadow(ctx, database.Pool, 0); err != nil {
 		t.Fatal(err)
 	}
-	report, err := readInboxShadowReport(ctx, database.Pool)
+	report, err := readInboxShadowReport(ctx, database.Pool, "")
 	if err != nil {
 		t.Fatal(err)
 	}

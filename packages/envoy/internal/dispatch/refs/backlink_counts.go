@@ -253,7 +253,9 @@ var backlinkArms = map[string][]backlinkArm{
 	// is pointed at by mentions alone, a reply naming the block of an ask, a comment or a
 	// message instead. The entry is present and empty so a block is counted from its mention
 	// arms rather than refused.
-	"block": {},
+	"block":  {},
+	"person": {},
+	"role":   {},
 	// A reply names the block it answers by node id, and the prefix of that id is what tells an
 	// ask's part from a comment's block, so each of these two arms carries the test the view's
 	// own arm carries. Both read comments_replies_to_block, partial on replies_to_block is not

@@ -7,7 +7,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-func TestRebuildAndOwedSweepRestoreDocumentIdentityMentionsAfterOldReindex(t *testing.T) {
+func TestDocumentIdentityMentionsSurviveOldReconciliation(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx := context.Background()
 	id := createOwedDocument(t, database, service, "", "identity-mentions", "Please read dispatch://people/alice", "")
@@ -25,16 +25,16 @@ func TestRebuildAndOwedSweepRestoreDocumentIdentityMentionsAfterOldReindex(t *te
 	if got := count(); got != 1 {
 		t.Fatalf("indexed mentions=%d", got)
 	}
-	// The old parser finds no identity reference; its reconciliation removes those rows
-	// while leaving an unchanged document's index version current.
-	if _, err := database.Pool.Exec(ctx, `delete from block_refs where artifact_id=$1 and to_kind='person_mention'`, id); err != nil {
+	// Execute the old writer's deletes. It knows no identity table, so a current
+	// index marker does not strand a missing identity edge after the overlap.
+	if _, err := database.Pool.Exec(ctx, `delete from block_refs where artifact_id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Pool.Exec(ctx, `delete from refs where from_kind='artifact' and from_id=$1 and to_kind='person_mention'`, id); err != nil {
+	if _, err := database.Pool.Exec(ctx, `delete from refs where from_kind='artifact' and from_id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 0 || count() != 0 {
-		t.Fatalf("unchanged document must remain absent until rebuild: %+v", tick)
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 0 || count() != 1 {
+		t.Fatalf("old writer lost an unchanged mention: %+v", tick)
 	}
 	if _, err := refs.RebuildAll(ctx, database.Pool, "https://dispatch.example"); err != nil {
 		t.Fatal(err)

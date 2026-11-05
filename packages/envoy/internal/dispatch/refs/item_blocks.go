@@ -583,7 +583,10 @@ func itemBlockPairs(next []itemblocks.Block, ids []string, located []text.Locate
 // of their key, and returns the targets of the pairs it deleted and inserted. A pair that survives
 // keeps its created_at and source_seq; a new one takes `at`, or at the item's first indexing the
 // item's own refs row for that target's created_at and source_seq, when one exists. At the first
-// indexing the item holds no block mention, so nothing is deleted.
+// indexing the item holds no block mention, so nothing is deleted. A pair naming a person, a
+// session or a role goes to identity_mentions by the same rules (replaceIdentityMentions), since
+// this delete is scoped by the item alone and a build that does not know identity mentions would
+// drop them from here.
 func replaceItemBlockRefs(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -594,17 +597,34 @@ func replaceItemBlockRefs(
 	firstIndexing bool,
 	pairs []blockPair,
 ) ([]Target, error) {
-	blockIDs := make([]string, len(pairs))
-	kinds := make([]string, len(pairs))
-	toKinds := make([]string, len(pairs))
-	toIDs := make([]string, len(pairs))
-	for i, pair := range pairs {
-		blockIDs[i], kinds[i], toKinds[i], toIDs[i] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
+	blockIDs := make([]string, 0, len(pairs))
+	kinds := make([]string, 0, len(pairs))
+	toKinds := make([]string, 0, len(pairs))
+	toIDs := make([]string, 0, len(pairs))
+	identity := []identityRow{}
+	node := string(kind) + "/" + itemID + "#"
+	for _, pair := range pairs {
+		if IsIdentity(pair.target.Kind) {
+			identity = append(identity, identityRow{fromID: node + pair.blockID, target: pair.target})
+			continue
+		}
+		blockIDs = append(blockIDs, pair.blockID)
+		kinds = append(kinds, pair.kind)
+		toKinds = append(toKinds, pair.target.Kind)
+		toIDs = append(toIDs, pair.target.ID)
 	}
-	var moved []Target
+	inherit := ""
+	if firstIndexing {
+		inherit = string(kind)
+	}
+	mentions, err := replaceIdentityMentions(ctx, tx, blockOwnerKind(string(kind)), itemID,
+		kind.BlockKind(), identity, &at, inherit)
+	if err != nil {
+		return nil, err
+	}
+	moved := mentions
 	if !firstIndexing {
-		var err error
-		moved, err = scanTargets(tx.Query(ctx, `
+		dropped, err := scanTargets(tx.Query(ctx, `
 			delete from `+tables.refs+` r
 			where r.`+tables.item+` = $1::uuid and not exists (
 				select 1 from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
@@ -614,8 +634,9 @@ func replaceItemBlockRefs(
 		if err != nil {
 			return nil, fmt.Errorf("delete the block mentions %s %s dropped: %w", kind, itemID, err)
 		}
+		moved = append(moved, dropped...)
 	}
-	if len(pairs) == 0 {
+	if len(blockIDs) == 0 {
 		return moved, nil
 	}
 	added, err := scanTargets(tx.Query(ctx, `

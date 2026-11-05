@@ -75,6 +75,19 @@ holds no ask and no credential request; with the filter on someone else it says 
 this filter`, and with the filter cleared, `Nothing needs anyone`. An open Inbox picks up a new
 request, or one that is no longer pending, within moments on its own - no reload needed.
 
+### Unified inbox preview and comparison
+
+**Inbox comparison** opens the saved comparison of asks and replies with the opt-in unified
+inbox. The counts at the top cover everyone who has signed in; the person row is yours alone.
+Opening the page reads the background sweep's last observations and does not run a comparison.
+The preview does not replace today's Inbox.
+
+The three-day comparison gate covers asks, unread thread replies, and direct or broadcast
+replies only. It does not cover pending credential requests. Replacing today's Inbox requires
+keeping its **Credential requests** section and those requests' contribution to **Needs you**
+and the blocked-on-you banner, even when the comparison has stayed at zero.
+
+
 ### Asks grouped by issue
 
 When an issue or a document has more than one ask in a section, its asks sit together under one

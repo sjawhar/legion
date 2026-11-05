@@ -146,6 +146,9 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 		Kind:  "session",
 		ID:    caller.Session,
 		Owner: &caller.Person,
+		// The broker bound this token to this session, so the pair (session, person) is proved
+		// rather than claimed, and a read may take it as a fact of who the session is.
+		SessionVerified: true,
 		// The broker proved this session, so the credential already names the agent behind the
 		// request and no request body has to name it.
 		Credential: &model.Credential{Scopes: scopes, Session: caller.Session},

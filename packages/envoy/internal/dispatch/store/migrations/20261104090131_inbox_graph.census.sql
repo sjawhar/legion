@@ -1,3 +1,3 @@
--- Creates one derived sibling view and empty observation-only tables.
--- No existing table/view changes, row backfill, new index, or rejected source row.
+-- The index changes no row invariant. The census separately measures messages
+-- and the locks required to build its partial index.
 select 0

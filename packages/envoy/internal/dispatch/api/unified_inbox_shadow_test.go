@@ -30,6 +30,9 @@ func TestUnifiedInboxShadowCountsDroppedAskAndNeverErasesBadDay(t *testing.T) {
 	}
 	read := func() report {
 		t.Helper()
+		if err := observeInboxShadow(ctx, database.Pool, 0); err != nil {
+			t.Fatal(err)
+		}
 		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/inbox/shadow", nil, "alice")
 		if response.Code != 200 {
 			t.Fatalf("shadow: %d %s", response.Code, response.Body.String())

@@ -1,5 +1,8 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { type APIResponse, expect, type Page, type Route, test } from "@playwright/test";
 
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import {
   createArtifactComment,
   createAsk,
@@ -106,10 +109,14 @@ test("reference: a title written while the reference's read is in flight shows a
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // Every wait below is a page timer of the refresh scheduler, so the page's own clock fires
+    // them rather than the wall clock.
+    await page.clock.install();
     await openLive(page, `/issues/${holder.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
     await expect(turns.getByRole("link", { exact: true, name: "Target v1" })).toBeVisible();
-    await page.waitForTimeout(1_200);
+    // Past the first read's `MIN_REFETCH_INTERVAL_MS`, so the refresh v2 owes is fetched at once.
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS + 200);
 
     // The refresh v2 owes is composed at once and held for a moment, as a busy server holds it;
     // v3 lands while it is in flight, so the page owes one more fetch once it settles. The page
@@ -118,7 +125,8 @@ test("reference: a title written while the reference's read is in flight shows a
     await patchIssue(target.key, { title: "Target v2" }, bob);
     await held.arrived;
     await patchIssue(target.key, { title: "Target v3" }, bob);
-    await page.waitForTimeout(150);
+    // Past the event feed's 100 ms batch window, so v3 is owed before the read is handed back.
+    await page.clock.fastForward(150);
     await held.release();
     const navigation = page.getByRole("navigation", { name: "Navigation" });
     if (testInfo.project.name === "iphone") {
@@ -126,7 +134,8 @@ test("reference: a title written while the reference's read is in flight shows a
     }
     await navigation.getByRole("link", { name: /^Inbox/ }).click();
     await expect(page).toHaveURL(/\/(\?.*)?$/);
-    await page.waitForTimeout(1_500);
+    // Away from the page for longer than the second the scheduler waits.
+    await page.clock.fastForward(1_500);
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`/issues/${holder.key}/conversation`));
     await expect(turns.getByRole("link", { exact: true, name: "Target v3" })).toBeVisible(live);
@@ -146,6 +155,8 @@ test("inbox: an issue closed while the Inbox read is in flight drops its ask fro
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // The pause below is a page timer of the refresh scheduler: the page's clock fires it.
+    await page.clock.install();
     await openLive(page, "/?assignee=everyone");
     // The question the Inbox keeps, read as the row it is: from 1280 px its text is also in the
     // reading pane, which draws the selected row's card (INFRA-575).
@@ -170,7 +181,7 @@ test("inbox: an issue closed while the Inbox read is in flight drops its ask fro
     await patchIssue(closing.key, { status: "done" }, bob);
     // A close refreshes the sidebar's project list: the page has handled the close's event.
     await projectsRead;
-    await page.waitForTimeout(300);
+    await page.clock.fastForward(300);
     await held.release();
 
     await expect(page.locator(`[data-inbox-row="${ask.id}"]`)).toHaveCount(0, live);
@@ -266,6 +277,8 @@ test("children: a child's priority write moves its active time in the open paren
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // The wait below is the scheduler's own second, which the page's clock spends.
+    await page.clock.install();
     await openLive(page, `/issues/${parent.key}/children`);
     const active = page
       .getByRole("tabpanel")
@@ -276,7 +289,7 @@ test("children: a child's priority write moves its active time in the open paren
     const before = await active.getAttribute("datetime");
     expect(before).not.toBeNull();
 
-    await page.waitForTimeout(1_100);
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS + 100);
     await patchIssue(child.key, { priority: 1 }, bob);
     await expect(active).not.toHaveAttribute("datetime", before ?? "", live);
   } finally {
@@ -309,24 +322,26 @@ test("document panel: an edit of a comment on a project document shows its new t
 test("budget: a document in another project citing 25 documents reads no issue detail, Inbox or ask list for an open issue page", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(120_000);
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OTHER", name: "Other" });
   const issue = await createIssue({ project: "CORE", title: "Open issue page" });
-  const cited = [];
-  for (let index = 0; index < 25; index += 1) {
-    cited.push(
-      await createProjectDocument("OTHER", {
-        content: `# Chapter ${index + 1}\n`,
-        name: `Chapter ${String(index + 1).padStart(2, "0")}`,
+  // Twenty-five documents to cite; nothing here reads the order they were written in.
+  const cited = await Promise.all(
+    Array.from({ length: 25 }, (_, number) =>
+      createProjectDocument("OTHER", {
+        content: `# Chapter ${number + 1}\n`,
+        name: `Chapter ${String(number + 1).padStart(2, "0")}`,
       })
-    );
-  }
+    )
+  );
   const index = cited.map((doc) => `dispatch://OTHER/artifact/${doc.artifact.slug}`).join(" ");
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // The batch window and the refresh deferral below are page timers: the page's clock fires
+    // them rather than the wall clock.
+    await page.clock.install();
     const gets: string[] = [];
     page.on("request", (request) => {
       const url = new URL(request.url());
@@ -339,12 +354,26 @@ test("budget: a document in another project citing 25 documents reads no issue d
     await expect(page.getByTestId("issue-header").getByRole("heading", { level: 1 })).toHaveText(
       issue.title
     );
-    await page.waitForTimeout(2_000);
+    // The opening reads are the page's own; count from the moment they have stopped arriving.
+    await expect
+      .poll(
+        async () => {
+          const before = gets.length;
+          await sleep(100);
+          return gets.length - before;
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(0);
     gets.length = 0;
 
     // One document in another project whose one paragraph cites 25 documents.
     await createProjectDocument("OTHER", { content: `Index: ${index}\n`, name: "Index" }, bob);
-    await page.waitForTimeout(2_500);
+    // The citation's event is batched for 100 ms and any read it owes is deferred up to
+    // `MIN_REFETCH_INTERVAL_MS`; one jump fires both, and the margin is for a request they make
+    // reaching Playwright's counter.
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS + 100);
+    await sleep(200);
     console.log(`REFETCH-INDEX [${testInfo.project.name}] GETs: ${gets.join(", ")}`);
     const unrelated = gets.filter(
       (path) =>

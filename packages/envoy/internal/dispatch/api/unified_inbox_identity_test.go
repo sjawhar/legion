@@ -25,6 +25,9 @@ func TestInboxShadowDistinguishesEqualIDsOfDifferentNodeKinds(t *testing.T) {
 	}
 	read := func() inboxShadowReport {
 		t.Helper()
+		if err := observeInboxShadow(ctx, database.Pool, 0); err != nil {
+			t.Fatal(err)
+		}
 		r := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/inbox/shadow", nil, "alice")
 		if r.Code != 200 {
 			t.Fatalf("shadow %d %s", r.Code, r.Body.String())

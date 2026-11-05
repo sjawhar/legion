@@ -127,10 +127,10 @@ type Deps struct {
 	// that reads two processes inside one answer's life needs no timing window.
 	RouteRosterTTL time.Duration
 	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
-	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
-	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment runs twelve seconds.
-	// Only this package's tests set another, so a send to a session that is gone settles without
-	// sleeping the production window.
+	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; a
+	// deployment leaves it zero, and only a test process sets another (cmd/dispatch:
+	// DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under the test hooks), so a send to a session that
+	// is gone settles without sleeping the production window.
 	ListenerTakeoverWindow time.Duration
 	// TestHookTimeout replaces how long a test hook waits for every process's acknowledgement
 	// (testHookTimeout, test_hooks_fanout.go). Zero keeps ten seconds; neither
@@ -1130,6 +1130,11 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 		Origin:  supplied.Origin,
 		Owner:   authenticated.Owner,
 		Service: authenticated.Service,
+		// No SessionVerified: the id above is the caller's word, not the credential's. A
+		// personal token proves its owner and no session, so this pairing of owner and session
+		// is a claim, and a body that sent session_verified is dropped here with every other
+		// field this literal does not name (model.Actor.SessionVerified).
+		//
 		// No Credential: this actor is one a handler records and compares, and a stored actor
 		// was decoded from JSON, which carries none (model.Actor.Recorded). A layer that needs
 		// the request's own credential reads it from optionalActor (callerHoldsScope).

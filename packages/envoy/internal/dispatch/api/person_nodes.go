@@ -30,20 +30,40 @@ type personNodes struct {
 	Offset int          `json:"offset"`
 }
 
+const personAliasesQuery = `
+	select coalesce(bool_or(alias_kind = 'login'), false),
+	       coalesce(array_agg(alias) filter (where alias_kind = 'session'), '{}'::text[])
+	from person_aliases where person = $1 and alias_kind in ('login', 'session')`
+
 const personNodesQuery = `
-	with related as (
-		select from_kind, from_id, array_agg(distinct kind order by kind) as relations from (
-			select g.from_kind, g.from_id, g.kind from ` + refs.AllEdgesSQL + ` g
+	with reached as materialized (
+		select case e.type when 'comment.created' then 'comment' when 'ask.answered' then 'ask' else 'message' end as from_kind,
+		       e.payload->>'id' as from_id, e.created_at
+		from events e
+		where e.type in ('ask.answered', 'comment.created', 'message.created', 'message.answered')
+		  and e.payload->>'id' <> '' and e.created_at >= $4
+		  and e.published_destinations && array(select 'notifications.agent.' || unnest($5::text[]))
+	), related as (
+		select from_kind, from_id, array_agg(distinct kind order by kind) as relations, min(created_at) as related_at from (
+			select g.from_kind, g.from_id, g.kind, g.created_at from graph_person_edges g
 			where g.kind = 'authored_by' and g.to_kind = 'person' and g.to_id = $1
 			  and g.from_kind in ('comment', 'message', 'ask')
 			union all
-			select g.from_kind, g.from_id, g.kind from person_aliases a
-			join ` + refs.AllEdgesSQL + ` g on g.to_kind = 'session' and g.to_id = a.alias and g.kind = 'delivered_to'
-			where a.person = $1 and a.alias_kind = 'session' and g.from_kind in ('comment', 'message', 'ask')
+			select from_kind, from_id, 'delivered_to', created_at from reached
 			union all
-			select g.from_kind, g.from_id, g.kind from ` + refs.MentionEdgesSQL + ` g
-			where g.kind = 'mentions' and g.to_kind = 'person' and g.to_id = $1
-			  and g.from_kind in ('comment', 'message', 'block')
+			select 'message', d.message_id::text, 'delivered_to', d.created_at
+			from message_deliveries d
+			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
+			union all
+			select 'comment', d.comment_id::text, 'delivered_to', d.created_at
+			from comment_deliveries d
+			where d.session_id = any($5) and d.state = 'sent' and d.created_at >= $4
+			union all
+			select r.from_kind, r.from_id, 'mentions', r.created_at from graph_mention_resolutions r
+			where r.to_kind = 'person' and r.to_id = $1 and r.from_kind in ('comment', 'message', 'block')
+			union all
+			select r.from_kind, r.from_id, 'mentions', r.created_at from graph_mention_resolutions r
+			where r.to_kind = 'session' and r.to_id = any($5) and r.from_kind in ('comment', 'message', 'block')
 		) edges group by from_kind, from_id
 	), items as (
 		select 'comment' as kind, c.id::text as id, c.body as title, c.created_at, r.relations,
@@ -58,7 +78,7 @@ const personNodesQuery = `
 		from related r join asks k on r.from_kind = 'ask' and r.from_id = k.id::text
 		left join artifacts a on a.id = k.artifact_id
 		union all
-		select 'block', d.node_id, d.excerpt, d.changed_at, r.relations, a.issue_key, a.project_key, a.slug, d.block_id
+		select 'block', d.node_id, d.excerpt, r.related_at, r.relations, a.issue_key, a.project_key, a.slug, d.block_id
 		from related r join document_blocks d on r.from_kind = 'block' and r.from_id = d.node_id
 		join artifacts a on a.id = d.artifact_id
 	), page as (
@@ -76,9 +96,20 @@ func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	query := r.URL.Query()
+	if len(query["since"]) > 1 {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "since must be one RFC3339 timestamp")
+		return
+	}
+	since, err := parseOptionalRFC3339(query, "since", time.Now().UTC().Add(-30*24*time.Hour))
+	if err != nil {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, err.Error())
+		return
+	}
 	login := model.CanonicalLogin(r.PathValue("login"))
 	var exists bool
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select exists (select 1 from person_aliases where person = $1 and alias_kind = 'login')`, login).Scan(&exists); err != nil {
+	var sessions []string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), personAliasesQuery, login).Scan(&exists, &sessions); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -86,7 +117,7 @@ func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "PERSON_NOT_FOUND", http.StatusNotFound, "person not found")
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), personNodesQuery, login, limit, offset)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), personNodesQuery, login, limit, offset, since, sessions)
 	if err != nil {
 		s.writeHandlerError(w, fmt.Errorf("read person nodes: %w", err))
 		return

@@ -43,7 +43,7 @@ const unreadDirectRepliesCTE = `
 		select id as root_id, substr(target, length('session:') + 1) as session_id
 		from messages
 		where issue_key is null and in_reply_to is null and target like 'session:%'
-		  and author->>'kind' = 'user' and lower(author->>'id') = $1
+		  and author->>'kind' = 'user' and user_threads_login(author->>'id') = $1
 		  and ($3::text is null or target = 'session:' || $3::text)
 	),
 	direct_thread as (

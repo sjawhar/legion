@@ -626,8 +626,8 @@ func TestSessionAnswersLeavesAFollowersReplyToTheDeliveredMentionAndListsItOnce(
 
 // One comment both sources hold, the session's topic among its event's destinations (the route)
 // and a sent mention delivery to the session (the mention), is listed once. It happens when the
-// mention's send was not known to be delivered at publish time, so the outbox published the route
-// copy, and a retry delivered the mention after.
+// mention's send failed at the transport before publish time, so the outbox published the
+// route copy, and a retry delivered the mention after.
 func TestSessionAnswersListsACommentBothTheRouteAndAMentionHoldOnce(t *testing.T) {
 	f := newAnswersFixture(t)
 	f.route(t, "session:"+answersSession)
@@ -637,9 +637,11 @@ func TestSessionAnswersListsACommentBothTheRouteAndAMentionHoldOnce(t *testing.T
 	if !f.sentCommentDelivery(t, comment, answersSession) {
 		t.Fatal("the mention was not delivered to the session")
 	}
-	// At publish time the send is not known to have landed (a receipt timeout records it failed),
-	// so the outbox publishes the route copy to the session's topic.
+	// A known transport failure permits the outbox to publish the route copy.
 	f.setCommentDelivery(t, comment, answersSession, "failed")
+	if _, err := f.database.Pool.Exec(context.Background(), `update comment_deliveries set error='envoy listener: connection refused' where comment_id=$1`, comment); err != nil {
+		t.Fatal(err)
+	}
 	f.publishOutbox(t)
 	if !slices.Contains(f.destinations(t, "comment.created", comment), contracts.AgentSubject(answersSession)) {
 		t.Fatal("the route copy did not reach the session's topic")
