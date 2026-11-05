@@ -22,7 +22,7 @@ name: Fold Changelog Fragments
 # hand. Every run folds everything foldable on main's tip from the tags as they are then, so a
 # lost push, a skipped run or a pending run GitHub dropped for a newer one is redone by the next
 # run. When main moves between the build and the push, push-fold pushes nothing and starts a new
-# run on main's new tip instead (land_on_main in release-push.sh), which is the retry.
+# run on main's new tip instead (land_on_branch in release-push.sh), which is the retry.
 #
 # The fold is split as the releases are (release.yaml's header says why). fold_build renders the
 # fragments with changie, which is dependency code, and so holds no write scope and no secret and
@@ -60,7 +60,7 @@ permissions: {}
 
 # One run at a time per ref: runs on main queue one behind another, and a pull request's runs queue
 # on their own, never in main's queue. The group only saves wasted runs. A fold lands only while
-# main is still the base its build checked out (land_on_main in release-push.sh), so two runs never
+# main is still the base its build checked out (land_on_branch in release-push.sh), so two runs never
 # fold the same fragments, and a pending run GitHub drops for a newer one in its group loses
 # nothing: the newer one folds everything the dropped one would have.
 concurrency:

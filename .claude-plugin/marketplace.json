@@ -7,7 +7,12 @@
   "plugins": [
     {
       "name": "claude-envoy",
-      "source": "./packages/claude-envoy",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/cybermonklabs/legion.git",
+        "path": "packages/claude-envoy",
+        "ref": "claude-plugin"
+      },
       "description": "Delivers Envoy NATS notifications into Claude Code."
     }
   ]

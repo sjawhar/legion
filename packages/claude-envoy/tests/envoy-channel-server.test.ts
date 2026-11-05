@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test"
+import { execFileSync } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -32,6 +34,9 @@ import { FakeNatsServer } from "./fake-nats-server"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
+
+/** The checkout's root, whose .github/scripts the marketplace case below reads. */
+const repositoryRoot = resolve(import.meta.dir, "..", "..", "..")
 
 /**
  * A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for,
@@ -406,15 +411,39 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
 
 test("Claude Code versions the plugin by its commit; omp and the MCP server report package.json's", () => {
   // Claude Code updates an installed plugin only when its computed version changes. With no
-  // version in plugin.json or the marketplace entry it takes the version of a relative-path plugin
-  // from the marketplace commit it installs from, so every merge to main reaches an update; a
-  // declared version nothing bumps holds every install at the tree it was first installed from.
+  // version in plugin.json or the marketplace entry it takes the version from the commit it
+  // installed the plugin from, which for the git-subdir source below is the tip of the
+  // claude-plugin branch; every rebuild push moves that tip, so every rebuild reaches an update.
+  // A declared version nothing bumps would hold every install at the commit it was first
+  // installed from.
   expect(plugin).not.toHaveProperty("version")
   const entries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
   expect(entries).toHaveLength(1)
   expect(entries[0]).not.toHaveProperty("version")
   expect(ompPlugin.version).toBe(pkg.version)
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
+})
+
+test("the marketplace entry installs the plugin from the claude-plugin branch", () => {
+  // claude-envoy-rebuild.yaml's push job force-updates that branch with the build over main's
+  // tip, and nothing on main reads it, so the merge queue is left alone. The branch name is
+  // release-push.sh's plugin_branch constant, read here so the entry and the push cannot drift,
+  // and the URL is repo-paths.sh's repository_url with .git appended, so moving the repository
+  // fails this test instead of leaving a dead URL in the marketplace.
+  const repoPathsScript = join(repositoryRoot, ".github/scripts/repo-paths.sh")
+  const printed = execFileSync(repoPathsScript, ["repository_url"], { encoding: "utf8" })
+  const repositoryUrl = printed.trim()
+  const script = readFileSync(join(repositoryRoot, ".github/scripts/release-push.sh"), "utf8")
+  const branch = /^plugin_branch=(\S+)$/m.exec(script)?.[1]
+  expect(branch).toBe("claude-plugin")
+  const entries = marketplace.plugins.filter((candidate) => candidate.name === plugin.name)
+  expect(entries).toHaveLength(1)
+  expect(entries[0]?.source).toEqual({
+    source: "git-subdir",
+    url: `${repositoryUrl}.git`,
+    path: "packages/claude-envoy",
+    ref: branch,
+  })
 })
 
 test("the Oh My Pi manifest declares no MCP server", () => {
