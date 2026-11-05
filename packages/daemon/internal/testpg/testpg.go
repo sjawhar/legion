@@ -33,18 +33,17 @@ func create(dsn, prefix string) (string, func() error, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("parse LEGION_TEST_PG_DSN: %w", err)
 	}
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", nil, err
+	}
+	name := prefix + "_" + hex.EncodeToString(suffix[:])
 	admin := *base
 	admin.Path = "/postgres"
 	conn, err := pgx.Connect(context.Background(), admin.String())
 	if err != nil {
 		return "", nil, fmt.Errorf("connect to the admin database: %w", err)
 	}
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		_ = conn.Close(context.Background())
-		return "", nil, err
-	}
-	name := prefix + "_" + hex.EncodeToString(suffix[:])
 	// A copy of template1's files. Created the default way, from PostgreSQL 15, every page of
 	// template1 goes into the write-ahead log: 4.4 MB of log for each empty database.
 	if _, err := conn.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
@@ -86,12 +85,24 @@ func Database(t testing.TB, prefix string) string {
 	return database
 }
 
-// runServer is the LEGION_TEST_PG_DSN Main read, and runDatabase the URL of the database it made
-// on that server; both are empty until a Main with the variable set runs.
+// runServer is the server Main made the run's database on, named by serverKey, and runDatabase
+// the URL of that database; both are empty until a Main with LEGION_TEST_PG_DSN set runs.
 var (
 	runServer   string
 	runDatabase string
 )
+
+// serverKey is the part of a DSN that names the server rather than a database on it, so two DSNs
+// that differ only in the database they name have one key. A DSN no URL parser reads is its own
+// key, which no parsed one equals.
+func serverKey(dsn string) string {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	parsed.Path, parsed.RawPath = "", ""
+	return parsed.String()
+}
 
 // Main makes one database named <prefix>_<random> for the whole run on the server
 // LEGION_TEST_PG_DSN names, runs run, drops that database and returns run's code; a drop that
@@ -111,7 +122,7 @@ func Main(prefix string, run func() int) int {
 		fmt.Fprintf(os.Stderr, "make the package's run database: %v\n", err)
 		return 1
 	}
-	runServer, runDatabase = dsn, database
+	runServer, runDatabase = serverKey(dsn), database
 	code := run()
 	if err := drop(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -127,20 +138,7 @@ func Main(prefix string, run func() int) int {
 // points LEGION_TEST_PG_DSN at a server of its own keeps what it set. Without a run database — no
 // Main, or LEGION_TEST_PG_DSN unset — it is dsn.
 func RunDatabaseFor(dsn string) string {
-	if runDatabase == "" {
-		return dsn
-	}
-	server, err := url.Parse(runServer)
-	if err != nil {
-		return dsn
-	}
-	asked, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	server.Path, server.RawPath = "", ""
-	asked.Path, asked.RawPath = "", ""
-	if server.String() != asked.String() {
+	if runDatabase == "" || serverKey(dsn) != runServer {
 		return dsn
 	}
 	return runDatabase

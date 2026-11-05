@@ -41,15 +41,15 @@ func serverURL(t testing.TB) string {
 	return raw
 }
 
-// randomName mints the name of the schema or database one test gets of its own, kind naming
-// which of the two in a failure. It is random rather than derived from t.Name() because two
-// concurrent runs of one test - this package's tests and a sibling package's, against the one
-// server - would otherwise mint the same name and act on each other's rows.
-func randomName(t testing.TB, kind string) string {
+// randomName mints the name of the schema one test gets of its own. It is random rather than
+// derived from t.Name() because two concurrent runs of one test - this package's tests and a
+// sibling package's, against the one server - would otherwise mint the same name and act on each
+// other's rows.
+func randomName(t testing.TB) string {
 	t.Helper()
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random %s name: %v", kind, err)
+		t.Fatalf("random schema name: %v", err)
 	}
 	return "broker_test_" + hex.EncodeToString(suffix[:])
 }
@@ -61,7 +61,7 @@ func URL(t testing.TB, params ...string) string {
 	t.Helper()
 	raw := serverURL(t)
 	ctx := context.Background()
-	schema := randomName(t, "schema")
+	schema := randomName(t)
 	admin(t, raw, "create schema "+schema)
 	t.Cleanup(func() { admin(t, raw, "drop schema "+schema+" cascade") })
 

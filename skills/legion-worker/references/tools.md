@@ -15,7 +15,7 @@ your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet
 which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
 your change touches by name (`go test -run`). To run Go's race detector, prefix the command with
 `CGO_ENABLED=1`: `CGO_ENABLED=1 go test -race -count=1 ./internal/<package>/`. The worker image
-sets `CGO_ENABLED=0` and carries gcc (`packages/daemon/docker/worker.Dockerfile:975-976`), and Go
+sets `CGO_ENABLED=0` and carries gcc (`packages/daemon/docker/worker.Dockerfile:976-977`), and Go
 refuses `-race` without cgo.
 
 A whole module's or whole package's test run goes to CI on the pull request, where a job of that

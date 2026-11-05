@@ -194,7 +194,7 @@ type scratchDispatch struct {
 // cmd/dispatch, and starts it.
 func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scratchDispatch {
 	t.Helper()
-	serverURL := testpg.Database(t, "dispatch_scratch_test")
+	database := testpg.Database(t, "dispatch_scratch_test")
 	root := options.root
 	if root == "" {
 		root = filepath.Join("..", "..", "..", "..")
@@ -205,7 +205,7 @@ func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scrat
 	}
 	d := &scratchDispatch{
 		t: t, binary: filepath.Join(t.TempDir(), "dispatch"), dir: filepath.Join(root, "packages", "envoy"),
-		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: serverURL,
+		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: database,
 		natsURL: options.natsURL, token: scratchAgentToken, home: filepath.Join(t.TempDir(), "home"),
 		log: options.log,
 	}
