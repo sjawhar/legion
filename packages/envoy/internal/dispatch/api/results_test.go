@@ -1006,16 +1006,17 @@ func TestAResultsReadReadsThroughNeitherAnUnseenRepositoryNorAKnownHead(t *testi
 	}
 }
 
-// What a superseded result costs: one GitHub call, once. A check with two results — the newer at
-// the head of a pull request Dispatch holds, the older at a commit it holds none for — is the
-// state a push past a recorded head leaves behind. The superseded commit heads no row Dispatch
-// keeps, so the first read asks GitHub about it, and GitHub answers by naming the pull request at
-// the head it has now: an answer about that commit no later read can change, since a pull
-// request's head never moves back to a commit it has left. So the pair is settled and no read
-// asks again (delivery.CommitPullReads.Settle, api/results_currency.go's readThroughHead);
-// without that, a tab left open would spend the call again every
-// delivery.CommitPullReadStaleAfter for as long as the result is read.
-func TestASupersededResultsCommitIsAskedOfGitHubOnceAndNeverAgain(t *testing.T) {
+// What a superseded result costs: one GitHub call, once, and not again while the answer stands.
+// A check with two results — the newer at the head of a pull request Dispatch holds, the older
+// at a commit it holds none for — is the state a push past a recorded head leaves behind. The
+// superseded commit heads no row Dispatch keeps, so the first read asks GitHub about it, and
+// GitHub answers by naming the pull request at the head it has now: an answer about that commit
+// that stands until something opens a pull request at it. So the pair is held off for
+// delivery.CommitPullSettledFor and no read inside that span asks again
+// (delivery.CommitPullReads.Settle, api/results_currency.go's readThroughHead); without that, a
+// tab left open would spend the call again every delivery.CommitPullReadStaleAfter for as long
+// as the result is read.
+func TestASupersededResultsCommitIsAskedOfGitHubOnceAndNotAgainWithinTheSpan(t *testing.T) {
 	handler, database, served, fake := readThroughGitHub(t, "acme/widgets")
 	issue := issueInRepository(t, handler, "RESP", "acme/widgets", "Pushed past")
 	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
@@ -1057,11 +1058,84 @@ func TestASupersededResultsCommitIsAskedOfGitHubOnceAndNeverAgain(t *testing.T) 
 				read.name, asked, read.asked)
 		}
 	}
-	// Settled, not merely bounded: the pair is refused a claim long past
-	// delivery.CommitPullReadStaleAfter too, which is what keeps the call off for as long as the
-	// process lives.
-	if served.commitPulls.Claim("acme/widgets", headCommit, time.Now().Add(24*time.Hour)) {
-		t.Fatal("a claim of the superseded commit a day later was granted, want the pair settled for good")
+	// Settled, not merely bounded: the pair is refused a claim far past
+	// delivery.CommitPullReadStaleAfter, which is what keeps the call off the refetches of the
+	// hour that follows. The settling's own moment is the read's, a second or so before this
+	// one, so a claim a minute short of the span is inside it.
+	if served.commitPulls.Claim("acme/widgets", headCommit, time.Now().Add(delivery.CommitPullSettledFor-time.Minute)) {
+		t.Fatal("a claim of the superseded commit inside the settled span was granted, want it refused")
+	}
+}
+
+// The settling is believed for a span and no longer. GitHub has answered about the commit —
+// naming a pull request whose head is another commit — and a pull request opened later can
+// still have its head at that commit, which no event tells Dispatch about: so the answer is
+// held for delivery.CommitPullSettledFor and then asked again, and a settling kept for the life
+// of the process would leave such a result `older` for ever (dispatch://INFRA-1240, the round-3
+// review of pull request #2798).
+//
+// Four steps: the first read settles the pair; the second pull request opens at the commit; a
+// read inside the span answers `older` and asks GitHub nothing, which is what bounds the cost;
+// and a read past the span asks once and answers `current`.
+func TestAPullRequestOpenedAtASettledCommitIsSeenOnceTheSpanEnds(t *testing.T) {
+	handler, _, served, fake := readThroughGitHub(t, "acme/widgets")
+	issue := issueInRepository(t, handler, "RESS", "acme/widgets", "Opened at a settled commit")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	// The result is recorded while GitHub names no pull request for its commit at all, so its
+	// own read-through stores nothing and the commit heads no row Dispatch keeps.
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)))
+	// The pull request the commit is behind, and the one that opens at it later: both titled
+	// after the issue, so each is attributed to it.
+	pushedPast := func(repo string) string {
+		return fmt.Sprintf(`{"number":97,"title":%q,"body":"","html_url":"https://github.com/%s/pull/97",
+			"state":"open","merged":false,"updated_at":"2026-11-05T07:15:08Z",
+			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}`,
+			issue.Key+" the work", repo, newHeadCommit, repo)
+	}
+	openedAtTheCommit := func(repo, sha string) string {
+		return fmt.Sprintf(`{"number":98,"title":%q,"body":"","html_url":"https://github.com/%s/pull/98",
+			"state":"open","merged":false,"updated_at":"2026-11-05T07:15:08Z",
+			"head":{"ref":"legion/y","sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}`,
+			issue.Key+" the rest", repo, sha, repo)
+	}
+
+	// 1. GitHub names the one pull request, whose head is another commit, and the read settles
+	// the pair on that answer.
+	fake.answers(func(repo, _ string) string { return "[" + pushedPast(repo) + "]" })
+	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the read that settles the commit = %q, want older", got)
+	}
+
+	// 2. The second pull request opens with its head at that commit, and nothing tells Dispatch:
+	// a deployment holding no delivery settings consumes no `pull_request` event, and the
+	// reconcile's head pass only re-reads rows that already exist.
+	fake.answers(func(repo, sha string) string {
+		return "[" + pushedPast(repo) + "," + openedAtTheCommit(repo, sha) + "]"
+	})
+
+	// 3. Inside the span the settling still refuses the read, which is what bounds its cost: a
+	// tab left open spends no call an hour on a commit GitHub has answered about.
+	spent := fake.asks("acme/widgets")
+	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the read inside the settled span = %q, want older: the settling stands", got)
+	}
+	if asked := fake.asks("acme/widgets") - spent; asked != 0 {
+		t.Fatalf("the read inside the settled span asked GitHub %d times, want none", asked)
+	}
+
+	// 4. Past the span. The cache's moments are its only clock, and the public way to move one
+	// is to stamp the pair again from an earlier moment: a settling made
+	// delivery.CommitPullSettledFor ago is one whose span has just run out, which is what the
+	// clock does on its own between a reviewer's refetches, without the test waiting an hour for
+	// it — as the sibling tests rewind the whole cache to its zero value for the shorter span.
+	served.commitPulls.Settle("acme/widgets", headCommit, time.Now().Add(-delivery.CommitPullSettledFor))
+	spent = fake.asks("acme/widgets")
+	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("the read past the settled span = %q, want current: a pull request has opened at the commit", got)
+	}
+	if asked := fake.asks("acme/widgets") - spent; asked != 1 {
+		t.Fatalf("the read past the settled span asked GitHub %d times, want 1", asked)
 	}
 }
 

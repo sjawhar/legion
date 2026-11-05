@@ -269,6 +269,37 @@ func TestReadThroughCommitPullsStoresEveryPullRequestNamedForACommit(t *testing.
 	}
 }
 
+// HeadStoredAt compares the repository without case, and the two spellings meet here: a row the
+// intake writes carries GitHub's own spelling of the repository, from the envelope's
+// `full_name` (`Acme/Widgets`), while the results read passes the lowercase spelling the
+// repository-to-project mapping stores (api/results_currency.go, currencyReader.repositoryOf).
+// An exact comparison would answer "no row" for every repository whose owner writes their name
+// with capitals, and the read would spend a GitHub call on each commit Dispatch already holds
+// the pull request for. Another repository's row is still another repository's: the case is all
+// that is forgiven.
+func TestHeadStoredAtFindsARowWrittenUnderGitHubsOwnSpelling(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	const sha = "cccccccccccccccccccccccccccccccccccccccc"
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: "Acme/Widgets", Number: 41, HeadSHA: sha, HeadRef: "legion/x", BaseRef: "main",
+		State: "open", AttributionSource: string(sourceNone),
+		Title: "HEAD-41 the work", URL: "https://github.com/Acme/Widgets/pull/41",
+	}); err != nil {
+		t.Fatalf("store a head row under GitHub's spelling of the repository: %v", err)
+	}
+
+	stored, err := HeadStoredAt(ctx, pool, "acme/widgets", sha)
+	if err != nil || !stored {
+		t.Fatalf("HeadStoredAt(acme/widgets) = %v, %v; want true: the row is that repository's, spelt as GitHub spells it",
+			stored, err)
+	}
+	elsewhere, err := HeadStoredAt(ctx, pool, "acme/gadgets", sha)
+	if err != nil || elsewhere {
+		t.Fatalf("HeadStoredAt(acme/gadgets) = %v, %v; want false: another repository's commit is not this one's",
+			elsewhere, err)
+	}
+}
+
 // A pull request's title, body and branch are text any account that can open one writes, and an
 // attributed head row is what makes a `before_merge` result read current, so an issue that
 // resolves to another repository attributes nothing: the row is still written, with no issue.

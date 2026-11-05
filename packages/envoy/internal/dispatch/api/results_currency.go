@@ -160,12 +160,15 @@ func (c *currencyReader) headOf(ctx context.Context, result model.CheckResult) (
 //     that result current, since the issue a result was recorded on counts for nothing here. A
 //     closed-unmerged row is counted for nothing, because the reconcile keeps none and a pull
 //     request closed at a commit does not stop another opening from the same head.
-//   - Or a read has already asked GitHub about that repository and commit and been told of a
-//     pull request whose head is another commit (delivery.CommitPullReads.Settle, which that
-//     read records and Claim refuses from). GitHub has answered about this commit, and its
-//     answer put the pull request's head past it, so no later read can put the head back and
-//     nothing here can repair the result. GitHub naming no pull request at all is settled by
-//     nothing, since one may open at the commit a moment later.
+//   - Or a read within the last delivery.CommitPullSettledFor has asked GitHub about that
+//     repository and commit and been told of a pull request whose head is another commit
+//     (delivery.CommitPullReads.Settle, which that read records and Claim refuses from). GitHub
+//     has answered about this commit for now — its answer put the pull request's head past it —
+//     so the answer is believed for that span and nothing a read inside it can learn repairs the
+//     result. It is a span and not for ever because a pull request opened later can have its
+//     head at that commit, which the next read after the span sees. GitHub naming no pull
+//     request at all is settled for no span at all, since one may open at the commit a moment
+//     later.
 //
 // Three tests cost nothing and bound the rest. A deployment holding no App key can ask nothing.
 // A repository Dispatch cannot see is the unknown answer whatever GitHub would say, and it is the
@@ -199,7 +202,7 @@ func (c *currencyReader) readThroughHead(ctx context.Context, result model.Check
 		return false
 	}
 	if written > 0 && !atHead {
-		c.server.commitPulls.Settle(*repo, result.CommitSHA)
+		c.server.commitPulls.Settle(*repo, result.CommitSHA, now)
 	}
 	return atHead
 }

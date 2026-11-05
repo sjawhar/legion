@@ -530,14 +530,14 @@ func repositoryUnreadable(err error) bool {
 // result stands as its stored rows leave it.
 //
 // atHead is the difference between the two answers GitHub gives about a commit no pull request
-// of Dispatch's heads. GitHub naming nothing leaves the question open — the pull request may
-// open at that commit a moment later, which is the whole of what this read repairs — while
-// GitHub naming a pull request whose head is another commit has answered it for good: the
-// commit is behind that pull request and no later read can put the head back on it. The
-// read-time caller settles the pair on that answer rather than asking again every
-// CommitPullReadStaleAfter for ever (delivery.CommitPullReads.Settle). The rows written say
-// nothing of it on their own: the row of a pull request whose head has moved on is written at
-// the head it has now, not at the commit that was asked about.
+// of Dispatch's heads. GitHub naming nothing leaves the question wide open — the pull request
+// may open at that commit a moment later, which is the whole of what this read repairs — while
+// GitHub naming a pull request whose head is another commit has answered it for now: the commit
+// is behind that pull request, and only a pull request opened later can put a head back on it.
+// So the read-time caller holds the pair off for CommitPullSettledFor on that answer rather
+// than asking again every CommitPullReadStaleAfter (delivery.CommitPullReads.Settle). The rows
+// written say nothing of it on their own: the row of a pull request whose head has moved on is
+// written at the head it has now, not at the commit that was asked about.
 //
 // Each row is attributed through all five sources, the commit messages included (attributeHead),
 // exactly as the envelope writer attributes one. Attributing from fewer and calling it complete
