@@ -245,11 +245,6 @@ func resolveAttributionCandidates(ctx context.Context, pool *store.Pool, repo, u
 	return candidates, nil
 }
 
-// resolveIssueKey is the issue facts names now, and the source it came from.
-func resolveIssueKey(ctx context.Context, pool *store.Pool, facts attributionFacts) (*string, attributionSource, error) {
-	return resolveStoredIssueKey(ctx, pool, facts.Repo, facts.URL, attributionInputsFrom(facts))
-}
-
 // resolveStoredIssueKey is the issue a pull request's stored inputs name: the first candidate
 // held to repo, the repository the pull request is in, and nobody with the source "none" when
 // no candidate is. Its callers hand over the repository they already hold — completePullRequest

@@ -94,6 +94,85 @@ func TestAttributingStoredPullRequestsTakesEverySourceInOrder(t *testing.T) {
 	}
 }
 
+// TestAttributingAStoredPullRequestTitledAfterAnotherRepositorysIssueKeepsItsOwn: the stored
+// population answers a two-key title exactly as the head row does. Its pair is
+// TestAPullRequestTitledAfterAnotherRepositorysIssueKeepsItsOwn (pull_request_heads_test.go),
+// which holds the same title to pull_request_heads. One rule answers both — every candidate the
+// five sources name (attributionCandidates), the first of them held to the pull request's own
+// repository (attributionHeld) — and the two tables must never disagree about which issue one
+// pull request belongs to: pull_request_heads is what a check result's currency is measured
+// against, delivery_pull_requests what the Delivery timeline credits.
+func TestAttributingAStoredPullRequestTitledAfterAnotherRepositorysIssueKeepsItsOwn(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	foreign := seedHeadIssue(t, ctx, pool, 9)
+	own := seedGadgetsIssue(t, ctx, pool, 9)
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+		Repo: "acme/gadgets", Number: 220,
+		Title: foreign + ": the other repository's issue, and " + own + " (this one)",
+		URL:   "https://github.com/acme/gadgets/pull/220", Author: "octocat",
+		CreatedAt: &merged, MergedAt: &merged,
+		// The stored inputs of that title, in title order: the other repository's issue first.
+		Attribution: &AttributionInputs{TitleKeys: []string{foreign, own}},
+	}); err != nil {
+		t.Fatalf("seed the stored pull request: %v", err)
+	}
+
+	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
+		t.Fatalf("attribute: %v", err)
+	}
+	var issue *string
+	if err := pool.QueryRow(ctx,
+		`select issue_key from delivery_pull_requests where repo = 'acme/gadgets' and number = 220`).Scan(&issue); err != nil {
+		t.Fatalf("read the stored pull request: %v", err)
+	}
+	if issue == nil || *issue != own {
+		got := "none"
+		if issue != nil {
+			got = *issue
+		}
+		t.Fatalf("the stored pull request's issue = %s, want %s: %s resolves to acme/widgets, %s to acme/gadgets",
+			got, own, foreign, own)
+	}
+}
+
+// TestAStoredPullRequestTitledAfterTwoOfItsOwnIssuesTakesTheFirst: precedence inside one
+// repository is what it always was. A candidate is passed over only where it fails the
+// repository test (attributionHeld), so two candidates that both pass it keep their ranked
+// order and the first one named wins. The rule reaches past a candidate of another
+// repository, never past one of this repository's own.
+func TestAStoredPullRequestTitledAfterTwoOfItsOwnIssuesTakesTheFirst(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedAttributionIssues(t, ctx, pool, []string{"ATTR-221", "ATTR-222"}, nil)
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+		Repo: "acme/widgets", Number: 221, Title: "ATTR-221 and ATTR-222, both of this repository",
+		URL: "https://github.com/acme/widgets/pull/221", Author: "octocat",
+		CreatedAt: &merged, MergedAt: &merged,
+		Attribution: &AttributionInputs{TitleKeys: []string{"ATTR-221", "ATTR-222"}},
+	}); err != nil {
+		t.Fatalf("seed the stored pull request: %v", err)
+	}
+
+	if _, err := AttributePullRequests(ctx, pool, 100); err != nil {
+		t.Fatalf("attribute: %v", err)
+	}
+	var issue *string
+	if err := pool.QueryRow(ctx,
+		`select issue_key from delivery_pull_requests where repo = 'acme/widgets' and number = 221`).Scan(&issue); err != nil {
+		t.Fatalf("read the stored pull request: %v", err)
+	}
+	if issue == nil || *issue != "ATTR-221" {
+		got := "none"
+		if issue != nil {
+			got = *issue
+		}
+		t.Fatalf("a title naming two issues of acme/widgets = %s, want ATTR-221, the first of them", got)
+	}
+}
+
 // TestTheAttributionBackfillStaysWithinItsCallBudget: with more unread rows than one pass's budget
 // covers, a pass makes no more than attributionBackfillCalls GitHub calls for them, the rest wait
 // for later passes, and the workflow runs are read before the backfill spends anything.

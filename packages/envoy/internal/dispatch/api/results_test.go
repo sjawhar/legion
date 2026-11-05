@@ -470,6 +470,34 @@ func TestBeforeMergeResultCurrencyIsUnknownWhenDispatchCannotSeeTheRepository(t 
 	}
 }
 
+// The same unknown, with a second repository in play: Dispatch reads one of the two, and the
+// commit a result of the unreadable repository's issue names is the head of an open pull request
+// of the readable one, attributed to the readable repository's own issue. That head says nothing
+// about the unreadable repository — Dispatch sees none of its pull requests, so it cannot know
+// what that commit is there — so the result stays unknown and never reads older, while the
+// readable issue's own result at the same commit reads current.
+func TestBeforeMergeResultCurrencyStaysUnknownAtAnotherRepositorysHead(t *testing.T) {
+	handler, database := resultsGitHub(t, map[string]bool{"acme/widgets": true},
+		func(string, string) string { return "diverged" })
+	seen := issueInRepository(t, handler, "RESY", "acme/widgets", "Readable")
+	hidden := issueInRepository(t, handler, "RESZ", "acme/hidden", "Unreadable")
+	uploadDocument(t, handler, "/api/v1/issues/"+seen.Key, "verification.md", twoChecks)
+	uploadDocument(t, handler, "/api/v1/issues/"+hidden.Key, "verification.md", twoChecks)
+
+	// The one pull request Dispatch knows at that commit: open, in the repository it reads, and
+	// attributed to that repository's own issue.
+	writeHead(t, database, "acme/widgets", 41, headCommit, "open", seen.Key)
+
+	elsewhere := decodeBody[recordedResult](t, recordResult(t, handler, hidden.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, hidden.Key), "k1", elsewhere.Result.ID); got != model.CurrencyUnknown {
+		t.Fatalf("a pre-merge result of acme/hidden's issue at acme/widgets' head = %q, want unknown: Dispatch cannot see acme/hidden's pull requests at all", got)
+	}
+	atHead := decodeBody[recordedResult](t, recordResult(t, handler, seen.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, seen.Key), "k1", atHead.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("acme/widgets' own result at that head = %q, want current", got)
+	}
+}
+
 // Recording a result at a commit that is the head of no pull request Dispatch has an event for
 // reads GitHub through the App and stores every pull request it names, so the result is current
 // without a webhook ever arriving.
@@ -524,11 +552,12 @@ func TestRecordingAResultReadsThroughToAPullRequestDispatchHasNoEventFor(t *test
 }
 
 // The same case at the surface a reviewer reads: a pull request of acme/gadgets whose title
-// names acme/widgets' issue before its own. The attribution takes the first ranked candidate
-// and nothing after it (delivery's attributionSelect), so the head the read-through learns is
-// attributed to nobody and the result at it reads older, although the title names the check's
-// own issue too. Judged through the route, which is where a reviewer's approval condition is
-// actually read.
+// names acme/widgets' issue before its own. The attribution walks every candidate the five
+// sources name (delivery's attributionCandidates) and takes the first one held to the pull
+// request's own repository (attributionHeld), so the head the read-through learns is attributed
+// to the check's own issue and the result at it reads current, although the title names another
+// repository's issue first. Judged through the route, which is where a reviewer's approval
+// condition is actually read.
 func TestAResultAtTheHeadOfAPullRequestTitledAfterAnotherRepositorysIssueReadsCurrent(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -555,8 +584,9 @@ func TestAResultAtTheHeadOfAPullRequestTitledAfterAnotherRepositorysIssueReadsCu
 			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":%q}},"base":{"ref":"main"}}]`,
 			title, repo, headCommit, repo)
 	})
-	// While the defect stands the title, body, links and branch name nobody the read-through may
-	// keep, so it pages the commit messages, the fifth source.
+	// The title names a candidate held to acme/gadgets, so the read-through keeps it without
+	// paging the commit messages, the fifth source; the handler answers an empty page for a read
+	// that asks anyway.
 	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[]`)
 	})

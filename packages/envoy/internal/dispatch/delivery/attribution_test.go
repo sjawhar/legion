@@ -43,9 +43,9 @@ func seedAttributionIssues(t *testing.T, ctx context.Context, pool *store.Pool, 
 
 func resolvedKey(t *testing.T, ctx context.Context, pool *store.Pool, facts attributionFacts) (string, attributionSource) {
 	t.Helper()
-	key, source, err := resolveIssueKey(ctx, pool, facts)
+	key, source, err := resolveStoredIssueKey(ctx, pool, facts.Repo, facts.URL, attributionInputsFrom(facts))
 	if err != nil {
-		t.Fatalf("resolveIssueKey(%+v): %v", facts, err)
+		t.Fatalf("resolveStoredIssueKey(%+v): %v", facts, err)
 	}
 	if key == nil {
 		return "", source

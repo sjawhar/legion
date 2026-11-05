@@ -255,10 +255,11 @@ func TestAPullRequestNamingAnIssueOfAnotherRepositoryAttributesNobody(t *testing
 	}
 }
 
-// A title that names another repository's issue before this repository's own must not cost the
-// pull request its attribution. The attribution takes the first ranked candidate and nothing
-// after it (attributionSelect's `limit 1`), so a title naming two issues loses the one that
-// belongs here, and an attributed head is exactly what makes a `before_merge` result at that
+// A title that names another repository's issue before this repository's own does not cost the
+// pull request its attribution: the attribution walks every candidate the five sources name
+// (attributionCandidates) and takes the first one that resolves to the pull request's own
+// repository (attributionHeld), so the other repository's issue is passed over and the one that
+// belongs here is kept. An attributed head is exactly what makes a `before_merge` result at that
 // head read current (HeadAttributedTo, the question api/results_currency.go asks). Both writers
 // of the row answer for it: the `pull_request` envelope and the read-through a recorded result
 // makes.
@@ -272,8 +273,10 @@ func TestAPullRequestTitledAfterAnotherRepositorysIssueKeepsItsOwn(t *testing.T)
 	title := foreign + ": the other repository's issue, and " + own + " (this one)"
 
 	fake := newFakeGitHub(t)
-	// While the defect stands the four cheap sources name nobody, so both paths page the commit
-	// messages, the fifth. How often they do is no part of this test: what the row holds is.
+	// The title names a candidate held to this repository, so neither path needs the commit
+	// messages, the fifth source and the only one GitHub is paged for; the handler answers an
+	// empty page for a path that asks anyway. How often they ask is no part of this test: what
+	// the row holds is.
 	fake.handle("GET /repos/acme/gadgets/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
 		mustEncode(t, w, []any{})
 	})
