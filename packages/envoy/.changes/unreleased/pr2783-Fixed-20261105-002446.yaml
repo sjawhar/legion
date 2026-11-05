@@ -1,0 +1,5 @@
+kind: Fixed
+body: The document service's cleanups hold their owner weakly, so a room its process evicted is collected with its document instead of being kept for the life of the process.
+time: 2026-11-05T00:24:46.834343438Z
+custom:
+    Issue: pr2783
