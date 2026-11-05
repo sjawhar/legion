@@ -27,11 +27,16 @@ import (
 // over and never waits for one forward's outcome before publishing the next: while every wait of a
 // holder that does not answer is held, that holder's later forwards are still published, in order,
 // and another holder's forwards are published and settled.
+//
+// A forward counts as outstanding until its outcome is reported (roleForwarder.finish), so that
+// gauge is what the test waits on. The live holder's wait counts itself settled and is then held
+// too, which puts the settle counter at its number while all 100 forwards are still outstanding -
+// the window a read of the settle counter took for the gauge - and the test alone ends it.
 func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOutcomes(t *testing.T) {
 	const perHolder = 50
 	harness := newListenerDeliveryHarness(t)
 	silent, live := contracts.AgentSubject("ses_forwarder_silent"), contracts.AgentSubject("ses_forwarder_live")
-	release := make(chan struct{})
+	release, settling := make(chan struct{}), make(chan struct{})
 	var mu sync.Mutex
 	published := map[string][]string{}
 	var settled atomic.Int32
@@ -43,16 +48,17 @@ func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOu
 		if subject == silent {
 			return func() error { <-release; return bus.ErrReceiptTimeout }, nil
 		}
-		return func() error { settled.Add(1); return nil }, nil
+		return func() error { settled.Add(1); <-settling; return nil }, nil
 	}
 	forwarder := newRoleForwarder(cfg)
-	t.Cleanup(func() {
+	closeOnce := func(held chan struct{}) {
 		select {
-		case <-release:
+		case <-held:
 		default:
-			close(release)
+			close(held)
 		}
-	})
+	}
+	t.Cleanup(func() { closeOnce(settling); closeOnce(release) })
 
 	handed := map[string][]string{}
 	for i := range perHolder {
@@ -62,7 +68,7 @@ func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOu
 			forwarder.enqueue(roleForward{item: item, sessionID: sessionID})
 		}
 	}
-	waitFor(t, 10*time.Second, "every forward published and the live holder's settled", func() bool {
+	waitFor(t, 10*time.Second, "every forward published and the live holder's waits counted", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(published[silent]) == perHolder && len(published[live]) == perHolder && settled.Load() == perHolder
@@ -75,9 +81,16 @@ func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOu
 		}
 	}
 	mu.Unlock()
-	if outstanding := forwarder.outstanding(); outstanding != perHolder {
-		t.Fatalf("%d forwards outstanding while the silent holder's waits are held, want its %d", outstanding, perHolder)
+	if outstanding := forwarder.outstanding(); outstanding != 2*perHolder {
+		t.Fatalf("%d forwards outstanding while every holder's wait is held, want the %d handed over", outstanding, 2*perHolder)
 	}
+
+	// The live holder's waits are let go: each is reported as it ends, and the gauge - the one
+	// number that says so - comes down to the silent holder's forwards, which the lane still holds.
+	close(settling)
+	waitFor(t, 10*time.Second, fmt.Sprintf("the live holder's %d forwards reported", perHolder), func() bool {
+		return forwarder.outstanding() == perHolder
+	})
 
 	close(release)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
