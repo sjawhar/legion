@@ -265,18 +265,6 @@ export default function legionExtension(pi: PiApi): void {
   const claimSession = createClaimSession({
     daemon: roleDaemon,
     persistedTranscript,
-    // The six live rows, measured against this session's tool surface as session_start sees it
-    // (`pi.getActiveTools()` answers only from a handler), the host's `pi.agents`, and the task
-    // agents the registration says the role's prompts dispatch.
-    measureCapabilities: (context, input) =>
-      measureCapabilities(capabilityHost(), {
-        cwd: context.cwd,
-        sessionId: context.sessionManager.getSessionId(),
-        issue: input.issue,
-        promptAgents: input.promptAgents,
-        activeTools: pi.getActiveTools(),
-        agentsExposed: pi.agents !== undefined,
-      }),
     exitProcess: (code) => exitProcess(code),
   });
   const controllerSession = createControllerSession({

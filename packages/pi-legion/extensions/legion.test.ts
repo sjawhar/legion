@@ -14,7 +14,6 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
-import type { LegionCapabilityRow } from "@legion/contracts/legion-api";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { noteInjectedUserTurn, noteTypedUserTurn } from "@legion/pi-shared/injected-user-turns";
@@ -45,7 +44,7 @@ import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
-import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
+import type { CapabilityHost } from "../src/capability-report";
 import { classifySession } from "../src/classify";
 
 const natsConnections: {
@@ -584,6 +583,24 @@ function fakeCapabilityHost(overrides: Partial<CapabilityHost> = {}): Capability
   };
 }
 
+/** `fakeCapabilityHost`, wrapped so every member called pushes its name into `calls`: what proves
+ * a path measures nothing. */
+function recordingCapabilityHost(
+  calls: string[],
+  overrides?: Partial<CapabilityHost>
+): CapabilityHost {
+  const host = fakeCapabilityHost(overrides);
+  return Object.fromEntries(
+    Object.entries(host).map(([name, member]) => [
+      name,
+      (...args: never[]) => {
+        calls.push(name);
+        return (member as (...rest: never[]) => unknown)(...args);
+      },
+    ])
+  ) as unknown as CapabilityHost;
+}
+
 interface ClaimPane {
   readonly claimToken: string;
   /** The daemon's `claims/register` answer: the claim it issued this pane. */
@@ -1096,12 +1113,14 @@ describe("Legion OMP extension", () => {
       "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller."
     );
   });
-  test("a claim registers, claims its Envoy role, and reports ready through the claim routes alone", async () => {
+  test("a claim registers, claims its Envoy role, measures nothing, and reports ready through the claim routes alone", async () => {
+    const calls: string[] = [];
     const pane = await bootPane({
       role: "tester",
       sessionId: "ses_worker",
       promptAgents: ["deep-worker", "oracle"],
       agentsExposed: true,
+      capabilityHost: () => recordingCapabilityHost(calls),
     });
 
     expect(daemonRequests(pane.requests)).toEqual([
@@ -1122,30 +1141,6 @@ describe("Legion OMP extension", () => {
           sessionId: "ses_worker",
           secret: pane.registration.secret,
           generation: pane.registration.generation,
-          capabilities: {
-            measuredAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/),
-            elapsedMs: expect.any(Number),
-            rows: [
-              {
-                name: "subagents",
-                ok: true,
-                detail: "task resolves 2 agents, every one the prompts dispatch",
-              },
-              { name: "web-search", ok: false, detail: "web_search is not a registered tool" },
-              { name: "mcp", ok: true, detail: "no MCP server configured" },
-              {
-                name: "repository-extensions",
-                ok: true,
-                detail: "the repository carries no .omp/extensions, .omp/skills or .claude/skills",
-              },
-              {
-                name: "dispatch-envoy-tools",
-                ok: false,
-                detail: `Envoy tools missing: ${[...ENVOY_TOOL_NAMES].join(", ")}`,
-              },
-              { name: "github", ok: true, detail: "gh viewer login: legion-reviewer[bot]" },
-            ],
-          },
         },
       },
     ]);
@@ -1160,66 +1155,8 @@ describe("Legion OMP extension", () => {
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
     expect(pane.exits).toEqual([]);
-  });
-  test("the ready's capability report measures the registration's promptAgents against the task tool's agents", async () => {
-    const measured = await bootPane({
-      role: "implementer",
-      sessionId: "ses_capabilities",
-      promptAgents: ["oracle", "plan-reviewer"],
-      agentsExposed: true,
-      capabilityHost: () => fakeCapabilityHost({ disabledAgents: async () => ["oracle"] }),
-    });
-    const ready = daemonRequests(measured.requests).find(
-      (request) => request.path === "/legion/v1/claims/ready"
-    )?.body as { readonly capabilities: { readonly rows: LegionCapabilityRow[] } };
-    expect(ready.capabilities.rows).toHaveLength(6);
-    expect(ready.capabilities.rows[0]).toEqual({
-      name: "subagents",
-      ok: false,
-      detail:
-        "agents the prompts dispatch that the task tool does not resolve: plan-reviewer; disabled by task.disabledAgents: oracle",
-    });
-    expect(measured.exits).toEqual([]);
-    expect(measured.errors).toEqual([]);
-
-    // Without `pi.agents` the subagents row says so; the pane boots all the same.
-    const unexposed = await bootPane({ role: "planner", sessionId: "ses_no_agents" });
-    const unexposedReady = daemonRequests(unexposed.requests).find(
-      (request) => request.path === "/legion/v1/claims/ready"
-    )?.body as { readonly capabilities: { readonly rows: LegionCapabilityRow[] } };
-    expect(unexposedReady.capabilities.rows[0]).toEqual({
-      name: "subagents",
-      ok: false,
-      detail: "pi.agents is not exposed",
-    });
-    expect(unexposed.exits).toEqual([]);
-  });
-  test("a measurer that fails outright costs the report alone: one log line, ready without capabilities, no exit", async () => {
-    const pane = await bootPane({
-      role: "reviewer",
-      sessionId: "ses_no_measurer",
-      capabilityHost: () => {
-        throw new Error("no capability host in this pane");
-      },
-    });
-    expect(
-      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/claims/ready")
-    ).toEqual([
-      {
-        path: "/legion/v1/claims/ready",
-        body: {
-          claimToken: pane.claimToken,
-          sessionId: "ses_no_measurer",
-          secret: pane.registration.secret,
-          generation: pane.registration.generation,
-        },
-      },
-    ]);
-    expect(pane.errors).toEqual([
-      "[legion] capability measurement failed; ready carries no report: no capability host in this pane",
-    ]);
-    expect(pane.exits).toEqual([]);
-    expect(pane.tools.find((tool) => tool.name === "legion")).toBeDefined();
+    // The boot measures nothing: no capability host member was called before its ready.
+    expect(calls).toEqual([]);
   });
   test("does nothing for a session with no Legion environment markers", async () => {
     const requests: { readonly path: string }[] = [];
@@ -2878,7 +2815,8 @@ describe("Legion OMP extension", () => {
     pane.intervals[0]?.();
     await secondReady.promise;
 
-    // The same ready, the boot's capability report included: the regain measures nothing anew.
+    // The one ready the boot built, sent again: the regain measures nothing anew, and neither
+    // ready carries a capability report.
     const readyBodies = daemonRequests(pane.requests).filter(
       (request) => request.path === "/legion/v1/claims/ready"
     );
@@ -2890,10 +2828,11 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_regain",
         secret: pane.registration.secret,
         generation: pane.registration.generation,
-        capabilities: expect.objectContaining({ rows: expect.any(Array) }),
       },
     });
     expect(readyBodies[1]).toEqual(readyBodies[0]);
+    expect(readyBodies[0]?.body).not.toHaveProperty("capabilities");
+    expect(readyBodies[1]?.body).not.toHaveProperty("capabilities");
   });
 });
 
