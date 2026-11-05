@@ -370,6 +370,9 @@ projects:
 
 A project's repositories are Dispatch's mapping (Settings → Repositories → Projects), one of them the project's default;
 `legion.yaml` names none, and refuses `projects.<KEY>.repo`.
+Its one exception names no repository of the project either:
+`projects.<KEY>.commit_issue_trailer_repos` selects, among the repositories Dispatch maps to the project, the ones whose commits carry their issue key, as a `Dispatch: <KEY>` trailer the pane's jj appends;
+a name the project does not serve selects nothing, and boot warns about it.
 The daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json` (`repositories.refused`), one either App is missing from.
 A repository whose installation read GitHub does not answer (any failure but a 404) is left out for now the same way and read again, 30 s doubling to 10 min, until GitHub answers;
 a served one whose read fails stays served.

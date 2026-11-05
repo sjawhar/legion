@@ -404,6 +404,30 @@ What each part is for:
   the state names no tree, and a tree handed over as one of its own carries its old tree's draw
   verbatim, so trees cannot be counted from it — and
   `legion state --json` shows each issue its tree's group, the mode it was drawn under and when.
+- **`projects.<KEY>.commit_issue_trailer_repos`** (optional) names the repositories whose commits
+  carry their issue key:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      commit_issue_trailer_repos: [acme/widgets]
+  ```
+
+  A pane working one of them is told that key, and its jj appends a `Dispatch: <KEY>` line to
+  every commit the pane makes in its own workspace, beside the `Omp-Session:` line every pane's
+  commits carry, so a squash landing that branch carries the issue key in its message — which is
+  what a base branch that requires the key in the commit it lands reads.
+  A repository the key names must be one [Dispatch maps to the
+  project](#the-projects-repositories): the mapping is what the project serves, and this key only
+  selects among it, so a name the project does not serve stamps nothing and the boot log says so
+  once, naming the repository and the project.
+  A pane of a repository the key does not name is told no key, and its commits carry the session
+  line alone, as does a commit that pane's shell makes in any other jj repository.
+  The variable the pane is told is the runtime's own, so `runtime.kubernetes.pod.env` and
+  `runtime.tmux.pane_env` are refused for setting it.
+  The loader refuses a name that is no `owner/name` and a repository the list names twice,
+  compared without case and through `repository_renames`, and a daemon that predates the key
+  refuses it at boot, as it does any key it does not know.
 - **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
   repository that moved: after a transfer GitHub's events name the new repository while every tree
   Legion has already recorded names the old one.
