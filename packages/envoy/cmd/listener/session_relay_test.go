@@ -33,22 +33,15 @@ type relayRig struct {
 
 func newRelayRig(t *testing.T) *relayRig {
 	t.Helper()
-	return newRelayRigPausing(t, relayPauseFirst, relayPauseMax)
+	return newRelayRigReceipt(t, relayPauseFirst, relayPauseMax, relayReceiptWait)
 }
 
-// newRelayRigPausing is newRelayRig with the backoff a paused relay waits before it sends the
-// session's unanswered messages again bounded by first and max, so a test need not wait the
-// production bounds out.
-func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
-	t.Helper()
-	return newRelayRigReceipt(t, first, max, relayReceiptWait)
-}
-
-// newRelayRigReceipt is newRelayRigPausing with the receipt wait shortened too: how long the
-// oldest frame a session has not answered may wait before the relay pauses. A row about what an
-// unreachable session leaves behind spends that wait twice over in fixed sleeps, and production's
-// three seconds buy it nothing, so such a row names a short one of its own and scales its sleeps
-// and its silent windows to it.
+// newRelayRigReceipt is newRelayRig with the backoff a paused relay waits before it sends the
+// session's unanswered messages again bounded by first and max, and the receipt wait shortened too:
+// how long the oldest frame a session has not answered may wait before the relay pauses. A row
+// about what an unreachable session leaves behind spends that wait twice over in fixed sleeps, and
+// production's three seconds buy it nothing, so such a row names a short one of its own and scales
+// its sleeps and its silent windows to it.
 func newRelayRigReceipt(t *testing.T, first, max, receipt time.Duration) *relayRig {
 	t.Helper()
 	rig := newRelayRigUnowned(t, first, max)
@@ -57,7 +50,7 @@ func newRelayRigReceipt(t *testing.T, first, max, receipt time.Duration) *relayR
 	return rig
 }
 
-// newRelayRigUnowned is newRelayRigPausing for a task that does not hold its machine's durable
+// newRelayRigUnowned bounds the same backoff, for a task that does not hold its machine's durable
 // binding yet: it relays nothing, and no relay starts, until the test calls
 // rig.relays.setOwned(true). A test that must run the durable path before any relay orders them
 // this way rather than by timing.

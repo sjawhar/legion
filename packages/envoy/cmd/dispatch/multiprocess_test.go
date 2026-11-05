@@ -2948,12 +2948,18 @@ func requireLeasedOncePerPeriod(t *testing.T, pair *dispatchPair, lease string) 
 // pass served (duty.Exclusive).
 func leasePeriodOf(t *testing.T, line string) string {
 	t.Helper()
-	_, after, found := strings.Cut(line, " period=")
-	if !found {
-		t.Fatalf("a leased pass line carries no period=: %s", line)
+	for _, match := range logAttribute.FindAllStringSubmatch(line, -1) {
+		if match[1] != "period" {
+			continue
+		}
+		value := match[2]
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		return value
 	}
-	period, _, _ := strings.Cut(after, " ")
-	return period
+	t.Fatalf("a leased pass line carries no period=: %s", line)
+	return ""
 }
 
 // lockTables holds every table named in mode (`exclusive`, or `access exclusive`) in a transaction

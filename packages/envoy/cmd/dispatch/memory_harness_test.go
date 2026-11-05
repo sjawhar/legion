@@ -227,9 +227,9 @@ func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
 //
 // It does that work itself rather than waiting for it. Between one server's stop and the next
 // server's start no process in this test is settling anything, so a settlement a write left on a
-// server that has since stopped would stand for ever: the first text of this guard waited ten
-// seconds for such a row and failed the run, which is how every memory test of this package red
-// on CI (INFRA-985, run 42013424869).
+// server that has since stopped would stand for ever: a guard that waited for such a row to
+// settle would wait out its whole timeout and fail, which is how every memory test of this
+// package went red on CI (INFRA-985, run 42013424869).
 func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	t.Helper()
 	owed := h.readOwed(t)
@@ -461,8 +461,9 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	// that finds nothing owed logs nothing, so a clean window holds no such line. One case stays:
 	// a window that itself stores a document of more than 2,000 blocks leaves its index to the
 	// server's next pass, 30 s after start, which is past the end of every window here. The
-	// handler is slog.NewTextHandler (main.go:163), which writes the message mid-line as
-	// msg="dispatch: block index", so the substring is the match and not a line's prefix.
+	// handler is the slog.NewTextHandler main installs with slog.SetDefault in
+	// cmd/dispatch/main.go, which writes the message mid-line as msg="dispatch: block index", so
+	// the substring is the match and not a line's prefix.
 	for _, line := range strings.Split(p.output.from(written), "\n") {
 		if strings.Contains(line, "dispatch: block index") {
 			t.Fatalf("the server indexed blocks inside the measured window, so the peak is that pass's memory: %s", line)

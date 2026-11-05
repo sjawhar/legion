@@ -375,7 +375,9 @@ type rig struct {
 	autoStart atomic.Bool
 	// suspendDelay is how long a pod the controller deletes stays terminating first, in
 	// nanoseconds. It is atomic because a test may shorten it while control() is running, to ask
-	// for a pod it has been holding terminating to end now (endTerminatingPod).
+	// for a pod it has been holding terminating to end now: g.suspendDelay.Store(0) in
+	// TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs (drift_test.go) ends the pod its
+	// replacement is waiting out, as the cluster would.
 	suspendDelay atomic.Int64
 	// noController leaves every object as the test wrote it.
 	noController bool

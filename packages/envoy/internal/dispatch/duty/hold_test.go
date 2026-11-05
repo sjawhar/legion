@@ -288,8 +288,9 @@ func TestHoldTokenReadsBack(t *testing.T) {
 // the run that red INFRA-1039 read -2.176685 s, which is 176 ms of inter-statement time and not a
 // clock that disagrees. So each comparison is bracketed by the database's own clock instead, and
 // what it allows is the time those statements took, read from that same clock. Load can only
-// lengthen it, so a slow runner cannot fail the test, while a reading taken from any other clock
-// than the database's still falls outside the bracket.
+// lengthen it, so a slow runner cannot fail the test, while a reading wrong by more than the time
+// those two statements took still falls outside the bracket: the now() plus or minus one second
+// mutants of this issue's plan (INFRA-985, task T7) are caught.
 func TestHoldExpiryMatchesTheDatabaseClock(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
