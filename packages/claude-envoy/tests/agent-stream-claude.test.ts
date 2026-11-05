@@ -276,6 +276,34 @@ test("an unknown content part renders as its type in brackets", () => {
   ])
 })
 
+// A person's message that carries a picture reaches the session as the person's own text and the
+// picture beside it. The page hides Dispatch's stored copy of that message only where the row the
+// session streamed says what the person wrote, so the person's text has to stay a part of its
+// own, as it does by every other door: flattened with the picture into one
+// "Look at this\n[image]" part it matches no stored message, and the message shows twice
+// (INFRA-1026).
+test("a person's message with a picture keeps the person's text as a part of its own", () => {
+  const live = harness(1_000, () => "m1")
+  live.feed(
+    appendRow(
+      "prompt",
+      [
+        { text: "Look at this", type: "text" },
+        { source: { data: "…", type: "base64" }, type: "image" },
+      ],
+      { origin: { asUser: true, kind: "plugin" }, uuid: "row-picture" },
+    ),
+  )
+
+  const kept = messages(live.replay())
+  expect(kept).toHaveLength(1)
+  expect(kept[0]?.dispatchMessageId).toBe("m1")
+  expect(kept[0]?.parts).toEqual([
+    { text: "Look at this", type: "text" },
+    { text: "[image]", type: "text" },
+  ])
+})
+
 test("a row with nothing to show records nothing, and the rows around it still publish", () => {
   const live = harness()
   live.feed(
@@ -490,6 +518,37 @@ test("a thinking pick is the level the header shows at once, until a step report
   const reported = live.stream.settings("claude-opus-5-5", rows)
   if (!reported.reported) throw new Error("the settings were not reported")
   expect(reported.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })
+})
+
+// The mod puts the effort it was last told to set on every later request, whatever model the
+// session runs (`../hooks/mod`, `effortNow`), and only another pick changes it. So a person who
+// picks a model after picking a level is still thinking at that level, and the header says so:
+// falling back to the model's default would tell the person a level the requests do not carry
+// (INFRA-1026).
+test("a model pick keeps the effort the mod puts on every later request in the header", async () => {
+  const recorded = await fixture("claude-2.1.310-turn")
+  const live = harness()
+  const rows = recorded.answers["config.list"]
+
+  // The session ran at max on claude-opus-5-5; a person picked low, and the next step reported it.
+  for (const event of recorded.events) live.feed(event)
+  live.stream.pickedEffort("low")
+  live.feed(
+    step({
+      done: true,
+      effort: "low",
+      index: 0,
+      model: "claude-opus-5-5",
+      parts: [{ text: "ready", type: "text" }],
+      turnId: "turn-2",
+    }),
+  )
+
+  // The person now picks another model. No step of that model has run, but the mod still sets
+  // low on its requests, so low is the level in force.
+  const switched = live.stream.settings("claude-sonnet-4-5", rows)
+  if (!switched.reported) throw new Error("the settings were not reported")
+  expect(switched.thinking).toEqual({ level: "low", levels: CLAUDE_EFFORT_LEVELS })
 })
 
 test("a model that reports no effort has no thinking to adjust", async () => {

@@ -529,6 +529,46 @@ test("a streamed user message tagged with a person's message but saying somethin
   ).toEqual(["Merge only after review.", "Merge now, skip review."]);
 });
 
+// A person's message that carries a picture reaches the session as the text the person wrote and
+// the picture beside it, which the stream names `[image]` in a part of its own
+// (`conversationParts` in `@legion/pi-shared/agent-stream`). The person sent one message, so the
+// stored copy still gives way: the picture makes the row say more than the body, never something
+// else (INFRA-1026).
+test("a person's message with a picture shows once, not beside its stored copy", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "Look at this"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [
+      {
+        kind: "message",
+        message: {
+          at,
+          dispatchMessageId: "m1",
+          id: `u${at}`,
+          parts: [
+            { text: "Look at this", type: "text" },
+            { text: "[image]", type: "text" },
+          ],
+          role: "user",
+          streaming: false,
+        },
+        seq: 1,
+        v: 1,
+      } as const satisfies AgentStreamFrame,
+    ],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("[image]");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["Look at this[image]"]);
+});
+
 // Send is the terminal's Enter: the default wherever the session takes a steer. A session that
 // advertises Aside and no Send would refuse one, so Aside is its default.
 test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {
