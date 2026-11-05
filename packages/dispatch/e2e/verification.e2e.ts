@@ -56,6 +56,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): 2.3 s - a project, its default repository, a pull request in the fake GitHub, a
+// Verification document of three checks and two recorded results, each result's record route
+// reading through to that fake for the pull request's head, before one load of the tab, which
+// opens the document's live room and draws all three checks with every field of both results.
 test("the Verification tab lists every check of the document, each with the results recorded against it", async ({
   browser,
 }, testInfo) => {
@@ -154,6 +158,15 @@ A check nobody has run yet reads no result.
   }
 });
 
+// SLOW(>=2s): 1.9 s here, over the bar on the four-lane report this rule is read against, and
+// this pod puts it over in a third of runs. Two results recorded against the document's two
+// checks, each one's record route reading through to the fake GitHub for the pull request's
+// head, with the fake re-seeded between them so the first result ages; then one load of the
+// Verification tab. Most of it is the floor every row of these files pays, measured on this
+// row: a fresh Chromium context (0.25 s), the cold parse of the dashboard bundle a fresh
+// context cannot cache (0.40 s) and the dashboard's own fifteen boot reads before the first
+// check draws (0.80 s). The row's own seven assertions are 0.26 s of it. INFRA-1109 holds that
+// floor; nothing in the row is removable.
 test("a result at a commit the pull request has moved past reads older", async ({ browser }) => {
   const issue = await seedIssue("Verification currency", firstHead);
   await createIssueArtifact(issue.key, {

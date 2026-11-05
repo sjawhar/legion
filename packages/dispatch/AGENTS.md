@@ -463,8 +463,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   `mergeIssue`'s included.
 - A read of a block of a comment or issue message (`blockQuery`, `["references", "to", ref]`, whose node id is `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`) is no target `references_changed` names (the server stores those blocks as `comment_block` / `message_block`, which `refs.CountedChanges` drops), so its item's own events refresh it (`api/event-refresh.ts`): a `comment.edited` refreshes every read whose node is a block of that comment, pinned or not (`commentBlockReads`), since the edit can change the block's text or its pin's state; and a reply that names a block (`reply_block.node` on `comment.created`, `comment.answered`, `message.created`, `message.answered`) refreshes that block's read, which lists the reply (`appendRepliedBlock`). An issue message is never edited, so its blocks' text never moves.
 - `web/src/main.tsx` installs React Router and the shared Query client, a `DispatchQueryClient` (`api/query-client.ts`): its `refetchQueries`, and through it every `invalidateQueries` and `resetQueries`, never cancels a running request; a query already fetching is fetched once more when that fetch settles, so no read ever has two requests in flight, and a mutation's invalidation during a fetch still ends on the answer composed after its write. Every mutation's own `invalidateQueries` call keeps its shape. A failed read is retried twice unless the failure is definitive (`isRetryableQueryError` in `api/client.ts`: a 401, among others), each retry after `queryRetryDelay` (`api/query-client.ts`): a refusal carrying `Retry-After` in seconds (`ApiError.retryAfterMs`; Dispatch sends it with a 503 refusing excess load) waits that long, at most 30 s (`RETRY_AFTER_CEILING_MS`), plus a random share of it again, so tabs refused together do not all come back in the same instant and the whole wait stays under a minute however long a proxy's `Retry-After` is, and any other failure waits 500 ms.
-- `web/src/features/search/` owns the global palette and the rail `Search` control. It opens in one of three modes (`PaletteMode`): `all` - `Ctrl/Cmd+K` and the rail control - lists this page's actions and the search hits, `search` (`/`) lists hits alone, and `projects` (`g p`) lists the projects, Enter opening one. Each open is a global keymap binding in `app.tsx`, and the palette registers its own `Ctrl/Cmd+K` close in the `dialog` scope while open. The palette's dialog is mounted only while it is open, so each open starts on its first row and a closed palette holds no search of its own; `Ctrl/Cmd+K` and `g p` open with an empty query, since a query left there would filter a new page's actions, or its projects, down to nothing, while `/` reopens on its last search, selected so that typing replaces it, since its hits do not depend on the page. The action rows are `appKeymap.actions()`, taken on the render that opens the palette (the registry bullet below says why), so the rail control and `Ctrl/Cmd+K` offer the same rows for the same page and focus; with an empty query they all render under `Actions`, above the `Type at least 2 characters` message, and a query filters them by label. An action whose label the query starts stays under `Actions`, above the hits; one that holds the query further in (`issue` in `Close issue`, `status` in `Move card to the next status`) moves to `More actions`, below the hits, so a search and Enter opens a hit rather than running an action that only shares a word with it. Actions, projects and hits are one list of `role="option"` rows, so the arrows, Enter and `aria-activedescendant` cover all three, and an action row shows the keys that also run it (a palette-only action has none). The highlight is the row the reader sees highlighted, held by its id rather than a position: hits that arrive below the actions after the reader has arrowed, or a refetch that re-ranks them, leave it on that row; a new query returns it to the head, and so does its row leaving the list, the head then keeping it when the row comes back. The head is the first row unless the list holds only `More actions`: then nothing is highlighted and Enter runs nothing until the reader arrows, Down to the first row and Up to the last. While the query's search is still out, the arrows walk only the rows above where its hits will go, and with none they do nothing, so a key pressed before the answer cannot land on a `More actions` row that the hits then arrive above. A refresh that fails keeps the hits the query already has, and `Search failed.` shows only when it has none. The dialog is a column no taller than the screen below it, in which only the list scrolls; the list keeps one row's height, so a short window cuts the key hints and then the message rather than the row, and it scrolls the highlighted row into view whenever the highlight moves or the list's own height changes. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node. It queries between 2 and `SEARCH_QUERY_MAX` (`@legion/contracts/dispatch-tools`, 1,000) characters of trimmed text, the server's own bounds, and names the limit in place of a request past it.
+- `web/src/features/search/` owns the global palette; the rail `Search` control that opens it is a `RailButton` (below). It opens in one of three modes (`PaletteMode`): `all` - `Ctrl/Cmd+K` and the rail control - lists this page's actions and the search hits, `search` (`/`) lists hits alone, and `projects` (`g p`) lists the projects, Enter opening one. Each open is a global keymap binding in `app.tsx`, and the palette registers its own `Ctrl/Cmd+K` close in the `dialog` scope while open. The palette's dialog is mounted only while it is open, so each open starts on its first row and a closed palette holds no search of its own; `Ctrl/Cmd+K` and `g p` open with an empty query, since a query left there would filter a new page's actions, or its projects, down to nothing, while `/` reopens on its last search, selected so that typing replaces it, since its hits do not depend on the page. The action rows are `appKeymap.actions()`, taken on the render that opens the palette (the registry bullet below says why), so the rail control and `Ctrl/Cmd+K` offer the same rows for the same page and focus; with an empty query they all render under `Actions`, above the `Type at least 2 characters` message, and a query filters them by label. An action whose label the query starts stays under `Actions`, above the hits; one that holds the query further in (`issue` in `Close issue`, `status` in `Move card to the next status`) moves to `More actions`, below the hits, so a search and Enter opens a hit rather than running an action that only shares a word with it. Actions, projects and hits are one list of `role="option"` rows, so the arrows, Enter and `aria-activedescendant` cover all three, and an action row shows the keys that also run it (a palette-only action has none). The highlight is the row the reader sees highlighted, held by its id rather than a position: hits that arrive below the actions after the reader has arrowed, or a refetch that re-ranks them, leave it on that row; a new query returns it to the head, and so does its row leaving the list, the head then keeping it when the row comes back. The head is the first row unless the list holds only `More actions`: then nothing is highlighted and Enter runs nothing until the reader arrows, Down to the first row and Up to the last. While the query's search is still out, the arrows walk only the rows above where its hits will go, and with none they do nothing, so a key pressed before the answer cannot land on a `More actions` row that the hits then arrive above. A refresh that fails keeps the hits the query already has, and `Search failed.` shows only when it has none. The dialog is a column no taller than the screen below it, in which only the list scrolls; the list keeps one row's height, so a short window cuts the key hints and then the message rather than the row, and it scrolls the highlighted row into view whenever the highlight moves or the list's own height changes. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node. It queries between 2 and `SEARCH_QUERY_MAX` (`@legion/contracts/dispatch-tools`, 1,000) characters of trimmed text, the server's own bounds, and names the limit in place of a request past it.
 - The palette lists one page of hits, `GET /api/v1/search`'s first 20 in the server's fused order (`packages/envoy/cmd/dispatch/README.md`, "Search"), grouped under each owner in the order of its first hit. When the query matches more than the page holds, the message slot under the list says `Showing the best <n> of <total> matches`, so a partial list never reads as complete. An ask hit whose result carries `ask` adds a status line under its excerpt (`AskHitStatus` in `features/search/AskHitStatus.tsx`, which the create dialog's related items show too): a badge (`Open`, `Answered`, `Closed, no answer` or `Closed after an answer`), who closed it and when, and its latest answer - who gave it, when, the options chosen and the start of its text clamped to three lines. The clamp is CSS only and an option's text is its accessible name, so the text is first cut to `ANSWER_PREVIEW_CHARS` characters (beside `AskHitStatus`) at a word, balanced and closed with an ellipsis (`markdownHead` in `features/refs/markdown-fragment.ts`), and a screen reader never reads a whole long answer as the row's name; the closer is named through `AskResolutionLine agent="static"`, since a link inside the option would be a second control in one listbox row, and a hit from a Dispatch that predates the field shows no line.
+- `web/src/features/shell/RailButton.tsx` is the rail's control for a keyboard binding: a label, then the binding's keys in a `<kbd>`, with the top margin passed by the call site. `app.tsx`'s `NavigationContents` renders it twice, beside the keymap the hints stand for: `Search` (`⌘K` / `Ctrl K`), which opens the palette in its `all` mode, and under it `New issue`, which opens the same `CreateIssueDialog` the global `c` binding opens (`app.tsx` owns the one `createOpen` state both set), showing `c` as `?` and the palette show that binding and `aria-keyshortcuts="C"`, so a person who has not learned the shortcut can still file an issue. Each click calls `onClose`, which closes the compact navigation sheet, before it opens its dialog.
 - `web/src/features/issue/RelatedItems.tsx` is the new-issue dialog's related-item section, between its Spec field and its refusal: `RELATED_DEBOUNCE_MS` (400 ms, `features/issue/related-timing.ts`, a module importing nothing so the Playwright specs read the value the dialog runs on) after the title rests, it asks `GET /api/v1/projects/{key}/related` (`api.relatedItems`, the no-write check, which records nothing) with the title alone and lists what it found, each item a link in a new tab named by its owner alone, so the draft survives the click and a screen reader's link list names the item. Nothing is asked below two trimmed characters or with no project chosen. The query is keyed on the debounced title, so react-query aborts a check a newer title superseded, and what is shown is gated on that debounced title still being the one in the box: an answer that lands under an older title leaves `Checking for related items…` on screen rather than answering a title the reader has left. Which of the three forms an answer holds is `@legion/contracts`' `relatedCheckFormOf`, the one the CLI's lines read too (`packages/envoy-client/src/related-check.ts`); each surface only words that union, so a check that never ran (`No related-item check was made: …`) cannot be read as one that searched and found nothing on one surface and not the other. A past decision is named under the form, who answered it inside the same list item. The query asks fresh for every settled title (`staleTime: 0`, `gcTime: 0`): nothing invalidates its key, so under the app's defaults a title checked a moment ago would be answered from before the issue someone filed since. The section is a polite live region but `aria-busy` while a check is out, so a screen reader hears the answer alone rather than `Checking for related items…` at every pause in someone's typing; and because the section grows with what the check finds, the dialog's own form caps its height at the window and scrolls (`max-h-[100dvh] overflow-y-auto`, `xl:max-h-[calc(100dvh-6rem)]` for the wrapper's padding), or on a phone its Create row and the possible duplicate's **Create anyway** paint past the bottom edge with nothing to scroll. `e2e/create-issue-related.e2e.ts` drives in a real browser what only a browser shows: the found form and its found-nothing control, the fresh check after an issue is filed between two checks of one title, the debounce, the display gate with its `aria-busy`, and the scroll. The not-made form, the past decision, the failed check with Retry, and the two-character and no-project floors are `RelatedItems.test.tsx`'s.
 - `web/src/features/inbox/InboxDrawer.tsx` is the Inbox as a drawer over any page: the same `Inbox` component, mounted once in `app.tsx` beside `<main>` rather than inside `<Routes>`, so opening it never unmounts the page underneath (a live conversation keeps its half-typed message). It opens from `i` (a global binding offered everywhere but `/`, where the page already is the Inbox), from the compact top bar's `Needs you N` / `Inbox` button and from the rail's `Peek` beside Inbox (on `/` the top bar keeps its plain badge and the rail shows no `Peek`); Escape, Close, a click outside it and any navigation close it, and focus returns to what opened it. It docks right at `md:max-w-md` and fills the screen on a phone. `Inbox` takes `filter`, `onAssigneesChange` and `keymapScope` for it: the drawer keeps its assignee filter in its own state instead of the URL (a pick must not navigate the page beneath), opening on the reader as the page does, and registers the Inbox's keys in the `dialog` scope, the only scope consulted while a dialog is open.
 - `web/src/features/shell/keymap.ts` is the one keyboard registry. A component registers bindings with `useKeymap(scope, [{ id, keys, label, run, when?, inEditable?, palette? }])` (`scope` is a `KeymapScope` — `global`, `dialog`, `inbox`, `project`, `architecture`, `board`, `issue`, `document`, `agents` today; add a member when a page grows bindings, and list it in `ShortcutHelp.tsx`'s `SCOPE_LABELS` (typed) and `SCOPE_ORDER` (a plain array — a scope missing there is silently dropped from `?`) — and `keys` is tinykeys syntax: `"g i"` chord, `"$mod+k"` for Meta or Control, `"Shift+P"`, `"?"`; an array lists alternatives, and `[]` is a palette-only action no key press ever matches), and a page or dialog pushes its scope with `useKeymapScope(scope)`; `useDialog` pushes `dialog` and registers its Escape there. A combo matches the character its key types, so a reader on AZERTY or Dvorak presses the letter a shortcut names wherever the layout puts it; on a Mac, a combo that holds `Alt` also matches the key's position (`event.code`, `KeyM` for `m`), because Option rewrites the character there (`$mod+Alt+m` types `µ`). Elsewhere Alt combos match the character, so AltGr still types its layout's character; no other combo matches by position, since by position Dvorak's `l` would also press `p`. `ShortcutHelp` shows `$mod` as `⌘` and `Alt` as `⌥` on a Mac (`MOD_KEY_LABEL`, `ALT_KEY_LABEL`). `KeymapProvider` (mounted once around `AppShell`) owns the single `window` keydown dispatcher and the bottom-right chord indicator (`data-testid="chord-indicator"`): a key resolves top-down through `["global", …pages]`, the first scope with a match wins, and while any `dialog` scope is on the stack it is the only scope consulted, whatever mounted after it; a `when()` of `false` neither fires nor shadows. Chords wait 1000 ms for their next key. While a control that takes typed text has focus - a `TEXTAREA`, a `SELECT`, contentEditable, or an `INPUT` whose type is one of the text-entry ones - only `inEditable` bindings run (`$mod+k`, `Escape`, a document's `$mod+Alt+m`), so single letters and digits never eat typing; such a binding reaches every one of those controls, so one that belongs to only some of them says which in its `when`; a checkbox, radio or button `INPUT` takes no text, so the page's keys keep working when a pointer leaves focus on one; a keydown something else already `preventDefault`ed, or one mid-IME composition, is left alone. Registering a strict prefix of another sequence (`g` beside `g i`) throws in development. Global bindings live in `app.tsx`: `$mod+k` search, `/` search-only, `?`, `c`, `g i`/`g a`/`g s`, `g d` (the route's project Documents, `routeProjectOf` in `features/refs/routes.ts`, which `CreateIssueDialog` preselects from too), `g p` (pick a project), `i` (the Inbox drawer above, offered everywhere but `/`), and `Shift+S`/`Shift+M` toggling the sidebar and the margin, each persisted like its button and offered only where its button renders: from `xl`, and the margin's only on a route that has one, since below `xl` both are sheets that ignore the stored preference. `appKeymap.actions()` is what `$mod+k` offers as rows: the enabled bindings of the scopes beneath the innermost dialog, innermost scope first, less every one whose `palette` is `false`. `palette` defaults to `true` for a binding with one key or none and to `false` for one with several or one that is `inEditable`. A row presses only its first key, and a binding with several keys may pick what it does by the key pressed (the arrows, `1`–`9`, `0`–`3`), so a binding whose keys all do the same thing says `palette: true`, as the Architecture tab's `Enter`/`o` and `h`/`ArrowLeft` do. An `inEditable` key is one that has to work while the reader types, today `Escape`, `$mod+k` and a document's `$mod+Alt+m`, and such a binding is a row only when it says `palette: true`: inside the palette Escape closes it and `$mod+k` is its own key. Rows read innermost scope first and alphabetically by label within a scope, so the highlighted first row is a decision rather than a result of mount timing. `palette: false` marks the keys that walk a list with the row in hand - moving the cursor (`j`/`k`, and the Board's `h`/`l`) and marking rows (`x`) - the List's and the Board's `Enter` beside their `o`, which is already that action's row, the Architecture tab's `l`/`ArrowRight` into children (on a row with children its Open row does the same, and on a leaf it would do nothing), the Inbox's Escape that clears the marks, since Escape in the palette closes the palette, and `/`, which from `$mod+k`'s palette would only reopen it with its actions taken away. A binding that opens something else - `g p`'s project list, `?`'s shortcuts, `c`'s dialog - is a row like any other, since a row runs once the palette has closed. The list is taken on the render that opens the palette, while focus is still on whatever opened it, and a chosen row runs after the palette has closed and `useDialog` has put focus back there — otherwise a `when()` or a `run` that reads the focused element would see the palette's own input, and a row that moves focus would have its move undone by that restore. Running a row calls the binding's `run` with a `keydown` for its first key as written (`key: "Shift+P"` with no modifier flags, where a press of Shift+P reads `key: "P"` and `shiftKey: true`; no row's `run` reads its event today), and only if the binding is still registered and its `when()` still holds at that moment: the row was decided when the palette opened, and since then its control may have gone (another writer reopened the issue) or its component unmounted (the page fell to its error view). `c` mounts `features/issue/CreateIssueDialog.tsx` — project (preselecting the route's project), title, optional first spec line — which `POST`s through `api.createIssue`, shows a `POSSIBLE_DUPLICATE` answer with its candidate and offers **Create anyway** (`force`), and opens the created issue; Escape closes it and returns focus to the caller. The Inbox registers `j`/`k` (and arrows from a focused row) roving real focus over its `tabIndex={-1}` rows, `Enter` for the row's answer textarea, `1`–`9` for its fixed options, `o` for the owning issue or document, `y` to copy the focused ask's `dispatch://` reference (it clicks the card's own `CopyRefButton`, `COPY_REF_SELECTOR`, so the card confirms), `Escape` back to the row and then out, `x` to mark the focused row (its own checkbox is the mouse path into the same selection), and `h` to snooze - the whole selection whenever anything is marked, from wherever marking leaves the reader (a row, the checkbox they just ticked, the page) but not from inside an ask card, where the card's controls own the keys; otherwise the focused row's own picker - with `Escape` out of the bulk picker returning to the row focus came from (the bar itself when no row is rendered), and `Escape` with no row focused clearing the selection (the assignee filter's popover takes Escape first, since one press should close it rather than also drop what the reader marked). The bar counts - and the bulk write touches - only the marks whose rows are on the page: a mark made under a wider assignee filter neither shows nor writes once the filter is back on the reader's own work, and one whose row has folded into `Later` neither shows nor writes until the band is opened, since the reader has no checkbox for it there and may well have set that row's own moment since marking it. The mark itself survives both. Each row's own controls are named after its ask (`Select CORE-12: Which release?`, and the same for Snooze), since two asks on one issue would otherwise give two controls one name; where an issue has more than one row in the list the name carries the position too (`Select CORE-12, ask 2 of 2: …`), because two questions can agree for longer than a name can carry. `ProjectPage` pushes `project` and registers `v` (List ⇄ Board; inert on the Architecture and Documents tabs) while `IssueList` registers the List's own rows into that same scope, mounting only while the List shows so the Board never lists them beside its own: `j`/`k` rove real focus over its `tabIndex={-1}` `[data-issue-row]` rows, `o` opens the focused issue and `Enter` does from the row itself, and `j`/`k` are greyed in `?` whenever no row sits outside a collapsed band - a reader who folds every band by hand, as much as a project whose every issue is closed and so has only the band the page renders closed. `roveFocus` steps only over rows a reader can reach - every row that is not inside a closed `details` (`reachableRows`, the one helper the `when` gates count too, so a step and the offer of it cannot disagree; `checkVisibility()` would answer the same and needs Safari 17.4) - so a collapsed status band is crossed rather than dead-ended in: its rows stay in the DOM, can take no focus, and counting them would strand every row past the band; the same rule holds for the Inbox and Architecture rows it also serves, and the Board, which keeps the same four keys for its cards, answers it in its own model (`focusTarget`'s `isCollapsed`, since a collapsed rail renders no card). The Architecture tab pushes `architecture` and registers `j`/`k` (and arrows from a focused row) roving real focus over its `tabIndex={-1}` component rows, `Enter`/`o` to open the focused component (into its children when it has any, exactly like `l`, else its details), `l`/`ArrowRight` into its children and `h`/`ArrowLeft` up one level (focus follows: the first row of the new level, or the row just left), and `Escape` back to the row and then out. The Board pushes `board` and registers `j`/`k` (and arrows from a focused card, column or rail) roving real focus over its `tabIndex={-1}` cards, `h`/`l` to the previous / next column at the same index clamped (an empty column or a collapsed rail takes focus itself), `Shift+J`/`Shift+K` to move the focused card down / up one, `Shift+H`/`Shift+L` to move it to the top of the previous / next status (into Done closes, out of Done reopens - the drag rule), `o` and `Enter` (on the card itself) to open the issue, `p` to focus the card's priority select, `y` / `Shift+Y` to copy the focused card's `dispatch://CORE-12` reference / bare key, and `Escape` back to the card and then out; every move goes through `moveCard` and is read out by the board's `sr-only` `role=status` live region (`Board announcements`: `CORE-12 → Todo, position 2 of 5`, `CORE-12 → Done, closed`, `Copied dispatch://CORE-12`). The Agents page pushes `agents` and registers `j`/`k` roving real focus over its `tabIndex={-1}` session rows, `Enter` to message the focused agent (opening a collapsed row first, then focusing its composer on the next frame), `i` for that row's issue picker - which ends inside the picker's own `<select>`, where the arrows choose, Enter commits the pick and hands the reader on to the composer the issue is for, and Escape closes the picker and returns to the row, from inside the composer and from the row itself (a list that fails or is still out renders no select, so the row is where `i` leaves the reader), while leaving the select any other way - Tab, Shift+Tab, a click elsewhere - drops a choice Enter has not committed, so the open select never shows an issue the message is not addressed to; the picker takes focus only once its list lands and only if focus is still where the open left it - the row, the picker's own button, or nothing - and a pick keeps whatever the reader has already typed, since the composer takes the mention an issue-owned comment needs into the live draft in place - body and accepted mentions together, so what the reader sees and what reaches the wire cannot disagree, with the one exception that the mention a channel seeded is dropped on the way into a channel that seeds none (a direct message already reaches its session), while a mention the reader accepted themselves survives every trip; a message on its way to the server is addressed already, so it holds the picker (disabled, and `i` greyed, until the server answers), every Reply and Cancel reply, and a refusal hands back exactly the draft that was sent; an issue closed after it was picked drops out of the open list on the next read but stays in the select (a disabled option) and on the toggle as `<KEY> (closed)` until another is picked, as a closed issue's header keeps its own status among its Status select's options, and a send to it is refused `ISSUE_CLOSED` - `Shift+P` to pin or unpin it, focus following the row to where the pin moves it - or to the fold's toggle when the row lands in a closed fold, hidden - since moving the row's node can drop focus to the document, and `x` to tick its broadcast checkbox; Escape inside the composer is the composer's own key - `MentionComposer` stops it before the dispatcher sees it - and its close runs the same `Back to the agent row` the `agents` scope registers, so `?` describes it and the binding takes over if the composer ever stops swallowing it. `IssuePage` pushes `issue` and registers the header's own controls: `s` and `p` focus the Status and priority selects, `0`–`3` set P0–P3 through the very write the picker uses - `IssuePage` creates one `useIssuePriority` for the page and hands it to `IssueHeader`, which renders `PriorityEditor` with it, so a refused keyed write rolls back once and is reported by the control the reader is looking at (every other surface - list row, board card, Inbox row - has no second way to write that priority and uses `PriorityControl`, which owns its write), `l` opens the labels popover, `e` edits the title, `Shift+P` pins or unpins, the chords `t s`/`t c`/`t h`/`t a`/`t v`/`t d` select the Spec, Conversation, Children, Artifacts, Activity and Decisions tabs (`t a` is already Artifacts and `l` is already the label editor, so Activity takes `t v`), and `Escape` leaves a focused Status or priority select - without it the next key is that select's own type-ahead, where `t` picks Todo or Testing instead of starting a chord. The bindings find their controls through `data-issue-header`, and each is offered exactly while its own control takes a click, so a closed issue greys the ones its header disables. `IssueHeader` registers keyless `close`, `reopen` and `set-p0`-`set-p3` into the same scope: too consequential for a single key, so they are palette-only, on the same handlers and the same guards as the Close and Reopen buttons and the priority editor, and the four priority rows write through the page's one priority write too, so a refused palette pick is reported where a refused digit is. The two that write without focusing a control - `0`-`3` and `Shift+P` - are also withheld while focus is on any `<input>` (an ask card's option radios, the margin composer's `Allow multiple`) or anywhere inside an ask card (`[data-ask-card]`, whose buttons are the card's too), since a key pressed there belongs to that control's own surface. A focused `<button>` is deliberately not withheld: every single-key binding in the registry fires from one, a digit has no native meaning on a button, and after any click - a tab, a disclosure, Copy - focus sits on the button that was clicked, which is where a reader reaching for the next shortcut stands. Single keys reach these controls at all because the registry passes every control that takes no typed text; that permission carries the obligation that a page whose key writes says for itself where the reader may press it (`IssuePage`'s `outsideInputsAndAskCards`, the Inbox's `outsideAskCard`). `ProofDocument` pushes `document` - an issue's Spec and its other documents and a project's document page each render one - and registers `$mod+Alt+m`, `Comment on selection` (Google Docs' chord): `inEditable`, since the editor is where it is pressed, and offered only while that editor has focus, takes edits and holds a non-empty selection, which is when the selection bar offers Comment, so it does nothing from a comment composer or any other field, on a closed issue's or a historical document, or with only a caret. It calls `ProofEditorHandle.commentOnSelection`, the bar's own Comment path (`act` in `@legion/proof-editor`'s `dispatch-action-bar.ts`, which the buttons call too), so the margin's composer opens on a provisional mark exactly as the button opens it. The issue page keeps its Spec mounted, hidden, beside another of its documents, so two documents register the binding at once; `describe()` lists a binding two mounted instances register as one row, enabled when either's `when()` holds. `?` opens `ShortcutHelp`, a `useDialog` overlay rendered from the registry as described the moment `?` fired (grouped by scope, live-filtered, `when()===false` rows greyed, keyless palette-only bindings omitted since they have no key to list, closed by a route change) — adding a binding is the whole change; the help has no list of its own.
@@ -1343,9 +1344,12 @@ Postgres. It runs Playwright through `e2e/run.ts`, which starts the harness
 (`e2e/run-server.sh` and its fakes) unless `PLAYWRIGHT_BASE_URL` selects an
 already deployed server. Every harness server serves on a port the OS chooses
 unless its variable sets one (below), so the temporary server never meets the
-production listener on port 8766, but `DATABASE_URL` is required: the
-database must be isolated because `e2e/seed.ts` truncates it before every
-scenario and never falls back to `dispatch_c`. It runs the server in cookie
+production listener on port 8766. A run of one lane takes `DATABASE_URL`, unless
+it names a Postgres provider instead (below): the
+database must be isolated because `e2e/seed.ts` empties it before every
+scenario and never falls back to `dispatch_c`. A run of more than one lane
+starts a Postgres per lane instead and refuses a `DATABASE_URL` the caller set
+(the lanes, below). It runs the server in cookie
 identity, the production mode, and signs `alice` and `bob` in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
 origin, listener and database, with a per-process signing key, or one key per run
@@ -1353,11 +1357,101 @@ in two-process mode, below):
 `e2e/users.ts`'s `signIn`/`asUser` for a browser context, `e2e/api.ts`'s
 `userHeaders` for a plain fetch, which also sends the dashboard origin the CSRF
 guard requires on writes. A cookie names its login's generation in
-`user_sessions`, which `resetDatabase` truncates, so a context signs in after the
-reset, never before it. Address the harness as `127.0.0.1:<port>`, never
+`user_sessions`, which `resetDatabase` empties and then puts back at generation
+0 for `alice` and `bob`, so their cookie still authenticates and a worker mints
+one for them once rather than once per row; every other login's row goes, so a
+context signing in as anyone else signs in after the reset, never before it.
+Address the harness as `127.0.0.1:<port>`, never
 `localhost`: the router refuses any other `Host`. Do not replace the server with
 a fixture server. `bun run dispatch:local` runs the same harness by hand,
 seeded and signed in, and leaves it running (below, after the port rules).
+
+`DISPATCH_E2E_WORKERS` is how many Playwright workers the run has — unset or
+empty is one — and `e2e/run.ts` starts one lane per worker, all at once, before
+Playwright starts. A lane is one whole harness as `e2e/harness-start.ts` starts
+it (a Dispatch server, the fake Envoy, the fake GitHub, the fake broker, the
+plain-HTTP proxy, a file-store bucket of its own and ports the OS chose for it)
+and a Postgres server of its own. A lane owns every piece of state a row
+writes, because `e2e/seed.ts` empties its lane's database before every row and
+clears that lane's fakes with it: two workers on one harness would empty each
+other's state mid-row. The run exports `DISPATCH_E2E_LANES=<n>` and every
+harness variable of every lane under `DISPATCH_E2E_LANE_<i>_<V>`, that lane's
+`DATABASE_URL` and file-store bucket included, and keeps the plain names
+pointing at lane 0, so every one-lane consumer reads what it read before lanes
+existed.
+
+A worker finds its lane by `TEST_PARALLEL_INDEX`, which Playwright sets in each
+worker process and a restarted worker keeps, so a worker Playwright restarts
+comes back on the lane it had. `e2e/harness-ports.ts` resolves it, the one
+place: `laneValue` reads a variable under the lane's name and falls back to the
+plain one, which is how the harness ports resolve and how `e2e/psql.ts` finds
+the database every `sql()` statement runs against. A process that is no worker
+has no `TEST_PARALLEL_INDEX` and so reads lane 0 — the config itself,
+`e2e/preflight.ts` (which checks every lane in turn, resolving each through
+`asLane`) and each harness listener `e2e/run.ts` started, which was handed its
+own lane's values under the plain names.
+
+A lane's Postgres comes from one of two providers (`e2e/harness-postgres.ts`),
+and a run of more than one lane that names neither is refused naming both.
+`DISPATCH_E2E_PG_IMAGE` is a `docker run` of the image digest the caller names,
+which is CI's path: a runner has Docker and no Postgres binaries, and the
+`dispatch` job passes the pgvector digest its `postgres` service ran before the
+lanes. `DISPATCH_E2E_PG_BIN` is a directory holding `initdb` and `pg_ctl`,
+which is a developer's and an issue pod's path, where there is a Postgres
+installation and no Docker; that provider runs `initdb` once per run and copies
+the data directory it made per lane, since `initdb` is the cost that grows with
+the lanes. Both keep the lane's data under the run's own temporary directory,
+which `e2e/run.ts` removes when it ends, and both answer on 127.0.0.1, which
+the server's dev sign-in requires of its database. With one worker and
+`DATABASE_URL` set, the run uses that database as lane 0 and starts no
+Postgres, exactly as it always has.
+
+With more than one worker the run refuses, before a directory is made or a
+server starts and naming the variable, a caller-set `DATABASE_URL`,
+`PLAYWRIGHT_BASE_URL`, `DISPATCH_E2E_PROCESSES=2`, `DISPATCH_E2E_REUSE_SERVERS`
+or any harness port variable (`refuseLaneConflicts`, `e2e/harness-ports.ts`).
+Each names one database, one set of servers or one port that every lane would
+share, and a shared one is one lane emptying another's rows. The Playwright
+config refuses a `--workers` or `-j` on the command line that differs from the
+lane count, naming `DISPATCH_E2E_WORKERS` as the way to ask for that many: the
+lanes were started before Playwright, so another worker count would leave a
+lane unused or put two workers on one. Its `workers` is the lane count and
+`fullyParallel` is on, since a row empties its own lane before it runs: rows of
+one file may run in different lanes, and a file whose rows must run in order
+says so itself, with `test.describe.configure({ mode: "serial" })` and the
+reason.
+
+Every other mode is one lane and one worker, none of them setting
+`DISPATCH_E2E_WORKERS`: the deployed run (`bun run e2e:deployed`,
+`PLAYWRIGHT_BASE_URL`), two-process mode (`bun run e2e:multiprocess`), a run
+against servers a person started (`DISPATCH_E2E_REUSE_SERVERS=1`),
+`e2e/local-instance.ts` (`bun run dispatch:local`), `docs/site/media/harness.ts`,
+`docs/site/media/broker/seed.ts`,
+`packages/pi-legion/scripts/skill-scenarios/seed.ts` and
+`scripts/e2e/dispatch-claimant-delivery.sh`.
+
+CI runs the whole suite, with more than one worker, in the `dispatch` job of
+`.github/workflows/ci.yaml`, which exports the worker count and the pgvector
+digest on the browser step's own command line. A role does not run the whole
+suite in an issue pod — two CPUs do not carry it — it runs the files it is
+working on.
+
+A row of this suite takes under two seconds, or says above its `test(` why it
+cannot. The reason goes in a `// SLOW(>=2s): <what it spends the time on>`
+comment, and `bun e2e/tools/check-slow-rows.ts <playwright report.json> --dir e2e`
+holds the two together: it exits 1 on a row at or above 2,000 ms that no such
+comment covers, and on a comment whose every row came in well under that. Run it
+over a one-worker report of the files you changed, since four workers inflate a
+row by the contention of its neighbours rather than by its own work. A marker is
+earned by a row that reached three quarters of the threshold, not only by one
+that crossed it: four of the eight rows of `coverage.e2e.ts`, `plan-tab.e2e.ts`
+and `verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
+decides which side of the bar they land, and without that band such a row fails
+the check bare on a slow run and marked on a fast one. A row's own cost is what
+it proves: most of a short row is the floor every row pays, measured in an issue
+pod at a fresh Chromium context (0.25 s), the cold parse of the dashboard bundle
+that context cannot cache (0.40 s) and the dashboard's boot reads before its
+first draw (0.80 s).
 
 A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
@@ -1415,6 +1509,56 @@ directory before it changes into `packages/envoy`. The broker's docs rig
 (`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
 `packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. The harness starts the
 fake broker only for the default, and the skill-scenarios rig sets the switch empty.
+
+`run-server.sh` also sets `DISPATCH_TEST_SETTLE_DELAY=250ms`, under the
+`DISPATCH_TEST_HOOKS=1` the server requires with it, so a document room settles
+250 ms after its last live update rather than at the document service's own 2 s
+default. A settlement is when an `:::ask` block becomes an ask row and when
+live typing is written as a version, so it is what every row that waits for one
+waits for; the one class of row the shorter delay changes is a row that proves
+a settlement did not happen inside a window, whose window must now be shorter
+than 250 ms. A caller that set the variable itself keeps its own value.
+
+`run-server.sh` sets four more test-only settings under that same
+`DISPATCH_TEST_HOOKS=1`, and every server it starts gets them, the one behind
+`bun run dispatch:local` included. Each is read as `${VAR:-default}`, so a
+caller that set the variable itself keeps its own value; the value named at the
+end of each paragraph below is the server's own behaviour back.
+
+`DISPATCH_TEST_MARK_WAIT=250ms` is how long a Send that names a provisional
+comment, ask or suggestion mark waits for the room to receive that mark before
+the server answers that the document does not hold it (`VerifyMark`,
+`internal/dispatch/docs/marks.go`), in place of the document service's own 1 s.
+The whole wait is paid by every Send whose mark really is gone, so locally such
+a Send is refused a quarter second after it was made rather than a second
+after. `DISPATCH_TEST_MARK_WAIT=1s` is the service's own wait.
+
+`DISPATCH_TEST_UNRECORDED_MARK_TTL=4s` is how long a comment, ask or suggestion
+mark that no row records survives before a sweep removes it, counted from the
+first settlement that saw it (`sweepUnrecordedMarks`, same file), in place of
+the service's own minute. Locally the highlight a composer somebody abandoned
+left behind therefore goes four seconds after that settlement rather than a
+minute after; a mark whose author still has a browser on the room is kept
+whatever its age, as it is on any server.
+`DISPATCH_TEST_UNRECORDED_MARK_TTL=1m` is the service's own TTL.
+
+`DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=500ms` is how long, from its first try,
+a sender keeps trying a session whose listener is being replaced before the
+send settles failed (`listenerTakeoverWindow`,
+`internal/dispatch/api/envoy_resolve.go`), in place of the server's own 12 s.
+Locally a message to a session that has really gone fails in half a second
+rather than twelve, and a message made while a listener really is handing over
+can settle failed where a deployment would have waited and delivered it.
+`DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=12s` is the server's own window.
+
+`DISPATCH_TEST_EMBEDDER_OFF=1` builds no embedder, whatever `DISPATCH_EMBEDDER`
+and the AWS variables the file-store block exports name: the embedding queue's
+`Run` returns at once, no text and no query is embedded, and search answers
+keyword-only and says so. Locally that is a search that never ranks by meaning,
+and a server that makes no call to Bedrock - which it would otherwise make for
+every indexed text and every query, on the file store's static keys, and be
+refused 403. `DISPATCH_TEST_EMBEDDER_OFF=0` builds the embedder again, for a
+run that means to prove that path.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
@@ -1548,38 +1692,51 @@ reaches, `/agents` with both folds, the broadcast page, an issue's Conversation)
 `seedWorkspace()` expects an empty database and returns the ids it made;
 it waits for the spec's decision block to be indexed, so `inboxRows` is exact when it resolves.
 
-`e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
+`e2e/seed.ts` empties the test database before each scenario. It first quiesces the server
 (`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every
 live document and waits for the settlements in flight, so the documents the previous scenario had
-open finish writing before the truncate rather than failing against the emptied tables after it.
-`TRUNCATE` locks its tables one at a time, in its own order, so a transaction that reads two of
-them in another order can close a cycle with it, and PostgreSQL aborts one side: a settlement
-(which locks its document's owner row and then reads `artifact_versions`), a request from a page an
-earlier scenario left open, or one of the server's own sweeps. So the reset first takes
-`ACCESS EXCLUSIVE` on every table the truncate empties, and never waits while it holds one (the
-comment above `resetDatabaseOnce` says how), so the truncate cannot deadlock and the reset does
-not retry. A table still held after 5 s fails the reset, naming each holder's query. For a
-deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
-bearer-seeded API calls. Every SQL statement the harness runs, `seed.ts`'s and
-`failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that database
-(`PLAYWRIGHT_DATABASE_URL` for a deployed server, else `DATABASE_URL`, never a default) and runs
-psql without `~/.psqlrc` and without `PGHOSTADDR`: libpq reads it and connects there in place of
-the URL's host, and the server's pgx does not read it, so with it set in a shell psql would
-truncate a database the server's own loopback check never saw. `PGHOST` and `PGSERVICE` stay,
+open finish writing before the delete rather than failing against the emptied tables after it.
+It then empties, in one statement, only the tables that hold rows among the ones it names and
+every table whose foreign keys reach them, and restarts the identity sequences of the tables it
+emptied, which is what `TRUNCATE ... RESTART IDENTITY CASCADE` did for all of
+them; emptying the tables that held nothing was most of the old reset's 441 ms,
+against 49 ms for the reset as it stands. It also puts `alice`'s and `bob`'s
+`user_sessions` rows back at generation 0, so a worker mints their sign-in
+cookie once rather than once per row. The delete locks its tables one at a
+time, in its own order, so a transaction that reads two of them in another order can close a cycle
+with it, and PostgreSQL aborts one side: a settlement (which locks its document's owner row and
+then reads `artifact_versions`), a request from a page an earlier scenario left open, or one of
+the server's own sweeps. So the reset first takes `ACCESS EXCLUSIVE` on every table it can empty,
+and never waits while it holds one (the comment above `resetDatabaseOnce` says how), so the delete
+cannot deadlock and the reset does not retry. A table still held after 5 s fails the reset, naming
+each holder's query. For a deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database
+and `E2E_AGENT_TOKEN` for bearer-seeded API calls. Every SQL statement the harness runs,
+`seed.ts`'s and `failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that
+database (`PLAYWRIGHT_DATABASE_URL` for a deployed server, else this process's
+lane's `DATABASE_URL`, never a default)
+and runs psql without `~/.psqlrc` and without `PGHOSTADDR`: libpq reads it and connects there in
+place of the URL's host, and the server's pgx does not read it, so with it set in a shell psql
+would empty a database the server's own loopback check never saw. `PGHOST` and `PGSERVICE` stay,
 since pgx and libpq read both; a service entry's `hostaddr`, the one key they part on, pgx sends
 to Postgres as a setting, which refuses the connection, so the harness server never boots on one.
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
-is up, without evaluating `e2e/api.ts`; its `sqlAt` runs the same psql against a URL it is given,
-and kills it when an `AbortSignal` it is passed fires, which `e2e/local-instance.ts` uses to
-create its database through the server's `postgres` one.
+is up, without evaluating `e2e/api.ts`. `sql()` runs its statements on one psql the process keeps
+open, started at the first call and asked for one statement at a time with a sentinel after each
+(`\echo` on stdout, `\warn` on stderr), since a session cannot use `ON_ERROR_STOP` without psql
+exiting on the first error; a statement psql wrote to stderr for is the call's failure, nothing
+after it runs, and a `ROLLBACK` leaves the session usable for the next caller. A call that arrives
+while another holds that session runs as a psql of its own, so two calls still reach the database
+at once. `sqlAt` runs one psql against a URL it is given, and kills it when an `AbortSignal` it is
+passed fires, which `e2e/local-instance.ts` uses to create its database through the server's
+`postgres` one.
 
 That reset is also the one rig failure that presents as a code failure. A transaction that holds
-one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
+one of the emptied tables for 5 s, such as a session left idle in a transaction, a long query, or
 a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, makes
 `resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
-reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
-which reads as a catastrophic regression in the change under test. Recognise that shape as the
-rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
+reports failed, each carrying the `DO $$` lock step's own error and the holders it names in its
+message, which reads as a catastrophic regression in the change under test. Recognise that shape
+as the rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
 that shape through a port at all, since its servers serve on ports the OS chose for it alone, and
 this paragraph is where the harness-port rule lives — `README.md` and the `docs/solutions`
 learnings point here rather than restating it.
@@ -1603,6 +1760,18 @@ consumer would otherwise fail in its own words — the second Bun listener dying
 Because the check lives with the resolution, those listeners refuse it too, not only the
 Playwright config. A's and B's ports take part in it only in two-process mode, the one mode that
 listens on them, and the issuer's only under `DISPATCH_E2E_SIGNIN=oidc`.
+It resolves the lane too: `workerCount` reads `DISPATCH_E2E_WORKERS`,
+`laneCount` the `DISPATCH_E2E_LANES` the run exported, `laneIndex` the
+`TEST_PARALLEL_INDEX` of this process, and `laneValue` a variable under that
+lane's name with the plain name as its fallback, which is how `harnessPorts()`
+reads a port and `e2e/psql.ts` its database. `refuseLaneConflicts` holds the
+refusals a run of more than one lane makes, so the message names the variable
+and says which thing one lane owns. `withoutHarnessPort` is the other side of
+that lookup: a spec that starts a second listener of its own and wants the OS to
+choose its port (`e2e/fake-envoy.e2e.ts`, `e2e/plain-http-proxy.e2e.ts`) must
+clear the port under both names, since dropping the plain one alone still leaves
+the lane's own, and the child would die on `EADDRINUSE` before it printed its
+listening line.
 
 `e2e/harness-start.ts` is the harness's one starter. It starts the rows of
 `e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its
@@ -1627,7 +1796,7 @@ targeted ports are not all set — all five for a local run (with `DISPATCH_E2E_
 without `DISPATCH_E2E_REUSE_SERVERS=1`, whose only accepted value is `1` (any other is refused
 naming the variable and the value). Every port set by hand plus that flag runs against a harness
 a person started and left listening; pair it with that harness's own `DATABASE_URL`, since
-`e2e/seed.ts` truncates the database the server holds. `CI` takes no part in that decision. A
+`e2e/seed.ts` empties the database the server holds. `CI` takes no part in that decision. A
 deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose file, which derives the target's
 `ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. A listing
 (`--list`, with no `--ui`) with every harness port unset is the one exception: it targets nothing,
@@ -1635,6 +1804,26 @@ so the config lets it evaluate with no harness. The argv test is loose, and Play
 `--list` of `--grep --list` as `--grep`'s value, a real run; with no port set that run fails at
 `e2e/preflight.ts`, and with any port set a listing meets the reuse refusal like any other run, so
 it asks for `DISPATCH_E2E_REUSE_SERVERS=1` or the ports unset.
+It also refuses a `--workers` or `-j` that differs from the lane count, as the lanes above say.
+
+A spec writes every file it makes under its own row's `testInfo.outputPath()`,
+the per-row directory beneath `e2e/test-results` the workflow uploads on a
+failure — the fixture a row uploads as much as a debugging screenshot. Two
+workers run two rows at once, so a path shared between rows is a file one row
+reads while another writes it, and a fixed absolute path is somebody else's
+file on a shared box. `e2e/artifacts.e2e.ts` writes the note and the diagram it
+uploads that way; the tree holds no `e2e/fixtures/` directory.
+
+`e2e/tools/` holds the two tools that read a run. `ci-row-inventory.ts` turns
+one `dispatch` CI job's log into its per-row inventory, a TSV of
+`index project file line col title ms status`, with a reconciliation on stderr
+against the log's own `Running N tests using M worker(s)` line and its summary,
+exiting 1 when the counts disagree. `measure-summary.ts` summarises the records
+of the timing fixture (`e2e/measure.ts` and `e2e/measure-reporter.ts`, which do
+nothing unless `E2E_MEASURE_FILE` names a file for the run to write): one
+markdown table per input file, so a base run and a head run read side by side,
+counting a part only for the rows that run it and dividing a part paid once per
+worker over that worker's rows.
 
 `DISPATCH_E2E_PROCESSES` picks how many Dispatch servers the harness runs
 (`e2e/harness-processes.ts`): unset or `1` is the one server above, `2` is two-process mode, and
@@ -1860,6 +2049,25 @@ page's `POST /auth/logout` to a server that never answers (`route.continue` to a
 rather than leaving the route unanswered, because Chromium sends a paused request on to the
 server once its page closes. They skip on an `https:` `PLAYWRIGHT_BASE_URL` as the two specs
 above do.
+
+The `chromium-alone`, `firefox-alone` and `webkit-alone` projects run the rows whose claim is a
+wall-clock time, with the machine to themselves. `chromium-alone` runs
+`e2e/heavy-document-writes.e2e.ts` (a document write of each heavy body answers in under a
+second), `e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
+holding the main thread for a second, both through `e2e/main-thread-hold.ts`); `firefox-alone`
+and `webkit-alone` run `e2e/heavy-bodies.e2e.ts`, which ran in those engines before, for the
+reasons given under `webkit` and `firefox` above. No project above them runs those three files,
+so each row runs once. Each of the three names every project before it in `dependencies`, so
+Playwright starts them only once the rest of the run has finished and runs them one after
+another, and each sets `workers: 1`, which caps that project's own workers while the run's own
+`workers` stays at the lane count: `dependencies` orders a project but does not stop its own
+rows running four at a time. Four lanes put four browsers, four Dispatch servers and four
+Postgres servers on one machine, and a second of wall clock there holds what the other three
+lanes took as surely as the work the row measured, so these rows are given the machine rather
+than a correction for sharing it (INFRA-317, sjawhar/legion#2612). A row that proves an absence
+over real time - that no request happens within a second - needs no such project: contention
+cannot make that claim false. A project whose dependency has a failing row does not run at all,
+so a red run leaves these rows unrun rather than measured beside a retry.
 
 ## Phone acceptance
 

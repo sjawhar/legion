@@ -386,6 +386,8 @@ It ships these with Legion's other skills in its `dist/skills`:
 
 The Envoy plugin ships these skills in its `dist/skills`:
 
+- `agent-secrets`
+
 - `asd-ste100`
 
 - `dispatch`
