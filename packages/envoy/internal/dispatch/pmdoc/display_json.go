@@ -34,12 +34,29 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 		return tree
 	}
 	displayTreeBuilds.Add(1)
+	tree := DisplayTreeToStore(markdown, mode)
+	if tree == nil {
+		return nil
+	}
+	displayCache.Put(key, tree)
+	return tree
+}
+
+// DisplayTreeToStore is the tree DisplayJSON answers, read and encoded without the cache:
+// neither read from it nor put into it. It is what a write stores (texttrees), and a write is no
+// reader - the cache holds the trees readers were served, and filling it with the tree of every
+// text written would make one writer's long document the eviction of the bodies a hundred
+// readers are re-reading, which is also what TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound
+// measures. It counts no build either (DisplayTreeBuilds), since no response was read to make it.
+func DisplayTreeToStore(markdown string, mode DisplayMode) json.RawMessage {
+	if markdown == "" {
+		return nil
+	}
 	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
 	if err != nil {
 		slog.Warn("dispatch: display tree encoding failed", "error", err)
 		return nil
 	}
-	displayCache.Put(key, tree)
 	return tree
 }
 

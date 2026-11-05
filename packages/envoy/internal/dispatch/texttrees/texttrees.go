@@ -58,7 +58,7 @@ func (t Table) Store(ctx context.Context, mode pmdoc.DisplayMode, texts ...strin
 	trees := make([][]byte, 0, len(texts))
 	seen := make(map[[32]byte]struct{}, len(texts))
 	for _, text := range texts {
-		tree := pmdoc.DisplayJSON(text, mode)
+		tree := pmdoc.DisplayTreeToStore(text, mode)
 		if tree == nil {
 			continue
 		}
