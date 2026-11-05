@@ -36,7 +36,7 @@ function unmarkedText(node: ProseMirrorNode): string | undefined {
 }
 
 /** Every run the server marked as matching a search, as the engine's serializer draws one
- *  (`markdown-engine.ts`, `displaySchemaOf`). The server reads the snippet and marks the words
+ *  (`markdown-serializer.ts`, `displaySchemaOf`). The server reads the snippet and marks the words
  *  it matched, so nothing on this page looks for them in the rendered text. */
 const HIGHLIGHT_SELECTOR = "mark[data-search-highlight]";
 

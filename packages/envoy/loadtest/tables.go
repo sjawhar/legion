@@ -410,7 +410,7 @@ func resourcesTable(md *markdown, steps []stepData) {
 	}
 	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity (a failed connect included) and of Dispatch's goroutine and heap profiles",
 		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
-	md.line("\nheap live: the in-use bytes of Dispatch's heap profile (`/debug/pprof/heap`), every 15 s: a sampled estimate of the live heap, not runtime.MemStats HeapInuse.")
+	md.line("\nheap live: the in-use bytes of Dispatch's heap profile (`/debug/pprof/heap`), read every 15 s by a run given -heap-samples, and `-` in a run without it: a sampled estimate of the live heap, not runtime.MemStats HeapInuse.")
 	if memStats {
 		md.line("\n%s: the step ran before the sampler read the heap profile, so its heap cell is runtime.MemStats HeapInuse from `/debug/pprof/heap?debug=1` (summary.json `resources.heap_inuse_mib`), a different metric that is not comparable with a heap live cell.", memStatsHeapMark)
 	}

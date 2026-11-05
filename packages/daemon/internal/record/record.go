@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
@@ -1376,6 +1377,12 @@ func (i Issue) Lingers() bool { return i.LingerUntil != nil }
 // linger only, not in the tree's next run nor in a later linger of it.
 func (i Issue) LingersAt(generation uint64) bool {
 	return i.Lingers() && i.Generation == generation
+}
+
+// Standing is where the issue stands for the gate every path that acts on an idle or released
+// pod reads (pods.InWorkflowNotLingering).
+func (i Issue) Standing() pods.Standing {
+	return pods.Standing{Phase: i.Phase, Status: i.Status, Lingers: i.Lingers()}
 }
 
 // CarriesRun says whether the issue carries a run: it started a phase, and its tree neither left

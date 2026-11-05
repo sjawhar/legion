@@ -271,3 +271,49 @@ export function unresolvedAgentDispatches(
         `${source} dispatches ${name}, which neither this plugin nor Oh My Pi ships`
     );
 }
+
+/** The worker skill, the one file the release rule below is written over. */
+export const WORKER_SKILL = path.join(REPO_ROOT, "skills/legion-worker/SKILL.md");
+
+/**
+ * The claim the idle release retired (INFRA-945): that a role, or the pane it runs in, stays live
+ * for as long as its issue is in the workflow. Under `runtime: kubernetes` the daemon now releases
+ * an issue pod that has had no turn in progress and no turn due for the idle period, which ends
+ * every role process of it and deletes the pod, its disk and its Sandbox. What outlives that is
+ * the claim's session, its phase and the task it holds, which a wake resumes — so a sentence
+ * saying the *session* is kept is the rule as it now is, and one saying the *role* stays live is
+ * what this forbids. The subject is listed rather than inferred so the two read apart: "your
+ * session is kept, until your issue leaves the workflow, to answer questions" passes, and main's
+ * "you stay live only to answer questions" does not.
+ */
+const ROLE_STAYS_LIVE =
+  /\b(?:you|your (?:role|pane|process|pod|agent)|the (?:role|worker|pane|process))\s+(?:stays?|remains?|keeps?)\s+(?:live|alive|running|up)\b/i;
+
+/**
+ * The sentence the skill must carry instead, which is the heading of the bullet that tells a
+ * worker what a release does to it. It is pinned whole and literally: a worker that reads nothing
+ * about release reads its pod's deletion as a crash and its restored workspace as lost work.
+ */
+const RELEASE_IS_NO_STOP = "A released pod is not a stop.";
+
+/**
+ * What `markdown` — skills/legion-worker/SKILL.md — gets wrong about a released pod, each as one
+ * sentence naming the file. Both halves are read over whitespace-normalized text, because the
+ * skill is written with semantic line breaks and a sentence of it can cross lines.
+ */
+export function retiredWorkerLifecycleClaims(markdown: string): string[] {
+  const text = markdown.replace(/\s+/g, " ");
+  const faults: string[] = [];
+  const live = text.match(ROLE_STAYS_LIVE);
+  if (live !== null) {
+    faults.push(
+      `skills/legion-worker/SKILL.md says "${live[0]}": a released pod ends every role process of it, so no role stays live for as long as its issue is in the workflow`
+    );
+  }
+  if (!text.includes(RELEASE_IS_NO_STOP)) {
+    faults.push(
+      `skills/legion-worker/SKILL.md does not say "${RELEASE_IS_NO_STOP}": a worker told nothing about release reads its pod's deletion as a crash`
+    );
+  }
+  return faults;
+}

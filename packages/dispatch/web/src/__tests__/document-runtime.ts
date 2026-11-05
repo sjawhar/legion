@@ -2,6 +2,7 @@ import type { BlockMark, DocumentJSON } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
+import { installTypedBlocks } from "../features/doc/ask-block";
 import type {
   ConnectDocument,
   ConnectionCallbacks,
@@ -206,6 +207,15 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         },
       },
     } as unknown as EditorHandle;
+    // The real `createEditor` installs Dispatch's node views once the editor library has
+    // loaded (`features/doc/editor.ts`); the fake stands in for that call too, so a test reads
+    // the same `viewProps.nodeViews` the host would.
+    installTypedBlocks(
+      handle.view,
+      options.blockSchema,
+      options.onAskBlockHosts,
+      options.watchPicture
+    );
     editors.push(editor);
     return handle;
   };

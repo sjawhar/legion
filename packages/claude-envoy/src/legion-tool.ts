@@ -22,7 +22,7 @@ export function legionToolDefinition() {
     name: LEGION_TOOL_NAME,
     description: legionToolDescription({
       envoyPublish: "mcp__legion__envoy_publish",
-      before: PHASE_OP_SENTENCES.readRecord,
+      before: PHASE_OP_SENTENCES.readRecord + PHASE_OP_SENTENCES.readReleaseRecords,
       after: PHASE_OP_SENTENCES.requestBackwardMove,
     }),
     inputSchema: z.toJSONSchema(z.object({ op: z.enum(PHASE_OPS), ...phaseOpParameters(z) })),

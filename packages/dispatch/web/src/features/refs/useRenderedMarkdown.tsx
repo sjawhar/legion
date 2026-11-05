@@ -13,7 +13,12 @@ import type { DisplayTree } from "../../api/types";
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
-import { parsesInTheWorker, renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import {
+  type MarkdownEngine,
+  parsesInTheWorker,
+  renderWithEngine,
+  type SoftBreaks,
+} from "./markdown-engine";
 import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
@@ -126,7 +131,7 @@ export type SliceYield = "page" | undefined;
 export type PaintMarkdownInSlices = (
   element: HTMLElement,
   parsed: ProseMirrorNode,
-  serializer: DOMSerializer
+  engine: MarkdownEngine
 ) => Generator<SliceYield>;
 
 /** How long one slice of off-page work may hold the page's thread before it hands it back. */
@@ -576,7 +581,7 @@ export function useRenderedMarkdown(
         // cancel it returns is in hand: `running` is what keeps `painting.current` from being
         // left holding a paint that is already over (sjawhar/legion#2519).
         let running = true;
-        const stop = paintAcrossTasks(inSlices(element, parsed, engine.serializer), {
+        const stop = paintAcrossTasks(inSlices(element, parsed, engine), {
           afterPageBatch() {
             // The batch that has just arrived is laid out here, while it is all of the page that
             // is dirty. Left to the engine, the layout of every batch would fall into whichever
