@@ -1,5 +1,11 @@
-import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
+import type { SoftBreaks } from "@legion/proof-editor/headless";
+import type {
+  Attrs,
+  DOMOutputSpec,
+  DOMSerializer,
+  Node as ProseMirrorNode,
+  Schema,
+} from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
 import { compiledBlockSchema } from "../doc/schema";
@@ -7,19 +13,28 @@ import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawin
 import type { DocumentJSON, ParsedBody, ParseRequest } from "./markdown-parse.worker";
 import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
-import {
-  buildDispatchReference,
-  buildReferencePath,
-  parseDispatchReference,
-  pictureReference,
-  shortForm,
-} from "./routes";
+import { parseDispatchReference, shortForm } from "./routes";
 import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
 /** What a single newline inside a paragraph becomes, chosen per parse: `"space"` (the document
  *  default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
  *  lines as lines, a model's streamed turn in the live view). The engine's own type. */
 export type { SoftBreaks };
+
+/**
+ * `DOMSerializer.renderSpec` with the attribute object prosemirror-model's own serializer passes
+ * it. Upstream's signature is `renderSpec(doc, structure, xmlNS = null, blockArraysIn)`, and
+ * `blockArraysIn` is what makes it refuse a spec array that came out of an attribute object
+ * (`suspiciousAttributes`), the guard a node's own `toDOM` is held to everywhere else.
+ * prosemirror-model 1.25.11 declares only the first three in `dist/index.d.ts`, so the fourth is
+ * passed through this one named type rather than at each call (sjawhar/legion#2519).
+ */
+export type RenderSpecWithAttrs = (
+  doc: Document,
+  structure: DOMOutputSpec,
+  xmlNS: string | null,
+  blockArraysIn: Attrs
+) => { dom: HTMLElement; contentDOM?: HTMLElement };
 
 /**
  * The one headless Proof engine every Markdown-bearing surface parses with - `MarkdownBody` for a
@@ -30,6 +45,13 @@ export type { SoftBreaks };
  */
 export interface MarkdownEngine {
   readonly serializer: DOMSerializer;
+  /** `DOMSerializer.renderSpec`, which opens one node where the serializer would write it whole,
+   *  for the painter that fills an element a batch at a time (`MarkdownBody`,
+   *  `paintBlockInSlices`). It is a static of that class, and this module names the class as a
+   *  type alone: everything written against prosemirror-model's own classes is built in the
+   *  chunk the engine loads with, so the first route parses none of them
+   *  (`markdown-serializer.ts`). */
+  readonly renderSpec: RenderSpecWithAttrs;
   /** The schema this engine parses with, built from the manifest this page was built with
    *  (`compiledBlockSchema`), which the parse worker builds its own from too, so a long body
    *  reads the same above and below the threshold: what turns the worker's answer, a document as
@@ -73,77 +95,27 @@ let loadingEngine: Promise<MarkdownEngine> | undefined;
  *  evict it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
-/**
- * Proof's DOM serializer, except for a picture whose address is a Dispatch reference
- * (`pictureReference` in `routes.ts`, the reading `pictureView` shares): the browser cannot fetch
- * `dispatch://`, so an `image` node naming an artifact, at a version or not
- * (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the syntax a pasted picture is written in,
- * or `![shot.png](dispatch://KEY/artifact/shot-png)`, its latest version) becomes an empty link to
- * the artifact's page, marked `data-dispatch-picture` and captioned by its `alt` or the
- * artifact's slug, for `collectPictureAnchors` to hand to a `DispatchPicture`
- * (`useRenderedMarkdown`). One that names something other than an artifact is a reference like
- * any other and becomes a link `collectReferenceAnchors` titles. A picture on another website, or
- * an address that is no reference, is serialized as Proof serializes it.
- */
-function pictureSerializer(schema: Schema): DOMSerializer {
-  const base = DOMSerializer.fromSchema(schema);
-  const image = base.nodes.image;
-  if (image === undefined) {
-    return base;
-  }
-  return new DOMSerializer(
-    {
-      ...base.nodes,
-      image: (node) => {
-        const picture = pictureReference(node.attrs);
-        if (picture === undefined) {
-          return image(node);
-        }
-        const { named, route } = picture;
-        if (named === undefined) {
-          return ["a", { href: picture.source }];
-        }
-        return [
-          "a",
-          {
-            "data-dispatch-picture": buildDispatchReference(route),
-            "data-picture-caption": picture.caption,
-            href: buildReferencePath(route),
-          },
-        ];
-      },
-    },
-    base.marks
-  );
-}
-
-function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
-  return {
-    schema: proof.schema,
-    serializer: pictureSerializer(proof.schema),
-    parse(markdown, softBreaks = "space") {
-      try {
-        return proof.parseMarkdown(markdown, softBreaks);
-      } catch {
-        return undefined;
-      }
-    },
-  };
-}
-
 function loadEngine(): Promise<MarkdownEngine> {
-  loadingEngine ??= import("@legion/proof-editor/headless")
-    .then(({ createHeadlessProof }) =>
-      createHeadlessProof({
-        blockSchema: compiledBlockSchema,
-        readOnly: true,
-        renderBlock: (node, type) =>
-          type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
-      })
+  // The serializer travels with the headless editor rather than with this module: it is written
+  // against prosemirror-model's own classes, and nothing can build one before that editor's
+  // schema exists (`markdown-serializer.ts`).
+  loadingEngine ??= Promise.all([
+    import("@legion/proof-editor/headless"),
+    import("./markdown-serializer"),
+  ])
+    .then(async ([{ createHeadlessProof }, { buildEngine }]) =>
+      buildEngine(
+        await createHeadlessProof({
+          blockSchema: compiledBlockSchema,
+          readOnly: true,
+          renderBlock: (node, type) =>
+            type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
+        })
+      )
     )
-    .then((proof) => {
-      readyEngine = buildEngine(proof);
-      return readyEngine;
+    .then((engine) => {
+      readyEngine = engine;
+      return engine;
     });
   return loadingEngine;
 }

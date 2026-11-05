@@ -12,7 +12,11 @@ request: <request>`, because triage reads it to tell your filing from anyone els
 (`skill://legion-controller/references/triage.md`). The request, and the person it names, are:
 
 - an answer to an ask: `dispatch://<REPORT KEY>/ask/<id>`, for the person who answered it;
-- a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`;
+- a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`. When the
+  mention adopts an earlier message's request by asking for it
+  (`skill://legion-controller/references/slack-mentions.md`), the request reads
+  `Slack <channel_id> message <mention ts>, adopting message <earlier ts>`, and the person it names
+  is still the mention's `<@user_id>`;
 - a direct message: `direct message <id>`, with the id its frame's `reply_with` names after
   `--in-reply-to`, for the frame's `actor`. A message that arrives as your own user turn shows no
   id: write `direct message to session <your session id>`, for the person by the name they gave,

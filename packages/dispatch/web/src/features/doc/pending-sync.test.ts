@@ -888,6 +888,10 @@ test("an element the editor cannot build survives a read-only session and a late
     const editor = await createEditor(root, {
       awareness: null,
       blockSchema: compiledBlockSchema,
+      // This row reads the document the editor keeps, never its decision blocks.
+      onAskBlockHosts: () => {},
+      // No picture in this row's document, so nothing ever asks for a latest version.
+      watchPicture: () => () => {},
       readOnly: true,
       user: { color: "#f59e0b", name: "alice" },
       ydoc: readOnly.connection.doc,
@@ -924,6 +928,10 @@ test("an edit typed in the editor is kept, and the editor's repair beside it is 
   const editor = await createEditor(root, {
     awareness: null,
     blockSchema: compiledBlockSchema,
+    // This row reads the document the editor keeps, never its decision blocks.
+    onAskBlockHosts: () => {},
+    // No picture in this row's document, so nothing ever asks for a latest version.
+    watchPicture: () => () => {},
     user: { color: "#f59e0b", name: "alice" },
     ydoc: doc,
   });
