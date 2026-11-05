@@ -43,7 +43,7 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 	case a.BlockID != nil:
 		// A typed ask block lives in its document's text, which the history wrote; settlement
 		// indexed it.
-		local, err := adopt(`select id::text from asks where issue_key = $1 and block_id = $2 order by created_at, id`, key, *a.BlockID)
+		local, err := adopt(`select id::text from public.asks where issue_key = $1 and block_id = $2 order by created_at, id`, key, *a.BlockID)
 		if err != nil {
 			return "", err
 		}
@@ -56,7 +56,7 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 		if d == nil {
 			return "", fmt.Errorf("ask %s asks to approve %s, which is not one of the issue's seeded documents", a.ID, a.Approval.ArtifactID)
 		}
-		local, err := adopt(`select id::text from asks where issue_key = $1 and kind = 'approval' and approval->>'artifact_id' = $2 order by created_at, id`, key, d.local)
+		local, err := adopt(`select id::text from public.asks where issue_key = $1 and kind = 'approval' and approval->>'artifact_id' = $2 order by created_at, id`, key, d.local)
 		if err != nil {
 			return "", err
 		}
@@ -76,7 +76,7 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 		}
 		return local, s.ids.put(ctx, idAsk, a.ID, local)
 	}
-	local, err := adopt(`select id::text from asks where issue_key = $1 and kind = 'question' and block_id is null and question = $2 order by created_at, id`, key, a.Question)
+	local, err := adopt(`select id::text from public.asks where issue_key = $1 and kind = 'question' and block_id is null and question = $2 order by created_at, id`, key, a.Question)
 	if err != nil {
 		return "", err
 	}
@@ -162,7 +162,7 @@ func (s *replaySeeder) answer(ctx context.Context, key string, docs map[string]*
 		return fmt.Errorf("ask %s is answered with no answer in the bundle", a.ID)
 	}
 	var state string
-	if err := s.pool.QueryRow(ctx, `select state from asks where id = $1`, local).Scan(&state); err != nil {
+	if err := s.pool.QueryRow(ctx, `select state from public.asks where id = $1`, local).Scan(&state); err != nil {
 		return err
 	}
 	if state == "open" {
@@ -218,7 +218,7 @@ func (s *replaySeeder) resolveAsk(ctx context.Context, key string, docs map[stri
 	}
 	block := docs[*a.BlockArtifactID]
 	var state string
-	if err := s.pool.QueryRow(ctx, `select state from asks where id = $1`, local).Scan(&state); err != nil {
+	if err := s.pool.QueryRow(ctx, `select state from public.asks where id = $1`, local).Scan(&state); err != nil {
 		return err
 	}
 	if state != "resolved" {
@@ -240,8 +240,8 @@ func (s *replaySeeder) waitVersion(ctx context.Context, d *issueDoc, want int) e
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
 		var pending, got int
-		if err := s.pool.QueryRow(ctx, `select (select count(*) from doc_settlements_pending where artifact_id = $1),
-			(select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)`, d.local).Scan(&pending, &got); err != nil {
+		if err := s.pool.QueryRow(ctx, `select (select count(*) from public.doc_settlements_pending where artifact_id = $1),
+			(select coalesce(max(number), 0) from public.artifact_versions where artifact_id = $1)`, d.local).Scan(&pending, &got); err != nil {
 			return err
 		}
 		if got > want {

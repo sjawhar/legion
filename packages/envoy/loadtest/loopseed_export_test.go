@@ -147,7 +147,7 @@ func loopExportTestPlan(t *testing.T) *loopPlan {
 	return loopTestPlanOf(t, 11, loopTestRows(), map[int]int{0: 3})
 }
 
-// loopWriteTestSeed writes a plan to a stub Dispatch over a real loadtest.loop_ids, as
+// loopWriteTestSeed writes a plan to a stub Dispatch over a real public.loadtest_loop_ids, as
 // loop-seed-write does, and answers the id map the export then reads. refuse, when it is not nil,
 // refuses the writes it names, as a deployment refuses what it cannot hold.
 func loopWriteTestSeed(t *testing.T, p *loopPlan, refuse func(route, key string) (int, string)) (*loopStub, map[string]string) {

@@ -6,17 +6,18 @@ package main
 // documents with their replies and their resolves, and each live proposal's review pages and
 // review index.
 //
-// Every created object is recorded in loadtest.loop_ids under the plan's identity the moment it
-// exists, as replay-seed records a logged id in loadtest.replay_ids (replay_seed_ids.go), so a
-// second run of the same plan against the same database creates nothing again: the map is read
-// whole at the start and every write whose logical path it already holds is skipped. Every write
+// Every created object is recorded in public.loadtest_loop_ids under the plan's identity the
+// moment it exists, as replay-seed records a logged id in loadtest.replay_ids
+// (replay_seed_ids.go), so a second run of the same plan against the same database creates
+// nothing again: the map is read whole at the start and every write whose logical path it
+// already holds is skipped. Every write
 // also carries an idempotency key minted from the plan's identity and that same path, so a retry
 // of a write whose answer was lost adds no second object either (api.go callRetryKeyed).
 //
 // A refusal is data, not a failure: a 413, a 400 CAP_EXCEEDED or any other non-2xx answer is
-// counted by route and error code, whatever that object would have held is counted as skipped,
-// and the run goes on. Only a failure of the id map itself stops a run, since without it a resume
-// would write everything again.
+// counted by route and error code, every object it left unwritable that the id map does not
+// already hold is counted as skipped, and the run goes on. Only a failure of the id map itself
+// stops a run, since without it a resume would write everything again.
 //
 // The writer never holds the whole seed. A worker takes one proposal at a time off a channel and
 // expands one part at a time (partDocument, partThreads), so what a run holds is one part's
@@ -49,14 +50,22 @@ import (
 // loopIDsDDL is the id map a run writes as it goes and a resumed run reads: one row per created
 // object, under the plan that minted it. The path names the object logically and carries its kind,
 // so (plan, path) is the key and kind is the column the check counts rows by.
-const loopIDsDDL = `create schema if not exists loadtest;
-create table if not exists loadtest.loop_ids (
+//
+// It is a table of public, the schema Dispatch's own tables live in, and not a schema of this
+// tool's own. A schema this tool created could be named as the database's login is - the
+// deployment's login is loadtest - and Postgres's default search_path is "$user", public, so
+// that schema would stand in front of public for every unqualified statement the server itself
+// runs afterwards, Dispatch's own create table if not exists among them: that is how one
+// deployment came to hold a second, empty copy of Dispatch's schema (dispatch://INFRA-988). A
+// tool that creates no schema at all can shadow none, and public is there before this tool
+// connects, so nothing of this map has to be created outside it.
+const loopIDsDDL = `create table if not exists public.loadtest_loop_ids (
   plan text not null, kind text not null, path text not null, local_id text not null,
   primary key (plan, path));
-create index if not exists loop_ids_kind on loadtest.loop_ids (plan, kind)`
+create index if not exists loadtest_loop_ids_kind on public.loadtest_loop_ids (plan, kind)`
 
-// The kinds of loadtest.loop_ids, which are also the kinds loopseed.meta.json counts by, in the
-// order the seed writes them.
+// The kinds of public.loadtest_loop_ids, which are also the kinds loopseed.meta.json counts by,
+// in the order the seed writes them.
 const (
 	loopKindProject = "project"
 	loopKindIssue   = "issue"
@@ -157,7 +166,7 @@ type loopIDMap interface {
 	held() map[string]int
 }
 
-// loopIDStore is loadtest.loop_ids for one plan, read whole at the start and cached, as the
+// loopIDStore is public.loadtest_loop_ids for one plan, read whole at the start and cached, as the
 // replay seed's idStore is (replay_seed_ids.go): 464,602 comment rows are 464,602 lookups, and one
 // query at the start costs less than one round trip per object.
 type loopIDStore struct {
@@ -172,24 +181,24 @@ type loopIDStore struct {
 // loadLoopIDStore creates the id map's table if it is not there and reads the plan's rows whole.
 func loadLoopIDStore(ctx context.Context, pool *pgxpool.Pool, planID string) (*loopIDStore, error) {
 	if _, err := pool.Exec(ctx, loopIDsDDL); err != nil {
-		return nil, fmt.Errorf("create loadtest.loop_ids: %w", err)
+		return nil, fmt.Errorf("create public.loadtest_loop_ids: %w", err)
 	}
 	s := &loopIDStore{pool: pool, plan: planID, loaded: map[string]int{}, m: map[string]string{}}
-	rows, err := pool.Query(ctx, `select kind, path, local_id from loadtest.loop_ids where plan = $1`, planID)
+	rows, err := pool.Query(ctx, `select kind, path, local_id from public.loadtest_loop_ids where plan = $1`, planID)
 	if err != nil {
-		return nil, fmt.Errorf("read loadtest.loop_ids: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_loop_ids: %w", err)
 	}
 	defer rows.Close()
 	var kind, path, local string
 	for rows.Next() {
 		if err := rows.Scan(&kind, &path, &local); err != nil {
-			return nil, fmt.Errorf("read loadtest.loop_ids: %w", err)
+			return nil, fmt.Errorf("read public.loadtest_loop_ids: %w", err)
 		}
 		s.m[path] = local
 		s.loaded[kind]++
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read loadtest.loop_ids: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_loop_ids: %w", err)
 	}
 	return s, nil
 }
@@ -202,7 +211,7 @@ func (s *loopIDStore) get(path string) (string, bool) {
 }
 
 func (s *loopIDStore) put(ctx context.Context, kind, path, local string) error {
-	_, err := s.pool.Exec(ctx, `insert into loadtest.loop_ids (plan, kind, path, local_id) values ($1, $2, $3, $4) on conflict do nothing`,
+	_, err := s.pool.Exec(ctx, `insert into public.loadtest_loop_ids (plan, kind, path, local_id) values ($1, $2, $3, $4) on conflict do nothing`,
 		s.plan, kind, path, local)
 	if err != nil {
 		return fmt.Errorf("record %s %s: %w", kind, path, err)
@@ -640,16 +649,31 @@ func (w *loopWriter) proposal(ctx context.Context, index int) error {
 	return w.review(ctx, key, index)
 }
 
-// skipProposal counts what an issue that was refused leaves unwritable. The resolves are the
-// proposal's ids less its live ids: a live id's thread is left open and every other is resolved
-// (loopStatuses), so they need no expansion of the proposal's threads to count.
+// skipProposal counts what an issue that was refused leaves unwritable: the objects of the
+// proposal the id map does not hold already. It expands the proposal's threads to count them one
+// at a time, as the write path does, because an object an earlier run wrote is written whatever
+// this run's issue write met: a skip of the whole proposal would say a seed lacks what it holds,
+// and a resumed run would report a plan as missing objects that are there (dispatch://INFRA-988).
 func (w *loopWriter) skipProposal(index int, pr *loopProposal) {
-	w.skip(loopKindPart, len(pr.Parts))
-	w.skip(loopKindThread, pr.IDs)
-	w.skip(loopKindReply, pr.ReplyLines)
-	w.skip(loopKindResolve, pr.IDs-pr.LiveIDs)
-	if pr.LiveInDriver {
-		w.skip(loopKindPage, len(w.pages[index]))
+	parts := 0
+	for part := range pr.Parts {
+		if _, ok := w.ids.get(loopPartPath(index, part)); !ok {
+			parts++
+		}
+		w.skipThreads(w.plan.partThreads(index, part))
+	}
+	w.skip(loopKindPart, parts)
+	if !pr.LiveInDriver {
+		return
+	}
+	pages := 0
+	for _, page := range w.pages[index] {
+		if _, ok := w.ids.get(loopPagePath(index, page.Index)); !ok {
+			pages++
+		}
+	}
+	w.skip(loopKindPage, pages)
+	if _, ok := w.ids.get(loopIndexPath(index)); !ok {
 		w.skip(loopKindIndex, 1)
 	}
 }
@@ -685,18 +709,36 @@ func (w *loopWriter) part(ctx context.Context, key string, proposal, part int) e
 }
 
 // skipThreads counts the threads, replies and resolves a part document that was refused leaves
-// unwritable.
+// unwritable: of each thread, the objects the id map does not hold already.
 func (w *loopWriter) skipThreads(threads []loopThread) {
-	replies, resolves := 0, 0
+	roots, replies, resolves := 0, 0, 0
 	for _, th := range threads {
-		replies += len(th.Bodies) - 1
-		if !th.Open {
-			resolves++
-		}
+		root, reply, resolve := w.threadLeft(th)
+		roots, replies, resolves = roots+root, replies+reply, resolves+resolve
 	}
-	w.skip(loopKindThread, len(threads))
+	w.skip(loopKindThread, roots)
 	w.skip(loopKindReply, replies)
 	w.skip(loopKindResolve, resolves)
+}
+
+// threadLeft is what one thread of a refused write leaves unwritable: its root, its replies and
+// its resolve, each counted only where the id map does not hold that object, since a refusal
+// keeps nothing that is already written from being written.
+func (w *loopWriter) threadLeft(th loopThread) (root, replies, resolves int) {
+	lacks := func(path string) int {
+		if _, ok := w.ids.get(path); ok {
+			return 0
+		}
+		return 1
+	}
+	root = lacks(loopThreadPath(th.Proposal, th.Part, th.Index))
+	for i := range len(th.Bodies) - 1 {
+		replies += lacks(loopReplyPath(th.Proposal, th.Part, th.Index, i+1))
+	}
+	if !th.Open {
+		resolves = lacks(loopResolvePath(th.Proposal, th.Part, th.Index))
+	}
+	return root, replies, resolves
 }
 
 // thread writes one requirement id's thread: its root, anchored on its own quote row in the part
@@ -716,10 +758,11 @@ func (w *loopWriter) thread(ctx context.Context, key, doc string, th loopThread)
 		return err
 	}
 	if !ok {
-		w.skip(loopKindReply, len(th.Bodies)-1)
-		if !th.Open {
-			w.skip(loopKindResolve, 1)
-		}
+		// The root is the replies' and the resolve's parent, so a refused root leaves both
+		// unwritable - except any the id map already holds, which an earlier run wrote.
+		_, replies, resolves := w.threadLeft(th)
+		w.skip(loopKindReply, replies)
+		w.skip(loopKindResolve, resolves)
 		return nil
 	}
 	for i, size := range th.Bodies[1:] {
@@ -924,7 +967,19 @@ func runLoopSeedWrite(args []string) error {
 	for _, k := range meta.Written {
 		wrote += k.Objects
 	}
-	lg.Printf("wrote %d objects, skipped %d already written, %d refusals, in %s: %s",
-		wrote, meta.ResumedObjects, len(meta.Refusals), time.Duration(meta.DurationMS)*time.Millisecond, *out)
+	// The refused writes, not the classes they fall into: 453 issues refused under one code are
+	// one refusal row and 453 objects nobody wrote, and a run that said "1 refusals" read as a
+	// run that wrote the plan (dispatch://INFRA-988). Unwritten is what those refusals left,
+	// which after this run is what the plan still lacks.
+	refused, unwritten := 0, 0
+	for _, r := range meta.Refusals {
+		refused += r.Count
+	}
+	for _, n := range meta.Skipped {
+		unwritten += n
+	}
+	lg.Printf("wrote %d objects, skipped %d already written, %d writes refused in %d classes, %d objects of the plan unwritten, in %s: %s",
+		wrote, meta.ResumedObjects, refused, len(meta.Refusals), unwritten,
+		time.Duration(meta.DurationMS)*time.Millisecond, *out)
 	return runErr
 }

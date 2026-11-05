@@ -239,7 +239,7 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			if !ok {
 				continue
 			}
-			vrows, err := conn.Query(ctx, `select coalesce(size, octet_length(markdown)) from artifact_versions where artifact_id = $1 order by number`, local)
+			vrows, err := conn.Query(ctx, `select coalesce(size, octet_length(markdown)) from public.artifact_versions where artifact_id = $1 order by number`, local)
 			if err != nil {
 				return r, err
 			}
@@ -260,7 +260,7 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 						continue
 					}
 					var seeded string
-					if err := conn.QueryRow(ctx, `select coalesce(answer->>'at', '') from asks where id = $1`, localAsk).Scan(&seeded); err != nil {
+					if err := conn.QueryRow(ctx, `select coalesce(answer->>'at', '') from public.asks where id = $1`, localAsk).Scan(&seeded); err != nil {
 						return r, err
 					}
 					if seeded != "" {
@@ -412,8 +412,8 @@ func checkSeed(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []see
 			var maxV int
 			var latest string
 			err := conn.QueryRow(ctx, `select coalesce(max(number), 0),
-				coalesce((select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1), '')
-				from artifact_versions where artifact_id = $1`, local).Scan(&maxV, &latest)
+				coalesce((select markdown from public.artifact_versions where artifact_id = $1 order by number desc limit 1), '')
+				from public.artifact_versions where artifact_id = $1`, local).Scan(&maxV, &latest)
 			if err != nil {
 				return r, err
 			}
@@ -450,7 +450,7 @@ func checkSeed(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []see
 				continue
 			}
 			var n int
-			if err := conn.QueryRow(ctx, `select count(*) from comments where anchor->>'artifact_id' = $1 and reply_to is null and not resolved`, local).Scan(&n); err != nil {
+			if err := conn.QueryRow(ctx, `select count(*) from public.comments where anchor->>'artifact_id' = $1 and reply_to is null and not resolved`, local).Scan(&n); err != nil {
 				return r, err
 			}
 			atSeed = append(atSeed, n)
@@ -514,16 +514,16 @@ func md5Fields(h io.Writer, fields ...string) {
 
 func replayChecksum(ctx context.Context, conn *pgx.Conn) (replaySum, error) {
 	var s replaySum
-	if err := conn.QueryRow(ctx, `select (select count(*) from issues), (select count(*) from artifacts),
-		(select count(*) from artifact_versions), (select count(*) from comments), (select count(*) from asks),
-		(select count(*) from events)`).Scan(&s.Issues, &s.Artifacts, &s.ArtifactVersions, &s.Comments, &s.Asks, &s.Events); err != nil {
+	if err := conn.QueryRow(ctx, `select (select count(*) from public.issues), (select count(*) from public.artifacts),
+		(select count(*) from public.artifact_versions), (select count(*) from public.comments), (select count(*) from public.asks),
+		(select count(*) from public.events)`).Scan(&s.Issues, &s.Artifacts, &s.ArtifactVersions, &s.Comments, &s.Asks, &s.Events); err != nil {
 		return s, err
 	}
 	h := md5.New()
 	var key, name, slug, md, sha string
 	var number int
 	rows, err := conn.Query(ctx, `select coalesce(a.issue_key, ''), a.name, a.slug, v.number, coalesce(v.markdown, ''), coalesce(v.sha256, '')
-		from artifact_versions v join artifacts a on a.id = v.artifact_id
+		from public.artifact_versions v join public.artifacts a on a.id = v.artifact_id
 		order by 1, 2, 3, 4`)
 	if err != nil {
 		return s, err
@@ -537,7 +537,7 @@ func replayChecksum(ctx context.Context, conn *pgx.Conn) (replaySum, error) {
 		return s, err
 	}
 	var body string
-	rows, err = conn.Query(ctx, `select issue_key, body from comments order by issue_key, created_at, id`)
+	rows, err = conn.Query(ctx, `select issue_key, body from public.comments order by issue_key, created_at, id`)
 	if err != nil {
 		return s, err
 	}
@@ -676,9 +676,9 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 		ClaimedAt               *string
 	}
 	rows, err := conn.Query(ctx, `select i.key, i.title, i.status, i.priority, i.labels, i.parent_key, i.route, i.assignee,
-		coalesce((select json_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '[]'),
+		coalesce((select json_agg(l.target_key order by l.target_key) from public.issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '[]'),
 		i.claimed_by, i.created_by, i.claimed_at::text
-		from issues i order by i.project_key, i.number`)
+		from public.issues i order by i.project_key, i.number`)
 	if err != nil {
 		return lines, fmt.Errorf("issues: %w", err)
 	}
@@ -708,7 +708,7 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 	// Documents and their versions; a document's ordinal is its place in this order within its issue.
 	docOrd := map[string]int{} // local artifact id -> ordinal within its issue
 	rows, err = conn.Query(ctx, `select id::text, coalesce(issue_key, project_key), name, slug, kind, is_primary
-		from artifacts order by 2, name, slug`)
+		from public.artifacts order by 2, name, slug`)
 	if err != nil {
 		return lines, fmt.Errorf("artifacts: %w", err)
 	}
@@ -732,7 +732,7 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 		}
 		vrows, err := conn.Query(ctx, `select number, coalesce(markdown, ''), coalesce(sha256, ''), coalesce(size, 0), coalesce(mime, ''),
 			named, coalesce(summary, ''), authors
-			from artifact_versions where artifact_id = $1 order by number`, a.id)
+			from public.artifact_versions where artifact_id = $1 order by number`, a.id)
 		if err != nil {
 			return lines, fmt.Errorf("artifact_versions: %w", err)
 		}
@@ -760,7 +760,7 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 	}
 	rows, err = conn.Query(ctx, `select id::text, issue_key, kind, state, question, urgency, options, anchor, answer, approval,
 		resolution, multiple, block_id, block_artifact_id::text
-		from asks order by issue_key, created_at, coalesce(block_id, ''), question, id`)
+		from public.asks order by issue_key, created_at, coalesce(block_id, ''), question, id`)
 	if err != nil {
 		return lines, fmt.Errorf("asks: %w", err)
 	}
@@ -800,7 +800,7 @@ func logicalDump(ctx context.Context, conn *pgx.Conn, w *bufio.Writer) (int, err
 	}
 	rows, err = conn.Query(ctx, `select id::text, issue_key, body, author, anchor, suggestion, resolved_by, reply_to::text, ask_id::text,
 		artifact_id::text, resolved, turn
-		from comments order by issue_key, created_at, id`)
+		from public.comments order by issue_key, created_at, id`)
 	if err != nil {
 		return lines, fmt.Errorf("comments: %w", err)
 	}

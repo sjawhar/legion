@@ -67,23 +67,23 @@ owed_work() {
   OWED=0
   OWED_WHAT=""
   if has_table "$db" events; then
-    owe "unpublished events" "$(sql "$db" 'select count(*) from events where published_at is null')"
+    owe "unpublished events" "$(sql "$db" 'select count(*) from public.events where published_at is null')"
   fi
   if has_table "$db" comment_deliveries; then
-    owe "pending comment deliveries" "$(sql "$db" "select count(*) from comment_deliveries where state = 'pending'")"
+    owe "pending comment deliveries" "$(sql "$db" "select count(*) from public.comment_deliveries where state = 'pending'")"
   fi
   if has_table "$db" message_deliveries; then
-    owe "pending message deliveries" "$(sql "$db" "select count(*) from message_deliveries where state = 'pending'")"
+    owe "pending message deliveries" "$(sql "$db" "select count(*) from public.message_deliveries where state = 'pending'")"
   fi
   if has_table "$db" doc_settlements_pending; then
-    owe "pending document settlements" "$(sql "$db" 'select count(*) from doc_settlements_pending')"
+    owe "pending document settlements" "$(sql "$db" 'select count(*) from public.doc_settlements_pending')"
   fi
   if has_table "$db" document_block_versions; then
-    n=$(sql "$db" 'select count(*) from document_block_versions where version is null')
+    n=$(sql "$db" 'select count(*) from public.document_block_versions where version is null')
     owe "unversioned document blocks" "$n"
   fi
   if has_table "$db" block_grammar_owed; then
-    owe "block-grammar entries owed" "$(sql "$db" 'select count(*) from block_grammar_owed')"
+    owe "block-grammar entries owed" "$(sql "$db" 'select count(*) from public.block_grammar_owed')"
   fi
 }
 
@@ -275,13 +275,13 @@ cmd_replay_seed() {
 
   local counts
   counts=$(sql "$REPLAY_DB" "select json_build_object(
-      'projects', (select count(*) from projects),
-      'issues', (select count(*) from issues),
-      'artifacts', (select count(*) from artifacts),
-      'artifact_versions', (select count(*) from artifact_versions),
-      'comments', (select count(*) from comments),
-      'asks', (select count(*) from asks),
-      'events', (select count(*) from events))")
+      'projects', (select count(*) from public.projects),
+      'issues', (select count(*) from public.issues),
+      'artifacts', (select count(*) from public.artifacts),
+      'artifact_versions', (select count(*) from public.artifact_versions),
+      'comments', (select count(*) from public.comments),
+      'asks', (select count(*) from public.asks),
+      'events', (select count(*) from public.events))")
   jq -n --argjson migration "$migration" --slurpfile build "$binary.json" \
     --arg pg "$("$PGBIN/postgres" --version)" --arg at "$(date -u +%FT%TZ)" \
     --argjson seed_seconds "$seed_seconds" --argjson quiet "$QUIET_SECONDS" \
@@ -523,7 +523,7 @@ cmd_replay_prepare() {
     note "waiting for Dispatch's block-index backfill in $db (at most 3600 s)"
     local deadline=$((SECONDS + 3600)) logged=$SECONDS pending
     while :; do
-      pending=$(sql "$db" 'select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)')
+      pending=$(sql "$db" 'select (select count(*) from public.document_block_versions where version is null) + (select count(*) from public.block_grammar_owed)')
       [ "$pending" = 0 ] && break
       running dispatch || die "Dispatch exited while the block index still owed $pending entries; see $log"
       ((SECONDS < deadline)) || die "Dispatch still owes $pending block-index entries after 3600 s; see $log"
@@ -561,10 +561,10 @@ cmd_replay_prepare() {
 block_index_owed() {
   local n=0
   if has_table "$1" document_block_versions; then
-    n=$((n + $(sql "$1" 'select count(*) from document_block_versions where version is null')))
+    n=$((n + $(sql "$1" 'select count(*) from public.document_block_versions where version is null')))
   fi
   if has_table "$1" block_grammar_owed; then
-    n=$((n + $(sql "$1" 'select count(*) from block_grammar_owed')))
+    n=$((n + $(sql "$1" 'select count(*) from public.block_grammar_owed')))
   fi
   printf '%s\n' "$n"
 }

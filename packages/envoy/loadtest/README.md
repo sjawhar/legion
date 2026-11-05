@@ -21,7 +21,7 @@ same step before and after its change, and compares the two rows.
 | `seedfinish.go` | `loadgen seed-finish`: the steps after the seed (the wait for the outbox, the wait for the block-index backfill, `vacuum analyze`, the commit-time trigger), which `stack.sh seed` and `cluster.sh seed` both run |
 | `refs.go` | The reference seed: the plan of 1,000 cited documents and their citations, the writes, the shape check (`refs-shape`) and the answer fetch (`refs-fetch`) |
 | `loopseed.go` | `loadgen loop-seed-plan`: the Verified Linux spec loop's own seed, planned from `proposals-64796913-byid.tsv` alone, with no stack and no network, under the caps a Dispatch document and a comment body have (The spec loop's seed, below). `-rehearsal n` cuts the plan to its first n proposals. `loopseed_test.go` pins the totals and the cut. |
-| `loopseed_write.go` | `loadgen loop-seed-write`: that plan sent through Dispatch's API — the project, one issue per proposal, its part documents in order, the requirement threads anchored on their own quote rows with their replies and resolves, and each live proposal's review pages and review index. Every created object is recorded in `loadtest.loop_ids` the moment it exists, so a second run of the same plan creates nothing again; a refusal is counted by route and error code and the run goes on. |
+| `loopseed_write.go` | `loadgen loop-seed-write`: that plan sent through Dispatch's API — the project, one issue per proposal, its part documents in order, the requirement threads anchored on their own quote rows with their replies and resolves, and each live proposal's review pages and review index. Every created object is recorded in `public.loadtest_loop_ids` the moment it exists, so a second run of the same plan writes exactly the objects that map lacks; a refusal is counted by route and error code and the run goes on. |
 | `loopseed_check.go` | `loadgen loop-seed-check`: what a seeded database holds of a plan, beside what the plan expected, one line per check. Every expected number comes from the plan file, so a rehearsal checks against its own totals. |
 | `loopseed_export.go` | `loadgen loop-seed-export`: `loopseed.seed.json`, which `loadgen run -loop-seed` reads — per proposal its issue key, its part documents with the last marked, its spare quote rows, its review pages and index, a capped sample of its open and resolved thread ids, and its requirement-id count. It is also this package's reader of that file and the weighted draw a step lands a read or a write with. |
 | `proposals-64796913-byid.tsv` | The seed's source: one row per proposal of the spec loop, by requirement id, as the loop held them on 2026-10-26. Its verified totals are the seed's identity, and a file that disagrees with one of them is refused by that total's name rather than planned under this seed's name. |
@@ -241,7 +241,7 @@ message and at `run.log`. A Dispatch crash or out-of-memory kill at a high step 
 the overload that the series measures.
 
 **A step whose commit rows cannot be read fails.** The committed counts, the receipts and the
-delivery latencies all come from the run's rows of `loadtest.event_commits` (Delivery latency,
+delivery latencies all come from the run's rows of `public.loadtest_event_commits` (Delivery latency,
 below). When `loadgen` cannot read them, because the database has no `commit-trigger.sql` or
 Postgres does not answer, it still writes `summary.json` with `events.commits_error` (why the read
 failed), `meta.json` and `samples.json`. Then it exits with status 1, naming the commit-row read and
@@ -649,16 +649,29 @@ quote, and the 70% that part's margin stops at is what leaves room for the threa
 A run that takes all 64, or that meets a 413 on that document, opens a part document of its own
 with 64 fresh rows and counts it (`summary.json` `loop.new_parts`, `loop.cap_exceeded`).
 
-**`loop-seed-write` resumes.** Every created object is recorded in `loadtest.loop_ids` — the plan
-that minted it, its kind, its logical path and its local id — the moment it exists, as
-`replay-seed` records a logged id in `loadtest.replay_ids`. A second run of the same plan against
-the same database reads that map whole at the start and skips every write whose path it already
-holds. Every write also carries an idempotency key minted from the plan's identity and that same
-path, so a retry of a write whose answer was lost adds no second object either. Only a failure of
-the id map itself stops a run, since without it a resume would write everything again. A refusal
-is data, not a failure: a 413, a 400 `CAP_EXCEEDED` or any other non-2xx answer is counted by
-route and error code, whatever that object would have held is counted as skipped, and the run goes
-on.
+**`loop-seed-write` resumes, one object at a time.** Every created object is recorded in
+`public.loadtest_loop_ids` — the plan that minted it, its kind, its logical path and its local id
+— the moment it exists, as `replay-seed` records a logged id in `loadtest.replay_ids`. A second
+run of the same plan against the same database reads that map whole at the start and skips every
+write whose path it already holds, so a run over a plan the map holds any part of writes exactly
+the objects the map lacks: a proposal written half way through has the rest of it written, down
+to one reply of one thread. Every write also carries an idempotency key minted from the plan's
+identity and that same path, so a retry of a write whose answer was lost adds no second object
+either. Only a failure of the id map itself stops a run, since without it a resume would write
+everything again. A refusal is data, not a failure: a 413, a 400 `CAP_EXCEEDED` or any other
+non-2xx answer is counted by route and error code, and every object it left unwritable that the
+map does not already hold is counted as skipped — so what a run reports as skipped is what the
+plan still lacks, and the run goes on.
+
+**The map is a table of `public`, and every statement of this package names the schema of every
+Dispatch table it reads.** Postgres's default `search_path` is `"$user", public`, so a schema
+named as the database's login is stands in front of `public` for every unqualified name. A
+`create schema` of this tool's under a login called `loadtest` made such a schema on the
+deployment; Dispatch's own `create table if not exists` then built a second, empty copy of its
+whole schema there at the next restart and served it, while the seed sat in `public`
+(dispatch://INFRA-988). This tool now creates no schema at all — `public.loadtest_loop_ids` and
+`public.loadtest_event_commits` are its two tables — and names `public.` in every statement, so
+a login called anything at all reads the same tables.
 
 On the local stack of a 2-vCPU pod at this checkout, the rehearsal of 10 proposals wrote 6,214
 objects in 19m51s with 0 refusals; the same command again wrote 0 and skipped 6,214 in 60 ms;
@@ -1573,9 +1586,9 @@ and have its kind's primary type. Only primary events on issue topics are timed.
   client's own wait for a connection is in `summary.json` as `conn_wait_ms`, so a generator that
   queues its own requests shows it.
 - **From commit**: the receipt time minus the commit time of the primary event's transaction.
-  - The seed installs `loadtest.event_commits` and an `AFTER INSERT` trigger on `events`. For each
-    new event that carries a marker, the trigger copies the event id, the type and the first marker
-    in its payload. Events without a marker insert nothing.
+  - The seed installs `public.loadtest_event_commits` and an `AFTER INSERT` trigger on
+    `public.events`. For each new event that carries a marker, the trigger copies the event id,
+    the type and the first marker in its payload. Events without a marker insert nothing.
   - After the grace period, `loadgen` reads `pg_xact_commit_timestamp(xmin)` of the rows whose
     marker is one of the run's in-window writes, its nonce included. This needs
     `track_commit_timestamp = on`.
@@ -1588,7 +1601,7 @@ and have its kind's primary type. Only primary events on issue topics are timed.
 The counts:
 
 - **Offered**: the writes whose scheduled arrival is in the window.
-- **Committed**: the offered writes whose primary event is in `loadtest.event_commits` with the
+- **Committed**: the offered writes whose primary event is in `public.loadtest_event_commits` with the
   write's marker, whatever their HTTP status. A write that hit the 30 s client timeout but committed
   counts, and gets delivery latencies. Another run's rows never count: their nonce differs.
 - **Expected issue-topic receipts**: the committed primary events × the sessions that subscribe to
@@ -1601,7 +1614,7 @@ The counts:
 - **`commit_times_missing`**: the primary events with no commit time. They get no latency from
   commit.
 
-When `loadgen` cannot read the run's rows of `loadtest.event_commits`, `events.commits_error` holds
+When `loadgen` cannot read the run's rows of `public.loadtest_event_commits`, `events.commits_error` holds
 why. Then every count and latency that comes from the commit rows is 0 because nothing was read, not measured:
 committed (also per kind), the issue-topic and agent-topic receipts, the expected receipts,
 `missing`, `other_events`, `other_receipts`, `commit_times_missing`, `clock_anomalies` and every
@@ -1687,7 +1700,7 @@ row has the mark.
 
 **The commit-rows mark.** `(commit rows not read)` after the step name, in this table, the
 write-latency-by-kind table, the resources table and the delivery-from-sending table, means that
-`loadgen` could not read the run's rows of `loadtest.event_commits`: the database has no
+`loadgen` could not read the run's rows of `public.loadtest_event_commits`: the database has no
 `commit-trigger.sql`, or Postgres did not answer. `events.commits_error` says why. Every cell that
 depends on those rows shows `-`, not a measured 0: here the committed rate, both delivery
 latencies and the receipts; per kind the committed count; in the resources table the Dispatch
@@ -3026,7 +3039,7 @@ so a reader is not left looking for it among the deployment's own readings.
   and its own seed, gets:
   - no `/proc` CPU or RSS columns, because it has no pids,
   - no committed counts, issue-topic receipts or delivery latencies at all when its database lacks
-    `loadtest.event_commits`. The read of the commit rows fails, every cell that depends on them
+    `public.loadtest_event_commits`. The read of the commit rows fails, every cell that depends on them
     shows `-` with the mark `(commit rows not read)` (The tables, above), and `loadgen run` exits
     non-zero naming the read (`events.commits_error`). Such a database needs `commit-trigger.sql`
     (`loadgen trigger-sql` prints it) installed before the run, and `track_commit_timestamp = on`,

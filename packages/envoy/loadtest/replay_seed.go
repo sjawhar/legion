@@ -435,8 +435,8 @@ func (s *replaySeeder) createIssue(ctx context.Context, p seedIssuePlan) error {
 	// A seed killed after Dispatch created the issue but before the mapping was written left it
 	// unmapped: adopt it.
 	var key, primary string
-	err := s.pool.QueryRow(ctx, `select key, coalesce((select id::text from artifacts where issue_key = issues.key and is_primary), '')
-		from issues where project_key = $1 and number = $2`, s.b.State.Project, p.Number).Scan(&key, &primary)
+	err := s.pool.QueryRow(ctx, `select key, coalesce((select id::text from public.artifacts where issue_key = issues.key and is_primary), '')
+		from public.issues where project_key = $1 and number = $2`, s.b.State.Project, p.Number).Scan(&key, &primary)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
@@ -722,7 +722,7 @@ func docCreateBody(name, text string) map[string]any {
 // adoptArtifact finds an artifact of the issue by name that no logged id maps to yet: one a killed
 // seed created without recording it.
 func (s *replaySeeder) adoptArtifact(ctx context.Context, key, name string) (string, error) {
-	return s.adoptUnmapped(ctx, idArtifact, `select id::text from artifacts where issue_key = $1 and name = $2 order by created_at`, key, name)
+	return s.adoptUnmapped(ctx, idArtifact, `select id::text from public.artifacts where issue_key = $1 and name = $2 order by created_at`, key, name)
 }
 
 // adoptUnmapped is the first id query returns that no logged id of kind maps to yet, "" when none.
@@ -893,7 +893,7 @@ func (s *replaySeeder) versionSize(ctx context.Context, artifactID string, n int
 	var size int
 	var markdown string
 	err := s.pool.QueryRow(ctx, `select coalesce(size, octet_length(markdown)), coalesce(markdown, '')
-		from artifact_versions where artifact_id = $1 and number = $2`, artifactID, n).Scan(&size, &markdown)
+		from public.artifact_versions where artifact_id = $1 and number = $2`, artifactID, n).Scan(&size, &markdown)
 	return size, markdown, err
 }
 
@@ -1023,7 +1023,7 @@ func abs(x int) int {
 
 func (s *replaySeeder) maxVersion(ctx context.Context, artifactID string) (int, error) {
 	var n int
-	err := s.pool.QueryRow(ctx, `select coalesce(max(number), 0) from artifact_versions where artifact_id = $1`, artifactID).Scan(&n)
+	err := s.pool.QueryRow(ctx, `select coalesce(max(number), 0) from public.artifact_versions where artifact_id = $1`, artifactID).Scan(&n)
 	return n, err
 }
 
@@ -1033,7 +1033,7 @@ func (s *replaySeeder) waitSettled(ctx context.Context, key string, docs []strin
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
 		var n int
-		if err := s.pool.QueryRow(ctx, `select count(*) from doc_settlements_pending where artifact_id::text = any($1)`, docs).Scan(&n); err != nil {
+		if err := s.pool.QueryRow(ctx, `select count(*) from public.doc_settlements_pending where artifact_id::text = any($1)`, docs).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {
@@ -1071,8 +1071,8 @@ func openAnchored(ctx context.Context, q interface {
 }, doc string) (int, error) {
 	var n int
 	err := q.QueryRow(ctx, `select
-		(select count(*) from comments where anchor->>'artifact_id' = $1 and reply_to is null and not resolved) +
-		(select count(*) from asks where anchor->>'artifact_id' = $1 and state <> 'resolved')`, doc).Scan(&n)
+		(select count(*) from public.comments where anchor->>'artifact_id' = $1 and reply_to is null and not resolved) +
+		(select count(*) from public.asks where anchor->>'artifact_id' = $1 and state <> 'resolved')`, doc).Scan(&n)
 	return n, err
 }
 
@@ -1085,7 +1085,7 @@ type localComment struct {
 
 func (s *replaySeeder) unmappedComments(ctx context.Context, key string) ([]localComment, error) {
 	rows, err := s.pool.Query(ctx, `select id::text, body, coalesce(author->>'id', ''), coalesce(anchor->>'quote', '')
-		from comments where issue_key = $1 order by created_at, id`, key)
+		from public.comments where issue_key = $1 order by created_at, id`, key)
 	if err != nil {
 		return nil, err
 	}
@@ -1303,7 +1303,7 @@ func (s *replaySeeder) resolve(ctx context.Context, key string, docs map[string]
 		return fmt.Errorf("resolve %s: the comment is not seeded", c.ID)
 	}
 	var resolved bool
-	if err := s.pool.QueryRow(ctx, `select resolved from comments where id = $1`, local).Scan(&resolved); err != nil {
+	if err := s.pool.QueryRow(ctx, `select resolved from public.comments where id = $1`, local).Scan(&resolved); err != nil {
 		return err
 	}
 	if !resolved {

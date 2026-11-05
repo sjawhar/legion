@@ -49,21 +49,24 @@ const (
 // gate reads it with the deployment's agent bearer like every other call the harness makes.
 const searchCoveragePath = "/api/v1/search/coverage"
 
-// The queries seed-finish runs. The block-index tables do not exist in a build older than
-// migration 0121, which owes nothing; Postgres resolves every table a statement names before it
-// runs, so the existence check is its own query.
+// The queries seed-finish runs. Each names the schema of every table it reads: Dispatch's are in
+// public, and on a database whose login is named as a schema is - the deployment's login is
+// loadtest - an unqualified name resolves in that schema first (search_path "$user", public),
+// which would count an empty copy of Dispatch's tables (dispatch://INFRA-988). The block-index
+// tables do not exist in a build older than migration 0121, which owes nothing; Postgres resolves
+// every table a statement names before it runs, so the existence check is its own query.
 const (
-	sqlUnpublishedEvents = "select count(*) from events where published_at is null"
+	sqlUnpublishedEvents = "select count(*) from public.events where published_at is null"
 	sqlBlockIndexTables  = "select to_regclass('public.document_block_versions') is not null and to_regclass('public.block_grammar_owed') is not null"
-	sqlBlockIndexOwed    = "select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)"
+	sqlBlockIndexOwed    = "select (select count(*) from public.document_block_versions where version is null) + (select count(*) from public.block_grammar_owed)"
 	sqlVacuumAnalyze     = "vacuum analyze"
 	// seed-refs writes under idempotency keys, so Dispatch keeps one request_keys row per write.
 	// They protect retries during the seed only. Left in the template, Dispatch's sweep of keys
 	// older than a day would delete them inside the window of every step on a seed older than
 	// that, and not on a younger one. A build older than migration 0137 has no such table.
 	sqlRequestKeysTable = "select to_regclass('public.request_keys') is not null"
-	sqlRequestKeysDel   = "delete from request_keys"
-	sqlRequestKeysCount = "select count(*) from request_keys"
+	sqlRequestKeysDel   = "delete from public.request_keys"
+	sqlRequestKeysCount = "select count(*) from public.request_keys"
 )
 
 // pgSession is what seed-finish uses of a Postgres connection; *pgx.Conn is one.
@@ -256,7 +259,7 @@ func (f seedFinisher) finish(ctx context.Context, db pgSession) error {
 	if _, err := db.Exec(ctx, sqlVacuumAnalyze); err != nil {
 		return fmt.Errorf("%s: %w", sqlVacuumAnalyze, err)
 	}
-	f.lg.Print("installing the commit-time trigger (loadtest.event_commits)")
+	f.lg.Print("installing the commit-time trigger (public.loadtest_event_commits)")
 	if _, err := db.Exec(ctx, commitTriggerSQL); err != nil {
 		return fmt.Errorf("install the commit-time trigger (commit-trigger.sql): %w", err)
 	}

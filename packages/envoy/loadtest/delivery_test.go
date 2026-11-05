@@ -108,8 +108,8 @@ func TestJoinDeliveryCountsClockAnomalies(t *testing.T) {
 }
 
 // TestReadCommitsNamesTheTableWhenItCannotRead: given a Postgres it cannot reach, readCommits
-// returns no rows and an error naming loadtest.event_commits, never an empty result that reads as
-// no commits; with no write in the window it reads nothing and fails nothing.
+// returns no rows and an error naming public.loadtest_event_commits, never an empty result that
+// reads as no commits; with no write in the window it reads nothing and fails nothing.
 func TestReadCommitsNamesTheTableWhenItCannotRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -117,8 +117,8 @@ func TestReadCommitsNamesTheTableWhenItCannotRead(t *testing.T) {
 	if err == nil || rows != nil {
 		t.Fatalf("readCommits on an unreachable Postgres = %v, %v; want no rows and an error", rows, err)
 	}
-	if !strings.Contains(err.Error(), "loadtest.event_commits") {
-		t.Fatalf("error %q does not name loadtest.event_commits", err)
+	if !strings.Contains(err.Error(), "public.loadtest_event_commits") {
+		t.Fatalf("error %q does not name public.loadtest_event_commits", err)
 	}
 	// With no write in the window there is no row to read, and nothing depends on one.
 	if rows, err := readCommits(ctx, unreachablePG, 1, nil); err != nil || rows != nil {

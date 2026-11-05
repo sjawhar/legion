@@ -1,9 +1,9 @@
 package main
 
 // loadgen loop-seed-check: what a seeded Dispatch database holds of a plan, against what the plan
-// expected. It reads Postgres only - the seed's own rows, found through loadtest.loop_ids, which
-// loop-seed-write wrote as it created them - prints one line per check and exits non-zero when any
-// line fails.
+// expected. It reads Postgres only - the seed's own rows, found through public.loadtest_loop_ids,
+// which loop-seed-write wrote as it created them - prints one line per check and exits non-zero
+// when any line fails.
 //
 // Every expected number comes from the plan file, never from a constant typed again here: a plan
 // of another seed or another source file expects its own totals, and a check that held copies of
@@ -50,12 +50,17 @@ type loopQuerier interface {
 // readLoopFound counts the seed of plan planID in the database: its issues, comment rows and
 // bodies, its documents by kind, and the documents past a cap. Every count is of rows the id map
 // names, so another seed in the same database counts for nothing here.
+//
+// Every table below names its schema. Dispatch's own are in public, and a database whose login
+// is named as a schema is - the deployment's login is loadtest - resolves an unqualified name in
+// that schema first (search_path "$user", public), which on that deployment counted an empty
+// copy of Dispatch's tables and reported 0 of everything (dispatch://INFRA-988).
 func readLoopFound(ctx context.Context, q loopQuerier, planID string) (loopFound, error) {
 	var f loopFound
 	// The issues of the seed that the database still holds, by the keys the id map recorded.
 	if err := q.QueryRow(ctx, `
-		select count(*) from issues i
-		join loadtest.loop_ids m on m.local_id = i.key
+		select count(*) from public.issues i
+		join public.loadtest_loop_ids m on m.local_id = i.key
 		where m.plan = $1 and m.kind = 'issue'
 	`, planID).Scan(&f.Issues); err != nil {
 		return f, fmt.Errorf("count the seed's issues: %w", err)
@@ -63,8 +68,8 @@ func readLoopFound(ctx context.Context, q loopQuerier, planID string) (loopFound
 	// The thread roots and replies together: the comment rows the seed wrote, and the bytes their
 	// bodies hold, which is the thread text the plan counted.
 	if err := q.QueryRow(ctx, `
-		select count(*), coalesce(sum(octet_length(c.body)), 0) from comments c
-		join loadtest.loop_ids m on m.local_id = c.id::text
+		select count(*), coalesce(sum(octet_length(c.body)), 0) from public.comments c
+		join public.loadtest_loop_ids m on m.local_id = c.id::text
 		where m.plan = $1 and m.kind in ('thread', 'reply')
 	`, planID).Scan(&f.CommentRows, &f.ThreadBytes); err != nil {
 		return f, fmt.Errorf("count the seed's comment rows: %w", err)
@@ -77,10 +82,10 @@ func readLoopFound(ctx context.Context, q loopQuerier, planID string) (loopFound
 		  count(*) filter (where m.kind = 'page'),
 		  count(*) filter (where m.kind = 'index'),
 		  coalesce(sum(octet_length(v.markdown)) filter (where m.kind = 'page'), 0)
-		from loadtest.loop_ids m
-		join artifacts a on a.id::text = m.local_id
+		from public.loadtest_loop_ids m
+		join public.artifacts a on a.id::text = m.local_id
 		left join lateral (
-		  select markdown from artifact_versions av
+		  select markdown from public.artifact_versions av
 		  where av.artifact_id = a.id order by av.number desc limit 1
 		) v on true
 		where m.plan = $1 and m.kind in ('part', 'page', 'index')
@@ -93,18 +98,18 @@ func readLoopFound(ctx context.Context, q loopQuerier, planID string) (loopFound
 	// bytes of the bodies the seed wrote, which are ASCII.
 	if err := q.QueryRow(ctx, `
 		with docs as (
-		  select a.id from loadtest.loop_ids m join artifacts a on a.id::text = m.local_id
+		  select a.id from public.loadtest_loop_ids m join public.artifacts a on a.id::text = m.local_id
 		  where m.plan = $1 and m.kind in ('part', 'page', 'index')
 		), heavy_markdown as (
 		  select d.id from docs d
 		  where (
-		    select octet_length(av.markdown) from artifact_versions av
+		    select octet_length(av.markdown) from public.artifact_versions av
 		    where av.artifact_id = d.id order by av.number desc limit 1
 		  ) > $2
 		), heavy_margin as (
 		  select (root.anchor->>'artifact_id')::uuid as id
-		  from comments c
-		  join comments root on root.id = coalesce(c.reply_to, c.id)
+		  from public.comments c
+		  join public.comments root on root.id = coalesce(c.reply_to, c.id)
 		  where root.anchor->>'artifact_id' in (select id::text from docs)
 		  group by 1 having sum(octet_length(c.body)) > $3
 		)

@@ -217,7 +217,7 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 // the commit rows, so a step whose read of them failed fails, naming it; a failed read of the other
 // probes marks its own table and does not fail the step.
 func TestStepFailsWhenItsCommitRowsWereNotRead(t *testing.T) {
-	const commitsErr = `read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation "loadtest.event_commits" does not exist (SQLSTATE 42P01)`
+	const commitsErr = `read public.loadtest_event_commits (is commit-trigger.sql installed?): ERROR: relation "public.loadtest_event_commits" does not exist (SQLSTATE 42P01)`
 	err := stepFailure(summary{Events: eventsSummary{CommitsError: commitsErr}})
 	if err == nil {
 		t.Fatal("a step whose commit rows were not read does not fail")

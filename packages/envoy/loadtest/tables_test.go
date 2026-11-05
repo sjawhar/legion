@@ -180,14 +180,14 @@ func TestTablesResourcesShowFailedSamplerReadsAsMissing(t *testing.T) {
 	checkRowWidths(t, md)
 }
 
-// TestTablesDoNotShowUnreadCommitsAsZero: a step whose loadtest.event_commits could not be read
-// (events.commits_error: a foreign run's database without the commit trigger, or an unreachable
-// -pg) knows nothing about its commits, receipts or delivery: Committed is 0 because nothing was
-// read, not because nothing committed. Its tables must not present that 0 as a measurement: the
-// committed rate, the issue-topic receipts and each kind's committed count are not 0; each table
-// with cells that depend on the commit rows marks the row, shows "-" in those cells and names
-// events.commits_error in a note; the other cells keep their values; and neither a step whose
-// commit rows were read nor a table that no commit row feeds carries the mark.
+// TestTablesDoNotShowUnreadCommitsAsZero: a step whose public.loadtest_event_commits could not be
+// read (events.commits_error: a foreign run's database without the commit trigger, or an
+// unreachable -pg) knows nothing about its commits, receipts or delivery: Committed is 0 because
+// nothing was read, not because nothing committed. Its tables must not present that 0 as a
+// measurement: the committed rate, the issue-topic receipts and each kind's committed count are
+// not 0; each table with cells that depend on the commit rows marks the row, shows "-" in those
+// cells and names events.commits_error in a note; the other cells keep their values; and neither
+// a step whose commit rows were read nor a table that no commit row feeds carries the mark.
 func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 	perOp := 0.0123
 	read := stepData{name: "read", sum: summary{
@@ -207,7 +207,7 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 				kindComment:  {Offered: 1, WriteMs: stat{N: 1, P50: 118, P99: 118}},
 				kindAnchored: {Offered: 8, WriteMs: stat{N: 8, P50: 670, P99: 720}},
 			},
-			CommitsError: `read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation "loadtest.event_commits" does not exist (SQLSTATE 42P01)`,
+			CommitsError: `read public.loadtest_event_commits (is commit-trigger.sql installed?): ERROR: relation "public.loadtest_event_commits" does not exist (SQLSTATE 42P01)`,
 		},
 		Resources: &resourcesSummary{},
 		Live:      liveSummary{Frames: 40, FrameMsFromCreatedAt: stat{N: 40, P50: 30, P99: 80}},

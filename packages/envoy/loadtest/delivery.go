@@ -26,8 +26,8 @@ type writeRec struct {
 	InWindow bool
 }
 
-// commitRow is one loadtest.event_commits row of this run: an event that carries one of the run's
-// markers, with the marker's counter and the commit time of its transaction
+// commitRow is one public.loadtest_event_commits row of this run: an event that carries one of
+// the run's markers, with the marker's counter and the commit time of its transaction
 // (pg_xact_commit_timestamp(xmin)), 0 when Postgres has none.
 type commitRow struct {
 	EventID  int64
@@ -36,7 +36,7 @@ type commitRow struct {
 	CommitNs int64
 }
 
-// commitTagRow is one loadtest.event_commits row as read: its marker as text.
+// commitTagRow is one public.loadtest_event_commits row as read: its marker as text.
 type commitTagRow struct {
 	EventID int64
 	Type    string
@@ -170,11 +170,12 @@ type eventsSummary struct {
 	ClockAnomalies int         `json:"clock_anomalies"`
 	WriteErrors    writeErrors `json:"write_errors"`
 	ConnWaitMs     stat        `json:"conn_wait_ms"`
-	// CommitsError is why loadtest.event_commits could not be read, when it could not. Then every
-	// count and latency above that comes from the commit rows (committed, by_kind committed, the
-	// receipts, missing, other events and receipts, commit_times_missing, clock_anomalies and the
-	// delivery latencies) is 0 because nothing was read, not measured; the tables show it as "-"
-	// with the mark "(commit rows not read)", and the step fails (stepFailure).
+	// CommitsError is why public.loadtest_event_commits could not be read, when it could not.
+	// Then every count and latency above that comes from the commit rows (committed, by_kind
+	// committed, the receipts, missing, other events and receipts, commit_times_missing,
+	// clock_anomalies and the delivery latencies) is 0 because nothing was read, not measured; the
+	// tables show it as "-" with the mark "(commit rows not read)", and the step fails
+	// (stepFailure).
 	CommitsError string `json:"commits_error,omitempty"`
 }
 
@@ -451,15 +452,16 @@ func primaryCommit(rows []commitRow, primaryType string) *commitRow {
 
 // readCommits reads the commit rows of the given markers of the run with this nonce over a direct
 // Postgres connection (commit-trigger.sql installs the table; track_commit_timestamp gives the
-// times). Every error names loadtest.event_commits. With no markers there is no row to read, and
-// it reads nothing: a step with no write in the window has nothing that depends on the rows.
+// times). Every error names public.loadtest_event_commits. With no markers there is no row to
+// read, and it reads nothing: a step with no write in the window has nothing that depends on the
+// rows.
 func readCommits(ctx context.Context, pgURL string, nonce int64, markers []int64) ([]commitRow, error) {
 	if len(markers) == 0 {
 		return nil, nil
 	}
 	conn, err := pgx.Connect(ctx, pgURL)
 	if err != nil {
-		return nil, fmt.Errorf("read loadtest.event_commits: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_event_commits: %w", err)
 	}
 	defer conn.Close(context.Background())
 	tags := make([]string, len(markers))
@@ -468,21 +470,21 @@ func readCommits(ctx context.Context, pgURL string, nonce int64, markers []int64
 	}
 	rows, err := conn.Query(ctx, `
 		select event_id, type, marker, pg_xact_commit_timestamp(xmin)
-		from loadtest.event_commits where marker = any($1)`, tags)
+		from public.loadtest_event_commits where marker = any($1)`, tags)
 	if err != nil {
-		return nil, fmt.Errorf("read loadtest.event_commits (is commit-trigger.sql installed?): %w", err)
+		return nil, fmt.Errorf("read public.loadtest_event_commits (is commit-trigger.sql installed?): %w", err)
 	}
 	defer rows.Close()
 	var read []commitTagRow
 	for rows.Next() {
 		var c commitTagRow
 		if err := rows.Scan(&c.EventID, &c.Type, &c.Tag, &c.At); err != nil {
-			return nil, fmt.Errorf("read loadtest.event_commits: %w", err)
+			return nil, fmt.Errorf("read public.loadtest_event_commits: %w", err)
 		}
 		read = append(read, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read loadtest.event_commits: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_event_commits: %w", err)
 	}
 	return runCommits(read, nonce), nil
 }

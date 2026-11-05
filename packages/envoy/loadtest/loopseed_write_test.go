@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -647,6 +648,70 @@ func TestLoopSeedWriteRefusedIssue(t *testing.T) {
 	}
 }
 
+// TestLoopSeedWriteSkipsOnlyWhatTheMapLacks: a refusal counts the objects it left unwritable,
+// and an object an earlier run already wrote is not one of them. The map holds a part of
+// proposal 0 - its first part document, its first thread with the replies and the resolve under
+// it - and not its issue, which is the state a run killed between an issue's creation and the
+// row that records it leaves. The deployment refuses the issue this run writes again, so the
+// proposal is unwritable; what the run reports as skipped is what the map lacks of it and no
+// more, so a resumed run never says a proposal is missing objects that are written
+// (dispatch://INFRA-988).
+func TestLoopSeedWriteSkipsOnlyWhatTheMapLacks(t *testing.T) {
+	ctx := context.Background()
+	p := loopTestPlanOf(t, 31, loopTestRows(), map[int]int{0: 2})
+	planID := loopPlanID(p)
+	pr := &p.Proposals[0]
+	threads := p.partThreads(0, 0)
+	if len(threads) < 2 {
+		t.Fatalf("proposal 0's first part holds %d threads; this test needs one held and one lacking", len(threads))
+	}
+	ids := newLoopMemIDs()
+	hold := func(kind, path string) {
+		t.Helper()
+		if err := ids.put(ctx, kind, path, "held-"+path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hold(loopKindPart, loopPartPath(0, 0))
+	th := threads[0]
+	hold(loopKindThread, loopThreadPath(0, 0, th.Index))
+	for i := range len(th.Bodies) - 1 {
+		hold(loopKindReply, loopReplyPath(0, 0, th.Index, i+1))
+	}
+	heldResolves := 0
+	if !th.Open {
+		hold(loopKindResolve, loopResolvePath(0, 0, th.Index))
+		heldResolves = 1
+	}
+	ids.reload()
+
+	stub := newLoopStub(t)
+	stub.refuse = func(route, key string) (int, string) {
+		if key == loopKey(planID, loopIssuePath(0)) {
+			return http.StatusRequestEntityTooLarge, "CAP_EXCEEDED"
+		}
+		return 0, ""
+	}
+	w := loopTestWriter(t, p, stub, ids)
+	if err := w.run(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	meta := w.meta()
+	want := map[string]int{
+		loopKindPart:    len(pr.Parts) - 1,
+		loopKindThread:  pr.IDs - 1,
+		loopKindReply:   pr.ReplyLines - (len(th.Bodies) - 1),
+		loopKindResolve: pr.IDs - pr.LiveIDs - heldResolves,
+		loopKindPage:    2,
+		loopKindIndex:   1,
+	}
+	for kind, n := range want {
+		if meta.Skipped[kind] != n {
+			t.Errorf("skipped %d %s, want the %d the map lacks (all: %v)", meta.Skipped[kind], kind, n, meta.Skipped)
+		}
+	}
+}
+
 // TestLoopSeedWriteNoID: a 2xx answer that names no id leaves the object unrecorded - a resume
 // would write it again, and nothing may hang off an id the run does not have - and is counted
 // like any other answer the run cannot use.
@@ -731,8 +796,16 @@ func loopTestPG(t *testing.T) string {
 }
 
 // loopTestDB opens a database of this test's own on that server and drops it afterwards, so a
-// test's loadtest.loop_ids rows and its dispatch-shaped rows are nobody else's.
+// test's public.loadtest_loop_ids rows and its dispatch-shaped rows are nobody else's.
 func loopTestDB(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool, _ := loopTestDBAt(t)
+	return pool
+}
+
+// loopTestDBAt is that database with its URL, for a test that opens a second pool on it: a
+// session setting the database carries (search_path) reaches the sessions opened after it alone.
+func loopTestDBAt(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, loopTestPG(t))
@@ -753,7 +826,8 @@ func loopTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	u.Path = "/" + name
-	pool, err := pgxpool.New(ctx, u.String())
+	dsn := u.String()
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
 	}
@@ -769,10 +843,10 @@ func loopTestDB(t *testing.T) *pgxpool.Pool {
 			t.Errorf("drop the test database: %v", err)
 		}
 	})
-	return pool
+	return pool, dsn
 }
 
-// TestLoopSeedWriteLiveResume: the whole resume, over a real loadtest.loop_ids. The first run
+// TestLoopSeedWriteLiveResume: the whole resume, over a real public.loadtest_loop_ids. The first run
 // creates the plan's objects and records each in the table; a second run, whose id map is read
 // from that table and not from the first run's memory, sends no request and reports that it
 // created nothing.
@@ -800,7 +874,7 @@ func TestLoopSeedWriteLiveResume(t *testing.T) {
 		objects += k.Objects
 	}
 	var rows int
-	if err := pool.QueryRow(ctx, `select count(*) from loadtest.loop_ids where plan = $1`, planID).Scan(&rows); err != nil {
+	if err := pool.QueryRow(ctx, `select count(*) from public.loadtest_loop_ids where plan = $1`, planID).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
 	if rows != objects {
@@ -824,7 +898,7 @@ func TestLoopSeedWriteLiveResume(t *testing.T) {
 		t.Errorf("the resumed run reports %d objects already written, want %d", meta2.ResumedObjects, objects)
 	}
 	after := 0
-	if err := pool.QueryRow(ctx, `select count(*) from loadtest.loop_ids where plan = $1`, planID).Scan(&after); err != nil {
+	if err := pool.QueryRow(ctx, `select count(*) from public.loadtest_loop_ids where plan = $1`, planID).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if after != rows {
@@ -841,5 +915,245 @@ func TestLoopSeedWriteLiveResume(t *testing.T) {
 	}
 	if n := len(otherIDs.held()); n != 0 {
 		t.Errorf("a plan of another seed resumed %d kinds of this one's objects", n)
+	}
+}
+
+// loopPlanPaths is the logical path of every object the plan has the writer create, in the order
+// it writes them: the project, then each proposal's issue, its part documents with the threads,
+// replies and resolves that hang off each, and the live proposal's review pages and index. It is
+// the list a run's writes are judged against - exactly these, each once.
+func loopPlanPaths(p *loopPlan) []string {
+	paths := []string{loopKindProject}
+	pages := map[int][]loopReviewPage{}
+	for _, page := range p.ReviewPages {
+		pages[page.Proposal] = append(pages[page.Proposal], page)
+	}
+	indexes := map[int]bool{}
+	for _, ix := range p.ReviewIndexes {
+		indexes[ix.Proposal] = true
+	}
+	for i := range p.Proposals {
+		pr := &p.Proposals[i]
+		paths = append(paths, loopIssuePath(i))
+		for part := range pr.Parts {
+			paths = append(paths, loopPartPath(i, part))
+			for _, th := range p.partThreads(i, part) {
+				paths = append(paths, loopThreadPath(i, part, th.Index))
+				for reply := range len(th.Bodies) - 1 {
+					paths = append(paths, loopReplyPath(i, part, th.Index, reply+1))
+				}
+				if !th.Open {
+					paths = append(paths, loopResolvePath(i, part, th.Index))
+				}
+			}
+		}
+		if !pr.LiveInDriver {
+			continue
+		}
+		for _, page := range pages[i] {
+			paths = append(paths, loopPagePath(i, page.Index))
+		}
+		if indexes[i] {
+			paths = append(paths, loopIndexPath(i))
+		}
+	}
+	return paths
+}
+
+// loopCutIDs is an id map that interrupts the run the moment it has recorded cut objects, which
+// is what a deployment's restart or a killed pod does to a run in flight: the map holds exactly
+// the objects that reached it, which is a part of a proposal and not a whole one.
+type loopCutIDs struct {
+	loopIDMap
+	cut    int
+	cancel context.CancelFunc
+
+	mu sync.Mutex
+	n  int
+}
+
+func (s *loopCutIDs) put(ctx context.Context, kind, path, local string) error {
+	if err := s.loopIDMap.put(ctx, kind, path, local); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.n++
+	n := s.n
+	s.mu.Unlock()
+	if n == s.cut {
+		s.cancel()
+	}
+	return nil
+}
+
+// TestLoopSeedWriteLiveResumesAPartWrittenProposal: the resume is per object, over a real id map.
+// The first run is interrupted inside a proposal - the map holds its issue, its first part
+// document and some of that part's threads, and nothing of the rest of the plan - and the second
+// run writes exactly the objects the map lacks: the rest of that proposal included, each once,
+// and the whole plan between the two runs.
+func TestLoopSeedWriteLiveResumesAPartWrittenProposal(t *testing.T) {
+	pool := loopTestDB(t)
+	ctx := context.Background()
+	p := loopTestPlanOf(t, 17, loopTestRows(), map[int]int{0: 3})
+	planID := loopPlanID(p)
+	whole := loopPlanPaths(p)
+	// The cut lands inside the first proposal's first part, past its issue and its document, so
+	// the interrupted proposal is one the map holds a part of.
+	const cut = 7
+	if cut >= len(whole) {
+		t.Fatalf("the plan holds %d objects, too few to cut at %d", len(whole), cut)
+	}
+
+	store, err := loadLoopIDStore(ctx, pool, planID)
+	if err != nil {
+		t.Fatalf("load the id map: %v", err)
+	}
+	cutCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	first := newLoopStub(t)
+	// One worker, so the run stops at a known object rather than wherever eight of them stood.
+	err = loopTestWriter(t, p, first, &loopCutIDs{loopIDMap: store, cut: cut, cancel: cancel}).run(cutCtx, 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the interrupted run ended with %v, want it cut short", err)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `select count(*) from public.loadtest_loop_ids where plan = $1`, planID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != cut {
+		t.Fatalf("the interrupted run recorded %d objects, want the %d it was cut at", rows, cut)
+	}
+
+	resumed, err := loadLoopIDStore(ctx, pool, planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := newLoopStub(t)
+	w2 := loopTestWriter(t, p, second, resumed)
+	if err := w2.run(ctx, 4); err != nil {
+		t.Fatal(err)
+	}
+	wrote := 0
+	for _, k := range w2.meta().Written {
+		wrote += k.Objects
+	}
+	if want := len(whole) - cut; wrote != want {
+		t.Errorf("the resumed run wrote %d objects, want the %d the map lacked", wrote, want)
+	}
+
+	// Exactly the plan's objects were written, each by one of the two runs and each once: the
+	// key of a write names its object's path, so the two runs' keys are the proof.
+	sent := map[string]int{}
+	for _, w := range first.writes {
+		sent[w.key]++
+	}
+	for _, w := range second.writes {
+		sent[w.key]++
+	}
+	for _, path := range whole {
+		switch n := sent[loopKey(planID, path)]; n {
+		case 1:
+		case 0:
+			t.Errorf("%s was never written", path)
+		default:
+			t.Errorf("%s was written %d times", path, n)
+		}
+	}
+	if len(sent) != len(whole) {
+		t.Errorf("the two runs sent %d distinct writes, want the plan's %d objects", len(sent), len(whole))
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from public.loadtest_loop_ids where plan = $1`, planID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != len(whole) {
+		t.Errorf("the id map holds %d rows, want the plan's %d objects", rows, len(whole))
+	}
+}
+
+// TestLoopSeedWriteResumesAnySubset: the resume is per object and not per proposal, per part or
+// per thread. The map holds a subset that cuts across every kind - a proposal whose issue it
+// holds without some of its documents, a part document without some of its threads, a thread
+// root without its replies or without its resolve - and the run writes exactly what the map
+// lacks, each object once, and sends nothing for an object the map holds.
+func TestLoopSeedWriteResumesAnySubset(t *testing.T) {
+	// Two proposals live in the driver, so the review pages and the review indexes are kinds the
+	// subset can hold one of and lack another.
+	rows := append(loopTestRows(), loopRow{Name: "delta", IDs: 4, LiveIDs: 1, Met: 2, Rejected: 1,
+		ReplyLines: 3, ThreadBytes: 12_000, DocBytes: 2_000, LiveInDriver: true})
+	p := loopTestPlanOf(t, 23, rows, map[int]int{0: 3, 3: 2})
+	planID := loopPlanID(p)
+	whole := loopPlanPaths(p)
+	ids := newLoopMemIDs()
+	held, lacked := map[string]bool{}, map[string]bool{}
+	heldKinds, lackedKinds := map[string]int{}, map[string]int{}
+	of := map[string]int{}
+	for i, path := range whole {
+		kind, _, _ := strings.Cut(path, ".")
+		// Every second object of each kind, so the map ends inside proposals, inside parts and
+		// inside threads rather than on their boundaries, and holds some and lacks some of
+		// every kind the plan writes more than one of.
+		n := of[kind]
+		of[kind]++
+		if n%2 == 0 {
+			held[path] = true
+			heldKinds[kind]++
+			if err := ids.put(context.Background(), kind, path, fmt.Sprintf("held-%04d", i)); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		lacked[path] = true
+		lackedKinds[kind]++
+	}
+	ids.reload()
+	// The subset is mixed: every kind the plan holds more than one of is both held and lacking,
+	// so no kind's resume is left untested. The project is the one object of its
+	// kind, and the map holds it.
+	if !held[loopKindProject] {
+		t.Fatal("the subset lacks the project, which the stride must hold for this test")
+	}
+	for _, kind := range loopKinds[1:] {
+		if heldKinds[kind] == 0 || lackedKinds[kind] == 0 {
+			t.Fatalf("the subset holds %d and lacks %d of kind %s; it tests nothing of that kind",
+				heldKinds[kind], lackedKinds[kind], kind)
+		}
+	}
+
+	stub := newLoopStub(t)
+	w := loopTestWriter(t, p, stub, ids)
+	if err := w.run(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	sent := map[string]int{}
+	for _, write := range stub.writes {
+		sent[write.key]++
+	}
+	for path := range lacked {
+		switch n := sent[loopKey(planID, path)]; n {
+		case 1:
+		case 0:
+			t.Errorf("%s is not in the map and was not written", path)
+		default:
+			t.Errorf("%s was written %d times", path, n)
+		}
+	}
+	for path := range held {
+		if n := sent[loopKey(planID, path)]; n != 0 {
+			t.Errorf("%s is in the map and was written %d times over", path, n)
+		}
+	}
+	if len(sent) != len(lacked) {
+		t.Errorf("the run sent %d distinct writes, want the %d objects the map lacked", len(sent), len(lacked))
+	}
+	meta := w.meta()
+	wrote := 0
+	for _, k := range meta.Written {
+		wrote += k.Objects
+	}
+	if wrote != len(lacked) {
+		t.Errorf("the run recorded %d objects written, want the %d the map lacked", wrote, len(lacked))
+	}
+	if len(meta.Refusals) != 0 || len(meta.Skipped) != 0 {
+		t.Errorf("a resume nothing refused recorded %v and skipped %v", meta.Refusals, meta.Skipped)
 	}
 }

@@ -181,7 +181,7 @@ func withFailedReads(label string, failedReads int) string {
 }
 
 // commitsUnreadMark marks the step, in a table with cells that depend on the run's commit rows,
-// when loadtest.event_commits could not be read (events.commits_error).
+// when public.loadtest_event_commits could not be read (events.commits_error).
 const commitsUnreadMark = "(commit rows not read)"
 
 // commitsLabel is the step's label in a table with cells that depend on the run's commit rows,
@@ -208,7 +208,7 @@ func (s stepData) commitCount(text string) string {
 // table's cells that depend on the commit rows, and verb is "show" or "shows" to agree with it.
 func commitsUnreadNote(md *markdown, marked bool, subject, verb string) {
 	if marked {
-		md.line("\n%s: loadgen could not read the run's rows of loadtest.event_commits (summary.json `events.commits_error` says why: a database without commit-trigger.sql, or Postgres not reachable), so %s %s `-`, not a measured 0, and the step failed.",
+		md.line("\n%s: loadgen could not read the run's rows of public.loadtest_event_commits (summary.json `events.commits_error` says why: a database without commit-trigger.sql, or Postgres not reachable), so %s %s `-`, not a measured 0, and the step failed.",
 			commitsUnreadMark, subject, verb)
 	}
 }

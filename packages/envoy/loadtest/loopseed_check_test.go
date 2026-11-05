@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -177,20 +178,22 @@ func TestLoopSeedCheckPrints(t *testing.T) {
 // (internal/dispatch/store/migrations/0001_init.up.sql: projects, issues, artifacts,
 // artifact_versions and comments), with the columns readLoopFound names and no other. A full
 // Dispatch is not this package's to start, so the live check runs over these tables, filled from
-// what the stub answered.
+// what the stub answered. Each is created in public by name, where Dispatch's own are, so a
+// schema of the login's name cannot take the DDL either
+// (TestLoopSeedReadsPublicUnderAShadowingUserSchema).
 const loopCheckSchemaDDL = `
-create table projects (key text primary key, name text not null);
-create table issues (
-  key text primary key, project_key text not null references projects(key), title text not null);
-create table artifacts (
-  id uuid primary key, issue_key text not null references issues(key),
+create table public.projects (key text primary key, name text not null);
+create table public.issues (
+  key text primary key, project_key text not null references public.projects(key), title text not null);
+create table public.artifacts (
+  id uuid primary key, issue_key text not null references public.issues(key),
   slug text not null, name text not null, kind text not null);
-create table artifact_versions (
-  id uuid primary key default gen_random_uuid(), artifact_id uuid not null references artifacts(id),
+create table public.artifact_versions (
+  id uuid primary key default gen_random_uuid(), artifact_id uuid not null references public.artifacts(id),
   number integer not null, markdown text, unique (artifact_id, number));
-create table comments (
-  id uuid primary key, issue_key text not null references issues(key), body text not null,
-  anchor jsonb, reply_to uuid references comments(id), resolved boolean not null default false)`
+create table public.comments (
+  id uuid primary key, issue_key text not null references public.issues(key), body text not null,
+  anchor jsonb, reply_to uuid references public.comments(id), resolved boolean not null default false)`
 
 // TestLoopSeedCheckLive: the check's own queries, over a database holding a seed. A plan is
 // written through the stub, every object it created is stored as Dispatch stores it, and the check
@@ -243,21 +246,21 @@ func TestLoopSeedCheckLive(t *testing.T) {
 	// each is counted once. The margin is every comment on the document, the seed's own and any
 	// other, which is what Dispatch weighs (internal/dispatch/docs/growth.go:149-153).
 	var part, page string
-	if err := pool.QueryRow(ctx, `select local_id from loadtest.loop_ids where plan = $1 and kind = 'part' order by path limit 1`, planID).Scan(&part); err != nil {
+	if err := pool.QueryRow(ctx, `select local_id from public.loadtest_loop_ids where plan = $1 and kind = 'part' order by path limit 1`, planID).Scan(&part); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `select local_id from loadtest.loop_ids where plan = $1 and kind = 'page' order by path limit 1`, planID).Scan(&page); err != nil {
+	if err := pool.QueryRow(ctx, `select local_id from public.loadtest_loop_ids where plan = $1 and kind = 'page' order by path limit 1`, planID).Scan(&page); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `update artifact_versions set markdown = repeat('x', $2) where artifact_id = $1`, page, loopMarkdownCap+1); err != nil {
+	if _, err := pool.Exec(ctx, `update public.artifact_versions set markdown = repeat('x', $2) where artifact_id = $1`, page, loopMarkdownCap+1); err != nil {
 		t.Fatal(err)
 	}
 	var issue string
-	if err := pool.QueryRow(ctx, `select issue_key from artifacts where id = $1`, part).Scan(&issue); err != nil {
+	if err := pool.QueryRow(ctx, `select issue_key from public.artifacts where id = $1`, part).Scan(&issue); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
-		insert into comments (id, issue_key, body, anchor)
+		insert into public.comments (id, issue_key, body, anchor)
 		values (gen_random_uuid(), $1, repeat('y', $2), jsonb_build_object('artifact_id', $3::text, 'quote', 'q'))
 	`, issue, loopMarginCap+1, part); err != nil {
 		t.Fatal(err)
@@ -277,13 +280,13 @@ func TestLoopSeedCheckLive(t *testing.T) {
 
 // loopStoreSeed stores everything the stub was sent as Dispatch stores it: the project, the
 // issues, each document with its version 1 markdown, each thread root with its anchor and each
-// reply under it. It walks loadtest.loop_ids, so what it stores is exactly what the run recorded.
+// reply under it. It walks public.loadtest_loop_ids, so what it stores is exactly what the run recorded.
 func loopStoreSeed(ctx context.Context, t *testing.T, pool *pgxpool.Pool, planID string, stub *loopStub) {
 	t.Helper()
 	// In the order the seed writes them, so an issue is there before its documents and a thread
 	// root before the replies that name it.
 	rows, err := pool.Query(ctx, `
-		select kind, path, local_id from loadtest.loop_ids where plan = $1
+		select kind, path, local_id from public.loadtest_loop_ids where plan = $1
 		order by array_position($2::text[], kind), path
 	`, planID, loopKinds)
 	if err != nil {
@@ -324,16 +327,16 @@ func loopStoreSeed(ctx context.Context, t *testing.T, pool *pgxpool.Pool, planID
 		write := stub.made[o.local]
 		switch o.kind {
 		case loopKindProject:
-			exec(`insert into projects (key, name) values ($1, $1)`, o.local)
+			exec(`insert into public.projects (key, name) values ($1, $1)`, o.local)
 		case loopKindIssue:
-			exec(`insert into issues (key, project_key, title) values ($1, $2, $3)`,
+			exec(`insert into public.issues (key, project_key, title) values ($1, $2, $3)`,
 				o.local, "LOOP", write.body["title"])
 		case loopKindPart, loopKindPage, loopKindIndex:
 			name, _ := write.body["name"].(string)
 			content, _ := write.body["content"].(string)
-			exec(`insert into artifacts (id, issue_key, slug, name, kind) values ($1, $2, $3, $3, 'doc')`,
+			exec(`insert into public.artifacts (id, issue_key, slug, name, kind) values ($1, $2, $3, $3, 'doc')`,
 				o.local, issueOf[proposalOf(o.path)], name)
-			exec(`insert into artifact_versions (artifact_id, number, markdown) values ($1, 1, $2)`,
+			exec(`insert into public.artifact_versions (artifact_id, number, markdown) values ($1, 1, $2)`,
 				o.local, content)
 		case loopKindThread, loopKindReply:
 			body, _ := write.body["body"].(string)
@@ -345,10 +348,139 @@ func loopStoreSeed(ctx context.Context, t *testing.T, pool *pgxpool.Pool, planID
 			if to, ok := write.body["reply_to"].(string); ok {
 				replyTo = to
 			}
-			exec(`insert into comments (id, issue_key, body, anchor, reply_to) values ($1, $2, $3, $4, $5)`,
+			exec(`insert into public.comments (id, issue_key, body, anchor, reply_to) values ($1, $2, $3, $4, $5)`,
 				o.local, issueOf[proposalOf(o.path)], body, anchor, replyTo)
 		case loopKindResolve:
-			exec(`update comments set resolved = true where id = $1`, o.local)
+			exec(`update public.comments set resolved = true where id = $1`, o.local)
+		}
+	}
+}
+
+// loopShadowSchemaDDL is an empty copy, in the schema named after the database's login, of every
+// table of Dispatch's this package reads and of the id map itself. Its columns are the ones the
+// queries name, so a query that resolved here would answer 0 rather than fail - which is what
+// the deployment did (dispatch://INFRA-988).
+const loopShadowSchemaDDL = `
+create table %[1]s.projects (key text primary key, name text not null);
+create table %[1]s.issues (key text primary key, project_key text not null, title text not null);
+create table %[1]s.artifacts (
+  id uuid primary key, issue_key text not null, slug text not null, name text not null, kind text not null);
+create table %[1]s.artifact_versions (
+  id uuid primary key default gen_random_uuid(), artifact_id uuid not null, number integer not null,
+  markdown text, unique (artifact_id, number));
+create table %[1]s.comments (
+  id uuid primary key, issue_key text not null, body text not null, anchor jsonb, reply_to uuid,
+  resolved boolean not null default false);
+create table %[1]s.loadtest_loop_ids (
+  plan text not null, kind text not null, path text not null, local_id text not null,
+  primary key (plan, path))`
+
+// TestLoopSeedReadsPublicUnderAShadowingUserSchema: the case the local stack cannot produce by
+// itself, built here on purpose. The database's own login is given a schema of its name holding
+// an empty table of the name of each table this package reads; Postgres's default search_path is
+// "$user", public, so from that session every unqualified name in the writer, the check and the
+// export resolves to the empty copy. That is what the deployment met - its login is loadtest, a
+// create schema of this tool's made the schema, and the check read 0 of everything while 438
+// issues and 248,354 comments sat in public (dispatch://INFRA-988).
+//
+// The run writes its map and reads its counts over a session where that shadow is in force, and
+// every number is the seed's own.
+func TestLoopSeedReadsPublicUnderAShadowingUserSchema(t *testing.T) {
+	pool, dsn := loopTestDBAt(t)
+	ctx := context.Background()
+	var login, database string
+	if err := pool.QueryRow(ctx, `select current_user, current_database()`).Scan(&login, &database); err != nil {
+		t.Fatal(err)
+	}
+	user := pgx.Identifier{login}.Sanitize()
+	if _, err := pool.Exec(ctx, "create schema "+user); err != nil {
+		t.Fatalf("create the schema named as the login (%s): %v", login, err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(loopShadowSchemaDDL, user)); err != nil {
+		t.Fatalf("create the empty copies in %s: %v", user, err)
+	}
+	if _, err := pool.Exec(ctx, loopCheckSchemaDDL); err != nil {
+		t.Fatalf("create the dispatch tables the check reads: %v", err)
+	}
+	// The default search_path, set on the database so that every session opened after this one
+	// resolves "$user" before public, whatever the test server was started with.
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`alter database %s set search_path = "$user", public`,
+		pgx.Identifier{database}.Sanitize())); err != nil {
+		t.Fatalf("set the database's search_path: %v", err)
+	}
+	shadowed, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shadowed.Close()
+	var path string
+	if err := shadowed.QueryRow(ctx, "show search_path").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(path, `"$user"`) {
+		t.Fatalf("the shadowed session's search_path is %q, want one that resolves \"$user\" first", path)
+	}
+
+	// The seed, written and stored over that session.
+	p := loopTestPlanOf(t, 29, loopTestRows(), map[int]int{0: 2})
+	planID := loopPlanID(p)
+	ids, err := loadLoopIDStore(ctx, shadowed, planID)
+	if err != nil {
+		t.Fatalf("load the id map under the shadow: %v", err)
+	}
+	stub := newLoopStub(t)
+	w := newLoopWriter(p, newAPI(stub.srv.URL, "token", 8), ids, "LOOP", log.New(io.Discard, "", 0))
+	if err := w.run(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	loopStoreSeed(ctx, t, shadowed, planID, stub)
+
+	// The shadow is in force: an unqualified name reads the empty copy, and the seed's own rows
+	// are in public. Without this the test would pass against unqualified SQL too.
+	var shadowIssues, publicIssues, shadowMap, publicMap int
+	if err := shadowed.QueryRow(ctx, `select (select count(*) from issues), (select count(*) from public.issues),
+		(select count(*) from loadtest_loop_ids), (select count(*) from public.loadtest_loop_ids)`).
+		Scan(&shadowIssues, &publicIssues, &shadowMap, &publicMap); err != nil {
+		t.Fatal(err)
+	}
+	if shadowIssues != 0 || shadowMap != 0 {
+		t.Fatalf("the %s schema holds %d issues and %d id-map rows; the writer wrote into the shadow",
+			login, shadowIssues, shadowMap)
+	}
+	if publicIssues != len(p.Proposals) || publicMap == 0 {
+		t.Fatalf("public holds %d issues and %d id-map rows, want the seed's %d issues and its map",
+			publicIssues, publicMap, len(p.Proposals))
+	}
+
+	// The check reads the seed's own rows, not the empty copies.
+	found, err := readLoopFound(ctx, shadowed, planID)
+	if err != nil {
+		t.Fatalf("read what the database holds under the shadow: %v", err)
+	}
+	if want := loopCheckFound(p); found != want {
+		t.Fatalf("under a schema named as the login the check finds %+v, want the plan's %+v", found, want)
+	}
+	var out strings.Builder
+	if failed := printLoopCheck(&out, loopCheckLines(p, found), p.Rehearsal); failed != 0 {
+		t.Fatalf("%d checks failed under a schema named as the login:\n%s", failed, out.String())
+	}
+
+	// So does the export: the id map it joins the plan to is public's.
+	exported, err := readLoopIDs(ctx, shadowed, planID)
+	if err != nil {
+		t.Fatalf("read the id map under the shadow: %v", err)
+	}
+	ls, err := buildLoopSeed("loopseed.plan.json", p, exported, loopThreadSample)
+	if err != nil {
+		t.Fatalf("build the loop seed under the shadow: %v", err)
+	}
+	if ls.Project != "LOOP" || len(ls.Proposals) != len(p.Proposals) {
+		t.Fatalf("the export names project %q and %d proposals, want LOOP and %d",
+			ls.Project, len(ls.Proposals), len(p.Proposals))
+	}
+	for i, sp := range ls.Proposals {
+		if sp.Key == "" {
+			t.Errorf("the export names no issue key for proposal %d", i)
 		}
 	}
 }

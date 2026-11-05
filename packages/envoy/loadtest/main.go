@@ -24,10 +24,11 @@ commands:
   refs-fetch       write a TSV of every seeded issue's references answer (status, ETag, sha256, bytes)
   run              one load step against the stack in stack.json; writes summary.json and profiles
   loop-seed-plan   plan the Verified Linux spec loop's own seed, without a stack; writes loopseed.plan.json
-  loop-seed-write  write that plan to a Dispatch through its API, resumably (loadtest.loop_ids maps
-                   each planned object to the one it created); writes loopseed.meta.json
+  loop-seed-write  write that plan to a Dispatch through its API, resumably
+                   (public.loadtest_loop_ids maps each planned object to the one it created);
+                   writes loopseed.meta.json
   loop-seed-check  compare a written loop seed with its plan over Postgres; exit 1 on a failed line
-  loop-seed-export read loadtest.loop_ids and that plan into loopseed.seed.json: the ids, quote rows
+  loop-seed-export read public.loadtest_loop_ids and that plan into loopseed.seed.json: the ids, quote rows
                    and search terms a run needs to drive the loop (run -loop-seed)
   plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
                    the most versions to (the run's own plan of the same flags, seed.json)

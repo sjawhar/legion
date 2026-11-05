@@ -4,14 +4,14 @@ package main
 // (loopseed_write.go) to the run that drives it (run.go -loop-seed).
 //
 // A step cannot read the seed's 334,536 thread ids out of Postgres as it starts, and seed.json
-// describes the other seed, so this subcommand reads loadtest.loop_ids once, joins it to the plan
-// those ids were written from, and writes loopseed.seed.json: for every proposal its issue key,
-// the artifact ids of its part documents with the last marked, the spare quote rows an anchored
-// write can take, its review pages and review index, a capped sample of its open and of its
-// resolved thread ids, and the requirement-id count a read or a write is drawn by. The file also
-// carries the project key, the plan identity and the two search-term lists a requirement query
-// reads by: every proposal name, which is a query's target, and the six status words the planner
-// gives a thread (loopStatusNames).
+// describes the other seed, so this subcommand reads public.loadtest_loop_ids once, joins it to
+// the plan those ids were written from, and writes loopseed.seed.json: for every proposal its
+// issue key, the artifact ids of its part documents with the last marked, the spare quote rows an
+// anchored write can take, its review pages and review index, a capped sample of its open and of
+// its resolved thread ids, and the requirement-id count a read or a write is drawn by. The file
+// also carries the project key, the plan identity and the two search-term lists a requirement
+// query reads by: every proposal name, which is a query's target, and the six status words the
+// planner gives a thread (loopStatusNames).
 //
 // A proposal the id map does not hold - a write the deployment refused - is recorded with what it
 // has, and the file's missing counts say how many of each kind the export could not fill, so a run
@@ -198,22 +198,22 @@ type loopIDRows interface {
 // thread roots, resolves, review pages and review indexes, and the loop's 130,066 reply rows are
 // a quarter of the table that nothing here reads.
 func readLoopIDs(ctx context.Context, q loopIDRows, planID string) (map[string]string, error) {
-	rows, err := q.Query(ctx, `select path, local_id from loadtest.loop_ids where plan = $1 and kind <> $2`,
+	rows, err := q.Query(ctx, `select path, local_id from public.loadtest_loop_ids where plan = $1 and kind <> $2`,
 		planID, loopKindReply)
 	if err != nil {
-		return nil, fmt.Errorf("read loadtest.loop_ids: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_loop_ids: %w", err)
 	}
 	defer rows.Close()
 	ids := map[string]string{}
 	var path, local string
 	for rows.Next() {
 		if err := rows.Scan(&path, &local); err != nil {
-			return nil, fmt.Errorf("read loadtest.loop_ids: %w", err)
+			return nil, fmt.Errorf("read public.loadtest_loop_ids: %w", err)
 		}
 		ids[path] = local
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read loadtest.loop_ids: %w", err)
+		return nil, fmt.Errorf("read public.loadtest_loop_ids: %w", err)
 	}
 	return ids, nil
 }
@@ -525,7 +525,7 @@ type loopSeedExportFlags struct {
 
 func (f *loopSeedExportFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.plan, "plan", "", "the plan the seed was written from (loopseed.plan.json)")
-	fs.StringVar(&f.pg, "pg", "", "direct Postgres URL of the database loadtest.loop_ids was written to")
+	fs.StringVar(&f.pg, "pg", "", "direct Postgres URL of the database public.loadtest_loop_ids was written to")
 	fs.StringVar(&f.pgFile, "pg-file", "", "file holding the -pg value, so no password reaches the command line")
 	fs.StringVar(&f.out, "out", "", "the loop seed's path (default $LOADTEST_ROOT/"+loopSeedFileName+")")
 	fs.IntVar(&f.threads, "threads-per-proposal", loopThreadSample, "open and resolved thread ids recorded per proposal")
