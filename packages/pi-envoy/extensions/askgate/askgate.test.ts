@@ -1299,6 +1299,31 @@ describe("a write that passes unreviewed is recorded and said", () => {
     expect(context).toContain("openai-codex");
     expect(context).toContain("The call ran unreviewed.");
   });
+  // The sourcing lint is the one check with no model behind it, so the sessions the model review
+  // never reaches are exactly the ones it has to reach. A session on another provider is skipped
+  // before a single call is made (3,823 of 28,463 gate entries on this machine on 2026-11-05);
+  // the lint still runs, and its note rides the same result.
+  test("a skipped session still gets the sourcing lint's note", async () => {
+    const g = bind({ hasUI: false, primary: { provider: "openai-codex", id: "gpt-5.5" } });
+    const result = await g.device("t1", "dispatch_comment", {
+      issue: "X-1",
+      body: "The regrade moved 15 of 79 rewrites.",
+    });
+    expect(result?.block).toBeUndefined();
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries.at(-1)?.outcome).toBe("skipped");
+    expect(result?.additionalContext).toContain('check="sourcing"');
+    expect(result?.additionalContext).toContain("The regrade moved 15 of 79 rewrites.");
+  });
+  test("a sourced write gets no sourcing note, on the same path", async () => {
+    const g = bind({ hasUI: false, primary: { provider: "openai-codex", id: "gpt-5.5" } });
+    const result = await g.device("t1", "dispatch_comment", {
+      issue: "X-1",
+      body: "The regrade moved 15 of 79 rewrites, per dispatch://INFRA-515.",
+    });
+    expect(g.entries.at(-1)?.outcome).toBe("skipped");
+    expect(result?.additionalContext).not.toContain('check="sourcing"');
+  });
   test("a rebuttal and a breaker trip already say the write went unreviewed", async () => {
     const g = bind({
       hasUI: false,

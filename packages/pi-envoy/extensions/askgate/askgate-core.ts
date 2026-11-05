@@ -275,6 +275,7 @@ import {
   type Usage,
   type Walked,
 } from "./rules-check";
+import { proseOf, renderSourcingNotice, sourcingLint } from "./sourcing-lint";
 import {
   agentFacing,
   byteLength,
@@ -2980,7 +2981,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
       const { role, model } = resolved;
-      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
+      // A session routed off the gate's provider keeps its transcript there: nothing is rendered
+      // or sent. The test is exact equality of the provider string the session's primary model
+      // carries and the one the gate's role resolved to, so `anthropic` and a gateway that also
+      // serves Anthropic are two providers here — which is why most skips read `primary on
+      // anthropic` (3,722 of the 3,823 skipped entries in this machine's session files on
+      // 2026-11-05). It stays: the review's prompt carries the agent's whole transcript as data,
+      // and the rule that keeps that text on the provider it is already on is not the gate's to
+      // relax. The cost of it — a check that reaches no such session — is paid instead by the
+      // sourcing lint, which has no model and so no provider (`sourcing-lint.ts`), and which
+      // `handleCall` runs on this call after this return.
       if (ctx.model?.provider !== model.provider)
         return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
       // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
@@ -3629,6 +3639,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch {
         // The rules notice is best effort too.
       }
+      // The sourcing lint, the gate's one check with no model behind it. It runs on every gated
+      // call, whatever the decision above was and whoever the session's provider is: a session the
+      // model review skips ("skipped", 3,823 of 28,463 gate entries read from this machine's
+      // session files on 2026-11-05) still gets it, which is the point of having a check that
+      // needs no call. It reports and never refuses, so it changes no decision and no record.
+      let sourcingNotice: string | undefined;
+      try {
+        sourcingNotice = renderSourcingNotice(sourcingLint(proseOf(event.input)));
+      } catch {
+        // Best effort, as the notices above are: a lint that throws never holds a write.
+      }
       // A refused call runs nothing, so it keeps no command of the gate's: a rules refusal is the
       // agent's own command refused, whatever the charter's outcome was.
       if (decision.result?.block) revised = undefined;
@@ -3707,10 +3728,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         notices.delete(event.toolCallId);
         return minted;
       }
-      if (minted?.additionalContext !== undefined)
+      // The minted marker's note, then the sourcing lint's. The lint rides the result of every
+      // call that still posts — a refused one is not one, since its text never went anywhere and
+      // the sender is rewriting it anyway.
+      const extra = [minted?.additionalContext, sourcingNotice].filter(
+        (note) => note !== undefined
+      );
+      if (extra.length > 0)
         decision.result = {
           ...decision.result,
-          additionalContext: [decision.result?.additionalContext, minted.additionalContext]
+          additionalContext: [decision.result?.additionalContext, ...extra]
             .filter((note) => note !== undefined)
             .join("\n"),
         };
