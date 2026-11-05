@@ -59,6 +59,87 @@ func TestAPassSettlesAHeadNoWebhookReached(t *testing.T) {
 	}
 }
 
+// A head whose completion webhook GitHub never delivered settles after one pass. The listener
+// took the run's in_progress webhook and recorded a running check, and cistore settles no head
+// while a check its record holds is queued or running (settlementReady), so until something
+// writes the end of that run the head cannot settle and the Legion daemon waits on an answer
+// that never comes. The pass reads GitHub's own listing, finds the run ended, writes it over the
+// running one, and the listener publishes the settlement the daemon was waiting for.
+func TestAPassSettlesAHeadWhoseCompletionWebhookNeverCame(t *testing.T) {
+	h := newHarness(t, reviewerAppID)
+	h.mapRepository(rowRepository)
+	h.listHead()
+	settlements := h.subscribe()
+
+	// The run GitHub started and never reported the end of, as its own delivery carries it.
+	running := checkRun(1, "ci-ok", "in_progress", "", otherApp, "2026-11-05T03:01:00Z")
+	// GitHub leaves completed_at null until a run ends, so this observation is timed by the
+	// run's start, and the completed one the pass reads is later than it.
+	delete(running, "completed_at")
+	// The delivery names no pull request, so the listener attributes it by its check suite's
+	// head branch, which is this branch's own attribution rule: refs/pull/<n>/head is the ref
+	// that pull request's head is fetched by.
+	running["pull_requests"] = []any{}
+	running["check_suite"] = object{"id": 900, "head_branch": "refs/pull/" + pullNumber + "/head"}
+	body, err := json.Marshal(object{
+		// GitHub's action for a run it has begun, which is not the "completed" every other
+		// webhook in these tests carries.
+		"action":    "created",
+		"check_run": running,
+		"sender":    object{"login": "ci", "type": "Bot"},
+		"repository": object{
+			"name":           gitHubName,
+			"owner":          object{"login": gitHubOwner},
+			"full_name":      gitHubRepository,
+			"default_branch": "main",
+		},
+	})
+	if err != nil {
+		t.Fatalf("build the in_progress webhook body: %v", err)
+	}
+
+	h.post("check_run", string(body), "d1")
+
+	state, _, ok := h.record()
+	if !ok {
+		t.Fatal("the in_progress webhook left the head no record")
+	}
+	if held := state.Checks["ci-ok"]; held.Status != "in_progress" {
+		t.Fatalf("the record holds %+v, want ci-ok in_progress from the webhook", state.Checks)
+	}
+	h.noSettlement(settlements, "while the record holds a running ci-ok")
+
+	// GitHub holds what the completion webhook would have carried: the same run, ended, beside
+	// the suite that ran it.
+	h.github.setCheckRuns(gitHubRepository, headSHA,
+		checkRun(1, "ci-ok", "completed", "failure", otherApp, "2026-11-05T03:05:00Z"),
+	)
+	h.github.setCheckSuites(gitHubRepository, headSHA,
+		checkSuite(900, "completed", "failure", otherApp, "2026-11-05T03:05:10Z"),
+	)
+
+	h.pass()
+
+	settled := h.settlement(settlements, "after a pass over the run whose completion never arrived")
+	if settled.Number != pullNumber || settled.SHA != headSHA {
+		t.Fatalf("the settlement is of %s at %s, want %s at %s", settled.Number, settled.SHA, pullNumber, headSHA)
+	}
+	if settled.Failed.Count != 1 || len(settled.FailingChecks) != 1 || settled.FailingChecks[0].Name != "ci-ok" {
+		t.Fatalf("settlement = %+v, want ci-ok among its failing checks", settled)
+	}
+	state, _, ok = h.record()
+	if !ok {
+		t.Fatal("the head has no record after the pass")
+	}
+	held, has := state.Checks["ci-ok"]
+	if !has {
+		t.Fatalf("the record holds %+v, want ci-ok", state.Checks)
+	}
+	if held.Status != "completed" || held.Conclusion != "failure" {
+		t.Fatalf("the record holds ci-ok as %+v, want it completed with conclusion failure", held)
+	}
+}
+
 // Only a mapped repository is read, and a repository two rows name -- the name it had and the
 // name it has -- is read once, because GitHub answers both rows with one id.
 func TestAPassReadsEachMappedRepositoryOnce(t *testing.T) {
