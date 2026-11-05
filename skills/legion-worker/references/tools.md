@@ -89,11 +89,14 @@ COMMIT;
 ```
 
 ```sh
-psql "$URL" --single-transaction -q -c 'SET TRANSACTION READ ONLY' -f <file>
+psql "$URL" --single-transaction -q -X -v ON_ERROR_STOP=1 -c 'SET TRANSACTION READ ONLY' -f <file>
 ```
 
 `-q` keeps psql's `SET` status line off stdout. Without it psql prints that line, and it becomes
-the first line of a file you redirect the output into.
+the first line of a file you redirect the output into. `-X` keeps your `~/.psqlrc` out of the
+run, and `ON_ERROR_STOP` ends the run at the first error. The file holds no `COMMIT` or
+`ROLLBACK` of its own: one would end the read-only transaction early, and every statement after
+it would run outside it.
 
 Your deployment may give no `SESSION_READER_DSN_FILE`. Then read nothing of a shared database
 through the session URL. Read your deployment's instructions for the route they give, and when

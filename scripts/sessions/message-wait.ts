@@ -16,9 +16,9 @@ import { SQL, type TransactionSQL } from "bun";
  * minutes.
  *
  * Every read runs in one transaction begun read-only, which this script confirms from the server
- * before it reads and which ends with that transaction. The store is pooled in transaction mode,
- * so a read-only setting made for a whole session or a whole connection would stay on the backend
- * the connection goes back to, and the pool's next client's writes would fail.
+ * before it reads and which ends with that transaction. A store behind a pool in transaction mode
+ * keeps a read-only setting made for a whole session or a whole connection on the backend the
+ * connection goes back to, and the pool's next client's writes then fail.
  *
  * Nothing it prints carries the connection URL, a credential or an exception's text: its lines
  * hold a role name, a session id, a tool name, an instant and a count, and a failure is a fixed
@@ -534,7 +534,9 @@ async function main(argv: readonly string[]): Promise<number> {
     return 0;
   } catch (error) {
     if (error instanceof NotReadOnlyError) {
-      console.error("unavailable: that transaction is not read-only, so nothing was read");
+      console.error(
+        "unavailable: that transaction is not read-only, so the run stopped and reported nothing"
+      );
       return 2;
     }
     console.error(`unavailable: the session store could not be read${errorCode(error)}`);

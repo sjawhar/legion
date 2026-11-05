@@ -280,11 +280,11 @@ export const WORKER_TOOLS = path.join(REPO_ROOT, "skills/legion-worker/reference
 
 /**
  * What one skill file gets wrong about a rule pinned over the repository's own `skills/`: it
- * still carries a claim the rule retired (`retired.claim`, matched rather than its one wording,
- * so a reword is caught too), or it has lost the sentence the rule turns on (`required.sentence`,
- * pinned whole and literally). Each fault is one sentence naming `file` and saying what a reader
- * of the wrong text would believe. The text is whitespace-normalized first, because these files
- * are wrapped and a sentence of one crosses lines.
+ * still carries a claim the rule retired (`retired.claim`, a pattern rather than its one wording,
+ * so a reword of the same shape is caught too), or it has lost the sentence the rule turns on
+ * (`required.sentence`, pinned whole and literally). Each fault is one sentence naming `file` and
+ * saying what a reader of the wrong text would believe. The text is whitespace-normalized first,
+ * because these files are wrapped and a sentence of one crosses lines.
  */
 function prosePinFaults(
   file: string,
@@ -342,12 +342,14 @@ export function retiredWorkerLifecycleClaims(markdown: string): string[] {
 
 /**
  * The claim INFRA-1315 retired: that a login, or the URL that carries one, can create and drop
- * databases on the shared server. This deployment is splitting the session login in two, so a
- * role's login owns nothing there, and a role that reads the old claim believes a power it does
- * not have. The claim is matched rather than its one wording, and the subject is named rather
- * than left open, so the file's own "Each makes and drops a database of its own per test", said
- * of the pod's server, stays outside it; the rule the file does carry, that nothing which creates
- * or drops a database gets the session URL, names no login that can and so passes too.
+ * databases on the shared server. The skill ships to every deployment and cannot know what a
+ * deployment's session login may do, so it claims no power for it: a deployment that splits that
+ * login gives its roles one that owns nothing, and a role that read the old claim there would
+ * believe a power it does not have. The claim is a pattern rather than its one wording, and the
+ * subject is named rather than left open, so the file's own "Each makes and drops a database of
+ * its own per test", said of the pod's server, stays outside it; the rule the file does carry,
+ * that nothing which creates or drops a database gets the session URL, names no login that can
+ * and so passes too.
  */
 const LOGIN_OWNS_DATABASES =
   /\b(?:login|account|credentials?|URL|DSN)\b[^.]{0,40}?\b(?:can|could|may|is able to|is allowed to|has (?:the )?(?:rights?|permissions?|privileges?) to)\s+(?:create|make|drop|delete)\b[^.]{0,40}?\bdatabases?\b/i;
@@ -369,7 +371,7 @@ export function brokenSharedDatabaseRules(markdown: string): string[] {
     {
       claim: LOGIN_OWNS_DATABASES,
       because:
-        "the session login is being split in two, so no role's login creates or drops a database on the shared server",
+        "the skill cannot know what a deployment's session login may do, so it claims no power for that login",
     },
     {
       sentence: NO_READ_THROUGH_SESSION_URL,
