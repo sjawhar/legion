@@ -369,11 +369,13 @@ type Issue struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ClosedAt          *time.Time `json:"closed_at"`
 	PrimaryArtifactID string     `json:"primary_artifact_id"`
-	// VerificationArtifactID and PlanArtifactID are the issue's documents by role
-	// (Artifact.Role): the one created as verification.md and the one created as plan.md, each
-	// "" when the issue holds none. They are resolved on read, as PrimaryArtifactID is.
+	// VerificationArtifactID, PlanArtifactID and DecisionsArtifactID are the issue's documents
+	// by role (Artifact.Role): the one created as verification.md, the one created as plan.md
+	// and the one created as decisions.md, each "" when the issue holds none. They are resolved
+	// on read, as PrimaryArtifactID is.
 	VerificationArtifactID string `json:"verification_artifact_id"`
 	PlanArtifactID         string `json:"plan_artifact_id"`
+	DecisionsArtifactID    string `json:"decisions_artifact_id"`
 	LastSeq                int    `json:"last_seq"`
 }
 
@@ -759,8 +761,9 @@ type Artifact struct {
 	Primary   bool    `json:"primary"`
 	// Role is the part an issue's document plays beside its spec: ArtifactRoleVerification for
 	// the document created as verification.md, ArtifactRolePlan for the one created as plan.md,
-	// "" for every other document. It is set from the document's slug when the row is created
-	// and never changes, as Primary never changes, and no request field sets it.
+	// ArtifactRoleDecisions for the one created as decisions.md, "" for every other document.
+	// It is set from the document's slug when the row is created and never changes, as Primary
+	// never changes, and no request field sets it.
 	Role      string    `json:"role,omitempty"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
@@ -770,12 +773,13 @@ type Artifact struct {
 	Approval *ArtifactApproval `json:"approval,omitempty"`
 }
 
-// ArtifactRoleVerification and ArtifactRolePlan are the two parts Artifact.Role names, the
-// values the contract's union declares (dispatch-api.ts). A document that plays neither holds
-// "".
+// ArtifactRoleVerification, ArtifactRolePlan and ArtifactRoleDecisions are the three parts
+// Artifact.Role names, the values the contract's union declares (dispatch-api.ts). A document
+// that plays none of them holds "".
 const (
 	ArtifactRoleVerification = "verification"
 	ArtifactRolePlan         = "plan"
+	ArtifactRoleDecisions    = "decisions"
 )
 
 // ArtifactReview is one human review of a document, pinned to the version it was

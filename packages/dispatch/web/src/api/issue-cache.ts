@@ -9,18 +9,26 @@ export function primarySpec(
   return issue?.artifacts.find((artifact) => artifact.id === issue.primary_artifact_id);
 }
 
-/** The issue's document in `role` - `verification.md` or `plan.md`, which the issue names in
- *  `verification_artifact_id` and `plan_artifact_id` - or undefined while the details are
- *  unread, when the issue holds none (`""`), and on a Dispatch older than document roles
- *  (absent). The id the issue names is the one answer, so a document whose name was changed by
- *  hand cannot put a second document on the tab. */
+/** The issue's document in `role` - `verification.md`, `plan.md` or `decisions.md`, which the
+ *  issue names in `verification_artifact_id`, `plan_artifact_id` and `decisions_artifact_id` -
+ *  or undefined while the details are unread, when the issue holds none (`""`), and on a
+ *  Dispatch older than that role (absent). The id the issue names is the one answer, so a
+ *  document whose name was changed by hand cannot put a second document on the tab. */
 export function roleDocument(
   issue:
-    | Pick<IssueDetails, "artifacts" | "plan_artifact_id" | "verification_artifact_id">
+    | Pick<
+        IssueDetails,
+        "artifacts" | "plan_artifact_id" | "verification_artifact_id" | "decisions_artifact_id"
+      >
     | undefined,
   role: DocumentRole
 ): Artifact | undefined {
-  const id = role === "plan" ? issue?.plan_artifact_id : issue?.verification_artifact_id;
+  const ids: Record<DocumentRole, string | undefined> = {
+    plan: issue?.plan_artifact_id,
+    verification: issue?.verification_artifact_id,
+    decisions: issue?.decisions_artifact_id,
+  };
+  const id = ids[role];
   return id === undefined || id === ""
     ? undefined
     : issue?.artifacts.find((artifact) => artifact.id === id);

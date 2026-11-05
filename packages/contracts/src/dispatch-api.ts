@@ -416,11 +416,13 @@ export interface Issue {
   readonly updated_at: string;
   readonly closed_at: string | null;
   readonly primary_artifact_id: string;
-  /** The issue's Verification document, the one created as `verification.md`, and its Plan, the
-   *  one created as `plan.md` (`Artifact.role`); `""` when the issue holds none. Absent from a
-   *  Dispatch older than document roles. */
+  /** The issue's Verification document, the one created as `verification.md`, its Plan, the one
+   *  created as `plan.md`, and its decisions document, the one created as `decisions.md`
+   *  (`Artifact.role`); `""` when the issue holds none. Absent from a Dispatch older than
+   *  document roles, and `decisions_artifact_id` from one older than the design gate's steps. */
   readonly verification_artifact_id?: string;
   readonly plan_artifact_id?: string;
+  readonly decisions_artifact_id?: string;
   readonly last_seq: number;
 }
 
@@ -690,9 +692,10 @@ export interface Artifact {
   readonly kind: "doc" | "image" | "file";
   readonly primary: boolean;
   /** The part an issue's document plays beside its spec: `verification` for the document created
-   *  as `verification.md`, `plan` for the one created as `plan.md`. It is set when the document
-   *  is created and never changes; absent for every other document and from a Dispatch older
-   *  than document roles. */
+   *  as `verification.md`, `plan` for the one created as `plan.md`, `decisions` for the one
+   *  created as `decisions.md`. It is set when the document is created and never changes; absent
+   *  for every other document and from a Dispatch older than document roles. A `decisions.md`
+   *  stored before Dispatch knew that role carries no role, and is found by its slug instead. */
   readonly role?: DocumentRole;
   readonly created_by: Actor;
   readonly created_at: string;
@@ -703,8 +706,9 @@ export interface Artifact {
 
 export type ArtifactReviewState = "approved" | "changes_requested";
 
-/** The part an issue's document plays beside its spec. */
-export type DocumentRole = "verification" | "plan";
+/** The part an issue's document plays beside its spec. `decisions` is absent from a Dispatch
+ *  older than the design gate's steps. */
+export type DocumentRole = "verification" | "plan" | "decisions";
 
 /** Who gave a review: `person` for one a person gave, `plan_review` for a plan review's approval
  *  of a plan version. A review Dispatch carried forward to a later version keeps the kind of the
