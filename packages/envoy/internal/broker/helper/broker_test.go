@@ -832,7 +832,7 @@ func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	sess.setEnrolled(id)
-	if _, err := b.Renew(context.Background(), sess); err != nil {
+	if _, _, err := b.Renew(context.Background(), sess); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
 	if _, _, renews := f.snapshot(); renews != 1 {
@@ -844,7 +844,7 @@ func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 	if err := b.Revoke(context.Background(), id); err != nil {
 		t.Fatalf("a second revoke (404) is done, not an error: %v", err)
 	}
-	_, err = b.Renew(context.Background(), sess)
+	_, _, err = b.Renew(context.Background(), sess)
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != 401 {
 		t.Fatalf("renew after revoke must be 401: %v", err)

@@ -129,6 +129,26 @@ func StartTicks(pid int) (uint64, error) {
 	return strconv.ParseUint(f[19], 10, 64)
 }
 
+// bootIDPath is where Linux publishes the random UUID it picks for each boot.
+const bootIDPath = "/proc/sys/kernel/random/boot_id"
+
+// readBootID is this boot's UUID. Start ticks are counted from boot and pids are reused, so a
+// pid and a start-ticks value that matched a recorded session before a reboot can match an
+// UNRELATED process after one — and a record is durable now, so matching it would hand that
+// stranger the recorded private key and the enrollment, without it ever knowing the session id.
+// The boot id is what makes "the same process incarnation" mean anything across a reboot.
+//
+// An unreadable boot id answers "", and a record's boot id is then "" too, so the comparison
+// (Registry.SameBoot) fails closed: every record looks like another boot's, which costs a
+// re-pin and never hands an identity to the wrong process.
+func readBootID() string {
+	data, err := os.ReadFile(bootIDPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // procParent is pid's parent as /proc/<pid>/stat names it.
 func procParent(pid int) (int, error) {
 	f, err := statFields(pid)

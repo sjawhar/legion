@@ -84,6 +84,11 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
+	case *wait > 0 && resp.State != "enrolled" && resp.Code == helper.CodeNoCredential && resp.EnrollmentID != "":
+		// A session that came back to an identity its record kept holds that enrollment and
+		// can sign with it; what the helper cannot do without a login is confirm it, or make
+		// a new one if the broker has ended it meanwhile.
+		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway with the enrollment this session had, which the helper cannot confirm or replace until it is (run: agent-secrets machine login)")
 	case *wait > 0 && resp.State != "enrolled" && resp.Code == helper.CodeNoCredential:
 		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets machine login) this session's agent-secrets calls fail")
 	case *wait > 0 && resp.State != "enrolled":

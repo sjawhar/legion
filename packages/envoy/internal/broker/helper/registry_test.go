@@ -71,8 +71,11 @@ func TestSaveAndLoadRecordsCarryNoKey(t *testing.T) {
 		t.Fatalf("the record must not carry key material: %s", data)
 	}
 	recs, err := LoadRecords(path)
-	if err != nil || len(recs) != 1 || recs[0] != (Record{PID: 4242, StartTicks: 99, RuntimeID: "h:4242:99", EnrollmentID: "enr-1"}) {
-		t.Fatalf("records: %+v %v", recs, err)
+	// The boot id is on every saved record: it is what makes the pid and the start ticks name
+	// one process incarnation across a reboot (Registry.SameBoot).
+	want := Record{PID: 4242, StartTicks: 99, BootID: reg.bootID, RuntimeID: "h:4242:99", EnrollmentID: "enr-1"}
+	if err != nil || len(recs) != 1 || recs[0] != want {
+		t.Fatalf("records: %+v %v, want %+v", recs, err, want)
 	}
 	if recs, err := LoadRecords(filepath.Join(t.TempDir(), "none.json")); err != nil || recs != nil {
 		t.Fatalf("a missing file is no records: %+v %v", recs, err)
@@ -141,11 +144,14 @@ func TestStateFollowsEnrollment(t *testing.T) {
 		t.Fatal("a lapse must reopen ready, so a register --wait waits for the re-enrollment")
 	default:
 	}
-	if got := sess.recordedEnrollmentID(); got != "enr-2" {
+	// The record keeps the lapsed id in its own field until the revoke lands, separately
+	// from the live one, so a restart can tell an enrollment the key holds from one it only
+	// has to end.
+	if got := sess.identity().LapsedID; got != "enr-2" {
 		t.Fatalf("the record keeps the lapsed id until its revoke: %q", got)
 	}
 	sess.clearLapsed()
-	if got := sess.recordedEnrollmentID(); got != "" {
+	if got := sess.identity().LapsedID; got != "" {
 		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
 	}
 	sess.setEnrolled("enr-3")

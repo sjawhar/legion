@@ -7,7 +7,8 @@
 // enrollment cancels every request still pending under it and revokes its grants (the broker's
 // enroll.endEnrollment). Until this change a host session's runtime id was
 // <hostname>:<pid>:<start ticks since boot> and its key lived only in the helper's memory, so a
-// reboot — both halves of that id are boot-unique, and the recorded process is gone — could only
+// reboot — that id names a process only within the boot that made it, and the recorded process
+// is gone — could only
 // ever enrol the session afresh, and the grant a human had approved before the reboot answered
 // NOT_YOURS. These tests pin the three parts of the fix: a session named by its launcher, a key
 // and an enrollment that survive the helper, and revocation that still happens for a session

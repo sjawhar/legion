@@ -44,7 +44,7 @@ func TestABrokerCallErrorNamesNoCredentialTheURLCarries(t *testing.T) {
 	} {
 		t.Run(row.base, func(t *testing.T) {
 			b := &Broker{URL: row.base, HTTP: &http.Client{Timeout: 5 * time.Second}}
-			_, err := b.Renew(context.Background(), s)
+			_, _, err := b.Renew(context.Background(), s)
 			if err == nil {
 				t.Fatal("renew against a broker that never answers succeeded")
 			}

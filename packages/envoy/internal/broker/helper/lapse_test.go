@@ -188,8 +188,10 @@ func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The lapsed id has its own field, separate from the live one: a restart must be able to
+	// tell an enrollment the recorded key holds from one it only has to end.
 	i := slices.IndexFunc(recs, func(rec Record) bool { return rec.PID == os.Getpid() })
-	if i < 0 || recs[i].EnrollmentID != lapsed {
+	if i < 0 || recs[i].LapsedEnrollmentID != lapsed {
 		t.Fatalf("the record must keep the lapsed id until its revoke succeeds: %+v, want %q", recs, lapsed)
 	}
 	r.fake.mu.Lock()
@@ -498,7 +500,10 @@ func recordPrior(t *testing.T, state, id string) int {
 	return pid
 }
 
-// recordedID is the enrollment id state's record for pid names ("" with no record).
+// recordedID is the enrollment state's record for pid names, live or lapsed ("" with no
+// record, and "" once both are revoked). The two live in their own fields, so a restart can
+// tell an enrollment the recorded key holds from one it only has to end; either way the
+// helper still owes the broker a revoke for it.
 func recordedID(t *testing.T, state string, pid int) string {
 	t.Helper()
 	recs, err := LoadRecords(state)
@@ -506,7 +511,9 @@ func recordedID(t *testing.T, state string, pid int) string {
 		t.Fatal(err)
 	}
 	if i := slices.IndexFunc(recs, func(rec Record) bool { return rec.PID == pid }); i >= 0 {
-		return recs[i].EnrollmentID
+		if ids := recs[i].enrollments(); len(ids) > 0 {
+			return ids[0]
+		}
 	}
 	return ""
 }

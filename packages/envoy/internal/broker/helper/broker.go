@@ -1186,26 +1186,36 @@ func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint strin
 
 // Renew extends the lease with a proof signed by the session key. Unchanged: it always
 // authenticates with the session's own key, never the launcher credential.
-func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
+//
+// It answers the identity reading it signed, so the caller can act on the result only while the
+// session still holds that very enrollment: a refusal that arrives after a rename has reclaimed
+// another identity speaks for the OLD enrollment, and applying it to the new one would lapse —
+// and then revoke — an enrollment the broker is still honouring, with the grants it carries.
+func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, identity, error) {
 	// One reading: the enrollment id and the key that signs for it must be the same
 	// generation's, or the proof names an enrollment the key does not hold.
 	cur := s.identity()
+	return b.renewIdentity(ctx, cur)
+}
+
+// renewIdentity renews the enrollment one identity reading names, with that reading's key.
+func (b *Broker) renewIdentity(ctx context.Context, cur identity) (time.Time, identity, error) {
 	id := cur.EnrollmentID
 	url := b.URL + "/v1/enrollments/" + id + "/renew"
 	compact, err := proof.Sign(cur.Key, id, http.MethodPost, url, time.Now())
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, cur, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return time.Time{}, redact.Error(err, b.URL)
+		return time.Time{}, cur, redact.Error(err, b.URL)
 	}
 	req.Header.Set("Proof", compact)
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK}, &out); err != nil {
-		return time.Time{}, err
+		return time.Time{}, cur, err
 	}
-	return out.LeaseExpiresAt, nil
+	return out.LeaseExpiresAt, cur, nil
 }
 
 // Revoke deletes the enrollment and every grant under it. 204 and 404 both mean done.
