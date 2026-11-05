@@ -141,8 +141,11 @@ func (r *roomServer) closeWhenFree(ctx context.Context, room string, try func() 
 // ygo's to refuse: its CloseRoom answers websocket.ErrRoomInUse while any of them is inside the
 // room (reearth/ygo#342), which is this same answer and not a failure, so the budget counts the
 // room still charged and sweeps it again rather than reporting an eviction that did not happen.
-// A refusal after before has run leaves what before did standing, which is why the rebuild's
-// caller retries its whole rebuild (RebuildDocument) rather than carrying on.
+// Only ygo's refusal comes after before has run, and the room it leaves standing is one before
+// has already made ready for a close that then did not happen, so its caller has that to undo:
+// the rebuild arms again the settlement its invalidation ended (evictBeforeRebuild,
+// invalidateForEviction) before it refuses its whole rebuild for its caller to retry
+// (RebuildDocument) rather than carrying on.
 //
 // It gives up rather than waits, so no apply ever waits for a close: a repair's apply waiting for
 // one would close the cycle through the room's persistence worker that the gate is there to break

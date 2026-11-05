@@ -2703,11 +2703,23 @@ func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
 // retries while a caller is inside the room; it cannot interrupt ygo's close once one starts,
 // including its wait for a room to finish loading. A caller whose ctx has already ended closes
 // nothing. A caller inside its own Apply on the room must not call it, since it would wait for itself.
+//
+// A close that did not happen - ctx ended while a caller was inside the room, or ygo refused it -
+// leaves the room live with the edits it holds, and the invalidation ran before it: the
+// settlement that invalidation ended is armed again here, at the generation it moved to
+// (invalidateForEviction).
 func (s *Service) Evict(ctx context.Context, artifactID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.evictRoom(ctx, artifactID, s.invalidateForEviction(artifactID))
+	state, owed := s.invalidateForEviction(artifactID)
+	err := s.evictRoom(ctx, artifactID, state)
+	// An error is every close that did not happen: forgetEvicted reports none for a room that
+	// closed or had already gone (websocket.ErrRoomNotFound), and keeps the record for the rest.
+	if err != nil && owed {
+		s.scheduleSettle(artifactID)
+	}
+	return err
 }
 
 // evictFailed is a failed room's eviction (failRoomLocked): it closes the room that runs on
@@ -2747,18 +2759,29 @@ func (s *Service) evictFailed(room string, state *roomState) error {
 
 // invalidateForEviction ends what room's state has armed, ahead of the room's close: the
 // generation bump ends a settlement whose timer already fired before it opens its transaction,
-// and the timer's stop the one still armed. It returns the state, for the eviction to settle once
-// the room is closed (forgetEvicted: kept while held, forgotten when nothing holds it, or handed
-// over when it failed), or nil when the service holds none for room.
-func (s *Service) invalidateForEviction(room string) *roomState {
+// and the take-over of the room's timer (takeOverSettlementLocked) the one still armed. It
+// answers the state, for the eviction to settle once the room is closed (forgetEvicted: kept
+// while held, forgotten when nothing holds it, or handed over when it failed), or nil when the
+// service holds none for room, and whether it ended a settlement its caller now owes.
+//
+// It runs before the close rather than after it, so that no settlement runs against a room that
+// is closing, and a close can still not happen: ygo refuses one while a caller is inside the
+// room, and Evict's ctx can end while it waits for that caller to leave. The room that close
+// leaves is live and holds edits nothing has versioned, with no settlement left to version them
+// - the room's last browser leaving settles only a room whose timer it can take (settleLastPeer)
+// - so a caller whose close did not happen arms the settlement it owes again (Evict,
+// evictBeforeRebuild). The generation stays where this moved it: it ends only the settlements
+// that read the one before it, and the settlement armed again reads the new one.
+func (s *Service) invalidateForEviction(room string) (*roomState, bool) {
 	state := s.lockExistingState(room)
-	if state != nil {
-		state.roomGeneration = s.nextRoomGeneration()
-		state.settleFailures = 0
-		s.stopSettleTimer(state.settle)
-		s.unlockState(room, state)
+	if state == nil {
+		return nil, false
 	}
-	return state
+	state.roomGeneration = s.nextRoomGeneration()
+	state.settleFailures = 0
+	owed := s.takeOverSettlementLocked(state)
+	s.unlockState(room, state)
+	return state, owed
 }
 
 // evictRoom closes room and then settles what becomes of its record. Once the close succeeds, a
@@ -2810,11 +2833,18 @@ func (s *Service) evictUnusedRoom(room string, state *roomState) (bool, error) {
 // called from allowInject, which ygo runs before it opens the room), never one already inside
 // its callback. Its state is invalidated under the guard's hold, which an Apply inside the room
 // keeps it from taking at all, so a close refused for that leaves the room's armed settlement as
-// it found it.
+// it found it. A close ygo refuses is refused after that invalidation has run, and the room it
+// leaves is live with the edits it holds: the settlement the invalidation ended is armed again
+// here, at the generation it moved to, rather than left for the room's next edit
+// (invalidateForEviction).
 func (s *Service) evictBeforeRebuild(room string) (bool, error) {
 	var state *roomState
-	closed, err := s.srv.closeUnused(room, func() { state = s.invalidateForEviction(room) })
+	var owed bool
+	closed, err := s.srv.closeUnused(room, func() { state, owed = s.invalidateForEviction(room) })
 	if !closed {
+		if owed {
+			s.scheduleSettle(room)
+		}
 		return false, nil
 	}
 	return true, s.forgetEvicted(room, state, err)

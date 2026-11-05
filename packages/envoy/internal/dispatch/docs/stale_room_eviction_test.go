@@ -1048,7 +1048,7 @@ func TestALiveWriteDuringAnEvictionLeavesNoGenerationForTheReload(t *testing.T) 
 	}
 
 	// The eviction's own steps, with the write between them: invalidate, close, forget.
-	evicted := service.invalidateForEviction(artifactID)
+	evicted, _ := service.invalidateForEviction(artifactID)
 	if evicted == nil {
 		t.Fatal("the service holds no state for the room, so nothing here is tested")
 	}
