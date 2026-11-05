@@ -87,6 +87,9 @@ function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
 
+/** The reading column's own scroller: `l` hands it focus and Escape takes it back to the list. */
+const PANE_SCROLLER_SELECTOR = '[data-testid="inbox-pane-scroller"]';
+
 /** The "Add a note or answer in your own words" disclosure an `AskCard` folds its answer box
  *  behind in its compact variant - the card a decision block hosts, which is what the reading
  *  column shows for a question written as one - while it is still shut. The card carries the
@@ -710,9 +713,25 @@ export function Inbox({
   const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
   const focusInPane = () => paneRef.current?.contains(document.activeElement) === true;
   const focusInList = () => listRef.current?.contains(document.activeElement) === true;
+  /** The row `l` was pressed on, which is the row Escape returns the focus to. Null for every
+   *  other way into the column, which keeps returning to the selected row as it always has. */
+  const paneReturn = useRef<string | null>(null);
   /** One step of the reader's, in whichever mode the Inbox is in: the selection the column
    *  follows, or the focus roving the rows. Chosen once, so no binding below asks again. */
-  const move = paneShown ? paneSelection.step : step;
+  const stepInMode = paneShown ? paneSelection.step : step;
+  /** That step, taken from wherever the reader is standing. From inside the column the focus
+   *  comes back to the selected row first: `j` fires in there, a `tabindex=0` section being no
+   *  editable target, and a step from an approval to a question the column draws as a card
+   *  swaps `ApprovalBody` for `CardBody`, which unmounts the focused scroller and drops the
+   *  focus to `document.body` - where neither of Escape's branches holds and the key would do
+   *  nothing. The reader then stands exactly where a click and then `j` leaves them today. */
+  const move = (delta: 1 | -1) => {
+    if (paneShown && focusInPane()) {
+      paneSelection.selectedRow()?.focus();
+      paneReturn.current = null;
+    }
+    stepInMode(delta);
+  };
   /** What the keys act on, for the bindings' labels: the row the column is showing, or the row
    *  holding the focus. */
   const acted = paneShown ? "selected" : "focused";
@@ -732,6 +751,10 @@ export function Inbox({
   /** The control `selector` names in whichever of the two that is, or null for none: every
    *  `when` below tests this against `null`, so the accessor never answers `undefined`. */
   const inHand = (selector: string) => hand()?.querySelector<HTMLElement>(selector) ?? null;
+  /** The column's scroller, the focus stop `l` moves the reader into, or null where no column
+   *  is rendered. */
+  const paneScroller = () =>
+    paneRef.current?.querySelector<HTMLElement>(PANE_SCROLLER_SELECTOR) ?? null;
   /** Where the answer keys - Enter and 1-9 - act: the selected question's own card, not the
    *  whole column. The column of a question written as a decision block draws the whole live
    *  document, and `ProofDocument` hosts an answerable card for every open block of it
@@ -847,10 +870,18 @@ export function Inbox({
       keys: "Escape",
       label: "Back to the ask row, then clear the focused row",
       run: () => {
-        // From the reading column, Escape is the way back to the row the column is showing: the
-        // focus belongs in the list, and the three ways into the column are deliberate.
+        // From the reading column, Escape is the way back to the row the reader came from: `l`
+        // recorded that row, which is not the selected one whenever `j` moved the selection
+        // without moving the focus. Every other way in records nothing and returns, as it
+        // always has, to the row the column is showing.
         if (paneShown && focusInPane()) {
-          paneSelection.selectedRow()?.focus();
+          const origin = paneReturn.current;
+          paneReturn.current = null;
+          const row =
+            origin === null
+              ? null
+              : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
+          (row ?? paneSelection.selectedRow())?.focus();
           return;
         }
         const row = rowAround(document.activeElement);
@@ -863,6 +894,26 @@ export function Inbox({
       when: () =>
         rowAround(document.activeElement) !== null ||
         (paneShown && focusInPane() && paneSelection.selectedRow() !== null),
+    },
+    {
+      // The column is the other half of the page, and `l` is the step into it: the scroller
+      // takes the focus, and the browser scrolls it on the arrow keys, Page Up, Page Down,
+      // Space, Home and End from there.
+      id: "read-pane",
+      keys: "l",
+      label: "Move the focus into the reading pane",
+      run: () => {
+        // The row the reader came from, for Escape: the one holding the focus, or the selected
+        // one where the focus is on nothing - `document.body`, where a reader who has pressed
+        // no key yet stands - or on something that is not a row.
+        paneReturn.current =
+          focusedRow()?.dataset.inboxRow ?? paneSelection.selectedRow()?.dataset.inboxRow ?? null;
+        paneScroller()?.focus();
+      },
+      // One test for all three cases the key does nothing in: below 1280 px and in the drawer
+      // `paneShown` is false (`pane && wideEnoughForPane`), and with no row selected no column
+      // is rendered at all, so `paneRef.current` is null and there is no scroller under it.
+      when: () => paneShown && paneScroller() !== null,
     },
     {
       // Marking walks the list with the row in hand, as `j`/`k` do, so it is no palette row.

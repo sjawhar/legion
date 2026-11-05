@@ -455,6 +455,49 @@ test("an approved document shows the approval it follows in place of the actions
   }
 });
 
+test("an approval draws the request's own question above the document, inside the scroller", async () => {
+  await warmMarkdownRenderer();
+  const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const { view } = renderPane({
+    ask: approvalAsk(),
+    seed: (client) =>
+      seedDocument(
+        client,
+        document({ approval: { latest_version: 4, state: "awaiting" }, versions: [version(4)] }),
+        { 4: latest }
+      ),
+  });
+
+  try {
+    // The block is drawn before the document's own reads land, so it is on screen beside the
+    // skeleton as well as beside the version.
+    const block = await screen.findByTestId("pane-approval-question");
+    expect(block.textContent).toContain("Approve spec.md at version 4?");
+    const drawn = await screen.findByLabelText("Document version 4");
+    expect(block.compareDocumentPosition(drawn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeGreaterThan(
+      0
+    );
+    // Inside the one scroller, so the document holds the whole column again once the reader
+    // has scrolled past the question.
+    expect(screen.getByTestId("inbox-pane-scroller").contains(block)).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval that falls back to the card draws the question once, as the card's own", async () => {
+  const { view } = renderPane({ ask: approvalAsk() });
+
+  try {
+    // `getArtifact` is refused by default, so the column never reads a version to show.
+    expect(await screen.findByRole("article", { name: "Urgency: Medium" })).toBeDefined();
+    expect(screen.queryByTestId("pane-approval-question")).toBeNull();
+    expect(screen.getAllByText("Approve spec.md at version 4?")).toHaveLength(1);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("an anchored question is today's card", async () => {
   const { opened, view } = renderPane({
     ask: issueAsk({

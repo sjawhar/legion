@@ -22,7 +22,7 @@ import type {
 import { DocumentRuntime, type DocumentRuntimeValue } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { DIALOG_SCOPE } from "../shell/keymap";
+import { appKeymap, DIALOG_SCOPE } from "../shell/keymap";
 import { Inbox } from "./Inbox";
 import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 
@@ -2906,6 +2906,65 @@ test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape
     expect((within(shortRow("ask-a")).getByRole("checkbox") as HTMLInputElement).checked).toBe(
       true
     );
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("l reads the column, and Escape returns the focus to the row l was pressed on", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    // Both keys are the Inbox scope's, so `?` lists them in the Inbox section.
+    expect(
+      appKeymap
+        .describe()
+        .filter((entry) => entry.id === "read-pane" || entry.id === "search")
+        .map((entry) => [entry.scope, entry.id, entry.keys])
+    ).toEqual([
+      ["inbox", "read-pane", ["l"]],
+      ["inbox", "search", ["f"]],
+    ]);
+
+    // The focus is on the first row and `j` moves the selection off it without moving the
+    // focus, so the row `l` is pressed on is not the row the column is showing.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(document.activeElement).toBe(shortRow("ask-a"));
+
+    const scroller = () => screen.getByTestId("inbox-pane-scroller");
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+
+    // Escape is the way back to the row the reader came from, not to the selected one.
+    fireEvent.keyDown(scroller(), { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-a"));
+    expect(selectedIds()).toEqual(["ask-b"]);
+
+    // A step taken from inside the column leaves it first, so the focus lands on the selected
+    // row rather than on a node the step may unmount - and the record `l` made goes with it,
+    // leaving Escape the plain list key it is from a row.
+    fireEvent.keyDown(shortRow("ask-a"), { key: "l" });
+    expect(document.activeElement).toBe(scroller());
+    fireEvent.keyDown(scroller(), { key: "k" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+    expect(document.activeElement).toBe(shortRow("ask-b"));
+    fireEvent.keyDown(shortRow("ask-b"), { key: "Escape" });
+    expect(document.activeElement).toBe(document.body);
   } finally {
     unmount();
     narrow();

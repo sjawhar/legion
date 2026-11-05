@@ -14,7 +14,7 @@ import { api } from "../../api/client";
 import { issueQuery, whoAmIQuery } from "../../api/queries";
 import type { AskApproval, InboxRow } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
-import { quoteAccentBorder } from "../../theme/classes";
+import { borderDefault, focusVisibleRing, quoteAccentBorder } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import { CHANGED_BLOCK_CLASS } from "../doc/change-marks";
 import { liveTextQueryOptions, ProofDocument } from "../doc/ProofDocument";
@@ -22,6 +22,7 @@ import { DocumentRuntime } from "../doc/runtime";
 import { loadBlockSchema } from "../doc/schema";
 import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop, scrollElementToTop } from "../doc/scroll-block";
 import { VersionView } from "../doc/VersionView";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { AskCard } from "./AskCard";
 import { isDecisionAsk } from "./ask-decision";
 import { ReadingPaneHead } from "./ReadingPaneHead";
@@ -160,7 +161,7 @@ function PaneFrame({
   children: ReactNode;
   content?: RefObject<HTMLDivElement | null>;
   head: ReactNode;
-  scroller?: RefObject<HTMLDivElement | null>;
+  scroller?: RefObject<HTMLElement | null>;
   sectionBar?: SectionBar;
 }): ReactNode {
   return (
@@ -170,7 +171,21 @@ function PaneFrame({
       data-testid="inbox-pane"
     >
       {head}
-      <div className="min-h-0 flex-1 overflow-y-auto" ref={scroller}>
+      {/* The one scroller every flow draws in is a focus stop of its own, so a reader who has
+          read the head can hand the keyboard to the document. Nothing here scrolls it: the
+          browser scrolls whichever focusable element holds the focus on the arrow keys, Page
+          Up, Page Down, Space, Home and End, so this writes no scrolling code. A labelled
+          `<section>` is `role="region"`, and its name is neither a superset nor a subset of
+          the enclosing section's "Selected question", since Playwright matches an accessible
+          name by substring: each of the two names matches only itself. */}
+      <section
+        aria-label="Question body"
+        className={`min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 ${focusVisibleRing}`}
+        data-testid="inbox-pane-scroller"
+        ref={scroller}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: A region is not interactive, and this one is deliberately in the tab order: it is the column's one focus stop, and the keyboard reaches the document through it.
+        tabIndex={0}
+      >
         {/* The bar is drawn beside the editor rather than inside it: a class Dispatch writes into
             editor DOM is read back as a document edit. */}
         <div className="relative">
@@ -185,7 +200,7 @@ function PaneFrame({
             {children}
           </div>
         </div>
-      </div>
+      </section>
     </section>
   );
 }
@@ -268,7 +283,7 @@ function ApprovalBody({
   onSnoozeLive,
   viewer,
 }: PaneFlowProps & { approval: AskApproval; artifactId: string }): ReactNode {
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement>(null);
   const content = useRef<HTMLDivElement>(null);
   /** Where "Next change" stands in the marked blocks, and the question it stands in: another
    *  question is read from its first marked block, not from where the last one was left. */
@@ -328,9 +343,19 @@ function ApprovalBody({
   }, [askId]);
 
   const body = (): ReactNode => {
+    // The card the column falls back to draws the whole question itself, and the question
+    // belongs on screen once: a block above that card would say it twice.
     if (failed) {
       return <QuestionCard ask={ask} onAnswered={onAnswered} />;
     }
+    /** The question the request itself asks, which is the requester's own words about the
+     *  document below it. `AskCard`'s renderer draws it, so a message with a list or a link
+     *  reads as it was written, and a rule tells it from the document's first paragraph. */
+    const question = (
+      <div className={`mb-3 border-b pb-3 ${borderDefault}`} data-testid="pane-approval-question">
+        <MarkdownBody markdown={ask.question} />
+      </div>
+    );
     const skeleton = <LoadingSkeleton label={`Opening ${approval.name}`} />;
     if (
       !settled ||
@@ -339,28 +364,38 @@ function ApprovalBody({
       latestVersion === undefined ||
       (approvedVersion !== undefined && baselineQuery.isPending)
     ) {
-      return skeleton;
+      // The question stands while the skeleton does: it is the pane's alone to draw, and waits
+      // on none of the document's reads.
+      return (
+        <>
+          {question}
+          {skeleton}
+        </>
+      );
     }
     return (
-      <VersionView
-        artifactId={artifact.id}
-        // The pane draws no ask row over a stored version: the blocks of the version carry what
-        // was decided in them, and a column the reader flips through with `j` reads no list of
-        // the document's asks to name their askers.
-        asks={[]}
-        blockSchema={blockSchema}
-        changeBaseline={changeBaseline}
-        createdAt={
-          artifact.versions.find((version) => version.number === latestVersion)?.created_at
-        }
-        highlight={undefined}
-        owner={
-          artifact.issue_key === null
-            ? { project: artifact.project, slug: artifact.slug }
-            : undefined
-        }
-        version={latestVersion}
-      />
+      <>
+        {question}
+        <VersionView
+          artifactId={artifact.id}
+          // The pane draws no ask row over a stored version: the blocks of the version carry
+          // what was decided in them, and a column the reader flips through with `j` reads no
+          // list of the document's asks to name their askers.
+          asks={[]}
+          blockSchema={blockSchema}
+          changeBaseline={changeBaseline}
+          createdAt={
+            artifact.versions.find((version) => version.number === latestVersion)?.created_at
+          }
+          highlight={undefined}
+          owner={
+            artifact.issue_key === null
+              ? { project: artifact.project, slug: artifact.slug }
+              : undefined
+          }
+          version={latestVersion}
+        />
+      </>
     );
   };
 
@@ -397,7 +432,7 @@ function DecisionBody({
   onSnoozeLive,
   viewer,
 }: PaneFlowProps & { artifactId: string; blockId: string }): ReactNode {
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const [sectionBar, setSectionBar] = useState<SectionBar | undefined>(undefined);
   const [sectionBlockId, setSectionBlockId] = useState<string | undefined>(undefined);
