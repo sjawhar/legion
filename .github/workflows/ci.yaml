@@ -420,6 +420,8 @@ jobs:
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -450,6 +452,8 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/dispatch/**'
@@ -1176,6 +1180,7 @@ jobs:
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
               - 'packages/envoy/cmd/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
@@ -1282,6 +1287,7 @@ jobs:
               - 'packages/envoy/deploy/**'
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
