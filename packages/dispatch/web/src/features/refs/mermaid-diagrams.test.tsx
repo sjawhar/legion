@@ -372,8 +372,9 @@ describe("Mermaid diagrams", () => {
   const openIn = (container: HTMLElement): (boolean | undefined)[] =>
     figuresIn(container).map((figure) => disclosureIn(figure)?.open);
   /** Opens or closes one block's source as a reader does, by clicking `Mermaid source`.
-   *  happy-dom gives a clicked `summary` its activation behaviour, so this flips the `details`
-   *  and fires `toggle`, as a browser does; when it fires is what differs (the last case here). */
+   *  happy-dom gives a clicked `summary` its activation behaviour after the click's own
+   *  listeners have run, so this records the click and then flips the `details`, which fires
+   *  `toggle`, as a browser does; when `toggle` fires is what differs, and has a case below. */
   const clickTheSummary = (figure: Element): void => {
     const summary = disclosureIn(figure)?.querySelector("summary");
     if (summary == null) throw new Error("The drawn block has no Mermaid source summary.");
@@ -393,7 +394,7 @@ describe("Mermaid diagrams", () => {
       clickTheSummary(figuresIn(view.container)[0]);
       expect(first?.open).toBe(true);
       // A whole task of the page's own timers, so a `toggle` queued as the HTML specification
-      // queues it has run by the repaint below; the ordering is the last case here.
+      // queues it has run by the repaint below; the ordering has a case of its own below.
       await Bun.sleep(10);
 
       view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
@@ -526,15 +527,15 @@ describe("Mermaid diagrams", () => {
     }
   });
 
-  // The disclosure is remembered from `toggle`, which the HTML specification queues as a task:
-  // in a browser a repaint inside the reader's own click task - the live view painting a
-  // streaming turn anew, a decision card arriving - could read the memory before that task had
-  // written it. This head answers open: happy-dom fires `toggle` from the `open` attribute
-  // being set, inside the click's own activation behaviour, so the opening is written down
-  // before the repaint reads it. A head that queued it would fail this row and no other, and
-  // what it would ask for is a `click` listener on the summary, writing the state the
-  // activation is about to produce, with the `toggle` listener kept beside it for the
-  // programmatic path. What a browser does is `e2e/mermaid.e2e.ts`'s to measure.
+  // Recorded from the summary's `click` as well as from `toggle`, because the HTML
+  // specification queues `toggle` as a task: a repaint inside the reader's own click task - the
+  // live view painting a streaming turn anew, a decision card arriving - can read the memory
+  // before that task has written it, and draw the disclosure closed. That is measured, not
+  // feared: the label row of `e2e/mermaid.e2e.ts` failed exactly that way once in 100 repeats
+  // on Firefox at the head that recorded from `toggle` alone, the source hidden for the whole
+  // 15 s expect timeout after the reader's click. happy-dom runs the click's listeners before
+  // it flips the `details`, so the click's own record is written first here and this row holds
+  // from either listener; what a browser does between them is `e2e/mermaid.e2e.ts`'s to measure.
   test("a source the reader opens is open in a body painted anew inside their own click", async () => {
     await warmMarkdownRenderer();
     const diagram = fence("sequenceDiagram\n  Alice->>Bob: Same task");
@@ -543,6 +544,32 @@ describe("Mermaid diagrams", () => {
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
       const first = disclosureIn(figuresIn(view.container)[0]);
       clickTheSummary(figuresIn(view.container)[0]);
+      view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
+      const repainted = disclosureIn(figuresIn(view.container)[0]);
+      expect(repainted).not.toBe(first);
+      expect(repainted?.open).toBe(true);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The click reports what the reader does to the summary, and nothing else. An opening the
+  // code makes - an editor opening a block's source, a browser's keyboard activation where it
+  // sends no click - reaches the memory through `toggle` alone, which is why that listener
+  // stays beside the click's.
+  test("a source the code opens, with no click of the reader's, is open in a body painted anew", async () => {
+    await warmMarkdownRenderer();
+    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Opened by the code");
+    const view = render(<MarkdownBody markdown={`Lead:\n\n${diagram}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const first = disclosureIn(figuresIn(view.container)[0]);
+      if (first == null) throw new Error("The drawn block has no Mermaid source disclosure.");
+      expect(first.open).toBe(false);
+      first.open = true;
+      // A task, as above, so the opening is written down whenever the head runs `toggle`.
+      await Bun.sleep(10);
+
       view.rerender(<MarkdownBody markdown={`Lead, and more of it:\n\n${diagram}`} />);
       const repainted = disclosureIn(figuresIn(view.container)[0]);
       expect(repainted).not.toBe(first);

@@ -272,13 +272,24 @@ function drawBlock(pre: HTMLPreElement, drawn: MermaidDrawing, key: string): voi
     showMermaidSvg(preview, drawn.svg, PREVIEW_STYLE);
     figure.append(preview);
     details.open = opened.has(key);
-    details.addEventListener("toggle", () => {
-      // `rememberUpTo` drops the oldest entry whenever the map is full, and `Map.set` on a key
-      // already there does not move it, so a write on every open would cost another reader's
-      // source its place once per paint.
-      if (!details.open) opened.delete(key);
+    // Both paths record through one step: on open the key is written only when it is absent,
+    // because `rememberUpTo` drops the oldest entry whenever the map is full and `Map.set` on a
+    // key already there does not move it, so a write on every open would cost another reader's
+    // source its place once per paint; on close the key goes.
+    const remember = (open: boolean): void => {
+      if (!open) opened.delete(key);
       else if (!opened.has(key)) rememberUpTo(opened, CACHE_LIMIT, key, true);
-    });
+    };
+    // The reader's click is recorded too, with the state the summary's activation is about to
+    // produce, because the HTML specification queues `toggle` as a task: a repaint that lands
+    // between the click and that task - the live view painting a streaming turn anew, a decision
+    // card arriving - reads the memory before the listener wrote it and draws the disclosure
+    // closed. Measured, not feared: the label row of `e2e/mermaid.e2e.ts` failed that way once
+    // in 100 repeats on Firefox at this head, the source hidden for the whole 15 s expect
+    // timeout after the reader clicked `Mermaid source`. `toggle` stays beside it for the
+    // keyboard and for an opening the code makes, which no click reports.
+    summary.addEventListener("click", () => remember(!details.open));
+    details.addEventListener("toggle", () => remember(details.open));
   } else {
     const status = document.createElement("p");
     status.setAttribute("role", "status");
