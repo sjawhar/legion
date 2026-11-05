@@ -88,6 +88,15 @@ type Actor struct {
 	Owner   *string      `json:"owner,omitempty"`
 	Service *string      `json:"service,omitempty"`
 	Project *string      `json:"project,omitempty"`
+	// SessionVerified is set only where the credential itself proved the session this actor
+	// names: a broker-issued access token, which the secrets broker binds to one session.
+	// Every other bearer takes its session id from the request body (bearerSessionActor), so
+	// the id is the caller's word and this stays false. A body cannot set it: the one branch
+	// that builds a session actor from a body names each field it copies and copies no flag,
+	// and the branch that keeps the credential's own actor copies only Origin from the body.
+	// A read that treats "this session is that person's" as a fact — the person_aliases view's
+	// session arm — takes only the actors carrying it.
+	SessionVerified bool `json:"session_verified,omitempty"`
 	// Act names the agent that made this act for the person, and is set only where a
 	// credential acted as its person (actingPerson). A browser's act carries none, and so
 	// does an agent's own write on a route that always took tokens, which is recorded as the
@@ -2195,7 +2204,7 @@ type GraphExcerpt struct {
 // GraphEdgeKinds is every structural edge kind graph_edges emits. A typed block's `block[]`
 // attribute makes edges of a kind named by the attribute (pmdoc.LinkKinds), which is never one of
 // these: a schema name equal to one would merge silently with it in every reader.
-var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "answers", "followed_by", "part_of", "depends_on", "affects"}
+var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "answers", "followed_by", "part_of", "depends_on", "affects", "authored_by", "delivered_to"}
 
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges

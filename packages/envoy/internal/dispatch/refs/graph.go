@@ -274,6 +274,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		// The item's id again, bound as the uuid its blocks are keyed by.
 		args = append(args, query.ID)
 	}
+	relation := "graph_edges"
+	if slices.Contains(query.Kinds, "authored_by") || slices.Contains(query.Kinds, "delivered_to") {
+		relation = AllEdgesSQL
+	}
 	var arms string
 	switch {
 	case query.Direction == "in":
@@ -288,13 +292,13 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			own += ` and not ` + repliesToABlockOf(repliesFrom(item), item, "g", "$3")
 		}
 		arms = `select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and ` + own
+			from ` + relation + ` g where g.to_kind = $1 and g.to_id = $2 and ` + own
 		switch {
 		case document:
 			arms += `
 			union all
 			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
-			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and ` + source
+			from ` + relation + ` g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and ` + source
 			if query.WholeDocuments {
 				// An ask's row holds its question's links alone, so the only edge from an ask
 				// that cites the document in an option or in its answer is that part's.
@@ -306,27 +310,27 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			arms += `
 			union all
 			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
-			from graph_edges g where g.to_kind = '` + item.BlockKind() + `' and g.to_id in ` + itemBlockIDs(item, "$3") + ` and ` + source
+			from ` + relation + ` g where g.to_kind = '` + item.BlockKind() + `' and g.to_id in ` + itemBlockIDs(item, "$3") + ` and ` + source
 		}
 	case query.Direction == "out" && document:
 		// The document's id again, bound as the uuid block_refs keys its rows by.
 		args = append(args, query.ID)
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
+			from ` + relation + ` g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
 			union all
 			select b.kind, b.to_kind, b.to_id, b.created_at, b.source_seq, b.from_node
 			from block_refs b where b.artifact_id = $3::uuid and (b.to_types is null or block_ref_listed(b.to_types, b.to_id))`
 	case query.Direction == "out" && itemBlocks:
 		tables, _ := item.tables()
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
+			from ` + relation + ` g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
 			union all
 			select r.kind, r.to_kind, r.to_id, r.created_at, r.source_seq, r.from_node
 			from ` + tables.refs + ` r join ` + tables.blocks + ` b on b.` + tables.item + ` = r.` + tables.item + ` and b.block_id = r.block_id
 			where r.` + tables.item + ` = $3::uuid and b.position is not null`
 	case query.Direction == "out":
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.from_kind = $1 and g.from_id = $2`
+			from ` + relation + ` g where g.from_kind = $1 and g.from_id = $2`
 	default:
 		return nil, fmt.Errorf("reference direction %q must be in or out", query.Direction)
 	}
@@ -425,6 +429,8 @@ var nodeLoaders = map[string]nodeLoader{
 	"message":       loadMessageNodes,
 	"component":     loadComponentNodes,
 	"session":       loadSessionNodes,
+	"role":          loadRoleNodes,
+	"person":        loadPersonNodes,
 	"block":         loadBlockNodes,
 	"ask_block":     loadAskBlockNodes,
 	"comment_block": loadCommentBlockNodes,
@@ -472,6 +478,35 @@ func loadSessionNodes(_ context.Context, _ Queryer, kind string, _ bool, ids []s
 		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id, MadeBy: []model.Actor{}, ChangedBy: []model.Actor{}}}
 	}
 	return nil
+}
+
+// loadRoleNodes addresses a role node by its token alone, as loadSessionNodes does a session.
+// A role is a name an event was published to (notifications.role.<token>); Dispatch records no
+// fact of it, and who holds it at a moment is the listener's, not a fact of the graph. A role
+// endpoint resolves whether or not anyone holds it, because the delivery to it happened.
+func loadRoleNodes(_ context.Context, _ Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	for _, id := range ids {
+		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id, MadeBy: []model.Actor{}, ChangedBy: []model.Actor{}}}
+	}
+	return nil
+}
+
+// loadPersonNodes resolves canonical logins, including people known only from a stored actor.
+// Identity records establish existence, not the time or actor that created the person.
+func loadPersonNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	rows, err := q.Query(ctx, `select person from person_aliases where alias_kind = 'login' and person = any($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("load person nodes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var login string
+		if err := rows.Scan(&login); err != nil {
+			return err
+		}
+		nodes[[2]string{kind, login}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: login, MadeBy: []model.Actor{}, ChangedBy: []model.Actor{}}, text: login}
+	}
+	return rows.Err()
 }
 
 // loadIssueNodes resolves issue nodes. An issue is made by its creator; its last change is the

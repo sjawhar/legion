@@ -19,3 +19,31 @@ the expanding migration adds, with a default or a backfill, and the release that
 A migration that cannot be written that way is a stop-the-world migration, deployed with no server of the earlier release running, and that is an exception named in the pull request, not a default.
 
 `../../../cmd/dispatch/README.md` ("Database migrations") has the rule with its examples, the naming and the identifiers a set is refused for, and what the census is held to.
+
+## Derived graph
+
+The graph is the union of `graph_edges` and `graph_person_edges`, through `refs.AllEdgesSQL`.
+`graph_edges` retains the citation and structural relations existing builds read; `graph_person_edges` derives `authored_by` and `delivered_to` without changing old builds' results or query plans, during a rollout or a rollback.
+Neither view stores or writes an edge.
+`person_aliases(person, alias_kind, alias)` is the one alias table, and it carries three kinds: `login`, the canonical person id `user_threads_login` derives; `actor_id`, the raw user actor id a record stored; and `session`, a session id.
+A session alias is taken only from a stored session actor carrying `session_verified`.
+A session actor's `owner` is always the credential's own — `bearerSessionActor` copies it from the authenticated token and never from the body — but its session id is the body's for every bearer except a broker-issued token, which the secrets broker binds to one session.
+Without that guard a person's own token could write as any session and then read that session's deliveries as that person's.
+
+**Deviation from the slice's spec, and who owns it: Sami Jawhar, with the rest of the person-graph work.**
+The spec asks for roles in the alias table and for `delivered_to` edges that end at a person.
+This table has neither, deliberately.
+Dispatch records no durable fact that a role belongs to a person: a role's holder is resolved live by the listener at the moment of a forward (`outbox/role.go`), one role is held by different sessions over time, and an issue's route to a role records the role topic alone in `published_destinations`.
+A person↔role alias would therefore have to be invented, and it would put every delivery a role ever received onto the page of everyone who ever held it.
+So a role stays an address, not an identity: it is a node kind of its own (`refs.loadRoleNodes`), and a `delivered_to` edge to a role ends at that role node.
+What a person received is read instead through their `login` and their proved `session` aliases, and a role delivery that actually reached a session is read there, because the resolution that reached it was recorded — `comment_deliveries.session_id` and `message_deliveries.session_id` hold the session a `role:<token>` target resolved to.
+A role delivery that reached nobody (kept on the role's lane for the next holder) belongs to no person and is shown on the role node alone.
+Delivery reads the four word-carrying event types used by `sessionanswers`, their `published_destinations`, and sent message/comment delivery attempts.
+The person page resolves proved session aliases through canonical-login expression indexes, then reads receipts through `refs.SessionReceiptsSQL`, the one derivation of a session's recorded deliveries: delivery attempts through their session/time indexes and recorded event topics through a partial GIN index, narrowed to that person's sessions and the window.
+`envoy-dispatch census --deliveries` runs that same text, so the page's own read is what the census compares with the records, not a second query beside it.
+Every alias source is a column one of those indexes covers.
+`artifact_versions.authors` is not one: a person can be read out of that array only by expanding it, and only a GIN index on the table could bound the expansion, which no migration may create — `artifact_versions` is 5.2 GiB and the pre-deploy census refuses a migration that locks a table above `pgmigrate.CensusTableLimit`.
+A document's actors reach the aliases through `artifacts.created_by` and through the actor of each `artifact.created` and `artifact.version` event, so what the bound leaves out is a co-author a version credits who appears in no other record at all.
+Received nodes default to deliveries in the last 30 days; `since` (RFC3339) selects another lower bound without limiting authored nodes.
+Role endpoints remain addressable in graph reads, including a delivery to a role alone.
+`envoy-dispatch census --deliveries` independently compares the graph's recipient sets with those records for every comment, message and ask created in the last 30 days.

@@ -313,6 +313,8 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		{"message", rootMessage},
 		{"component", "CORE/core"},
 		{"session", "session-backlink"},
+		{"person", "alice"},
+		{"role", "backlink-reviewer"},
 		{"block", notesBlock},
 		{"comment_block", commentBlock},
 		{"comment_block", removedCommentBlock},

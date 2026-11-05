@@ -149,6 +149,9 @@ const AnswersPage = lazy(() =>
 const RepliesPage = lazy(() =>
   import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
 );
+const PersonPage = lazy(() =>
+  import("./features/people/PersonPage").then((module) => ({ default: module.PersonPage }))
+);
 const SettingsPage = lazy(() =>
   import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
 );
@@ -376,7 +379,19 @@ function NavigationContents({
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
           above is read on every visit, so the footer sits under it rather than over it. */}
       <div className={`mt-auto border-t pt-4 ${railBorder}`}>
-        <p className={`px-2 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
+        <p className={`px-2 text-sm ${railMutedText}`}>
+          {user.kind === "user" ? (
+            <Link
+              className={`inline-flex min-h-11 items-center ${railAccentText} ${railAccentHoverText}`}
+              onClick={onClose}
+              to={`/people/${encodeURIComponent(user.login)}`}
+            >
+              Signed in as {user.login}
+            </Link>
+          ) : (
+            <>Signed in as {user.login}</>
+          )}
+        </p>
         <button
           className={`mt-1 px-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
           disabled={signOutPending}
@@ -818,6 +833,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 <Route element={<RepliesPage />} path={REPLIES_PATH} />
+                <Route element={<PersonPage />} path="/people/:login" />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />

@@ -54,6 +54,27 @@ afterEach(() => {
   restore = undefined;
 });
 
+test("a role endpoint has a readable source label", async () => {
+  const { getReferences, view } = renderPanel({
+    edges: [
+      {
+        created_at: createdAt,
+        direction: "in",
+        kind: "mentions",
+        node: { id: "reviewer", kind: "role" },
+        source_seq: 7,
+      },
+    ],
+    node: { id: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  expect(await within(panel).findByText("Role · reviewer")).toBeTruthy();
+});
+
 test("an answers edge is labelled Answer", async () => {
   const { getReferences, view } = renderPanel({
     edges: [

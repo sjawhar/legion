@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/persongraph"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -31,6 +34,45 @@ func census(ctx context.Context, databaseURL string, out, errOut io.Writer) int 
 	}
 	report.Write(out)
 	if report.Refused() {
+		return 1
+	}
+	return 0
+}
+
+// runCensus preserves the pre-deploy migration census with no arguments. --deliveries is a
+// post-deploy read only: it never migrates the database it is checking.
+func runCensus(ctx context.Context, args []string, databaseURL string, out, errOut io.Writer) int {
+	if len(args) == 0 {
+		return census(ctx, databaseURL, out, errOut)
+	}
+	if len(args) != 1 || args[0] != "--deliveries" {
+		fmt.Fprintln(errOut, "usage: envoy-dispatch census [--deliveries]")
+		return 2
+	}
+	if strings.TrimSpace(databaseURL) == "" {
+		fmt.Fprintln(errOut, "census: DATABASE_URL is required")
+		return 2
+	}
+	database, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintln(errOut, "census:", err)
+		return 2
+	}
+	defer database.Pool.Close()
+	report, err := persongraph.Census(ctx, database.Pool, time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		fmt.Fprintln(errOut, "census:", err)
+		return 2
+	}
+	if err := json.NewEncoder(out).Encode(report); err != nil {
+		fmt.Fprintln(errOut, "census:", err)
+		return 2
+	}
+	if report.Checked == 0 {
+		fmt.Fprintln(errOut, "census: no comments, messages or asks in the last 30 days")
+		return 1
+	}
+	if report.Mismatched != 0 {
 		return 1
 	}
 	return 0
