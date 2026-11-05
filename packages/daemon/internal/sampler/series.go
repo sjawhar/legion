@@ -116,6 +116,7 @@ const (
 	selfMemoryResidentBytes
 	readErrorsTotal
 	restartsTotal
+	processesSeenTotal
 	seriesDropped
 	smapsDeferred
 	totalsDeferred
@@ -278,6 +279,14 @@ var metrics = [metricCount]metric{
 	restartsTotal: {
 		name: "legion_sampler_restarts_total", typ: counterType, modes: bothModes,
 		help: "Times the launcher has started the sampler again",
+	},
+	// The rate of new processes is what the sampler's own cost grows with once its walks and
+	// its totals are at their floors, so the counter that reports it is served in both modes:
+	// a node's sampler walks the node's whole process table and its reader needs the same
+	// number (processesSeen, docs/sampler-metrics.md).
+	processesSeenTotal: {
+		name: "legion_sampler_processes_seen_total", typ: counterType, modes: bothModes,
+		help: "New processes the walk has read, counted at the stat read that first sees one",
 	},
 	seriesDropped: {
 		name: "legion_sampler_series_dropped", typ: gaugeType, modes: bothModes,
@@ -983,6 +992,10 @@ func (s *fixedSamples) add(owner string, id metricID, value float64, labels ...s
 // issue pod they count against that pod's 200; in node mode they belong to the node's sampler and
 // to no grade pod. The deferral series below are an issue pod's alone and add passes over them in
 // node mode, which is why the dropped count's place is read after the series before it.
+//
+// The new processes the walk has read are the sampler's own reading too, and the walk keeps the
+// count itself: it is one number for the whole sampler process, carrying no label, so no pass
+// hands it here (tree.go's processesSeen).
 func (r *Registry) addSelf(s *fixedSamples) {
 	s.add("", selfCPUSecondsTotal, r.self.cpuSeconds.value)
 	s.add("", selfMemoryAnonymousBytes, r.self.anonymous)
@@ -991,6 +1004,7 @@ func (r *Registry) addSelf(s *fixedSamples) {
 		s.add("", readErrorsTotal, r.errors[source].value, string(source))
 	}
 	s.add("", restartsTotal, r.restarts.value)
+	s.add("", processesSeenTotal, float64(processesSeen.Load()))
 	s.droppedAt = len(s.samples)
 	s.add("", seriesDropped, 0)
 	s.add("", smapsDeferred, r.deferred)

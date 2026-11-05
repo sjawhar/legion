@@ -45,6 +45,10 @@ There is no `pod` label: Managed Prometheus adds one itself.
 a disk `emptyDir` shows there as `tmpfs`.
 `role` on a volume is the role that owns it, or `shared` for a volume no single role owns.
 
+A volume's bytes are one `statfs`, of the first of the volume's paths that can be read, and a `statfs` reports the filesystem that path is on rather than the directory's own tree.
+In an issue pod under gVisor the two are the same thing: the kernel there gives each `emptyDir` a tmpfs of its own, so the filesystem is the volume.
+On a kernel that backs a disk `emptyDir` with a directory of the node's own filesystem they are not, and the series would carry the node's whole used disk rather than the volume's bytes.
+
 ## The series node mode serves
 
 `legion sampler --node` runs as a DaemonSet on a grade node and serves one set of these for each pod of that node.
@@ -74,9 +78,13 @@ Both modes serve these, and they carry no `project` or `issue`.
 | `legion_sampler_self_memory_resident_bytes` | gauge | — | resident memory the sampler holds, which under gVisor counts the mapped 102 MB `legion` binary |
 | `legion_sampler_read_errors_total` | counter | `source` | reads of this source that failed: `proc`, `cgroup`, `volume` or `kubernetes` |
 | `legion_sampler_restarts_total` | counter | — | times the launcher has started the sampler again, a count the launcher keeps and hands over |
+| `legion_sampler_processes_seen_total` | counter | — | new processes the walk has read, counted at the `stat` read that first sees one |
 | `legion_sampler_series_dropped` | gauge | — | series the 200-series cap removed at the last scrape |
 
 All four sources of `legion_sampler_read_errors_total` are served from the first scrape, at zero, so a rate over one of them answers on a sampler that has never failed a read.
+
+`legion_sampler_processes_seen_total` is the rate the cap below is held at: a rate over it is how many new processes a second the pod is starting, which is what the sampler's own cost grows with once its walks and its totals are at their floors.
+Both modes serve it, since a node's sampler walks that node's whole process table and its reader needs the same number.
 
 ### The deferral series, which an issue pod's sampler alone serves
 
@@ -91,11 +99,13 @@ the cap is over what the sampler costs the pod it reads, and a node's sampler re
 
 The two counts carry no `_total` suffix, which the 0.0.4 text format does not require, because dispatch://INFRA-1208's spec gives these names and the dashboards of dispatch://INFRA-1141 pin them.
 
-The cap on what the sampler costs the pod it reads is 3% of one CPU over any minute, whether or not the pod's CPUs are saturated,
+The cap on what the sampler costs the pod it reads is 3% of one CPU over any minute in which the pod starts at most 20 new processes a second, whether or not the pod's CPUs are saturated,
 over the whole of its own work and not over one pass of it.
 It is held from `/proc/self/stat`, as every other reading here is read from the kernel's own counts.
 Each ten-second window has 250 ms of that allowance, five sixths of the cap, and what the window has spent already decides what the rest of it may read.
 The window budgets against five sixths and not against the whole of it because the floors below force readings a spent allowance cannot pay for, and the sixth left over is what those cost.
+Above that rate of new processes the cost grows with the rate: once the walks and the memory totals are at their floors nothing is left to give way, and each new process the walk meets still costs a `stat` on the pass that first sees it and a command line on the next.
+`legion_sampler_processes_seen_total` is where a reader sees the rate a minute was held at.
 
 The rates are split by what a reading costs rather than by what it is of:
 
@@ -148,6 +158,13 @@ Scraped four times a second over an idle minute, `legion_sampler_pod_memory_byte
 A scrape of the port costs the sampler 1.3 ms, of which writing the exposition is 0.04 ms, so a collector reading every two seconds costs it 0.07% of one CPU.
 Those are this pod's numbers, measured 2026-11-05 under dispatch://INFRA-1208.
 
+The tester measured the bound itself on 2026-11-05, on this pod and on a `legion` built from `5fe2698c6aca`, scraped every two seconds:
+a gVisor issue pod of two CPUs, which is the pod every number above was measured in too.
+A `go build -a -o /dev/null ./...` there started about 11 new processes a second, and the highest of its 102 rolling minutes was 2.558%, none of them over 3%.
+Four shell loops forking `date` started about 210 a second, and over two runs the highest rolling minute was 3.368% and 3.376% read from the series and 3.368% and 3.532% read from `/proc`, with the walk deferred on 42 of some 55 walk ticks and the memory totals on 26 of some 55.
+That is the cost growing with the rate of new processes once the walk and the totals are at their floors, which is what the bound on the cap says it does.
+Four CPU loops that fork nothing held the pod at 1.49 of its 2 CPUs and left the sampler at 0.910% with nothing deferred, so the term is the rate of new processes and not the pod's CPU load.
+
 ## The two profiles
 
 The sampler reads two kinds of pod.
@@ -171,6 +188,9 @@ This is a pod that runs each command in a cgroup v2 cgroup of its own, named `<r
 Each command's cgroup gives that command's own numbers:
 `cpu.stat`'s `usage_usec` is its CPU, `memory.current` its resident memory, `memory.stat`'s `anon` its anonymous memory and `memory.peak` its peak, and the pod cgroup's `memory.current` and `cpu.stat` are the pod's totals.
 The role is the first part of the cgroup's name and the kind is the first `build` or `test` process found in it, else `tool`.
+
+A pod of this profile runs on a kernel of its own, and that is the kernel a volume's `statfs` answers for:
+where a disk `emptyDir` there is a directory of the node's filesystem rather than a tmpfs of its own, `legion_sampler_volume_used_bytes` carries the node's whole used disk and whoever deploys that pod must read it as such.
 
 Nobody writes those cgroups today:
 dispatch://INFRA-1115 leaves INFRA's pods on gVisor, so the sampler has the reading side and no pod yet has the writing side.
@@ -253,13 +273,15 @@ Two scrapes of one unchanged state are the same bytes.
 
 The DaemonSet asks for 50m of CPU and 64Mi of memory and is limited to 200m and 128Mi.
 Those are the numbers dispatch://INFRA-1209's B3 deploys, and they hold the sampler's own cost rule:
-3% of one CPU over any minute, and an exit of its own when its anonymous memory passes 64 MiB.
+3% of one CPU over any minute in which `legion_sampler_processes_seen_total` rises by at most 20 a second, and an exit of its own when its anonymous memory passes 64 MiB.
+Above that rate the cost grows with the rate of new processes, since the walks and the memory totals are then already at their floors and nothing is left to give way.
 
 ## What a per-command cgroup must keep
 
 Whoever adds the per-command cgroups of the cgroup profile must keep an ended command's cgroup until the sampler has read it once more.
 
-The sampler reads each command's cgroup at least every two seconds, so one cgroup kept for two seconds past the command's end is enough, and the launcher may remove it after the sampler's next pass.
+The sampler reads each command's cgroup on a walk pass, which is every two seconds while the window's allowance can pay for it and never less often than once every ten seconds:
+a cgroup kept for ten seconds past the command's end is read once more whatever the pod was doing, where two seconds is enough only on a pod whose sampler is deferring nothing.
 Without that, nothing disappears from the output:
 the sampler keeps a removed cgroup's last values in its own memory and goes on serving them until the hour window drops the pair.
 But those are the values of the last read before the command ended, not the command's final ones, and a build that does most of its work in its last second is then reported as though it never did.

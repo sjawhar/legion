@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"sync/atomic"
 
 	"github.com/sjawhar/legion/daemon/internal/procread"
 	"github.com/sjawhar/legion/daemon/internal/samplerwire"
@@ -44,6 +45,20 @@ var agentPrograms = []string{"legion", "omp", "claude"}
 // this package's readAnonymous is, so that a test can say which processes a pass read one for:
 // which pass reads which command line is the whole of the rule Next describes.
 var readCmdline = procread.ReadCmdline
+
+// processesSeen is every new process the walks of this process have read, counted once each, at
+// the stat read that first sees one (sight). It is what the sampler serves as
+// legion_sampler_processes_seen_total, the rate the cap of dispatch://INFRA-1208/spec#b-a-rates
+// is held at: 3% of one CPU over any minute in which this counter rises by at most 20 a second,
+// and above that rate a cost that grows with it.
+//
+// It stands here, beside the sighting, and not in a registry a pass hands a number to, because
+// it is the sampler process's own count and carries no label to tell two of anything apart. One
+// sampler runs one walk — an issue pod's over its container, a node's over the node's whole
+// process table — and both modes serve the one counter, so there is one number here and no
+// reading for a collector of either mode to carry. A test reads the rise between two scrapes
+// rather than the count itself, as a reader of the series does (pod_test.go's churn minute).
+var processesSeen atomic.Uint64
 
 // Work is what a pass counts a process's work under: the owner the work belongs to and the kind
 // of work it is. The owner is a role in an issue pod and the uid of a pod on a node, which is
@@ -335,6 +350,12 @@ func (w *Walk) forget(stats map[int]procread.Stat) map[int][]*reading {
 // the first sighting is the stat the pass has just read, and the second is the policy's chance to
 // read what only a process that lived longer than one pass is worth reading (Attribution.Seen).
 //
+// Every process this reading is made for is one more in processesSeen: a process is new to the
+// walk at the stat read that first sees it, whatever it turns out to cost after that, and a
+// process that lived and died between two passes was never new to any pass and is counted
+// nowhere. The pass that first sees the pod — the walk's own first — counts the processes it
+// inherited there, as it charges none of their CPU.
+//
 // On the first pass of a walk's life a new reading holds the counters /proc answered with rather
 // than zero, so that pass charges nothing of a lifetime the walk never watched; on every pass
 // after it a new reading starts at zero, since a process that appeared since the last pass spent
@@ -350,6 +371,7 @@ func (w *Walk) sight(live []int, stats map[int]procread.Stat) {
 				entry.reaped = stat.ChildUserTicks + stat.ChildSystemTicks
 			}
 			w.last[pid] = entry
+			processesSeen.Add(1)
 		}
 		if entry.sightings >= 2 {
 			continue

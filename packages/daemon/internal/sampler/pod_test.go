@@ -1012,11 +1012,21 @@ func (f *podFixture) appear(process fakeProcess) {
 	f.write(filepath.Join(dir, "stat"), statLine(process))
 }
 
+// vanish takes one process out of the fixture's /proc, as the kernel does once its parent has
+// reaped it: the next pass finds it gone, forgets the reading it kept of it and charges its
+// parent whatever the reap answered with (Walk.forget).
+func (f *podFixture) vanish(pid int) {
+	f.t.Helper()
+	if err := os.RemoveAll(filepath.Join(f.root, "proc", strconv.Itoa(pid))); err != nil {
+		f.t.Fatalf("could not end process %d: %v", pid, err)
+	}
+}
+
 // costlyReads is the seam the whole sampler's cap is tested through: every read the collector
-// makes — the walk's stat of each process, the pod's CPU, the pod's memory and its meminfo,
-// each volume's statfs and each smaps — charges the sampler's own process a cost the test
-// fixes, written into the fixture's /proc where every budget here reads its own spending back
-// from, and every read is recorded.
+// makes — the walk's stat and command line of each process, the pod's CPU, the pod's memory and
+// its meminfo, each volume's statfs and each smaps — charges the sampler's own process the
+// price this test gives that read, written into the fixture's /proc where every budget here
+// reads its own spending back from, and every read is recorded.
 //
 // What the fixture's own files cost the machine running the test is no part of that charge. So
 // what a cap is held against here is CPU the test put there and not CPU a neighbour on the
@@ -1025,68 +1035,122 @@ type costlyReads struct {
 	t     *testing.T
 	f     *podFixture
 	pages uint64
-	// cost is what one read charges, and spent what every read so far has charged together.
-	cost, spent time.Duration
-	// stats and smaps are the processes those two reads were of, volumes the paths the
-	// volume reads were of, cpu how many readings of the pod's CPU were taken and totals how
-	// many of the two files the pod's memory totals are read from, each in the order the
-	// passes made them.
-	stats, smaps []int
-	volumes      []string
-	cpu, totals  int
+	// prices is what each kind of read charges, and spent what every read so far has
+	// charged together.
+	prices readPrices
+	spent  time.Duration
+	// stats, cmdlines and smaps are the processes those three reads were of, volumes the
+	// paths the volume reads were of, cpu how many readings of the pod's CPU were taken and
+	// totals how many of the two files the pod's memory totals are read from, each in the
+	// order the passes made them.
+	stats, cmdlines, smaps []int
+	volumes                []string
+	cpu, totals            int
+}
+
+// readPrices is what one read of each kind charges the sampler's own CPU. They are apart and
+// not one number because that is how a pod's own reads are split: what a reading costs is what
+// the rates of docs/sampler-metrics.md are decided by, and a test that charged a stat what a
+// reading of the pod's memory costs would hold the sampler to a pod nobody runs.
+type readPrices struct {
+	// stat is one process's stat and the sampler's own, cmdline the command line the walk
+	// reads on a process's second sighting, and volume one volume's statfs: the cheap reads,
+	// each of a file the sampler already holds a descriptor on or of one small path.
+	stat, cmdline, volume time.Duration
+	// podCPU is the one cgroup file the pod's CPU total comes from, and totals each of the
+	// two files its memory totals come from, so one reading of those costs twice this.
+	podCPU, totals time.Duration
+	// smaps is one process's smaps, the costly read of the /proc profile, and selfSmaps the
+	// sampler's own, which every pass reads for the memory guard: the sampler holds a few
+	// mappings where a process of the pod holds hundreds, and this pod charged 0.50 ms for
+	// the one against 2.45 ms for the other (docs/sampler-metrics.md).
+	smaps, selfSmaps time.Duration
+}
+
+// flatPrices charges every reading of the collector's own rates the same, which is what a test
+// of a pod saturated enough for each of those reads to cost what a read costs there holds the
+// sampler to.
+//
+// It leaves the walk's command line at nothing. That read belongs to a process the walk saw and
+// found again, so a pod of long-lived processes pays it once and a pod starting processes pays
+// it for every one of them: what it costs is the churning pod's question, and the prices of the
+// pod the cap was measured in are what answer it (podPrices, the churn minute below).
+func flatPrices(cost time.Duration) readPrices {
+	return readPrices{stat: cost, volume: cost, podCPU: cost, totals: cost, smaps: cost, selfSmaps: cost}
 }
 
 // charge takes one more read's cost. /proc counts a process's CPU in hundredths of a second, so
 // what the collector reads back is the whole ticks of what has been charged, which is the
 // resolution a real sampler measures its own budget at too.
-func (r *costlyReads) charge() {
-	r.spent += r.cost
+func (r *costlyReads) charge(price time.Duration) {
+	r.spent += price
 	chargeSelf(r.t, r.f, uint64(r.spent/(time.Second/procread.ClockTicks)), r.pages)
 }
 
-// useCostlyReads gives every read of the collector the same cost and holds what was read. The
+// useCostlyReads gives every reading of the collector's own rates the same cost and holds what
+// was read.
+func useCostlyReads(t *testing.T, f *podFixture, cost time.Duration, pages uint64) *costlyReads {
+	t.Helper()
+	return usePricedReads(t, f, flatPrices(cost), pages)
+}
+
+// usePricedReads gives each kind of read the price this test fixes and holds what was read. The
 // charge is taken before the read it is for, so a read of the sampler's own stat answers with
 // its own cost already in it, as a real one does.
 //
 // It wraps whatever readers are installed when it is called, so a test that answers its volumes
 // with a reader of its own (useVolumeReader) installs that one first.
-func useCostlyReads(t *testing.T, f *podFixture, cost time.Duration, pages uint64) *costlyReads {
+func usePricedReads(t *testing.T, f *podFixture, prices readPrices, pages uint64) *costlyReads {
 	t.Helper()
-	reads := &costlyReads{t: t, f: f, pages: pages, cost: cost}
+	reads := &costlyReads{t: t, f: f, pages: pages, prices: prices}
 	stat, anonymous, info, memory, cpu, volume := readStat, readAnonymous, readMemInfo, readPodMemory, readPodCPU, usedBytes
+	cmdline := readCmdline
 	readStat = func(reader *procread.Reader, pid int) (procread.Stat, error) {
-		reads.charge()
+		reads.charge(prices.stat)
 		reads.stats = append(reads.stats, pid)
 		return stat(reader, pid)
 	}
+	readCmdline = func(root string, pid int) ([]string, error) {
+		reads.charge(prices.cmdline)
+		reads.cmdlines = append(reads.cmdlines, pid)
+		return cmdline(root, pid)
+	}
 	readAnonymous = func(reader *procread.Reader, pid int) (int64, error) {
-		reads.charge()
+		// The sampler's own smaps is the one every pass reads for the memory guard, and
+		// it is the cheap one: the price of a process of the pod is what the window's
+		// own pass pays (readPrices).
+		price := prices.smaps
+		if pid == selfPID() {
+			price = prices.selfSmaps
+		}
+		reads.charge(price)
 		reads.smaps = append(reads.smaps, pid)
 		return anonymous(reader, pid)
 	}
 	readMemInfo = func(reader *procread.Reader) (procread.MemInfo, error) {
-		reads.charge()
+		reads.charge(prices.totals)
 		reads.totals++
 		return info(reader)
 	}
 	readPodMemory = func(reader *procread.Reader) (int64, error) {
-		reads.charge()
+		reads.charge(prices.totals)
 		reads.totals++
 		return memory(reader)
 	}
 	readPodCPU = func(reader *procread.Reader) (float64, error) {
-		reads.charge()
+		reads.charge(prices.podCPU)
 		reads.cpu++
 		return cpu(reader)
 	}
 	usedBytes = func(path string) (int64, error) {
-		reads.charge()
+		reads.charge(prices.volume)
 		reads.volumes = append(reads.volumes, path)
 		return volume(path)
 	}
 	t.Cleanup(func() {
 		readStat, readAnonymous, readMemInfo = stat, anonymous, info
 		readPodMemory, readPodCPU, usedBytes = memory, cpu, volume
+		readCmdline = cmdline
 	})
 	return reads
 }
@@ -1102,15 +1166,15 @@ func useCostlyReads(t *testing.T, f *podFixture, cost time.Duration, pages uint6
 // reading is taken every tick whatever the dear ones are doing.
 func useCostlyTotals(t *testing.T, f *podFixture, cost time.Duration, pages uint64) *costlyReads {
 	t.Helper()
-	reads := &costlyReads{t: t, f: f, pages: pages, cost: cost}
+	reads := &costlyReads{t: t, f: f, pages: pages, prices: readPrices{totals: cost}}
 	info, memory, cpu := readMemInfo, readPodMemory, readPodCPU
 	readMemInfo = func(reader *procread.Reader) (procread.MemInfo, error) {
-		reads.charge()
+		reads.charge(cost)
 		reads.totals++
 		return info(reader)
 	}
 	readPodMemory = func(reader *procread.Reader) (int64, error) {
-		reads.charge()
+		reads.charge(cost)
 		reads.totals++
 		return memory(reader)
 	}
@@ -1416,6 +1480,300 @@ func TestTheWholeSamplerHoldsItsCapOverASaturatedMinute(t *testing.T) {
 		if spent := time.Duration(2*reached) * readCost; spent > smapsBudget+2*readCost {
 			t.Errorf("the smaps pass of the window of ticks %d to %d spent %s, past the %s it may spend",
 				window*c.smapsEvery, (window+1)*c.smapsEvery-1, spent, smapsBudget)
+		}
+	}
+}
+
+// podPrices are what one read of each kind cost in the pod the cap was measured in, which is
+// what dispatch://INFRA-1208/artifact/verification-md#b-ca-unit holds the sampler to over the
+// churning minute below: 0.07 ms for a stat, a command line and a volume, 20 ms for each of the
+// two files the pod's memory totals are read from, and 2.45 ms for one process's smaps.
+//
+// Two reads that check does not price are charged what docs/sampler-metrics.md measured them at
+// in this pod: 0.50 ms for the cgroup file the pod's CPU comes from, which is the cheap half of
+// its totals, read every tick and deferred by nothing, and 0.50 ms for the sampler's own smaps,
+// which every pass reads for the memory guard and which holds a few mappings where a process of
+// the pod holds hundreds.
+var podPrices = readPrices{
+	stat:      70 * time.Microsecond,
+	cmdline:   70 * time.Microsecond,
+	volume:    70 * time.Microsecond,
+	podCPU:    500 * time.Microsecond,
+	totals:    20 * time.Millisecond,
+	smaps:     2450 * time.Microsecond,
+	selfSmaps: 500 * time.Microsecond,
+}
+
+// churnFirstPID is where the churn's process ids begin: above every pid costTree hands out, so
+// no new process of the churn wears a number a long-lived process of the pod is using and the
+// walk's own answer to a reused pid is not what this fixture is testing.
+const churnFirstPID = 10000
+
+// churn is a pod starting new processes while the sampler reads it: so many a second, each
+// living two or three passes of the walk, which is what a compile under `go build` does and the
+// dearest thing a new process can be.
+//
+// Two to three passes is the dear case because of how the walk reads a process it has not seen
+// before: the pass that first sees one reads its stat and nothing else, and the next pass that
+// still finds it reads the command line its kind comes from (Walk.Next). A process that lived a
+// single pass would cost the stat alone, and one that lived ten would cost those two reads over
+// ten passes; one that lives two or three costs both reads and is then replaced by another that
+// costs them again, so every pass pays for a whole set of new processes.
+//
+// A process here ends when the passes have read it enough times and not when the clock says so,
+// because that is what living two to three passes means. Under its cap the sampler may defer a
+// walk, and a compile the walk has read once has not yet cost the sampler what a compile costs:
+// retiring it on a tick instead would let a deferred walk make the churn cheaper, which is the
+// opposite of what a pod starting processes does to a sampler.
+type churn struct {
+	t *testing.T
+	f *podFixture
+	// perTick is how many processes start on each tick of the loop, and parents the role
+	// shells they start under, so each one's work is some role's work.
+	perTick int
+	parents []int
+	// next is the pid the next process starts with, started how many have started, and
+	// sighted how many have been read by a second pass, which is the pass the walk reads a
+	// command line on.
+	next, started, sighted int
+	// alive is every churn process in the fixture's /proc now, by pid: how many passes have
+	// read it and how many must before it ends.
+	alive map[int]*churnProcess
+}
+
+// churnProcess is one of those processes as the fixture holds it.
+type churnProcess struct{ read, passes int }
+
+func newChurn(t *testing.T, f *podFixture, perTick int, parents []int) *churn {
+	return &churn{t: t, f: f, perTick: perTick, parents: parents, next: churnFirstPID, alive: map[int]*churnProcess{}}
+}
+
+// start writes this tick's new processes into the fixture's /proc, each a compile under one of
+// the role shells, half of them to live two passes and half three.
+func (c *churn) start(tick int64) {
+	c.t.Helper()
+	for range c.perTick {
+		pid := c.next
+		c.next, c.alive[pid] = pid+1, &churnProcess{passes: 2 + c.started%2}
+		c.started++
+		c.f.appear(fakeProcess{
+			pid:    pid,
+			parent: c.parents[pid%len(c.parents)],
+			args:   []string{"/usr/lib/go/pkg/tool/linux_amd64/compile", "-o", "a.out"},
+			own:    1,
+			start:  uint64(1000 + tick),
+			pages:  300,
+		})
+		c.f.writeSmaps(pid, 1024)
+	}
+}
+
+// ended counts this pass's stat reads against what each of its own processes has left to live,
+// and takes out of the fixture's /proc every one that has now lived its passes out.
+func (c *churn) ended(read []int) {
+	c.t.Helper()
+	for _, pid := range read {
+		process, mine := c.alive[pid]
+		if !mine {
+			continue
+		}
+		process.read++
+		if process.read == 2 {
+			// The second pass that finds a process is the one the walk reads a
+			// command line on, whichever pass that turns out to be (Walk.Next).
+			c.sighted++
+		}
+		if process.read >= process.passes {
+			delete(c.alive, pid)
+			c.f.vanish(pid)
+		}
+	}
+}
+
+// What the sampler costs a pod that is starting processes, which is the bound the cap carries:
+// 3% of one CPU over any minute in which the pod starts at most 20 new processes a second
+// (dispatch://INFRA-1208/spec#b-a-rates, docs/sampler-metrics.md). A minute of passes over the
+// 200 long-lived processes of a busy issue pod, with 20 more starting every second of it, each
+// read at the prices of the pod the cap was measured in (podPrices).
+//
+// Both sides of the measurement belong to the test, as they do in the saturated minute above:
+// every read is charged a cost the test fixes and the sampler reads back out of its own
+// /proc/self/stat, and the sixty passes are driven by hand, so what is held against the cap is
+// CPU the test put there and sixty seconds of a sampler at the rates
+// docs/sampler-metrics.md gives, however long the test takes to drive them.
+//
+// What the sampler gives up to hold the cap at this churn is the rate of its dearest reading:
+// at 20 ms a file the pod's memory totals cost 40 ms a reading, and a ten-second window cannot
+// pay for five of those beside its walks and its smaps, so they fall to their four-second floor
+// and legion_sampler_totals_deferred rises. The walk need not give way at these prices and may,
+// and every walk or volume read that waits is counted as legion_sampler_walk_deferred.
+//
+// What neither gives up is a floor: no two readings of the pod's memory stand more than four
+// seconds apart, no walk or volume read waits more than ten, and every process that lived
+// across a whole window was read in that window.
+func TestTheWholeSamplerHoldsItsCapOverAMinuteOfChurn(t *testing.T) {
+	const (
+		longLived = 200
+		perSecond = 20
+		// seenLeast and seenMost are what legion_sampler_processes_seen_total rises by
+		// over the minute: 20 a second, less the processes that started after the last
+		// walk pass of it, which the check gives as 1,080 to 1,320.
+		seenLeast, seenMost = 1080, 1320
+	)
+	f := newPodFixture(t)
+	tree := costTree(longLived)
+	f.writeProcesses(743092, 56, tree...)
+	for _, process := range tree {
+		f.writeSmaps(process.pid, int64(process.pages)*4)
+	}
+	f.writeV1Totals(1<<28, 1_000_000_000)
+	f.writeRoles(rolesOf())
+	// Two volumes, each a directory that is there, so a volume pass takes the statfs a pod's
+	// own volumes cost it beside the cost the fixture charges for it.
+	f.writeVolumes([]samplerwire.Volume{
+		{Name: "private-implementer", Paths: []string{f.root}, Medium: "memory", Role: "implementer"},
+		{Name: "workspace", Paths: []string{f.root}, Medium: "disk"},
+	})
+	reads := usePricedReads(t, f, podPrices, 1200)
+	// The new processes start under the role shells of costTree, which is where a role's
+	// commands start.
+	churning := newChurn(t, f, perSecond, []int{13, 17, 21})
+
+	c := f.collector()
+	minute := int64(time.Minute / podInterval)
+	stats := map[int64]map[int]bool{}
+	smaps := map[int64]int{}
+	var walks, totals []int64
+	inherited := 0.0
+	for tick := range minute {
+		churning.start(tick)
+		read, reached := len(reads.stats), len(reads.smaps)
+		walked, counted := len(reads.volumes), reads.totals
+		c.pass(tick)
+		window := tick / c.smapsEvery
+		if stats[window] == nil {
+			stats[window] = map[int]bool{}
+		}
+		for _, pid := range reads.stats[read:] {
+			stats[window][pid] = true
+		}
+		// Every pass reads the sampler's own smaps first, which is the memory guard's
+		// reading and not the window's (readSelf), so the window's own pass is what
+		// follows it.
+		smaps[window] += len(reads.smaps) - reached - 1
+		if len(reads.volumes) > walked {
+			walks = append(walks, tick)
+		}
+		if reads.totals > counted {
+			totals = append(totals, tick)
+		}
+		churning.ended(reads.stats[read:])
+		if tick == 0 {
+			// The walk's first pass counts the processes the sampler inherited, as
+			// it charges none of their CPU (Walk.sight), so the rate the minute
+			// held is read from that reading on.
+			inherited = f.scrape().value(t, processesSeenTotal)
+		}
+	}
+
+	// What the minute cost, against the cap it is held to, and the numbers a reader of CI
+	// needs to see what the minute was.
+	stood := time.Duration(minute) * podInterval
+	share := reads.spent.Seconds() / stood.Seconds()
+	e := f.scrape()
+	seen := e.value(t, processesSeenTotal) - inherited
+	t.Logf("%d passes over %d long-lived processes, with %d new ones a second, spent %s of CPU for the %s they stand for: %.3f%% of one CPU, with legion_sampler_processes_seen_total up %.0f over the minute, %.0f walk passes deferred and %.0f memory-total readings deferred",
+		minute, longLived, perSecond, reads.spent, stood, 100*share, seen,
+		e.value(t, walkDeferred), e.value(t, totalsDeferred))
+	if share > samplerCap {
+		t.Errorf("the sampler spent %.3f%% of one CPU over a minute of %d new processes a second; the cap is %.0f%%",
+			100*share, perSecond, 100*samplerCap)
+	}
+	if served, allowed := e.value(t, selfCPUSecondsTotal), samplerCap*stood.Seconds(); served > allowed {
+		t.Errorf("the sampler served %g s of its own CPU for the minute, past the %g s of the cap", served, allowed)
+	}
+
+	// The counter is the rate the cap was held at: 20 a second, less the ones that started
+	// after the minute's last walk pass and are still waiting to be read.
+	if seen < seenLeast || seen > seenMost {
+		t.Errorf("legion_sampler_processes_seen_total rose by %.0f over the minute, want %d to %d for %d new processes a second",
+			seen, seenLeast, seenMost, perSecond)
+	}
+
+	// Each of them cost the dear pair of reads, which is what two to three passes buys: a
+	// stat on the pass that first saw it and a command line on the pass that found it again
+	// (Walk.Next). So the churn's command lines are one for each process a second pass
+	// reached, and the pod's work of a kind a rule names is read from those.
+	lines := 0
+	for _, pid := range reads.cmdlines {
+		if pid >= churnFirstPID {
+			lines++
+		}
+	}
+	if lines != churning.sighted {
+		t.Errorf("%d of the new processes were read by a second pass and they cost %d command lines, want one each",
+			churning.sighted, lines)
+	}
+
+	// The rate is what gave way. The memory totals are the dearest reading at these prices
+	// and the one the cap's own rule lets slow down, so they fell to their floor and said so.
+	walkTicks := int64(minute / c.walkEvery)
+	totalsTicks := int64(minute / c.totalsEvery)
+	wantValue(t, e, float64(totalsTicks-int64(len(totals))), totalsDeferred)
+	if e.value(t, totalsDeferred) == 0 {
+		t.Errorf("the memory totals were read on all %d of the minute's totals ticks at 40 ms a reading, which no window's 250 ms pays for five of",
+			totalsTicks)
+	}
+	// Every walk or volume read that waited is counted too. The walk need not wait at these
+	// prices: a pass over this pod costs a few milliseconds, where one reading of the pod's
+	// memory costs 40.
+	wantValue(t, e, float64(walkTicks-int64(len(walks))), walkDeferred)
+	// The pod's CPU is the cheap half of its totals and waits for nothing.
+	if reads.cpu != int(minute) {
+		t.Errorf("the pod's CPU was read %d times over the minute's %d passes, want every one of them",
+			reads.cpu, minute)
+	}
+
+	// The floors held under all of it: the memory totals no more than four seconds apart and
+	// no walk or volume read waiting more than ten.
+	for i, tick := range totals[1:] {
+		if gap := tick - totals[i]; gap > c.totalsFloor {
+			t.Errorf("the pod's memory was read at tick %d and not again until tick %d, %d ticks later, and nothing waits past four seconds",
+				totals[i], tick, gap)
+		}
+	}
+	for i, tick := range walks[1:] {
+		if gap := tick - walks[i]; gap > c.smapsEvery {
+			t.Errorf("the walk and the volumes ran at tick %d and not again until tick %d, %d ticks later, and nothing waits past a window",
+				walks[i], tick, gap)
+		}
+	}
+
+	// Every process that lived across a whole window was read in that window, which is the
+	// floor the series rest on. It is the long-lived processes alone: a process that starts
+	// inside a window was not there for the passes before it, and one that starts and ends
+	// between two passes is read by no pass at all — its CPU reaches its role when its parent
+	// reaps it (Walk.Next, the reaped-parent path).
+	for window := range minute / c.smapsEvery {
+		for _, process := range tree {
+			if !stats[window][process.pid] {
+				t.Errorf("long-lived process %d was not read in the window of ticks %d to %d, and nothing waits longer than a window",
+					process.pid, window*c.smapsEvery, (window+1)*c.smapsEvery-1)
+			}
+		}
+	}
+
+	// So did the smaps budget: each process a window reached cost its own read and the
+	// reading of the sampler's own CPU that follows it, and the last of them is the one that
+	// crossed the line. The budget is read from /proc/self/stat, which counts in hundredths
+	// of a second, so a window may also spend what it spends inside the tick it crosses the
+	// line in — which is what a real sampler's budget overshoots by too.
+	each := podPrices.smaps + podPrices.stat
+	allowed := smapsBudget + time.Second/procread.ClockTicks + each
+	for window, reached := range smaps {
+		if spent := time.Duration(reached) * each; spent > allowed {
+			t.Errorf("the smaps pass of the window of ticks %d to %d spent %s, past the %s it may spend",
+				window*c.smapsEvery, (window+1)*c.smapsEvery-1, spent, allowed)
 		}
 	}
 }

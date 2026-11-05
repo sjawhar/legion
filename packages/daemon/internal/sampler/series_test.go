@@ -578,7 +578,7 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 	registry.SetVolumeBytes(registry.Volume("issue", "disk", RoleShared), 8<<20)
 
 	// Forty pairs of five series each, one minute apart, is 200 droppable series beside the
-	// eighteen the cap may never drop and the one volume.
+	// nineteen the cap may never drop and the one volume.
 	for i := range 40 {
 		pair := registry.Pair("implement", samplerwire.Kind("k"+strconv.Itoa(100+i)))
 		registry.AddCPUSeconds(pair, 1)
@@ -588,13 +588,13 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 	}
 
 	read := scrape(t, registry)
-	// 219 series stand against a cap of 200, so the four oldest pairs go and the fifth
-	// stays: dropping a fifth pair would be 194, further under the cap than it has to be.
+	// 220 series stand against a cap of 200, so the four oldest pairs go and the fifth
+	// stays: dropping a fifth pair would be 195, further under the cap than it has to be.
 	if got := read.value(t, seriesDropped); got != 20 {
 		t.Errorf("the cap removed %v series, not the twenty of the four oldest pairs", got)
 	}
-	if served := len(read.series); served != 199 {
-		t.Errorf("%d series are served, not the 199 the cap leaves", served)
+	if served := len(read.series); served != 200 {
+		t.Errorf("%d series are served, not the 200 the cap leaves", served)
 	}
 	for i := range 4 {
 		kind := "k" + strconv.Itoa(100+i)
@@ -616,7 +616,7 @@ func TestTheCapDropsTheOldestPairsFirstAndCountsThem(t *testing.T) {
 			t.Errorf("%s was dropped, and the pod's totals never are", metrics[id].name)
 		}
 	}
-	for _, id := range []metricID{selfCPUSecondsTotal, selfMemoryAnonymousBytes, selfMemoryResidentBytes, restartsTotal, smapsDeferred} {
+	for _, id := range []metricID{selfCPUSecondsTotal, selfMemoryAnonymousBytes, selfMemoryResidentBytes, restartsTotal, processesSeenTotal, smapsDeferred} {
 		if !read.has(id) {
 			t.Errorf("%s was dropped, and the sampler's own series never are", metrics[id].name)
 		}
@@ -643,22 +643,22 @@ func TestTheCapDropsVolumesLastAndNeverTheTotals(t *testing.T) {
 		registry.SetVolumeBytes(registry.Volume("volume-"+strconv.Itoa(100+i), "memory", RoleShared), 1<<20)
 	}
 
-	// Eighteen series the cap may never drop, three of the one pair and 190 volumes is 211.
-	// The pair goes first, whole, and then the eight volumes whose names come first.
+	// Nineteen series the cap may never drop, three of the one pair and 190 volumes is 212.
+	// The pair goes first, whole, and then the nine volumes whose names come first.
 	read := scrape(t, registry)
-	if got := read.value(t, seriesDropped); got != 11 {
-		t.Errorf("the cap removed %v series, not the three of the pair and the eight oldest volumes", got)
+	if got := read.value(t, seriesDropped); got != 12 {
+		t.Errorf("the cap removed %v series, not the three of the pair and the nine oldest volumes", got)
 	}
 	if read.has(cpuSecondsTotal, "INFRA", "INFRA-1208", "implement", string(samplerwire.KindBuild)) {
 		t.Error("the pair is served while volumes were dropped, and every pair goes before the first volume")
 	}
-	for i := range 8 {
+	for i := range 9 {
 		name := "volume-" + strconv.Itoa(100+i)
 		if read.has(volumeUsedBytes, "INFRA", "INFRA-1208", name, "memory", RoleShared) {
 			t.Errorf("%s is served, and volumes are dropped by name", name)
 		}
 	}
-	for i := 8; i < 190; i++ {
+	for i := 9; i < 190; i++ {
 		name := "volume-" + strconv.Itoa(100+i)
 		if !read.has(volumeUsedBytes, "INFRA", "INFRA-1208", name, "memory", RoleShared) {
 			t.Errorf("%s is not served, and the cap had already come down to 200", name)
@@ -672,7 +672,7 @@ func TestTheCapDropsVolumesLastAndNeverTheTotals(t *testing.T) {
 			t.Errorf("%s was dropped, and the pod's totals never are", metrics[id].name)
 		}
 	}
-	for _, id := range []metricID{selfCPUSecondsTotal, selfMemoryAnonymousBytes, selfMemoryResidentBytes, restartsTotal, seriesDropped, smapsDeferred} {
+	for _, id := range []metricID{selfCPUSecondsTotal, selfMemoryAnonymousBytes, selfMemoryResidentBytes, restartsTotal, processesSeenTotal, seriesDropped, smapsDeferred} {
 		if !read.has(id) {
 			t.Errorf("%s was dropped, and the sampler's own series never are", metrics[id].name)
 		}
@@ -699,11 +699,12 @@ func TestTheCapIsPerGradePod(t *testing.T) {
 	if got := read.value(t, seriesDropped); got != 0 {
 		t.Errorf("the cap removed %v series from a node whose pods are each far under it", got)
 	}
-	// Forty pods of twelve series, and the sampler's own nine: its three readings of itself, one
-	// read-error count for each of the four sources, the restart count and the dropped count. The
-	// three deferral series are an issue pod's alone and a node serves none of them.
-	if served := len(read.series); served != 489 {
-		t.Errorf("%d series are served, not the 489 of forty grade pods and the sampler itself", served)
+	// Forty pods of twelve series, and the sampler's own ten: its three readings of itself, one
+	// read-error count for each of the four sources, the restart count, the new processes its
+	// walk has read and the dropped count. The three deferral series are an issue pod's alone
+	// and a node serves none of them.
+	if served := len(read.series); served != 490 {
+		t.Errorf("%d series are served, not the 490 of forty grade pods and the sampler itself", served)
 	}
 	for _, id := range []metricID{smapsDeferred, totalsDeferred, walkDeferred} {
 		if read.has(id) {
