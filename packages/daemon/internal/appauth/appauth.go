@@ -590,12 +590,20 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 			return Lease{}, fmt.Errorf("%w: %w", errInstallationGone, failed)
 		}
 		refused := transient(response, body, failed)
-		// A 422 that transient kept as GitHub's answer, to a request that named permissions, is
-		// the installation holding fewer than the request asked for; a 422 that is a rate limit
-		// is GitHub's trouble and says nothing about the permissions, so it stays transient.
-		var trouble *TransientError
-		if response.StatusCode == http.StatusUnprocessableEntity && permissions != nil && !errors.As(refused, &trouble) {
-			return Lease{}, fmt.Errorf("%w: %w", errPermissionsRefused, refused)
+		if response.StatusCode == http.StatusUnprocessableEntity {
+			// GitHub documents its rate limits on a 429 and a 403 (githubrest.RateLimited), but
+			// the headers or the secondary-limit text of a limit on a 422 are that limit too,
+			// and no verdict on what the request asked for: the same request may pass later, so
+			// it is GitHub's trouble and never the installation's permissions.
+			if githubrest.RateLimitSignals(response, body) {
+				return Lease{}, &TransientError{Err: failed}
+			}
+			// Otherwise a 422 to a request that named permissions is the installation holding
+			// fewer of them than the request asked for. One to a request that named none (the
+			// write token's) says nothing about permissions and stays the refusal it is.
+			if permissions != nil {
+				return Lease{}, fmt.Errorf("%w: %w", errPermissionsRefused, refused)
+			}
 		}
 		return Lease{}, refused
 	}

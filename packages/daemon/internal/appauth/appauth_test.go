@@ -534,6 +534,69 @@ func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) 
 	}
 }
 
+// A 422 carrying GitHub's rate limit says nothing about what the installation holds: it is
+// GitHub's trouble (TransientError), so the request is not asked again without actions, no lease
+// is served and nothing is said about a missing grant. GitHub documents its limits on a 429 and a
+// 403, so the three ways a 422 can still carry one are each checked.
+func TestARateLimited422DoesNotDropActions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		body    string
+	}{
+		{"the remaining header", map[string]string{"X-RateLimit-Remaining": "0"}, `{"message":"Validation failed"}`},
+		{"a retry-after", map[string]string{"Retry-After": "60"}, `{"message":"Validation failed"}`},
+		{"the secondary limit in the body", nil, `{"message":"You have exceeded a secondary rate limit."}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, privatePEM := testAppKey(t)
+			now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+			var mu sync.Mutex
+			exchanges := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/app/installations":
+					fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+				case strings.HasSuffix(r.URL.Path, "/access_tokens"):
+					mu.Lock()
+					exchanges++
+					mu.Unlock()
+					for name, value := range tc.headers {
+						w.Header().Set(name, value)
+					}
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					fmt.Fprint(w, tc.body)
+				default:
+					t.Errorf("unexpected GitHub path %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			var stderr bytes.Buffer
+			tokens := New(config.GitHubApps{Review: config.GitHubApp{AppID: "67890", PrivateKey: privatePEM}},
+				Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
+			defer tokens.Close()
+
+			lease, err := tokens.ReadToken(context.Background(), Review, "acme")
+			var trouble *TransientError
+			if lease.Token != "" || !errors.As(err, &trouble) {
+				t.Fatalf("read token under a rate limit = %q, %v; want no lease and a TransientError", lease.Token, err)
+			}
+			if errors.Is(err, errPermissionsRefused) {
+				t.Errorf("a rate limit = %v, want it never read as the permissions the installation holds", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if exchanges != 1 {
+				t.Errorf("%d exchanges, want the one request: a rate limit is not asked again without actions", exchanges)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing said of a grant the answer says nothing about", stderr.String())
+			}
+		})
+	}
+}
+
 func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 	key, privatePEM := testAppKey(t)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
