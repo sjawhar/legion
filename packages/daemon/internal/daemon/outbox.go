@@ -353,7 +353,7 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 		told = func() {
 			r.log.Error("outbox status write refused by Dispatch; its architect is told what the issue holds now",
 				"row", row.ID, "issue", row.Issue, "status", value.Status,
-				"status set", wrote.status, "reason posted", wrote.reason, "error", cause)
+				"status_set", wrote.status, "reason_posted", wrote.reason, "error", cause)
 		}
 	case record.MessagePost:
 		notice, err := record.NewOutboxRow(row.Issue, messagePostRefused(row.Issue, value, cause), r.now().UTC())
@@ -687,30 +687,6 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		}
 		return r.consumeHandover(ctx, row, payload)
 	}
-	if issue.Status == payload.Status {
-		// Dispatch already holds the status this row writes: this row's own earlier run made that
-		// write and lost its answer, or a person's move, or another writer, set it. The status
-		// needs no second write, but the reason beside it does. The row ends here, and a run that
-		// returned without the reason would finish it with the reason posted nowhere, the issue
-		// at its new status for no stated cause and nobody told, which is what the reason is
-		// for. The post is this row's own, under its marker, so a run reaching here after a post
-		// that landed finds it and posts nothing again (message). A reason Dispatch refuses the
-		// same way on every attempt (dispatch.PermanentRefusal), its refusal of a message on the
-		// issue this status closed among them, goes back as this row's failure with the status
-		// counted set, so the row is finished refused and its architect told that the status
-		// stands and the reason is on no issue; any other failure goes back as it is and the row
-		// retries on its backoff.
-		if payload.Reason == "" {
-			return nil
-		}
-		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
-			if _, permanent := dispatch.PermanentRefusal(err); !permanent {
-				return err
-			}
-			return &statusWriteFailure{err: err, wrote: statusWrites{status: true}}
-		}
-		return nil
-	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
 	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
 	// A reason Dispatch refuses the same way on every attempt (dispatch.PermanentRefusal, a block
@@ -720,9 +696,11 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	// stands. Any other failure of the post goes back as it is and the row retries on its
 	// backoff, and so does a failed status write: nothing of this row is recorded until it is
 	// finished, so its next run makes both writes again, and a write Dispatch took before its
-	// answer was lost is one that run finds already made — the reason's post by its marker, the
-	// status by the issue's own status, which is the branch above. One attempt at the status
-	// would leave the issue at the status it had while the daemon's own record read done.
+	// answer was lost is the one that run finds already made. Each is found its own way, which is
+	// why the two writes are guarded one by one rather than the run ending at the first: the
+	// reason's post by its own marker (message), and the status by the status Dispatch holds, so
+	// a status Dispatch already holds is not written again and counts as set. One attempt at the
+	// status would leave the issue at the status it had while the daemon's own record read done.
 	var wrote statusWrites
 	var refused error
 	if payload.Reason != "" {
@@ -735,8 +713,10 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 			wrote.reason = true
 		}
 	}
-	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
-		return &statusWriteFailure{err: fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err), wrote: wrote}
+	if issue.Status != payload.Status {
+		if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
+			return &statusWriteFailure{err: fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err), wrote: wrote}
+		}
 	}
 	if refused != nil {
 		return &statusWriteFailure{err: refused, wrote: statusWrites{status: true}}

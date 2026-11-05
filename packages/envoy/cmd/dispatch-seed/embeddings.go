@@ -33,18 +33,19 @@ const (
 // text, so a larger batch would make one statement several hundred megabytes.
 const embeddingBatch = 200
 
-// hnswBuildSettings keep the index build in the server's own memory rather than the host's. A
-// parallel maintenance operation asks for a dynamic shared memory segment sized by
-// maintenance_work_mem, which lives in /dev/shm, and a container holds that to 64 MB: CI's
-// Postgres service refused one at 63,999,456 bytes ("could not resize shared memory segment …
-// No space left on device") on two runs of this seed, whose embeddings heap of 13 MB at scale
-// 0.01 is past min_parallel_table_scan_size and so earns the build its workers. With no
-// maintenance workers the leader builds alone, under a bound of its own, and the run depends on
-// the host's shared memory not at all. It costs nothing at the sizes this tool seeds: 69 ms
-// against 203 ms, measured on a seeded database at scale 0.01.
+// hnswBuildSettings keep the index build out of the host's shared memory. A parallel maintenance
+// operation asks for a dynamic shared memory segment sized by maintenance_work_mem, which lives
+// in /dev/shm, and a container holds that to 64 MB: CI's Postgres service refused one at
+// 63,999,456 bytes ("could not resize shared memory segment … No space left on device") on two
+// runs of this seed, whose embeddings heap of 13 MB at scale 0.01 is past
+// min_parallel_table_scan_size and so earns the build its workers. A build with no maintenance
+// workers holds its graph in the backend's own memory and asks the host for nothing, which is
+// the whole of what is needed here. How much memory that graph may take is the cluster's to say
+// (maintenance_work_mem), and the measurement protocol sets it: a bound written here would
+// override it, and at this tool's default scale — about 285,000 vectors — too small a one puts
+// pgvector back on the per-row on-disk insertions that dropping the index exists to avoid.
 var hnswBuildSettings = []string{
 	`set local max_parallel_maintenance_workers = 0`,
-	`set local maintenance_work_mem = '64MB'`,
 }
 
 // writeEmbeddings fills half the embedding rows the triggers queued. It drops the HNSW index
